@@ -37,7 +37,7 @@ Escrow and account-recovery paths are the first attack class in the ETH Zurich a
 4. **Single-use and rotating.**
    - Using the code issues a **new Secret Key and a new recovery code**, which means a new kit. The old kit is assumed lost or compromised.
    - Using the code also **rotates the account key and the vault keys by default** (a standard rotation, [CRYPTO.md §11.6](../CRYPTO.md#116-key-rotation)). "Skip rotation" is an explicit opt-out. Reason: every copy of the old `E_rec` opens with the old code and yields the account key. Routine DB backups taken before the recovery hold such copies, and so does a server that ignored the deletion. Without a rotation, a kit thief with an old backup reads everything written after the recovery too.
-   - Rotating the account key for any other reason also issues a new code, unless the user types the current code to keep it.
+   - Rotating the account key for any other reason also issues a new code, unless recovery is off or the user types the current code to keep it. Keeping the code is not offered when the rotation follows an SK change, a recovery or an exposed kit ([CRYPTO.md §11.6](../CRYPTO.md#116-key-rotation) step 5).
 5. **Waiting period.** A valid code opens a *pending* recovery, and every enrolled device and the account email (if mail is configured) are notified.
    - After a **72 h** wait, admin-configurable from 0 to 30 days, the server releases `E_rec`.
    - Any enrolled device can cancel the pending recovery.
@@ -47,8 +47,8 @@ Escrow and account-recovery paths are the first attack class in the ETH Zurich a
    2. After the wait, the server returns `E_rec`.
    3. The client unwraps the account key and verifies the identity keys, the bundle and the signed state.
    4. The user sets a new master password, and the client generates a new SK and code.
-   5. By default the client runs a standard rotation: new account key and vault keys, item keys re-wrapped, a PSK-mode grant to each remaining device. It enrols itself as a device.
-   6. The client re-registers OPAQUE and uploads the new wraps and state atomically.
+   5. By default the client runs a standard rotation: new account key and vault keys, item keys re-wrapped, a PSK-mode grant to each remaining device. A durable client enrols itself as a device; the web vault does not.
+   6. The user saves and confirms the new kit. Only then does the client re-register OPAQUE and upload the new wraps and state atomically ([CRYPTO.md §11](../CRYPTO.md#11-flows), secrets before commit).
    7. The server ends every session and notifies all devices and the account email.
 
    Unknown names and wrong codes get the same response and timing.

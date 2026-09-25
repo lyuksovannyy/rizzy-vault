@@ -22,7 +22,7 @@ Tool facts (fact sheet, V unless marked):
 - **wasm-bindgen 0.2.129.** The repository moved to `github.com/wasm-bindgen/wasm-bindgen`. The rustwasm working group sunset is U.
 - **UniFFI 0.32.2**, MPL-2.0, which is on our licence allow-list. It is pre-1.0, so minor releases break.
 - **getrandom 0.4** on `wasm32-unknown-unknown` needs the `wasm_js` feature, enabled only in the final crate (README).
-- **Argon2id cost** at 64 MiB, t=3, p=4 on the M0 machine: about 309 ms in wasm (Node 22) against about 116 ms native with 4 threads. wasm gains nothing from p > 1.
+- **Argon2id cost** at 64 MiB, t=3, p=4 on the M0 machine: about 309 ms in wasm (Node 22) against about 236 ms native. Both are single-threaded: the approved argon2 feature set has no `parallel` (rayon) feature, because OS threads would break the no-I/O rule for `rizzy-core` ([ADR 0016](0016-workspace-layout.md) R1). The 116 ms four-thread figure in the M0 fact sheet needs that feature and does not apply to our build. wasm gains nothing from p > 1 either.
 
 In the browser, wasm and JavaScript share one heap. The boundary between `rizzy-core` and the UI is therefore an audit boundary, not a security boundary ([THREAT_MODEL TB-10](../THREAT_MODEL.md#33-trust-boundaries)). In Tauri and on mobile it is a process or language boundary, and keys can stay on the Rust side.
 

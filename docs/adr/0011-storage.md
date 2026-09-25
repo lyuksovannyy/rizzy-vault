@@ -114,7 +114,7 @@ SQLite files must not live on NFS or SMB shares, and the docs say so.
 
 | Domain | Server mode | On-device mode |
 |---|---|---|
-| `auth` | accounts; OPAQUE records with `setup_id`; `E_srv`, `E_rec`, `H_rec`; session-token hashes; 2FA secrets encrypted under a server key kept outside the DB; device certificates and revocations; key bundles; signed `account-state`; key grants; short-lived auth state: sealed login state, challenges, rate-limit counters, pending recoveries ([ADR 0010](0010-server-shape.md) §5) | the same, **except** the OPAQUE record, `E_srv`, `E_rec` and `H_rec`, which are not stored ([CRYPTO.md §5.7](../CRYPTO.md#57-on-device-sync-mode), INV-28) |
+| `auth` | accounts; OPAQUE records with `setup_id`; `E_srv`, `E_rec`, `H_rec`; session-token hashes; 2FA secrets encrypted under a server key kept outside the DB ([CRYPTO.md §5.11](../CRYPTO.md#511-server-side-encryption-not-zero-knowledge)); device certificates and revocations; key bundles; signed `account-state`; key grants; short-lived auth state: sealed login state, challenges, rate-limit counters, pending recoveries ([ADR 0010](0010-server-shape.md) §5) | the same, **except** the OPAQUE record, `E_srv`, `E_rec` and `H_rec`, which are not stored ([CRYPTO.md §5.7](../CRYPTO.md#57-on-device-sync-mode), INV-28) |
 | `vault` | vault self-grants, item-key wraps, per-item snapshots, op records not yet compacted, signed op headers kept after compaction, per-device cursors ([ADR 0012](0012-sync-engine.md)) | nothing: the server deletes it at the switch point ([CRYPTO.md §5.7](../CRYPTO.md#57-on-device-sync-mode), [ADR 0012](0012-sync-engine.md) §10) |
 | `relay` (M4) | nothing | pending relay batches, per-device ack cursors, TTL bookkeeping, short-lived pairing sessions |
 | `share` (M5) | share envelopes, link-token and access-token hashes ([CRYPTO.md §11.10](../CRYPTO.md#1110-public-share-link-creation-m5)), expiry, view counts | the same |
@@ -160,7 +160,7 @@ A mode switch moves an account from one column to the other, with one transactio
   - IndexedDB in the extension;
   - SQLite on desktop, CLI and mobile;
   - nothing in the web vault, which keeps everything in memory and persists only the Secret Key, and only if the user opts in ([CRYPTO.md §11.4](../CRYPTO.md#114-web-vault)).
-- Native clients that use SQLite use sqlx as well, so the workspace never links two `libsqlite3-sys` versions.
+- Native clients that use SQLite use sqlx as well, with only its `sqlite` driver, so the workspace never links two `libsqlite3-sys` versions. [ADR 0016](0016-workspace-layout.md) R5 allows exactly those client leaf crates to depend on sqlx.
 
 ### Attachments (M3)
 
@@ -210,7 +210,7 @@ Out of scope here. The M3 attachments ADR chooses between DB blobs and a separat
 
 1. **PostgreSQL in CI from M1**, officially supported from M3. *Recommendation:* yes.
 2. **Automatic migration on SQLite, with a pre-migration copy kept for 24 h; explicit migration on PostgreSQL.** *Recommendation:* yes. A longer window keeps deleted data around longer.
-3. **Encrypting the server-secrets backup file under an operator passphrase.** This is server-side cryptography, so it needs a CRYPTO.md amendment and a new purpose id. *Recommendation:* yes from M1, reusing the export-file construction ([CRYPTO.md §11.14](../CRYPTO.md#1114-encrypted-export-m1)) with its own purpose id.
+3. **Encrypting the server-secrets backup file under an operator passphrase.** This is server-side cryptography. *Recommendation:* yes from M1, reusing the export-file construction ([CRYPTO.md §11.14](../CRYPTO.md#1114-encrypted-export-m1)) with its own purpose id, `SERVER_SECRETS_BACKUP` ([CRYPTO.md §5.11](../CRYPTO.md#511-server-side-encryption-not-zero-knowledge)).
 4. **The engine-neutral backup format** versus documenting `pg_dump` and `VACUUM INTO` only. *Recommendation:* build it. It is the only way to move from SQLite to PostgreSQL, and the restore drill needs one format for both engines.
 5. **Engine dispatch.** Enum dispatch over the two pools with shared `$N` query files, confirmed by an M1 spike on the first domain. *Recommendation:* yes. The alternatives are the sqlx `Any` driver, or code generic over `DB: Database`.
 

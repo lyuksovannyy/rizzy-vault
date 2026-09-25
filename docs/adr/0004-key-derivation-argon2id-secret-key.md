@@ -32,7 +32,7 @@ Constraints:
 
 ## Decision
 
-1. **Algorithm.** Argon2id v0x13 (RFC 9106), from `argon2` 0.6.0 with `default-features = false` and features `alloc` and `zeroize`.
+1. **Algorithm.** Argon2id v0x13 (RFC 9106), from `argon2` 0.6.0 with `default-features = false` and the `zeroize` feature only (not `alloc`; see [CRYPTO.md §12.2](../CRYPTO.md#122-memory-hygiene)).
 2. **Parameter table, compiled into `rizzy-core`.** The server only ever names a `kdf_id`.
 
    | `kdf_id` | Parameters | Status |
@@ -52,7 +52,7 @@ Constraints:
    - for share passphrases, with the `share_id` as salt.
 
    ROADMAP §4.3 asks for "Argon2id with per-account salt". On the server path that salt is the per-account OPRF key, which RFC 9807 treats as a secret salt; the Argon2id salt itself is zero. Locally the salt is per device, which is stronger than per account. This deviates from the ROADMAP wording, not its intent (open question 4).
-5. **Memory wiping.** We call `hash_password_into_with_memory` with a `Zeroizing` block buffer that we own. argon2 0.6.0's `hash_password_into` frees its 64 MiB block matrix without wiping it (verified in its source).
+5. **Memory wiping.** We call `hash_password_into_with_memory` with a `Zeroizing` block buffer that we own. argon2 0.6.0's `hash_password_into` frees its 64 MiB block matrix without wiping it (verified in its source). Without the `alloc` feature that function does not exist in our build.
 6. **Secret Key: yes, mandatory for every account, derivation in M1.**
    - 128 bits from the CSPRNG, generated on the client.
    - Shown as `RV1-` plus 28 Crockford Base32 characters: 26 for the data and 2 check characters for typo detection.
@@ -69,7 +69,7 @@ The full constructions are in [CRYPTO.md §5.2](../CRYPTO.md#52-password-input-a
 ### Positive
 - The server cannot weaken the KDF.
 - With the Secret Key, a stolen DB plus `server_setup` gives an attacker nothing to guess against, and a harvested OPAQUE transcript is useless even to a future quantum attacker.
-- Each unlock costs about 0.3 s in a desktop browser and about 0.1–0.25 s natively.
+- Each unlock costs about 0.3 s in a desktop browser and about 0.25 s natively (single-threaded).
 
 ### Negative
 - A new device or browser needs the Secret Key, typed from the Emergency Kit or transferred from another device. That is real friction.
@@ -95,7 +95,7 @@ The full constructions are in [CRYPTO.md §5.2](../CRYPTO.md#52-password-input-a
 ## Open questions for the owner
 
 1. **Adopt the Secret Key as mandatory from M1**, which differs from ROADMAP's "M3 ship"? *Recommendation:* yes. Update ROADMAP §4.3 accordingly.
-2. **Freeze `kdf_id` 1 after the M1 phone measurement even at 1–2 s?** *Recommendation:* yes. If phones run out of memory, route them through the OS keystore rather than lowering the floor.
+2. **Freeze `kdf_id` 1 after the M1 phone measurement even at 1–2 s?** *Recommendation:* yes. The keystore path (`E_ks`) helps only an enrolled device and AutoFill. The first login on a phone runs the OPAQUE KSF at the account's `kdf_id` in the main app. The M1 spike therefore measures a full OPAQUE login (KSF plus local wrap) in the main-app process on the lowest-end target phones. If that runs out of memory, `kdf_id` 1 is changed before any M1 account exists, or a Server-mode enrolment path that approves a new phone from an existing device is specified first ([CRYPTO.md §6.4](../CRYPTO.md#64-feasibility)).
 3. **Normalise master passwords to NFC?** *Recommendation:* yes, and reject code points that are unassigned in the pinned Unicode tables, so a later table update cannot change `NFC(password)` ([CRYPTO.md §16](../CRYPTO.md#16-open-questions-for-the-owner) question 4).
 4. **Update the ROADMAP §4.3 row "Argon2id with per-account salt"** to "Argon2id with a secret per-account salt (the OPAQUE OPRF key) on the server path and a per-device salt locally"? *Recommendation:* yes. The current wording reads as if a plain per-account Argon2id salt were stored, which RFC 9807's zero-salt KSF does not use.
 

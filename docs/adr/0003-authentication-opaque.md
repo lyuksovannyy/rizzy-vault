@@ -22,7 +22,7 @@ Crate facts (fact sheet, checked 2026-09-25):
 - `opaque-ke` 4.0.1 is the latest stable release.
 - 4.0.0 synced with RFC 9807 and always creates the dummy record, which fixes a timing leak.
 - NCC Group audited v0.5.0 in 2021. 4.x is not audited.
-- It is built on the previous RustCrypto generation: curve25519-dalek 4, digest 0.10, voprf 0.5, rand 0.8 / rand_core 0.6. It re-exports `rand` and `generic_array`, but not sha2 (V, crate source).
+- It is built on the previous RustCrypto generation: curve25519-dalek 4, digest 0.10, voprf 0.5, rand 0.8 / rand_core 0.6, and, non-optionally even with only `ristretto255`, elliptic-curve 0.13. It re-exports `rand` and `generic_array`, but not sha2 (V, crate source).
 - With `ksf: None` it silently falls back to Argon2 defaults of 19 MiB, t=2, p=1.
 
 ## Decision
@@ -30,7 +30,7 @@ Crate facts (fact sheet, checked 2026-09-25):
 1. **Protocol.** OPAQUE per **RFC 9807**, implemented with **`opaque-ke` =4.0.1**, with `default-features = false` and `features = ["ristretto255"]`. We do not enable the crate's `argon2` or `std` features. We do not ship on 4.1.0-pre.
 2. **Ciphersuite** (`suite_id = 1`): ristretto255-SHA512 OPRF and `TripleDh<Ristretto255, Sha512>`. This is RFC 9807's first recommended configuration. `Sha512` comes from a direct, renamed dependency on sha2 0.10.9, because opaque-ke does not re-export it ([ADR 0009](0009-crypto-dependency-policy.md)).
 3. **KSF.** Our own `RizzyArgon2idKsf`, which runs Argon2id through `argon2` 0.6 with parameters from [ADR 0004](0004-key-derivation-argon2id-secret-key.md) and the all-zero salt RFC 9807 specifies.
-   - Its `Default` is the M1 parameter set, so a missing `ksf` fails safe.
+   - Its `Default` is a sentinel that refuses to run, so a missing `ksf` fails closed ([CRYPTO.md §5.1](../CRYPTO.md#51-ciphersuite-and-key-stretching)).
    - Every call goes through one wrapper that passes `ksf: Some(..)`.
 4. **Password input.** OPAQUE's password input is `pw_in = HKDF(password, salt = Secret Key)`, so the Secret Key is required for every guess ([ADR 0004](0004-key-derivation-argon2id-secret-key.md)).
 5. **Context and identifiers.**
@@ -58,7 +58,7 @@ Crate facts (fact sheet, checked 2026-09-25):
 - The login flow can carry a KDF-version binding that the server cannot downgrade, and an origin binding that defeats relay phishing of native clients.
 
 ### Negative
-- A second RustCrypto generation stays in the dependency tree: curve25519-dalek 4 next to 5, sha2 0.10 next to 0.11, and rand_core 0.6 next to 0.10. `cargo deny` reports these as `multiple-versions` warnings, and they increase the audit surface.
+- A second RustCrypto generation stays in the dependency tree: curve25519-dalek 4 next to 5; sha2, digest, hmac and hkdf of the previous generation next to the current one; rand_core 0.6 next to 0.10; and the elliptic-curve 0.13 stack that opaque-ke pulls non-optionally ([CRYPTO.md §3](../CRYPTO.md#3-primitives)). `cargo deny` reports these as `multiple-versions` warnings ([ADR 0009](0009-crypto-dependency-policy.md) lists them), and they increase the audit surface.
 - `rizzy-core` needs a small rand_core 0.6 adapter, because opaque-ke takes a 0.6 RNG. It is written against opaque-ke's own `rand` re-export, so there is no separate rand_core 0.6 dependency; `rand` 0.8 (no default features, no getrandom) stays in the tree transitively.
 - Binding the origin means a client that dials a non-canonical hostname (a LAN IP, an old domain) cannot log in with OPAQUE, and a Context mismatch fails exactly like a wrong password. So the server returns its canonical origin next to KE2; the client compares it with the origin it dialled and reports a mismatch before running the KSF. That value is unauthenticated and is used only for this message.
 - Login takes three messages, and the server keeps short-lived login state (60 s TTL).

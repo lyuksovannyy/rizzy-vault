@@ -53,7 +53,7 @@ Each crate is created only when it gets real code (§6). The milestone column sa
 | `rizzy-storage` | lib | M1 | sqlx pools, migrations, per-account lock, backup and restore ([ADR 0011](0011-storage.md)) | – | no |
 | `rizzy-bus` | lib | M1 | Typed domain events. In-process from M1; PostgreSQL `LISTEN/NOTIFY` backend in M3 | – | no |
 | `rizzy-domain-auth` | lib | M1 | OPAQUE server side, sessions, 2FA, devices, key bundles, account state, short-lived auth state ([ADR 0010](0010-server-shape.md) §5) | core, proto, storage, bus | no |
-| `rizzy-domain-vault` | lib | M1 | Server-mode op records and retained headers, snapshots, cursors | sync, proto, storage, bus | no |
+| `rizzy-domain-vault` | lib | M1 | Server-mode op records and retained headers, snapshots, cursors; verifies each uploaded op and snapshot signature ([ADR 0012](0012-sync-engine.md) §7) | core, sync, proto, storage, bus | no |
 | `rizzy-match` | lib | M2 | URL normalisation, PSL (the `psl` crate), signed equivalence lists | core | yes |
 | `rizzy-icon-proxy` | lib | M3 | Favicon fetch, SSRF guard, re-encoding, cache | proto | no |
 | `rizzy-desktop` | bin | M3 | Tauri shell, in `apps/desktop/src-tauri` ([ADR 0015](0015-desktop-tauri.md)) | client | no; a leaf |
@@ -67,6 +67,7 @@ Each crate is created only when it gets real code (§6). The milestone column sa
 
 Notes:
 - **Four crates were not in the ROADMAP's original list:** `rizzy-proto`, `rizzy-client`, `rizzy-import` and `rizzy-match`. They keep wire types, client flows, importers and URL matching shared across platforms, and keep them out of `rizzy-core`'s audit scope.
+- **`rizzy-domain-vault` gets certificates from `rizzy-domain-auth`** through a trait that `rizzy-server` wires in (R4). It needs `rizzy-core` to parse headers and verify signatures, not to decrypt.
 - **`rizzy-sync` is shared, but only clients merge.** The server uses its header and version-vector types for sequence checks and compaction bookkeeping. It never decrypts or merges.
 - **What the binaries depend on.** `rizzy-server` depends on the domain crates, `rizzy-storage`, `rizzy-bus`, `rizzy-smtp-ingress` and `rizzy-icon-proxy`. `rizzy-cli` moves from `rizzy-core` to `rizzy-client` in M1.
 - **`rizzy-wasm` on the host.** CI runs `cargo lint`, `cargo test --workspace` and `cargo doc --workspace` for the host on three OSes, and those build every member. So `rizzy-wasm` must compile, though not run, on host targets. Code that only works on wasm32 sits behind `cfg(target_arch = "wasm32")`. wasm-bindgen 0.2.129 compiles for the host (checked in M0).
@@ -80,7 +81,7 @@ Notes:
 | **R2** OS access and randomness | (a) The R1 crates never touch the OS, and never have getrandom in their closure. (b) Server-side libraries (`rizzy-storage`, `rizzy-bus`, `rizzy-domain-*`, `rizzy-icon-proxy`, `rizzy-smtp-ingress`) may do I/O, and may pull getrandom in through third-party dependencies (Context). No first-party library depends on getrandom directly; libraries take an injected RNG. (c) Only the leaf crates depend on getrandom directly: `rizzy-server`, `rizzy-cli`, `rizzy-desktop`, `rizzy-wasm` and `rizzy-ffi` (plus `xtask`). Only `rizzy-wasm` enables `wasm_js`. |
 | **R3** Isolated ingress | `rizzy-smtp-ingress` and `rizzy-icon-proxy` do not depend, directly or transitively, on `rizzy-storage`, sqlx, any `rizzy-domain-*` crate or `rizzy-bus`. `rizzy-icon-proxy` also does not depend on `rizzy-core`, because it handles no keys. |
 | **R4** Domains are separate | No `rizzy-domain-*` crate depends on another. A domain that needs something from another defines a trait for it. `rizzy-server` implements the trait by wiring in the other domain's public API, or the domains exchange `rizzy-bus` events. Each domain queries only its own tables ([ADR 0011](0011-storage.md)). |
-| **R5** Who holds what | Only `rizzy-storage` and the `rizzy-domain-*` crates depend on sqlx. Only `rizzy-server` depends on the domain crates, `rizzy-smtp-ingress` and `rizzy-icon-proxy`. |
+| **R5** Who holds what | Only `rizzy-storage`, the `rizzy-domain-*` crates and the native client leaf crates (`rizzy-cli` from M1, `rizzy-desktop` from M3, `rizzy-ffi` from M7) depend on sqlx. The client leaf crates enable only its `sqlite` driver. Only `rizzy-server` depends on the domain crates, `rizzy-smtp-ingress` and `rizzy-icon-proxy`. |
 | **R6** Client and server are separate | Client-side crates (`rizzy-client`, `rizzy-import`, `rizzy-match`, `rizzy-wasm`, `rizzy-ffi`, `rizzy-cli`, `rizzy-desktop`) never depend on server-side crates (`rizzy-storage`, `rizzy-bus`, `rizzy-domain-*`, `rizzy-smtp-ingress`, `rizzy-icon-proxy`, `rizzy-server`), and the reverse holds too. The shared crates are `rizzy-core`, `rizzy-sync` and `rizzy-proto`. |
 | **R7** Lints | Every crate sets `[lints] workspace = true`, including `unsafe_code = "forbid"`. There is no exception, and the binding crates do not need one: generated wasm-bindgen and UniFFI glue compiles under `forbid` ([ADR 0013](0013-shared-client-core.md), Risks). If an exception is ever needed, it takes a new ADR. The crate then copies the whole workspace lint table, with only `unsafe_code` changed, instead of `workspace = true`. That is the only mechanism that works: Cargo rejects local overrides next to `workspace = true`, and in-source attributes cannot lower a command-line `forbid` (both checked on 1.94.1). `xtask` compares the copy with the workspace table. |
 | **R8** Manifest | Every crate inherits `publish`, `license` and `rust-version` from the workspace ([ADR 0017](0017-licensing.md)). |
@@ -125,12 +126,13 @@ Notes:
 - It reads `cargo metadata --format-version 1 --all-features --locked` and walks the resolved graph.
 - It applies a rules table:
   - **Forbidden edges** (R3, R5, R6), checked transitively over normal, build and dev dependencies, with R6's one named exception.
-  - **An allow-list of external crates for the R1 crates,** over normal and build dependencies. `rand` 0.8 appears on it only as a dependency of opaque-ke, and only with default features off.
+  - **An allow-list of external crates for the R1 crates,** over normal and build dependencies. `rand` 0.8 appears on it only as a dependency of opaque-ke, and only with default features off. For `rizzy-core` it includes the whole opaque-ke tree ([CRYPTO.md §3](../CRYPTO.md#3-primitives): curve25519-dalek 4, voprf, rand_core 0.6, the elliptic-curve 0.13 stack, and digest/hkdf/hmac of the previous generation). The M1 PR generates the list from `Cargo.lock`.
+  - **R5's client edge:** a client leaf crate may depend on sqlx only with the `sqlite` driver and no other driver feature.
   - **getrandom:** never in an R1 crate's closure; never a direct dependency of a first-party library; `wasm_js` only in `rizzy-wasm`.
 - **Features for the getrandom rule.** `cargo metadata` reports features unified across the whole workspace (U, confirm in M1). The getrandom rule is therefore evaluated per R1 crate, with the features cargo resolves when that crate is built alone for wasm32, e.g. `cargo tree -p <crate> --target wasm32-unknown-unknown -e normal,build`. Otherwise a server crate that turns on `rand`'s `std` feature would put getrandom into every crate that uses `rand` 0.8.
 
 **cargo-deny, second layer.** `[bans]` entries with `wrappers`, for example:
-- `sqlx` with wrappers = `rizzy-storage` and the domain crates;
+- `sqlx` with wrappers = `rizzy-storage`, the domain crates and the native client leaf crates (`rizzy-cli`, `rizzy-desktop`, `rizzy-ffi`, R5);
 - `rizzy-storage` with wrappers = the domain crates and `rizzy-server`;
 - each domain crate with wrappers = `rizzy-server`.
 
