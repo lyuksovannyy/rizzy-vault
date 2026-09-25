@@ -1,6 +1,6 @@
 # ADR 0013: Shared Rust client core (wasm + UniFFI)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-25
 - Deciders: project owner
 - Milestone: M1 (wasm for the web vault, native for the CLI) / M3 (Tauri) / M7 (UniFFI)
@@ -119,6 +119,14 @@ These rules apply to `rizzy-wasm`, `rizzy-ffi` and the Tauri IPC commands ([ADR 
   The outputs must be byte-for-byte equal. A difference is a release blocker.
 - The `rizzy-client` flows run against a simulated server in plain Rust tests, so every platform shares the same flow tests.
 
+### Owner decisions (2026-09-25)
+
+The owner answered the open questions on 2026-09-25:
+
+1. **No `unsafe` exception for the binding crates** → Confirmed. `forbid` stays in every crate, `rizzy-wasm` and `rizzy-ffi` included, and is re-checked on every binding-generator upgrade through the CI builds. If a future generator ever needs `unsafe`, that is a new ADR, and the mechanism is the one recommended: the crate drops `lints.workspace = true` and copies the whole workspace lint table with only `unsafe_code` changed, and `xtask`'s R7 check compares that copy with the workspace table ([ADR 0016](0016-workspace-layout.md)). Cargo rejects a local `[lints.rust]` override next to `workspace = true`, and an in-source attribute cannot lower the command-line `forbid` (both checked on 1.94.1, V).
+2. **`rizzy-client` as its own crate** → Yes, its own crate, not a module of `rizzy-core`.
+3. **The rule "copy never returns the value" on desktop and mobile** → Keep the rule. The UI shows "Copied", never the value.
+
 ## Consequences
 
 ### Positive
@@ -157,13 +165,7 @@ These rules apply to `rizzy-wasm`, `rizzy-ffi` and the Tauri IPC commands ([ADR 
 
 ## Open questions for the owner
 
-1. **No `unsafe` exception for the binding crates.** The M0 check (Risks) found that the generated glue needs none for the shapes we use. [CONTRIBUTING.md](../../CONTRIBUTING.md) and [CLAUDE.md](../../CLAUDE.md) already say there is no exception mechanism. *Recommendation:* keep `forbid` in every crate, `rizzy-wasm` and `rizzy-ffi` included, and re-check on every binding-generator upgrade through the CI builds above.
-   - If a future generator ever needs `unsafe`, that is a new ADR. The mechanism is fixed now, because the obvious ones do not work (both checked on 1.94.1, V):
-     - Cargo rejects `[lints] workspace = true` combined with a local `[lints.rust]` override ("cannot override `workspace.lints` in `lints`").
-     - An in-source attribute cannot lower the command-line `forbid`. `#![deny(unsafe_code)]` is accepted but changes nothing, and `#[allow]` or `#[expect]` fail with E0453.
-   - So such a crate would drop `lints.workspace = true` and copy the whole workspace lint table, with only `unsafe_code` changed. `xtask`'s R7 check compares that copy with the workspace table ([ADR 0016](0016-workspace-layout.md)).
-2. **`rizzy-client` as its own crate,** rather than a module of `rizzy-core`. *Recommendation:* its own crate. It keeps `rizzy-core`'s audit scope to crypto and formats, and flows can change without touching the crypto crate.
-3. **The rule "copy never returns the value"** on desktop and mobile. Some UI patterns, such as showing a copied value in a toast, would break it. *Recommendation:* keep the rule. The UI shows "Copied", never the value.
+None. All were answered by the owner on 2026-09-25; see [Owner decisions (2026-09-25)](#owner-decisions-2026-09-25) in the Decision section. The answers keep the original question numbers, so a reference to "open question N" means owner decision N.
 
 ## References
 

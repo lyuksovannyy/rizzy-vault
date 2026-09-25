@@ -1,6 +1,6 @@
 # ADR 0007: Versioned ciphertext envelope and crypto agility
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-25
 - Deciders: project owner
 - Milestone: M1
@@ -61,6 +61,10 @@ Bitwarden's SDK V2 uses COSE, with private-use algorithm ids for XChaCha20-Poly1
 8. **Signed statements** are fixed binary layouts: `LABEL("sig/<type>") ‖ 0x00 ‖ u16 statement_version ‖ body`. They are never serde-derived. The label is not transmitted: the verifier prepends it for the statement type it expects ([CRYPTO.md §9.6](../CRYPTO.md#96-encoding-for-transport-and-storage)).
 
 The exact layouts, registry and migration procedure are in [CRYPTO.md §9](../CRYPTO.md#9-envelope-format).
+
+### Owner decisions (2026-09-25)
+
+No open questions were raised. The owner accepted this ADR as written on 2026-09-25.
 
 ## Consequences
 

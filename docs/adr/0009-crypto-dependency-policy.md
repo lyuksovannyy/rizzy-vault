@@ -1,6 +1,6 @@
 # ADR 0009: Cryptographic dependency and memory-hygiene policy
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-25
 - Deciders: project owner
 - Milestone: M1 (applies from the first crypto dependency in `rizzy-core`)
@@ -135,6 +135,18 @@ Scope: HMAC-SHA-1 in HOTP/TOTP, and from M3 the SHA-1 prefix of HIBP range queri
 - `ed25519-dalek` verification always uses `verify_strict`.
 - Signing always goes through `SigningKey`, never with a separately supplied public key (RUSTSEC-2022-0093).
 
+### Owner decisions (2026-09-25)
+
+The owner answered the open questions on 2026-09-25:
+
+1. **WebAuthn server library (M3)** → A narrowly scoped exception for `webauthn-rs`, with written rationale and a check at each milestone for a rustls/RustCrypto-only path. WebAuthn 2FA stays in M3.
+   - `deny.toml`: `openssl` with `wrappers = ["webauthn-rs-core"]`, and `openssl-sys` with `wrappers = ["openssl", "webauthn-rs-core"]`, keeping only the direct parents M3's lockfile actually shows.
+   - `cargo xtask check-deps` ([ADR 0016](0016-workspace-layout.md)) enforces that `openssl` and `openssl-sys` are reachable only from `rizzy-server` and the domain crate that does WebAuthn, never from `rizzy-core`, `rizzy-client`, `rizzy-cli`, `rizzy-wasm`, `rizzy-ffi` or `rizzy-desktop`.
+   - The cost to the server image (OpenSSL built through openssl-sys's `vendored` feature, or linked dynamically) is confirmed in M3.
+2. **cargo-vet** → Adopt cargo-vet in M1, at once for the crypto crates in the table above (about 20 crates, importing published audit sets where they exist), and extend it to all dependencies by M8, before the external audit. Until adoption, reviews are recorded in PRs. This answers the cargo-vet part of [THREAT_MODEL Q-9](../THREAT_MODEL.md#10-open-questions-for-the-owner).
+3. **Zeroizing global allocator** → No for v1.0. It needs `unsafe`, and targeted `Zeroizing` buffers cover the known secrets.
+4. **Nightly toolchain for fuzzing only** → Yes, in a separate scheduled CI job (weekly and non-blocking for PRs, [CRYPTO.md §16](../CRYPTO.md#16-open-questions-for-the-owner) question 7). Release builds stay on the pinned 1.94.1.
+
 ## Consequences
 
 ### Positive
@@ -161,16 +173,7 @@ Scope: HMAC-SHA-1 in HOTP/TOTP, and from M3 the SHA-1 prefix of HIBP range queri
 
 ## Open questions for the owner
 
-1. **WebAuthn server library (M3).**
-   - `webauthn-rs` 0.5.5 is audited by SUSE product security (V; the year is probably 2021, L), but depends on openssl unconditionally, which our `deny.toml` bans.
-   - `webauthn_rp` depends on `rsa` 0.9, which has an unfixed advisory.
-   - *Recommendation:* a narrowly scoped exception, with written rationale and a check at each milestone for a rustls/RustCrypto-only path. The alternative is dropping WebAuthn 2FA from M3. How to scope it:
-     - cargo-deny cannot scope a ban by binary. Its `[bans]` entries scope by `wrappers`, i.e. which crates may depend on the banned crate directly. So the `deny.toml` exception is: `openssl` with `wrappers = ["webauthn-rs-core"]`, and `openssl-sys` with `wrappers = ["openssl", "webauthn-rs-core"]` (keeping only the direct parents M3's lockfile actually shows).
-     - "Only the server" is enforced by `cargo xtask check-deps` ([ADR 0016](0016-workspace-layout.md)): a rule that `openssl` and `openssl-sys` are reachable only from `rizzy-server` and the domain crate that does WebAuthn, never from `rizzy-core`, `rizzy-client`, `rizzy-cli`, `rizzy-wasm`, `rizzy-ffi` or `rizzy-desktop`.
-     - Cost: a C library in the server image. [ADR 0010](0010-server-shape.md) builds a static musl binary on a distroless base, so OpenSSL has to be built from source through openssl-sys's `vendored` feature or linked dynamically, which changes the image (U, confirm in M3).
-2. **cargo-vet** (or cargo-crev) to record reviews of crypto crates? Threat model Q-9 asks for this decision before M1 adds crypto crates. *Recommendation:* decide it then, in M1, and adopt cargo-vet at once for the crypto crates in the table above (about 20 crates, importing published audit sets where they exist), extending it to all dependencies by M8, before the external audit. Until adoption, reviews are recorded in PRs.
-3. **Zeroizing global allocator.** *Recommendation:* no for v1.0. It needs `unsafe`, and targeted `Zeroizing` buffers cover the known secrets.
-4. **Nightly toolchain for fuzzing only.** *Recommendation:* yes, in a separate scheduled CI job; release builds stay on the pinned 1.94.1.
+None. All were answered by the owner on 2026-09-25; see [Owner decisions (2026-09-25)](#owner-decisions-2026-09-25) in the Decision section. The answers keep the original question numbers, so a reference to "open question N" means owner decision N.
 
 ## References
 

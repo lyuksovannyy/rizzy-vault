@@ -1,6 +1,6 @@
 # ADR 0015: Desktop shell: Tauri
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-25
 - Deciders: project owner
 - Milestone: M3
@@ -95,6 +95,15 @@ Tauri renders with the operating system's webview: WebView2 (Chromium-based) on 
    - Keys are zeroized on lock. There is no `mlock` (AR-10).
 10. **Integration with the browser extension**, such as the desktop app unlocking the extension through native messaging, is out of scope for M3. It is a new IPC surface and needs its own ADR.
 
+### Owner decisions (2026-09-25)
+
+The owner answered the open questions on 2026-09-25:
+
+1. **Code-signing budget** → macOS notarization (Apple Developer Program) from the first M3 release. Windows code signing before M8; unsigned Windows builds in between trigger a SmartScreen warning.
+2. **Linux package formats** → AppImage and `.deb` at M3. Flatpak later, if users ask.
+3. **Keep the Tauri crate in the main Cargo workspace** → Yes, the same workspace. The WebKitGTK development packages are added to CI in M3.
+4. **Default clipboard clear time** → 30 s, configurable.
+
 ## Consequences
 
 ### Positive
@@ -131,16 +140,7 @@ Tauri renders with the operating system's webview: WebView2 (Chromium-based) on 
 
 ## Open questions for the owner
 
-1. **Code-signing budget:** the Apple Developer Program (for notarization) and a Windows code-signing certificate. *Recommendation:*
-   - macOS notarization from the first M3 release, because unsigned apps are hard for users to open on macOS;
-   - Windows signing before M8. Unsigned Windows builds in between trigger a SmartScreen warning.
-2. **Linux package formats.** *Recommendation:* AppImage and `.deb` at M3; Flatpak later, if users ask.
-3. **Keep the Tauri crate in the main Cargo workspace?**
-   - For: one lockfile and one `cargo deny` run.
-   - Against: CI needs the WebKitGTK development packages, and builds get longer.
-
-   *Recommendation:* the same workspace. Add the system packages to CI in M3.
-4. **Default clipboard clear time.** *Recommendation:* 30 s, configurable.
+None. All were answered by the owner on 2026-09-25; see [Owner decisions (2026-09-25)](#owner-decisions-2026-09-25) in the Decision section. The answers keep the original question numbers, so a reference to "open question N" means owner decision N.
 
 ## References
 

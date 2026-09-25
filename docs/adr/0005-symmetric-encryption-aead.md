@@ -1,6 +1,6 @@
 # ADR 0005: Symmetric encryption: AEAD and key commitment
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-25
 - Deciders: project owner
 - Milestone: M1
@@ -43,6 +43,12 @@ Facts that shape the choice:
 5. **Padding.** Item, share, relay and mail plaintexts are framed and padded with Padmé, minimum 256 bytes ([CRYPTO.md §8.5](../CRYPTO.md#85-plaintext-framing-and-padding)).
 6. **AES-256-GCM-SIV** gets a reserved algorithm id (0x02) and no implementation.
 
+### Owner decisions (2026-09-25)
+
+The owner answered the open questions on 2026-09-25:
+
+1. **Padmé padding from M1** → Yes. Padmé padding (decision 5, minimum 256 bytes) ships in M1, although ROADMAP listed size padding as a Should for M4. Adding it later would be a format change. ROADMAP §4.6 is updated accordingly.
+
 ## Consequences
 
 ### Positive
@@ -72,7 +78,7 @@ Facts that shape the choice:
 
 ## Open questions for the owner
 
-1. **Padmé padding from M1**, even though ROADMAP lists size padding as a Should for M4? *Recommendation:* yes. Adding it later is a format change.
+None. All were answered by the owner on 2026-09-25; see [Owner decisions (2026-09-25)](#owner-decisions-2026-09-25) in the Decision section. The answers keep the original question numbers, so a reference to "open question N" means owner decision N.
 
 ## References
 

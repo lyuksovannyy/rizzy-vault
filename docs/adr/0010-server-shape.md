@@ -1,6 +1,6 @@
 # ADR 0010: Server shape: modular monolith with roles
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-25
 - Deciders: project owner
 - Milestone: M1 (`api`, `web`, `worker`) / M3 (`notify`, `icons`) / M6 (`smtp`)
@@ -126,6 +126,17 @@ Each read-and-update of these rows is one transaction under [ADR 0011](0011-stor
 
 Why: in profile C, a KE3 message or a challenge response can land on any `api` replica. Per-replica counters would also multiply an attacker's guess budget by the number of replicas. On SQLite this costs a few row writes per login, which does not matter at personal scale, and the same code serves both engines. The state also survives a restart.
 
+### Owner decisions (2026-09-25)
+
+The owner answered the open questions on 2026-09-25:
+
+1. **Accept or reject this ADR** → Accepted.
+2. **`smtp` refuses to start when DB configuration is visible** → Yes (§2). Profile B is mandatory for mail ([THREAT_MODEL Q-5](../THREAT_MODEL.md#10-open-questions-for-the-owner)).
+3. **Built-in TLS with ACME** → Not in M1. The M1 compose file ships the Caddy example. Revisit in M3 if setup reports show the reverse proxy is the main hurdle.
+4. **Authentication from `smtp` to `api`** → The per-deployment bearer secret on the isolated network, for M6 (§2). Mutual TLS only if profile C deployments span several hosts.
+5. **`icons` off by default** → Yes ([THREAT_MODEL Q-11](../THREAT_MODEL.md#10-open-questions-for-the-owner)).
+6. **Mobile push (M7)** → Option (b) for v1.0: no push, and no project-run push relay. The apps sync on OS background refresh and in the foreground. Option (c), UnifiedPush on Android through a distributor the user or admin runs, is added as an opt-in if users ask. Payloads carry no content under any option ([INV-54](../THREAT_MODEL.md#8-security-invariants)). The "push on mobile in M7" wording in [ROADMAP §4.8](../ROADMAP.md#48-aliases--email-receiving-m6) changes to background refresh.
+
 ## Consequences
 
 ### Positive
@@ -195,17 +206,7 @@ The first candidate is `smtp`. Its crate already has no path to storage ([ADR 00
 
 ## Open questions for the owner
 
-1. **Accept or reject this ADR.** It is the only record of the server's shape. *Recommendation:* accept.
-2. **`smtp` refuses to start when DB configuration is visible** ([THREAT_MODEL Q-5](../THREAT_MODEL.md#10-open-questions-for-the-owner)). This makes profile B mandatory for mail. *Recommendation:* yes.
-3. **Built-in TLS with ACME,** so that profile A needs no reverse proxy. *Recommendation:* not in M1; ship the Caddy example. Revisit in M3 if setup reports show the proxy is the main hurdle. A built-in ACME client means new TLS-adjacent code and a new dependency, and it would still face the rootless port limit in §4.
-4. **Authentication for `smtp` → `api`:** a bearer secret on an isolated network, or mutual TLS. *Recommendation:* the bearer secret for M6. Use mTLS only if profile C deployments span several hosts.
-5. **`icons` off by default** ([THREAT_MODEL Q-11](../THREAT_MODEL.md#10-open-questions-for-the-owner)). *Recommendation:* yes.
-6. **Mobile push (M7).** Each self-hosted instance cannot push to the official apps itself (see Alternatives). Options:
-   - (a) A project-run push relay that forwards content-free wake-ups, with one credential per instance. Bitwarden runs such a relay for self-hosted servers, and Vaultwarden can use it (general knowledge, not re-verified). It is a hosted service that [ROADMAP §4.9](../ROADMAP.md#49-server-self-hosting--ops-m1-onward) does not plan. It would see every device's push token, which instance the token belongs to, and when each wake-up is sent. Apple and Google see the token and the timing in any design that uses their push.
-   - (b) No push. The apps sync on OS background refresh and in the foreground.
-   - (c) UnifiedPush on Android, through a distributor that the user or admin runs.
-
-   *Recommendation:* (b) for v1.0, and (c) as an Android opt-in if users ask. The Should row "push on mobile in M7" in [ROADMAP §4.8](../ROADMAP.md#48-aliases--email-receiving-m6) then changes to background refresh, which is a ROADMAP edit for the owner. Payloads carry no content under any option ([INV-54](../THREAT_MODEL.md#8-security-invariants)).
+None. All were answered by the owner on 2026-09-25; see [Owner decisions (2026-09-25)](#owner-decisions-2026-09-25) in the Decision section. The answers keep the original question numbers, so a reference to "open question N" means owner decision N.
 
 ## References
 

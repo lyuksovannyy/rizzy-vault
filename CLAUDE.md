@@ -9,6 +9,7 @@ rizzy-vault is a self-hostable, end-to-end encrypted, zero-knowledge password ma
    - If there is no row, the task is out of scope. Ask.
 2. Read [docs/adr/README.md](docs/adr/README.md), then every ADR your task touches. For security work, also read the relevant parts of [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and [docs/CRYPTO.md](docs/CRYPTO.md).
 3. Check the ADR's **Status** line. Only `Accepted` is binding.
+   - As of 2026-09-25, ADRs 0001–0013, 0015 and 0016 are Accepted; 0014 (UI stack: React chosen, the rest open) and 0017 are Proposed.
 4. Do not recreate `docs/ARCHITECTURE.md`. It was deliberately removed; do not link to it either.
 
 ## The ADR gate (hard stop)
@@ -21,13 +22,13 @@ rizzy-vault is a self-hostable, end-to-end encrypted, zero-knowledge password ma
 
 ## Crate boundaries
 
-The rules are set by [ADR 0016](docs/adr/0016-workspace-layout.md) once it is Accepted. Until then:
+The rules are set by [ADR 0016](docs/adr/0016-workspace-layout.md), Accepted on 2026-09-25. Read it before touching crate boundaries. In short, for the current crates:
 
 - **`rizzy-core`:** crypto, envelopes, item models.
   - No I/O: no filesystem, network, clock or OS randomness.
   - Randomness and time are injected (`rand_core::CryptoRng`).
   - Must build for `wasm32-unknown-unknown`.
-- **`rizzy-sync`:** the sync engine. It depends on `rizzy-core` only, handles ciphertext only, and follows the same no-I/O and wasm rules. ([ADR 0012](docs/adr/0012-sync-engine.md) open question 6 proposes that the field merge see decrypted values; until the owner accepts that, ciphertext only.)
+- **`rizzy-sync`:** the sync engine. It depends on `rizzy-core` only and follows the same no-I/O and wasm rules. Everything the server uses from it is ciphertext only. The field merge, however, receives decrypted field writes from `rizzy-client` as opaque bytes in zeroizing types, so `rizzy-sync` is in the plaintext audit scope ([ADR 0012](docs/adr/0012-sync-engine.md) §13 and owner decision 6, accepted 2026-09-25).
 - **`rizzy-server`** (binary `rizzy-vault`) and **`rizzy-cli`** (binary `rv`) are leaf crates. Nothing depends on them.
 - Dependencies point one way: core ← sync ← leaves. Never the reverse.
 - Only leaf crates depend on `getrandom` directly. It never appears in the dependency closure of `rizzy-core` or `rizzy-sync`, and only the wasm bindings crate enables `wasm_js` ([ADR 0009](docs/adr/0009-crypto-dependency-policy.md#rng-rules), [ADR 0016](docs/adr/0016-workspace-layout.md) R1–R2).

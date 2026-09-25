@@ -55,22 +55,22 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | # | Title | Status | Milestone |
 |---|---|---|---|
 | 0000 | [Template](0000-template.md) | Template | – |
-| 0001 | [Record architecture decisions](0001-record-architecture-decisions.md) | Proposed | M0 |
-| 0002 | [Own protocol, not Bitwarden-API compatible](0002-own-protocol.md) | Proposed | M1 |
-| 0003 | [Authentication: OPAQUE](0003-authentication-opaque.md) | Proposed | M1 |
-| 0004 | [Key derivation: Argon2id and the Secret Key](0004-key-derivation-argon2id-secret-key.md) | Proposed | M1 |
-| 0005 | [Symmetric encryption: AEAD and key commitment](0005-symmetric-encryption-aead.md) | Proposed | M1 |
-| 0006 | [Key hierarchy, per-user keypairs and key wrapping](0006-key-hierarchy.md) | Proposed | M1 |
-| 0007 | [Versioned ciphertext envelope and crypto agility](0007-ciphertext-envelope.md) | Proposed | M1 |
-| 0008 | [Account recovery: Emergency Kit](0008-account-recovery.md) | Proposed | M1 |
-| 0009 | [Cryptographic dependency and memory-hygiene policy](0009-crypto-dependency-policy.md) | Proposed | M1 |
-| 0010 | [Server shape: modular monolith with roles](0010-server-shape.md) | Proposed | M1 (`api`, `web`, `worker`) / M3 (`notify`, `icons`) / M6 (`smtp`) |
-| 0011 | [Storage: SQLite and PostgreSQL via sqlx](0011-storage.md) | Proposed | M1 (SQLite) / M3 (PostgreSQL supported) |
-| 0012 | [Sync engine: op log, HLC and version vectors](0012-sync-engine.md) | Proposed | M1 (engine, Server mode) / M4 (On-device mode) |
-| 0013 | [Shared Rust client core (wasm + UniFFI)](0013-shared-client-core.md) | Proposed | M1 (wasm, CLI) / M3 (Tauri) / M7 (UniFFI) |
-| 0014 | [UI stack](0014-ui-stack.md) | Proposed | M1 (web vault) / M2 (extension) / M3 (design system, desktop) |
-| 0015 | [Desktop shell: Tauri](0015-desktop-tauri.md) | Proposed | M3 |
-| 0016 | [Workspace layout and crate boundaries](0016-workspace-layout.md) | Proposed | M0 (rules, current crates) / M1–M9 (planned crates) |
+| 0001 | [Record architecture decisions](0001-record-architecture-decisions.md) | Accepted | M0 |
+| 0002 | [Own protocol, not Bitwarden-API compatible](0002-own-protocol.md) | Accepted | M1 |
+| 0003 | [Authentication: OPAQUE](0003-authentication-opaque.md) | Accepted | M1 |
+| 0004 | [Key derivation: Argon2id and the Secret Key](0004-key-derivation-argon2id-secret-key.md) | Accepted | M1 |
+| 0005 | [Symmetric encryption: AEAD and key commitment](0005-symmetric-encryption-aead.md) | Accepted | M1 |
+| 0006 | [Key hierarchy, per-user keypairs and key wrapping](0006-key-hierarchy.md) | Accepted | M1 |
+| 0007 | [Versioned ciphertext envelope and crypto agility](0007-ciphertext-envelope.md) | Accepted | M1 |
+| 0008 | [Account recovery: Emergency Kit](0008-account-recovery.md) | Accepted | M1 |
+| 0009 | [Cryptographic dependency and memory-hygiene policy](0009-crypto-dependency-policy.md) | Accepted | M1 |
+| 0010 | [Server shape: modular monolith with roles](0010-server-shape.md) | Accepted | M1 (`api`, `web`, `worker`) / M3 (`notify`, `icons`) / M6 (`smtp`) |
+| 0011 | [Storage: SQLite and PostgreSQL via sqlx](0011-storage.md) | Accepted | M1 (SQLite) / M3 (PostgreSQL supported) |
+| 0012 | [Sync engine: op log, HLC and version vectors](0012-sync-engine.md) | Accepted | M1 (engine, Server mode) / M4 (On-device mode) |
+| 0013 | [Shared Rust client core (wasm + UniFFI)](0013-shared-client-core.md) | Accepted | M1 (wasm, CLI) / M3 (Tauri) / M7 (UniFFI) |
+| 0014 | [UI stack](0014-ui-stack.md) | Proposed (framework decided: React) | M1 (web vault) / M2 (extension) / M3 (design system, desktop) |
+| 0015 | [Desktop shell: Tauri](0015-desktop-tauri.md) | Accepted | M3 |
+| 0016 | [Workspace layout and crate boundaries](0016-workspace-layout.md) | Accepted | M0 (rules, current crates) / M1–M9 (planned crates) |
 | 0017 | [Licensing and contribution terms](0017-licensing.md) | Proposed | M0 |
 
 ## Gates

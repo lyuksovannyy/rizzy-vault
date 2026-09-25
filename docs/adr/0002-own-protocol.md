@@ -1,6 +1,6 @@
 # ADR 0002: Own protocol, not Bitwarden-API compatible
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-25
 - Deciders: project owner
 - Milestone: M1
@@ -75,6 +75,15 @@ Vaultwarden already fills the "self-hosted, Bitwarden-compatible server" niche. 
 
    At v1.0, `v1` freezes and point 3 applies in full: additive changes only, `/api/v2` for breaking ones, and the overlap.
 
+### Owner decisions (2026-09-25)
+
+The owner answered the open questions on 2026-09-25:
+
+1. **Importing Bitwarden's password-protected JSON export** → Not in M1. M1 imports plain (unencrypted) Bitwarden JSON only. The password-protected format is added in M3 if users ask, confined to `rizzy-import`.
+2. **Session binding for native clients** → Yes, request signing from M1. Native clients (device kinds 1–3) sign every request made over a device-authenticated session with the device key, using the `device-request` statement ([CRYPTO.md §5.10](../CRYPTO.md#510-sessions-after-authentication), [§10.2](../CRYPTO.md#102-ed25519-signatures-and-signed-statements)), so a stolen bearer token alone is useless. The web vault keeps short-lived bearer tokens. The change is additive to `v1`. This also answers [CRYPTO.md §16](../CRYPTO.md#16-open-questions-for-the-owner) question 15 and [THREAT_MODEL Q-7](../THREAT_MODEL.md#10-open-questions-for-the-owner).
+3. **Deprecation window** → Confirmed as in point 3: once `v2` ships, `v1` and `v2` are served side by side for at least two server releases or six months, whichever is longer.
+4. **Before v1.0: forced client update or the `/api/v2` overlap from M2** → The forced client update (point 5), with the store-first release rule. The overlap rule applies in full from v1.0.
+
 ## Consequences
 
 ### Positive
@@ -117,13 +126,7 @@ Vaultwarden already fills the "self-hosted, Bitwarden-compatible server" niche. 
 
 ## Open questions for the owner
 
-1. **Importing Bitwarden's password-protected JSON export.** This needs Bitwarden's KDF and AES-CBC-HMAC decryption in `rizzy-import`. It spares users from leaving an unencrypted export file on disk. *Recommendation:* not in M1, which supports plain Bitwarden JSON only. Add it in M3 if users ask, confined to `rizzy-import`.
-2. **Session binding for native clients** ([THREAT_MODEL Q-7](../THREAT_MODEL.md#10-open-questions-for-the-owner); [CRYPTO.md §5.10](../CRYPTO.md#510-sessions-after-authentication) specifies the construction, the `device-request` statement, and [§16](../CRYPTO.md#16-open-questions-for-the-owner) question 15 leaves the adoption to the owner). *Recommendation:*
-   - From M1, native clients sign every request, or a per-session nonce, with the device key, so a stolen bearer token alone is useless.
-   - The web vault keeps short-lived bearer tokens.
-   - The change is additive to `v1`, and it costs less now than later.
-3. **Deprecation window.** *Recommendation:* the rule above, two server releases or six months, whichever is longer. Confirm it, or pick other numbers.
-4. **Before v1.0: forced client update (point 5), or the `/api/v2` overlap from M2 on.** The forced update keeps the pre-1.0 API cheap to fix. Its cost is an "update required" state for users whose clients lag. Applying the overlap rule from M2 protects those users, at the price of carrying old API versions before the API has settled. *Recommendation:* the forced update, with the store-first release rule.
+None. All were answered by the owner on 2026-09-25; see [Owner decisions (2026-09-25)](#owner-decisions-2026-09-25) in the Decision section. The answers keep the original question numbers, so a reference to "open question N" means owner decision N.
 
 ## References
 

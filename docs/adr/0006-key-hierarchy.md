@@ -1,6 +1,6 @@
 # ADR 0006: Key hierarchy, per-user keypairs and key wrapping
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-25
 - Deciders: project owner
 - Milestone: M1
@@ -77,6 +77,13 @@ The full construction, with every HKDF label, is in [CRYPTO.md §4](../CRYPTO.md
     - The `smtp` role (M6) pins each account's identity key too, so an attacker controlling only the API or DB cannot substitute the mail key.
     - Key transparency is a post-1.0 Could.
 
+### Owner decisions (2026-09-25)
+
+The owner answered the open questions on 2026-09-25:
+
+1. **Full rotation, including identity keys, as the default on revocation** → Yes for a lost or stolen device. A device that was wiped and handed over gets a standard rotation. The UI asks which ([CRYPTO.md §16](../CRYPTO.md#16-open-questions-for-the-owner) question 10).
+2. **Sign every op from M1** → Yes. Every op is signed from M1, so M9 does not force a change to the op format.
+
 ## Consequences
 
 ### Positive
@@ -112,8 +119,7 @@ The full construction, with every HKDF label, is in [CRYPTO.md §4](../CRYPTO.md
 
 ## Open questions for the owner
 
-1. **Full rotation (including identity keys) as the default** when a lost or stolen device is revoked? *Recommendation:* yes. Use standard rotation for a device that was wiped and handed over.
-2. **Sign every op from M1?** *Recommendation:* yes. Otherwise M9 forces a change to the op format.
+None. All were answered by the owner on 2026-09-25; see [Owner decisions (2026-09-25)](#owner-decisions-2026-09-25) in the Decision section. The answers keep the original question numbers, so a reference to "open question N" means owner decision N.
 
 ## References
 

@@ -94,7 +94,7 @@ MoSCoW is scored **against v1.0 (end of M8)**. Items for M9/M10 are listed so th
 
 | Pri | Item | When |
 |---|---|---|
-| M | KDF: **Argon2id** with per-account salt, versioned params, client-side | M1 |
+| M | KDF: **Argon2id** with a secret per-account salt (the OPAQUE OPRF key) on the server path and a per-device salt locally, versioned params, client-side ([ADR 0004](adr/0004-key-derivation-argon2id-secret-key.md)) | M1 |
 | M | Symmetric: **XChaCha20-Poly1305** (or AES-256-GCM-SIV) via RustCrypto, AAD binds item ID + version | M1 |
 | M | Key hierarchy: master key → account key → per-vault keys → item keys; enables rotation & sharing without re-encrypting the world | M1 |
 | M | Per-user asymmetric keypair (**X25519** for key wrapping, **Ed25519** for signing) generated at signup — required for sharing, orgs, email | M1 |
@@ -104,7 +104,8 @@ MoSCoW is scored **against v1.0 (end of M8)**. Items for M9/M10 are listed so th
 | M | Master password change & key rotation | M1 |
 | M | 2FA: TOTP, WebAuthn/FIDO2 security keys | M1 (TOTP) / M3 (WebAuthn) |
 | M | Recovery story written down and implemented: "Emergency Kit" (printable Secret Key + recovery code). No recovery = data gone, and the UI says so plainly | M1 |
-| S | **Secret Key / 2SKD** (1Password-style 128-bit device-held key mixed into KDF) — protects against server breach + weak master password | M1 decision, M3 ship |
+| M | **Secret Key / 2SKD** (1Password-style 128-bit device-held key mixed into KDF), mandatory for every account ([ADR 0004](adr/0004-key-derivation-argon2id-secret-key.md)) — protects against server breach + weak master password | M1 (derivation, Emergency Kit) / M3 (QR transfer, polish) |
+| M | Request signing for native clients: every request over a device-authenticated session is signed with the device key (`device-request` statement, [CRYPTO.md §5.10](CRYPTO.md#510-sessions-after-authentication), [ADR 0002](adr/0002-own-protocol.md)); the web vault keeps short-lived bearer tokens | M1 |
 | S | Unlock with biometrics / OS keychain on desktop & mobile | M3 / M7 |
 | S | Session/device management: list devices, revoke, force logout | M3 |
 | C | Hybrid post-quantum key wrapping (X25519 + ML-KEM-768) for sharing & org keys | post-1.0 (format must allow it from M1) |
@@ -171,8 +172,9 @@ What on-device mode actually buys you (be honest in the UI): in server mode the 
 | M | Data-loss guardrails for on-device mode: warn when only one device is registered; mandatory encrypted backup prompt (local file) on setup and periodically | M4 |
 | M | Transparency page in settings: exactly what the server stores for this account in the current mode (item counts, byte sizes, retention) | M4 |
 | M | Server admin can restrict which modes are allowed on the instance | M4 |
+| M | Size padding of item, share, relay and mail plaintexts (Padmé, minimum 256 bytes, [ADR 0005](adr/0005-symmetric-encryption-aead.md)) to reduce metadata leakage (how much you edit) | M1 |
 | S | Scheduled encrypted backups to user-chosen storage (local folder, WebDAV, S3-compatible) — strongly recommended for on-device mode | M4 |
-| S | Size padding and batching of relayed ops to reduce metadata leakage (how often and how much you edit) | M4 |
+| S | Batching of relayed ops to reduce metadata leakage (how often you edit) | M4 |
 | S | Clear conflict UI: "edited on Phone and Laptop at the same time — keep both / pick one" | M4 |
 | C | Direct LAN sync (mDNS discovery) that skips the relay when devices share a network | post-1.0 |
 | C | Fully serverless peer-to-peer sync (e.g. `iroh` / WebRTC) | post-1.0 |
@@ -218,7 +220,7 @@ This is the most operationally expensive feature in the whole plan. Read the ris
 | M | Disable/delete alias; mail to disabled alias is rejected at SMTP time | M6 |
 | M | Admin docs: MX, SPF, port 25 requirements, reverse proxy, TLS | M6 |
 | S | Extract OTP / verification links from mail and offer them in autofill | M6 |
-| S | Real-time notification of new mail (WebSocket/SSE → UI, push on mobile in M7) | M6 |
+| S | Real-time notification of new mail (WebSocket/SSE → UI; on mobile from M7, OS background refresh, no push, [ADR 0010](adr/0010-server-shape.md)) | M6 |
 | S | Multiple mail domains per server; user-owned custom domains | M9 |
 | C | Forward to real inbox (re-encrypted or plaintext, opt-in) — deliverability nightmare, treat carefully | post-1.0 |
 | C | Hosted shared mail domain for non-self-hosters | only if a hosted offering exists |

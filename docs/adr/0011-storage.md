@@ -1,6 +1,6 @@
 # ADR 0011: Storage: SQLite and PostgreSQL via sqlx
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-25
 - Deciders: project owner
 - Milestone: M1 (SQLite) / M3 (PostgreSQL supported)
@@ -166,6 +166,16 @@ A mode switch moves an account from one column to the other, with one transactio
 
 Out of scope here. The M3 attachments ADR chooses between DB blobs and a separate blob store. Until then the DB is the only place that holds user data.
 
+### Owner decisions (2026-09-25)
+
+The owner answered the open questions on 2026-09-25:
+
+1. **PostgreSQL in CI from M1** → Yes. The PostgreSQL CI job exists from the first migration in M1; PostgreSQL is officially supported from M3.
+2. **Automatic migration on SQLite with a 24 h pre-migration copy; explicit migration on PostgreSQL** → Yes, with the copy kept for 24 h (rule 9).
+3. **Encrypting the server-secrets backup file under an operator passphrase** → Yes, from M1, reusing the export-file construction ([CRYPTO.md §11.14](../CRYPTO.md#1114-encrypted-export-m1)) with its own purpose id, `SERVER_SECRETS_BACKUP` ([CRYPTO.md §5.11](../CRYPTO.md#511-server-side-encryption-not-zero-knowledge)).
+4. **Engine-neutral backup format versus `pg_dump` and `VACUUM INTO` only** → Build the engine-neutral format (`rizzy-vault backup` / `restore`, "Backups" above). The native methods stay documented.
+5. **Engine dispatch** → Yes: enum dispatch over the two pools with shared `$N` query files (rule 3), confirmed by the M1 spike on the first domain. Not the sqlx `Any` driver, and not code generic over `DB: Database`.
+
 ## Consequences
 
 ### Positive
@@ -208,11 +218,7 @@ Out of scope here. The M3 attachments ADR chooses between DB blobs and a separat
 
 ## Open questions for the owner
 
-1. **PostgreSQL in CI from M1**, officially supported from M3. *Recommendation:* yes.
-2. **Automatic migration on SQLite, with a pre-migration copy kept for 24 h; explicit migration on PostgreSQL.** *Recommendation:* yes. A longer window keeps deleted data around longer.
-3. **Encrypting the server-secrets backup file under an operator passphrase.** This is server-side cryptography. *Recommendation:* yes from M1, reusing the export-file construction ([CRYPTO.md §11.14](../CRYPTO.md#1114-encrypted-export-m1)) with its own purpose id, `SERVER_SECRETS_BACKUP` ([CRYPTO.md §5.11](../CRYPTO.md#511-server-side-encryption-not-zero-knowledge)).
-4. **The engine-neutral backup format** versus documenting `pg_dump` and `VACUUM INTO` only. *Recommendation:* build it. It is the only way to move from SQLite to PostgreSQL, and the restore drill needs one format for both engines.
-5. **Engine dispatch.** Enum dispatch over the two pools with shared `$N` query files, confirmed by an M1 spike on the first domain. *Recommendation:* yes. The alternatives are the sqlx `Any` driver, or code generic over `DB: Database`.
+None. All were answered by the owner on 2026-09-25; see [Owner decisions (2026-09-25)](#owner-decisions-2026-09-25) in the Decision section. The answers keep the original question numbers, so a reference to "open question N" means owner decision N.
 
 ## References
 

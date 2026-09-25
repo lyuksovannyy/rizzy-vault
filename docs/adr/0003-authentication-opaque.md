@@ -1,6 +1,6 @@
 # ADR 0003: Authentication: OPAQUE
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-25
 - Deciders: project owner
 - Milestone: M1
@@ -49,6 +49,13 @@ Crate facts (fact sheet, checked 2026-09-25):
 10. **On-device mode** stores no OPAQUE record at all.
 11. **2FA** (TOTP in M1, WebAuthn in M3) gates server access only. It never feeds key derivation.
 
+### Owner decisions (2026-09-25)
+
+The owner answered the open questions on 2026-09-25:
+
+1. **Invite-only signup as the default** → Yes. Open signup is an explicit admin opt-in, with rate limits.
+2. **Re-authentication window** → 5 minutes. A re-authentication counts as fresh for sensitive actions (password change, export, rotation, revocation) for 5 minutes.
+
 ## Consequences
 
 ### Positive
@@ -82,8 +89,7 @@ Crate facts (fact sheet, checked 2026-09-25):
 
 ## Open questions for the owner
 
-1. **Invite-only signup as the default.** Accept it? *Recommendation:* yes. Open signup is an explicit admin opt-in with rate limits.
-2. **Re-authentication window.** How long after re-authentication counts as "fresh" for sensitive actions (password change, export, rotation, revocation)? *Recommendation:* 5 minutes.
+None. All were answered by the owner on 2026-09-25; see [Owner decisions (2026-09-25)](#owner-decisions-2026-09-25) in the Decision section. The answers keep the original question numbers, so a reference to "open question N" means owner decision N.
 
 ## References
 
