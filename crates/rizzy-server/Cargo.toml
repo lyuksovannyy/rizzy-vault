@@ -1,0 +1,16 @@
+[package]
+name = "rizzy-server"
+description = "rizzy-vault self-hosted server binary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "rizzy-vault"
+path = "src/main.rs"
+
+[lints]
+workspace = true

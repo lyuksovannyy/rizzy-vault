@@ -1,0 +1,12 @@
+[package]
+name = "rizzy-core"
+description = "Crypto primitives, envelope formats and item models. No I/O; portable to wasm32."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

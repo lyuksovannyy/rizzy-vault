@@ -1,0 +1,5 @@
+[alias]
+# `cargo lint` — the exact clippy invocation CI runs.
+lint = "clippy --workspace --all-targets --locked -- -D warnings"
+# `cargo check-wasm` — rizzy-core and rizzy-sync must stay portable to the browser/extension.
+check-wasm = "check -p rizzy-core -p rizzy-sync --target wasm32-unknown-unknown --locked"

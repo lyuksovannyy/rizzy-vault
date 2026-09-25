@@ -1,0 +1,19 @@
+[package]
+name = "rizzy-cli"
+description = "`rv` — rizzy-vault command-line client."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "rv"
+path = "src/main.rs"
+
+[dependencies]
+rizzy-core.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "rizzy-sync"
+description = "Sync engine shared by clients and server: op log, hybrid logical clocks, version vectors, merge."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rizzy-core.workspace = true
+
+[lints]
+workspace = true
