@@ -19,7 +19,7 @@ Target users by phase: **Personal → Enthusiasts/Families → Small & medium bu
 
 1. **Zero knowledge.** The server never sees plaintext secrets, master passwords, or keys. Ever. Including for shares and email.
 2. **No home-made crypto.** Only audited primitives from established crates. Every crypto decision is written down in an ADR before it is coded.
-3. **Design the data model for orgs on day one.** UI for orgs comes late; the key hierarchy (per-user keypairs, per-vault keys) must exist from M1 or we rewrite everything at M8.
+3. **Design the data model for orgs on day one.** UI for orgs comes late; the key hierarchy (per-user keypairs, per-vault keys) must exist from M1 or we rewrite everything at M9.
 4. **Versioned everything.** Ciphertext formats, KDF params, API — all carry a version so we can migrate (e.g. to post-quantum) without breaking vaults.
 5. **Email is a module, not the core.** The password manager must be fully usable with the mail subsystem disabled.
 6. **Ship a usable personal product before starting anything business-shaped.**
@@ -32,12 +32,13 @@ Target users by phase: **Personal → Enthusiasts/Families → Small & medium bu
 | **M1** | Core vault (MVP) | Register/login, E2EE vault CRUD, sync, web vault, CLI, import/export, generator, TOTP. Author uses it daily. | Personal (dogfood) |
 | **M2** | Browser extension & URL matching | Autofill in Chromium + Firefox, save-on-submit, domain equivalence (youtube.com ≡ youtu.be), match modes. | Personal |
 | **M3** | 1Password-grade UX & desktop | Design system, desktop app, quick-access search, Watchtower-style health report, tags/favorites. | Personal |
-| **M4** | Public sharing | Share an item by link with fragment-held key, expiry, view limits, optional recipient verification. | Personal |
-| **M5** | Aliases & email receiving | Generate alias identities, receive-only mailbox in UI, ingress encryption, autofill integration. | Personal / enthusiasts |
-| **M6** | Mobile & passkeys | iOS/Android apps with OS autofill, passkey (WebAuthn) storage and use. | Personal |
-| **M7** | Hardening → **v1.0** | External security audit, bug bounty, backup/restore drills, docs. Public 1.0 for personal use. | Public |
-| **M8** | Families & enthusiasts | Shared vaults, family org, emergency access, multiple mail domains, admin panel. | Enthusiasts |
-| **M9** | Business | Org policies, roles, SSO (OIDC/SAML), SCIM, audit logs, admin console, billing hooks. | SMB |
+| **M4** | Sync modes | User picks **Server** sync (encrypted vault stored on server) or **On-device** sync (server is only an encrypted relay + version tracker, no durable vault copy). Switch between modes without data loss. | Personal |
+| **M5** | Public sharing | Share an item by link with fragment-held key, expiry, view limits, optional recipient verification. | Personal |
+| **M6** | Aliases & email receiving | Generate alias identities, receive-only mailbox in UI, ingress encryption, autofill integration. | Personal / enthusiasts |
+| **M7** | Mobile & passkeys | iOS/Android apps with OS autofill, passkey (WebAuthn) storage and use. | Personal |
+| **M8** | Hardening → **v1.0** | External security audit, bug bounty, backup/restore drills, docs. Public 1.0 for personal use. | Public |
+| **M9** | Families & enthusiasts | Shared vaults, family org, emergency access, multiple mail domains, admin panel. | Enthusiasts |
+| **M10** | Business | Org policies, roles, SSO (OIDC/SAML), SCIM, audit logs, admin console, billing hooks. | SMB |
 
 Rough rule: each milestone ends with a tagged release and a written "what we learned" note. A milestone is not done because features are merged; it is done when the exit criteria are met.
 
@@ -46,7 +47,7 @@ Rough rule: each milestone ends with a tagged release and a written "what we lea
 ## 4. MoSCoW by area
 
 Legend: **M** = Must, **S** = Should, **C** = Could, **W** = Won't (not in this horizon). The column *When* is the milestone.
-MoSCoW is scored **against v1.0 (end of M7)**. Items for M8/M9 are listed so the architecture accounts for them, but they are *Won't for v1.0* by definition.
+MoSCoW is scored **against v1.0 (end of M8)**. Items for M9/M10 are listed so the architecture accounts for them, but they are *Won't for v1.0* by definition.
 
 ### 4.1 Foundations & project hygiene (M0)
 
@@ -58,8 +59,8 @@ MoSCoW is scored **against v1.0 (end of M7)**. Items for M8/M9 are listed so the
 | M | CI: fmt, clippy (deny warnings), tests, `cargo audit`, `cargo deny` (licenses/advisories) | M0 |
 | M | License policy: AGPL-3.0 server/core; decide client license; dependency license allow-list | M0 |
 | S | `SECURITY.md` with disclosure process | M0 |
-| S | Fuzzing harness for parsers (import formats, email MIME, URL parser) | M1–M5 |
-| C | Reproducible builds for server binary and extension | M7 |
+| S | Fuzzing harness for parsers (import formats, email MIME, URL parser) | M1–M6 |
+| C | Reproducible builds for server binary and extension | M8 |
 | W | Monorepo tooling beyond Cargo + one JS package manager | — |
 
 ### 4.2 Core vault (M1)
@@ -74,7 +75,7 @@ MoSCoW is scored **against v1.0 (end of M7)**. Items for M8/M9 are listed so the
 | M | TOTP secret storage + code generation | M1 |
 | M | Password history per item | M1 |
 | M | Trash with restore (soft delete, auto-purge after N days) | M1 |
-| M | Sync with conflict handling (last-write-wins per item + revision numbers; no silent data loss) | M1 |
+| M | Mode-agnostic sync engine (see 4.6): encrypted operation log, per-item version vectors, deterministic merge, no silent data loss. M1 ships Server mode only, but the engine must not assume the server holds the vault | M1 |
 | M | Offline read access on clients (encrypted local cache) | M1 |
 | M | Import: Bitwarden JSON, 1Password (1PUX), KeePass (KDBX/XML), generic CSV, Chrome/Firefox CSV | M1 |
 | M | Export: encrypted JSON (own format) + plaintext JSON/CSV with scary warning | M1 |
@@ -89,7 +90,7 @@ MoSCoW is scored **against v1.0 (end of M7)**. Items for M8/M9 are listed so the
 | C | `.env` / secrets injection for developers (`rv run -- cmd`) | post-1.0 |
 | W | Server-side search over item contents (violates zero knowledge) | never |
 
-### 4.3 Cryptography & authentication (M0–M1, audited in M7)
+### 4.3 Cryptography & authentication (M0–M1, audited in M8)
 
 | Pri | Item | When |
 |---|---|---|
@@ -104,12 +105,12 @@ MoSCoW is scored **against v1.0 (end of M7)**. Items for M8/M9 are listed so the
 | M | 2FA: TOTP, WebAuthn/FIDO2 security keys | M1 (TOTP) / M3 (WebAuthn) |
 | M | Recovery story written down and implemented: "Emergency Kit" (printable Secret Key + recovery code). No recovery = data gone, and the UI says so plainly | M1 |
 | S | **Secret Key / 2SKD** (1Password-style 128-bit device-held key mixed into KDF) — protects against server breach + weak master password | M1 decision, M3 ship |
-| S | Unlock with biometrics / OS keychain on desktop & mobile | M3 / M6 |
+| S | Unlock with biometrics / OS keychain on desktop & mobile | M3 / M7 |
 | S | Session/device management: list devices, revoke, force logout | M3 |
 | C | Hybrid post-quantum key wrapping (X25519 + ML-KEM-768) for sharing & org keys | post-1.0 (format must allow it from M1) |
 | C | Login with passkey (PRF extension to derive unlock key) | post-1.0 |
 | W | Custom/novel crypto constructions | never |
-| W | Server-side password reset that can decrypt vaults | never (org admin recovery in M9 uses explicit key escrow the user consents to) |
+| W | Server-side password reset that can decrypt vaults | never (org admin recovery in M10 uses explicit key escrow the user consents to) |
 
 ### 4.4 URL matching & autofill (M2)
 
@@ -125,7 +126,7 @@ The problem: `youtube.com`, `youtu.be`, `m.youtube.com`, `accounts.google.com` a
 | M | Security rules: never autofill HTTPS-saved credentials on HTTP; never autofill into cross-origin iframes by default; autofill on user gesture only (no silent page-load fill) | M2 |
 | M | Visual warning when filling on a domain matched only via equivalence group | M2 |
 | M | Browser extension: Chromium (MV3) + Firefox — inline menu, fill, save/update on submit, generator in field | M2 |
-| S | Android app-ID ↔ domain mapping (Digital Asset Links) and iOS associated domains | M6 |
+| S | Android app-ID ↔ domain mapping (Digital Asset Links) and iOS associated domains | M7 |
 | S | Community-contributed equivalence list via PRs with review rules (both domains provably same owner) | M2 |
 | S | Safari extension | M3 |
 | C | Heuristic multi-step login form support (username page → password page) | M3 |
@@ -145,50 +146,86 @@ The problem: `youtube.com`, `youtu.be`, `m.youtube.com`, `accounts.google.com` a
 | S | Onboarding flow (import wizard, Emergency Kit download, extension install) | M3 |
 | S | Localization framework (i18n from day one of M3, English only at first) | M3 |
 | C | Themes / accent color customization | post-1.0 |
-| C | Travel mode (hide vaults on device while crossing borders) | M8 |
+| C | Travel mode (hide vaults on device while crossing borders) | M9 |
 | W | Pixel-copying 1Password's UI or icons | never |
 
-### 4.6 Public sharing (M4)
+### 4.6 Sync modes (M4)
+
+Two modes, chosen per account at setup and changeable later:
+
+- **Server mode** (default): the server durably stores the full *encrypted* vault and op log. Any new device just logs in and downloads.
+- **On-device mode**: the vault lives only on the user's devices. The server is a **store-and-forward relay**: it keeps the device registry, each device's sync cursor / version vector (metadata only), and encrypted operations **until every registered device has acknowledged them**, then deletes them. No durable vault snapshot on the server.
+
+What on-device mode actually buys you (be honest in the UI): in server mode the server already sees only ciphertext. On-device mode removes the *offline-crackable vault blob* from the server (a breach yields nothing to brute-force against the master password), shrinks metadata, and satisfies "my data never rests on someone else's disk". The price: **lose all devices = lose the vault**, and a new device cannot be set up without an existing one online.
+
+| Pri | Item | When |
+|---|---|---|
+| M | Single sync engine for both modes (built in M1): client-side encrypted op log, hybrid logical clocks + per-item version vectors, field-level merge, tombstones for deletes, conflicting edits kept as item history instead of dropped | M1 (engine) / M4 (modes) |
+| M | Mode selection at account creation, with a plain-language comparison screen | M4 |
+| M | **Server mode**: full encrypted vault + op log stored server-side; compaction of op log into snapshots | M1 |
+| M | **On-device mode**: server stores only device registry, public keys, per-device version vectors, and pending encrypted ops; ops purged once acked by all active devices | M4 |
+| M | Pending-op TTL (configurable, e.g. 90 days); a device offline longer than the TTL is marked stale and must re-sync from a peer device, never from the server | M4 |
+| M | New-device enrollment in on-device mode: pair with an existing online device (QR / short code), full snapshot transferred device→device over the relay, E2EE, verified with a short authentication string (SAS) | M4 |
+| M | Device revocation: revoked device is removed from the ack set and vault key is rotated | M4 |
+| M | Mode switching both ways. Server→device: server deletes vault blobs and op log, and proves it by returning a signed deletion receipt. Device→server: client uploads a full encrypted snapshot. Explicit confirmation, no silent switch | M4 |
+| M | Data-loss guardrails for on-device mode: warn when only one device is registered; mandatory encrypted backup prompt (local file) on setup and periodically | M4 |
+| M | Transparency page in settings: exactly what the server stores for this account in the current mode (item counts, byte sizes, retention) | M4 |
+| M | Server admin can restrict which modes are allowed on the instance | M4 |
+| S | Scheduled encrypted backups to user-chosen storage (local folder, WebDAV, S3-compatible) — strongly recommended for on-device mode | M4 |
+| S | Size padding and batching of relayed ops to reduce metadata leakage (how often and how much you edit) | M4 |
+| S | Clear conflict UI: "edited on Phone and Laptop at the same time — keep both / pick one" | M4 |
+| C | Direct LAN sync (mDNS discovery) that skips the relay when devices share a network | post-1.0 |
+| C | Fully serverless peer-to-peer sync (e.g. `iroh` / WebRTC) | post-1.0 |
+| C | Per-vault mode (e.g. personal vault on-device, shared family vault on server) | M9 |
+| W | Web vault as a device in on-device mode — a browser tab is not durable storage. In on-device mode the web vault is disabled (browser extension, desktop, mobile and CLI are real devices) | Won't |
+| W | On-device mode for shared/org vaults in v1.0 — multi-user, multi-device relay with membership changes is a separate design problem | M9 decision |
+
+Interactions with other features:
+- **Public shares (M5)** are always stored on the server (encrypted, fragment key) — that is their nature. Allowed in both modes; the transparency page lists them.
+- **Alias mailbox (M6)**: inbound mail must wait somewhere while devices are offline. In on-device mode mail is kept encrypted on the server until all devices ack, then purged — same relay rule as vault ops.
+- **Business (M10)**: org policy can force Server mode (admins need recovery and audit).
+
+### 4.7 Public sharing (M5)
 
 Model: 1Password-style share links. The share is an **encrypted snapshot**, not a live link to the item.
 
 | Pri | Item | When |
 |---|---|---|
-| M | Create share link for one item; item encrypted with a random key; key lives **only in the URL fragment** (`#…`), never sent to the server | M4 |
-| M | Expiry (1h / 1d / 7d / 30d / custom), max views, manual revoke | M4 |
-| M | Recipient view page that works without an account | M4 |
-| M | Choose which fields are included (e.g. share password but not notes/TOTP) | M4 |
-| M | Owner sees list of active shares + view count | M4 |
-| S | Restrict to specific email addresses, verified by one-time code | M4 |
-| S | Optional extra passphrase on share (out-of-band) | M4 |
-| S | "Send"-style arbitrary text/file share (Bitwarden Send equivalent) | M4 |
-| C | Recipient can "save to my rizzy-vault" in one click | M8 |
-| W | Live shared items between two personal accounts (that is what shared vaults in M8 are for) | M8 |
+| M | Create share link for one item; item encrypted with a random key; key lives **only in the URL fragment** (`#…`), never sent to the server | M5 |
+| M | Expiry (1h / 1d / 7d / 30d / custom), max views, manual revoke | M5 |
+| M | Recipient view page that works without an account | M5 |
+| M | Choose which fields are included (e.g. share password but not notes/TOTP) | M5 |
+| M | Owner sees list of active shares + view count | M5 |
+| S | Restrict to specific email addresses, verified by one-time code | M5 |
+| S | Optional extra passphrase on share (out-of-band) | M5 |
+| S | "Send"-style arbitrary text/file share (Bitwarden Send equivalent) | M5 |
+| C | Recipient can "save to my rizzy-vault" in one click | M9 |
+| W | Live shared items between two personal accounts (that is what shared vaults in M9 are for) | M9 |
 
-### 4.7 Aliases & email receiving (M5)
+### 4.8 Aliases & email receiving (M6)
 
 This is the most operationally expensive feature in the whole plan. Read the risks section before starting it.
 
 | Pri | Item | When |
 |---|---|---|
-| M | Generate alias identity (random name, username, alias address, password) from item creation and from the extension on sign-up forms | M5 |
-| M | Inbound SMTP receiver (Rust, e.g. `mail-parser` + own SMTP listener, or front with Postfix/Haraka and hand off) — **receive only** | M5 |
-| M | Catch-all per configured domain; alias → owner lookup without revealing which aliases exist (no SMTP user enumeration) | M5 |
-| M | **Encrypt at ingress** with the alias owner's public key; server stores ciphertext only; plaintext held in RAM for the minimum time | M5 |
-| M | Spam/abuse filtering **before** encryption (rspamd or equivalent), SPF/DKIM/DMARC verification shown in UI | M5 |
-| M | Mailbox UI: list, read (sanitized HTML, remote images blocked by default), delete, per-alias view | M5 |
-| M | Size limits, attachment limits, retention policy (auto-delete after N days, configurable) | M5 |
-| M | Disable/delete alias; mail to disabled alias is rejected at SMTP time | M5 |
-| M | Admin docs: MX, SPF, port 25 requirements, reverse proxy, TLS | M5 |
-| S | Extract OTP / verification links from mail and offer them in autofill | M5 |
-| S | Real-time notification of new mail (WebSocket/SSE → UI, push on mobile in M6) | M5 |
-| S | Multiple mail domains per server; user-owned custom domains | M8 |
+| M | Generate alias identity (random name, username, alias address, password) from item creation and from the extension on sign-up forms | M6 |
+| M | Inbound SMTP receiver (Rust, e.g. `mail-parser` + own SMTP listener, or front with Postfix/Haraka and hand off) — **receive only** | M6 |
+| M | Catch-all per configured domain; alias → owner lookup without revealing which aliases exist (no SMTP user enumeration) | M6 |
+| M | **Encrypt at ingress** with the alias owner's public key; server stores ciphertext only; plaintext held in RAM for the minimum time | M6 |
+| M | Spam/abuse filtering **before** encryption (rspamd or equivalent), SPF/DKIM/DMARC verification shown in UI | M6 |
+| M | Mailbox UI: list, read (sanitized HTML, remote images blocked by default), delete, per-alias view | M6 |
+| M | Size limits, attachment limits, retention policy (auto-delete after N days, configurable) | M6 |
+| M | Disable/delete alias; mail to disabled alias is rejected at SMTP time | M6 |
+| M | Admin docs: MX, SPF, port 25 requirements, reverse proxy, TLS | M6 |
+| S | Extract OTP / verification links from mail and offer them in autofill | M6 |
+| S | Real-time notification of new mail (WebSocket/SSE → UI, push on mobile in M7) | M6 |
+| S | Multiple mail domains per server; user-owned custom domains | M9 |
 | C | Forward to real inbox (re-encrypted or plaintext, opt-in) — deliverability nightmare, treat carefully | post-1.0 |
 | C | Hosted shared mail domain for non-self-hosters | only if a hosted offering exists |
 | W | **Sending** email / replying from alias | Won't for v1.0 (deliverability, abuse, blacklisting) |
 | W | Full IMAP/POP server | never — we are not an email provider |
 
-### 4.8 Server, self-hosting & ops (M1 onward)
+### 4.9 Server, self-hosting & ops (M1 onward)
 
 | Pri | Item | When |
 |---|---|---|
@@ -202,23 +239,23 @@ This is the most operationally expensive feature in the whole plan. Read the ris
 | S | Admin panel (user list, disable user, invite-only signup, SMTP settings for notifications) | M3 |
 | S | Push/live sync (WebSocket) so clients update without polling | M3 |
 | S | Metrics endpoint (Prometheus) | M3 |
-| C | High-availability deployment guide | M9 |
+| C | High-availability deployment guide | M10 |
 | W | Official managed cloud hosting | not in this roadmap — separate business decision |
 
-### 4.9 Mobile & passkeys (M6)
+### 4.10 Mobile & passkeys (M7)
 
 | Pri | Item | When |
 |---|---|---|
-| M | Android app with Autofill Framework integration | M6 |
-| M | iOS app with AutoFill Credential Provider | M6 |
-| M | Shared Rust core via **UniFFI** bindings (no crypto re-implemented in Kotlin/Swift) | M6 |
-| M | Biometric unlock, auto-lock timeout, screenshot blocking | M6 |
-| M | Passkey storage (store WebAuthn credentials in vault) and use in extension | M6 |
-| S | Passkey provider on Android 14+/iOS 17+ | M6 |
-| S | Passkey import/export via FIDO Credential Exchange Protocol (CXP/CXF) when stable | M7 |
+| M | Android app with Autofill Framework integration | M7 |
+| M | iOS app with AutoFill Credential Provider | M7 |
+| M | Shared Rust core via **UniFFI** bindings (no crypto re-implemented in Kotlin/Swift) | M7 |
+| M | Biometric unlock, auto-lock timeout, screenshot blocking | M7 |
+| M | Passkey storage (store WebAuthn credentials in vault) and use in extension | M7 |
+| S | Passkey provider on Android 14+/iOS 17+ | M7 |
+| S | Passkey import/export via FIDO Credential Exchange Protocol (CXP/CXF) when stable | M8 |
 | C | Wear OS / watchOS TOTP viewer | post-1.0 |
 
-### 4.10 Families & enthusiasts (M8) — *Won't for v1.0*
+### 4.11 Families & enthusiasts (M9) — *Won't for v1.0*
 
 | Item |
 |---|
@@ -229,7 +266,7 @@ This is the most operationally expensive feature in the whole plan. Read the ris
 | Recipient "save shared item to my vault" |
 | Travel mode |
 
-### 4.11 Business / SMB (M9) — *Won't for v1.0*
+### 4.12 Business / SMB (M10) — *Won't for v1.0*
 
 | Item |
 |---|
@@ -254,7 +291,8 @@ This is the most operationally expensive feature in the whole plan. Read the ris
 | UI stack | Rust UI (Leptos/Dioxus) vs. TypeScript (Svelte/React) | **TypeScript + one framework** for web/extension/desktop | Extension ecosystem, hiring, and component libraries are JS-first. Rust stays where security lives. |
 | Desktop | Electron / Tauri | **Tauri** | Smaller, Rust-native, reuses `core` directly. |
 | DB | SQLite / Postgres | **Both via sqlx**, SQLite default | Personal self-hosters want zero-config. |
-| Mail ingress | Own SMTP in Rust vs. Postfix/Haraka front | **Decide in M5 spike**; lean own minimal receive-only listener | Fewer moving parts for self-hosters, but must be fuzzed hard. |
+| Sync engine | Whole-vault LWW / per-item LWW / op log + version vectors / full CRDT library (Automerge, Yrs) | **Op log + HLC + per-item version vectors, field-level merge** | Needed for relay-only On-device mode; a full CRDT library is overkill for records of ~20 fields and bloats the payload. |
+| Mail ingress | Own SMTP in Rust vs. Postfix/Haraka front | **Decide in M6 spike**; lean own minimal receive-only listener | Fewer moving parts for self-hosters, but must be fuzzed hard. |
 
 ## 6. Risks & hard truths
 
@@ -265,12 +303,14 @@ This is the most operationally expensive feature in the whole plan. Read the ris
 5. **"1Password design" is not a feature list.** It is consistent, boring polish across every screen. Without a design system in M3 it will look like a template.
 6. **Crypto credibility.** Nobody serious (enthusiasts, SMBs) will trust an unaudited password manager. Budget for an external audit before v1.0 or do not call it 1.0.
 7. **The org key model must exist from M1.** Retrofitting sharing into a single-user key hierarchy means re-encrypting every vault — the classic rewrite trap.
-8. **Naming.** "rizzy-vault" is fine for a personal project; it will be a hard sell to an SMB security buyer. Decide on the public product name before M7.
+8. **On-device sync turns support tickets into data loss.** Users *will* lose their only phone. Server mode stays the default; on-device mode ships with backup nagging and a scary-but-honest setup screen. The sync engine is the hardest correctness problem in the project — it needs property-based tests (random edit/offline/reconnect sequences on N simulated devices converging to the same state) before M4 ships.
+9. **Naming.** "rizzy-vault" is fine for a personal project; it will be a hard sell to an SMB security buyer. Decide on the public product name before M8.
 
-## 7. Definition of done for v1.0 (end of M7)
+## 7. Definition of done for v1.0 (end of M8)
 
-- All **Must** items in sections 4.1–4.9 shipped.
+- All **Must** items in sections 4.1–4.10 shipped.
 - Third-party security audit completed, findings fixed or publicly documented.
 - Backup → wipe → restore tested on SQLite and Postgres.
+- Sync convergence property tests pass for both modes; mode switch server↔device tested with 3+ devices including one offline past the TTL.
 - Import from Bitwarden, 1Password and KeePass verified on real exports.
 - Author and at least 10 external users have used it daily for 60+ days without data loss.
