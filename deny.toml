@@ -1,0 +1,61 @@
+# cargo-deny policy — run with `cargo deny check`. CI fails on any error.
+# Changing this file is a security decision: it needs a reason in the PR description.
+
+[graph]
+all-features = true
+
+[advisories]
+# RustSec advisory database. Every vulnerability advisory is an error; ignoring one needs an
+# entry here with the advisory ID and a written reason.
+version = 2
+yanked = "deny"
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+# The allow-list is policy for future dependencies; not every entry is used yet.
+unused-allowed-license = "allow"
+# Permissive and weak-copyleft licenses compatible with shipping AGPL-3.0 binaries.
+allow = [
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "CC0-1.0",
+  "Unicode-3.0",
+  "MPL-2.0",
+  "CDLA-Permissive-2.0",
+  "AGPL-3.0-only",
+  "AGPL-3.0-or-later",
+]
+exceptions = []
+
+[licenses.private]
+# Our own workspace crates are `publish = false`; their license is set in Cargo.toml.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+deny = [
+  # TLS is rustls-only: static musl builds, no system OpenSSL in the container image.
+  { crate = "openssl", reason = "use rustls" },
+  { crate = "openssl-sys", reason = "use rustls" },
+  # Deprecated/unmaintained crypto-adjacent crates we never want pulled in.
+  { crate = "rust-crypto", reason = "unmaintained; use RustCrypto crates" },
+  { crate = "sodiumoxide", reason = "unmaintained; use RustCrypto crates" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
