@@ -49,7 +49,7 @@ The `rizzy-server` crate builds one binary, `rizzy-vault`. A process runs the ro
 - **`smtp` and `icons` run alone.** A process started with either role refuses to start if:
   - the role is combined with any other role, or
   - it can see any database setting (a URL or a SQLite path), or
-  - it can see any server-secret file (the OPAQUE setup, token keys).
+  - it can see any server-secret file (the secrets file, [CRYPTO.md §5.11](../CRYPTO.md#511-server-side-encryption-not-zero-knowledge)).
 
   This turns [THREAT_MODEL Q-5](../THREAT_MODEL.md#10-open-questions-for-the-owner) and INV-44 into a startup check instead of a line in the docs. Tests cover each refusal.
 - **`smtp` reaches `api` through exactly two internal endpoints.** They sit on the internal listener only and are authenticated with a per-deployment bearer secret, mounted as a file.
@@ -117,7 +117,7 @@ One OCI image carries the one binary with every role.
 ### 5. Short-lived auth state lives in the database
 
 From M1, on both engines, every piece of short-lived auth state lives in `auth_` tables, never in process memory:
-- OPAQUE `ServerLogin` state, keyed by `login_id`, with a 60 s TTL ([CRYPTO.md §5.10](../CRYPTO.md#510-sessions-after-authentication)). It carries key-confirmation material: a live DB reader who saw it in the clear could complete a login that is in flight. It is therefore stored sealed under a server key from the secrets mount, like the 2FA secrets ([INV-8](../THREAT_MODEL.md#8-security-invariants)). The sealing construction and its purpose id go into CRYPTO.md in M1, together with the 2FA-secret construction;
+- OPAQUE `ServerLogin` state, keyed by `login_id`, with a 60 s TTL ([CRYPTO.md §5.10](../CRYPTO.md#510-sessions-after-authentication)). It carries key-confirmation material: a live DB reader who saw it in the clear could complete a login that is in flight. It is therefore stored sealed under a server key from the secrets mount, like the 2FA secrets ([INV-8](../THREAT_MODEL.md#8-security-invariants)): as `SERVER_LOGIN_STATE`, and the 2FA secrets as `SERVER_TOTP_SECRET` ([CRYPTO.md §5.11](../CRYPTO.md#511-server-side-encryption-not-zero-knowledge));
 - device-auth challenges, with a 60 s TTL (CRYPTO.md §5.10);
 - rate-limit and backoff counters per (account, source), and per-IP signup limits ([ROADMAP §4.9](../ROADMAP.md#49-server-self-hosting--ops-m1-onward), [CRYPTO.md §5.9](../CRYPTO.md#59-account-enumeration));
 - pending recoveries and their waiting periods ([CRYPTO.md §11.9](../CRYPTO.md#119-recovery-with-the-emergency-kit)).

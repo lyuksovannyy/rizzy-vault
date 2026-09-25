@@ -46,7 +46,7 @@ Bitwarden's SDK V2 uses COSE, with private-use algorithm ids for XChaCha20-Poly1
 
    Signature algorithms: `sig_alg` 0x01 is Ed25519; 0x02 is reserved for hybrid Ed25519 + ML-DSA.
 4. **Allow-lists.**
-   - Each purpose has exactly one encrypt algorithm and a decrypt allow-list. In M1 that is `{0x01}` for symmetric purposes, `{0x12}` for the purposes that carry an account key or a vault between one user's devices (device grants, password-verifier grants, pairing and re-sync transfers), and `{0x10}` for member grants and mail. A PSK purpose never accepts Base mode, which would silently drop the PSK ([CRYPTO.md §9.5](../CRYPTO.md#95-parsing-and-allow-list-rules)).
+   - Each purpose has exactly one encrypt algorithm and a decrypt allow-list. In M1 that is `{0x01}` for symmetric purposes, `{0x12}` for the purposes that carry an account key or a vault between one user's devices (device grants, password-verifier grants, pairing and re-sync transfers), and `{0x10}` for member grants and mail. Server-only purposes (0x0100–0x01FF, [CRYPTO.md §5.11](../CRYPTO.md#511-server-side-encryption-not-zero-knowledge)) use `{0x01}` and appear in no client allow-list. A PSK purpose never accepts Base mode, which would silently drop the PSK ([CRYPTO.md §9.5](../CRYPTO.md#95-parsing-and-allow-list-rules)).
    - Checks run in a fixed order: length, version, the purpose's allow-list, then key id. Only after all four does any crypto run.
    - There is one error for every failure.
 5. **No negotiation, no legacy paths.**
@@ -58,7 +58,7 @@ Bitwarden's SDK V2 uses COSE, with private-use algorithm ids for XChaCha20-Poly1
    - base64url without padding in JSON.
    - Export and backup files are JSON, with the envelope in a `data` field.
 7. **Strict parser.** The parser is a pure, non-panicking function that never allocates in proportion to a length field. It is fuzzed from M1.
-8. **Signed statements** are fixed binary layouts: `LABEL("sig/<type>") ‖ 0x00 ‖ u16 statement_version ‖ body`. They are never serde-derived.
+8. **Signed statements** are fixed binary layouts: `LABEL("sig/<type>") ‖ 0x00 ‖ u16 statement_version ‖ body`. They are never serde-derived. The label is not transmitted: the verifier prepends it for the statement type it expects ([CRYPTO.md §9.6](../CRYPTO.md#96-encoding-for-transport-and-storage)).
 
 The exact layouts, registry and migration procedure are in [CRYPTO.md §9](../CRYPTO.md#9-envelope-format).
 

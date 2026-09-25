@@ -36,11 +36,12 @@ This document holds the full constructions. The ADRs record each decision and li
    2. mixing the Secret Key into the OPAQUE password input with HKDF, and binding `kdf_id` and the server origin into the OPAQUE Context ([§5.2](#52-password-input-and-the-secret-key), [§5.3](#53-context-identifiers-and-credential-identifier));
    3. signed HPKE grants: HPKE (Base or PSK mode) plus an Ed25519 signature, with sender and recipient ids in the AAD, and the PSK derivations ([§10.1](#101-hpke-key-wrapping));
    4. the signed account state, device set and key-bundle chain, including the settings commitment and TOFU rules ([§10.2](#102-ed25519-signatures-and-signed-statements), [§10.3](#103-public-key-authenticity));
-   5. device-key challenge signing for sessions ([§5.10](#510-sessions-after-authentication));
+   5. device-key challenge signing and request signing for sessions ([§5.10](#510-sessions-after-authentication));
    6. lazy item-key rotation with an authenticated creation epoch ([§11.6](#116-key-rotation));
    7. device pairing: commit-then-reveal SAS followed by an HPKE-sealed transfer ([§11.7](#117-new-device-in-on-device-mode));
    8. the recovery token plus waiting period ([§11.9](#119-recovery-with-the-emergency-kit));
-   9. the share link token, access token and passphrase scheme ([§11.10](#1110-public-share-link-creation-m5), [§11.11](#1111-public-share-link-opening-m5)).
+   9. the share link token, access token and passphrase scheme ([§11.10](#1110-public-share-link-creation-m5), [§11.11](#1111-public-share-link-opening-m5));
+   10. server-side sealing ([§5.11](#511-server-side-encryption-not-zero-knowledge)).
 
    Nothing else may be invented. A new construction needs an ADR first, and joins this list. [ADR 0009](adr/0009-crypto-dependency-policy.md) sizes the audit scope from it.
 3. **"Audited" is weaker than it sounds.** Almost none of the crate versions we will ship have been audited in that exact version ([§3](#3-primitives)). The rule we enforce is: standard algorithm, established crate with a public audit history or a well-reviewed codebase, pinned version, and our own external audit of the integration in M8 ([ADR 0009](adr/0009-crypto-dependency-policy.md)).
@@ -77,11 +78,12 @@ Versions are the latest stable releases as of 2026-09-25 (fact sheet). Audit sta
 | Purpose | Algorithm | Crate (features) | Version | Audit status |
 |---|---|---|---|---|
 | Login / PAKE | OPAQUE, RFC 9807. OPRF ristretto255-SHA512, 3DH over ristretto255 with SHA-512 | `opaque-ke` (`default-features = false`, `ristretto255`; **not** `argon2`, **not** `std`) | =4.0.1 | NCC Group, 2021 (sponsored by WhatsApp): reviewed v0.5.0, fixes landed in v1.2.0. **4.x is not audited** (V) |
-| OPAQUE internals | ristretto255 group, VOPRF, SHA-512 | `curve25519-dalek` 4.x, `voprf` 0.5 and `rand` 0.8 (no default features) are transitive. `sha2` 0.10 is a **direct, renamed** dependency (`sha2_010`), because the ciphersuite names `Sha512` and opaque-ke 4.0.1 does not re-export sha2 (it re-exports only `rand` and `generic_array`, V). All previous RustCrypto generation | `sha2_010` =0.10.9; the rest lockfile-pinned (rand 0.8.8); curve25519-dalek ≥ 4.1.3 (RUSTSEC-2024-0344) | Quarkslab reviewed curve25519-dalek in 2019 (L). voprf: U |
-| Password KDF, and the OPAQUE KSF | Argon2id v0x13, RFC 9106 | `argon2` (`default-features = false`, `alloc`, `zeroize`) | 0.6.0 | No audit found (U) |
+| OPAQUE internals | ristretto255 group, VOPRF, SHA-512 | Transitive, even with only `ristretto255`: curve25519-dalek 4.1.3, voprf 0.5.0, rand 0.8.8 (no features) and rand_core 0.6.4, and non-optionally elliptic-curve 0.13.8 (hash2curve, sec1) with crypto-bigint 0.5, der 0.7, sec1 0.7, ff 0.13, group 0.13, base16ct 0.2 and const-oid 0.9, plus digest 0.10 / hkdf 0.12 / hmac 0.12 and generic-array =0.14.7. `sha2` 0.10 is a **direct, renamed** dependency (`sha2_010`), because the ciphersuite names `Sha512` and opaque-ke 4.0.1 does not re-export sha2 (it re-exports only `rand` and `generic_array`, V). All previous RustCrypto generation | `sha2_010` =0.10.9; the rest lockfile-pinned (rand 0.8.8); curve25519-dalek ≥ 4.1.3 (RUSTSEC-2024-0344) | Quarkslab reviewed curve25519-dalek in 2019 (L). voprf: U |
+| Password KDF, and the OPAQUE KSF | Argon2id v0x13, RFC 9106 | `argon2` (`default-features = false`, `zeroize`; deliberately **not** `alloc` or `parallel`) | 0.6.0 | No audit found (U) |
 | Symmetric AEAD | XChaCha20-Poly1305 | `chacha20poly1305` (`default-features = false`, `alloc`, `zeroize`) | 0.11.0 | NCC Group, 2020: "no significant findings", but on a much older version (V) |
-| KDF, MAC, commitment | HKDF-SHA-256, HMAC-SHA-256 | `hkdf`, `hmac`, `sha2` | 0.13.0 / 0.13.0 / 0.11.0 | No audit found (U) |
-| Hash (key ids, fingerprints, token hashes) | SHA-256 | `sha2` | 0.11.0 | No audit found (U). RUSTSEC-2021-0100 was fixed long ago (V) |
+| KDF, MAC, commitment | HKDF-SHA-256, HMAC-SHA-256 | `hkdf` (the crate has no features), `hmac` (`zeroize`), `sha2` (`zeroize`) | 0.13.0 / 0.13.0 / 0.11.0 | No audit found (U) |
+| Hash (key ids, fingerprints, token hashes) | SHA-256 | `sha2` (`zeroize`) | 0.11.0 | No audit found (U). RUSTSEC-2021-0100 was fixed long ago (V) |
+| HOTP/TOTP only ([§11.15](#1115-totp-m1)); HIBP range queries from M3 | HMAC-SHA-1 (RFC 4226, RFC 6238). The SHA-256 and SHA-512 variants use `sha2` | `sha1` (`zeroize`) | 0.11.0, the digest 0.11 release that matches `hmac` 0.13 (V, crate manifest). Checklist in [ADR 0009](adr/0009-crypto-dependency-policy.md) | No audit found (U). SHA-1 appears only where an external standard fixes it, never in a construction of ours |
 | Public-key wrapping | HPKE, RFC 9180, Base and PSK modes: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20Poly1305 | `hpke` (`default-features = false`, `alloc`, `x25519`, `chacha`) | 0.14.1 | "Nobody has performed a paid audit". Cloudflare reviewed v0.8 internally (V) |
 | X25519 (inside HPKE) | X25519, RFC 7748 | `x25519-dalek` (transitive via `hpke`) | 3.0.0 | Quarkslab 2019, light review of a much older major (L). 3.0.0 was released 2026-07-06 |
 | Signatures | Ed25519, RFC 8032, verified with `verify_strict` | `ed25519-dalek` (`default-features = false`, `fast`, `zeroize`) | 3.0.0 | Quarkslab 2019 on an older major (L). 3.0.0 is a new major, released 2026-07-06 |
@@ -157,7 +159,7 @@ Versions are the latest stable releases as of 2026-09-25 (fact sheet). Audit sta
 | `server_unlock_key` | 32 B | HKDF(export_key) | Never stored | Each new OPAQUE registration |
 | `device_salt` | 16 B | CSPRNG per device | Device state file | Each local re-wrap after a password change |
 | `local_unlock_key` | 32 B | Argon2id + HKDF | Never stored | Password change |
-| **Account key** | 32 B | CSPRNG at signup | Server: `E_srv` (under server_unlock_key). Device: `E_local` (under local_unlock_key), and optionally `E_ks` (under the keystore unlock secret). Server or backup: `E_rec` (under the recovery wrap key) | Device revocation, recovery, SK change, suspected compromise, user request ([§11.6](#116-key-rotation)) |
+| **Account key** | 32 B | CSPRNG at signup | Server: `E_srv` (under server_unlock_key). Device: `E_local` (under local_unlock_key), optionally `E_ks` (under the keystore unlock secret), and after a keystore unlock that crossed a rotation, `ACCOUNT_KEY_FORWARD` (under the previous account key, until the next password unlock; [§11.3](#113-unlock-on-an-enrolled-device) step 4). Server or backup: `E_rec` (under the recovery wrap key) | Device revocation, recovery, SK change, suspected compromise, user request ([§11.6](#116-key-rotation)) |
 | Keystore unlock secret (M3/M7) | 32 B | CSPRNG per device | The OS keystore of that device, released only after an OS-enforced user-presence check (threat model INV-62). It opens `E_ks` and nothing else. This is the "local unlock secret" of [ADR 0013](adr/0013-shared-client-core.md) and [ADR 0015](adr/0015-desktop-tauri.md) | On biometric-enrolment change, re-enrolment, or when the user turns keystore unlock off (then `E_ks` is deleted) |
 | Identity signing key | Ed25519, 32 B seed | CSPRNG | `E_id` under the account key | Full rotation only |
 | Identity KEM key | X25519, 32 B | CSPRNG (`hpke` `gen_keypair_with_rng`) | `E_id` under the account key | Full rotation only |
@@ -168,7 +170,7 @@ Versions are the latest stable releases as of 2026-09-25 (fact sheet). Audit sta
 | Device KEM key | X25519 | CSPRNG per device (`hpke` `gen_keypair_with_rng`) | Same | Same |
 | Relay key | 32 B | HKDF(account key, epoch) | Never stored; derived on demand | With the account key |
 | Mail secret key (M6) | X25519 | CSPRNG | `MAIL_SECRET_KEY` under the account key | User request, full rotation (`mail_key_epoch + 1`) |
-| Recovery code | 16 B | CSPRNG | Emergency Kit only | On every use, and on every account-key rotation unless the user re-types the current code |
+| Recovery code | 16 B | CSPRNG | Emergency Kit only | On every use, and on every account-key rotation unless the user re-types the current code, which is not offered after an SK change, a recovery or "kit exposed" ([§11.6](#116-key-rotation) step 5) |
 | Share secret (M5) | 32 B | CSPRNG per share | URL fragment; the owner's item data (encrypted) | Never. A share is a snapshot; revoke it and create a new one |
 | Local index key (M3) | 32 B | HKDF(account key, device) | Never stored | With the account key |
 
@@ -177,12 +179,12 @@ Versions are the latest stable releases as of 2026-09-25 (fact sheet). Audit sta
 | Object | Server mode | On-device mode |
 |---|---|---|
 | `E_srv`, `E_rec`, `H_rec` | Server, `auth` domain | **Not stored** (INV-28). The recovery wrap lives in the M4 backup file ([§11.9](#119-recovery-with-the-emergency-kit)) |
-| `E_local`, `E_ks`, `E_dev` | That device only. **Never uploaded**; the API has no field that could carry them | Same |
+| `E_local`, `E_ks`, `E_dev`, `ACCOUNT_KEY_FORWARD` | That device only. **Never uploaded**; the API has no field that could carry them | Same |
 | `E_id`, `MAIL_SECRET_KEY`, `RETIRED_SECRET_KEY`, `ACCOUNT_SETTINGS` | Server, `auth` domain; devices cache them | Same. They are encrypted under the random account key, so storing them gives nothing to brute-force (INV-28 holds) and reveals nothing the server does not already know |
 | Key bundles, `account-state`, device certificates and revocations | Server, `auth` domain | Same |
-| `ACCOUNT_KEY_DEVICE_GRANT`, `PASSWORD_VERIFIER_GRANT` | Server, `auth` domain, until the recipient device consumes it | Same |
+| `ACCOUNT_KEY_DEVICE_GRANT`, `PASSWORD_VERIFIER_GRANT` | Server, `auth` domain, until the recipient device acknowledges it ([§10.1](#101-hpke-key-wrapping)) | Same |
 | `VAULT_KEY_SELF_GRANT` | Server, `vault` domain | **Devices only.** They travel as key records inside `RELAY_BATCH` ([§11.12](#1112-relay-ops-on-device-mode-m4)) and in the pairing transfer ([§11.7](#117-new-device-in-on-device-mode)). On the server they would reveal vault ids, which On-device mode hides ([ADR 0012](adr/0012-sync-engine.md) §11) |
-| `ITEM_KEY_WRAP` | Server, `vault` domain: one row per `(vault_id, item_id, item_key_id, vault_key_epoch)`, whether it arrived inside an op record or in a rotation upload | **Devices only.** They travel inside op records, as key records in `RELAY_BATCH`, and in the pairing transfer. On the server they would reveal item ids |
+| `ITEM_KEY_WRAP` | Server, `vault` domain: the current wrap set, one row per `(vault_id, item_id, item_key_id)`, holding the wrap under the vault's current `vault_key_epoch`. A wrap that arrives inside an op or snapshot record fills that row and is also kept with the record. A rotation upload overwrites the row ([§11.6](#116-key-rotation) step 9). From then on the server serves that record without its wrap but with the signed wrap hash, which it keeps for as long as it keeps the record | **Devices only.** They travel inside op records, as key records in `RELAY_BATCH`, and in the pairing transfer. On the server they would reveal item ids |
 | `ATTACHMENT_KEY_WRAP` (M3) | With the attachment; the M3 attachments ADR decides | Same |
 
 Wrapped-key objects travel with a cleartext locator (ids, epochs and, for `ITEM_KEY_WRAP`, the item key's id) so that the server and the relay can file them. The locator is never trusted: the reader rebuilds the AAD context from where it expected the object, and checks the unwrapped key's derived id against the envelope that uses it.
@@ -210,6 +212,8 @@ All HKDF is HKDF-SHA-256. The output length is in bytes.
 | Share link token (M5) | `HKDF(ikm = share_secret, salt = share_id, info = LABEL("share/link-token") ‖ 0x00, L)`. Proves possession of the URL fragment. The server stores `SHA-256(token)` | 32 |
 | Share access token (M5) | `HKDF(ikm = share_secret [‖ pp_key], salt = share_id, info = LABEL("share/access-token") ‖ 0x00, L)`. The server stores `SHA-256(token)` | 32 |
 | Export file key | `e = Argon2id(P = UTF-8(NFC(export_password)), S = export_salt (16 B random), kdf_id, T = 32)`, then `HKDF(ikm = e, salt = empty, info = LABEL("export/key") ‖ 0x00 ‖ export_id, L)` | 32 |
+| Server data subkey (server only, [§5.11](#511-server-side-encryption-not-zero-knowledge)) | `HKDF(ikm = server_data_key, salt = empty, info = LABEL("server/<purpose>") ‖ 0x00 ‖ u32(data_key_id), L)`, with `<purpose>` = `totp-secret` or `login-state` | 32 |
+| Server-secrets backup key (server only, [§5.11](#511-server-side-encryption-not-zero-knowledge)) | `b = Argon2id(P = UTF-8(NFC(passphrase)), S = backup_salt (16 B random), kdf_id, T = 32)`, then `HKDF(ikm = b, salt = empty, info = LABEL("server/secrets-backup") ‖ 0x00 ‖ backup_id, L)` | 32 |
 | Device-grant PSK | `HKDF(ikm = previous account key, salt = empty, info = LABEL("hpke-psk/device-grant") ‖ 0x00 ‖ account_id ‖ u32(new account_key_epoch) ‖ recipient device_id, L)`. `psk_id = LABEL("hpke-psk/device-grant")` ([§10.1](#101-hpke-key-wrapping)) | 32 |
 | Password-verifier PSK (M4) | `HKDF(ikm = account key, salt = empty, info = LABEL("hpke-psk/password-verifier") ‖ 0x00 ‖ account_id ‖ u32(new password_epoch) ‖ recipient device_id, L)`. `psk_id = LABEL("hpke-psk/password-verifier")` | 32 |
 | Re-sync PSK (M4) | `HKDF(ikm = account key, salt = empty, info = LABEL("hpke-psk/resync") ‖ 0x00 ‖ account_id ‖ u32(account_key_epoch) ‖ transfer_id ‖ recipient device_id, L)`. `psk_id = LABEL("hpke-psk/resync")` | 32 |
@@ -219,7 +223,7 @@ All HKDF is HKDF-SHA-256. The output length is in bytes.
 | Pairing transfer PSK (M4) | `psk = k_pair`, `psk_id = LABEL("hpke-psk/pairing")` | 32 |
 | Public key id | `SHA-256(LABEL("key-id") ‖ 0x00 ‖ u8(key_type) ‖ public_key)[0..16]` | 16 |
 | Account fingerprint | `SHA-256(LABEL("fingerprint") ‖ 0x00 ‖ account_id ‖ identity_ed25519_pk ‖ identity_x25519_pk)` | 32 |
-| Device set hash | `SHA-256(LABEL("device-set") ‖ 0x00 ‖ sorted SHA-256 of each non-revoked device certificate message with device_kind ≠ 4)` ([§10.2](#102-ed25519-signatures-and-signed-statements)) | 32 |
+| Device set hash | `SHA-256(LABEL("device-set") ‖ 0x00 ‖ sorted SHA-256 of each non-revoked device certificate message with device_kind ≠ 4)` ([§10.2](#102-ed25519-signatures-and-signed-statements)). The empty set, `SHA-256(LABEL("device-set") ‖ 0x00)`, is valid ([§11.1](#111-signup-server-mode), web-vault signup) | 32 |
 | Settings hash | `SHA-256(ACCOUNT_SETTINGS envelope bytes)`; 32 zero bytes while `settings_seq = 0` | 32 |
 | SK check characters | top 10 bits of `SHA-256(LABEL("secret-key/check") ‖ 0x00 ‖ SK)` | – |
 | Recovery code check characters | top 10 bits of `SHA-256(LABEL("recovery-code/check") ‖ 0x00 ‖ recovery_code)` | – |
@@ -230,7 +234,7 @@ Signature messages use `LABEL("sig/<type>")`; see [§10.2](#102-ed25519-signatur
 
 ### 4.4 Identifiers, epochs and key ids
 
-- **Symmetric keys.** Every symmetric key K has `key_id = HKDF(K, "key-id/symmetric")[0..16]` ([§4.3](#43-derivations)). One rule covers generated keys (account, vault, item, attachment keys, the keystore unlock secret) and derived keys (`server_unlock_key`, `local_unlock_key`, the recovery wrap key, the relay key, the share key, the export file key, `k_pair`, the local index key). Nothing stores a key id separately; the reader derives the expected id from each key it holds and compares ([§9.5](#95-parsing-and-allow-list-rules)).
+- **Symmetric keys.** Every symmetric key K has `key_id = HKDF(K, "key-id/symmetric")[0..16]` ([§4.3](#43-derivations)). One rule covers generated keys (account, vault, item, attachment keys, the keystore unlock secret) and derived keys (`server_unlock_key`, `local_unlock_key`, the recovery wrap key, the relay key, the share key, the export file key, `k_pair`, the local index key). Nothing stores a key id separately, with one exception: the signed `account-state` commits to the current account key's id, `account_key_id` ([§10.2](#102-ed25519-signatures-and-signed-statements)), which already appears in every envelope header under that key. The reader derives the expected id from each key it holds and compares ([§9.5](#95-parsing-and-allow-list-rules)).
   - The key id goes in the envelope header so the reader can find the key.
   - For a password-derived key the key id is a guess verifier, but so is the envelope commitment next to it, and both cost one full Argon2id per guess behind a random per-object salt (`device_salt`, `export_salt`) or a secret one (the OPRF key). The key id adds no cheaper oracle. What must never happen is a key id computed from the password or `pw_in` before stretching.
 - **Public keys** have a derived key id ([§4.3](#43-derivations)). `key_type` values:
@@ -281,12 +285,12 @@ impl opaque_ke::CipherSuite for RizzySuiteV1 {
   - It calls `Argon2id(P = oprf_output, S = 16 zero bytes, kdf_id, T = 64)`. The all-zero salt is what RFC 9807 specifies and what opaque-ke's own Argon2 KSF does. The OPRF key already acts as a secret per-user salt, so a zero salt costs nothing.
   - We use our own KSF type rather than opaque-ke's `argon2` feature for three reasons:
     1. opaque-ke's feature binds argon2 **0.5** and its parameters.
-    2. If `ksf: None` is passed, opaque-ke silently falls back to `CS::Ksf::default()`, which for `argon2::Argon2` is 19 MiB, t=2, p=1. Our `Default` impl returns `kdf_id = 1`, so even a forgotten `Some(..)` fails safe.
-    3. We control memory wiping ([§12.2](#122-memory-hygiene)).
-- **Always pass the KSF.** All opaque-ke calls go through one wrapper module in `rizzy-core`, which always passes `ksf: Some(&RizzyArgon2idKsf::new(kdf_id))`. Calling opaque-ke's `finish` functions from anywhere else is a review blocker, and a unit test covers the wrapper. `kdf_id` must come from the client's allow-list ([§6](#6-kdf-parameters)).
+    2. If `ksf: None` is passed, opaque-ke silently falls back to `CS::Ksf::default()`, which for `argon2::Argon2` is 19 MiB, t=2, p=1. opaque-ke requires `Ksf: Default`. Our `Default` is a sentinel (`kdf_id = 0`) whose `hash` returns `InternalError::KsfError`, so a forgotten `Some(..)` is a hard `ProtocolError::LibraryError(KsfError)`. It never silently runs `kdf_id` 1, which would lock the account out once `kdf_id` 2 exists.
+    3. We control the wiping of the Argon2 block memory ([§12.2](#122-memory-hygiene)). opaque-ke's own copies are a listed limit.
+- **Always pass the KSF.** All opaque-ke calls go through one wrapper module in `rizzy-core`, which always passes `ksf: Some(&RizzyArgon2idKsf::new(kdf_id))`. Calling opaque-ke's `finish` functions from anywhere else is a review blocker. The wrapper's unit tests cover it, and a call with `ksf: None` returns `KsfError`. `kdf_id` must come from the client's allow-list ([§6](#6-kdf-parameters)).
 - **Crate features.** No `argon2` feature and no `std` feature on opaque-ke. `std` pulls in `getrandom`, and `rizzy-core` must not touch randomness sources itself.
 - **RNG adapter.** opaque-ke needs a rand_core **0.6** `CryptoRng + RngCore`. `rizzy-core` provides a ~20-line adapter that implements `opaque_ke::rand::{RngCore, CryptoRng}` (opaque-ke re-exports `rand` 0.8, which re-exports rand_core 0.6) and forwards `fill_bytes` to the injected rand_core 0.10 `CryptoRng`. So there is no separate rand_core 0.6 dependency. The adapter contains no crypto.
-- **`rand` 0.8 in the tree.** opaque-ke 4.0.1 depends on `rand` 0.8 with `default-features = false`; it resolves to 0.8.8 and pulls only rand_core 0.6.4, with no `thread_rng` and no getrandom (V, M0 scratch build). `rizzy-core` never calls it. [ADR 0009](adr/0009-crypto-dependency-policy.md) allow-lists exactly this transitive edge.
+- **`rand` 0.8 in the tree.** opaque-ke 4.0.1 depends on `rand` 0.8 with `default-features = false`; it resolves to 0.8.8 and pulls only rand_core 0.6.4, with no `thread_rng` and no getrandom (V, M0 scratch build). `rizzy-core` never calls it. [ADR 0009](adr/0009-crypto-dependency-policy.md) allow-lists exactly this transitive edge, and [ADR 0016](adr/0016-workspace-layout.md) R1's allow-list carries the rest of opaque-ke's transitive tree ([§3](#3-primitives)).
 
 ### 5.2 Password input and the Secret Key
 
@@ -356,7 +360,7 @@ Cost figures come from the M0 benchmark (fact sheet §5): `kdf_id` 1 (Argon2id, 
 An enrolled device unlocks without contacting the server:
 1. Read the device state: `account_id`, `device_id`, SK, `device_salt`, `kdf_id`, `E_local`, `E_dev`, the last verified signed account state, and the encrypted cache.
 2. `pw_in` ← HKDF(password, SK). Compute `local_unlock_key` ([§4.3](#43-derivations)).
-3. Open `E_local` (purpose `ACCOUNT_KEY_LOCAL_WRAP`) to get the account key. A wrong password shows up as a commitment or tag failure, reported as "wrong password". A keystore unlock (M3/M7) skips steps 2–3: the OS releases the keystore unlock secret after its user-presence check, and it opens `E_ks` (`ACCOUNT_KEY_KEYSTORE_WRAP`) instead.
+3. Open `E_local` (purpose `ACCOUNT_KEY_LOCAL_WRAP`, ctx rebuilt from the epochs stored next to it) to get the account key, and follow any `ACCOUNT_KEY_FORWARD` envelopes to the newest one ([§11.3](#113-unlock-on-an-enrolled-device) step 4). A wrong password shows up as a commitment or tag failure, reported as "wrong password". A keystore unlock (M3/M7) skips steps 2–3: the OS releases the keystore unlock secret after its user-presence check, and it opens `E_ks` (`ACCOUNT_KEY_KEYSTORE_WRAP`) instead.
 4. Open `E_dev` to get the device keys. Read the cache and queue signed ops for later sync.
 
 The `kdf_id` used locally comes from the device's own state, never from the server. A local attempt counter with increasing delay slows down a casual attacker at the keyboard; it does nothing against someone who has copied the disk. The UI must not claim otherwise.
@@ -382,13 +386,13 @@ Switching modes:
 
 ### 5.8 Loss or rotation of the server OPAQUE secrets
 
-`server_setup` is opaque-ke's `ServerSetup`: `oprf_seed`, the server's AKE keypair, and the fake keypair. The same secrets file also holds `enum_key` (32 random bytes, [§5.9](#59-account-enumeration)); losing or rotating `enum_key` only reshuffles which fake `kdf_id` unknown names get. Rules:
+`server_setup` is opaque-ke's `ServerSetup`: `oprf_seed`, the server's AKE keypair, and the fake keypair. The same secrets file also holds `enum_key` (32 random bytes, [§5.9](#59-account-enumeration)); losing or rotating `enum_key` only reshuffles which fake `kdf_id` unknown names get. [§5.11](#511-server-side-encryption-not-zero-knowledge) is the normative list of the file's contents. Rules:
 - It lives in its own file (mode 0600), outside the database, so a database dump or a database backup alone does not contain it.
 - The database stores `SHA-256(server AKE public key)`. The server **refuses to start** if the database has OPAQUE records and the loaded setup does not match. This keeps a restore from silently generating a fresh seed.
 - The admin backs it up once, separately from routine database backups. The file never changes unless rotated.
 
 **Losing `server_setup`** makes every OPAQUE login fail, because the envelope no longer opens. Consequences:
-- **Users with an enrolled device** still unlock locally and authenticate with device keys. When the admin marks the records invalid, the client re-registers OPAQUE the next time the user enters the password. It already holds the account key, so it just writes a new `E_srv`.
+- **Users with an enrolled device** still unlock locally and authenticate with device keys. When the admin marks the records invalid, the client re-registers OPAQUE the next time the user enters the password. It already holds the account key, so it just writes a new `E_srv`. This is a same-password re-registration under the credential-replacement rule ([§11](#11-flows)), so a device session suffices. The same rule covers the transparent re-registration in step 3 below.
 - **Users with only the web vault** go through recovery ([§11.9](#119-recovery-with-the-emergency-kit)). `E_rec` and the recovery token hash do not depend on `server_setup`.
 - **Users with neither** have lost their data. The server still holds ciphertext, but nobody can open it.
 
@@ -414,15 +418,38 @@ Switching modes:
   - The server issues a random 32-byte bearer token and stores only `SHA-256(token)`.
   - The OPAQUE `session_key` is used only for OPAQUE's own key confirmation.
   - TLS carries the transport.
-  - `ServerLogin` state is kept server-side, keyed by a random `login_id`, with a 60 s TTL.
+  - `ServerLogin` state is kept server-side, keyed by a random `login_id`, with a 60 s TTL, sealed as `SERVER_LOGIN_STATE` ([§5.11](#511-server-side-encryption-not-zero-knowledge)).
 - **After an unlock on an enrolled device**, the device authenticates with its key:
   1. The server sends a 32-byte random `challenge` with a 60 s TTL.
   2. The client returns `Ed25519(device_sk, LABEL("sig/device-auth") ‖ 0x00 ‖ u16(1) ‖ str(server_origin) ‖ account_id ‖ device_id ‖ challenge)`.
   3. The server checks the signature with `verify_strict` against the registered, non-revoked device key.
   4. The origin binding stops a signature for server A from being replayed at server B.
 - **Device secret keys are wrapped under the account key** (`E_dev`), so device authentication requires a local unlock first. A stolen, locked device cannot talk to the server as that device. `E_dev` never leaves the device: anyone who once held the account key (a revoked device, a finished kit thief) could otherwise open it from server data and read every later grant addressed to that device. Background sync while locked (M3/M7) needs the device key in the OS keystore, which is a separate decision.
-- **Binding tokens to the device key.** Native clients hold a device key, so they can sign each request, or a session nonce, and a stolen bearer token alone becomes useless. Whether to do this from M1 is threat-model Q-7 and belongs to the API ADR; nothing in this document prevents it.
-- **Server-side 2FA** (TOTP in M1, WebAuthn in M3) gates *server access only*. It never enters key derivation. An attacker who defeats 2FA still needs the password and the SK to decrypt anything.
+- **Request signing** (proposed for M1; owner decision, [§16](#16-open-questions-for-the-owner) question 15, threat model Q-7). Native clients (kinds 1–3) sign every request made over a device-authenticated session with the device key: the `device-request` statement ([§10.2](#102-ed25519-signatures-and-signed-statements)) over the origin, the account and device ids, the 16-byte `session_id` the server returned with the session, a per-session `request_counter`, the method, the path and query, and `SHA-256(request body)`.
+  - The server verifies it with `verify_strict` against the session's device certificate and accepts each `request_counter` at most once per session, within a sliding window of 64.
+  - A stolen bearer token alone is then useless. A MITM that relayed the device-auth challenge can forward the client's own requests but cannot make its own.
+  - The web vault (kind 4) keeps short-lived bearer tokens. The OPAQUE `session_key` is not used for this.
+  - If the owner declines, the residual risk is: a stolen bearer token, or a device-auth session relayed through intercepted TLS, gives ciphertext access and destructive calls until the session ends.
+- **Server-side 2FA** (TOTP in M1, [§11.15](#1115-totp-m1); WebAuthn in M3) gates *server access only*. It never enters key derivation. An attacker who defeats 2FA still needs the password and the SK to decrypt anything.
+
+### 5.11 Server-side encryption (not zero knowledge)
+
+These objects are sealed by the server for the server. That protects them from a DB-only reader, not from someone who also holds the secrets file. This construction is audit target 10 ([§1](#1-goals-non-goals-and-rules)).
+
+- **Secrets file.** A versioned format (`format = 1`) and the single normative list of its contents:
+  - `server_setup` per `setup_id` ([§5.8](#58-loss-or-rotation-of-the-server-opaque-secrets));
+  - `enum_key` ([§5.9](#59-account-enumeration));
+  - `server_data_key` per `data_key_id`: 32 random bytes each, one marked current;
+  - the first-run bootstrap token (threat model INV-69).
+
+  The DB records the `data_key_id` of every sealed row, and the server refuses to start if a row names an id the file lacks.
+- **Subkeys.** `k = HKDF(ikm = server_data_key, salt = empty, info = LABEL("server/<purpose>") ‖ 0x00 ‖ u32(data_key_id), 32)` ([§4.3](#43-derivations)).
+- **Envelope.** Algorithm 0x01 ([§9.1](#91-symmetric-envelope-algorithm-0x01)), with purposes from the server-only range 0x0100–0x01FF, which no client allow-list contains ([§8.4](#84-aad-and-purposes), [§9.5](#95-parsing-and-allow-list-rules)):
+  - `SERVER_TOTP_SECRET` 0x0100, ctx `account_id ‖ u32 totp_credential_seq`. `totp_credential_seq` counts the account's TOTP enrolments from 1, so a DB writer cannot move one account's sealed secret into another account's row. The plaintext is the TOTP secret ([§11.15](#1115-totp-m1)).
+  - `SERVER_LOGIN_STATE` 0x0101, ctx `login_id ‖ credential_identifier (16) ‖ u64 expires_at_ms`. The plaintext is `ServerLogin::serialize()`, which opaque-ke 4.0.1 provides without its `serde` feature. The row is read and deleted in one transaction, and the fake-record path ([§5.9](#59-account-enumeration)) stores its state the same way.
+  - `SERVER_SECRETS_BACKUP` 0x0102, ctx `backup_id ‖ u64 created_at_ms ‖ u16 kdf_id ‖ backup_salt`. Its key is derived like the export file key ([§4.3](#43-derivations)) from the operator passphrase, with `LABEL("server/secrets-backup")` and `backup_id`. The file format follows [§11.14](#1114-encrypted-export-m1).
+- **Session tokens** are stored as `SHA-256(token)` ([§5.10](#510-sessions-after-authentication)). There is no token key.
+- **Rotation.** `rizzy-vault secrets rotate --data-key` adds a new current key; `worker` re-seals TOTP rows under the account lock, and the old key is dropped once no row names it. If the data key is lost, TOTP cannot be verified, OPAQUE logins for 2FA accounts fail closed, and only a logged admin 2FA reset (threat model INV-69) restores access.
 
 ---
 
@@ -457,7 +484,7 @@ This closes the attack Palant reported against Bitwarden in 2023 (L): the client
 ### 6.3 Upgrade path
 
 1. A release adds `kdf_id` 2 to the table and marks it "preferred".
-2. At the next event where the user types the password online, the client silently re-registers OPAQUE with the same password and the new `kdf_id`. This is the password-change flow without changing the password. The client also re-wraps `E_local`.
+2. At the next event where the user types the password online, the client silently re-registers OPAQUE with the same password and the new `kdf_id`. This is the password-change flow without changing the password. The client also re-wraps `E_local`. The upload follows the credential-replacement rule ([§11](#11-flows)): `password_epoch` unchanged, `kdf_id` set to the new value.
 3. The server can *request* an upgrade through a policy flag. The client decides, and never moves *down*.
 4. The old `kdf_id` stays on the allow-list until a later major release. Before removing it, the server's count of records per `kdf_id` must be close to zero. Stragglers then go through recovery.
 
@@ -472,9 +499,11 @@ Measured in M0 (fact sheet §5) on an Intel Xeon at 2.80 GHz with 4 vCPU, argon2
 | 256 MiB, t3, p4 | 986 ms | 966 ms | 1467 ms |
 | 2 GiB, t1, p4 (RFC 9807's own profile) | – | – | 16.6 s |
 
+The `parallel` column is for reference only. `rizzy-core` builds argon2 without `parallel` ([ADR 0016](adr/0016-workspace-layout.md) R1), so native clients see the 1-thread column.
+
 - **Desktop and browser.** About 0.3 s in wasm is fine for an unlock. wasm gets no speedup from p=4; the lanes run sequentially.
 - **iOS AutoFill.** The extension has a memory cap of about 120 MB (L). 64 MiB fits but leaves little room; Bitwarden warns above 64 MiB (L). In M7 the AutoFill extension SHOULD unlock through `E_ks` ([§4.2](#42-key-inventory)): the keystore unlock secret, held in the keychain behind biometry and bound to the Secure Enclave where possible, opens a wrap of the account key, and no Argon2id runs (threat model Q-13, AR-17, INV-62).
-- **Low-end Android and iOS.** No reliable numbers exist (U). **An M1 spike must measure** 64 MiB/t3/p4 on the oldest devices we intend to support before `kdf_id` 1 is frozen. The expected result is 1–2 s, which we would accept.
+- **Low-end Android and iOS.** No reliable numbers exist (U). The keystore path (`E_ks`) helps only an enrolled device and AutoFill. The first login on a phone runs the OPAQUE KSF at the account's `kdf_id` in the main app. **The M1 spike therefore measures a full OPAQUE login** (KSF plus local wrap) in the main-app process on the lowest-end target phones, before `kdf_id` 1 is frozen. The expected result is 1–2 s, which we would accept. If that runs out of memory, `kdf_id` 1 is changed before any M1 account exists, or a Server-mode enrolment path that approves a new phone from an existing device is specified first.
 - **RFC 9807's 2 GiB profile** is not feasible for us, and neither is anything above 64 MiB on phones.
 
 ---
@@ -597,10 +626,11 @@ The purpose is **not transmitted**. The reader rebuilds `u16(purpose) ‖ ctx` f
 | `ACCOUNT_KEY_DEVICE_GRANT` | 0x0004 | recipient device X25519 / 0x12 (PSK: device-grant PSK) | account_id ‖ u32 account_key_epoch (new) ‖ sender device_id ‖ recipient device_id | M1 (rotation) |
 | `PASSWORD_VERIFIER_GRANT` | 0x0005 | recipient device X25519 / 0x12 (PSK: password-verifier PSK) | account_id ‖ u32 password_epoch (new) ‖ sender device_id ‖ recipient device_id | M4 |
 | `ACCOUNT_KEY_KEYSTORE_WRAP` (`E_ks`) | 0x0006 | keystore unlock secret / 0x01 | account_id ‖ device_id ‖ u32 account_key_epoch | M3/M7 |
+| `ACCOUNT_KEY_FORWARD` | 0x0007 | previous account key / 0x01 | account_id ‖ device_id ‖ u32 from_account_key_epoch ‖ u32 to_account_key_epoch. Plaintext: the new account key. Device-local only ([§11.3](#113-unlock-on-an-enrolled-device) step 4) | M3/M7 |
 | `IDENTITY_SECRET_KEYS` (`E_id`) | 0x0010 | account key / 0x01 | account_id ‖ u32 identity_epoch | M1 |
-| `DEVICE_SECRET_KEYS` (`E_dev`) | 0x0011 | account key / 0x01 | account_id ‖ device_id | M1 |
+| `DEVICE_SECRET_KEYS` (`E_dev`) | 0x0011 | account key / 0x01 | account_id ‖ device_id. Plaintext: `u8 version = 1 ‖ device Ed25519 seed (32) ‖ device X25519 secret key (32)` | M1 |
 | `MAIL_SECRET_KEY` | 0x0012 | account key / 0x01 | account_id ‖ u32 mail_key_epoch | M6 |
-| `RETIRED_SECRET_KEY` | 0x0013 | account key / 0x01 | account_id ‖ retired public key id (16) | M1 (rotation) |
+| `RETIRED_SECRET_KEY` | 0x0013 | account key / 0x01 | account_id ‖ retired public key id (16). Plaintext: `u8 key_type ‖ secret key (32)` | M1 (rotation) |
 | `ACCOUNT_SETTINGS` | 0x0014 | account key / 0x01 | account_id ‖ u64 settings_seq. Freshness: [§10.2](#102-ed25519-signatures-and-signed-statements) | M1 |
 | `VAULT_KEY_SELF_GRANT` | 0x0020 | account key / 0x01 | account_id ‖ vault_id ‖ u32 account_key_epoch ‖ u32 vault_key_epoch | M1 |
 | `VAULT_KEY_MEMBER_GRANT` | 0x0021 | grantee identity X25519 / 0x10 | vault_id ‖ u32 vault_key_epoch ‖ granter account_id ‖ grantee account_id | M9 |
@@ -618,8 +648,13 @@ The purpose is **not transmitted**. The reader rebuilds `u16(purpose) ‖ ctx` f
 | `EXPORT_FILE` | 0x0070 | export file key / 0x01 | export_id ‖ u64 created_at_ms ‖ u16 kdf_id ‖ export_salt | M1 |
 | `BACKUP_FILE` | 0x0071 | backup key / 0x01 | defined by the M4 backup ADR | M4 |
 | `LOCAL_CACHE_INDEX` | 0x0090 | local index key / 0x01 | account_id ‖ device_id | M3 |
+| `SERVER_TOTP_SECRET` | 0x0100 | server data subkey / 0x01, **server only** ([§5.11](#511-server-side-encryption-not-zero-knowledge)) | account_id ‖ u32 totp_credential_seq | M1 |
+| `SERVER_LOGIN_STATE` | 0x0101 | server data subkey / 0x01, **server only** | login_id ‖ credential_identifier (16) ‖ u64 expires_at_ms | M1 |
+| `SERVER_SECRETS_BACKUP` | 0x0102 | server-secrets backup key / 0x01, **server only** | backup_id ‖ u64 created_at_ms ‖ u16 kdf_id ‖ backup_salt | M1 |
 
-**Op and snapshot headers.** The canonical op header and snapshot header, including the version vector, the causal context and the author `device_id`, are defined by [ADR 0012](adr/0012-sync-engine.md). The rule here is: **every field of an op or snapshot header that the server can see is covered by the AAD**, through the header hash, and the most important ones are also listed explicitly. This satisfies ROADMAP's "AAD binds item ID + version": the version is `(device_id, device_seq, hlc)` for an op and the covered version vector for a snapshot. Because the author `device_id` is inside the header hash, a vault member (M9) cannot strip another member's snapshot signature and re-sign the envelope as their own.
+**Op and snapshot headers.** The canonical op header and snapshot header, including the version vector, the causal context, the author `device_id` and the `vault_key_epoch` the author believed current, are defined by [ADR 0012](adr/0012-sync-engine.md) §3. The rule here is: **every field of an op or snapshot header that the server can see is covered by the AAD**, through the header hash, and the most important ones are also listed explicitly. This satisfies ROADMAP's "AAD binds item ID + version": the version is `(device_id, device_seq, hlc)` for an op and the covered version vector for a snapshot. Because the author `device_id` is inside the header hash, a vault member (M9) cannot strip another member's snapshot signature and re-sign the envelope as their own.
+
+**Op and snapshot plaintexts.** The `data` inside `ITEM_OP` and `ITEM_SNAPSHOT` ([§8.5](#85-plaintext-framing-and-padding)), the tombstone layout, the reserved vault-settings item type and the `item_schema_version` registry are defined by the item-record encoding ADR, which [ADR 0012](adr/0012-sync-engine.md) §3 requires before M1 freezes the formats. `item_schema_version` versions that body encoding; 1 is the M1 model.
 
 **Item keys and staleness.** The `ITEM_KEY_WRAP` plaintext carries the epoch in which the item key was *created*, and re-wrapping during a rotation copies it unchanged. That makes "this item key predates the last rotation" an authenticated fact that any device holding the vault key can read, rather than server metadata or one device's memory. The writer and reader rules are in [§11.6](#116-key-rotation). The item key's own key id is derived from the key ([§4.4](#44-identifiers-epochs-and-key-ids)); a reader checks that it equals the `key_id` in the op or snapshot envelope header.
 
@@ -640,7 +675,8 @@ padded_len = max(256, Padmé(4 + data_len))
 
 - **Padmé.** This is the padding from the PURBs paper (Nikitin et al., PETS 2019; not re-verified for this document). It leaks O(log log L) bits of length for at most about 12% overhead.
 - **The reader** rejects frames where `data_len > len - 4` or where any padding byte is non-zero.
-- **Key-wrap envelopes** are fixed-size and unpadded. A wrapped symmetric key's plaintext is the 32-byte key, except `ITEM_KEY_WRAP`, whose plaintext is the 37-byte layout in [§8.4](#84-aad-and-purposes).
+- **Key-wrap envelopes** are fixed-size and unpadded. A wrapped symmetric key's plaintext is the 32-byte key, except where [§8.4](#84-aad-and-purposes) gives a layout: `ITEM_KEY_WRAP` (37 bytes), `DEVICE_SECRET_KEYS` (65 bytes) and `RETIRED_SECRET_KEY` (33 bytes).
+- **`ITEM_OP` and `ITEM_SNAPSHOT` `data`** is the canonical item-record encoding ([§8.4](#84-aad-and-purposes), "Op and snapshot plaintexts").
 
 ---
 
@@ -675,7 +711,7 @@ padded_len = max(256, Padmé(4 + data_len))
 | 50 + n | 16 | tag |
 
 - HPKE parameters: KEM 0x0020 DHKEM(X25519, HKDF-SHA256), KDF 0x0001 HKDF-SHA256, AEAD 0x0003 ChaCha20Poly1305. Mode `mode_base` (0x00) for `alg_id` 0x10, `mode_psk` (0x01) for `alg_id` 0x12. The two layouts are identical; the purpose fixes which one is allowed ([§9.5](#95-parsing-and-allow-list-rules)).
-- Calls (hpke 0.14.1): `hpke::single_shot_seal_with_rng::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>(&mode, &pk_R, info, pt, aad, &mut rng)` to seal, `hpke::single_shot_open(&mode, &sk_R, &enc, info, ct, aad)` to open. `mode` is `OpModeS::Base` / `OpModeR::Base`, or `OpModeS::Psk(PskBundle::new(psk, psk_id)?)` and the matching `OpModeR::Psk`, with `psk` and `psk_id` from [§4.3](#43-derivations). The variants without `_with_rng` exist only with hpke's `getrandom` feature, which we never enable.
+- Calls (hpke 0.14.1): `hpke::single_shot_seal_with_rng::<hpke::aead::ChaCha20Poly1305, hpke::kdf::HkdfSha256, hpke::kem::X25519HkdfSha256>(&mode, &pk_R, info, pt, aad, &mut rng)` to seal, and `hpke::single_shot_open::<hpke::aead::ChaCha20Poly1305, hpke::kdf::HkdfSha256, hpke::kem::X25519HkdfSha256>(&mode, &sk_R, &enc, info, ct, aad)` to open. The AEAD and KDF type parameters cannot be inferred and must be spelled out on both calls. `enc` is parsed from envelope bytes [18, 50) with `<X25519HkdfSha256 as hpke::Kem>::EncappedKey::from_bytes` (trait `hpke::Deserializable`). `mode` is `OpModeS::Base` / `OpModeR::Base`, or `OpModeS::Psk(PskBundle::new(psk, psk_id)?)` and the matching `OpModeR::Psk`, with `psk` and `psk_id` from [§4.3](#43-derivations). The variants without `_with_rng` exist only with hpke's `getrandom` feature, which we never enable.
 - `info = LABEL("hpke") ‖ 0x00 ‖ u16(purpose)`.
 - `aad = header ‖ u16(purpose) ‖ ctx`.
 - Overhead: **66 bytes**.
@@ -721,7 +757,8 @@ HPKE envelopes carry **no** separate commitment. The key comes from a Diffie-Hel
 2. **Per-purpose allow-lists.** Each purpose has an **encrypt algorithm** (exactly one) and a **decrypt allow-list**. In M1:
    - every symmetric purpose: `{0x01}`;
    - `ACCOUNT_KEY_DEVICE_GRANT`, `PASSWORD_VERIFIER_GRANT`, `PAIRING_TRANSFER_SEALED`, `RESYNC_TRANSFER`: `{0x12}`;
-   - `VAULT_KEY_MEMBER_GRANT`, `MAIL_MESSAGE`: `{0x10}`.
+   - `VAULT_KEY_MEMBER_GRANT`, `MAIL_MESSAGE`: `{0x10}`;
+   - server-only purposes (0x0100–0x01FF, [§5.11](#511-server-side-encryption-not-zero-knowledge)): `{0x01}`, in the server's table only. No client allow-list contains them.
 
    A symmetric purpose never accepts an HPKE algorithm, a PSK-mode purpose never accepts Base mode, and vice versa. Base mode on a PSK purpose would silently drop the PSK's protection.
 3. **No negotiation.** The server never chooses an algorithm. The only asymmetric choice is made by the *sender*, from the recipient's **signed** key bundle ([§10.2](#102-ed25519-signatures-and-signed-statements)). A bundle MAY set `pq_required`, after which classical grants to that recipient are rejected.
@@ -738,7 +775,7 @@ HPKE envelopes carry **no** separate commitment. The key comes from a Diffie-Hel
 
 - **Storage.** Raw bytes: `BLOB` in SQLite, `bytea` in PostgreSQL, raw in the client cache.
 - **JSON APIs.** base64url without padding (RFC 4648 §5).
-- **Signed statements.** Carried as `bytes(statement) ‖ signature container`. A key bundle that changes the identity keys carries two containers, the new key's first ([§10.2](#102-ed25519-signatures-and-signed-statements)).
+- **Signed statements.** Carried as `bytes(u16(statement_version) ‖ body) ‖ signature container(s)`. The verifier prepends `LABEL("sig/<type>") ‖ 0x00` for the statement type it expects. `bundle_hash` and `prev_bundle_hash` remain over the full signed message. A key bundle that changes the identity keys carries two containers, the new key's first ([§10.2](#102-ed25519-signatures-and-signed-statements)).
 - **Files** (export, M4 backup). Written as JSON, with the envelope base64url-encoded in a `data` field and the header fields repeated in clear for tooling. The repeated header fields are informational only: the bytes that are bound come from the envelope and the ctx, and the tests assert that the two agree.
 
 ### 9.7 How a migration lands (PQ example)
@@ -768,13 +805,14 @@ None of this changes the symmetric envelopes. They are already fine against quan
   - pairing: `k_pair` from the QR code.
 
   So opening one needs both the recipient's X25519 private key and the PSK. A DB snapshot plus a future quantum computer breaks the X25519 half but not the PSK. A revoked device knows the previous account key but not the recipient's X25519 private key, which never leaves that device ([§5.10](#510-sessions-after-authentication)). All PSKs are 32 bytes derived from 256-bit keys, which meets RFC 9180's minimum PSK entropy (RFC text not re-verified for this document). rust-hpke 0.14.1 implements PSK mode for DHKEM(X25519) and for X-Wing (V, crate source), so the PQ upgrade path (0x13) exists.
-  - A device several rotations behind opens its pending grants in epoch order: each grant's PSK comes from the key the previous grant delivered. The server keeps every unconsumed grant for that device.
+  - A device several rotations behind opens its pending grants in epoch order: each grant's PSK comes from the key the previous grant delivered. The server keeps every grant for that device until the device acknowledges, in a separate call, that it has persisted the re-wrapped `E_local` (or an `ACCOUNT_KEY_FORWARD` envelope), `E_ks` and `E_dev` ([§11.3](#113-unlock-on-an-enrolled-device) step 4). Fetching a grant does not consume it.
 - **Why not Auth mode.** HPKE's Auth and AuthPSK modes authenticate the sender's KEM key, but PQ KEMs in rust-hpke do not support them (per the crate's own source: "Use Base or Psk operation mode"), and Auth mode's sender-authentication properties are weaker than a signature (U). Where authorship matters we add an Ed25519 signature.
 - **Signed grants** (`ACCOUNT_KEY_DEVICE_GRANT`, `PASSWORD_VERIFIER_GRANT`, `VAULT_KEY_MEMBER_GRANT`):
   - The AAD `ctx` names the sender and the recipient by id: `device_id` for device grants, `account_id` for member grants ([§8.4](#84-aad-and-purposes)).
   - The envelope header names the recipient public key id ([§9.2](#92-hpke-envelope-algorithms-0x10-and-0x12)).
   - The sender signs `LABEL("sig/key-grant") ‖ 0x00 ‖ u16(1) ‖ u16(purpose) ‖ sender public key id ‖ recipient public key id ‖ bytes(hpke_envelope)`. The sender *key* id appears only here.
-  - The recipient checks that the signing key belongs to the sender named in the AAD: a device certificate for that `device_id` in the current signed device set, or the pinned identity key for that `account_id`. Stripping the signature and re-signing with another key fails this check.
+  - The recipient checks that the signing key belongs to the sender named in the AAD: a certificate of the account for that `device_id` (the delivered key is authenticated by the `account_key_id` check in [§11.3](#113-unlock-on-an-enrolled-device) step 4), or the pinned identity key for that `account_id`. Stripping the signature and re-signing with another key fails this check.
+  - An `ACCOUNT_KEY_DEVICE_GRANT` created by a kind-4 client ([§11.4](#114-web-vault)) is signed by the identity key of the current `identity_epoch`, and the AAD sender id is the kind-4 `device_id`. Recipients accept that signature for device grants; the delivered key is still checked against `account_key_id` ([§11.3](#113-unlock-on-an-enrolled-device) step 4).
   - Re-sealing the plaintext to a third party requires the plaintext, and the third party would see the original sender id.
 - **Unsigned seals.** `MAIL_MESSAGE` is sealed by the server's `smtp` role and carries no sender signature. The server sees mail at ingress anyway; what `smtp` must get right is the recipient key, which it pins ([§11.13](#1113-mail-ingress-m6)).
 
@@ -792,31 +830,34 @@ None of this changes the symmetric envelopes. They are already fine against quan
 | `public-key-bundle` | account_id ‖ u32 identity_epoch ‖ u64 bundle_seq ‖ u8 n ‖ n × (u8 key_type ‖ bytes(public_key)) ‖ u8 flags (bit 0 = `pq_required`) ‖ u64 created_at_ms ‖ prev_bundle_hash (32 B: the hash of the immediately preceding bundle; zero only for `bundle_seq` 1) | The identity Ed25519 key inside the bundle (self-signature). When the identity keys differ from the preceding bundle's (`identity_epoch + 1`), **also** the preceding identity key |
 | `device-certificate` | account_id ‖ device_id ‖ u32 identity_epoch ‖ device Ed25519 pk (32) ‖ device X25519 pk (32) ‖ u8 device_kind (1 desktop/CLI, 2 extension, 3 mobile, 4 web-ephemeral) ‖ u64 created_at_ms ‖ u64 expires_at_ms (0 = none; for kind 4 at most created_at_ms + 12 h) | Identity key of that `identity_epoch` |
 | `device-revocation` | account_id ‖ device_id ‖ u64 last_accepted_device_seq ‖ u64 revoked_at_ms | Identity key |
-| `account-state` | account_id ‖ u64 state_seq ‖ u32 identity_epoch ‖ u32 account_key_epoch ‖ u32 password_epoch ‖ u16 kdf_id ‖ u32 recovery_epoch ‖ u8 recovery_enabled ‖ u8 sync_mode ‖ u32 mail_key_epoch ‖ bundle_hash (32) ‖ device_set_hash (32) ‖ u64 settings_seq ‖ settings_hash (32) | The identity key of the state's own `identity_epoch`. After a full rotation that is the **new** key |
+| `account-state` | account_id ‖ u64 state_seq ‖ u32 identity_epoch ‖ u32 account_key_epoch ‖ account_key_id (16) ‖ u32 password_epoch ‖ u16 kdf_id ‖ u32 recovery_epoch ‖ u8 recovery_enabled ‖ u8 sync_mode ‖ u32 mail_key_epoch ‖ bundle_hash (32) ‖ device_set_hash (32) ‖ u64 settings_seq ‖ settings_hash (32) | The identity key of the state's own `identity_epoch`. After a full rotation that is the **new** key |
 | `op` | bytes(canonical op header) ‖ SHA-256(op envelope) ‖ SHA-256(`ITEM_KEY_WRAP` envelope carried with the op), or 32 zero bytes in place of the second hash when the op carries no wrap. The body and the wrap are signed by hash so the server can delete a compacted op's body and keep its signed header ([ADR 0012](adr/0012-sync-engine.md) §3, §7). A receiver that holds the body or the wrap checks it against the signed hash before anything else | Device key of the authoring device |
-| `snapshot` | bytes(canonical snapshot header) ‖ bytes(snapshot envelope) ‖ bytes(`ITEM_KEY_WRAP` envelope carried with the snapshot, or empty) | Device key |
-| `key-grant` | see [§10.1](#101-hpke-key-wrapping) | Device key (device grants) or identity key (member grants, M9) |
+| `snapshot` | bytes(canonical snapshot header) ‖ SHA-256(snapshot envelope) ‖ SHA-256(`ITEM_KEY_WRAP` envelope carried with the snapshot), or 32 zero bytes in place of the second hash when it carries none. As for `op`, a receiver that holds the envelope or the wrap checks it against the signed hash before anything else, and the server can serve the record without a superseded wrap ([§4.2](#42-key-inventory)) | Device key |
+| `key-grant` | see [§10.1](#101-hpke-key-wrapping) | Device key (device grants) or identity key (member grants, M9; device grants from a kind-4 client) |
 | `device-auth` | see [§5.10](#510-sessions-after-authentication) | Device key |
+| `device-request` (proposed, [§16](#16-open-questions-for-the-owner) question 15) | str(server_origin) ‖ account_id ‖ device_id ‖ session_id (16) ‖ u64 request_counter ‖ str(method) ‖ str(path_and_query) ‖ SHA-256(request body) ([§5.10](#510-sessions-after-authentication)) | Device key |
+
+**Field values.** `sync_mode`: 0 invalid, 1 Server, 2 On-device. `recovery_enabled`: 0 or 1. Any other value is rejected. `account_key_id` is the symmetric key id ([§4.4](#44-identifiers-epochs-and-key-ids)) of the current account key. In a `public-key-bundle`, entries are sorted by `key_type`, strictly ascending (one key per type); parsers reject anything else.
 
 `bundle_hash` and `prev_bundle_hash` are `SHA-256` over the full signed message.
 
 **Bundles are a chain.** Every bundle names its immediate predecessor, and `bundle_seq` orders bundles within an identity epoch as well as across epochs. A new bundle is published whenever a public key changes: identity keys (full rotation), a PQ key ([§9.7](#97-how-a-migration-lands-pq-example)), the mail key (M6). Every verifier, whether own device, contact (M9) or `smtp` (M6), pins the highest `bundle_seq` it has accepted and rejects lower ones, so the server cannot serve an older validly signed bundle to strip `pq_required` or withhold the current mail key. How other people's clients treat an identity-key change is in [§10.3](#103-public-key-authenticity).
 
-**Device set.** `device_set_hash` = `SHA-256(LABEL("device-set") ‖ 0x00 ‖ h_1 ‖ … ‖ h_n)`. Here `h_i` is the SHA-256 of the signed message of each non-revoked device certificate **with `device_kind` ≠ 4**, and the list is sorted bytewise. Enrolling or revoking a durable device therefore always publishes a new `account-state` with `state_seq + 1`. The server applies state updates as compare-and-swap on `state_seq`: when two devices enrol at once, one of them retries. The server cannot hide a device without rolling back the signed state, which any device that has seen the newer state detects (threat model INV-14, INV-25).
+**Device set.** `device_set_hash` = `SHA-256(LABEL("device-set") ‖ 0x00 ‖ h_1 ‖ … ‖ h_n)`. Here `h_i` is the SHA-256 of the signed message of each non-revoked device certificate **with `device_kind` ≠ 4**, and the list is sorted bytewise. Enrolling or revoking a durable device therefore always publishes a new `account-state` with `state_seq + 1`. The server applies state updates as compare-and-swap on `state_seq`. The loser of a compare-and-swap re-fetches and re-verifies the state. If only `state_seq` and `device_set_hash` changed, it re-applies its change on top and retries. If any epoch, `kdf_id`, `bundle_hash`, `settings_seq` or `account_key_id` changed, it restarts its flow: an enrolling device discards its local `E_local` and `E_dev` and restarts from [§11.2](#112-login-on-a-new-device-server-mode) step 2. The server cannot hide a device without rolling back the signed state, which any device that has seen the newer state detects (threat model INV-14, INV-25).
 
-**Web-vault certificates (`device_kind` 4) are never in the device set.** Putting them in would mean a state CAS and a "new device" alarm on every web login, and a set that only grows, because expired certificates are never revoked. Instead, peers accept an op or snapshot from a kind-4 device only if (a) its certificate verifies under the identity key of the current `identity_epoch`, (b) `expires_at_ms ≤ created_at_ms + 12 h`, and (c) the op's HLC, read as milliseconds (its top 48 bits), is ≤ `expires_at_ms`. [ADR 0012](adr/0012-sync-engine.md) already checks (c) against the HLC so that replicas agree. The server refuses uploads from an expired certificate. Ending a web session early is server-enforced only (threat model AR-9), with one exception: a switch to On-device mode signs a `device-revocation` for every unexpired kind-4 certificate ([ADR 0012](adr/0012-sync-engine.md) §10), and peers reject later ops from it. Otherwise the certificate dies after 12 h regardless. Every other `device_kind` must be in the set, or its ops are rejected.
+**Web-vault certificates (`device_kind` 4) are never in the device set.** Putting them in would mean a state CAS and a "new device" alarm on every web login, and a set that only grows, because expired certificates are never revoked. Instead, peers accept an op or snapshot from a kind-4 device only if (a) its certificate verifies under the identity key of the current `identity_epoch`, (b) `expires_at_ms ≤ created_at_ms + 12 h`, and (c) the op's HLC, read as milliseconds (its top 48 bits), is ≤ `expires_at_ms`. [ADR 0012](adr/0012-sync-engine.md) already checks (c) against the HLC so that replicas agree. The server refuses uploads from an expired certificate. Ending a web session early is server-enforced only (threat model AR-9), with two exceptions: a switch to On-device mode ([ADR 0012](adr/0012-sync-engine.md) §10) and a full rotation ([§11.6](#116-key-rotation) step 7) sign a `device-revocation` for every unexpired kind-4 certificate, and peers reject later ops from it. Otherwise the certificate dies after 12 h regardless. Every other `device_kind` must be in the set, or its ops are rejected.
 
 **Settings freshness.** `settings_hash` is `SHA-256` over the current `ACCOUNT_SETTINGS` envelope, or 32 zero bytes while `settings_seq = 0`.
 - Every settings change writes a new envelope with `settings_seq + 1` and publishes a new `account-state` (`state_seq + 1`) carrying the new `settings_seq` and hash, in one compare-and-swap on `state_seq`.
 - The loser of a concurrent change re-fetches, re-applies its edit on top of the newer settings, and retries.
 - Clients reject an `ACCOUNT_SETTINGS` envelope whose hash differs from the verified state's `settings_hash`, and reject a state whose `settings_seq` is lower than the one they persisted. This is threat model INV-25; without it the server could serve an older, validly encrypted settings object that restores a deleted equivalence group or drops a contact pin.
 
-**Which identity key verifies what.** A device caches the identity public key of the newest `identity_epoch` it has accepted. After a full rotation, it rejects any certificate, bundle or `account-state` signed only by a superseded identity key (threat model INV-30). The step from the old key to the new one is [§11.3](#113-unlock-on-an-enrolled-device) step 3.
+**Which identity key verifies what.** A device caches the identity public key of the newest `identity_epoch` it has accepted. After a full rotation, it rejects any certificate, `device-revocation`, bundle or `account-state` signed only by a superseded identity key (threat model INV-30). The step from the old key to the new one is [§11.3](#113-unlock-on-an-enrolled-device) step 3. A full rotation re-issues every certificate and revocation under the new key ([§11.6](#116-key-rotation) step 7), so the retained ops and snapshots of revoked and kind-4 devices stay verifiable under the current key.
 
 **What signatures buy us:**
 - **Device registrations.** A device joins the account only with a certificate signed by the identity key, and the identity key is available only to someone who has unlocked the account. The server cannot inject a device into the user's device set.
-- **Ops and relay traffic.** Every op names its authoring device. Peers reject ops from devices outside the signed device set (except kind-4 devices under the rule above) or revoked, and ops past a revocation's `last_accepted_device_seq`. The signature also covers the item-key wrap that travels with an op, so the wrap's author is known. In M9 this is what stops one vault member from forging edits as another.
-- **Account state.** `kdf_id`, epochs, recovery status, sync mode, the current bundle, the device set and the settings version are signed. The server cannot change them, and a device that has seen `state_seq = n` rejects anything lower.
+- **Ops and relay traffic.** Every op names its authoring device. Peers reject ops from devices outside the signed device set (except kind-4 devices under the rule above) or revoked, and ops past a revocation's `last_accepted_device_seq`. The signature also covers the item-key wrap that travels with an op, so the wrap's author is known. In M9 this is what stops one vault member from forging edits as another. After a rotation the re-wraps are unsigned; the M9 ADR must add a signed rotation statement over them.
+- **Account state.** `kdf_id`, epochs, the current account key's id, recovery status, sync mode, the current bundle, the device set and the settings version are signed. The server cannot change them, and a device that has seen `state_seq = n` rejects anything lower.
 
 ### 10.3 Public key authenticity
 
@@ -846,6 +887,33 @@ For **other people's keys** (M9 invites and member grants):
 
 Endpoint paths are illustrative; the API specification owns them. The cryptographic content of each message is normative.
 
+**Which clients run which flow.**
+
+| Flow | Kinds 1–3 (durable devices) | Kind 4 (web vault) |
+|---|---|---|
+| Signup, login, unlock | yes | yes, as in [§11.4](#114-web-vault) |
+| Password change, SK change, rotation, recovery | yes | yes |
+| Device revocation ([§11.8](#118-device-revocation)), pairing ([§11.7](#117-new-device-in-on-device-mode)) | yes | no |
+
+Flows from kind 4 follow the secrets-before-commit rule below. A kind-4 client holds no device state, so it skips that rule's step 3; the kit it has shown and confirmed is what survives a closed tab.
+
+**Secrets before commit (normative).** Any flow that creates a new SK or a new recovery code (signup [§11.1](#111-signup-server-mode), SK change [§11.5](#115-master-password-or-secret-key-change), a rotation that issues a code [§11.6](#116-key-rotation) step 5, recovery [§11.9](#119-recovery-with-the-emergency-kit)) runs in this order:
+1. Generate the new secrets and build every object.
+2. Render the Emergency Kit and require the re-type confirmation from [§7](#7-secret-key).
+3. A durable client (kind 1–3) persists a pending record in its device state: the new SK and the new account key, wrapped as a pending `E_local'` under the local unlock key of the password that will be current after the commit. The recovery code is never persisted.
+4. Upload.
+5. Only after the server acknowledges the commit, finalise the device state and delete the pending record.
+
+On restart with a pending record, the client fetches `account-state`: if the server holds the new state it finalises, otherwise it resends the same request. The server treats a repeat of an already-applied commit (byte-identical new state) as success.
+
+**Replacing credentials (normative).** The server replaces the OPAQUE record, `E_srv`, `E_rec` or `H_rec` only in a request that also carries a new `account-state`. That state must verify under the current identity key and is applied by compare-and-swap (`state_seq + 1`). In it:
+- `password_epoch` is the current value + 1 when the password or SK changed, and unchanged for a same-password re-registration ([§5.8](#58-loss-or-rotation-of-the-server-opaque-secrets), [§6.3](#63-upgrade-path));
+- `kdf_id` equals the new record's;
+- `recovery_epoch` is the current value + 1 when a new code is issued;
+- the epochs in the ctx of the new `E_srv` and `E_rec` equal the state's.
+
+The server stores `kdf_id` and `password_epoch` from that state with the OPAQUE record, and `recovery_epoch` with `H_rec`. The request also needs a fresh OPAQUE session (≤ 5 min), the recovery-only session ([§11.9](#119-recovery-with-the-emergency-kit)), or, for a same-password re-registration only, a device session.
+
 ### 11.1 Signup (Server mode)
 
 1. The user enters: server URL, login name, master password, invite token (if the server requires one).
@@ -866,16 +934,20 @@ Endpoint paths are illustrative; the API specification owns them. The cryptograp
    - `E_id` = Envelope(account key, `IDENTITY_SECRET_KEYS`, `ed25519_seed ‖ x25519_sk`)
    - the key bundle (`bundle_seq = 1`, `prev_bundle_hash` zero) with its self-signature
    - the device certificate
-   - `account-state` with `state_seq = 1`, `kdf_id = 1`, `account_key_epoch = identity_epoch = password_epoch = 0`, `recovery_epoch = 1` and `recovery_enabled = 1` (both 0 if the user opted out), `mail_key_epoch = 0`, `settings_seq = 0` with a zero `settings_hash`, `bundle_hash`, and `device_set_hash` over this first device ([§4.4](#44-identifiers-epochs-and-key-ids))
+   - `account-state` with `state_seq = 1`, `kdf_id = 1`, `account_key_epoch = identity_epoch = password_epoch = 0`, the account key's `account_key_id`, `recovery_epoch = 1` and `recovery_enabled = 1` (both 0 if the user opted out), `mail_key_epoch = 0`, `settings_seq = 0` with a zero `settings_hash`, `bundle_hash`, and `device_set_hash` over this first device ([§4.4](#44-identifiers-epochs-and-key-ids))
    - the vault self-grant (`VAULT_KEY_SELF_GRANT`, epochs 0 and 0)
    - `E_dev` = Envelope(account key, `DEVICE_SECRET_KEYS`, device secret keys), **for local storage only**
    - `E_rec` = Envelope(recovery wrap key, `ACCOUNT_KEY_RECOVERY_WRAP`, account key) and `H_rec = SHA-256(recovery_auth_token)`
-6. `POST /api/v1/register/finish` with exactly these objects: the OPAQUE `upload`, `E_srv`, `E_id`, the bundle, `account-state`, the vault self-grant, the device certificate, and `E_rec` with `H_rec`. **`E_dev` is never uploaded**: it is written locally in step 7. The API has no field that could carry it, and the server rejects requests with unknown fields. The server:
+6. **Emergency Kit.** The client renders the kit, and signup continues only when the user confirms it is saved ([§7](#7-secret-key)).
+7. **Pending device state.** The client writes its device state as the pending record of the secrets-before-commit rule ([§11](#11-flows)): `account_id`, `device_id`, SK, `device_salt`, `kdf_id`, `E_dev`, the state it is about to upload, and `E_local` = Envelope(`local_unlock_key`, `ACCOUNT_KEY_LOCAL_WRAP`, account key). Computing `local_unlock_key` is Argon2id run 2, once.
+8. **Commit.** `POST /api/v1/register/finish` with exactly these objects: the OPAQUE `upload`, `E_srv`, `E_id`, the bundle, `account-state`, the vault self-grant, the device certificate, and `E_rec` with `H_rec`. **`E_dev` is never uploaded**: it is written locally in step 7. The API has no field that could carry it, and the server rejects requests with unknown fields. The server:
    - checks the bundle self-signature and the certificate chain (cheap consistency checks),
    - stores everything in one transaction,
-   - records the `setup_id` and `kdf_id` with the OPAQUE record.
-7. The client writes its device state: `account_id`, `device_id`, SK, `device_salt`, `kdf_id`, `E_dev`, the verified state, and `E_local` = Envelope(`local_unlock_key`, `ACCOUNT_KEY_LOCAL_WRAP`, account key). Computing `local_unlock_key` is Argon2id run 2, once.
-8. The client renders the Emergency Kit. Signup finishes only when the user confirms it is saved.
+   - records the `setup_id`, `kdf_id` and `password_epoch` with the OPAQUE record, and `recovery_epoch` with `H_rec`,
+   - treats a byte-identical repeat for the same `account_id` as success, so a client that crashed after sending can resend.
+9. **Finalise.** After the server acknowledges, the client finalises its device state.
+
+**Web-vault signup (kind 4).** Step 5 issues a kind-4 certificate ([§11.4](#114-web-vault)) instead of a durable one, and `device_set_hash` is over the empty set, `SHA-256(LABEL("device-set") ‖ 0x00)`, which is valid. Step 7 writes nothing except the SK if the user opted in, so signup runs one Argon2id. The UI warns that until a durable device is enrolled, nobody can cancel a pending recovery ([§11.9](#119-recovery-with-the-emergency-kit) step 2).
 
 ### 11.2 Login on a new device (Server mode)
 
@@ -891,7 +963,7 @@ Endpoint paths are illustrative; the API specification owns them. The cryptograp
    - device certificates, revocations
    - the vault self-grants
 6. The client verifies, aborting on any failure:
-   - `E_srv` opens.
+   - `E_srv` opens, and the key id of the account key inside equals `state.account_key_id`.
    - `E_id` opens, and the derived public keys equal the bundle's keys.
    - The `account-state` signature is valid under that identity key, and `state.identity_epoch` equals the bundle's.
    - `state.account_id` equals the `account_id` in use.
@@ -901,8 +973,8 @@ Endpoint paths are illustrative; the API specification owns them. The cryptograp
    - `state.kdf_id` equals the `kdf_id` used.
    - The epochs in `state` equal those used in the `E_srv` context.
    - Each self-grant opens with the `account_key_epoch` from `state` in its context.
-7. **Enrolment.** The client generates the device keys and signs the device certificate with the identity key. It writes `E_dev` and `E_local` locally (one more Argon2id run, once); neither is uploaded. It uploads the certificate together with a new `account-state` (`state_seq + 1`, new `device_set_hash`), which the server applies by compare-and-swap.
-8. The server pushes "new device enrolled" to every other device. Each verifies the certificate against the signed device set and shows a notification with a one-click revoke.
+7. **Enrolment.** The client generates the device keys and signs the device certificate with the identity key. It writes `E_dev` and `E_local` locally (one more Argon2id run, once); neither is uploaded. It uploads the certificate together with a new `account-state` (`state_seq + 1`, new `device_set_hash`) over the fresh OPAQUE session from step 5, and the server applies it by compare-and-swap.
+8. The server pushes "new device enrolled" to every other device. Each verifies the certificate against the signed device set and shows a notification with a one-click revoke. The server sends this notice for any growth of the device set, by any path ([ADR 0012](adr/0012-sync-engine.md) §7).
 
 ### 11.3 Unlock on an enrolled device
 
@@ -911,7 +983,7 @@ Endpoint paths are illustrative; the API specification owns them. The cryptograp
    1. Authenticate with the device key ([§5.10](#510-sessions-after-authentication)).
    2. Fetch `account-state`, every bundle with `bundle_seq` above the cached one, the device certificates and revocations, and `ACCOUNT_SETTINGS` if `settings_seq` changed.
    3. If the state's `identity_epoch` is higher than the cached one, run step 3 before anything else. Otherwise verify the state with the cached identity key.
-   4. Check, as in [§11.2](#112-login-on-a-new-device-server-mode) step 6: `account_id`, `bundle_hash`, `device_set_hash`, `settings_hash`.
+   4. Check, as in [§11.2](#112-login-on-a-new-device-server-mode) step 6: `account_id`, `bundle_hash`, `device_set_hash`, `settings_hash`, and, unless `account_key_epoch` increased (step 4), that the account key this device holds has key id `state.account_key_id`.
    5. If `state_seq` or `settings_seq` is lower than the stored value, warn "possible rollback by the server" and go read-only.
 3. **If `identity_epoch` increased** (a full rotation happened elsewhere):
    1. Walk the fetched bundles from the cached `bundle_seq` upwards. Each must name its predecessor in `prev_bundle_hash`, carry a valid self-signature, and, where the identity keys change, also a valid signature by the preceding identity key.
@@ -922,9 +994,10 @@ Endpoint paths are illustrative; the API specification owns them. The cryptograp
    If the user declines or any check fails, the device stays read-only, keeps the old key, and shows why.
 4. **If `account_key_epoch` increased** (a rotation happened elsewhere):
    1. Fetch this device's `ACCOUNT_KEY_DEVICE_GRANT`s for every epoch between the cached and the current one, and open them in epoch order with the device X25519 key and the device-grant PSK ([§10.1](#101-hpke-key-wrapping)).
-   2. Verify each grant's signature chains to a device certificate in the current signed device set.
-   3. Re-wrap `E_local` under the **same** `local_unlock_key`, `E_ks` if present, and `E_dev`. No Argon2id is needed.
+   2. Each grant's signature must verify under a certificate of the account for the sender `device_id` named in its AAD, which may since have been revoked, or under the identity key for a grant from a kind-4 client ([§10.1](#101-hpke-key-wrapping)). The key delivered by the last grant MUST have key id = `state.account_key_id`; otherwise abort and stay read-only.
+   3. After a password unlock, keep `local_unlock_key` in a `Zeroizing` buffer until the online part completes, then re-wrap `E_local`, `E_ks` (if present) and `E_dev`. After a keystore unlock, re-wrap `E_ks` and `E_dev` only. Leave `E_local` unchanged, store its ctx epochs next to it (the reader rebuilds its ctx from those, not from the current state), and write a local, never-uploaded `ACCOUNT_KEY_FORWARD` envelope from the old account key to the new one. At the next password unlock, open `E_local`, follow the forward envelopes to the key whose id equals `state.account_key_id`, re-wrap `E_local` and delete the forward envelopes. No Argon2id runs beyond the unlock's own.
    4. Fetch the new `E_id` and self-grants (Server mode), or read them from the rotation's key records in the relay (On-device mode, [§11.6](#116-key-rotation) step 9).
+   5. Acknowledge the grants ([§10.1](#101-hpke-key-wrapping)) once the objects from sub-step 3 are persisted.
 5. **If `password_epoch` increased** (password or SK changed elsewhere):
    - **Server mode.**
      1. Prompt immediately for the new password, and the new SK if it changed.
@@ -935,7 +1008,14 @@ Endpoint paths are illustrative; the API specification owns them. The cryptograp
      2. Prompt for the new password. Compute `pw_in'` with the new SK and check it by opening the carried `E_local` record: Argon2id with that record's salt, then HKDF with that record's `device_id`. It must yield the account key this device already holds.
      3. Re-create this device's own `E_local` with a new `device_salt` (the second Argon2id run), and store the new SK.
    - In both modes: if the user cannot provide the new password, lock and delete `E_local` and `E_ks`. The encrypted cache stays.
-   - **Only the new password known.** Step 1 then fails, because `E_local` is still under the old password. In Server mode the client falls back to an OPAQUE login with the new password and SK ([§11.2](#112-login-on-a-new-device-server-mode) steps 2–6), which yields the account key from `E_srv`, and then continues with this step. In On-device mode the verifier grant is sealed to the device key inside `E_dev`, so the device needs the old password once, or a keystore unlock; the UI asks for "the password you used before" and says why. A user who remembers neither pairs the device again from another device.
+   - **Only the new password known.** Step 1 then fails, because `E_local` is still under the old password. In Server mode, and only on explicit user action ("I changed my password on another device"), the client runs an OPAQUE login with the typed password and the new SK ([§11.2](#112-login-on-a-new-device-server-mode) steps 2–6). A failed local unlock never starts an online attempt by itself. If `E_dev` opens under the account key obtained (no rotation happened), continue with this step. Otherwise the device re-enrols:
+     1. It generates new device keys and a new `device_id`.
+     2. It signs, via `E_id`, a certificate and a new `account-state` that adds the new device and carries a `device-revocation` of its old `device_id`, with `last_accepted_device_seq` = the server-confirmed head of that device. Queued ops the old device key had already signed are uploaded before the revocation.
+     3. It writes a new `E_local` and `E_dev` and deletes the old `E_dev`, `E_local` and `E_ks`.
+
+     This self-revocation needs no rotation: the old device keys never left this device, and they are deleted.
+
+     In On-device mode the verifier grant is sealed to the device key inside `E_dev`, so the device needs the old password once, or a keystore unlock; the UI asks for "the password you used before" and says why. A user who remembers neither pairs the device again from another device.
 
    The old password stops working on this device as soon as the device is online.
 
@@ -957,8 +1037,11 @@ Endpoint paths are illustrative; the API specification owns them. The cryptograp
 4. **Build the new state:**
    - `E_srv'` under the new `server_unlock_key`, with context `password_epoch + 1`.
    - `account-state'` with `state_seq + 1` and `password_epoch + 1`.
-5. **Commit.** `POST` everything as one atomic replace. The server swaps the record, deletes the old `E_srv`, and ends all *OPAQUE* sessions. Device sessions continue, and those devices pick up the new epoch ([§11.3](#113-unlock-on-an-enrolled-device) step 5).
-6. **Locally.** Create a new `device_salt` and a new `E_local` (Argon2id). If the SK changed, produce a new Emergency Kit.
+   - Locally, a new `device_salt` and a new `E_local'` under the new password (Argon2id).
+
+   Then the secrets-before-commit rule ([§11](#11-flows)) applies. If the SK changed, render the new Emergency Kit, which also carries the new recovery code when the default rotation issues one ([§11.6](#116-key-rotation) step 5), and require the re-type confirmation. Persist the pending record.
+5. **Commit.** `POST` everything as one atomic replace, under the credential-replacement rule ([§11](#11-flows)). The server swaps the record, deletes the old `E_srv`, and ends all *OPAQUE* sessions. Device sessions continue, and those devices pick up the new epoch ([§11.3](#113-unlock-on-an-enrolled-device) step 5).
+6. **Finalise.** After the server acknowledges, replace `E_local` with `E_local'` and delete the pending record.
 
 **On-device mode** (M4). There is no OPAQUE record, so the other devices need another way to learn the new password's verifier:
 1. **Re-authenticate.** A local unlock with the current password on this device within the last 5 minutes.
@@ -967,9 +1050,10 @@ Endpoint paths are illustrative; the API specification owns them. The cryptograp
    - this device's new `E_local` (new `device_salt`, one Argon2id run);
    - `account-state'` with `state_seq + 1` and `password_epoch + 1`;
    - for every other device in the signed device set, a `PASSWORD_VERIFIER_GRANT`: HPKE PSK mode to that device's X25519 key ([§10.1](#101-hpke-key-wrapping)), carrying this device's new `E_local` record (`device_id`, `device_salt`, `kdf_id`, envelope) and the new SK if it changed, signed as a `key-grant`.
+
+   If the SK changed, render the new Emergency Kit and require the re-type confirmation. Persist the pending record (secrets-before-commit rule, [§11](#11-flows)).
 4. **Commit.** Upload the state (compare-and-swap) and the grants to the `auth` domain. Receiving devices follow [§11.3](#113-unlock-on-an-enrolled-device) step 5.
 5. **Backup file.** The M4 backup file's password wrap is under the old password and SK. The client re-wraps it in the next backup it writes. Older backup files still open with the old password and SK, and the UI says so.
-6. If the SK changed, produce a new Emergency Kit.
 
 The verifier grants carry a password-derived wrap, but sealed to device keys with a PSK from the account key. The server holds nothing it can test a password guess against (threat model INV-28), even with a future quantum computer.
 
@@ -992,26 +1076,28 @@ The verifier grants carry a password-derived wrap, but sealed to device keys wit
    - vault self-grants under account key' (context `account_key_epoch + 1`, `vault_key_epoch + 1`).
    - `E_id` under account key'.
    - retired secret keys, i.e. old identity and old mail keys needed for old HPKE ciphertext, under account key' as `RETIRED_SECRET_KEY`.
-   - `MAIL_SECRET_KEY` (M6) and `ACCOUNT_SETTINGS` under account key'. The settings get `settings_seq + 1`.
+   - `MAIL_SECRET_KEY` (M6) under account key'. If `settings_seq > 0`, `ACCOUNT_SETTINGS` is re-encrypted under account key' with `settings_seq + 1`. If `settings_seq = 0`, there is no settings object: nothing is written, `settings_seq` stays 0 and `settings_hash` stays zero.
 4. **Server wrap** (Server mode): `E_srv'` under the `export_key` from step 1.
-5. **Recovery.** A new recovery code, `E_rec'` and `H_rec'`, `recovery_epoch + 1`, and a new Emergency Kit the user must save. The old code stops working. The user MAY instead type the current recovery code to keep it; the client then derives the wrap key from it.
-6. **Device grants.** For each remaining device: an `ACCOUNT_KEY_DEVICE_GRANT`, sealed in HPKE PSK mode to that device's X25519 key with the device-grant PSK derived from the *old* account key ([§10.1](#101-hpke-key-wrapping)), and signed as a `key-grant` by the rotating device.
+5. **Recovery.** Skipped when `recovery_enabled = 0`, unless the user opts in. A new recovery code, `E_rec'` and `H_rec'`, `recovery_epoch + 1`, and a new Emergency Kit the user must save. The old code stops working. Except when the rotation was triggered by an SK change, a recovery or "kit exposed", the user MAY instead type the current recovery code to keep it. The client then derives the wrap key from it and builds `E_rec'` with the new `account_key_epoch`; `H_rec` and `recovery_epoch` stay unchanged.
+6. **Device grants.** For each remaining device: an `ACCOUNT_KEY_DEVICE_GRANT`, sealed in HPKE PSK mode to that device's X25519 key with the device-grant PSK derived from the *old* account key ([§10.1](#101-hpke-key-wrapping)), and signed as a `key-grant` by the rotating device (by the identity key when the rotating client is a web vault, [§10.1](#101-hpke-key-wrapping)).
 7. **Identity (full rotation only).**
    - A new bundle (`bundle_seq + 1`, `prev_bundle_hash` = the old bundle), signed by the new *and* the old identity key.
-   - New device certificates for every remaining device, signed by the new identity key.
-8. **State.** `account-state'` with every changed epoch, `settings_seq`, `bundle_hash` and `device_set_hash`, signed by the identity key of the new `identity_epoch`: the **new** key in a full rotation, the unchanged key in a standard one. The committed vectors cover both cases.
-9. **Upload.**
-   - **Server mode:** everything in one atomic request. The server deletes the superseded wraps, except that the re-wrapped item keys *replace* the old `ITEM_KEY_WRAP` rows ([§4.2](#42-key-inventory)).
-   - **On-device mode:** the account-level objects (state, bundle, certificates, grants, `E_id'`, retired keys, mail key, settings) go to the `auth` domain in one compare-and-swap. The vault-level objects (self-grants', re-wrapped item keys) go out as key records in a `RELAY_BATCH` under the **new** relay key ([§11.12](#1112-relay-ops-on-device-mode-m4)); other devices can open it once they have opened their grant. A device that misses the batch before the TTL is stale and re-syncs from a peer, which transfers the same objects.
-10. **Other devices** pick up the change at their next unlock ([§11.3](#113-unlock-on-an-enrolled-device) steps 3 and 4). The relay key changes automatically, because it is derived from the account key and epoch.
+   - Re-issued certificates for every device certificate the account holds (remaining devices, revoked devices, and every kind-4 certificate that authored a retained op or snapshot or has not expired). Each is signed by the new identity key and identical except that `identity_epoch` is the new epoch.
+   - `device-revocation`s signed by the new identity key: a re-issue of every existing revocation (same fields), the revocation of the device being revoked ([§11.8](#118-device-revocation)), and one for every kind-4 certificate that has not expired, other than the rotating client's own, with `last_accepted_device_seq` = the highest `device_seq` the server holds from it. The server ends those web sessions, as for the mode switch ([ADR 0012](adr/0012-sync-engine.md) §10).
+   - The rotating device fetches every certificate, revocation and op before signing. The server refuses a full rotation whose upload lacks a re-issued copy of any certificate or revocation it holds, and checks this under the account lock.
+8. **State.** `account-state'` with every changed epoch, `account_key_id`, `settings_seq`, `bundle_hash` and `device_set_hash`, signed by the identity key of the new `identity_epoch`: the **new** key in a full rotation, the unchanged key in a standard one. The committed vectors cover both cases.
+9. **Upload,** after the secrets-before-commit steps ([§11](#11-flows)): the kit from step 5 is confirmed, and the rotating device's pending record holds the new account key and vault keys. The request carries the rotating device's fetch cursor, and the server applies the rotation cut-off of [ADR 0012](adr/0012-sync-engine.md) §6 under the account lock.
+   - **Server mode:** everything in one atomic request, under the credential-replacement rule ([§11](#11-flows)). The server deletes the superseded wraps; the re-wrapped item keys overwrite the wrap-set rows ([§4.2](#42-key-inventory)).
+   - **On-device mode:** the account-level objects (state, bundle, certificates, grants, `E_id'`, retired keys, mail key, settings) and the `RELAY_BATCH` carrying the vault-level key records (self-grants', re-wrapped item keys) are one request. The server applies both in one DB transaction under the account lock, the state by compare-and-swap, with `rizzy-server` wiring the auth and relay domains together through the [ADR 0016](adr/0016-workspace-layout.md) R4 trait, and refuses either part without the other. The batch is under the **new** relay key ([§11.12](#1112-relay-ops-on-device-mode-m4)); other devices can open it once they have opened their grant. A device that misses the batch before the TTL is stale and re-syncs from a peer, which transfers the same objects.
+10. **Other devices** process a pushed `account-state` change before their next write; a locked device does so at its next unlock ([§11.3](#113-unlock-on-an-enrolled-device) steps 3 and 4). The relay key changes automatically, because it is derived from the account key and epoch.
 
 **Lazy item-key rotation.** Old item keys stay readable, because they were re-wrapped in step 3, but they must not encrypt anything new: the revoked device knows them. The rules:
 - **Current vault epoch.** A device learns a vault's current `vault_key_epoch` from the self-grant that opens under the account key of the `account_key_epoch` in the verified `account-state`, never from server metadata. The self-grant's context binds both epochs. In M1–M8 a vault key rotates only together with the account key, so exactly one vault key per vault opens under the current account key. M9 member removal rotates a vault key alone, and the M9 ADR must carry `vault_key_epoch` in a signed vault statement.
-- **Writer rule (MUST).** Before encrypting an op or snapshot under an item key, the writer opens the item's current `ITEM_KEY_WRAP`. If `created_vault_key_epoch` is lower than the current `vault_key_epoch`, it generates a fresh item key (`created_vault_key_epoch` = current), carries the new wrap with the op, and writes a full snapshot under the new key. This holds for every writer, including a device enrolled after the rotation that never saw the old epoch, and it holds when the server hides the fresh wrap and serves only the re-wrapped old one.
-- **Reader rule.** The `key_id` in an op or snapshot envelope header must equal the key id derived from an item key the reader unwrapped for that item. An op under an unknown item key waits for its wrap and, if the wrap never arrives, is reported like a missing op.
+- **Writer rule (MUST).** Before encrypting an op or snapshot under an item key, the writer opens the item's current `ITEM_KEY_WRAP`. If `created_vault_key_epoch` is lower than the current `vault_key_epoch`, it generates a fresh item key (`created_vault_key_epoch` = current), carries the new wrap with the op, and writes a full snapshot under the new key. This holds for every writer, including a device enrolled after the rotation that never saw the old epoch, and it holds when the server hides the fresh wrap and serves only the re-wrapped old one. If the item's current wrap does not open under a vault key the writer holds, the writer MUST NOT write to the item and reports it as unreadable.
+- **Reader rule.** The `key_id` in an op or snapshot envelope header must equal the key id derived from an item key the reader unwrapped for that item. An op under an unknown item key waits for its wrap and, if the wrap never arrives, is reported like a missing op. A delivered wrap is used only if its SHA-256 equals the signed wrap hash; otherwise it is ignored, and the op is not rejected for it. The reader takes the item key from such a wrap, or from the wrap-set row for (vault_id, item_id, the envelope header's `key_id`) opened with the ctx of the current `vault_key_epoch`, and requires the derived key id to equal the envelope's `key_id`.
 - "Re-encrypt everything now" is an explicit action that costs O(vault size).
 
-**Known limitation.** A *compromised* revoked device holds the old identity key and could race its own "rotation". Remaining devices accept a rotation only if its grants are signed by a device in the new signed device set, and they show the new identity fingerprint for the user to confirm on each device ([§11.3](#113-unlock-on-an-enrolled-device) step 3). The details belong to the M4 ADR on device management. Revocation never takes back data the device already had.
+**Known limitation.** A *compromised* revoked device holds the old identity key and could race its own "rotation". Remaining devices accept a rotation only if the key its grants deliver has the `account_key_id` committed in the new `account-state`, and they show the new identity fingerprint for the user to confirm on each device ([§11.3](#113-unlock-on-an-enrolled-device) step 3). The details belong to the M4 ADR on device management. Revocation never takes back data the device already had.
 
 ### 11.7 New device in On-device mode
 
@@ -1036,7 +1122,7 @@ This is an outline. M4 fixes it in its own ADR. It is audit target 7 ([§1](#1-g
    - **Chunk 1:** the account key, the SK, N's certificate, the signed `account-state` and bundle, and E's `E_local` record (`device_id`, `device_salt`, `kdf_id`, envelope), used as a password verifier.
    - **Chunks 2 to `total_chunks`:** every current `VAULT_KEY_SELF_GRANT` and `ITEM_KEY_WRAP`, then what [ADR 0012](adr/0012-sync-engine.md) §9 lists: a fresh signed snapshot of every item, all tombstones, the per-device high-water marks and the per-sender `batch_seq` cursors.
    - N fetches the account-level objects (`E_id`, retired keys, mail key, `ACCOUNT_SETTINGS`) from the `auth` domain, as in Server mode ([§4.2](#42-key-inventory)), and verifies them against the transferred state.
-8. **Verify.** N checks that the bundle hashes to the QR's `bundle_hash`, that `E_id` opens and matches the bundle, and that the state verifies. It asks for the master password and verifies it by opening E's `E_local` record, then creates its own `E_local` (two Argon2id runs, once).
+8. **Verify.** N checks that the bundle hashes to the QR's `bundle_hash`, that `E_id` opens and matches the bundle, that the state verifies, and that the transferred account key has key id `state.account_key_id`. It asks for the master password and verifies it by opening E's `E_local` record, then creates its own `E_local` (two Argon2id runs, once).
 9. **Finish.** N refuses to finish enrolment until chunks 1 to `total_chunks` have all arrived and opened. E publishes the new `account-state` with N added to the device set. The relay deletes the pairing session after 10 minutes.
 
 **Short-code path** (no camera). This needs a PAKE (e.g. CPace or SPAKE2) or the same commit-then-reveal SAS. **Not specified here, and no crate has been chosen.** It is an M4 ADR item. The same rules apply to it: no key material moves before both devices confirm the SAS, and all of it is sealed to the confirmed key.
@@ -1045,9 +1131,12 @@ This is an outline. M4 fixes it in its own ADR. It is audit target 7 ([§1](#1-g
 
 ### 11.8 Device revocation
 
-1. **Sign the revocation.** A remaining device (unlocked, fresh re-auth) signs a `device-revocation` with `last_accepted_device_seq` equal to the highest op sequence it has seen from that device. It also signs a new `account-state` whose `device_set_hash` no longer includes the revoked device.
-2. **Server.** It deletes the revoked device's sessions, rejects its device authentication, and in On-device mode removes it from the relay acknowledgement set.
+0. **Suspend** the device ([ADR 0012](adr/0012-sync-engine.md) §6). A remaining device (kind 1–3, unlocked, fresh re-auth) sends `suspend(device_id)`. From that commit on, the server rejects the device's uploads and device authentication and ends its sessions, the relay rejects its batches, and the server returns H, the highest `device_seq` it holds from that device.
+1. **Sign the revocation.** The revoker fetches up to H and signs a `device-revocation` with `last_accepted_device_seq` = H. It also signs the new `account-state`, which drops the revoked device from `device_set_hash` and is the rotation's state (step 3).
+2. **Server.** On commit the suspension becomes permanent: the server keeps rejecting the device's authentication and uploads, and in On-device mode removes it from the relay acknowledgement set.
 3. **Rotate** ([§11.6](#116-key-rotation)): full rotation for a lost or stolen device, standard rotation for a device that was wiped and handed over.
+
+   Steps 1 and 3 are one atomic request, which the server accepts only if H is still the head it holds. In a full rotation, the revocation and the new `account-state` are signed by the new identity key.
 4. **Peers.** They reject that device's ops with `device_seq > last_accepted_device_seq`.
 
 Revocation protects **future** data only. The UI says this in one sentence.
@@ -1061,18 +1150,20 @@ Revocation protects **future** data only. The UI says this in one sentence.
    - It notifies every enrolled device, and the account email if the server has mail configured.
    - It starts the waiting period: default **72 h**, admin-configurable from 0 to 30 days. A single-user instance may set 0.
    - Any enrolled device with a device-authenticated session can cancel the pending recovery.
-3. After the wait: `POST /api/v1/recovery/complete {login_name, recovery_auth_token}`. The server returns `E_rec`, the epochs, `E_id`, the bundle, the state, the device certificates, the self-grants and the item-key wraps, plus a recovery-only session with a 10-minute TTL that covers the rotation upload in step 5.
+3. After the wait: `POST /api/v1/recovery/complete {login_name, recovery_auth_token}`. The server returns `E_rec`, the epochs, `E_id`, the bundle, the state, the device certificates, the self-grants and the item-key wraps, plus a recovery-only session with a 10-minute TTL that covers the rotation upload in step 5. The pending recovery stays open, and `/recovery/complete` may be repeated with the same token, until the step 6 replace commits. `H_rec` is invalidated only by that commit.
    - The waiting period is server-enforced. A malicious server could skip it, but that gains the server nothing, because it still lacks the code.
    - What the wait defends against is a thief holding the printed kit (threat model Q-15).
-4. The client derives the recovery wrap key and opens `E_rec` to get the account key. It then opens `E_id` and verifies the bundle and state as in [§11.2](#112-login-on-a-new-device-server-mode) step 6.
+4. The client derives the recovery wrap key and opens `E_rec` to get the account key, and checks that its key id equals `state.account_key_id`. It then opens `E_id` and verifies the bundle and state as in [§11.2](#112-login-on-a-new-device-server-mode) step 6.
 5. The client generates a **new SK and a new recovery code**. The old kit is assumed lost or compromised. The user sets a new master password. The client then:
    - runs a **standard rotation** ([§11.6](#116-key-rotation)) **by default**: new account key and vault keys, item keys re-wrapped, PSK-mode device grants to every remaining device;
    - registers OPAQUE and builds new `E_srv`, `E_rec` and `H_rec`, with `password_epoch + 1` and `recovery_epoch + 1`, and a new signed state;
-   - enrols itself as a device, as in [§11.2](#112-login-on-a-new-device-server-mode) step 7.
+   - if the client is durable (kind 1–3), enrols itself as a device, as in [§11.2](#112-login-on-a-new-device-server-mode) step 7; a web vault (kind 4) does not.
 
    "Skip rotation" is an explicit opt-out. Why rotate by default: any copy of the old `E_rec` opens with the old code and yields the account key. Routine DB backups taken before the recovery hold such copies, and so does a server that ignored the deletion. Without a rotation, kit thief plus old backup equals every future write. The cost is O(items) small re-wraps; the client already holds the account key and is re-registering anyway.
-6. The server replaces everything atomically, ends every session, and notifies every device and the account email that "this account was recovered".
-7. Other devices must log in again with the new password and SK ([§11.3](#113-unlock-on-an-enrolled-device) steps 4 and 5).
+
+   The new Emergency Kit is rendered and confirmed before step 6 (secrets-before-commit rule, [§11](#11-flows)).
+6. The server replaces everything atomically, under the credential-replacement rule ([§11](#11-flows)), ends every session, and notifies every device and the account email that "this account was recovered".
+7. Other devices must log in again with the new password and SK ([§11.3](#113-unlock-on-an-enrolled-device) steps 4 and 5). If a rotation happened, devices that know only the new password re-enrol as in [§11.3](#113-unlock-on-an-enrolled-device) step 5.
 
 If the user believes the kit was stolen, the UI offers a full rotation instead, which also replaces the identity keys.
 
@@ -1152,8 +1243,20 @@ So a new device can recover with the backup file plus either (password + SK) or 
 
 - **Key.** The user chooses an **export password**, separate from the master password; the SK is not used, so the file is portable. `export_salt`, `export_id` and `created_at` are generated, and the file key is derived as in [§4.3](#43-derivations).
 - **File.** JSON: `{"format":"rizzy-vault-export","version":1,"kdf_id":1,"export_salt":…,"export_id":…,"created_at":…,"data":"<b64url Envelope(file_key, EXPORT_FILE, …)>"}`.
+- **`created_at`** is a JSON integer, milliseconds since the Unix epoch, and is the `created_at_ms` of the ctx.
 - **Import.** The importer rejects any `kdf_id` not on its allow-list.
 - **Plaintext export** (JSON or CSV) exists, behind the "scary warning" from ROADMAP §4.2.
+
+### 11.15 TOTP (M1)
+
+One implementation in `rizzy-core` serves two uses: codes for items that hold a TOTP secret, and server-side 2FA ([§5.10](#510-sessions-after-authentication)).
+
+- **Standards.** HOTP (RFC 4226) and TOTP (RFC 6238).
+- **Allow-lists.** Algorithm SHA1, SHA256 or SHA512 (HMAC from `hmac` over `sha1` or `sha2`, [§3](#3-primitives)); digits 6–8; period 1–300 s, default 30. Anything else is rejected, never clamped.
+- **otpauth URIs.** The secret is RFC 4648 Base32 (not the Crockford alphabet of [§7](#7-secret-key)), parsed case-insensitively with optional padding. The URI parser is fuzzed ([§15](#15-testing) item 7).
+- **Item TOTP secrets** stay in item data, encrypted like any other field, and are held in `Zeroizing` buffers while in use.
+- **Server 2FA.** The secret is sealed as `SERVER_TOTP_SECRET` ([§5.11](#511-server-side-encryption-not-zero-knowledge)). The server accepts the current time step or one step either side (±1), rejects a time step it has already accepted for that credential, and compares codes with `ct_eq`.
+- **Neither kind of TOTP feeds key derivation** ([§5.10](#510-sessions-after-authentication)).
 
 ---
 
@@ -1165,8 +1268,9 @@ So a new device can recover with the backup file plus either (password + SK) or 
 - **Platform crates** (CLI, server, Tauri shell, UniFFI bindings, wasm bindings) supply an RNG backed by `getrandom` 0.4, i.e. the OS CSPRNG: getrandom's `SysRng` (feature `sys_rng`) wrapped in rand_core's `UnwrapErr`. On `wasm32-unknown-unknown` the **wasm bindings crate alone** enables getrandom's `wasm_js` feature, which uses `crypto.getRandomValues`. The getrandom README says not to enable it in libraries.
 - **CI enforcement.** `cargo check-wasm` fails if a dependency pulls getrandom into `rizzy-core` without a backend. This was reproduced in M0 with hpke's default features.
 - **opaque-ke** gets its rand_core 0.6 RNG through the adapter in [§5.1](#51-ciphersuite-and-key-stretching), written against `opaque_ke::rand`. No other rand_core 0.6 use is allowed.
-- **What the RNG produces:** all keys, nonces, ids, salts, recovery codes, share secrets, pairing secrets and challenges. Nothing is derived from time, counters or ids where this document says "random".
-- **No direct `rand` dependency in `rizzy-core`**: no `rand::rng()` and no `thread_rng`. `rand` 0.8.8 is present only transitively through opaque-ke, with default features off, which leaves out `thread_rng` and getrandom ([§5.1](#51-ciphersuite-and-key-stretching)). RUSTSEC-2026-0097 is a reminder that convenience RNG paths have their own bugs. Deterministic RNGs (e.g. a seeded ChaCha20 RNG) are dev-dependencies for test vectors only.
+- **What the RNG produces:** all keys, nonces, ids, salts, recovery codes, share secrets, pairing secrets, challenges, and generated passwords and passphrases. Nothing is derived from time, counters or ids where this document says "random".
+- **Password generator (M1).** Characters and words are drawn uniformly by rejection sampling from the injected CSPRNG, never with `%` on raw bytes. Required character classes are met by rejecting the whole candidate and redrawing, never by patching positions. Passphrase mode uses one named, versioned wordlist embedded in `rizzy-core` (e.g. the EFF large list, 7,776 words; licence checked against [ADR 0017](adr/0017-licensing.md)). The UI reports entropy as log2 of the size of the space actually sampled. A unit test checks the output distribution for bias, and generated values are secrets ([§12.2](#122-memory-hygiene)).
+- **No direct `rand` dependency in `rizzy-core`**: no `rand::rng()` and no `thread_rng`. `rand` 0.8.8 is present only transitively through opaque-ke, with default features off, which leaves out `thread_rng` and getrandom ([§5.1](#51-ciphersuite-and-key-stretching)). RUSTSEC-2026-0097 is a reminder that convenience RNG paths have their own bugs. The deterministic RNG for test vectors is `chacha20`'s seeded `ChaCha20Rng`, a dev-dependency only ([ADR 0009](adr/0009-crypto-dependency-policy.md)).
 - **An RNG failure aborts the process.** `UnwrapErr` panics on an OS RNG error, and release builds use `panic = "abort"`, so the process dies (in wasm, the instance traps). There is no fallback and no retry with a weaker source. A failing OS CSPRNG is not a condition we can recover from safely.
 
 ### 12.2 Memory hygiene
@@ -1177,8 +1281,8 @@ So a new device can recover with the backup file plus either (password + SK) or 
   - `Debug` is implemented by hand and prints `[REDACTED]`. This is compatible with the workspace lint `missing_debug_implementations`.
   - Exposing a secret takes an explicit `expose_secret()` call, which is easy to grep for.
   - Secret `Vec`s are allocated at their final capacity; a reallocation leaves the old copy behind.
-- **Argon2 memory is our job.** `argon2` 0.6.0's `hash_password_into` allocates the m-KiB block matrix internally and frees it **without wiping it**, even with the `zeroize` feature; that feature wipes only the initial and final hash. This was verified by reading `src/block.rs` and `src/lib.rs`. Our KSF and local KDF therefore call `hash_password_into_with_memory` with our own `Zeroizing<Vec<argon2::Block>>`, which is wiped on drop. There is a test for this.
-- **Crate features.** `chacha20poly1305`, `argon2` and `ed25519-dalek` are built with their `zeroize` features.
+- **Argon2 memory is our job.** `argon2` 0.6.0's `hash_password_into` allocates the m-KiB block matrix internally and frees it **without wiping it**, even with the `zeroize` feature; that feature wipes only the initial and final hash. This was verified by reading `src/block.rs` and `src/lib.rs`. Our KSF and local KDF therefore call `hash_password_into_with_memory` with our own `Zeroizing<Vec<argon2::Block>>`, which is wiped on drop. There is a test for this. We build argon2 without its `alloc` feature. That feature gates only `hash_password_into` and its non-wiping internal buffer, so the forbidden call does not compile in our build, and `hash_password_into_with_memory` with our `Zeroizing<Vec<argon2::Block>>` is the only entry point.
+- **Crate features.** `chacha20poly1305`, `argon2`, `ed25519-dalek`, `hmac` 0.13 and `sha2` 0.11 are built with their `zeroize` features. `hkdf` 0.13 has no such feature (see Limits).
 - **Logs and panics.**
   - No secret or plaintext is ever logged, formatted into an error, or included in a panic message.
   - Release builds use `panic = "abort"`, as the workspace profile already sets.
@@ -1188,6 +1292,8 @@ So a new device can recover with the backup file plus either (password + SK) or 
   - **JavaScript strings** (the password field's `value`) are immutable and garbage-collected, so they cannot be wiped. The web client copies the password into a `Uint8Array` via `TextEncoder`, passes it to wasm, and zeroes the array. The string itself lives until GC.
   - **wasm linear memory** can be wiped from Rust, but the engine may copy it when memory grows (U). A 64 MiB Argon2 run grows the memory, and wasm memory never shrinks.
   - **No `mlock`.** It needs `unsafe` or a libc wrapper, and does not exist in wasm. Swap and hibernation files can hold secrets. We assume OS full-disk encryption.
+  - **hkdf 0.13.** It keeps its PRK and its T(i) expand blocks in plain arrays and never wipes them, so copies of HKDF state keyed by an envelope key, SK or `pw_in` are freed unwiped. opaque-ke's own hash stack is covered in the opaque-ke bullet.
+  - **opaque-ke internals.** In `get_password_derived_key`, opaque-ke 4.0.1 holds the OPRF output and the stretched output (both password-equivalents) in plain `GenericArray`s and feeds them to its own HKDF-SHA-512 (hkdf 0.12 / hmac 0.12 / sha2 0.10, which have no zeroize support). None of these is wiped. Our KSF gets a by-value copy and wipes only that copy. The same holds for the `export_key` and `session_key` arrays opaque-ke returns before we move them into `Zeroizing`. Tracked upstream; listed for the M8 audit.
   - **Allocators.** Bitwarden's SDK ships a zeroizing global allocator. Writing one needs `unsafe` (`GlobalAlloc`), which the workspace forbids. This is an open question ([ADR 0009](adr/0009-crypto-dependency-policy.md)).
 
 ### 12.3 Side channels
@@ -1206,7 +1312,7 @@ So a new device can recover with the backup file plus either (password + SK) or 
 **What is already PQ-safe at v1.0:** everything symmetric.
 - 256-bit keys, XChaCha20-Poly1305, HKDF-SHA-256.
 - Grover leaves about 128-bit security.
-- **A personal vault at rest is protected only by symmetric crypto.** The account key is wrapped by password- or recovery-derived symmetric keys. Personal vault keys are self-granted symmetrically. The HPKE objects that carry an account key or a vault (pending device grants, password-verifier grants, pairing and re-sync transfers) use PSK mode with a PSK derived from symmetric secrets ([§10.1](#101-hpke-key-wrapping)), so a quantum computer that breaks their X25519 still lacks the PSK. Without PSK mode this claim would be false for as long as any device grant sat unconsumed on the server.
+- **A personal vault at rest is protected only by symmetric crypto.** The account key is wrapped by password- or recovery-derived symmetric keys. Personal vault keys are self-granted symmetrically. The HPKE objects that carry an account key or a vault (pending device grants, password-verifier grants, pairing and re-sync transfers) use PSK mode with a PSK derived from symmetric secrets ([§10.1](#101-hpke-key-wrapping)), so a quantum computer that breaks their X25519 still lacks the PSK. Without PSK mode this claim would be false for as long as any device grant sat on the server.
 - The recovery wrap was deliberately made symmetric, not HPKE, for this reason ([ADR 0008](adr/0008-account-recovery.md)).
 
 **What is exposed to harvest-now-decrypt-later (HNDL):**
@@ -1214,7 +1320,7 @@ So a new device can recover with the backup file plus either (password + SK) or 
 | Object | Exposure | Mitigation in v1.0 |
 |---|---|---|
 | OPAQUE transcripts | A CRQC plus broken TLS recordings allows a DLog on the OPRF, then offline password guessing | The SK makes guessing infeasible ([§5.5](#55-offline-attack-analysis)) |
-| `ACCOUNT_KEY_DEVICE_GRANT`, `PASSWORD_VERIFIER_GRANT` (HPKE X25519, PSK mode) | Breaking X25519 alone reveals nothing: the PSK comes from the previous (or current) account key | PSK mode. Grants are also deleted once consumed |
+| `ACCOUNT_KEY_DEVICE_GRANT`, `PASSWORD_VERIFIER_GRANT` (HPKE X25519, PSK mode) | Breaking X25519 alone reveals nothing: the PSK comes from the previous (or current) account key | PSK mode. Grants are also deleted once acknowledged |
 | `PAIRING_TRANSFER_SEALED`, `RESYNC_TRANSFER` (M4) | Same | PSK mode (`k_pair` from the QR; the account key). Transient on the relay |
 | `MAIL_MESSAGE` (HPKE X25519) | Stored mail becomes readable | Short retention. PQ HPKE post-1.0 |
 | `VAULT_KEY_MEMBER_GRANT` (M9) | Shared vault keys | M9 decision: should ship with 0x11 if X-Wing is an RFC by then |
@@ -1246,7 +1352,7 @@ The threat model's §5 and §8 ([THREAT_MODEL.md](THREAT_MODEL.md)) state the ma
 | Attack class | What we do | What remains |
 |---|---|---|
 | 1. Key escrow / account recovery | No escrow and no admin reset in v1.0. Recovery needs a 128-bit code that only the user holds, plus a cancellable waiting period | Kit + server access = account after the wait if no device cancels (by design; the kit says so) |
-| 2. Unbound item-level encryption, swappable settings | AAD binds purpose, vault, item, op/snapshot header and epochs. Security settings sit in `ACCOUNT_SETTINGS`, and the signed state commits to their `settings_seq` and hash, so an older settings object is rejected. KDF id and epochs are signed and bound into the OPAQUE context. Item keys carry an authenticated creation epoch, so a stale key is never reused for new writes | The server can **withhold** ops. Only withholding in the middle of a device's stream shows up as a sequence gap; withholding a suffix, or freezing a device on an old state, looks like silence and stays hidden until devices compare heads (threat model AR-5; the "vault state fingerprint" Should in threat model §5.6 is the planned mitigation). It can **roll a fresh device back** to an older, validly signed state (existing devices detect it through `state_seq`). It can delete data |
+| 2. Unbound item-level encryption, swappable settings | AAD binds purpose, vault, item, op/snapshot header and epochs. Security settings sit in `ACCOUNT_SETTINGS`, and the signed state commits to their `settings_seq` and hash, so an older settings object is rejected. KDF id and epochs are signed and bound into the OPAQUE context. Item keys carry an authenticated creation epoch, so a stale key is never reused for new writes | The server can **withhold** ops. Only withholding in the middle of a device's stream shows up as a sequence gap; withholding a suffix, or freezing a device on an old state, looks like silence and stays hidden until devices compare heads (threat model AR-5; the "vault state fingerprint" Should in threat model §5.6 is the planned mitigation). It can **roll a fresh device back** to an older, validly signed state (existing devices detect it through `state_seq`). A server that withholds a rotation from a device keeps that device writing under keys the revoked device holds. It can delete data |
 | 3. Sharing and orgs: key substitution | Own keys are verified by decryption; device certificates chain to the identity key; the device set is signed and checked on login; bundles form a chain with `bundle_seq`; an identity-key change is a visible "safety number changed" event, and a fork is a hard alarm; fingerprints, TOFU pinning and signed grants (M9); `smtp` pins identity keys (M6); pairing uses a commit-then-reveal SAS and seals the transfer to the confirmed key (M4) | First-contact substitution when users skip fingerprint checks. Key transparency is post-1.0 |
 | 4. Backward compatibility / downgrade | One algorithm per purpose, allow-lists, no negotiation, no legacy decrypt path | – |
 | 5. KDF parameter downgrade | Compiled-in `kdf_id` table with a CI-checked floor | – |
@@ -1269,16 +1375,19 @@ The threat model's §5 and §8 ([THREAT_MODEL.md](THREAT_MODEL.md)) state the ma
 
 All of this lands with the code in M1. None of it is optional.
 
-1. **Known-answer vectors (ours).**
-   - `crates/rizzy-core/tests/vectors/*.json` is generated once from a seeded test RNG and committed. It covers every derivation in [§4.3](#43-derivations) (including every symmetric key id and every HPKE PSK), every envelope purpose in [§8.4](#84-aad-and-purposes), every signed statement in [§10.2](#102-ed25519-signatures-and-signed-statements) (including a standard and a full rotation's `account-state` and two-signature bundle), SK and recovery-code encoding, Padmé framing, and full signup → login → unlock transcripts.
-   - Changing a vector requires a version bump and an ADR note.
+1. **Known-answer vectors (ours),** committed under `crates/rizzy-core/tests/vectors/`, in two tiers:
+   - **(A) Normative format vectors:** every [§4.3](#43-derivations) derivation (including every symmetric key id and every HPKE PSK), [§8.4](#84-aad-and-purposes) purpose, [§10.2](#102-ed25519-signatures-and-signed-statements) statement (including a standard and a full rotation's `account-state` and two-signature bundle; the rotation vectors follow the `settings_seq = 0` rule of [§11.6](#116-key-rotation) step 3), SK and recovery-code encoding, and Padmé framing whose first use is M1. They also cover the canonical op and snapshot headers ([ADR 0012](adr/0012-sync-engine.md) §3) and the item-record encoding ([§8.4](#84-aad-and-purposes)). Envelopes are built through a `cfg(test)`-only fixed-nonce hook, so threat model INV-12 still holds for release builds. Changing one of these requires a version bump and an ADR note.
+   - **(B) Transcript regression vectors** (signup → login → unlock, including `RizzySuiteV1` registration and login): generated from a named seeded RNG (crate and version pinned in [ADR 0009](adr/0009-crypto-dependency-policy.md), implementing rand_core 0.10 and fed to opaque-ke through the [§5.1](#51-ciphersuite-and-key-stretching) adapter), and regenerated, with a note, in the PR that bumps a pinned crate.
+   - Vectors for M4–M6 constructions are added in the milestone that ships them.
+   - The vector files follow a published JSON schema: vector id, purpose or statement id, inputs, outputs.
 2. **Upstream vectors.** Run against our pinned crates, not just trusted from their CI:
    - RFC 5869 (HKDF), RFC 9106 (Argon2id)
    - draft-irtf-cfrg-xchacha-03 (XChaCha20-Poly1305)
    - RFC 7748 (X25519), RFC 8032 (Ed25519)
    - RFC 9180 (HPKE, through hpke's `kat` test data for our suite, in Base and PSK mode)
    - RFC 9807 (OPAQUE, through opaque-ke's test vectors)
-3. **Wycheproof.** Run the Wycheproof suites for XChaCha20-Poly1305, ChaCha20-Poly1305, HKDF-SHA-256, HMAC-SHA-256, X25519 and Ed25519 at a pinned commit of the repository. File names are to be confirmed in M1 (U).
+   - RFC 2202 (HMAC-SHA-1), RFC 4226 Appendix D and RFC 6238 Appendix B (HOTP and TOTP, all three algorithms)
+3. **Wycheproof.** Run the Wycheproof suites for XChaCha20-Poly1305, ChaCha20-Poly1305, HKDF-SHA-256, HMAC-SHA-256, HMAC-SHA-1, X25519 and Ed25519 at a pinned commit of the repository. File names are to be confirmed in M1 (U).
 4. **Property tests** (proptest):
    - encrypt/decrypt round-trips for all purposes;
    - any single-bit flip anywhere in an envelope → `DecryptError`;
@@ -1298,12 +1407,12 @@ All of this lands with the code in M1. None of it is optional.
    - It replays ops → deduplicated. It withholds a middle op → gap reported.
    - After a revocation and rotation, a device enrolled *after* the rotation writes to an item; the server serves only the re-wrapped old item key → the writer generates a fresh item key, and no pre-rotation item key opens the new op.
    - It strips the SK from the flow → the login fails.
-   - It passes `ksf: None` → our `Default` still uses `kdf_id` 1.
+   - It delivers a grant chain whose last key's id differs from `state.account_key_id` → rejected, and the device stays read-only.
    - A phishing server relays OPAQUE messages to the real server under a different origin → the client's KE2 check fails.
    - Enumeration across a simulated KDF migration: the `kdf_id` answers for real and unknown names behave alike (each flips at most once, never back).
    - A kind-4 (web) certificate signs an op with an HLC past `expires_at_ms` → rejected.
    - A caller holding only a share's `share_id` sends 10 bad `link_token`s → the share is not burned.
-   - Canary: the `E_dev`, `E_local` and `E_ks` envelope bytes never appear in any request body or server row (with threat model INV-15).
+   - Canary: the `E_dev`, `E_local`, `E_ks` and `ACCOUNT_KEY_FORWARD` envelope bytes never appear in any request body or server row (with threat model INV-15).
 
    Each test is tagged with the ETH attack class it covers.
 6. **Pairing tests** (M4), with an attacker that holds the QR secret and controls the relay:
@@ -1317,6 +1426,7 @@ All of this lands with the code in M1. None of it is optional.
    - share-URL fragment parser
    - Padmé frame parser
    - export-file parser
+   - otpauth URI parser ([§11.15](#1115-totp-m1))
 
    cargo-fuzz needs nightly, while the repository pins 1.94.1, so fuzzing runs as a separate scheduled job with its own toolchain (owner decision, [§16](#16-open-questions-for-the-owner)). ROADMAP §4.1 lists fuzzing as a Should for M1–M6.
 8. **Cross-platform equality.** The same vector files are run:
@@ -1338,7 +1448,7 @@ All of this lands with the code in M1. None of it is optional.
 
 1. **Secret Key in M1, mandatory.** ROADMAP says "M1 decision, M3 ship". *Recommendation:* ship the derivation and the Emergency Kit in M1, mandatory for all accounts, and leave only QR transfer and polish for M3 ([§7](#7-secret-key)). Without it, goal 2 is false for any account with a guessable password.
 2. **Recovery code on by default, behind a waiting period.** *Recommendation:* on by default, with an opt-out that shows "forgetting your password = data loss". Use it with a server-enforced **72 h waiting period** that any enrolled device can cancel, and notify every device and the email. Admins can lower the wait, down to 0 for single-user instances. Without the wait, kit + server access = immediate account takeover (threat model Q-15).
-3. **Freeze `kdf_id` 1 = 64 MiB / t3 / p4** only after the M1 low-end phone measurement. *Recommendation:* keep it even at 1–2 s on old phones. If it fails outright (out of memory), add a phone-only path through the OS keystore rather than lowering the floor.
+3. **Freeze `kdf_id` 1 = 64 MiB / t3 / p4** only after the M1 low-end phone measurement. *Recommendation:* keep it even at 1–2 s on old phones. The keystore path (`E_ks`) helps only an enrolled device and AutoFill. The first login on a phone runs the OPAQUE KSF at the account's `kdf_id` in the main app. The M1 spike therefore measures a full OPAQUE login (KSF plus local wrap) in the main-app process on the lowest-end target phones. If that runs out of memory, `kdf_id` 1 is changed before any M1 account exists, or a Server-mode enrolment path that approves a new phone from an existing device is specified first ([§6.4](#64-feasibility)).
 4. **Password normalisation: NFC, no trimming.** *Recommendation:* NFC. Other password managers differ (U), which matters only for importing *master* passwords. We never do that. A related choice: code points that are unassigned in the pinned Unicode tables could change their NFC form once assigned. *Recommendation:* reject unassigned code points in new master passwords (this needs a Unicode general-category table, and which crate provides it is U, confirm in M1), and review every `unicode-normalization` bump like a crypto bump ([ADR 0009](adr/0009-crypto-dependency-policy.md)).
 5. **Remember the SK in the web vault's browser storage.** *Recommendation:* opt-in checkbox, default off.
 6. **Sign every op from M1.** It costs one Ed25519 signature per op and adds complexity, but M9 needs it and the op format would otherwise change later. *Recommendation:* yes.
@@ -1350,6 +1460,7 @@ All of this lands with the code in M1. None of it is optional.
 12. **Share burn rule** (threat model Q-20). *Recommendation:* split the link token from the access token ([§11.11](#1111-public-share-link-opening-m5)): only failures with a valid link token count toward the 10-attempt burn, and everything else is rate-limited per IP.
 13. **ASCII-only login names** (`[a-z0-9._+@-]`, [§2](#2-conventions)). Internationalised names would need Unicode case folding, whose tables change between releases, on the enumeration-sensitive lookup path. *Recommendation:* ASCII for v1.0.
 14. **A pin store for the `smtp` role** (M6, [§11.13](#1113-mail-ingress-m6)). It is a small file on `smtp`'s own volume, which [ADR 0010](adr/0010-server-shape.md) §4 provides; it holds pins, no secrets and no DB data. *Recommendation:* yes. Without it, whoever controls `api` or the DB can substitute every account's mail key.
+15. **Request signing for native clients from M1** (threat model Q-7, [ADR 0002](adr/0002-own-protocol.md) open question 2). This must be decided before M1 auth work starts. [§5.10](#510-sessions-after-authentication) specifies the construction (the `device-request` statement, [§10.2](#102-ed25519-signatures-and-signed-statements)) so that M1 does not have to invent one. *Recommendation:* yes, as specified. If declined, §5.10 states the residual risk: a stolen bearer token or a relayed device-auth session gives ciphertext access and destructive calls until the session ends.
 
 Dependency-policy questions (webauthn-rs and the openssl ban, cargo-vet, a zeroizing allocator) are in [ADR 0009](adr/0009-crypto-dependency-policy.md).
 

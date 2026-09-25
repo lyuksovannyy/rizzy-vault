@@ -118,7 +118,7 @@ Vaultwarden already fills the "self-hosted, Bitwarden-compatible server" niche. 
 ## Open questions for the owner
 
 1. **Importing Bitwarden's password-protected JSON export.** This needs Bitwarden's KDF and AES-CBC-HMAC decryption in `rizzy-import`. It spares users from leaving an unencrypted export file on disk. *Recommendation:* not in M1, which supports plain Bitwarden JSON only. Add it in M3 if users ask, confined to `rizzy-import`.
-2. **Session binding for native clients** ([THREAT_MODEL Q-7](../THREAT_MODEL.md#10-open-questions-for-the-owner); [CRYPTO.md §5.10](../CRYPTO.md#510-sessions-after-authentication) leaves this to the API ADR). *Recommendation:*
+2. **Session binding for native clients** ([THREAT_MODEL Q-7](../THREAT_MODEL.md#10-open-questions-for-the-owner); [CRYPTO.md §5.10](../CRYPTO.md#510-sessions-after-authentication) specifies the construction, the `device-request` statement, and [§16](../CRYPTO.md#16-open-questions-for-the-owner) question 15 leaves the adoption to the owner). *Recommendation:*
    - From M1, native clients sign every request, or a per-session nonce, with the device key, so a stolen bearer token alone is useless.
    - The web vault keeps short-lived bearer tokens.
    - The change is additive to `v1`, and it costs less now than later.

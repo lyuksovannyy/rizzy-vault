@@ -32,6 +32,7 @@ ROADMAP principle 2 says we use only audited primitives from established crates.
 | Family / crate | Use | Pin (M1) |
 |---|---|---|
 | RustCrypto: `chacha20poly1305`, `hkdf`, `hmac`, `sha2`, `argon2`, `subtle`, `zeroize`, `base64ct` | AEAD, KDF, MAC, hash, constant time, wiping, constant-time encoding | `=0.11.0`, `=0.13.0`, `=0.13.0`, `=0.11.0`, `=0.6.0`, `=2.6.1`, `=1.9.0`, `=1.8.3` |
+| `sha1` (RustCrypto) | HMAC-SHA-1 for HOTP/TOTP only ([CRYPTO.md §11.15](../CRYPTO.md#1115-totp-m1)), and HIBP range queries from M3. Checklist below | `=0.11.0` (digest 0.11, like `hmac` 0.13) |
 | `sha2_010 = { package = "sha2", version = "=0.10.9", default-features = false }` | SHA-512 for the OPAQUE ciphersuite, which is on digest 0.10 ([CRYPTO.md §5.1](../CRYPTO.md#51-ciphersuite-and-key-stretching)). Used nowhere else | `=0.10.9` (from the M0 scratch lockfile; re-check against `Cargo.lock` when it lands) |
 | `unicode-normalization` | NFC of master passwords, export passwords and share passphrases. It is on the password path: a Unicode-table change can change `NFC(password)` for code points that were unassigned before, and then the user's password stops working. So it counts as a crypto crate | `=0.1.25` |
 | dalek-cryptography: `ed25519-dalek` (and `x25519-dalek`/`curve25519-dalek` transitively) | Signatures, X25519 | `=3.0.0` |
@@ -41,6 +42,7 @@ ROADMAP principle 2 says we use only audited primitives from established crates.
 | `rand_core` | RNG traits (0.10). The opaque-ke adapter implements the 0.6 traits through `opaque_ke::rand`, so there is no direct 0.6 dependency | `=0.10.1` |
 | `rand` 0.8 | **Transitive only**, through opaque-ke, with `default-features = false`: no `thread_rng`, no getrandom. Nothing in our code calls it | lockfile-pinned (0.8.8) |
 | `getrandom` | OS randomness, **leaf crates only**; feature `sys_rng` for `SysRng` | `0.4` (lockfile-pinned) |
+| `chacha20` (RustCrypto), feature `rng`, **dev-dependency only** | `ChaCha20Rng`, the seeded test RNG for the transcript vectors ([CRYPTO.md §15](../CRYPTO.md#15-testing) item 1). It implements rand_core 0.10 and is the crate `chacha20poly1305` 0.11 already depends on | `=0.10.2` |
 | Reserved, not in any build: `ml-kem`, `x-wing` | PQ, post-1.0 | – |
 
 Anything else that performs cryptography requires the approval procedure below. That includes any other AEAD, KDF, curve, signature, PAKE, RNG or TLS crate on the client side. `rustls` is the only TLS stack; `deny.toml` already enforces this.
@@ -51,7 +53,11 @@ These are the settings that keep `rizzy-core` free of I/O and buildable for wasm
 
 - `opaque-ke`: `default-features = false`, `["ristretto255"]`. Never `argon2`, never `std`.
 - `hpke`: `default-features = false`, `["alloc", "x25519", "chacha"]`. Never `mlkem`, never `getrandom`, in M1. We call only the `*_with_rng` functions and `single_shot_open`; `Kem::gen_keypair()` and the RNG-less seal exist only with `getrandom`. `cargo xtask check-deps` ([ADR 0016](0016-workspace-layout.md)) fails if getrandom becomes reachable from `rizzy-core`, which is how CI notices the feature being switched on.
-- `argon2`: `default-features = false`, `["alloc", "zeroize"]`.
+- `argon2`: `default-features = false`, `["zeroize"]`. Never `alloc` (it only exposes the non-wiping `hash_password_into`), never `parallel` (rayon threads, [ADR 0016](0016-workspace-layout.md) R1).
+- `sha2` (0.11): `["zeroize"]`.
+- `hmac`: `["zeroize"]`.
+- `sha1`: `["zeroize"]`.
+- `hkdf` 0.13 has no features; its unwiped state is a listed limit ([CRYPTO.md §12.2](../CRYPTO.md#122-memory-hygiene)).
 - `chacha20poly1305`: `default-features = false`, `["alloc", "zeroize"]`.
 - `ed25519-dalek`: `default-features = false`, `["fast", "zeroize"]`. Never `legacy_compatibility`, never `hazmat`.
 
@@ -70,6 +76,19 @@ The PR that adds the dependency must update this ADR, or supersede it, and [CRYP
 
 The owner approves. From M9 on, when a second maintainer exists, two maintainers must approve.
 
+### Checklist record: `sha1` (M1)
+
+Scope: HMAC-SHA-1 in HOTP/TOTP, and from M3 the SHA-1 prefix of HIBP range queries. Both standards fix SHA-1. No construction of ours may use it.
+
+1. **Need.** RFC 4226 and RFC 6238 default to HMAC-SHA-1, and most otpauth URIs in the wild say `SHA1` ([CRYPTO.md §11.15](../CRYPTO.md#1115-totp-m1)). ROADMAP §4.2 and §4.3 make item TOTP and server TOTP M1 Musts.
+2. **Provenance.** RustCrypto `hashes` repository, the same maintainers and release process as `sha2`. 0.11.0 is the digest 0.11 release (V, crate manifest). Download counts and bus factor: U, the approval PR records them.
+3. **Audit history.** None found (U).
+4. **Advisories.** None known (U); the approval PR checks RustSec.
+5. **`unsafe`.** Only in the hardware backends under `src/compress/`: SHA-NI on x86 and the SHA extension on aarch64, selected at run time through `cpufeatures`, and inline assembly on loongarch64. The portable backend, which wasm32 uses, is safe code (V, crate source).
+6. **Constant time.** SHA-1 has no secret-dependent branches or table lookups, and HMAC-SHA-1 inherits that. There is no separate timing test.
+7. **Builds and hygiene.** Dependencies: `digest` 0.11 (shared with `sha2`), `cfg-if`, and, on x86, x86_64 and aarch64, `cpufeatures` 0.3. License MIT OR Apache-2.0 (V). The approval PR confirms `cargo check-wasm` and `cargo deny check` with feature `zeroize`.
+8. **Test vectors.** FIPS 180-4 SHA-1 vectors, RFC 2202 HMAC-SHA-1, RFC 4226 Appendix D, RFC 6238 Appendix B for all three algorithms, and Wycheproof HMAC-SHA1.
+
 ### Pinning and updates
 
 - Crypto crates are pinned with `=x.y.z` in `[workspace.dependencies]`, and `Cargo.lock` is committed.
@@ -80,13 +99,13 @@ The owner approves. From M9 on, when a second maintainer exists, two maintainers
 ### cargo-deny
 
 - The existing policy stays: advisories deny, yanked deny, crates.io only, and the license allow-list.
-- Duplicate crypto crates (two RustCrypto generations) stay `warn`, and are listed here as known debt until opaque-ke moves to the new generation.
+- Duplicate crypto crates (two RustCrypto generations) stay `warn`, and are listed here as known debt: block-buffer, const-oid, cpufeatures, crypto-common, curve25519-dalek, digest, fiat-crypto, hkdf, hmac, rand_core and sha2 (plus syn, through proc macros): the 12 duplicates cargo-deny 0.20.2 reports for the M1 crypto set. They stay until opaque-ke moves to the new generation.
 - Any `ignore` or ban exception needs the advisory id, the reason, the affected code path, and an expiry milestone.
 
 ### Our code
 
 - **No `unsafe`.** Enforced by the workspace lint. This also rules out writing our own global allocator, `mlock` wrappers, or FFI to C crypto.
-- **No custom primitives,** and no compositions beyond those listed in [CRYPTO.md §1](../CRYPTO.md#1-goals-non-goals-and-rules) rule 2: the committing envelope, SK-into-OPAQUE with the Context bindings, signed HPKE grants and their PSKs, the signed account state and bundle chain, device-auth challenge signing, lazy item-key rotation, the pairing SAS and sealed transfer, the recovery token and wait, and the share token scheme. That list is also the M8 audit scope for our own code. A new composition needs an ADR and joins the list.
+- **No custom primitives,** and no compositions beyond those listed in [CRYPTO.md §1](../CRYPTO.md#1-goals-non-goals-and-rules) rule 2: the committing envelope, SK-into-OPAQUE with the Context bindings, signed HPKE grants and their PSKs, the signed account state and bundle chain, device-auth challenge signing and request signing, lazy item-key rotation, the pairing SAS and sealed transfer, the recovery token and wait, the share token scheme, and server-side sealing. That list is also the M8 audit scope for our own code. A new composition needs an ADR and joins the list.
 - **One entry point per construction.** Raw AEAD, HKDF and opaque-ke calls stay private to their `rizzy-core` modules, so the public API is envelopes, flows and signed statements. A raw AEAD call outside the envelope module is a review blocker.
 
 ### Memory hygiene

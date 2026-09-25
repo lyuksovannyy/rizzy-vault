@@ -56,11 +56,11 @@ The full construction, with every HKDF label, is in [CRYPTO.md §4](../CRYPTO.md
    - HPKE, RFC 9180: DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / ChaCha20Poly1305.
    - **Base mode** for member grants (M9) and mail. **PSK mode** for everything that carries an account key or a vault between one user's devices: device grants after a rotation, password-verifier grants (On-device mode), pairing and re-sync transfers. The PSK comes from a secret the recipient already holds (the previous account key, the current account key, or the QR pairing secret), so a stored grant needs both the device's X25519 key and that secret. A future quantum computer that breaks X25519 still lacks the PSK ([CRYPTO.md §10.1](../CRYPTO.md#101-hpke-key-wrapping)).
    - Crate: `hpke` 0.14.1 with `default-features = false` and features `alloc`, `x25519`, `chacha`. Keys are generated with `gen_keypair_with_rng` and the injected RNG.
-   - Sender authenticity comes from an Ed25519 signature over the HPKE envelope. The AAD context names the sender and the recipient by id (`device_id` for device grants, `account_id` for member grants). The envelope header names the recipient public key id; the sender public key id is in the signed message ([CRYPTO.md §10.1](../CRYPTO.md#101-hpke-key-wrapping)).
+   - Sender authenticity comes from an Ed25519 signature over the HPKE envelope: the sender's device key, or the identity key for a device grant from the web vault. The AAD context names the sender and the recipient by id (`device_id` for device grants, `account_id` for member grants). The envelope header names the recipient public key id; the sender public key id is in the signed message ([CRYPTO.md §10.1](../CRYPTO.md#101-hpke-key-wrapping)). A device grant's delivered key must match the account key id committed in the signed account state.
 10. **Signatures.** `ed25519-dalek` 3.0.0, always verified with `verify_strict`. Signed statements use fixed binary layouts with domain-separated labels:
     - key bundle,
     - device certificate and device revocation,
-    - account security state (`kdf_id`, epochs, recovery status, sync mode, the current bundle's hash, a hash of the durable device set, `settings_seq` and a hash of the encrypted settings, `state_seq`),
+    - account security state (`kdf_id`, epochs, the current account key's id, recovery status, sync mode, the current bundle's hash, a hash of the durable device set, `settings_seq` and a hash of the encrypted settings, `state_seq`),
     - ops and snapshots, including the item-key wrap that travels with them,
     - key grants and device authentication.
 

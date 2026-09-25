@@ -32,14 +32,14 @@ Constraints from the other design documents:
 
 ### 1. Model
 
-- **Vault:** the unit of keys and membership. Each vault has its own op stream. An M1 account has one personal vault, and the model allows many (M9). Vault-level settings (name, icon) are an item of a reserved type.
+- **Vault:** the unit of keys and membership. Each vault has its own op stream. An M1 account has one personal vault, and the model allows many (M9). Vault-level settings (name, icon) are an item of a reserved type, whose id the item-record encoding defines (§3).
 - **Item:** a 16-byte random id, created on the client ([CRYPTO.md §2](../CRYPTO.md#2-conventions)). Its state is a set of **fields**.
 - **Field key:**
   - Fixed fields have stable names: `login.username`, `login.password`, `notes`, `totp.secret`, and so on.
   - List-like parts (URIs, custom fields, tags, passkeys) are maps from a random 16-byte element id to fields, for example `uri/<id>/value`, `uri/<id>/match`, `uri/<id>/order`.
   - Order is itself a field that holds a sort key. So "added a URI on the phone, added another on the laptop" never conflicts.
 - **Lifecycle** is a field too: `Active` or `Trashed`.
-- **Unknown fields are kept.** A field written by a newer client is carried through merge and snapshots unchanged by an older one. This is tested from M1.
+- **Unknown fields are kept.** A field written by a newer client is carried through merge and snapshots unchanged by an older one; the item-record encoding (§3) carries unknown field keys verbatim. This is tested from M1.
 
 ### 2. Clocks and versions
 
@@ -60,16 +60,24 @@ The record uses the canonical binary encoding of [CRYPTO.md §2](../CRYPTO.md#2-
 
 | Part | Contents | Server sees (Server mode) |
 |---|---|---|
-| Header | `u8 header_version = 1` ‖ vault_id ‖ item_id ‖ op_id ‖ device_id ‖ `u64 device_seq` ‖ `u64 vault_prev_seq` ‖ `u64 hlc` ‖ `u16 item_schema_version` ‖ causal context (`u16 n` ‖ n × (device_id ‖ `u64 seq`), sorted by device_id) | yes |
+| Header | `u8 header_version = 1` ‖ vault_id ‖ item_id ‖ op_id ‖ device_id ‖ `u64 device_seq` ‖ `u64 vault_prev_seq` ‖ `u64 hlc` ‖ `u16 item_schema_version` ‖ `u32 vault_key_epoch` ‖ causal context (`u16 n` ‖ n × (device_id ‖ `u64 seq`)) | yes |
 | Body | `ITEM_OP` envelope under the item key ([CRYPTO.md §8.4](../CRYPTO.md#84-aad-and-purposes)): the field writes, framed and Padmé-padded ([§8.5](../CRYPTO.md#85-plaintext-framing-and-padding)) | padded size only |
-| Key wrap | the `ITEM_KEY_WRAP` envelope. Present only on the first op under a new item key: on create, or on the first write after a vault-key rotation | yes (ciphertext) |
+| Key wrap | the `ITEM_KEY_WRAP` envelope. Present only on the first op under a new item key: on create, or on the first write after a vault-key rotation. After a later rotation the server serves the record without it; the signed hash stays ([CRYPTO.md §4.2](../CRYPTO.md#42-key-inventory)) | yes (ciphertext) |
 | Signature | an `op` statement by the device key over `bytes(canonical op header) ‖ SHA-256(body envelope) ‖ SHA-256(key-wrap envelope)`, with 32 zero bytes in place of the second hash when the op carries no wrap ([CRYPTO.md §10.2](../CRYPTO.md#102-ed25519-signatures-and-signed-statements)) | yes |
 
 - `op_id` is 16 random bytes.
+- `vault_key_epoch` is the vault epoch the author believed current ([CRYPTO.md §11.6](../CRYPTO.md#116-key-rotation)). It is signed and, through the header hash, bound into the AAD. The server uses it for the stale-epoch check (§7).
+- **Canonical VV encoding.** For the op's causal context and the snapshot's covered VV: entries are sorted by `device_id`, strictly ascending bytewise (no duplicates), and every `seq` ≥ 1. Parsers reject any other encoding.
 - The body's AAD binds the header through `SHA-256(canonical op header)`, as CRYPTO.md §8.4 requires.
 - **The signature covers the hashes of the body and the key wrap, not their bytes.** The server can then delete a compacted op's body and keep its signed header, which the chain check in §7 needs. Whenever the body or the wrap is present, the receiver checks it against the signed hash before anything else. The wrap hash keeps the wrap's author signed ([ADR 0006](0006-key-hierarchy.md) decision 10). CRYPTO.md §10.2's `op` row uses this form (open question 7).
-- A snapshot header is `u8 header_version = 1` ‖ vault_id ‖ item_id ‖ snapshot_id ‖ author device_id ‖ `u16 item_schema_version` ‖ the VV it covers. Its body is an `ITEM_SNAPSHOT` envelope, and it is signed as a `snapshot` statement.
+- A snapshot header is `u8 header_version = 1` ‖ vault_id ‖ item_id ‖ snapshot_id ‖ author device_id ‖ `u16 item_schema_version` ‖ `u32 vault_key_epoch` ‖ covered VV (`u16 n` ‖ n × (device_id ‖ `u64 seq`)). Its body is an `ITEM_SNAPSHOT` envelope, and it is signed as a `snapshot` statement over `bytes(canonical snapshot header) ‖ SHA-256(snapshot envelope) ‖ SHA-256(key-wrap envelope)`, with 32 zero bytes in place of the second hash when it carries no wrap ([CRYPTO.md §10.2](../CRYPTO.md#102-ed25519-signatures-and-signed-statements)).
 - **The snapshot body's AAD binds `SHA-256(canonical snapshot header)`,** as `ITEM_OP` does for ops. Without it, `header_version` and the author `device_id` are visible to the server but outside the AAD, which breaks CRYPTO.md §8.4's rule that every server-visible header field is covered. The `ITEM_SNAPSHOT` row in [CRYPTO.md §8.4](../CRYPTO.md#84-aad-and-purposes) carries it.
+- **Item-record encoding.** Before M1 freezes the formats, an item-record encoding ADR defines, canonically and with vectors in [CRYPTO.md §15](../CRYPTO.md#15-testing) item 1:
+  - the `ITEM_OP` data: a list of (`str` field_key, `bytes` value), sorted by field_key with no duplicates, plus a lifecycle or purge marker;
+  - the `ITEM_SNAPSHOT` data: per field, the register values (dot = device_id ‖ `u64 seq`, `u64 hlc`, `bytes` value) sorted by field_key then dot; the history in the same form; and the item VV. Unknown field keys are carried verbatim;
+  - the tombstone layout (§5);
+  - the reserved item type id for vault settings (§1);
+  - the `item_schema_version` registry: 1 is the M1 model, and the value versions the body encoding.
 
 ### 4. Apply and merge (clients only)
 
@@ -106,14 +114,20 @@ With causal delivery, this is the standard multi-value-register CRDT: the result
   - Losing an edit to a concurrent delete would be silent data loss.
 - **Purge.** A `Purge` op is allowed only on trashed items: manually, or automatically once an item has been in the trash for the retention period. The default is 30 days, measured against the trash op's HLC, and any device may issue it.
   - **Only clients purge.** Lifecycle is encrypted, so the server cannot see which items are trashed or since when, and it has no unsigned delete path ([ADR 0010](0010-server-shape.md) §1). In Server mode as in On-device mode, auto-purge happens only when some client is online after the retention period. An account whose devices all stay offline keeps its trash on the server until one of them returns.
-  - A purge replaces the item's state with a **tombstone**: the item id, the purge op's dot and causal context, and the item-key wrap.
+  - A purge replaces the item's state with a **tombstone**: the item id, the purge op's dot and causal context, and the `item_key_id` (the key comes from the wrap set). Its layout is part of the item-record encoding (§3).
   - Tombstones are kept for the life of the vault. Each is tens of bytes.
 - **Late ops after a purge.** An op concurrent with a purge, typically from a device that was offline, does not resurrect the item. It goes into the tombstone's history and is surfaced once: "An edit from Laptop arrived for an item you deleted permanently. Restore it as a new item?"
 
 ### 6. Revocation cut-off
 
-- The server refuses a `device-revocation` while it holds ops from the revoked device that the revoking device has not fetched yet. In On-device mode, the relay refuses it while that device has batches beyond the revoker's ack cursor. The revoker syncs and retries.
+- **Revocation has two phases** ([CRYPTO.md §11.8](../CRYPTO.md#118-device-revocation)).
+  - Phase 1, suspend: a remaining device with a fresh re-authentication sends `suspend(device_id)`. From that commit on (under the account lock), the server rejects the device's uploads and device authentication and ends its sessions, the relay rejects its batches, and the server returns H, the highest `device_seq` it holds from that device.
+  - Phase 2: the revoker fetches up to H and signs the `device-revocation` with `last_accepted_device_seq` = H. It sends the revocation, the new `account-state` and the rotation in one atomic request, which the server accepts only if H is still the head it holds.
+  - Only a fresh session of another device in the device set can lift a suspension.
+  - In On-device mode the relay cannot see `device_seq`. It returns the highest `batch_seq` it holds from the device; the revoker applies the batches up to it and takes H from the ops they contain, and phase 2 requires that `batch_seq` to still be the head.
+  - Test: an upload loop from the device being revoked does not delay its revocation.
 - After the revocation, the server accepts nothing more from that device.
+- **The same cut-off applies to every rotation.** The rotation request carries the rotating device's fetch cursor, and under the account lock the server refuses the rotation while it holds any op, snapshot or `ITEM_KEY_WRAP` in a rotated vault beyond that cursor.
 - The check, the revocation and every upload run under the account's lock ([ADR 0011](0011-storage.md), "Transactions and concurrency"), so a concurrent upload from the revoked device cannot slip past the check.
 - With an honest server, every replica therefore agrees on the cut-off.
 - Only a misbehaving server can make a replica hold an op past the cut-off. If that happens, the replica removes the op and recomputes the item from its retained ops and snapshots. If it cannot, it flags the item for the user.
@@ -123,19 +137,23 @@ With causal delivery, this is the standard multi-value-register CRDT: the result
 
 The server stores and forwards. It never decrypts and never merges.
 - **Upload.** A device uploads its ops in `device_seq` order.
+  - The server parses the canonical header and verifies the `op` or `snapshot` signature with `verify_strict` against the author's registered certificate. The certificate must be unrevoked, or revoked with `device_seq ≤ last_accepted_device_seq`; for a kind-4 certificate the op's HLC (ms) must also be ≤ `expires_at_ms`. A record that fails is rejected and never stored. Certificates come from the `auth` domain through a trait ([ADR 0016](0016-workspace-layout.md) R4).
   - The server stores each op record under `(vault_id, device_id, device_seq)`.
   - It rejects an op whose `vault_prev_seq` is not the last op it holds from that device in that vault. The check and the insert are one transaction under the account's lock ([ADR 0011](0011-storage.md)).
-  - That check is a convenience. The client-side check is the control.
+  - Under the account lock the server rejects an op or snapshot whose `vault_key_epoch` is below the vault's current epoch ("stale epoch"). The client then processes the new `account-state` ([CRYPTO.md §11.3](../CRYPTO.md#113-unlock-on-an-enrolled-device) steps 3–4), applies the writer rule and re-issues the edit with the same `device_seq`, which the server never stored.
+  - The `vault_prev_seq` check is a convenience. The client-side check is the control.
+  - Test: a session of device A uploads an op claiming device B → rejected, and B's next genuine op is accepted.
 - **Fetch.** A device sends its cursor: the highest `device_seq` it has per device, per vault.
   - It receives every op header after the cursor, per device and in chain order, each with its signature.
   - An op whose body is still held comes with its body. An op whose body was compacted away comes as the signed header with its two hashes, plus the newest snapshot of that item.
+  - It also receives every wrap-set row of the vault whose `vault_key_epoch` is newer than the one it last fetched (all rows on a first fetch; [CRYPTO.md §4.2](../CRYPTO.md#42-key-inventory)).
 - **Chain check after compaction** (INV-27). The client verifies each header's signature and follows `vault_prev_seq` from its cursor to the newest header. Every link must be a received header. A header without a body counts only if a snapshot of that item, received now or already held, covers its dot. Anything else is reported as missing data, and nothing past the gap is applied.
   - Why the headers are kept: without them, a VV cannot tell a withheld op from an absorbed one. Example: device D writes seqs 11–50 on items X and Z, and X's ops are compacted behind a snapshot with VV[D] = 50. A laptop with cursor 10 for D syncs. The server withholds seq 12, the only edit to Z, and sends X's snapshot. Seq 12 is below X's VV[D], so a VV check would count it as covered, and the laptop would silently miss Z's edit. With retained headers, seq 12's header names item Z, and Z has no snapshot that covers it, so the gap is reported.
 - **Snapshots and compaction.**
   - A client that has applied an item's ops writes a signed per-item snapshot: item state, conflicts and history.
-  - Triggers: more than 32 ops on the item since its last snapshot, a key rotation, or a purge.
+  - Triggers: more than 32 ops on the item since its last snapshot, the first write under a fresh item key (the writer rule in [CRYPTO.md §11.6](../CRYPTO.md#116-key-rotation)), or a purge.
   - The server keeps the two newest snapshots per item. It deletes only the **bodies** of the ops covered by the **older** of the two. So a faulty snapshot never destroys the only copy of anything, and nothing is deleted except behind a signed snapshot (INV-26).
-  - The signed header of every op is kept for the life of the vault, with its body and key-wrap hashes. Each costs about 220 bytes plus 24 bytes per causal-context entry: a 93-byte fixed header, two 32-byte hashes and a 64-byte signature. Deleting headers would bring back the ambiguity above.
+  - The signed header of every op is kept for the life of the vault, with its body and key-wrap hashes. Each costs about 225 bytes plus 24 bytes per causal-context entry: a 97-byte fixed header, two 32-byte hashes and a 64-byte signature. Deleting headers would bring back the ambiguity above.
 - **Freshness.** Clients persist the highest VV they have accepted per item, and the last verified `account-state` (INV-25). A response that goes backwards is rejected and reported, never applied.
 - **Healing a server rollback** ([THREAT_MODEL §5.8](../THREAT_MODEL.md#58-server-restore-from-backup), [INV-59](../THREAT_MODEL.md#8-security-invariants)). A restore from an old backup rolls back more than ops. It also rolls back:
   - the signed `account-state`;
@@ -145,15 +163,16 @@ The server stores and forwards. It never decrypts and never merges.
 
   A device that finds the server behind its own accepted state (a lower `state_seq`, or a VV behind its own) goes read-only as [CRYPTO.md §11.3](../CRYPTO.md#113-unlock-on-an-enrolled-device) requires. While read-only it still re-publishes, in this order:
   1. **The bundle chain,** so the server holds the current identity key.
-  2. **Its newest signed `account-state`,** in one request with the device certificates of that state's device set and every `device-revocation` it holds. The server accepts any state that verifies against the current identity key and has a higher `state_seq` than the one it holds, not only `state_seq + 1`. From then on it refuses credentials older than that state (INV-59).
+  2. **Its newest signed `account-state`,** in one request with the device certificates of that state's device set and every `device-revocation` it holds. While the account is in the reconciliation epoch opened by `rizzy-vault restore` (INV-59), the server accepts any state that verifies against the current identity key and has a strictly higher `state_seq` than the one it holds. Outside that epoch, a new `account-state` is accepted only by compare-and-swap (`state_seq + 1`), over a session of a device in the server's current device set, over a fresh OPAQUE session ([CRYPTO.md §11.2](../CRYPTO.md#112-login-on-a-new-device-server-mode) step 7), or over the recovery-only session ([CRYPTO.md §11.9](../CRYPTO.md#119-recovery-with-the-emergency-kit)). From then on it refuses credentials older than that state (INV-59).
   3. **Key grants, vault self-grants and item-key wraps** that it holds, or can re-create with the keys it has.
   4. **Its ops, and a fresh signed snapshot of each affected item.**
 
   More rules for restore healing:
-  - **A device enrolled after the backup** is unknown to the restored DB, so it cannot device-authenticate on its own. It sends its certificate, the `account-state` that lists it and the bundle chain with its device-auth request. The server verifies them against the identity key it holds, requires a `state_seq` at least as high as its own, and only then issues the challenge.
-  - **What is not re-uploaded.** The OPAQUE record and `E_srv` are not re-uploaded. An enrolled device re-registers OPAQUE the next time the user types the password ([CRYPTO.md §5.8](../CRYPTO.md#58-loss-or-rotation-of-the-server-opaque-secrets)). If the recovery epoch moved, recovery stays refused until a device issues a new recovery code.
+  - **A device enrolled after the backup.** Only during the reconciliation epoch: such a device is unknown to the restored DB, so it cannot device-authenticate on its own. It sends its certificate, the `account-state` that lists it and the bundle chain with its device-auth request. The server verifies them against the identity key it holds, requires a `state_seq` strictly higher than its own, or a state byte-identical to the one it holds, and only then issues the challenge.
+  - **End of the reconciliation epoch.** It ends once a device in the restored device set has uploaded a verified state newer than the restored one, or after an admin-set limit (default 30 days). Any growth of the device set, by any path, triggers the notice of [CRYPTO.md §11.2](../CRYPTO.md#112-login-on-a-new-device-server-mode) step 8.
+  - **What is not re-uploaded.** The OPAQUE record and `E_srv` are not re-uploaded. An enrolled device re-registers OPAQUE the next time the user types the password ([CRYPTO.md §5.8](../CRYPTO.md#58-loss-or-rotation-of-the-server-opaque-secrets)), under the credential-replacement rule ([CRYPTO.md §11](../CRYPTO.md#11-flows)). If the recovery epoch moved, recovery stays refused until a device issues a new recovery code.
   - **Leaving read-only.** The device leaves read-only once the server serves a state and VVs at least as new as its own.
-  - **Who may upload.** Any client may upload any signed op, snapshot or statement: the signature, not the uploader, establishes origin.
+  - **Who may upload.** Any client may upload any signed op or snapshot: the signature, not the uploader, establishes origin. A new `account-state`, and the certificates and revocations it carries, follows the session rules of step 2.
   - **Test.** The [ADR 0011](0011-storage.md) restore drill covers a password change, an enrolment, a revocation and a rotation made after the backup.
 
 ### 8. On-device mode (M4)
@@ -167,7 +186,7 @@ How it works:
   - `0x01`: a signed op record (§3), with the item-key wrap it carries, if any;
   - `0x02`: a key record: one `VAULT_KEY_SELF_GRANT` or `ITEM_KEY_WRAP` envelope with its cleartext locator. Key rotations publish their vault-level objects this way ([CRYPTO.md §11.6](../CRYPTO.md#116-key-rotation) step 9).
 
-  A batch closes after 5 s or 64 records, whichever comes first.
+  A batch closes after 5 s or 64 records, whichever comes first. The relay rejects a `RELAY_BATCH` whose `account_key_epoch` is below the one in the current `account-state`.
 - **Ack set.** The relay stores each batch with the set of active devices other than the sender.
   - A device acks by posting, per sender, the highest `batch_seq` it has applied.
   - The relay removes that device from those batches' ack sets.
@@ -278,7 +297,7 @@ This matches [THREAT_MODEL §3.4](../THREAT_MODEL.md#34-what-the-server-holds-by
 - The clients carry all the complexity. A bug here reaches every platform at once through `rizzy-sync`, which is also the point of having one implementation ([ADR 0013](0013-shared-client-core.md)).
 - Version vectors grow with the number of devices that have ever edited an item. Every web-vault session is a new ephemeral device ([CRYPTO.md §11.4](../CRYPTO.md#114-web-vault)), so items edited often in the web vault collect entries, at about 24 bytes each. That is acceptable at personal scale; measure it in M3.
 - Tombstones are never collected.
-- Signed op headers are never collected in Server mode: about 220 bytes per op plus 24 bytes per causal-context entry. 10,000 ops with three entries each cost about 2.9 MB.
+- Signed op headers are never collected in Server mode: about 225 bytes per op plus 24 bytes per causal-context entry. 10,000 ops with three entries each cost about 3.0 MB.
 - Trash is purged only when a client is online after the retention period. The server cannot do it alone.
 - In Server mode, visible item ids and per-item snapshots reveal edit patterns per item.
 - Notes are a single field. Concurrent edits of a long note produce two versions that the user merges by hand. There is no text merge.
@@ -287,7 +306,7 @@ This matches [THREAT_MODEL §3.4](../THREAT_MODEL.md#34-what-the-server-holds-by
 
 - Convergence bugs appear only under rare interleavings. The property tests are the defence. The proposal is that M4 does not ship until the nightly job has been green for 30 consecutive days (open question 5).
 - Clock skew can make "latest wins" display an older edit. The losing value stays in the register and in history, so nothing is lost.
-- The revocation cut-off relies on the server refusing early revocations. Against a malicious server we detect divergence instead of preventing it.
+- The revocation cut-off relies on the server enforcing the suspension and refusing a revocation whose H is no longer its head. Against a malicious server we detect divergence instead of preventing it.
 
 ## Alternatives considered
 
