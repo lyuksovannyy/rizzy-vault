@@ -55,7 +55,7 @@ MoSCoW is scored **against v1.0 (end of M8)**. Items for M9/M10 are listed so th
 |---|---|---|
 | M | Written threat model (attackers: compromised server, malicious admin, network MITM, malware on client, phishing site, stolen device) | M0 |
 | M | Crypto design document + ADRs (see 4.3) reviewed before any vault code | M0 |
-| M | Cargo workspace layout: `core` (crypto + models, no I/O), `server`, `cli`, `client-sdk` (wasm + native bindings) | M0 |
+| M | Cargo workspace layout per [ARCHITECTURE.md §3](ARCHITECTURE.md#3-code-structure-the-modular-in-modular-monolith): `core`, `sync`, domain crates, `storage`, `bus`, `server`, `cli` | M0 |
 | M | CI: fmt, clippy (deny warnings), tests, `cargo audit`, `cargo deny` (licenses/advisories) | M0 |
 | M | License policy: AGPL-3.0 server/core; decide client license; dependency license allow-list | M0 |
 | S | `SECURITY.md` with disclosure process | M0 |
@@ -229,9 +229,13 @@ This is the most operationally expensive feature in the whole plan. Read the ris
 
 | Pri | Item | When |
 |---|---|---|
-| M | Single Rust server binary (recommendation: `axum` + `tokio` + `sqlx`) | M1 |
+| M | Modular monolith: one Rust binary (`axum` + `tokio` + `sqlx`) with selectable roles (`api`, `web`, `notify`, `worker`, `smtp`, `icons`). See [ARCHITECTURE.md](ARCHITECTURE.md) | M1 |
 | M | SQLite (default, personal) and PostgreSQL (orgs/SMB) | M1 (SQLite) / M3 (Postgres) |
-| M | Official Docker image + compose file; runs behind any reverse proxy | M1 |
+| M | One OCI image for all roles: multi-arch (amd64/arm64), distroless, non-root, read-only rootfs; runs on Docker **and** Podman | M1 |
+| M | `compose.yaml` for profile A (solo) that works with `docker compose` and `podman compose`; rootless Podman tested in CI | M1 |
+| M | Profile B: `smtp` role in its own container with **no DB access**, own network, rspamd alongside | M6 |
+| S | Podman Quadlet units (systemd-managed, rootless) + `podman auto-update` support | M3 |
+| S | Signed images (cosign), SBOM, provenance | M8 |
 | M | DB migrations, versioned API (`/api/v1`) | M1 |
 | M | Rate limiting, lockout/backoff on auth, security headers, CSP on web vault | M1 |
 | M | Backup & restore command + documented procedure (tested, not just written) | M1 |
@@ -239,7 +243,9 @@ This is the most operationally expensive feature in the whole plan. Read the ris
 | S | Admin panel (user list, disable user, invite-only signup, SMTP settings for notifications) | M3 |
 | S | Push/live sync (WebSocket) so clients update without polling | M3 |
 | S | Metrics endpoint (Prometheus) | M3 |
-| C | High-availability deployment guide | M10 |
+| C | High-availability deployment guide (profile C: N × api/notify/smtp, single-leader worker, Postgres) | M10 |
+| C | Helm chart for Kubernetes | M10 |
+| W | Microservices with a DB per service / separate images per service | Won't. Split further only on the criteria in ARCHITECTURE.md §6 |
 | W | Official managed cloud hosting | not in this roadmap — separate business decision |
 
 ### 4.10 Mobile & passkeys (M7)
@@ -290,6 +296,7 @@ This is the most operationally expensive feature in the whole plan. Read the ris
 | Client core | Per-platform code vs. shared Rust | **Shared Rust `core`** → wasm (web/extension) + UniFFI (mobile) + native (CLI/Tauri) | One crypto implementation to audit. |
 | UI stack | Rust UI (Leptos/Dioxus) vs. TypeScript (Svelte/React) | **TypeScript + one framework** for web/extension/desktop | Extension ecosystem, hiring, and component libraries are JS-first. Rust stays where security lives. |
 | Desktop | Electron / Tauri | **Tauri** | Smaller, Rust-native, reuses `core` directly. |
+| Server shape | Microservices / modular monolith with roles | **Modular monolith, one binary, multiple roles** | Personal users need one container; security boundaries (`smtp`, `icons`) get isolated as roles without distributed-system overhead. See ARCHITECTURE.md. |
 | DB | SQLite / Postgres | **Both via sqlx**, SQLite default | Personal self-hosters want zero-config. |
 | Sync engine | Whole-vault LWW / per-item LWW / op log + version vectors / full CRDT library (Automerge, Yrs) | **Op log + HLC + per-item version vectors, field-level merge** | Needed for relay-only On-device mode; a full CRDT library is overkill for records of ~20 fields and bloats the payload. |
 | Mail ingress | Own SMTP in Rust vs. Postfix/Haraka front | **Decide in M6 spike**; lean own minimal receive-only listener | Fewer moving parts for self-hosters, but must be fuzzed hard. |
