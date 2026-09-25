@@ -4,6 +4,7 @@ rizzy-vault is a self-hostable, end-to-end encrypted, zero-knowledge password ma
 
 ## Before you start
 
+0. If [docs/HANDOFF.md](docs/HANDOFF.md) exists, read it first: it holds the current state and next steps from the previous session.
 1. Read [docs/ROADMAP.md](docs/ROADMAP.md). It is the source of truth for scope and milestones.
    - Find the row your task implements.
    - If there is no row, the task is out of scope. Ask.

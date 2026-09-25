@@ -1,0 +1,66 @@
+# cargo-fuzz targets for rizzy-vault's untrusted-input parsers (CRYPTO.md §15 item 7).
+#
+# Its own workspace, outside the main one (ADR 0016 §7): the main workspace never builds it, and
+# `cargo deny`, `cargo lint` and `cargo test` at the root do not see it. It runs on nightly in a
+# separate, scheduled, non-blocking CI job (ADR 0009 owner decision 4):
+#
+#     cargo +nightly fuzz run envelope_parse
+#
+# `cargo check` from this directory also works on the pinned stable toolchain.
+[package]
+name = "rizzy-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+rizzy-core = { path = "../crates/rizzy-core" }
+
+[[bin]]
+name = "envelope_parse"
+path = "fuzz_targets/envelope_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "padding_unframe"
+path = "fuzz_targets/padding_unframe.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signed_statements"
+path = "fuzz_targets/signed_statements.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "secret_key_parse"
+path = "fuzz_targets/secret_key_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "otpauth_uri"
+path = "fuzz_targets/otpauth_uri.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "normalize"
+path = "fuzz_targets/normalize.rs"
+test = false
+doc = false
+bench = false

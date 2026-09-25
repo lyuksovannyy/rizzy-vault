@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# cargo-fuzz targets: their own workspace on the nightly toolchain (ADR 0016 §7, ADR 0009 owner
+# decision 4), never built by the stable workspace.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.0"
@@ -13,6 +16,37 @@ publish = false
 [workspace.dependencies]
 rizzy-core = { path = "crates/rizzy-core" }
 rizzy-sync = { path = "crates/rizzy-sync" }
+
+# Cryptography. Exact pins and feature sets from ADR 0009 ("Allowed crate families" and
+# "Required feature sets"); docs/CRYPTO.md §3. Bumps are reviewed like crypto changes and are
+# never auto-merged. `default-features = false` everywhere: several defaults pull getrandom,
+# which rizzy-core must never have in its dependency closure (ADR 0016 R1).
+argon2 = { version = "=0.6.0", default-features = false, features = ["zeroize"] }
+base64ct = { version = "=1.8.3", default-features = false, features = ["alloc"] }
+chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "zeroize"] }
+ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["fast", "zeroize"] }
+hkdf = { version = "=0.13.0", default-features = false }
+hmac = { version = "=0.13.0", default-features = false, features = ["zeroize"] }
+hpke = { version = "=0.14.1", default-features = false, features = ["alloc", "x25519", "chacha"] }
+opaque-ke = { version = "=4.0.1", default-features = false, features = ["ristretto255"] }
+rand_core = { version = "=0.10.1", default-features = false }
+sha1 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
+sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
+sha2_010 = { package = "sha2", version = "=0.10.9", default-features = false }
+subtle = { version = "=2.6.1", default-features = false }
+unicode-normalization = { version = "=0.1.25", default-features = false }
+zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
+
+# Tooling and tests. Not cryptography.
+# serde_json: `xtask` reads `cargo metadata` JSON with it (ADR 0016 §5), and `rizzy-core`'s tests
+# read the committed known-answer vector files (CRYPTO.md §15 item 1). Never a normal or build
+# dependency of a no-I/O crate. `std` only; no serde derive.
+serde_json = { version = "1.0.145", default-features = false, features = ["std"] }
+
+# Test-only. Never a normal or build dependency of a no-I/O crate (ADR 0016 R1).
+# `chacha20` with `rng` provides the seeded ChaCha20Rng for test vectors (ADR 0009).
+chacha20 = { version = "=0.10.2", default-features = false, features = ["rng"] }
+proptest = { version = "1.11", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -32,6 +66,22 @@ unwrap_used = "warn"
 expect_used = "warn"
 panic = "warn"
 module_name_repetitions = "allow"
+
+# Argon2id at kdf_id 1 (64 MiB, t = 3, p = 4) takes many seconds unoptimised. Tests run it,
+# so optimise the hash itself in dev and test builds. Release is unaffected.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
+# Ed25519 and X25519 verification take milliseconds unoptimised, and the signature tests verify
+# thousands of tampered statements. Optimise the curve and hash code in dev and test builds.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
 
 [profile.release]
 lto = "thin"
