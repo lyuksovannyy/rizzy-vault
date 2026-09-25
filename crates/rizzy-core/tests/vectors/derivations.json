@@ -1,0 +1,435 @@
+{
+  "file": "derivations",
+  "generator": "rand_core 0.10 ChaCha20Rng::seed_from_u64 (chacha20 =0.10.2)",
+  "schema": "rizzy-vault/test-vectors/v1",
+  "seed": "1027",
+  "spec": "CRYPTO.md §4.3, §4.4, §5.2, §5.3, §5.9, §5.11, §10.1, §10.3, §11.14",
+  "tier": "A",
+  "vectors": [
+    {
+      "id": "derivation/key-id/symmetric/0",
+      "inputs": {
+        "key": "e7afdbcd77bd0ebdbe9c1a3b8852eb6f1f6f16f49a36037f15cf592c3079d8fe"
+      },
+      "kind": "derivation",
+      "name": "key-id/symmetric",
+      "outputs": {
+        "key_id": "ea569aa1aaac24550b88a3c0443fef3d"
+      }
+    },
+    {
+      "id": "derivation/key-id/symmetric/1",
+      "inputs": {
+        "key": "968a7022e97330b1f94d88a3a2131d5c0325ea620c0b1614907baf3c6d0959b5"
+      },
+      "kind": "derivation",
+      "name": "key-id/symmetric",
+      "outputs": {
+        "key_id": "44227945f954ffdc91d4f05a8741b844"
+      }
+    },
+    {
+      "id": "derivation/key-id/0",
+      "inputs": {
+        "key_type": 1,
+        "public_key": "144c943c999725d776a50d59f683930c79abd67bf9838dc3039989373f9ca802"
+      },
+      "kind": "derivation",
+      "name": "key-id",
+      "outputs": {
+        "key_id": "a9db8714e91f58e34b64ece141a43755"
+      }
+    },
+    {
+      "id": "derivation/key-id/1",
+      "inputs": {
+        "key_type": 2,
+        "public_key": "faa5650f051f66c47608f463913d49e3001049dbfc0c89b458ece84d7f51d00b"
+      },
+      "kind": "derivation",
+      "name": "key-id",
+      "outputs": {
+        "key_id": "8eeda2429db3563630b479554d74477a"
+      }
+    },
+    {
+      "id": "derivation/key-id/2",
+      "inputs": {
+        "key_type": 3,
+        "public_key": "63fb0d39363affc3e61cea7d4d1766571806c74e9f788562f90c06b4e020695a"
+      },
+      "kind": "derivation",
+      "name": "key-id",
+      "outputs": {
+        "key_id": "ca633e32127823abd4ce0152dce06d34"
+      }
+    },
+    {
+      "id": "derivation/key-id/3",
+      "inputs": {
+        "key_type": 4,
+        "public_key": "a09f26e81533c2cafe07a842c6d8084b5d446073c63b1a364af6bd4cf65d7921"
+      },
+      "kind": "derivation",
+      "name": "key-id",
+      "outputs": {
+        "key_id": "2bdd8055560a9445744313893e8ba456"
+      }
+    },
+    {
+      "id": "derivation/key-id/4",
+      "inputs": {
+        "key_type": 5,
+        "public_key": "ecb506c6506e2fc19fdcab08651b019f8eab825d96f7631c530d6e4c412ec658"
+      },
+      "kind": "derivation",
+      "name": "key-id",
+      "outputs": {
+        "key_id": "ad2ed578aa7dca4b73ef22fd692f0cb9"
+      }
+    },
+    {
+      "id": "derivation/opaque/password/0",
+      "inputs": {
+        "password": "correct horse battery staple",
+        "secret_key": "f873a3bab8f3472d49e37cfc555f7075"
+      },
+      "kind": "derivation",
+      "name": "opaque/password",
+      "outputs": {
+        "nfc_utf8": "636f727265637420686f727365206261747465727920737461706c65",
+        "pw_in": "8632f6b16e56a47c72e487d07e05143f470e09046e427031a654f903e027202b"
+      }
+    },
+    {
+      "id": "derivation/opaque/password/1",
+      "inputs": {
+        "password": "Pásswörd 🔑",
+        "secret_key": "e312cb3df8b289fa62135abf0a0b321f"
+      },
+      "kind": "derivation",
+      "name": "opaque/password",
+      "outputs": {
+        "nfc_utf8": "50c3a1737377c3b6726420f09f9491",
+        "pw_in": "422233bd24243877f7936aaeb61145a8d965fdcd05f6ae7b2c21ccfcf8ea31b9"
+      }
+    },
+    {
+      "id": "derivation/opaque/context/0",
+      "inputs": {
+        "kdf_id": 1,
+        "server_origin": "https://vault.example.com"
+      },
+      "kind": "derivation",
+      "name": "opaque/context",
+      "outputs": {
+        "context": "72697a7a792d7661756c742f76312f6f70617175652f636f6e7465787400000100010000001968747470733a2f2f7661756c742e6578616d706c652e636f6d",
+        "server_origin": "https://vault.example.com"
+      }
+    },
+    {
+      "id": "derivation/opaque/context/1",
+      "inputs": {
+        "kdf_id": 1,
+        "server_origin": "HTTPS://Vault.Example.COM:443/"
+      },
+      "kind": "derivation",
+      "name": "opaque/context",
+      "outputs": {
+        "context": "72697a7a792d7661756c742f76312f6f70617175652f636f6e7465787400000100010000001968747470733a2f2f7661756c742e6578616d706c652e636f6d",
+        "server_origin": "https://vault.example.com"
+      }
+    },
+    {
+      "id": "derivation/opaque/context/2",
+      "inputs": {
+        "kdf_id": 1,
+        "server_origin": "http://192.168.1.20:8080"
+      },
+      "kind": "derivation",
+      "name": "opaque/context",
+      "outputs": {
+        "context": "72697a7a792d7661756c742f76312f6f70617175652f636f6e74657874000001000100000018687474703a2f2f3139322e3136382e312e32303a38303830",
+        "server_origin": "http://192.168.1.20:8080"
+      }
+    },
+    {
+      "id": "derivation/opaque/fake-credential-id/0",
+      "inputs": {
+        "login_name": "alice"
+      },
+      "kind": "derivation",
+      "name": "opaque/fake-credential-id",
+      "outputs": {
+        "credential_id": "9b2603ea90fd3e04312d7148d16c1be1",
+        "login_name": "alice"
+      }
+    },
+    {
+      "id": "derivation/opaque/fake-kdf/0",
+      "inputs": {
+        "enum_key": "1062d2fdfc40934095385a3fa04a610664bdfe9fc155bfa4014d6eb741585cf6",
+        "login_name": "alice"
+      },
+      "kind": "derivation",
+      "name": "opaque/fake-kdf",
+      "outputs": {
+        "selector": "6882566326384606008"
+      }
+    },
+    {
+      "id": "derivation/opaque/fake-credential-id/1",
+      "inputs": {
+        "login_name": "Bob.Smith+vault@Example.org"
+      },
+      "kind": "derivation",
+      "name": "opaque/fake-credential-id",
+      "outputs": {
+        "credential_id": "9aa82fdf093f55d400598a33aff8ee58",
+        "login_name": "bob.smith+vault@example.org"
+      }
+    },
+    {
+      "id": "derivation/opaque/fake-kdf/1",
+      "inputs": {
+        "enum_key": "6b6b5fb000ac6e88cf957cc98419bc385bea9458e435810aa8806c9f4a8e6a95",
+        "login_name": "Bob.Smith+vault@Example.org"
+      },
+      "kind": "derivation",
+      "name": "opaque/fake-kdf",
+      "outputs": {
+        "selector": "4273361589440326063"
+      }
+    },
+    {
+      "id": "derivation/unlock-key/server/0",
+      "inputs": {
+        "account_id": "7a064053f94dd24d48c1cb3198e3f4a9",
+        "export_key": "486ec8fabc8bfdb1a50ab024898b0da15907f1a07ce49fa63e9873caf7736d57eb80ff762619f987116e00df9cf11e2671839b3eb2f60b1e6d4c539c72097525"
+      },
+      "kind": "derivation",
+      "name": "unlock-key/server",
+      "outputs": {
+        "key": "2b3aa4ebbaa2c5d0cd15aa4b7b0301be987133a239b6b8cd772119ac73aad9e1",
+        "key_id": "6d659b46b64c3b25deeb7c325c345e16"
+      }
+    },
+    {
+      "id": "derivation/unlock-key/local/0",
+      "inputs": {
+        "account_id": "3546de24dcf2f2d1cbc61c3336f810a3",
+        "device_id": "0ece54a305e8966c679782116958240f",
+        "device_salt": "d0eec57fcc7dd08c04c76784b1809a3c",
+        "kdf_id": 1,
+        "pw_in": "e8689f4e52ab0c338eb18126dfbeaf72f121b8b9794e25d75da0641ba5a777f3"
+      },
+      "kind": "derivation",
+      "name": "unlock-key/local",
+      "outputs": {
+        "key": "22a78a9e6779a2913b26c80db675b7f3cc2d4dfac0c8a6cdcd881bd99480d82d",
+        "key_id": "dbb18e81312657137d0c39a598af74e7"
+      }
+    },
+    {
+      "id": "derivation/recovery/wrap-key/0",
+      "inputs": {
+        "recovery_code": "fb8773225baeafe8d89c64d170d9ea41"
+      },
+      "kind": "derivation",
+      "name": "recovery/wrap-key",
+      "outputs": {
+        "key": "a35aacf876118629adf4e4bfb5b104fbb43b099a2a92882543568387fdcafa77",
+        "key_id": "0ce5f33573fb0b83c1be7a703ca94857"
+      }
+    },
+    {
+      "id": "derivation/recovery/auth-token/0",
+      "inputs": {
+        "recovery_code": "fb8773225baeafe8d89c64d170d9ea41"
+      },
+      "kind": "derivation",
+      "name": "recovery/auth-token",
+      "outputs": {
+        "server_hash": "9c52d7aba56a672ab7d48fd227f9099b4814481f4a195db0d2bd06f3baa4bac8",
+        "token": "a166ee2c46fd00d45106118d7526525a8229fd20c44285b7396fae4b21175a5f"
+      }
+    },
+    {
+      "id": "derivation/export/key/0",
+      "inputs": {
+        "export_id": "5c96b67f94123c86ca425430a68f8850",
+        "export_password": "expért pass",
+        "export_salt": "2908e702becb828df484c865dd77657c",
+        "kdf_id": 1
+      },
+      "kind": "derivation",
+      "name": "export/key",
+      "outputs": {
+        "key": "bc008848b5edbf91205fb0ebab4a55b42f1c65d3e39ba8fa1a10145c31c31ff0",
+        "key_id": "ae0eb68d4601c756eea120a006c760f3"
+      }
+    },
+    {
+      "id": "derivation/server/secrets-backup/0",
+      "inputs": {
+        "backup_id": "a32415c21bb196acff9f4cfd41d15f37",
+        "backup_salt": "d4be5f90005ac9c1afa65905b0dee280",
+        "kdf_id": 1,
+        "passphrase": "operator backup passphrase"
+      },
+      "kind": "derivation",
+      "name": "server/secrets-backup",
+      "outputs": {
+        "key": "af6f755424f020c64c0f09db17ef4cdb9d26d623c50ea542b4553b82f887bd46",
+        "key_id": "ce5a5aec3d0a1c4916e98fb1ed28b453"
+      }
+    },
+    {
+      "id": "derivation/server/totp-secret/0",
+      "inputs": {
+        "data_key_id": 3,
+        "server_data_key": "5adc5d5d538086cfc0146ddfb40144545defff8053fd270bdb68919da3022ab4"
+      },
+      "kind": "derivation",
+      "name": "server/totp-secret",
+      "outputs": {
+        "key": "ddd244e3ded1ebac9c9193ec15d925bda98d2bed8c2b04cb9a964d137e0eb7d9",
+        "key_id": "651a7ef062e2c97ddf10d606b1b7780f"
+      }
+    },
+    {
+      "id": "derivation/server/login-state/0",
+      "inputs": {
+        "data_key_id": 3,
+        "server_data_key": "5adc5d5d538086cfc0146ddfb40144545defff8053fd270bdb68919da3022ab4"
+      },
+      "kind": "derivation",
+      "name": "server/login-state",
+      "outputs": {
+        "key": "15ad1c1a7d9f03a45f0565293d55c4975b47a89bb0fc392522e68392e2a3a900",
+        "key_id": "2d4bc5784ec142f682586e6f6d77de7f"
+      }
+    },
+    {
+      "id": "derivation/hpke-psk/device-grant/0",
+      "inputs": {
+        "account_id": "ae75110349a7674ad2af4697d3478842",
+        "account_key_epoch": 5,
+        "previous_account_key": "3b364a2f50a2640f69c1b90fe2155a215fe67a6630b159ed6ff2c0c985702b0f",
+        "recipient_device_id": "5ecac0d65db3f05a24e03c0fed3187cc"
+      },
+      "kind": "derivation",
+      "name": "hpke-psk/device-grant",
+      "outputs": {
+        "psk": "326b4adb934b03b2e28f2a1a74df03d1bfa229e247ba5df64a30f323542c88b2",
+        "psk_id": "72697a7a792d7661756c742f76312f68706b652d70736b2f6465766963652d6772616e74"
+      }
+    },
+    {
+      "id": "derivation/fingerprint/0",
+      "inputs": {
+        "account_id": "210e2382494e014b6a8573b44a2c205d",
+        "identity_ed25519_public_key": "914949d715236d60333beba8276f41d780961036ed84d1a1df49731deeb98512",
+        "identity_x25519_public_key": "7bdf6f49278b3b6d9e9af4ab982a9f33f38e725918921b6a53f079b9b69cdc53",
+        "other_account_id": "a2fe1f94efd81c19f7e7830fc3ee6498",
+        "other_identity_ed25519_public_key": "0fc29a627b5e0455d74fa94217874d0b670cae17c13b4128dbece1a747cb5a58",
+        "other_identity_x25519_public_key": "de06d12bf7ff1a3d7f1b785b9f542b18539d97966874a1ad86b8b60ff246a900"
+      },
+      "kind": "derivation",
+      "name": "fingerprint",
+      "outputs": {
+        "fingerprint": "4007a6301f58b1b193ecc8e161cea8dd6a1a881099e6c3041939c849838939cc",
+        "other_fingerprint": "26693eabf0c936201eecbbdfdd1b5fea29de5ce078dcd384e3f9677c5780a382",
+        "other_safety_number": "721760122893983858882515558816",
+        "pair_safety_number": "387512702042696960803653796873721760122893983858882515558816",
+        "safety_number": "387512702042696960803653796873"
+      }
+    },
+    {
+      "id": "derivation/device-set/0",
+      "inputs": {
+        "account_id": "49c0fdfe38cb8ecd26e91e07055a6dc1",
+        "certificates": [],
+        "identity_epoch": 0,
+        "identity_public_key": "0620b2a8132ca6a084d141067b9408fa715a1460009d7bfee34c4c882c7b9b5d",
+        "revocations": []
+      },
+      "kind": "derivation",
+      "name": "device-set",
+      "outputs": {
+        "device_set_hash": "ceed12dd75032f322df46a36b7c015eae9ec50dfb556ce77756ba3f65d4e03c7",
+        "members": []
+      }
+    },
+    {
+      "id": "derivation/device-set/1",
+      "inputs": {
+        "account_id": "49c0fdfe38cb8ecd26e91e07055a6dc1",
+        "certificates": [
+          "00000077000149c0fdfe38cb8ecd26e91e07055a6dc1497c5920f9327b8401d6ba53346b627f00000000093f6b3604513436383a6d4975b4b7b2939393a0276a42d947909afde94911a522bbdc1ca75f4d87df01a8a0ffad2c91c6d84cb96e659721f104c51229054c39010000019e70448800000000000000000001012ce79fae0303069ec0505514e47785f04fe21413b9683fecf81b22d48734e04fb724234095efba28899e8b2f67501f2003d913364e824818599ee4264040e1a1a832c706e8a2ff02d6b1200368949005"
+        ],
+        "identity_epoch": 0,
+        "identity_public_key": "0620b2a8132ca6a084d141067b9408fa715a1460009d7bfee34c4c882c7b9b5d",
+        "revocations": []
+      },
+      "kind": "derivation",
+      "name": "device-set",
+      "outputs": {
+        "device_set_hash": "34d6623765990aa2568a9af98a2ffb5ea0b9a84959d260115a881eb550888057",
+        "members": [
+          "1581012bc1426a38cdb3eb41461db0732aed2d977085b9f37637f82dbfaac9ad"
+        ]
+      }
+    },
+    {
+      "id": "derivation/device-set/2",
+      "inputs": {
+        "account_id": "49c0fdfe38cb8ecd26e91e07055a6dc1",
+        "certificates": [
+          "00000077000149c0fdfe38cb8ecd26e91e07055a6dc152f5d5e827853855df123e14f9024e060000000087c116c04f012ce3efdc8bdea6dad993a07f3c4d4fd94f4a89a3d0e8b72ae7710efd94e5382367505977fdddda0e5e776748f75d1f1ab901b25a5666615e6e16040000019e704493b80000019e707b823801012ce79fae0303069ec0505514e47785f0c53eded35e424de87ddd7b509ca3ca69f61f7067640b773109a7e20abbfceffdfb175300cc1b61661184c837cb1deae6ec599053157fda2dd2c0f8569e7d5e0f",
+          "00000077000149c0fdfe38cb8ecd26e91e07055a6dc15e74df7bf00e7c05f323106626f9c22b0000000009e0662564f798f14f6a22842acfa0d7029cc7a3083f34661e938f27decf08fe26df5dc415ad58ce73ecac87e5843f3d6b3b5af20b7c76013f89a4dd53d9db47030000019e70448fd0000000000000000001012ce79fae0303069ec0505514e47785f06e186f527a6add21746bf12bdb5d1fce9f495dcae2aba8f599a39c5ac335aa7734f948507d58c0cd5cf50bc8280b8e5929eeeefef75e67d2bb8b0f6e8b7d7301",
+          "00000077000149c0fdfe38cb8ecd26e91e07055a6dc1c308e6cad35b0e9a4646845feda0347d000000003bb8213f0d94094c921fff5431325f3755210f6cf24edfa695cede6543e946609eceb789ce29ea6f63e098dcc6e2f97e6929401dba0b243627785b3873f4b84c020000019e70448be8000000000000000001012ce79fae0303069ec0505514e47785f0020eb8b235e1530c2e8df38b94ef0fa12ebc29afae26021f527fa78c70a0891a5ded1ec2180beb373e59672a0ab5c4ad1147fa013583dbdd6cf91713fffa170d",
+          "00000077000149c0fdfe38cb8ecd26e91e07055a6dc1497c5920f9327b8401d6ba53346b627f00000000093f6b3604513436383a6d4975b4b7b2939393a0276a42d947909afde94911a522bbdc1ca75f4d87df01a8a0ffad2c91c6d84cb96e659721f104c51229054c39010000019e70448800000000000000000001012ce79fae0303069ec0505514e47785f04fe21413b9683fecf81b22d48734e04fb724234095efba28899e8b2f67501f2003d913364e824818599ee4264040e1a1a832c706e8a2ff02d6b1200368949005"
+        ],
+        "identity_epoch": 0,
+        "identity_public_key": "0620b2a8132ca6a084d141067b9408fa715a1460009d7bfee34c4c882c7b9b5d",
+        "revocations": [
+          "00000032000149c0fdfe38cb8ecd26e91e07055a6dc1c308e6cad35b0e9a4646845feda0347d00000000000000290000019e7044af1001012ce79fae0303069ec0505514e47785f08eb449223492f85281c185f0b0c50bcb2fee38222f9fe0d4ea70f40ab6a90f3351b7a0b3a4111b0e767f8fcfe08a5c3819ff27077b078e2b887e5be265f4a40a"
+        ]
+      },
+      "kind": "derivation",
+      "name": "device-set",
+      "outputs": {
+        "device_set_hash": "2691e914f0a1a0adcd33046f6c0b7f4f68dc2aed49276f40c8409bfa931f8f5c",
+        "members": [
+          "1581012bc1426a38cdb3eb41461db0732aed2d977085b9f37637f82dbfaac9ad",
+          "5b496c2719ab3642a051f68fa16a0f552266ccfc0ac3143a6c74097ba902d27f"
+        ]
+      }
+    },
+    {
+      "id": "derivation/settings/0",
+      "inputs": {
+        "settings_envelope": null,
+        "settings_seq": "0"
+      },
+      "kind": "derivation",
+      "name": "settings",
+      "outputs": {
+        "settings_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "id": "derivation/settings/1",
+      "inputs": {
+        "settings_envelope": "f4f071510217bb0ba868d176b9838c4d6be52e2e62ac5af3beb49f1ccea2f877c33749305f6157386bab309cca6fde3f565248cfec49df1bc30732b78934615098d8448b36f128a8f453b2d474ad4117fb2d0aba12d2318148f237c980c73cd4f10c146c1261f3453576b1cd2d649f501f7d4507c4d5610a8e1c78d40f9137fdf38a582f86403f5fba37a3d35e8dbc0009be8ce6ecc41002cfe895e9837d158e5bbdf66f185770eb7fe4e05e6fca28d1bf0f0cf7b30c240fbbe292f1988e37f5ea12e5a8d49df6b6",
+        "settings_seq": "7"
+      },
+      "kind": "derivation",
+      "name": "settings",
+      "outputs": {
+        "settings_hash": "b4fd269950a5d555d9b02e5a37965ed78f39f4311aaed496a390025992231452"
+      }
+    }
+  ]
+}

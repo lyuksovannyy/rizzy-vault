@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/lyuksovannyy/rizzy-vault/blob/main/crates/rizzy-core/tests/vectors/schema.json",
+  "title": "rizzy-vault known-answer vector file, version 1",
+  "description": "CRYPTO.md §15 item 1. Byte strings are lowercase hex; u64 values are decimal strings; u8, u16 and u32 values are JSON numbers; text (passwords, names, origins, formatted codes) is a JSON string as is. The inputs and outputs of each vector name are listed in README.md.",
+  "type": "object",
+  "required": ["schema", "file", "tier", "spec", "generator", "seed", "vectors"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "rizzy-vault/test-vectors/v1" },
+    "file": { "enum": ["derivations", "envelopes", "statements", "encodings", "transcript"] },
+    "tier": {
+      "description": "A: normative format vectors. B: transcript regression vectors.",
+      "enum": ["A", "B"]
+    },
+    "spec": { "type": "string", "description": "The CRYPTO.md sections the file covers." },
+    "generator": { "type": "string", "description": "The RNG the inputs were drawn from." },
+    "seed": { "$ref": "#/$defs/u64", "description": "ChaCha20Rng::seed_from_u64 seed." },
+    "vectors": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/vector" } }
+  },
+  "$defs": {
+    "u64": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,19})$" },
+    "hex": { "type": "string", "pattern": "^([0-9a-f]{2})*$" },
+    "value": {
+      "description": "A leaf value, a list of byte strings, or a nested object (an envelope context).",
+      "anyOf": [
+        { "type": "string" },
+        { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        { "type": "boolean" },
+        { "type": "null" },
+        { "type": "array", "items": { "$ref": "#/$defs/hex" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/value" } }
+      ]
+    },
+    "vector": {
+      "type": "object",
+      "required": ["id", "kind", "name", "inputs", "outputs"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "<kind>/<name>/<index>, unique within the file.",
+          "pattern": "^[A-Za-z0-9._/-]+$"
+        },
+        "kind": {
+          "enum": ["derivation", "envelope", "statement", "encoding", "padding", "transcript"]
+        },
+        "name": {
+          "type": "string",
+          "description": "The §4.3 label, the §8.4 purpose name, the §10.2 statement type, or the encoding."
+        },
+        "inputs": { "type": "object", "additionalProperties": { "$ref": "#/$defs/value" } },
+        "outputs": { "type": "object", "additionalProperties": { "$ref": "#/$defs/value" } }
+      }
+    }
+  }
+}

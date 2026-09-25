@@ -8,5 +8,40 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# Every version and feature set is fixed in [workspace.dependencies] (ADR 0009).
+# No getrandom and no direct `rand` here, ever (ADR 0016 R1): randomness is injected.
+[dependencies]
+argon2.workspace = true
+base64ct.workspace = true
+chacha20poly1305.workspace = true
+# Ed25519 signed statements (CRYPTO.md §10.2): `fast` and `zeroize` only, never
+# `legacy_compatibility` or `hazmat` (ADR 0009).
+ed25519-dalek.workspace = true
+hkdf.workspace = true
+# HMAC-SHA-1/256/512 for HOTP/TOTP (CRYPTO.md §11.15) and HMAC-SHA-256 for the fake `kdf_id`
+# selector (§4.3, §5.9). `zeroize` only (ADR 0009).
+hmac.workspace = true
+# HPKE Base and PSK modes (CRYPTO.md §9.2, §10.1): `alloc`, `x25519`, `chacha` only; never
+# `getrandom` or `mlkem` (ADR 0009).
+hpke.workspace = true
+# OPAQUE (CRYPTO.md §5): `ristretto255` only, never `argon2` or `std` (ADR 0009). Every call
+# goes through the `opaque` wrapper module; the rand_core 0.6 adapter lives in `rng`.
+opaque-ke.workspace = true
+rand_core.workspace = true
+# SHA-1 for HMAC-SHA-1 in HOTP/TOTP only (CRYPTO.md §11.15; ADR 0009 checklist record).
+sha1.workspace = true
+sha2.workspace = true
+# sha2 0.10: SHA-512 for the OPAQUE ciphersuite only, which is on digest 0.10 (CRYPTO.md §5.1).
+sha2_010.workspace = true
+subtle.workspace = true
+unicode-normalization.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+chacha20.workspace = true
+proptest.workspace = true
+# Reads and writes the known-answer vector files in tests/vectors (CRYPTO.md §15 item 1).
+serde_json.workspace = true
+
 [lints]
 workspace = true

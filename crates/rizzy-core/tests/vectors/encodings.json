@@ -1,0 +1,496 @@
+{
+  "file": "encodings",
+  "generator": "rand_core 0.10 ChaCha20Rng::seed_from_u64 (chacha20 =0.10.2)",
+  "schema": "rizzy-vault/test-vectors/v1",
+  "seed": "7",
+  "spec": "CRYPTO.md §4.3 (check characters), §7, §8.5, §11.9",
+  "tier": "A",
+  "vectors": [
+    {
+      "id": "encoding/secret-key/0",
+      "inputs": {
+        "code": "19454a27b752f905909507d6160ddc88"
+      },
+      "kind": "encoding",
+      "name": "secret-key",
+      "outputs": {
+        "check_value": 103,
+        "formatted": "RV1-352M-M9XQ-ABWG-B44N-0ZB1-C3EW-H037"
+      }
+    },
+    {
+      "id": "encoding/secret-key/1",
+      "inputs": {
+        "code": "8e2df8b773098ef3f7bcd321a7caa748"
+      },
+      "kind": "encoding",
+      "name": "secret-key",
+      "outputs": {
+        "check_value": 213,
+        "formatted": "RV1-HRPZ-HDVK-167F-7XXW-TCGT-FJN7-906N"
+      }
+    },
+    {
+      "id": "encoding/secret-key/2",
+      "inputs": {
+        "code": "3a9afa8c98415d2fde7ae061aed1ef68"
+      },
+      "kind": "encoding",
+      "name": "secret-key",
+      "outputs": {
+        "check_value": 140,
+        "formatted": "RV1-7ADF-N34R-85EJ-ZQKT-W1GT-XMFF-D04C"
+      }
+    },
+    {
+      "id": "encoding/secret-key/parse/0",
+      "inputs": {
+        "typed": "rv1 352m m9xq abwg b44n 0zb1 c3ew h037"
+      },
+      "kind": "encoding",
+      "name": "secret-key/parse",
+      "outputs": {
+        "code": "19454a27b752f905909507d6160ddc88"
+      }
+    },
+    {
+      "id": "encoding/secret-key/parse/1",
+      "inputs": {
+        "typed": "RVl352MM9XQABWGB44NOZBlC3EWHO37"
+      },
+      "kind": "encoding",
+      "name": "secret-key/parse",
+      "outputs": {
+        "code": "19454a27b752f905909507d6160ddc88"
+      }
+    },
+    {
+      "id": "encoding/secret-key/parse/2",
+      "inputs": {
+        "typed": "  RV1 - 352M - M9XQ - ABWG - B44N - 0ZB1 - C3EW - H037  "
+      },
+      "kind": "encoding",
+      "name": "secret-key/parse",
+      "outputs": {
+        "code": "19454a27b752f905909507d6160ddc88"
+      }
+    },
+    {
+      "id": "encoding/secret-key/reject/0",
+      "inputs": {
+        "typed": "RV1-352M-M9XR-ABWG-B44N-0ZB1-C3EW-H037"
+      },
+      "kind": "encoding",
+      "name": "secret-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "encoding/secret-key/reject/1",
+      "inputs": {
+        "typed": "RV1-352M-M9XQ-ABWG-B44N-0ZB1-C3EW-H137"
+      },
+      "kind": "encoding",
+      "name": "secret-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "encoding/secret-key/reject/2",
+      "inputs": {
+        "typed": "RVR1-352M-M9XQ-ABWG-B44N-0ZB1-C3EW-H037"
+      },
+      "kind": "encoding",
+      "name": "secret-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "encoding/recovery-code/0",
+      "inputs": {
+        "code": "21fb9ab3e89e9c7d07e32aa9c034fcd2"
+      },
+      "kind": "encoding",
+      "name": "recovery-code",
+      "outputs": {
+        "check_value": 642,
+        "formatted": "RVR1-47XS-NCZ8-KTE7-T1Z3-5AMW-0D7W-T8M2"
+      }
+    },
+    {
+      "id": "encoding/recovery-code/1",
+      "inputs": {
+        "code": "7a0786b127a9d7b2cad8ed51528891fd"
+      },
+      "kind": "encoding",
+      "name": "recovery-code",
+      "outputs": {
+        "check_value": 588,
+        "formatted": "RVR1-F83R-DC97-N7BV-5JPR-XN8N-524H-ZMJC"
+      }
+    },
+    {
+      "id": "encoding/recovery-code/2",
+      "inputs": {
+        "code": "641a359f29f44c6bd8cac846aaf615e2"
+      },
+      "kind": "encoding",
+      "name": "recovery-code",
+      "outputs": {
+        "check_value": 133,
+        "formatted": "RVR1-CGD3-B7S9-YH66-QP6A-S13A-NXGN-W845"
+      }
+    },
+    {
+      "id": "encoding/recovery-code/parse/0",
+      "inputs": {
+        "typed": "rvr1 47xs ncz8 kte7 t1z3 5amw 0d7w t8m2"
+      },
+      "kind": "encoding",
+      "name": "recovery-code/parse",
+      "outputs": {
+        "code": "21fb9ab3e89e9c7d07e32aa9c034fcd2"
+      }
+    },
+    {
+      "id": "encoding/recovery-code/parse/1",
+      "inputs": {
+        "typed": "RVRl47XSNCZ8KTE7TlZ35AMWOD7WT8M2"
+      },
+      "kind": "encoding",
+      "name": "recovery-code/parse",
+      "outputs": {
+        "code": "21fb9ab3e89e9c7d07e32aa9c034fcd2"
+      }
+    },
+    {
+      "id": "encoding/recovery-code/parse/2",
+      "inputs": {
+        "typed": "  RVR1 - 47XS - NCZ8 - KTE7 - T1Z3 - 5AMW - 0D7W - T8M2  "
+      },
+      "kind": "encoding",
+      "name": "recovery-code/parse",
+      "outputs": {
+        "code": "21fb9ab3e89e9c7d07e32aa9c034fcd2"
+      }
+    },
+    {
+      "id": "encoding/recovery-code/reject/0",
+      "inputs": {
+        "typed": "RVR1-47XS-NCZ9-KTE7-T1Z3-5AMW-0D7W-T8M2"
+      },
+      "kind": "encoding",
+      "name": "recovery-code/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "encoding/recovery-code/reject/1",
+      "inputs": {
+        "typed": "RVR1-47XS-NCZ8-KTE7-T1Z3-5AMW-0D7W-T9M2"
+      },
+      "kind": "encoding",
+      "name": "recovery-code/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "encoding/recovery-code/reject/2",
+      "inputs": {
+        "typed": "RV1-47XS-NCZ8-KTE7-T1Z3-5AMW-0D7W-T8M2"
+      },
+      "kind": "encoding",
+      "name": "recovery-code/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "padding/padme/0",
+      "inputs": {
+        "length": "2"
+      },
+      "kind": "padding",
+      "name": "padme",
+      "outputs": {
+        "padme": "2"
+      }
+    },
+    {
+      "id": "padding/padme/1",
+      "inputs": {
+        "length": "3"
+      },
+      "kind": "padding",
+      "name": "padme",
+      "outputs": {
+        "padme": "3"
+      }
+    },
+    {
+      "id": "padding/padme/2",
+      "inputs": {
+        "length": "9"
+      },
+      "kind": "padding",
+      "name": "padme",
+      "outputs": {
+        "padme": "10"
+      }
+    },
+    {
+      "id": "padding/padme/3",
+      "inputs": {
+        "length": "17"
+      },
+      "kind": "padding",
+      "name": "padme",
+      "outputs": {
+        "padme": "18"
+      }
+    },
+    {
+      "id": "padding/padme/4",
+      "inputs": {
+        "length": "100"
+      },
+      "kind": "padding",
+      "name": "padme",
+      "outputs": {
+        "padme": "104"
+      }
+    },
+    {
+      "id": "padding/padme/5",
+      "inputs": {
+        "length": "255"
+      },
+      "kind": "padding",
+      "name": "padme",
+      "outputs": {
+        "padme": "256"
+      }
+    },
+    {
+      "id": "padding/padme/6",
+      "inputs": {
+        "length": "256"
+      },
+      "kind": "padding",
+      "name": "padme",
+      "outputs": {
+        "padme": "256"
+      }
+    },
+    {
+      "id": "padding/padme/7",
+      "inputs": {
+        "length": "257"
+      },
+      "kind": "padding",
+      "name": "padme",
+      "outputs": {
+        "padme": "272"
+      }
+    },
+    {
+      "id": "padding/padme/8",
+      "inputs": {
+        "length": "260"
+      },
+      "kind": "padding",
+      "name": "padme",
+      "outputs": {
+        "padme": "272"
+      }
+    },
+    {
+      "id": "padding/padme/9",
+      "inputs": {
+        "length": "1000"
+      },
+      "kind": "padding",
+      "name": "padme",
+      "outputs": {
+        "padme": "1024"
+      }
+    },
+    {
+      "id": "padding/padme/10",
+      "inputs": {
+        "length": "1025"
+      },
+      "kind": "padding",
+      "name": "padme",
+      "outputs": {
+        "padme": "1088"
+      }
+    },
+    {
+      "id": "padding/padme/11",
+      "inputs": {
+        "length": "65535"
+      },
+      "kind": "padding",
+      "name": "padme",
+      "outputs": {
+        "padme": "65536"
+      }
+    },
+    {
+      "id": "padding/padme/12",
+      "inputs": {
+        "length": "1048577"
+      },
+      "kind": "padding",
+      "name": "padme",
+      "outputs": {
+        "padme": "1081344"
+      }
+    },
+    {
+      "id": "padding/padme/13",
+      "inputs": {
+        "length": "16777215"
+      },
+      "kind": "padding",
+      "name": "padme",
+      "outputs": {
+        "padme": "16777216"
+      }
+    },
+    {
+      "id": "padding/padme/14",
+      "inputs": {
+        "length": "4294967296"
+      },
+      "kind": "padding",
+      "name": "padme",
+      "outputs": {
+        "padme": "4294967296"
+      }
+    },
+    {
+      "id": "padding/frame/0",
+      "inputs": {
+        "data": ""
+      },
+      "kind": "padding",
+      "name": "frame",
+      "outputs": {
+        "frame": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "padded_len": 256
+      }
+    },
+    {
+      "id": "padding/frame/1",
+      "inputs": {
+        "data": "83"
+      },
+      "kind": "padding",
+      "name": "frame",
+      "outputs": {
+        "frame": "00000001830000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "padded_len": 256
+      }
+    },
+    {
+      "id": "padding/frame/2",
+      "inputs": {
+        "data": "e1e0e2a6a665081da4cd50891365085880"
+      },
+      "kind": "padding",
+      "name": "frame",
+      "outputs": {
+        "frame": "00000011e1e0e2a6a665081da4cd5089136508588000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "padded_len": 256
+      }
+    },
+    {
+      "id": "padding/frame/3",
+      "inputs": {
+        "data": "fb0f49541e618dbddfbc6898bb47daab2c76454484a266b7dbb48537acb29385f4fa9f02fb8c036d55df6735a95e964da29e3127983e206b2eea1aa20da34c3b2a99e750c33ee0b15190ce9324e514b64afdc75714712565d3c745be76e49c8c47d4be370f21230d65e55d52c52ec1c3eeca58614780487baae13145cf77820f2eb509a0dea2227104fa23787e5dbc120cb680c69b930c0913578d8ce27e0ae6de3e4bb1a6df2b871f0f4cdcddf6065b17b3ce3cf40ae7ec4c8c747911907148bd2122fe2d6c5eff5e2a818afe35c708e9d7c1aa0e2e7135b23435d70f3b35a4a68c8aa5f7dbadf04102d5d978980ef67f57fa1069e9eea25649e876"
+      },
+      "kind": "padding",
+      "name": "frame",
+      "outputs": {
+        "frame": "000000fcfb0f49541e618dbddfbc6898bb47daab2c76454484a266b7dbb48537acb29385f4fa9f02fb8c036d55df6735a95e964da29e3127983e206b2eea1aa20da34c3b2a99e750c33ee0b15190ce9324e514b64afdc75714712565d3c745be76e49c8c47d4be370f21230d65e55d52c52ec1c3eeca58614780487baae13145cf77820f2eb509a0dea2227104fa23787e5dbc120cb680c69b930c0913578d8ce27e0ae6de3e4bb1a6df2b871f0f4cdcddf6065b17b3ce3cf40ae7ec4c8c747911907148bd2122fe2d6c5eff5e2a818afe35c708e9d7c1aa0e2e7135b23435d70f3b35a4a68c8aa5f7dbadf04102d5d978980ef67f57fa1069e9eea25649e876",
+        "padded_len": 256
+      }
+    },
+    {
+      "id": "padding/frame/4",
+      "inputs": {
+        "data": "d7275ec422377668a99ffe3f8457b6228230aa1908fe7be8104621457a5e8d50826cf427c8c9d38a2b098707a189ffc83d10f3c4044a67c713fdf852616d8de87ea7565d02610649186a2b5e3bccd8402ebcc57e8e258eb35c0a3649fb6a07b983144388c69de1e6548a7246ed61be241878fb71d373a590274e41733b821063270ef82494abcb9a2e86af80f144964cb244236f9b356abc12cd666530e7638fac3b1684e9ffacc252a3a87537a0556e8824f4bc9be98cb71d61b0eff84e6e70d8141f2db5323c5b75338bd52203d47c8b2d27e910485f4c92a87721d5003fd8059d8e016e8b3ecde74ae42a1c4b0b2df3897f16c362a87526cd0bb6dd"
+      },
+      "kind": "padding",
+      "name": "frame",
+      "outputs": {
+        "frame": "000000fdd7275ec422377668a99ffe3f8457b6228230aa1908fe7be8104621457a5e8d50826cf427c8c9d38a2b098707a189ffc83d10f3c4044a67c713fdf852616d8de87ea7565d02610649186a2b5e3bccd8402ebcc57e8e258eb35c0a3649fb6a07b983144388c69de1e6548a7246ed61be241878fb71d373a590274e41733b821063270ef82494abcb9a2e86af80f144964cb244236f9b356abc12cd666530e7638fac3b1684e9ffacc252a3a87537a0556e8824f4bc9be98cb71d61b0eff84e6e70d8141f2db5323c5b75338bd52203d47c8b2d27e910485f4c92a87721d5003fd8059d8e016e8b3ecde74ae42a1c4b0b2df3897f16c362a87526cd0bb6dd000000000000000000000000000000",
+        "padded_len": 272
+      }
+    },
+    {
+      "id": "padding/frame/5",
+      "inputs": {
+        "data": "8aed7d39682c90138a9e2e327a80684ffe379f79c0cd9badc7b39701fdceb889cee042c02af85c23214afe516d629dfffa3ad570730897bcb41aa7d6e138046f67c49c08eeee34932531b74df546a32ca6ced66846949852aceae78355dc5fdf2ae7fb0f3222d983bcd3afe2538ad11e0449a7e9a476530974aaafa654f6a05eed092de85d2ee576991b4484d26b309b40ebc038c9d85a1fa58ba35ef2a702a11b49720a21145d2c327b6b7312052efadb5564ce8ecea47f71f747a967607a7508a3257f658fd3cc73e707aa5816c8803be34eef65778e9fdfc3f2bf936c749ad2b64ea70a07f0932685efcc4a7bf66b210d5f85657e5844755498a743580927a004cf575a5e8a2787f4c3c0dd33c07eec9b70f41bd34e56bb910a1d7394a1513c351b0aa425e0c4c1892b67"
+      },
+      "kind": "padding",
+      "name": "frame",
+      "outputs": {
+        "frame": "0000012c8aed7d39682c90138a9e2e327a80684ffe379f79c0cd9badc7b39701fdceb889cee042c02af85c23214afe516d629dfffa3ad570730897bcb41aa7d6e138046f67c49c08eeee34932531b74df546a32ca6ced66846949852aceae78355dc5fdf2ae7fb0f3222d983bcd3afe2538ad11e0449a7e9a476530974aaafa654f6a05eed092de85d2ee576991b4484d26b309b40ebc038c9d85a1fa58ba35ef2a702a11b49720a21145d2c327b6b7312052efadb5564ce8ecea47f71f747a967607a7508a3257f658fd3cc73e707aa5816c8803be34eef65778e9fdfc3f2bf936c749ad2b64ea70a07f0932685efcc4a7bf66b210d5f85657e5844755498a743580927a004cf575a5e8a2787f4c3c0dd33c07eec9b70f41bd34e56bb910a1d7394a1513c351b0aa425e0c4c1892b67",
+        "padded_len": 304
+      }
+    },
+    {
+      "id": "padding/frame/6",
+      "inputs": {
+        "data": "6b7799a98ab28fd0f96512bc8b0e288c4a3604bf76ff86d2beada8b1464a93f2d0920d31ff7ef8c026f1e36e57d32f3ae614e5b2b852ad92e719f9dcaff38d4b2f481ce869f55be7de02bd35ef557a8126d83e7bae60f2b28d6111e3ec9bad891f82b69fce1a57a96d4a89ff773bfb69404e5fa818095be480ea485300169a63710caaa5a75e50e28c5e2943da621c1a21e20dd9d72da0af4e5fd4ea897c92615d65ea98979b9197a05e6070c8fad185b63f10d572aec9a81e715b282ed12a06b0bd13c79f5d9ff9f55476e870eef179c9b97c88a3fe43c559716813cff0a7b0e8a60c8f9d876985f4ce13ddd51fa866bb6f9d2d1b1a756f1d63d346da7f0dec117aff6c4c271282b81eb1c9aaf364e461aa86eff3f665d2ff1ac775cf8d7b0366fba2ae1583eb216177ae40fd0d6304d5cc56f8c757d9f2ebf17e094401c227c6d8a2e626469f245be29a76eca81d92c0c9681107245a047eb0f84622a06480770f8c24e0a9d199b2431988f16da8cf888bdb1ec9024bc3b061017dbc6b2f596024db32451deaebbd00dbccb6ccba37f4202a7d10f535c0edaa48df0218f2620833bb94fa0321ddba81249a6fc0b3cbbfd29ee10bd8eac24a1e40a4c564b62c4fa3327858e0dbdc0f8079312c7be0670f1455d2768ec50416c190881f21eec6fc1a4ae581574275c4cb17e5192bba11c8b76f6dc034e91d1f4595430fdb303219c7f149f4853a8e8f0c7e9920e826f5baac4f8282aa6c8226bb13d246ccd7f952e5b72bc63e6d861e1383468303baec7e43742dd745cf3a791ff1cbf9ee457fb251624990d018423b92239d385fcd714ae3f6baef5973dc8b5e45f8127e3d1755e1bae9e5f40df700038e7202cdf501c80c9df10c0465e936b1426829550c92918e51f440b05272e8533d17c15b2f2b7b1219e73e2e0eefb6c4894c4ea52faf5a4bfd63b12e1da3c912105f0be1e0c033f3dd68a2b3ca31d374c6ee34818e4bd71464eedcd9a579ac88efb0d7bd5acd8fdb3c13afe38dc0f0cf5d3cb4886fc2001bd67f147cdd491dfd993318bef1332e084a0de957b6c8ee190d4068f3ee3351c790abb7e3f56e68f9ea29fec100fefc2f145cb721d6e3f4cc365394e2d95169466c8259e4ba7b2ec22579c42509c5e22d966c9a419059d663567e8cac51ec708a94d0655f835bc69180f5a27e020cfc10899bb6fc6800e72b2eaee7d244fca761db4788208d04b2d2663994c283ecc877687ebf87b2f5231041daf838b98144197842c637ff5509cf77a12c548da6ae83cba4d48c823032ac98ff2990db5216bb0a55e5e86ddb36471fcc7d7d102f515f6b1e94c547f906637063a9f694d75045ce5e252e0254d7e052fa9e718d1cd0a167215ed37aec9fc9cfa66449270c5e8d47ee9bd0fc45"
+      },
+      "kind": "padding",
+      "name": "frame",
+      "outputs": {
+        "frame": "000003e86b7799a98ab28fd0f96512bc8b0e288c4a3604bf76ff86d2beada8b1464a93f2d0920d31ff7ef8c026f1e36e57d32f3ae614e5b2b852ad92e719f9dcaff38d4b2f481ce869f55be7de02bd35ef557a8126d83e7bae60f2b28d6111e3ec9bad891f82b69fce1a57a96d4a89ff773bfb69404e5fa818095be480ea485300169a63710caaa5a75e50e28c5e2943da621c1a21e20dd9d72da0af4e5fd4ea897c92615d65ea98979b9197a05e6070c8fad185b63f10d572aec9a81e715b282ed12a06b0bd13c79f5d9ff9f55476e870eef179c9b97c88a3fe43c559716813cff0a7b0e8a60c8f9d876985f4ce13ddd51fa866bb6f9d2d1b1a756f1d63d346da7f0dec117aff6c4c271282b81eb1c9aaf364e461aa86eff3f665d2ff1ac775cf8d7b0366fba2ae1583eb216177ae40fd0d6304d5cc56f8c757d9f2ebf17e094401c227c6d8a2e626469f245be29a76eca81d92c0c9681107245a047eb0f84622a06480770f8c24e0a9d199b2431988f16da8cf888bdb1ec9024bc3b061017dbc6b2f596024db32451deaebbd00dbccb6ccba37f4202a7d10f535c0edaa48df0218f2620833bb94fa0321ddba81249a6fc0b3cbbfd29ee10bd8eac24a1e40a4c564b62c4fa3327858e0dbdc0f8079312c7be0670f1455d2768ec50416c190881f21eec6fc1a4ae581574275c4cb17e5192bba11c8b76f6dc034e91d1f4595430fdb303219c7f149f4853a8e8f0c7e9920e826f5baac4f8282aa6c8226bb13d246ccd7f952e5b72bc63e6d861e1383468303baec7e43742dd745cf3a791ff1cbf9ee457fb251624990d018423b92239d385fcd714ae3f6baef5973dc8b5e45f8127e3d1755e1bae9e5f40df700038e7202cdf501c80c9df10c0465e936b1426829550c92918e51f440b05272e8533d17c15b2f2b7b1219e73e2e0eefb6c4894c4ea52faf5a4bfd63b12e1da3c912105f0be1e0c033f3dd68a2b3ca31d374c6ee34818e4bd71464eedcd9a579ac88efb0d7bd5acd8fdb3c13afe38dc0f0cf5d3cb4886fc2001bd67f147cdd491dfd993318bef1332e084a0de957b6c8ee190d4068f3ee3351c790abb7e3f56e68f9ea29fec100fefc2f145cb721d6e3f4cc365394e2d95169466c8259e4ba7b2ec22579c42509c5e22d966c9a419059d663567e8cac51ec708a94d0655f835bc69180f5a27e020cfc10899bb6fc6800e72b2eaee7d244fca761db4788208d04b2d2663994c283ecc877687ebf87b2f5231041daf838b98144197842c637ff5509cf77a12c548da6ae83cba4d48c823032ac98ff2990db5216bb0a55e5e86ddb36471fcc7d7d102f515f6b1e94c547f906637063a9f694d75045ce5e252e0254d7e052fa9e718d1cd0a167215ed37aec9fc9cfa66449270c5e8d47ee9bd0fc450000000000000000000000000000000000000000",
+        "padded_len": 1024
+      }
+    },
+    {
+      "id": "padding/frame/reject/0",
+      "inputs": {
+        "frame": "000000ff616263000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "kind": "padding",
+      "name": "frame/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "padding/frame/reject/1",
+      "inputs": {
+        "frame": "00000003616263000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "kind": "padding",
+      "name": "frame/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "padding/frame/reject/2",
+      "inputs": {
+        "frame": "000000036162630000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "kind": "padding",
+      "name": "frame/reject",
+      "outputs": {
+        "accepted": false
+      }
+    }
+  ]
+}
