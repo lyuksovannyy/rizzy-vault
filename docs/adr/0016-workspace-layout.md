@@ -1,6 +1,6 @@
 # ADR 0016: Workspace layout and crate boundaries
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-25
 - Deciders: project owner
 - Milestone: M0 (rules and current crates) / M1–M9 (planned crates)
@@ -164,6 +164,15 @@ fuzz/       cargo-fuzz targets. Its own workspace on the nightly toolchain, outs
 
 In M3, the workspace `members` list gains `apps/desktop/src-tauri`. `fuzz/` stays excluded.
 
+### Owner decisions (2026-09-25)
+
+The owner answered the open questions on 2026-09-25:
+
+1. **Accept the four crates not in the ROADMAP's original list** → Yes: `rizzy-proto`, `rizzy-client`, `rizzy-import` and `rizzy-match`.
+2. **Domain crate naming** → `rizzy-domain-*`, not `rizzy-auth`, `rizzy-vault` and so on.
+3. **`xtask` or a test in a dedicated crate for the graph checks** → `xtask`, run as its own CI step.
+4. **Dev-dependencies under R3, R5 and R6** → The single exception `rizzy-server` → `rizzy-client` (dev-dependency only). No separate test-only crate.
+
 ## Consequences
 
 ### Positive
@@ -199,10 +208,7 @@ In M3, the workspace `members` list gains `apps/desktop/src-tauri`. `fuzz/` stay
 
 ## Open questions for the owner
 
-1. **Accept the four crates that were not in the ROADMAP's original list** (`rizzy-proto`, `rizzy-client`, `rizzy-import`, `rizzy-match`). *Recommendation:* yes.
-2. **Name the domain crates `rizzy-domain-*`** rather than `rizzy-auth`, `rizzy-vault` and so on. *Recommendation:* `rizzy-domain-*`. The prefix makes the rules in §4 easy to express, and `rizzy-vault` is already the server binary's name.
-3. **An `xtask` binary, or a test in a dedicated crate, for the graph checks?** *Recommendation:* `xtask`. It runs as its own CI step with a clear error message, and `cargo test` stays about product code.
-4. **Dev-dependencies under R3, R5 and R6, with the single exception `rizzy-server` → `rizzy-client`.** The alternative is a separate test-only crate that depends on both sides. *Recommendation:* the exception. It is one edge, and it never reaches a shipped binary.
+None. All were answered by the owner on 2026-09-25; see [Owner decisions (2026-09-25)](#owner-decisions-2026-09-25) in the Decision section. The answers keep the original question numbers, so a reference to "open question N" means owner decision N.
 
 [CLAUDE.md](../../CLAUDE.md) and [ADR 0009](0009-crypto-dependency-policy.md)'s RNG rules use R1 and R2's wording: only leaf crates depend on getrandom *directly*, server-side libraries may pull it in transitively, and it never appears in an R1 crate's closure.
 

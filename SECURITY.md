@@ -122,4 +122,4 @@ If in doubt, ask first through a private advisory. This statement binds the proj
 
 - [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md): attackers, trust boundaries, security goals, invariants, accepted risks. [§0 "The short version"](docs/THREAT_MODEL.md#0-the-short-version) states the limits plainly.
 - [docs/CRYPTO.md](docs/CRYPTO.md): primitives, key hierarchy, OPAQUE integration, KDF parameters, envelope format, flows.
-- [docs/adr/](docs/adr/): the decisions behind both, with their status. All are *Proposed*; none is Accepted yet.
+- [docs/adr/](docs/adr/): the decisions behind both, with their status. ADRs 0001–0013, 0015 and 0016 were accepted on 2026-09-25; 0014 and 0017 are still *Proposed* ([index](docs/adr/README.md#index)).

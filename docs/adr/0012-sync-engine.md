@@ -1,6 +1,6 @@
 # ADR 0012: Sync engine: op log, HLC and version vectors
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-25
 - Deciders: project owner
 - Milestone: M1 (engine, Server mode) / M4 (On-device mode, pairing, mode switch)
@@ -282,6 +282,19 @@ This matches [THREAT_MODEL §3.4](../THREAT_MODEL.md#34-what-the-server-holds-by
 - **The server** uses only the header, version-vector and cursor types ([ADR 0016](0016-workspace-layout.md)).
 - **Plaintext in `rizzy-sync`.** The crate's current doc comment says it "never needs plaintext". That holds for everything the server uses. The merge, however, receives decrypted field writes from `rizzy-client`, as opaque bytes in zeroizing types ([ADR 0009](0009-crypto-dependency-policy.md)). The doc comment has to change when the crate gets code (open question 6).
 
+### Owner decisions (2026-09-25)
+
+The owner answered the open questions on 2026-09-25:
+
+1. **`Active` wins over a concurrent delete** → Yes (§5).
+2. **Late ops after a purge are surfaced, not resurrected** → Yes (§5).
+3. **Defaults** → Accepted as starting values, to be revisited with M3/M4 data: relay TTL 90 days (admin range 7–365 days); trash retention 30 days; history N = 50 per field; a snapshot after 32 ops.
+4. **Notes: whole-field conflicts or text merge** → Whole-field conflicts for v1.0. No text merge.
+5. **M4 release gate** → Yes: 30 consecutive days of green nightly property runs before M4 ships.
+6. **Where the field merge runs** → Option A (§13): the multi-value-register merge lives in `rizzy-sync` and sees decrypted field writes as opaque bytes. `rizzy-sync` joins the plaintext audit scope, and the "never needs plaintext" line in its crate doc and the matching line in [CLAUDE.md](../../CLAUDE.md) must be corrected.
+7. **Gap detection after compaction** → Option (b), as written in §3 and §7: the `op` statement signs the canonical op header plus the SHA-256 of the body envelope and of the key-wrap envelope, and the server keeps signed headers after deleting bodies. This matches the `op` row of [CRYPTO.md §10.2](../CRYPTO.md#102-ed25519-signatures-and-signed-statements).
+8. **Server-mode ciphertext after a switch to On-device mode** → Delete at the switch point (§10 step 2), as [CRYPTO.md §5.7](../CRYPTO.md#57-on-device-sync-mode) and INV-28 require. Devices that were behind re-sync from a peer. INV-28 is not amended.
+
 ## Consequences
 
 ### Positive
@@ -324,22 +337,7 @@ This matches [THREAT_MODEL §3.4](../THREAT_MODEL.md#34-what-the-server-holds-by
 
 ## Open questions for the owner
 
-1. **`Active` wins over a concurrent delete.** *Recommendation:* yes. The alternative loses the edit.
-2. **Late ops after a purge are surfaced, not resurrected.** *Recommendation:* yes.
-3. **Defaults.** Relay TTL 90 days (admin range 7–365); trash retention 30 days; history N = 50 per field; a snapshot after 32 ops. *Recommendation:* accept these as starting values and revisit them with M3/M4 data.
-4. **Notes: whole-field conflicts or text merge?** *Recommendation:* whole-field for v1.0. Text merge would bring back the CRDT-library question.
-5. **M4 release gate.** 30 consecutive days of green nightly property runs before M4 ships. *Recommendation:* yes.
-6. **Where the field merge runs** (§13).
-   - Option A, recommended: the multi-value-register merge lives in `rizzy-sync` and sees decrypted field writes as opaque bytes. `rizzy-sync` then joins the plaintext audit scope, and the "never needs plaintext" line in its crate doc, and the matching line in [CLAUDE.md](../../CLAUDE.md), must be corrected.
-   - Option B: keep `rizzy-sync` ciphertext-only and move the field merge into `rizzy-client`. That splits one algorithm across two crates, and the property tests would have to span both.
-
-   *Recommendation:* option A.
-7. **Gap detection after compaction** (§7). This must be settled before M1 freezes the op and snapshot formats.
-   - Option (a): each snapshot lists every dot it absorbed, with its `vault_prev_seq`. The `op` signature then covers the full body and key-wrap bytes. But every snapshot grows with the item's whole edit history and is re-uploaded every 32 ops.
-   - Option (b), recommended and written into §3 and §7: the `op` statement signs the canonical op header plus the SHA-256 of the body envelope and of the key-wrap envelope, and the server keeps signed headers after deleting bodies. Storage grows with the op count, and a brand-new device can check every device's chain from seq 1.
-
-   *Recommendation:* option (b), which CRYPTO.md §10.2's `op` row already uses. Choosing (a) changes that row back.
-8. **Server-mode ciphertext after a switch to On-device mode** (§10). The decision above deletes everything at the switch point, as [CRYPTO.md §5.7](../CRYPTO.md#57-on-device-sync-mode) and INV-28 require, and devices that were behind re-sync from a peer. The alternative keeps the snapshots and op log until every active device acks the switch point or the TTL passes, so lagging devices catch up without a peer. It leaves vault ciphertext on the server for up to the TTL (90 days by default) after the user asked for it to go, and it needs INV-28 amended, which is the owner's call. *Recommendation:* delete at the switch point. Peer re-sync already exists for stale devices, and "my data never rests on someone else's disk" is why users pick the mode. If the owner prefers the delay, show the deletion deadline on the transparency page and amend CRYPTO.md §5.7 step 2 and INV-28 in the same PR.
+None. All were answered by the owner on 2026-09-25; see [Owner decisions (2026-09-25)](#owner-decisions-2026-09-25) in the Decision section. The answers keep the original question numbers, so a reference to "open question N" means owner decision N.
 
 ## References
 

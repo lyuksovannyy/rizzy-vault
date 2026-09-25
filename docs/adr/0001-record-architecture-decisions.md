@@ -1,6 +1,6 @@
 # ADR 0001: Record architecture decisions
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-25
 - Deciders: project owner
 - Milestone: M0
@@ -75,6 +75,19 @@ The failure mode ADRs prevent is a specific one. Code lands first, the design is
 
 8. **Index.** [docs/adr/README.md](README.md) lists every ADR with its status and milestone. It is updated in the same PR as the ADR.
 
+### Owner decisions (2026-09-25)
+
+The owner answered the open questions on 2026-09-25:
+
+1. **Acceptance with a second maintainer** → Yes. From the first milestone with two maintainers, ADRs on crypto, auth and persistent formats need the approval of two maintainers, as ADR 0009 already requires for a new crypto crate from M9. Until then the owner accepts alone, and the M8 external audit is the second review.
+2. **Order of acceptance for the M0 set** → As recommended:
+   1. 0001, 0016 and 0017 first: process, layout and licensing. They block every contribution.
+   2. Then 0002–0009, as one batch reviewed against CRYPTO.md. They block all vault code.
+   3. Then 0010–0014. They block server and client scaffolding in M1.
+   4. 0015 before desktop work starts in M3.
+
+   On 2026-09-25 the owner accepted 0001–0013, 0015 and 0016. 0014 and 0017 remain Proposed, so the gates that need them stay closed: external contributions other than documentation (0017), and server and client scaffolding in M1 (0010–0014) ([README](README.md#gates)).
+
 ## Consequences
 
 ### Positive
@@ -105,12 +118,7 @@ The failure mode ADRs prevent is a specific one. Code lands first, the design is
 
 ## Open questions for the owner
 
-1. **Acceptance with a second maintainer.** Today the owner alone accepts ADRs. ADR 0009 already requires two maintainers to approve a new crypto crate from M9 on. Should the same rule cover ADRs on crypto, auth and persistent formats once a second maintainer exists? *Recommendation:* yes, from the first milestone with two maintainers. Until then the owner accepts alone, and the M8 external audit is the second review.
-2. **Order of acceptance for the M0 set.** *Recommendation:*
-   1. 0001, 0016 and 0017 first: process, layout and licensing. They block every contribution.
-   2. Then 0002–0009, as one batch reviewed against CRYPTO.md. They block all vault code.
-   3. Then 0010–0014. They block server and client scaffolding in M1.
-   4. 0015 before desktop work starts in M3.
+None. All were answered by the owner on 2026-09-25; see [Owner decisions (2026-09-25)](#owner-decisions-2026-09-25) in the Decision section. The answers keep the original question numbers, so a reference to "open question N" means owner decision N.
 
 ## References
 

@@ -1,6 +1,6 @@
 # ADR 0008: Account recovery: Emergency Kit
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-25
 - Deciders: project owner
 - Milestone: M1
@@ -62,6 +62,16 @@ Escrow and account-recovery paths are the first attack class in the ETH Zurich a
 
 Flows are in [CRYPTO.md §11.9](../CRYPTO.md#119-recovery-with-the-emergency-kit). Key material is in [§4.3](../CRYPTO.md#43-derivations).
 
+### Owner decisions (2026-09-25)
+
+The owner answered the open questions on 2026-09-25:
+
+1. **Recovery code on by default** → Yes, with the explicit opt-out of decision 2 ("forgetting your password = data loss").
+2. **Require the current 2FA factor during recovery** → No. Recovery is the last resort, often after losing the phone that holds the TOTP. Notification of every enrolled device and the account email is the safeguard.
+3. **Waiting period** → Accepted as in decision 5: 72 h by default, admin-configurable from 0 to 30 days, cancellable by any enrolled device, server-enforced. This answers the main question of [THREAT_MODEL Q-15](../THREAT_MODEL.md#10-open-questions-for-the-owner). Its sub-question, whether a 0 wait is allowed only on instances with exactly one account, was not raised here and stays open there.
+4. **Rotate the account key by default on recovery** → Yes (decision 4): a standard rotation by default, with an explicit "skip rotation" opt-out. The same default applies to an SK change ([CRYPTO.md §11.5](../CRYPTO.md#115-master-password-or-secret-key-change)).
+5. **No email-based reset of the login or the data** → Confirmed (decision 8): there is none in v1.0. A login reset, if ever wanted, gets its own ADR with a threat analysis and an identity-key-signed authorisation ([THREAT_MODEL Q-16](../THREAT_MODEL.md#10-open-questions-for-the-owner), INV-66).
+
 ## Consequences
 
 ### Positive
@@ -97,11 +107,7 @@ Flows are in [CRYPTO.md §11.9](../CRYPTO.md#119-recovery-with-the-emergency-kit
 
 ## Open questions for the owner
 
-1. **Recovery code on by default?** *Recommendation:* yes, with the opt-out described above.
-2. **Require the current 2FA factor during recovery?** *Recommendation:* no. Recovery is the last resort, often after losing the phone that holds the TOTP. Notification is the safeguard.
-3. **Waiting period.** Is the default of 72 h, cancellable by any enrolled device and admin-configurable down to 0, acceptable? *Recommendation:* yes. This answers threat-model Q-15.
-4. **Rotate the account key by default on recovery**, with an explicit "skip rotation" opt-out? *Recommendation:* yes (decision 4). The same default applies to an SK change ([CRYPTO.md §11.5](../CRYPTO.md#115-master-password-or-secret-key-change)).
-5. **No email-based reset of the login or the data** (threat model Q-16, INV-66). *Recommendation:* confirm decision 8: there is none in v1.0. A login reset, if ever wanted, gets its own ADR with a threat analysis and an identity-key-signed authorisation.
+None. All were answered by the owner on 2026-09-25; see [Owner decisions (2026-09-25)](#owner-decisions-2026-09-25) in the Decision section. The answers keep the original question numbers, so a reference to "open question N" means owner decision N.
 
 ## References
 

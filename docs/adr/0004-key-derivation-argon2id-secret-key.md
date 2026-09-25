@@ -1,6 +1,6 @@
 # ADR 0004: Key derivation: Argon2id and the Secret Key
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-25
 - Deciders: project owner
 - Milestone: M1
@@ -64,6 +64,15 @@ Constraints:
 
 The full constructions are in [CRYPTO.md §5.2](../CRYPTO.md#52-password-input-and-the-secret-key), [§6](../CRYPTO.md#6-kdf-parameters) and [§7](../CRYPTO.md#7-secret-key).
 
+### Owner decisions (2026-09-25)
+
+The owner answered the open questions on 2026-09-25:
+
+1. **Secret Key mandatory from M1** → Yes. The Secret Key is mandatory for every account from M1: the derivation and the Emergency Kit ship in M1 ([CRYPTO.md §7](../CRYPTO.md#7-secret-key)), and only QR transfer and polish are left for M3. ROADMAP §4.3 is updated accordingly.
+2. **Freeze `kdf_id` 1 after the M1 phone measurement, even at 1–2 s** → Yes. `kdf_id` 1 (m = 64 MiB, t = 3, p = 4) is kept even at 1–2 s on low-end phones. The M1 spike measures a full OPAQUE login (KSF plus local wrap) in the main-app process on the lowest-end target phones. If that runs out of memory, `kdf_id` 1 is changed before any M1 account exists, or a Server-mode enrolment path that approves a new phone from an existing device is specified first ([CRYPTO.md §6.4](../CRYPTO.md#64-feasibility)).
+3. **Normalise master passwords to NFC** → Yes: NFC, no trimming, no case folding. Code points that are unassigned in the pinned Unicode tables are rejected in new master passwords, so a later table update cannot change `NFC(password)` ([CRYPTO.md §16](../CRYPTO.md#16-open-questions-for-the-owner) question 4).
+4. **ROADMAP §4.3 row "Argon2id with per-account salt"** → Yes. The row now reads "Argon2id with a secret per-account salt (the OPAQUE OPRF key) on the server path and a per-device salt locally".
+
 ## Consequences
 
 ### Positive
@@ -94,10 +103,7 @@ The full constructions are in [CRYPTO.md §5.2](../CRYPTO.md#52-password-input-a
 
 ## Open questions for the owner
 
-1. **Adopt the Secret Key as mandatory from M1**, which differs from ROADMAP's "M3 ship"? *Recommendation:* yes. Update ROADMAP §4.3 accordingly.
-2. **Freeze `kdf_id` 1 after the M1 phone measurement even at 1–2 s?** *Recommendation:* yes. The keystore path (`E_ks`) helps only an enrolled device and AutoFill. The first login on a phone runs the OPAQUE KSF at the account's `kdf_id` in the main app. The M1 spike therefore measures a full OPAQUE login (KSF plus local wrap) in the main-app process on the lowest-end target phones. If that runs out of memory, `kdf_id` 1 is changed before any M1 account exists, or a Server-mode enrolment path that approves a new phone from an existing device is specified first ([CRYPTO.md §6.4](../CRYPTO.md#64-feasibility)).
-3. **Normalise master passwords to NFC?** *Recommendation:* yes, and reject code points that are unassigned in the pinned Unicode tables, so a later table update cannot change `NFC(password)` ([CRYPTO.md §16](../CRYPTO.md#16-open-questions-for-the-owner) question 4).
-4. **Update the ROADMAP §4.3 row "Argon2id with per-account salt"** to "Argon2id with a secret per-account salt (the OPAQUE OPRF key) on the server path and a per-device salt locally"? *Recommendation:* yes. The current wording reads as if a plain per-account Argon2id salt were stored, which RFC 9807's zero-salt KSF does not use.
+None. All were answered by the owner on 2026-09-25; see [Owner decisions (2026-09-25)](#owner-decisions-2026-09-25) in the Decision section. The answers keep the original question numbers, so a reference to "open question N" means owner decision N.
 
 ## References
 

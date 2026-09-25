@@ -134,6 +134,8 @@ packages/
 1. **Framework: React (recommended) or Svelte 5?** The deciding question is who writes most of the UI.
    - If it is the owner alone, and the owner prefers Svelte, Svelte's productivity may outweigh React's ecosystem.
    - If the project wants outside contributors and the fastest route to WCAG AA, pick React.
+
+   **Owner answer 2026-09-25: React.** Questions 2 and 3 are still open, so this ADR stays Proposed.
 2. **The share recipient page (M5): framework-free TypeScript?** *Recommendation:* yes. It renders one decrypted snapshot. Keeping it tiny keeps it auditable, and it is served on every open ([THREAT_MODEL §4.2.1](../THREAT_MODEL.md#421-the-web-vault-delivery-problem)).
 3. **Desktop reuses `apps/web` views** (one SPA, two shells) rather than being a separate app. *Recommendation:* yes, one SPA over `packages/core`'s two backends.
 
