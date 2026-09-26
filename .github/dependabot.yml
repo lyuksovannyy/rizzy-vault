@@ -8,6 +8,15 @@ updates:
     groups:
       rust-minor-and-patch:
         update-types: [minor, patch]
+  # fuzz/ is its own workspace with its own Cargo.lock (ADR 0016 §7).
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      rust-minor-and-patch:
+        update-types: [minor, patch]
   - package-ecosystem: github-actions
     directory: /
     schedule:

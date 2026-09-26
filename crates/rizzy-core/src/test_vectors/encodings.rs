@@ -149,7 +149,8 @@ pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
             Obj::new().bytes("data", &random_vec(rng, len)),
         ));
     }
-    // Rejected frames (§8.5): data_len past the end, non-zero padding, a non-canonical length.
+    // Rejected frames (§8.5): data_len past the end, non-zero padding, and a frame one byte
+    // shorter and one byte longer than the canonical length (the extra byte is zero).
     let good = padding::frame(b"abc")
         .expect("frame")
         .expose_secret()
@@ -158,9 +159,11 @@ pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
     too_long[3] = 0xff;
     let mut dirty = good.clone();
     dirty[200] = 1;
-    let mut short = good;
+    let mut short = good.clone();
     short.truncate(255);
-    for (i, frame) in [too_long, dirty, short].iter().enumerate() {
+    let mut long = good;
+    long.push(0);
+    for (i, frame) in [too_long, dirty, short, long].iter().enumerate() {
         out.push(vector(
             "padding",
             "frame/reject",

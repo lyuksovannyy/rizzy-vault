@@ -31,7 +31,7 @@ use crate::kdf::{self, KdfId};
 use crate::labels::{self, Label};
 use crate::opaque::{CredentialIdentifier, ServerLoginState};
 use crate::secret::{KEY_LEN, Key32, SecretBytes};
-use crate::totp::TotpSecret;
+use crate::totp::{MIN_SERVER_SECRET_LEN, TotpSecret};
 
 /// How long a pending OPAQUE login may be kept (§5.10): 60 s.
 pub const LOGIN_STATE_TTL_MS: u64 = 60_000;
@@ -93,9 +93,15 @@ impl ServerDataKey {
     /// `account_id ‖ u32 totp_credential_seq`. The plaintext is the raw secret (§11.15); the
     /// server's 2FA uses [`crate::totp::TotpParams::DEFAULT`].
     ///
+    /// Here rizzy-vault is the issuer, so the secret must have at least
+    /// [`MIN_SERVER_SECRET_LEN`] bytes, the RFC 4226 §4 R6 floor (§11.15).
+    /// [`TotpSecret::generate`] draws 20. Item secrets, accepted as issued from 1 byte, never
+    /// come here.
+    ///
     /// # Errors
     /// [`EncryptError::ContextMismatch`] for `totp_credential_seq = 0` (it counts from 1),
-    /// otherwise [`EncryptError`] as for any envelope.
+    /// [`EncryptError::InvalidPlaintextLength`] for a secret shorter than
+    /// [`MIN_SERVER_SECRET_LEN`], otherwise [`EncryptError`] as for any envelope.
     pub fn seal_totp_secret<R: CryptoRng + ?Sized>(
         &self,
         rng: &mut R,
@@ -105,15 +111,21 @@ impl ServerDataKey {
         if ctx.totp_credential_seq == 0 {
             return Err(EncryptError::ContextMismatch);
         }
+        if secret.expose_secret().len() < MIN_SERVER_SECRET_LEN {
+            return Err(EncryptError::InvalidPlaintextLength);
+        }
         let key = self.subkey(labels::SERVER_TOTP_SECRET)?;
         server_seal(rng, &key, ctx, secret.expose_secret())
     }
 
     /// Opens a `SERVER_TOTP_SECRET` row.
     ///
+    /// A secret shorter than [`MIN_SERVER_SECRET_LEN`] is refused even though it authenticated:
+    /// defence in depth, since only a holder of the data key could have sealed it.
+    ///
     /// # Errors
     /// [`DecryptError`] for every failure, including another account's row or another
-    /// enrolment's.
+    /// enrolment's, and a secret shorter than [`MIN_SERVER_SECRET_LEN`].
     pub fn open_totp_secret(
         &self,
         ctx: &ServerTotpSecretCtx,
@@ -121,7 +133,11 @@ impl ServerDataKey {
     ) -> Result<TotpSecret, DecryptError> {
         let key = self.subkey(labels::SERVER_TOTP_SECRET)?;
         let plaintext = server_open(&key, ctx, envelope)?;
-        TotpSecret::from_slice(plaintext.expose_secret()).map_err(|_| DecryptError)
+        let bytes = plaintext.expose_secret();
+        if bytes.len() < MIN_SERVER_SECRET_LEN {
+            return Err(DecryptError);
+        }
+        TotpSecret::from_slice(bytes).map_err(|_| DecryptError)
     }
 
     /// Seals a pending OPAQUE login as `SERVER_LOGIN_STATE`, ctx
@@ -328,6 +344,10 @@ impl fmt::Debug for ServerSecretsBackupKey {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
 mod tests {
     use super::*;
     use crate::envelope::Purpose;
@@ -420,6 +440,39 @@ mod tests {
             k.seal_totp_secret(&mut rng, &totp_ctx(0), &secret),
             Err(EncryptError::ContextMismatch)
         );
+    }
+
+    /// Owner decision 2026-09-26 (CRYPTO.md §11.15): a server 2FA secret has at least 16 bytes,
+    /// checked when sealing and again when opening.
+    #[test]
+    fn server_totp_secret_floor() {
+        let mut rng = seeded_rng(6);
+        let k = data_key();
+        assert_eq!(MIN_SERVER_SECRET_LEN, 16);
+        let at_floor = TotpSecret::from_slice(&[7; MIN_SERVER_SECRET_LEN]).unwrap();
+        let env = k
+            .seal_totp_secret(&mut rng, &totp_ctx(1), &at_floor)
+            .unwrap();
+        assert_eq!(
+            k.open_totp_secret(&totp_ctx(1), &env)
+                .unwrap()
+                .expose_secret(),
+            at_floor.expose_secret()
+        );
+
+        // Item secrets may be this short; the server's own may not.
+        let key = k.subkey(labels::SERVER_TOTP_SECRET).unwrap();
+        for len in [1, 10, MIN_SERVER_SECRET_LEN - 1] {
+            let short = TotpSecret::from_slice(&vec![7; len]).unwrap();
+            assert_eq!(
+                k.seal_totp_secret(&mut rng, &totp_ctx(1), &short),
+                Err(EncryptError::InvalidPlaintextLength),
+                "{len}"
+            );
+            // Sealed around the check, straight through the envelope API: refused on open.
+            let forged = server_seal(&mut rng, &key, &totp_ctx(1), &vec![7; len]).unwrap();
+            assert!(k.open_totp_secret(&totp_ctx(1), &forged).is_err(), "{len}");
+        }
     }
 
     #[test]

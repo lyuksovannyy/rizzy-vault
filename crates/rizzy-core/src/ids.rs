@@ -246,13 +246,16 @@ impl PublicKeyId {
     /// Derives the id of a public key of the given type.
     #[must_use]
     pub fn derive(key_type: KeyType, public_key: &[u8; PUBLIC_KEY_LEN]) -> Self {
+        // The id is a prefix of the 32-byte digest, so the copy below writes every byte of it.
+        const _: () = assert!(ID_LEN <= 32);
         let digest = Sha256::new()
             .chain_update(labels::KEY_ID.as_bytes())
             .chain_update([0x00, key_type.to_u8()])
             .chain_update(public_key)
             .finalize();
+        let digest: [u8; 32] = digest.into();
         let mut id = [0u8; ID_LEN];
-        id.copy_from_slice(&digest[..ID_LEN]);
+        id.iter_mut().zip(digest).for_each(|(dst, src)| *dst = src);
         Self(id)
     }
 
@@ -278,6 +281,10 @@ impl fmt::Debug for PublicKeyId {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
 mod tests {
     use super::*;
     use crate::test_util::{hex, seeded_rng};

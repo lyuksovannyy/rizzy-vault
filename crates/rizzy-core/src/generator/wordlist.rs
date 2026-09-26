@@ -3,9 +3,9 @@
 //! - **Source.** "EFF's Long Wordlist", `eff_large_wordlist.txt`, published by the Electronic
 //!   Frontier Foundation on 2016-07-18 (<https://www.eff.org/dice>). The file is embedded
 //!   unmodified: 7,776 lines of `<five dice digits>\t<word>\n`.
-//! - **Licence.** CC BY 3.0 US; attribution in `THIRD_PARTY_NOTICES.md` at the repository root.
-//!   Its compatibility with the project licence is for the owner to confirm (ADR 0017 is
-//!   Proposed).
+//! - **Licence.** CC BY 4.0 (EFF's current terms for its site content). The attribution, and the
+//!   duty to show it in every artifact, are in `THIRD_PARTY_NOTICES.md` at the repository root.
+//!   The owner decided on 2026-09-26 to keep the list.
 //! - **Integrity.** The unit tests pin the file's SHA-256 and check its structure (count, dice
 //!   numbering, sorted unique words). The compile-time validation below rejects a malformed
 //!   file, so a bad edit fails the build rather than the generator.
@@ -66,44 +66,54 @@ pub(super) fn select_word(index: u32, slot: &mut [u8; SLOT]) {
 
 /// Whether `raw` is exactly `WORD_COUNT` lines of five dice digits (1–6), a tab, and a word of
 /// 1–9 bytes from `[a-z-]` starting with a letter, each ending in `\n`.
-const fn validate(raw: &[u8]) -> bool {
-    let mut i = 0;
+const fn validate(mut raw: &[u8]) -> bool {
     let mut lines = 0;
-    while i < raw.len() {
-        // Five dice digits.
-        let mut d = 0;
-        while d < 5 {
-            if i >= raw.len() || raw[i] < b'1' || raw[i] > b'6' {
-                return false;
+    while !raw.is_empty() {
+        // Five dice digits and a tab.
+        let [
+            b'1'..=b'6',
+            b'1'..=b'6',
+            b'1'..=b'6',
+            b'1'..=b'6',
+            b'1'..=b'6',
+            b'\t',
+            rest @ ..,
+        ] = raw
+        else {
+            return false;
+        };
+        raw = rest;
+        // The word, then its newline.
+        let mut len = 0;
+        loop {
+            match raw {
+                [b'\n', rest @ ..] => {
+                    raw = rest;
+                    break;
+                }
+                [c, rest @ ..] => {
+                    if !(c.is_ascii_lowercase() || (*c == b'-' && len > 0)) {
+                        return false;
+                    }
+                    len += 1;
+                    raw = rest;
+                }
+                [] => return false,
             }
-            i += 1;
-            d += 1;
         }
-        if i >= raw.len() || raw[i] != b'\t' {
+        if len == 0 || len > MAX_WORD_LEN {
             return false;
         }
-        i += 1;
-        // The word.
-        let start = i;
-        while i < raw.len() && raw[i] != b'\n' {
-            let c = raw[i];
-            let letter = c >= b'a' && c <= b'z';
-            if !(letter || (c == b'-' && i > start)) {
-                return false;
-            }
-            i += 1;
-        }
-        let len = i - start;
-        if len == 0 || len > MAX_WORD_LEN || i >= raw.len() {
-            return false;
-        }
-        i += 1; // '\n'
         lines += 1;
     }
     lines == WORD_COUNT
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
 mod tests {
     use sha2::{Digest as _, Sha256};
 
@@ -199,5 +209,16 @@ mod tests {
         let mut bad = RAW.to_vec();
         bad.extend_from_slice(b"66666\tzzz\n");
         assert!(!validate(&bad));
+        // Each rule, on the first line ("11111\tabacus\n", 13 bytes).
+        assert!(RAW.starts_with(b"11111\tabacus\n"));
+        for (at, byte) in [(4, b'0'), (5, b' '), (6, b'-'), (6, b'\n')] {
+            let mut bad = RAW.to_vec();
+            bad[at] = byte;
+            assert!(!validate(&bad), "byte {byte:#04x} at {at}");
+        }
+        let with_first_word = |word: &[u8]| [b"11111\t", word, b"\n", &RAW[13..]].concat();
+        assert!(validate(&with_first_word(b"abcdefgh-")));
+        assert!(!validate(&with_first_word(b"abcdefghij")));
+        assert!(!validate(&with_first_word(b"")));
     }
 }

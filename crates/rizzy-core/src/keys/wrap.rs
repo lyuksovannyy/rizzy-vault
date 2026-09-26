@@ -1,9 +1,10 @@
 //! The symmetric wrapped-key objects of M1 (CRYPTO.md §4.2, §8.4, §8.5).
 //!
 //! Every wrap checks, before sealing, that the context describes the keys being wrapped (the
-//! epochs and ids the keys carry). Every unwrap checks, before any crypto, that the unwrapping
-//! key is the one the context names, then opens the envelope (commitment first), then checks
-//! the plaintext layout. All unwrap failures are the same [`DecryptError`].
+//! epochs and ids the keys carry, and the `kdf_id` an unlock key was stretched with). Every
+//! unwrap checks, before any crypto, that the unwrapping key is the one the context names, then
+//! opens the envelope (commitment first), then checks the plaintext layout. All unwrap failures
+//! are the same [`DecryptError`].
 
 use rand_core::CryptoRng;
 use zeroize::Zeroizing;
@@ -65,14 +66,18 @@ impl ServerUnlockKey {
     /// ctx `account_id ‖ u32 account_key_epoch ‖ u32 password_epoch ‖ u16 kdf_id`).
     ///
     /// # Errors
-    /// [`EncryptError::ContextMismatch`] if `ctx` names another account or account-key epoch.
+    /// [`EncryptError::ContextMismatch`] if `ctx` names another account, account-key epoch or
+    /// `kdf_id` than the one whose OPAQUE run gave this key.
     pub fn wrap_account_key<R: CryptoRng + ?Sized>(
         &self,
         rng: &mut R,
         ctx: &AccountKeyServerWrapCtx,
         account_key: &AccountKey,
     ) -> Result<Vec<u8>, EncryptError> {
-        if ctx.account_id != self.account_id || ctx.account_key_epoch != account_key.epoch() {
+        if ctx.account_id != self.account_id
+            || ctx.kdf_id != self.kdf_id
+            || ctx.account_key_epoch != account_key.epoch()
+        {
             return Err(EncryptError::ContextMismatch);
         }
         seal(rng, &self.key, ctx, account_key.key().expose_secret())
@@ -81,13 +86,13 @@ impl ServerUnlockKey {
     /// Opens `E_srv`. The account key gets the epoch `ctx` names.
     ///
     /// # Errors
-    /// [`DecryptError`], including for a context of another account.
+    /// [`DecryptError`], including for a context of another account or `kdf_id`.
     pub fn unwrap_account_key(
         &self,
         ctx: &AccountKeyServerWrapCtx,
         envelope: &[u8],
     ) -> Result<AccountKey, DecryptError> {
-        if ctx.account_id != self.account_id {
+        if ctx.account_id != self.account_id || ctx.kdf_id != self.kdf_id {
             return Err(DecryptError);
         }
         let plaintext = open(&self.key, ctx, envelope)?;
@@ -101,8 +106,9 @@ impl LocalUnlockKey {
     /// Device-local only; never uploaded.
     ///
     /// # Errors
-    /// [`EncryptError::ContextMismatch`] if `ctx` names another account, device or account-key
-    /// epoch.
+    /// [`EncryptError::ContextMismatch`] if `ctx` names another account, device, account-key
+    /// epoch or `kdf_id` than this key was stretched with. A reader derives with the `kdf_id`
+    /// stored next to `E_local` (§5.6), so a wrap naming another one could never be opened.
     pub fn wrap_account_key<R: CryptoRng + ?Sized>(
         &self,
         rng: &mut R,
@@ -111,6 +117,7 @@ impl LocalUnlockKey {
     ) -> Result<Vec<u8>, EncryptError> {
         if ctx.account_id != self.account_id
             || ctx.device_id != self.device_id
+            || ctx.kdf_id != self.kdf_id
             || ctx.account_key_epoch != account_key.epoch()
         {
             return Err(EncryptError::ContextMismatch);
@@ -122,13 +129,16 @@ impl LocalUnlockKey {
     /// password shows up here as a [`DecryptError`].
     ///
     /// # Errors
-    /// [`DecryptError`], including for a context of another account or device.
+    /// [`DecryptError`], including for a context of another account, device or `kdf_id`.
     pub fn unwrap_account_key(
         &self,
         ctx: &AccountKeyLocalWrapCtx,
         envelope: &[u8],
     ) -> Result<AccountKey, DecryptError> {
-        if ctx.account_id != self.account_id || ctx.device_id != self.device_id {
+        if ctx.account_id != self.account_id
+            || ctx.device_id != self.device_id
+            || ctx.kdf_id != self.kdf_id
+        {
             return Err(DecryptError);
         }
         let plaintext = open(&self.key, ctx, envelope)?;

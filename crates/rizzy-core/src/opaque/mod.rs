@@ -38,6 +38,10 @@
 mod ksf;
 
 #[cfg(test)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
 mod tests;
 
 use core::fmt;
@@ -187,15 +191,22 @@ impl PasswordInput {
     }
 
     /// Derives `pw_in` for a newly chosen master password (signup, password or SK change).
-    /// First rejects code points that are unassigned in the pinned Unicode tables
-    /// (ADR 0004 owner decision 3, [`kdf::check_new_password`]).
+    /// First rejects an empty password (CRYPTO.md §2, "New passwords"; non-empty is the only
+    /// rule, there is no strength policy here), then code points that are unassigned in the
+    /// pinned Unicode tables (ADR 0004 owner decision 3, [`kdf::check_new_password`]). Login
+    /// and unlock use [`PasswordInput::derive`], which rejects neither, so no existing account
+    /// is locked out.
     ///
     /// # Errors
-    /// [`KdfError::UnassignedCodePoint`], or as [`PasswordInput::derive`].
+    /// [`KdfError::EmptyPassword`], [`KdfError::UnassignedCodePoint`], or
+    /// as [`PasswordInput::derive`].
     pub fn derive_for_new_password(
         password: &str,
         secret_key: &SecretKey,
     ) -> Result<Self, KdfError> {
+        if password.is_empty() {
+            return Err(KdfError::EmptyPassword);
+        }
         kdf::check_new_password(password)?;
         Self::derive(password, secret_key)
     }
@@ -583,19 +594,25 @@ impl fmt::Debug for ServerLoginState {
 // ---------------------------------------------------------------------------------------------
 
 /// OPAQUE's 64-byte `export_key` (§4.2). Never stored; it becomes `server_unlock_key`.
+///
+/// It remembers the `kdf_id` its KSF ran with (the registration's, or the login Context's),
+/// and passes it on to the [`ServerUnlockKey`], so `E_srv` can only be sealed under a context
+/// that names it (§8.4).
 pub struct ExportKey {
     key: SecretArray<EXPORT_KEY_LEN>,
+    kdf_id: KdfId,
 }
 
 impl ExportKey {
-    fn from_output(output: &mut [u8]) -> Result<Self, OpaqueError> {
+    fn from_output(output: &mut [u8], kdf_id: KdfId) -> Result<Self, OpaqueError> {
         let key = SecretArray::from_slice(output).map_err(|_| OpaqueError::Protocol);
         output.zeroize();
-        Ok(Self { key: key? })
+        Ok(Self { key: key?, kdf_id })
     }
 
     /// `server_unlock_key = HKDF(ikm = export_key, salt = empty, info =
-    /// LABEL("unlock-key/server") ‖ 0x00 ‖ account_id, 32)` (§4.3), the key of `E_srv`.
+    /// LABEL("unlock-key/server") ‖ 0x00 ‖ account_id, 32)` (§4.3), the key of `E_srv`. The
+    /// key carries this `export_key`'s `kdf_id`.
     ///
     /// # Errors
     /// [`DerivationError`] (unreachable).
@@ -603,7 +620,14 @@ impl ExportKey {
         &self,
         account_id: AccountId,
     ) -> Result<ServerUnlockKey, DerivationError> {
-        ServerUnlockKey::derive(&self.key, account_id)
+        ServerUnlockKey::derive(&self.key, account_id, self.kdf_id)
+    }
+
+    /// The `kdf_id` the OPAQUE run that produced this key stretched with: the one the `E_srv`
+    /// context must name.
+    #[must_use]
+    pub const fn kdf_id(&self) -> KdfId {
+        self.kdf_id
     }
 
     /// The 64 bytes.
@@ -774,7 +798,7 @@ pub fn client_registration_finish<R: CryptoRng + ?Sized>(
         params,
     )?;
     let upload = result.message.serialize().to_vec();
-    let export_key = ExportKey::from_output(result.export_key.as_mut_slice())?;
+    let export_key = ExportKey::from_output(result.export_key.as_mut_slice(), kdf_id)?;
     Ok(ClientRegistrationFinish { upload, export_key })
 }
 
@@ -904,7 +928,7 @@ pub fn client_login_finish<R: CryptoRng + ?Sized>(
     // The session key only confirms keys inside OPAQUE (§5.10); it is not used.
     result.session_key.as_mut_slice().zeroize();
     let ke3 = result.message.serialize().to_vec();
-    let export_key = ExportKey::from_output(result.export_key.as_mut_slice())?;
+    let export_key = ExportKey::from_output(result.export_key.as_mut_slice(), context.kdf_id())?;
     Ok(ClientLoginFinish { ke3, export_key })
 }
 

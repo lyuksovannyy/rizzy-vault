@@ -13,13 +13,13 @@ use crate::envelope::purpose::{
     AccountKeyServerWrapCtx, AccountSettingsCtx, DeviceSecretKeysCtx, IdentitySecretKeysCtx,
     ItemKeyWrapCtx, RetiredSecretKeyCtx, VaultKeySelfGrantCtx,
 };
-use crate::envelope::{open, seal};
-use crate::error::{DecryptError, EncryptError, ParseError};
+use crate::envelope::{Purpose, open, seal};
+use crate::error::{DecryptError, EncryptError, ParseError, VerifyError};
 use crate::ids::{AccountId, DeviceId, ItemId};
 use crate::kdf::KdfId;
 use crate::secret::SecretArray;
 use crate::sign::{
-    AccountState, DeviceCertificate, DeviceKind, DeviceRevocation, SyncMode, Verified,
+    AccountState, DeviceCertificate, DeviceKind, DeviceRevocation, KeyGrant, SyncMode, Verified,
 };
 use crate::test_util::{FixedRng, hex, seeded_rng};
 
@@ -152,13 +152,18 @@ const KEY_GRANT_WIRE: &str = "0000008a000100048b4f02d8c0c813226bd2f5ab5c54e8cdcf
 #[test]
 fn server_unlock_key_and_recovery_known_answers() {
     let export_key = SecretArray::<EXPORT_KEY_LEN>::from_slice(&[0x42; 64]).unwrap();
-    let server = ServerUnlockKey::derive(&export_key, account()).unwrap();
+    let server = ServerUnlockKey::derive(&export_key, account(), KdfId::DEFAULT).unwrap();
     assert_eq!(
         server.key.expose_secret().as_slice(),
         hex(SERVER_UNLOCK_KEY).as_slice()
     );
     // Bound to the account.
-    let other = ServerUnlockKey::derive(&export_key, AccountId::from_bytes([0x0b; 16])).unwrap();
+    let other = ServerUnlockKey::derive(
+        &export_key,
+        AccountId::from_bytes([0x0b; 16]),
+        KdfId::DEFAULT,
+    )
+    .unwrap();
     assert_ne!(other.key.expose_secret(), server.key.expose_secret());
 
     let code = SecretArray::<RECOVERY_CODE_LEN>::from_slice(&[0xc3; 16]).unwrap();
@@ -252,6 +257,32 @@ fn account_fingerprint_and_safety_numbers() {
         AccountFingerprint::compute(account(), &changed).as_bytes(),
         fp.as_bytes()
     );
+}
+
+/// §12.3: fingerprints compare in constant time, over the account and all 32 hash bytes.
+#[test]
+fn account_fingerprints_compare_in_constant_time() {
+    use subtle::ConstantTimeEq as _;
+
+    let fp = AccountFingerprint::compute(account(), &identity_keys().public_keys());
+    let same = AccountFingerprint::compute(account(), &identity_keys().public_keys());
+    assert!(bool::from(fp.ct_eq(&same)));
+    assert_eq!(fp, same);
+    // Another account with the same keys, and the same account with another key.
+    let other_account = AccountFingerprint::compute(
+        AccountId::from_bytes([0x0b; 16]),
+        &identity_keys().public_keys(),
+    );
+    let mut changed = identity_keys().public_keys();
+    changed.x25519 = crate::hpke::HpkePublicKey::x25519([9; 32]);
+    let other_key = AccountFingerprint::compute(account(), &changed);
+    for other in [other_account, other_key] {
+        assert!(!bool::from(fp.ct_eq(&other)));
+        assert_ne!(fp, other);
+    }
+    // `Hash` agrees with `Eq`.
+    let set: std::collections::HashSet<_> = [fp, same, other_key].into_iter().collect();
+    assert_eq!(set.len(), 2);
 }
 
 #[test]
@@ -364,7 +395,7 @@ fn settings_hash_rules_and_state_checks() {
 #[test]
 fn e_srv_round_trip_and_binding() {
     let export_key = SecretArray::<EXPORT_KEY_LEN>::from_slice(&[0x42; 64]).unwrap();
-    let unlock = ServerUnlockKey::derive(&export_key, account()).unwrap();
+    let unlock = ServerUnlockKey::derive(&export_key, account(), KdfId::DEFAULT).unwrap();
     let ctx = AccountKeyServerWrapCtx {
         account_id: account(),
         account_key_epoch: 3,
@@ -419,6 +450,7 @@ fn e_local_is_bound_to_its_device() {
         key: key32(0x31),
         account_id: account(),
         device_id: recipient_device(),
+        kdf_id: KdfId::DEFAULT,
     };
     let ctx = AccountKeyLocalWrapCtx {
         account_id: account(),
@@ -448,6 +480,7 @@ fn e_local_is_bound_to_its_device() {
         key: key32(0x31),
         account_id: account(),
         device_id: sender_device(),
+        kdf_id: KdfId::DEFAULT,
     };
     assert!(
         impostor
@@ -459,6 +492,90 @@ fn e_local_is_bound_to_its_device() {
         ..ctx
     };
     assert!(local.unwrap_account_key(&moved, &e_local).is_err());
+}
+
+/// §8.4, §5.6, INV-5: an unlock key remembers the `kdf_id` it was stretched with (for
+/// `server_unlock_key`, the one of the OPAQUE run behind its `export_key`), and a wrap whose
+/// context names another `kdf_id` is refused when sealing. A reader derives with the stored
+/// `kdf_id` and rebuilds the context from it, so such a wrap could never be opened. Uses a
+/// cheap test profile, so no 64 MiB Argon2id run.
+#[test]
+fn unlock_key_wraps_are_bound_to_the_kdf_id_of_the_key() {
+    let cheap = KdfId::test_cheap(0xfff1, 1);
+    let ak = account_key(0x11, 0);
+
+    // E_local: `derive` records the kdf_id it stretched with.
+    let local = LocalUnlockKey::derive(
+        &key32(0x99),
+        &[0x5a; 16],
+        cheap,
+        account(),
+        recipient_device(),
+    )
+    .unwrap();
+    assert_eq!(local.kdf_id(), cheap);
+    let local_ctx = AccountKeyLocalWrapCtx {
+        account_id: account(),
+        device_id: recipient_device(),
+        account_key_epoch: 0,
+        password_epoch: 0,
+        kdf_id: cheap,
+    };
+    let e_local = local
+        .wrap_account_key(&mut seeded_rng(1), &local_ctx, &ak)
+        .unwrap();
+    assert!(local.unwrap_account_key(&local_ctx, &e_local).is_ok());
+    let local_other_kdf = AccountKeyLocalWrapCtx {
+        kdf_id: KdfId::DEFAULT,
+        ..local_ctx
+    };
+    assert_eq!(
+        local
+            .wrap_account_key(&mut seeded_rng(1), &local_other_kdf, &ak)
+            .map(|_| ()),
+        Err(EncryptError::ContextMismatch)
+    );
+    assert_eq!(
+        local
+            .unwrap_account_key(&local_other_kdf, &e_local)
+            .map(|_| ()),
+        Err(DecryptError)
+    );
+
+    // E_srv: the kdf_id travels with the key, not into its bytes.
+    let export_key = SecretArray::<EXPORT_KEY_LEN>::from_slice(&[0x42; 64]).unwrap();
+    let server = ServerUnlockKey::derive(&export_key, account(), cheap).unwrap();
+    assert_eq!(server.kdf_id(), cheap);
+    assert_eq!(
+        server.key.expose_secret().as_slice(),
+        hex(SERVER_UNLOCK_KEY).as_slice()
+    );
+    let srv_ctx = AccountKeyServerWrapCtx {
+        account_id: account(),
+        account_key_epoch: 0,
+        password_epoch: 0,
+        kdf_id: cheap,
+    };
+    let e_srv = server
+        .wrap_account_key(&mut seeded_rng(1), &srv_ctx, &ak)
+        .unwrap();
+    assert!(server.unwrap_account_key(&srv_ctx, &e_srv).is_ok());
+    let srv_other_kdf = AccountKeyServerWrapCtx {
+        kdf_id: KdfId::DEFAULT,
+        ..srv_ctx
+    };
+    assert_eq!(
+        server
+            .wrap_account_key(&mut seeded_rng(1), &srv_other_kdf, &ak)
+            .map(|_| ()),
+        Err(EncryptError::ContextMismatch)
+    );
+    assert_eq!(
+        server
+            .unwrap_account_key(&srv_other_kdf, &e_srv)
+            .map(|_| ()),
+        Err(DecryptError)
+    );
 }
 
 #[test]
@@ -1045,6 +1162,59 @@ fn device_grant_rejections_by_recipient_psk_and_context() {
         ),
         Err(GrantError::Verify(_))
     ));
+}
+
+/// §10.1, §11.3 step 4: the opener refuses a validly signed `key-grant` whose signed purpose
+/// is not `ACCOUNT_KEY_DEVICE_GRANT`, even when the HPKE envelope inside is a real device
+/// grant. `PASSWORD_VERIFIER_GRANT` shares the `0x12` allow-list and the device X25519
+/// recipient type, so the same envelope re-signed under it passes every other check; the
+/// HPKE AAD (purpose `0x0004`) would still open it.
+#[test]
+fn device_grant_opener_checks_the_signed_purpose() {
+    let sender_keys = sender_keys();
+    let sender = sender_cert();
+    let prev = account_key(0x11, 0);
+    let wire = seal_grant(GrantSigner::Device(sender_keys.signing_key()));
+    let envelope = KeyGrant::verify(&wire, &sender.device_ed25519)
+        .unwrap()
+        .envelope()
+        .to_vec();
+    let open = |signed: &[u8]| {
+        open_account_key_device_grant(
+            signed,
+            &grant_ctx(),
+            &recipient_keys(),
+            &prev,
+            GrantSender::Device(&sender),
+        )
+        .map(|_| ())
+    };
+
+    // The same envelope, same signer, signed as a password-verifier grant: refused.
+    let as_verifier_grant = KeyGrant::sign(
+        Purpose::PasswordVerifierGrant,
+        sender_keys.signing_key(),
+        &envelope,
+    )
+    .unwrap();
+    assert_eq!(
+        KeyGrant::verify(&as_verifier_grant, &sender.device_ed25519)
+            .unwrap()
+            .purpose(),
+        Purpose::PasswordVerifierGrant
+    );
+    assert_eq!(
+        open(&as_verifier_grant),
+        Err(GrantError::Verify(VerifyError::Mismatch))
+    );
+    // Control: re-signed with the right purpose, it opens, so only the purpose differed.
+    let as_device_grant = KeyGrant::sign(
+        Purpose::AccountKeyDeviceGrant,
+        sender_keys.signing_key(),
+        &envelope,
+    )
+    .unwrap();
+    assert_eq!(open(&as_device_grant), Ok(()));
 }
 
 #[test]

@@ -373,6 +373,80 @@ pub(crate) const RAND: RandRule = RandRule {
 /// direct dependency on `rand` or getrandom").
 pub(crate) const RANDOMNESS_CRATES: &[&str] = &["rand", "getrandom"];
 
+/// ADR 0009 "Required feature sets" for one crypto crate in `rizzy-core`'s closure.
+pub(crate) struct FeatureRule {
+    /// `name@compat` of the resolved package ([`compat`]).
+    pub(crate) package: &'static str,
+    /// Features [`FEATURE_RULES_CRATE`] must turn on in its own normal-dependency entry for the
+    /// package. The entry, not the unified graph, is what counts: a feature some other member
+    /// turns on is not on when `rizzy-core` is built alone.
+    pub(crate) required: &'static [&'static str],
+    /// Features no build may turn on, checked on the workspace-unified graph (a superset of any
+    /// single build, so a pass holds for every build).
+    pub(crate) forbidden: &'static [&'static str],
+}
+
+/// The crate whose dependency entries [`FeatureRule::required`] is checked against.
+pub(crate) const FEATURE_RULES_CRATE: &str = "rizzy-core";
+
+/// ADR 0009 "Required feature sets" and its amendment of 2026-09-26. A rule applies when its
+/// package is in `rizzy-core`'s normal and build closure. `blake2` and `poly1305` are never
+/// called; `rizzy-core` declares them only so that feature unification turns on their `zeroize`,
+/// which `argon2` and `chacha20poly1305` do not forward. Such a declaration looks unused, so
+/// this rule is what stops a cleanup from dropping it.
+pub(crate) const FEATURE_RULES: &[FeatureRule] = &[
+    FeatureRule {
+        package: "opaque-ke@4",
+        required: &["ristretto255"],
+        forbidden: &["argon2", "std"],
+    },
+    FeatureRule {
+        package: "hpke@0.14",
+        required: &["alloc", "x25519", "chacha"],
+        forbidden: &["mlkem", "getrandom"],
+    },
+    FeatureRule {
+        package: "argon2@0.6",
+        required: &["zeroize"],
+        forbidden: &["alloc", "parallel"],
+    },
+    FeatureRule {
+        package: "blake2@0.11",
+        required: &["zeroize"],
+        forbidden: &[],
+    },
+    FeatureRule {
+        package: "sha2@0.11",
+        required: &["zeroize"],
+        forbidden: &[],
+    },
+    FeatureRule {
+        package: "hmac@0.13",
+        required: &["zeroize"],
+        forbidden: &[],
+    },
+    FeatureRule {
+        package: "sha1@0.11",
+        required: &["zeroize"],
+        forbidden: &[],
+    },
+    FeatureRule {
+        package: "chacha20poly1305@0.11",
+        required: &["alloc", "zeroize"],
+        forbidden: &[],
+    },
+    FeatureRule {
+        package: "poly1305@0.9",
+        required: &["zeroize"],
+        forbidden: &[],
+    },
+    FeatureRule {
+        package: "ed25519-dalek@3",
+        required: &["fast", "zeroize"],
+        forbidden: &["legacy_compatibility", "hazmat"],
+    },
+];
+
 /// R3: `rizzy-smtp-ingress` and `rizzy-icon-proxy` reach none of these, over normal, build and
 /// dev dependencies. `rizzy-icon-proxy` also does not reach `rizzy-core` (it handles no keys).
 pub(crate) const ISOLATED_INGRESS: &[(&str, &[&str])] = &[
@@ -423,6 +497,66 @@ pub(crate) const LINT_EXCEPTIONS: &[&str] = &[];
 
 /// ADR 0016 §3 notes: only `xtask` enables `rizzy-proto`'s `openapi` feature.
 pub(crate) const OPENAPI_FEATURE: (&str, &str, &str) = ("rizzy-proto", "openapi", "xtask");
+
+/// R2 (c): the getrandom features that switch on the JavaScript backend, which only
+/// `rizzy-wasm` may enable. getrandom 0.3 and later call it `wasm_js`; getrandom 0.2 calls the
+/// same backend `js`, and still reaches the workspace through third-party crates (ADR 0016,
+/// Context), so it counts too.
+pub(crate) const GETRANDOM_WASM_FEATURES: &[&str] = &["wasm_js", "js"];
+
+/// R1, API side (ADR 0016 §5, "the clippy lists"): the `disallowed-types` of every no-I/O
+/// crate's `clippy.toml`. Item paths only: clippy 1.94.1 ignores a module path ("found a
+/// module") and then flags nothing from it.
+pub(crate) const NO_IO_DISALLOWED_TYPES: &[&str] = &[
+    "std::fs::File",
+    "std::fs::OpenOptions",
+    "std::fs::DirBuilder",
+    "std::fs::ReadDir",
+    "std::net::TcpStream",
+    "std::net::TcpListener",
+    "std::net::UdpSocket",
+    "std::process::Command",
+    "std::process::Child",
+    "std::thread::Builder",
+];
+
+/// R1, API side: the `disallowed-methods` of every no-I/O crate's `clippy.toml` (see
+/// [`NO_IO_DISALLOWED_TYPES`]).
+pub(crate) const NO_IO_DISALLOWED_METHODS: &[&str] = &[
+    "std::fs::read",
+    "std::fs::read_to_string",
+    "std::fs::write",
+    "std::fs::read_dir",
+    "std::fs::create_dir",
+    "std::fs::create_dir_all",
+    "std::fs::remove_file",
+    "std::fs::remove_dir",
+    "std::fs::remove_dir_all",
+    "std::fs::rename",
+    "std::fs::copy",
+    "std::fs::metadata",
+    "std::net::ToSocketAddrs::to_socket_addrs",
+    "std::env::var",
+    "std::env::var_os",
+    "std::env::vars",
+    "std::env::args",
+    "std::env::current_dir",
+    "std::env::temp_dir",
+    "std::process::exit",
+    "std::thread::spawn",
+    "std::time::SystemTime::now",
+    "std::time::Instant::now",
+];
+
+/// R1, API side: each list key of a no-I/O crate's `clippy.toml` with its entries.
+pub(crate) const NO_IO_CLIPPY_LISTS: &[(&str, &[&str])] = &[
+    ("disallowed-types", NO_IO_DISALLOWED_TYPES),
+    ("disallowed-methods", NO_IO_DISALLOWED_METHODS),
+];
+
+/// The keys a `{ path = ..., ... }` entry of those lists may have. Never `allow-invalid`: it
+/// silences the warning an invalid or module path gets, which ADR 0016 §5 relies on.
+pub(crate) const CLIPPY_ENTRY_KEYS: &[&str] = &["path", "reason", "replacement"];
 
 /// The row for `name`, if any.
 pub(crate) fn rule(name: &str) -> Option<&'static CrateRule> {
@@ -597,6 +731,30 @@ mod tests {
                 assert!(name != "rand" || *entry == RAND.allowed, "{entry}");
             }
         }
+    }
+
+    /// ADR 0016 §5: entries name items, never modules, and no entry appears twice.
+    #[test]
+    fn clippy_lists_name_items() {
+        for (list, entries) in NO_IO_CLIPPY_LISTS {
+            let unique: HashSet<&&str> = entries.iter().collect();
+            assert_eq!(unique.len(), entries.len(), "{list}: duplicate entry");
+            for entry in *entries {
+                let segments: Vec<&str> = entry.split("::").collect();
+                assert!(segments.len() >= 3, "{list}: `{entry}` looks like a module");
+                assert_eq!(segments.first(), Some(&"std"), "{list}: {entry}");
+                assert!(segments.iter().all(|s| !s.is_empty()), "{list}: {entry}");
+            }
+        }
+        assert_eq!(
+            NO_IO_CLIPPY_LISTS
+                .iter()
+                .map(|(list, entries)| (*list, entries.len()))
+                .collect::<Vec<_>>(),
+            [("disallowed-types", 10), ("disallowed-methods", 23)],
+            "ADR 0016 §5 lists 10 types and 23 methods"
+        );
+        assert!(!CLIPPY_ENTRY_KEYS.contains(&"allow-invalid"));
     }
 
     #[test]

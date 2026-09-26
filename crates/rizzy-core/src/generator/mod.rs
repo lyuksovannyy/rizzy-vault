@@ -13,9 +13,18 @@
 //!   required class (inclusion–exclusion); for passphrases, `words × log2(7776)`.
 //! - **Secrets.** Results are wiped on drop and `Debug` is redacted. Characters and words are
 //!   selected by scanning the whole alphabet or wordlist in constant time, not by indexing with
-//!   the secret draw; class membership is computed the same way (§12.3). What timing reveals is
-//!   how many candidates and draws were rejected, which says nothing about the accepted result,
-//!   and, for passphrases, the output length, which the result's length reveals anyway.
+//!   the secret draw; class membership is computed the same way (§12.3).
+//! - **Passphrase layout.** Words have different lengths, so where a word lands in the output
+//!   depends on the secret lengths of the words before it. A passphrase is therefore built in
+//!   two passes whose memory accesses depend only on the word count: each word, its separator
+//!   and its capitalisation go into a fixed-width region of their own, at offsets fixed by the
+//!   word number, and a compaction pass then moves the bytes together with constant-time
+//!   selects. Neither pass reads or writes at an offset derived from a word's length.
+//! - **What timing reveals** is how many candidates and draws were rejected, which says nothing
+//!   about the accepted result, and, for passphrases, the total output length, which the
+//!   result's length reveals anyway.
+//! - **Allocation.** Every secret buffer is allocated once at its final capacity and never
+//!   grows (§12.2): a passphrase's at the fixed-width size, then truncated in place.
 
 pub mod wordlist;
 
@@ -41,6 +50,9 @@ pub const MAX_WORDS: usize = 20;
 const MAX_CANDIDATES: usize = 1000;
 /// Draws per uniform index before giving up. Each draw succeeds with probability above 1/2.
 const MAX_DRAWS: usize = 128;
+/// Bytes per word in a passphrase's fixed-width layout: the word, zero-filled to
+/// [`wordlist::MAX_WORD_LEN`], then one more byte, so the separator always fits after it.
+const WORD_WIDTH: usize = wordlist::MAX_WORD_LEN + 1;
 
 /// Lowercase letters.
 const LOWER: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
@@ -402,32 +414,104 @@ pub fn generate_passphrase<R: CryptoRng + ?Sized>(
 ) -> Result<Generated, GeneratorError> {
     let separator = options.check()?;
     let count = u32::try_from(wordlist::WORD_COUNT).map_err(|_| GeneratorError::NoClasses)?;
-    // Allocated once at the largest possible size.
-    let capacity = options.words * (wordlist::MAX_WORD_LEN + 1);
-    let mut out = Zeroizing::new(Vec::with_capacity(capacity));
-    let mut slot = Zeroizing::new([0u8; wordlist::SLOT]);
-    for n in 0..options.words {
-        if n > 0 {
-            out.push(separator);
-        }
+    // The words are assembled only through `assemble_words`, whose memory access pattern does
+    // not depend on the words' lengths (CRYPTO.md §12.3). Do not build the passphrase here by
+    // appending words: that copies each secret word at a length-dependent offset. If this call
+    // goes, `assemble_words` is dead code and `cargo lint` fails.
+    let out = assemble_words(options.words, separator, options.capitalize, |slot| {
         let mut index = uniform_index(rng, count)?;
-        wordlist::select_word(index, &mut slot);
+        wordlist::select_word(index, slot);
         index.zeroize();
-        let (len, letters) = slot.split_first().unwrap_or((&0, &[]));
-        let word = letters.get(..usize::from(*len)).unwrap_or_default();
-        let first = out.len();
-        out.extend_from_slice(word);
-        if options.capitalize {
-            // Every word starts with a lowercase letter (checked by the wordlist tests).
-            if let Some(b) = out.get_mut(first) {
-                *b = b.to_ascii_uppercase();
-            }
-        }
-    }
+        Ok(())
+    })?;
     Ok(Generated {
         value: ascii_string(out),
         entropy_bits: passphrase_entropy(options.words),
     })
+}
+
+/// Assembles `words` words, joined by `separator`, in two passes whose memory access pattern
+/// depends only on `words` (CRYPTO.md §12.3). `select` fills the slot for the next word, as
+/// [`wordlist::select_word`] does.
+///
+/// Pass 1 writes word `n` into bytes `n * WORD_WIDTH..(n + 1) * WORD_WIDTH` of a fixed-width
+/// buffer, whatever the lengths of the words before it ([`spread_word`]). Pass 2 squeezes out
+/// the padding ([`compact`]). The result has its final capacity from the start; truncating it
+/// to the total length, which the passphrase reveals anyway, does not reallocate.
+fn assemble_words(
+    words: usize,
+    separator: u8,
+    capitalize: bool,
+    mut select: impl FnMut(&mut [u8; wordlist::SLOT]) -> Result<(), GeneratorError>,
+) -> Result<Zeroizing<Vec<u8>>, GeneratorError> {
+    let mut wide = Zeroizing::new(vec![0u8; words * WORD_WIDTH]);
+    let mut slot = Zeroizing::new([0u8; wordlist::SLOT]);
+    for (n, region) in wide.chunks_exact_mut(WORD_WIDTH).enumerate() {
+        select(&mut slot)?;
+        // The last word has no separator after it; which word is last is public.
+        let after = (n + 1 < words).then_some(separator);
+        spread_word(region, &slot, after, capitalize);
+    }
+    let mut out = Zeroizing::new(vec![0u8; wide.len()]);
+    let len = compact(&wide, &mut out);
+    out.truncate(len);
+    Ok(out)
+}
+
+/// Writes one selected word into its fixed-width `region` (`WORD_WIDTH` bytes): the letters,
+/// then `separator` (if any) right after the last letter, then zeros. `slot` is as
+/// [`wordlist::select_word`] fills it: a length byte, then the letters, zero-filled.
+///
+/// Every byte of the region is written the same way whatever the word's length: the
+/// separator's position is chosen by a constant-time select, not by indexing with the length.
+fn spread_word(
+    region: &mut [u8],
+    slot: &[u8; wordlist::SLOT],
+    separator: Option<u8>,
+    capitalize: bool,
+) {
+    let (len, letters) = slot.split_first().unwrap_or((&0, &[]));
+    for (i, dst) in (0u8..).zip(region.iter_mut()) {
+        // Past the word's end the slot is already zero; the region's last byte has no letter.
+        *dst = letters.get(usize::from(i)).copied().unwrap_or(0);
+        if let Some(sep) = separator {
+            dst.conditional_assign(&sep, i.ct_eq(len));
+        }
+    }
+    if capitalize {
+        // The first letter is at offset 0 of the region, a public position. Every word starts
+        // with a lowercase letter (the wordlist's compile-time check); the case flip is still a
+        // constant-time select rather than a branch on the letter.
+        if let Some(first) = region.first_mut() {
+            let lower = !first.ct_lt(&b'a') & first.ct_lt(&(b'z' + 1));
+            let upper = *first ^ 0x20;
+            first.conditional_assign(&upper, lower);
+        }
+    }
+}
+
+/// Moves the non-zero bytes of `wide` to the front of `out`, in order, and returns how many
+/// there are. `out` must be at least as long as `wide`. Zero marks padding: no word byte is
+/// zero (the wordlist allows only `[a-z-]`) and no separator is ([`PassphraseOptions::check`]
+/// allows only printable ASCII).
+///
+/// The memory access pattern depends only on the two lengths. For each output byte `j`, every
+/// input byte is visited; its destination is the number of non-zero bytes before it, kept as a
+/// running count in a local rather than looked up, and the one byte whose destination is `j`
+/// is kept by a constant-time select. That is `(words × WORD_WIDTH)²` selects, at most 40,000
+/// for 20 words, which is small next to the wordlist scans.
+fn compact(wide: &[u8], out: &mut [u8]) -> usize {
+    for (j, dst) in out.iter_mut().enumerate() {
+        let mut dest = 0usize;
+        for b in wide {
+            let keep = !b.ct_eq(&0);
+            dst.conditional_assign(b, keep & dest.ct_eq(&j));
+            dest += usize::from(keep.unwrap_u8());
+        }
+    }
+    wide.iter()
+        .map(|b| usize::from((!b.ct_eq(&0)).unwrap_u8()))
+        .sum()
 }
 
 /// Moves an ASCII buffer into a `String` without copying it.
@@ -443,4 +527,8 @@ fn ascii_string(mut bytes: Zeroizing<Vec<u8>>) -> Zeroizing<String> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
 mod tests;

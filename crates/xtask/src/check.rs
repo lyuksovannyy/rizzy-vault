@@ -16,8 +16,8 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
-use crate::manifest::Manifest;
-use crate::metadata::{Graph, Kind};
+use crate::manifest::{self, Manifest, TomlValue};
+use crate::metadata::{Declared, Graph, Kind, Package};
 use crate::rules::{self, CrateRule, Side, Sqlx};
 
 /// One broken rule.
@@ -50,6 +50,13 @@ pub(crate) struct Inputs {
     pub(crate) workspace_manifest: Manifest,
     /// `.cargo/config.toml`.
     pub(crate) cargo_config: Manifest,
+    /// The root `clippy.toml` (empty if there is none).
+    pub(crate) root_clippy: Manifest,
+    /// Each no-I/O member's `clippy.toml`, by crate name; `None` if the file does not exist.
+    pub(crate) clippy_configs: Vec<(String, Option<Manifest>)>,
+    /// Every `.clippy.toml` at the workspace root or in a no-I/O crate's directory. Clippy reads
+    /// it in preference to `clippy.toml`, so it would replace the checked file.
+    pub(crate) hidden_clippy_configs: Vec<String>,
 }
 
 const NORMAL_BUILD: &[Kind] = &[Kind::Normal, Kind::Build];
@@ -65,11 +72,14 @@ pub(crate) fn run(inputs: &Inputs) -> Vec<Violation> {
         getrandom_closure(graph, target, &mut out);
     }
     direct_dependencies(g, &mut out);
+    crypto_features(g, &mut out);
     internal_edges(g, &mut out);
     isolated_ingress(g, &mut out);
     client_server_split(g, &mut out);
     openssl(g, &mut out);
     manifests(inputs, &mut out);
+    workspace_files(inputs, &mut out);
+    clippy_configs(inputs, &mut out);
     wasm_alias(g, &inputs.cargo_config, &mut out);
     out.sort();
     out.dedup();
@@ -273,6 +283,82 @@ fn rand_rule(
     }
 }
 
+/// ADR 0009 "Required feature sets" ([`rules::FEATURE_RULES`]): for each listed crypto crate in
+/// `rizzy-core`'s normal and build closure, every normal-dependency entry of `rizzy-core` that
+/// resolves to it turns on the required features, and no build turns on a forbidden one.
+fn crypto_features(g: &Graph, out: &mut Vec<Violation>) {
+    let krate = rules::FEATURE_RULES_CRATE;
+    let Some(root) = g.member(krate) else { return };
+    let Some(p) = g.package(root) else { return };
+    let reach = g.closure(root, NORMAL_BUILD, NORMAL_BUILD, &|_, _, _| false);
+    let mut reached: Vec<usize> = reach.keys().copied().collect();
+    reached.sort_unstable();
+    for i in reached {
+        let Some(dep) = g.package(i).filter(|d| !d.is_member) else {
+            continue;
+        };
+        let key = format!("{}@{}", dep.name, rules::compat(&dep.version));
+        let Some(rule) = rules::FEATURE_RULES.iter().find(|r| r.package == key) else {
+            continue;
+        };
+        // rizzy-core's own normal entries that resolve to this very package.
+        let entries: Vec<&Declared> = p
+            .declared
+            .iter()
+            .filter(|d| {
+                let extern_name = d.key().replace('-', "_");
+                d.kind == Kind::Normal
+                    && d.name == dep.name
+                    && p.deps.iter().any(|e| {
+                        e.to == i && e.name == extern_name && e.kinds.contains(&Kind::Normal)
+                    })
+            })
+            .collect();
+        let missing: Vec<&str> = rule
+            .required
+            .iter()
+            .copied()
+            .filter(|f| {
+                entries.is_empty() || entries.iter().any(|d| !d.features.iter().any(|x| x == f))
+            })
+            .collect();
+        if !missing.is_empty() {
+            out.push(violation(
+                "ADR 0009 required feature sets",
+                krate,
+                format!(
+                    "reaches {} (path: {}) but its own `[dependencies]` entry for it does not \
+                     turn on [{}]. Declare `{}.workspace = true`; the workspace entry carries \
+                     the ADR 0009 feature set. A feature another crate turns on does not count: \
+                     it is off when {krate} is built alone.",
+                    dep.label(),
+                    g.path(&reach, i),
+                    missing.join(", "),
+                    dep.name
+                ),
+            ));
+        }
+        let forbidden: Vec<&str> = dep
+            .features
+            .iter()
+            .map(String::as_str)
+            .filter(|f| rule.forbidden.contains(f))
+            .collect();
+        if !forbidden.is_empty() {
+            out.push(violation(
+                "ADR 0009 required feature sets",
+                krate,
+                format!(
+                    "{} has [{}] enabled, which ADR 0009 forbids.{}",
+                    dep.label(),
+                    forbidden.join(", "),
+                    unification_hint(krate, &dep.name)
+                ),
+            ));
+        }
+    }
+}
+
 fn unification_hint(krate: &str, dep: &str) -> String {
     format!(
         " (This check reads the workspace-unified graph. To see whether {krate} built alone \
@@ -305,15 +391,35 @@ fn getrandom_closure(g: &Graph, target: &str, out: &mut Vec<Violation>) {
     }
 }
 
+/// The features a member turns on for one of its declared dependencies: those in the
+/// dependency's own entry, plus every `key/feature` and `key?/feature` in the member's
+/// `[features]` table, whatever feature carries it. A `[features]` entry enables the feature as
+/// surely as the dependency entry does once the member's feature is on, and `--all-features`
+/// turns every one on. `key` is the dependency's rename, if it has one.
+fn declared_features<'a>(p: &'a Package, dep: &'a Declared) -> Vec<&'a str> {
+    let mut features: Vec<&str> = dep.features.iter().map(String::as_str).collect();
+    for entry in p.feature_table.iter().flat_map(|(_, enables)| enables) {
+        if let Some((key, feature)) = entry.split_once('/')
+            && key.strip_suffix('?').unwrap_or(key) == dep.key()
+        {
+            features.push(feature);
+        }
+    }
+    features
+}
+
 /// Direct dependencies as declared: R1 (no `rand` or getrandom in a no-I/O crate), R2 (getrandom
 /// only in leaf crates, `wasm_js` only in `rizzy-wasm`), R5 (sqlx holders and the client
-/// sqlite-only rule), and the `openapi` feature of `rizzy-proto`.
+/// sqlite-only rule), and the `openapi` feature of `rizzy-proto`. Features count whether the
+/// dependency entry or the member's `[features]` table turns them on ([`declared_features`]).
 fn direct_dependencies(g: &Graph, out: &mut Vec<Violation>) {
-    let mut wasm_js_declared_by_wasm = false;
+    // The resolved getrandom packages that rizzy-wasm itself turns the JavaScript backend on for.
+    let mut wasm_js_by_wasm: BTreeSet<usize> = BTreeSet::new();
     for (i, rule) in members(g) {
         let Some(p) = g.package(i) else { continue };
         for dep in &p.declared {
             let what = format!("{} `{}`", dep.kind.section(), dep.name);
+            let features = declared_features(p, dep);
             if rule.no_io && rules::RANDOMNESS_CRATES.contains(&dep.name.as_str()) {
                 out.push(violation(
                     "ADR 0016 R1",
@@ -325,69 +431,13 @@ fn direct_dependencies(g: &Graph, out: &mut Vec<Violation>) {
                 ));
             }
             if dep.name == "getrandom" {
-                if !rule.getrandom_direct {
-                    out.push(violation(
-                        "ADR 0016 R2",
-                        rule.name,
-                        format!(
-                            "declares a {what}: only the leaf crates depend on getrandom \
-                             directly; libraries take an injected RNG"
-                        ),
-                    ));
-                }
-                if dep.features.iter().any(|f| f == "wasm_js") {
-                    if rule.wasm_js {
-                        wasm_js_declared_by_wasm = true;
-                    } else {
-                        out.push(violation(
-                            "ADR 0016 R2",
-                            rule.name,
-                            "enables getrandom's `wasm_js`; only rizzy-wasm may".to_owned(),
-                        ));
-                    }
-                }
+                getrandom_entry(g, p, dep, &features, rule, &mut wasm_js_by_wasm, out);
             }
             if rules::matches_any(rules::SQLX, &dep.name) {
-                match rule.sqlx {
-                    Sqlx::Forbidden => out.push(violation(
-                        "ADR 0016 R5",
-                        rule.name,
-                        format!(
-                            "declares a {what}; only rizzy-storage, the domain crates and the \
-                             native client leaf crates depend on sqlx"
-                        ),
-                    )),
-                    Sqlx::SqliteOnly => {
-                        let drivers: Vec<&str> = dep
-                            .features
-                            .iter()
-                            .map(String::as_str)
-                            .filter(|f| rules::matches_any(rules::SQLX_NON_SQLITE_FEATURES, f))
-                            .collect();
-                        if !drivers.is_empty()
-                            || rules::SQLX_NON_SQLITE_CRATES.contains(&dep.name.as_str())
-                        {
-                            out.push(violation(
-                                "ADR 0016 R5",
-                                rule.name,
-                                format!(
-                                    "{what} enables a non-sqlite driver ({}); client leaf \
-                                     crates use only the sqlite driver",
-                                    if drivers.is_empty() {
-                                        dep.name.clone()
-                                    } else {
-                                        drivers.join(", ")
-                                    }
-                                ),
-                            ));
-                        }
-                    }
-                    Sqlx::Server => {}
-                }
+                sqlx_entry(dep, &features, rule, out);
             }
             let (proto, feature, owner) = rules::OPENAPI_FEATURE;
-            if dep.name == proto && dep.features.iter().any(|f| f == feature) && rule.name != owner
-            {
+            if dep.name == proto && features.contains(&feature) && rule.name != owner {
                 out.push(violation(
                     "ADR 0016 §3",
                     rule.name,
@@ -396,19 +446,117 @@ fn direct_dependencies(g: &Graph, out: &mut Vec<Violation>) {
             }
         }
     }
-    // A resolved `wasm_js` that rizzy-wasm did not ask for came from somewhere else.
-    for p in &g.packages {
-        if p.name == "getrandom"
-            && p.features.iter().any(|f| f == "wasm_js")
-            && !wasm_js_declared_by_wasm
+    // Backstop: a resolved JavaScript backend on any getrandom package other than the ones
+    // rizzy-wasm's own entries resolve to came from somewhere else, such as a third-party crate
+    // or a second getrandom version.
+    for (i, p) in g.packages.iter().enumerate() {
+        if p.name != "getrandom" || wasm_js_by_wasm.contains(&i) {
+            continue;
+        }
+        if let Some(f) = p
+            .features
+            .iter()
+            .find(|f| rules::GETRANDOM_WASM_FEATURES.contains(&f.as_str()))
         {
             out.push(violation(
                 "ADR 0016 R2",
                 &p.label(),
-                "has `wasm_js` enabled, but not by rizzy-wasm; a dependency switched it on"
-                    .to_owned(),
+                format!("has `{f}` enabled, but not by rizzy-wasm; a dependency switched it on"),
             ));
         }
+    }
+}
+
+/// R2 for one declared getrandom dependency of member `p`: only leaf crates declare it, and only
+/// `rizzy-wasm` turns on its JavaScript backend. For `rizzy-wasm`, records the resolved packages
+/// this entry points at in `wasm_js_by_wasm`.
+fn getrandom_entry(
+    g: &Graph,
+    p: &Package,
+    dep: &Declared,
+    features: &[&str],
+    rule: &CrateRule,
+    wasm_js_by_wasm: &mut BTreeSet<usize>,
+    out: &mut Vec<Violation>,
+) {
+    if !rule.getrandom_direct {
+        out.push(violation(
+            "ADR 0016 R2",
+            rule.name,
+            format!(
+                "declares a {} `{}`: only the leaf crates depend on getrandom directly; \
+                 libraries take an injected RNG",
+                dep.kind.section(),
+                dep.name
+            ),
+        ));
+    }
+    let backend: Vec<&str> = features
+        .iter()
+        .copied()
+        .filter(|f| rules::GETRANDOM_WASM_FEATURES.contains(f))
+        .collect();
+    if backend.is_empty() {
+        return;
+    }
+    if rule.wasm_js {
+        // The resolved package this very dependency entry points at.
+        let extern_name = dep.key().replace('-', "_");
+        wasm_js_by_wasm.extend(
+            p.deps
+                .iter()
+                .filter(|e| e.name == extern_name && name(g, e.to) == "getrandom")
+                .map(|e| e.to),
+        );
+    } else {
+        out.push(violation(
+            "ADR 0016 R2",
+            rule.name,
+            format!(
+                "enables getrandom's `{}` (in the dependency entry or through `[features]`); \
+                 only rizzy-wasm may",
+                backend.join("`, `")
+            ),
+        ));
+    }
+}
+
+/// R5 for one declared sqlx dependency: only the holders declare it, and a client leaf crate
+/// only with the sqlite driver.
+fn sqlx_entry(dep: &Declared, features: &[&str], rule: &CrateRule, out: &mut Vec<Violation>) {
+    let what = format!("{} `{}`", dep.kind.section(), dep.name);
+    match rule.sqlx {
+        Sqlx::Forbidden => out.push(violation(
+            "ADR 0016 R5",
+            rule.name,
+            format!(
+                "declares a {what}; only rizzy-storage, the domain crates and the native client \
+                 leaf crates depend on sqlx"
+            ),
+        )),
+        Sqlx::SqliteOnly => {
+            let drivers: Vec<&str> = features
+                .iter()
+                .copied()
+                .filter(|f| rules::matches_any(rules::SQLX_NON_SQLITE_FEATURES, f))
+                .collect();
+            if !drivers.is_empty() || rules::SQLX_NON_SQLITE_CRATES.contains(&dep.name.as_str()) {
+                out.push(violation(
+                    "ADR 0016 R5",
+                    rule.name,
+                    format!(
+                        "{what} enables a non-sqlite driver ({}); client leaf crates use only \
+                         the sqlite driver",
+                        if drivers.is_empty() {
+                            dep.name.clone()
+                        } else {
+                            drivers.join(", ")
+                        }
+                    ),
+                ));
+            }
+        }
+        Sqlx::Server => {}
     }
 }
 
@@ -619,6 +767,260 @@ fn lint_copy(krate: &str, manifest: &Manifest, workspace: &Manifest, out: &mut V
                 .to_owned(),
         ));
     }
+}
+
+/// R7 on the workspace side: `[workspace.lints.rust]` sets `unsafe_code = "forbid"`. `deny` is
+/// not enough: an in-source `#[allow]` or `#[expect]` can lower `deny`, never `forbid` (E0453).
+/// Also reports the lines the reader could not read in the root manifest and in
+/// `.cargo/config.toml`: a line hidden from it could hide the lint table or the alias.
+fn workspace_files(inputs: &Inputs, out: &mut Vec<Violation>) {
+    for (file, rule, m) in [
+        ("Cargo.toml", "ADR 0016 R7", &inputs.workspace_manifest),
+        (".cargo/config.toml", "ADR 0016 §5", &inputs.cargo_config),
+    ] {
+        for error in &m.errors {
+            out.push(violation(
+                rule,
+                "workspace",
+                format!("{file} {error}; check-deps cannot read it, so it cannot pass"),
+            ));
+        }
+    }
+    let key = "workspace.lints.rust.unsafe_code";
+    let entries: Vec<(&str, &str)> = inputs.workspace_manifest.under(key).collect();
+    let forbid = TomlValue::Str("forbid".to_owned());
+    let forbids = match entries.as_slice() {
+        [(k, v)] if *k == key => match manifest::parse_value(v) {
+            Ok(level @ TomlValue::Str(_)) => level == forbid,
+            // `{ level = "forbid", priority = N }`.
+            Ok(TomlValue::Table(fields)) => {
+                let levels: Vec<&TomlValue> = fields
+                    .iter()
+                    .filter(|(k, _)| k == "level")
+                    .map(|(_, v)| v)
+                    .collect();
+                levels == [&forbid]
+                    && fields.iter().all(|(k, v)| {
+                        k == "level" || (k == "priority" && matches!(v, TomlValue::Bare(_)))
+                    })
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    if !forbids {
+        out.push(violation(
+            "ADR 0016 R7",
+            "workspace",
+            "the root Cargo.toml must set `unsafe_code = \"forbid\"` in `[workspace.lints.rust]`; \
+             not `deny` or `allow`, because in-source attributes can lower `deny` but never \
+             `forbid`"
+                .to_owned(),
+        ));
+    }
+}
+
+/// ADR 0016 §5, R1 API side: every no-I/O crate has a `clippy.toml` that repeats every key of
+/// the root one (a crate-level `clippy.toml` replaces the root file, it does not merge with it),
+/// sets nothing else, and whose `disallowed-types` and `disallowed-methods` equal the ADR's
+/// lists ([`rules::NO_IO_CLIPPY_LISTS`]) plus any the root file has. Nothing may replace those
+/// files: no `.clippy.toml` beside them, no `CLIPPY_CONF_DIR` in `.cargo/config.toml`.
+fn clippy_configs(inputs: &Inputs, out: &mut Vec<Violation>) {
+    let root = &inputs.root_clippy;
+    let mut unreadable: Vec<String> = root.errors.clone();
+    for (list, _) in rules::NO_IO_CLIPPY_LISTS {
+        if let Some(Err(e)) = root.get(list).map(clippy_paths) {
+            unreadable.push(format!("`{list}`: {e}"));
+        }
+    }
+    for what in unreadable {
+        out.push(violation(
+            "ADR 0016 §5",
+            "workspace",
+            format!("clippy.toml {what}; check-deps cannot read it, so it cannot pass"),
+        ));
+    }
+    for hidden in &inputs.hidden_clippy_configs {
+        out.push(violation(
+            "ADR 0016 §5",
+            "workspace",
+            format!(
+                "{hidden} exists; clippy reads it instead of clippy.toml, so the checked R1 \
+                 lists would not apply. Remove it"
+            ),
+        ));
+    }
+    if let Some((key, _)) = inputs.cargo_config.entries.iter().find(|(k, v)| {
+        (k == "env" || k.starts_with("env."))
+            && (k.contains("CLIPPY_CONF_DIR") || v.contains("CLIPPY_CONF_DIR"))
+    }) {
+        out.push(violation(
+            "ADR 0016 §5",
+            "workspace",
+            format!(
+                ".cargo/config.toml sets `{key}`, which points clippy away from each crate's \
+                 clippy.toml and so switches off the R1 lists"
+            ),
+        ));
+    }
+    for (krate, file) in &inputs.clippy_configs {
+        match file {
+            Some(file) => clippy_file(krate, file, root, out),
+            None => out.push(violation(
+                "ADR 0016 §5",
+                krate,
+                "has no clippy.toml: a no-I/O crate carries one that repeats the root \
+                 clippy.toml and adds the R1 disallowed-types and disallowed-methods lists \
+                 (copy crates/rizzy-core/clippy.toml)"
+                    .to_owned(),
+            )),
+        }
+    }
+}
+
+/// One no-I/O crate's `clippy.toml` against the root one and the ADR 0016 §5 lists.
+fn clippy_file(krate: &str, file: &Manifest, root: &Manifest, out: &mut Vec<Violation>) {
+    let lists: Vec<&str> = rules::NO_IO_CLIPPY_LISTS.iter().map(|(l, _)| *l).collect();
+    let unreadable = |what: String| {
+        violation(
+            "ADR 0016 §5",
+            krate,
+            format!("clippy.toml {what}; check-deps cannot read it, so it cannot pass"),
+        )
+    };
+    for error in &file.errors {
+        out.push(unreadable(error.clone()));
+    }
+    for (key, value) in &root.entries {
+        if !lists.contains(&key.as_str()) && file.get(key) != Some(value.as_str()) {
+            out.push(violation(
+                "ADR 0016 §5",
+                krate,
+                format!(
+                    "its clippy.toml does not repeat the root clippy.toml's `{key} = {value}`; \
+                     a crate-level clippy.toml replaces the root one"
+                ),
+            ));
+        }
+    }
+    for (key, _) in &file.entries {
+        if !lists.contains(&key.as_str()) && root.get(key).is_none() {
+            out.push(violation(
+                "ADR 0016 §5",
+                krate,
+                format!(
+                    "its clippy.toml sets `{key}`, which the root clippy.toml does not; it must \
+                     be the root file plus the R1 lists"
+                ),
+            ));
+        }
+    }
+    for (list, adr) in rules::NO_IO_CLIPPY_LISTS {
+        let mut expected: BTreeSet<String> = adr.iter().map(|p| (*p).to_owned()).collect();
+        // A root list the crate file must repeat; an unreadable one is reported on the root.
+        if let Some(Ok(paths)) = root.get(list).map(clippy_paths) {
+            expected.extend(paths);
+        }
+        let paths = match file.get(list).map(clippy_paths) {
+            Some(Ok(paths)) => paths,
+            Some(Err(e)) => {
+                out.push(unreadable(format!("`{list}`: {e}")));
+                continue;
+            }
+            None => Vec::new(),
+        };
+        let got: BTreeSet<String> = paths.iter().cloned().collect();
+        let missing: Vec<&str> = expected.difference(&got).map(String::as_str).collect();
+        let extra: Vec<&str> = got.difference(&expected).map(String::as_str).collect();
+        if !missing.is_empty() || !extra.is_empty() || got.len() != paths.len() {
+            out.push(violation(
+                "ADR 0016 §5",
+                krate,
+                format!(
+                    "its clippy.toml `{list}` must list ADR 0016 §5's entries once each \
+                     (crates/xtask/src/rules.rs); missing [{}], not in the ADR [{}]",
+                    missing.join(", "),
+                    extra.join(", ")
+                ),
+            ));
+        }
+    }
+}
+
+/// The paths of a `disallowed-types` or `disallowed-methods` value: each entry is a path
+/// string or a `{ path = "...", reason = "..." }` table with only [`rules::CLIPPY_ENTRY_KEYS`].
+fn clippy_paths(value: &str) -> Result<Vec<String>, String> {
+    let TomlValue::Array(items) = manifest::parse_value(value)? else {
+        return Err("expected an array".to_owned());
+    };
+    items
+        .into_iter()
+        .map(|item| match item {
+            TomlValue::Str(path) => Ok(path),
+            TomlValue::Table(fields) => {
+                if let Some((key, _)) = fields
+                    .iter()
+                    .find(|(k, _)| !rules::CLIPPY_ENTRY_KEYS.contains(&k.as_str()))
+                {
+                    return Err(format!(
+                        "an entry sets `{key}`; only `{}` are allowed (`allow-invalid` would hide \
+                         the warning for a module path)",
+                        rules::CLIPPY_ENTRY_KEYS.join("`, `")
+                    ));
+                }
+                let paths: Vec<&TomlValue> = fields
+                    .iter()
+                    .filter(|(k, _)| k == "path")
+                    .map(|(_, v)| v)
+                    .collect();
+                match paths.as_slice() {
+                    [TomlValue::Str(path)] => Ok(path.clone()),
+                    _ => Err("an entry needs exactly one string `path`".to_owned()),
+                }
+            }
+            _ => Err("an entry is neither a path string nor a `{ path = ... }` table".to_owned()),
+        })
+        .collect()
+}
+
+/// ADR 0016 §5 ("fails when clippy's output contains 'found a module'"): the problems clippy
+/// reports with a `clippy.toml` entry. That is every line saying "found a module" (clippy then
+/// ignores the entry), and every other diagnostic located in a `clippy.toml`, such as a path
+/// that "does not refer to a reachable function". `-D warnings` does not make these errors
+/// (checked with clippy 1.94.1), so `cargo lint` passes with them.
+pub(crate) fn clippy_config_warnings(output: &str) -> Vec<String> {
+    let mut found = BTreeSet::new();
+    // The current diagnostic's first line, and whether it still has to be reported.
+    let mut message = "";
+    let mut pending = false;
+    for line in output.lines() {
+        let location = line.trim_start().strip_prefix("--> ");
+        if line.starts_with("warning") || line.starts_with("error") {
+            if pending {
+                found.insert(message.trim().to_owned());
+            }
+            message = line;
+            pending = line.contains("found a module");
+        } else if let Some(location) = location.filter(|l| in_clippy_toml(l)) {
+            found.insert(format!("{} (at {location})", message.trim()));
+            pending = false;
+        } else if line.contains("found a module") {
+            found.insert(line.trim().to_owned());
+        }
+    }
+    if pending {
+        found.insert(message.trim().to_owned());
+    }
+    found.into_iter().collect()
+}
+
+/// Whether a diagnostic location `path:line:column` is in a `clippy.toml` or `.clippy.toml`.
+fn in_clippy_toml(location: &str) -> bool {
+    let mut parts = location.trim().rsplitn(3, ':');
+    let (column, line, path) = (parts.next(), parts.next(), parts.next());
+    let number =
+        |s: Option<&str>| s.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
+    number(column) && number(line) && path.is_some_and(|p| p.ends_with("clippy.toml"))
 }
 
 /// ADR 0016 §5 (R1, build side): `cargo check-wasm` covers every no-I/O crate and

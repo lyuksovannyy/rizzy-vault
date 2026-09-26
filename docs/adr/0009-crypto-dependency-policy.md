@@ -182,3 +182,54 @@ None. All were answered by the owner on 2026-09-25; see [Owner decisions (2026-0
 - The getrandom README (the wasm32 backend must be enabled only in the final crate)
 - RustSec: RUSTSEC-2022-0093, RUSTSEC-2023-0071, RUSTSEC-2023-0096, RUSTSEC-2024-0344, RUSTSEC-2026-0097
 - [ADR 0003](0003-authentication-opaque.md), [ADR 0005](0005-symmetric-encryption-aead.md), [ADR 0013](0013-shared-client-core.md), [ADR 0016](0016-workspace-layout.md)
+
+## Amendments
+
+### 2026-09-26: `blake2` and `poly1305` pinned to switch on their `zeroize` features
+
+Owner decision of 2026-09-26, from the M1 step 1 review (finding hygiene-secrets#5). This entry adds two rows to [Allowed crate families for cryptography](#allowed-crate-families-for-cryptography) and two lines to [Required feature sets](#required-feature-sets), as those sections provide for. It changes nothing else in this ADR.
+
+**Added to the crate table:**
+
+| Family / crate | Use | Pin (M1) |
+|---|---|---|
+| `blake2` (RustCrypto) | Never called by our code. BLAKE2b inside `argon2`; declared only to switch on its `zeroize` feature | `=0.11.0` |
+| `poly1305` (RustCrypto) | Never called by our code. Poly1305 inside `chacha20poly1305`; declared only to switch on its `zeroize` feature | `=0.9.1` |
+
+**Added to the required feature sets:**
+
+- `blake2`: `default-features = false`, `["zeroize"]`.
+- `poly1305`: `default-features = false`, `["zeroize"]`.
+
+Both are declared in `[workspace.dependencies]` and as normal dependencies of `rizzy-core`, with a manifest comment that says why. Both versions are the ones `Cargo.lock` and `fuzz/Cargo.lock` had already resolved, so no new package or version enters either lockfile. In each lockfile the changes are the new `rizzy-core → blake2` and `rizzy-core → poly1305` entries and the new `poly1305 → zeroize` edge. Because the two declarations look unused, `cargo xtask check-deps` enforces them: its "ADR 0009 required feature sets" rule fails if `rizzy-core`'s own entry for either crate stops turning on `zeroize`, and it checks the other feature sets of [Required feature sets](#required-feature-sets) the same way.
+
+**Why.** Cargo unifies features per package, so a direct dependency that names a feature turns it on for the transitive copy too. The parents do not forward these two features:
+
+- `argon2` 0.6.0's `zeroize` feature is only `dep:zeroize`. Without blake2's own `zeroize`, the `Drop` of the Blake2b core (the chaining state `h` and the counter `t`) compiles to nothing (V, crate source). The hasher of Argon2's initial hash then ends holding H0, and the hasher in `blake2b_long` ends holding the Argon2 output tag: the local-unlock `a`, the KSF output, and the export and backup key `e`.
+- `chacha20poly1305` 0.11.0's `zeroize` feature forwards only `chacha20/zeroize`. Without poly1305's own `zeroize`, the `Poly1305` state, which holds the one-time key halves r and s, is not wiped on drop (V, crate source). That key is used for one nonce only, so it is worth little, but the fix costs nothing.
+
+**What this does not fix.** No feature reaches argon2 0.6.0's `blake2b_long` output buffer (`full_out`) and H' chain blocks, argon2's stack block holding G(H0 ‖ i ‖ l), or hmac 0.13's key block in `new_from_slice`. [CRYPTO.md §12.2](../CRYPTO.md#122-memory-hygiene) lists them as limits. If `argon2` starts forwarding `blake2/zeroize` and `chacha20poly1305` starts forwarding `poly1305/zeroize`, these two pins become unnecessary, and removing them is a reviewed change like any pin change.
+
+**Checklist record: `blake2` 0.11.0**
+
+1. **Need.** No construction of ours. Argon2id (RFC 9106) is built on BLAKE2b, and `argon2` already depended on this exact crate. It is declared only for the feature ([Memory hygiene](#memory-hygiene)).
+2. **Provenance.** RustCrypto Developers, repository `RustCrypto/hashes`: the same repository and authors as `sha2` and `sha1` (V, crate manifests). Release cadence, download counts and bus factor: U.
+3. **Audit history.** None found (U).
+4. **Advisories.** RustSec has one advisory for the crate, RUSTSEC-2019-0019: HMAC-BLAKE2 used the wrong block size before 0.8.1. It affected the HMAC use only, not the digest, and does not apply to 0.11.0 (V, RustSec advisory-db checkout of 2026-09-25). How quickly it was fixed: U. `cargo deny check` (cargo-deny 0.20.2) reports advisories ok (V, 2026-09-26).
+5. **`unsafe`.** One block, in `src/simd.rs` (`as_bytes`, a byte view of the SIMD-style vector type used on every target, wasm32 included). The `zeroize` feature adds no `unsafe` (V, crate source).
+6. **Constant time.** BLAKE2b is an add-rotate-xor design with no table lookups and no data-dependent branches (L, a property of the algorithm). There is no separate timing test.
+7. **Builds and hygiene.** Dependencies: `digest` 0.11 with `mac`, plus `digest/zeroize` through this feature, which `sha2` and `hmac` already switch on. No new package. License MIT OR Apache-2.0, MSRV 1.85 (V, crate manifest). With the feature on, `cargo check-wasm`, `cargo deny check` and `cargo xtask check-deps` pass, and `cargo tree -e features -p rizzy-core` shows `blake2 [zeroize]` on the host and on wasm32-unknown-unknown, with getrandom outside rizzy-core's normal and build closure on both (V, 2026-09-26).
+8. **Test vectors.** Covered through Argon2id: the RFC 9106 §5.3 Argon2id vector (`kdf.rs`) and the transcript vector (`tests/vectors/transcript.json`), which runs Argon2id at `kdf_id` 1. Every known-answer vector still replays byte for byte (V, 2026-09-26). The feature changes only `Drop`.
+
+**Checklist record: `poly1305` 0.9.1**
+
+1. **Need.** No construction of ours. It is the Poly1305 half of XChaCha20-Poly1305 ([CRYPTO.md §3](../CRYPTO.md#3-primitives)) and of HPKE's ChaCha20Poly1305, through `chacha20poly1305`, which already depended on this exact crate. It is declared only for the feature.
+2. **Provenance.** RustCrypto Developers, repository `RustCrypto/universal-hashes`: the same organisation and authors as `chacha20poly1305` (V, crate manifests). Release cadence, download counts and bus factor: U.
+3. **Audit history.** The NCC Group 2020 review of the RustCrypto AEADs covered `chacha20poly1305` on a much older version. Whether `poly1305` itself was in scope: U.
+4. **Advisories.** None in RustSec (V, advisory-db checkout of 2026-09-25, which has no entry for the crate). `cargo deny check` reports advisories ok (V, 2026-09-26).
+5. **`unsafe`.** In the AVX2 backend and its run-time detection (`src/backend/avx2*`, `src/backend/autodetect.rs`, x86 and x86_64 only) and in a fuzzing helper compiled only under `cfg(fuzzing)` or `cfg(test)`. **This feature switches on one more block:** the `Drop` impl calls `zeroize::zeroize_flat_type` on the whole state. wasm32 uses the portable `soft` backend (V, crate source).
+6. **Constant time.** Upstream writes both backends without secret-dependent branches or lookups (U). There is no separate timing test.
+7. **Builds and hygiene.** Dependencies: `universal-hash` 0.6, `zeroize` 1 (optional, now on; already in the tree at `=1.9.0`), and `cpufeatures` 0.3 on x86 and x86_64. No new package. License Apache-2.0 OR MIT, MSRV 1.85 (V, crate manifest). With the feature on, `cargo check-wasm`, `cargo deny check` and `cargo xtask check-deps` pass, and `cargo tree -e features -p rizzy-core` shows `poly1305 [zeroize]` on the host and on wasm32-unknown-unknown (V, 2026-09-26).
+8. **Test vectors.** Covered through XChaCha20-Poly1305 and HPKE: the envelope vectors (`tests/vectors/envelopes.json`, including the HPKE PSK device grant) and the transcript's `E_srv` and `E_local`. Every known-answer vector still replays byte for byte (V, 2026-09-26). The feature changes only `Drop`.
+
+cargo-deny's duplicate list is unchanged by this entry: the two crates add no package and no second version.

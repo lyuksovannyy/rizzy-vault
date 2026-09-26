@@ -1,13 +1,16 @@
 //! Signature tests: RFC 8032 through the wrappers, `verify_strict` behaviour, the container,
 //! independent known answers for every statement, a round trip and a bit-flip tamper test per
-//! statement, the structural rules of each statement, and the bundle chain rules.
+//! statement, the structural rules and length bounds of each statement, the `account-state`
+//! compare-and-swap and fork rules, and the bundle chain rules.
 //!
 //! Known answers marked "independent" were computed with a separate Python implementation
 //! written from CRYPTO.md (Python `cryptography` 50.0.1 Ed25519, `hashlib`), not from this code.
+//! The small-order-`R` signature uses RFC 8032 point arithmetic written in Python from the RFC.
 
 use super::bundle::FLAG_PQ_REQUIRED;
 use super::statements::{
-    OP_HEADER_MAX_LEN, OP_HEADER_MIN_LEN, SNAPSHOT_HEADER_MIN_LEN, WEB_CERT_MAX_LIFETIME_MS,
+    MAX_GRANT_ENVELOPE_LEN, OP_HEADER_MAX_LEN, OP_HEADER_MIN_LEN, SNAPSHOT_HEADER_MAX_LEN,
+    SNAPSHOT_HEADER_MIN_LEN, WEB_CERT_MAX_LIFETIME_MS,
 };
 use super::*;
 use crate::envelope::Purpose;
@@ -16,6 +19,7 @@ use crate::ids::{AccountId, DeviceId, SessionId, SymmetricKeyId};
 use crate::kdf::KdfId;
 use crate::keys::IdentityPublicKeys;
 use crate::labels;
+use crate::normalize::ServerOrigin;
 use crate::test_util::{hex, seeded_rng};
 
 // ---------------------------------------------------------------------------------------------
@@ -108,6 +112,21 @@ fn raw_wire<R: SignerRole>(label: labels::Label, body: &[u8], key: &SigningKey<R
     encode_wire(body, &[container]).unwrap()
 }
 
+/// Signs `bundle` with two containers, `first` then `second`, bypassing the writer's checks.
+fn two_signatures(
+    bundle: &PublicKeyBundle,
+    first: &IdentitySigningKey,
+    second: &IdentitySigningKey,
+) -> Vec<u8> {
+    let body = bundle.encode_body().unwrap();
+    let message = signed_message(labels::SIG_PUBLIC_KEY_BUNDLE, &body);
+    let containers = [
+        first.sign_message(&message).unwrap(),
+        second.sign_message(&message).unwrap(),
+    ];
+    encode_wire(&body, &containers).unwrap()
+}
+
 /// Every single-bit flip anywhere in `wire` is rejected, and every truncation too, without a
 /// panic. `verify` returns whether the statement was accepted.
 fn assert_every_bit_is_bound(wire: &[u8], verify: impl Fn(&[u8]) -> bool) {
@@ -140,6 +159,13 @@ const DEVICE_GRANT_ENVELOPE: &str = "0112cfc73380bda7467f0b0fa7b309c67b7686e76b8
 const KEY_GRANT_WIRE: &str = "0000008a000100048b4f02d8c0c813226bd2f5ab5c54e8cdcfc73380bda7467f0b0fa7b309c67b76000000620112cfc73380bda7467f0b0fa7b309c67b7686e76b8dd088dabf46d94d4820a251861376de69c3a36f2e53f8bffcdb519e008af61a94cfae79e703dad5b2b8bd10f7ec486c68920bdee3ef0a4f2c6fffdecb5ae7f9f8b8318632e6fa830e56af4a7201018b4f02d8c0c813226bd2f5ab5c54e8cdf09cf8d2c2eade4f6bfed14a55468fb995267fdd05bb16884187b6e9f40213eff4e71275b6f58851979039130339250ddd6bcd359a4c0371b7e2cc3aaf530b01";
 const DEVICE_AUTH_CONTAINER: &str = "0101e0f805f5eb8d09a48be91ca1e27455a3e92d41c927db6b42f37bd8ebf923ccf38b36324fe2e5a5abcac89c5a6fb89fd9db1c033e4efe11a02365c2b659c263af77f14ad816c8f6ecee1bdee58235c607";
 const DEVICE_REQUEST_CONTAINER: &str = "0101e0f805f5eb8d09a48be91ca1e27455a3dcd5aee16ff96a8c9d42017f636b077567fc560e279488e22ad300d12e8707d0102fc2e4e5a9a99e6525e51ee8d45d0762f8fbb3494e57177c650fcedfc22707";
+/// The signed message of the `device-revocation` in [`verify_strict_rejects_a_small_order_r`].
+const SMALL_ORDER_R_MESSAGE: &str = "72697a7a792d7661756c742f76312f7369672f6465766963652d7265766f636174696f6e0000010a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e00000000000000050000018bcfe56800";
+/// `R ‖ s` over [`SMALL_ORDER_R_MESSAGE`] under the identity key (seed `0x66…`): `R` is the
+/// identity point `01 00…00` (small order), `s = k·a mod ℓ` with
+/// `k = SHA-512(R ‖ A ‖ M) mod ℓ` and `a` the clamped secret scalar. Independent (RFC 8032
+/// arithmetic written from the RFC, in Python).
+const SMALL_ORDER_R_SIGNATURE: &str = "01000000000000000000000000000000000000000000000000000000000000003104f970727335805c48d5b929ce61c8c944929cb8174d6d508cebfdd3a8830b";
 
 // ---------------------------------------------------------------------------------------------
 // RFC 8032 and verify_strict (CRYPTO.md §10.2, §15 item 2)
@@ -190,8 +216,12 @@ fn rfc8032_section_7_1_through_the_wrappers() {
     }
 }
 
-/// `verify_strict` rejects a malleated signature (`s + ℓ`), and key parsing rejects small-order
-/// and non-canonically encoded keys.
+/// A malleated signature (`s + ℓ`) is rejected, and key parsing rejects small-order and
+/// non-canonically encoded keys.
+///
+/// The `s + ℓ` case checks that `s` is canonical, which `ed25519-dalek`'s plain `verify` also
+/// does; it does not tell `verify_strict` from `verify`.
+/// [`verify_strict_rejects_a_small_order_r`] does.
 #[test]
 fn strict_verification_and_strict_keys() {
     let key = DeviceSigningKey::from_seed(&[0x21; 32]);
@@ -241,6 +271,51 @@ fn strict_verification_and_strict_keys() {
         }
     }
     assert!(found > 0, "the test found non-canonical encodings to try");
+}
+
+/// Only `verify_strict` rejects this signature: its `R` is the identity point (small order),
+/// with `s = k·a mod ℓ`, over a real `device-revocation` message. The cofactorless equation of
+/// plain verification, `[s]B = R + [k]A`, holds, so `ed25519-dalek`'s `verify` accepts it; this
+/// test fails if verification ever stops using `verify_strict` (§10.2, ADR 0006 decision 10).
+#[test]
+fn verify_strict_rejects_a_small_order_r() {
+    let revocation = DeviceRevocation {
+        account_id: account(),
+        device_id: device(),
+        last_accepted_device_seq: 5,
+        revoked_at_ms: CREATED,
+    };
+    let body = revocation.encode_body().unwrap();
+    let message = signed_message(labels::SIG_DEVICE_REVOCATION, &body);
+    assert_eq!(message, hex(SMALL_ORDER_R_MESSAGE));
+    let signature: [u8; SIGNATURE_LEN] = hex(SMALL_ORDER_R_SIGNATURE).try_into().unwrap();
+    let mut identity_point = [0u8; 32];
+    identity_point[0] = 1;
+    assert_eq!(signature[..32], identity_point);
+
+    // The forgery is real: plain verification accepts it, strict verification does not.
+    let dalek =
+        ed25519_dalek::VerifyingKey::from_bytes(identity().verifying_key().as_bytes()).unwrap();
+    let dalek_signature = ed25519_dalek::Signature::from_bytes(&signature);
+    assert!(ed25519_dalek::Verifier::verify(&dalek, &message, &dalek_signature).is_ok());
+    assert!(dalek.verify_strict(&message, &dalek_signature).is_err());
+
+    // This module rejects it: in the container check, and through a statement verifier.
+    let container = SignatureContainer {
+        signer: identity().key_id(),
+        signature,
+    };
+    assert_eq!(
+        identity()
+            .verifying_key()
+            .verify_container(&message, &container),
+        Err(VerifyError::BadSignature)
+    );
+    let wire = encode_wire(&body, &[container]).unwrap();
+    assert_eq!(
+        DeviceRevocation::verify(&wire, identity().verifying_key()).map(|_| ()),
+        Err(VerifyError::BadSignature)
+    );
 }
 
 #[test]
@@ -566,15 +641,16 @@ fn account_state_field_rules() {
 #[test]
 fn account_state_compare_and_swap_rules() {
     let base = state();
-    // Only state_seq and device_set_hash changed: re-apply.
+    // A newer state where only state_seq and device_set_hash changed: re-apply.
     let reapply = AccountState {
         state_seq: 2,
         device_set_hash: [7; 32],
         ..state()
     };
     assert_eq!(base.cas_retry(&reapply), CasRetry::Reapply);
-    assert_eq!(base.cas_retry(&base), CasRetry::Reapply);
-    // Anything else changed: restart.
+    // The same state again: a spurious conflict, re-applied.
+    assert_eq!(base.cas_retry(&base.clone()), CasRetry::Reapply);
+    // A newer state where anything else changed: restart.
     let restart: Vec<AccountState> = vec![
         AccountState {
             account_id: AccountId::from_bytes([1; 16]),
@@ -625,12 +701,25 @@ fn account_state_compare_and_swap_rules() {
     for current in &restart {
         assert_eq!(base.cas_retry(current), CasRetry::Restart, "{current:?}");
     }
-    // Same state_seq, other content: a fork of the signed state.
-    let fork = AccountState {
-        password_epoch: 1,
-        ..state()
-    };
-    assert_eq!(base.cas_retry(&fork), CasRetry::Restart);
+    // Same state_seq, other content: a fork of the signed state, never re-applied. The second
+    // case is the dropped-device attack: devices A and B race from one state, A's enrolment
+    // wins, and the server serves B's losing state at the same state_seq to a device that
+    // built on A's; it differs only in device_set_hash, and re-applying on it would drop A's
+    // device from the signed set.
+    let forks = [
+        AccountState {
+            password_epoch: 1,
+            ..state()
+        },
+        AccountState {
+            device_set_hash: [7; 32],
+            ..state()
+        },
+    ];
+    for fork in &forks {
+        assert_eq!(base.cas_retry(fork), CasRetry::Fork, "{fork:?}");
+        assert_eq!(fork.cas_retry(&base), CasRetry::Fork, "{fork:?}");
+    }
     // Older than the base: rollback.
     let newer = AccountState {
         state_seq: 5,
@@ -641,6 +730,55 @@ fn account_state_compare_and_swap_rules() {
     assert!(!base.is_rollback(1, 0));
     assert!(base.is_rollback(2, 0));
     assert!(base.is_rollback(1, 1));
+}
+
+/// `is_fork` against the persisted state (§10.2, §11.3 step 2.5, INV-25): the same
+/// `state_seq` with different content, however small the difference, and only then.
+#[test]
+fn account_state_fork_against_the_persisted_state() {
+    let persisted = state();
+    let wire = persisted.sign(&identity()).unwrap();
+    let persisted = AccountState::verify(&wire, identity().verifying_key(), 0).unwrap();
+    // Two verified states at one state_seq, differing only in device_set_hash: a fork.
+    let other = AccountState {
+        device_set_hash: [7; 32],
+        ..state()
+    };
+    let other_wire = other.sign(&identity()).unwrap();
+    let other = AccountState::verify(&other_wire, identity().verifying_key(), 0).unwrap();
+    assert_ne!(other.message_hash(), persisted.message_hash());
+    assert!(other.is_fork(&persisted));
+    assert!(persisted.is_fork(&other));
+    assert!(!other.is_rollback(persisted.state_seq, persisted.settings_seq));
+    // Any single other field at the same state_seq is a fork too.
+    for fork in [
+        AccountState {
+            password_epoch: 1,
+            ..state()
+        },
+        AccountState {
+            bundle_hash: [1; 32],
+            ..state()
+        },
+        AccountState {
+            recovery_enabled: false,
+            ..state()
+        },
+    ] {
+        assert!(fork.is_fork(&persisted), "{fork:?}");
+    }
+    // The same state fetched again is not a fork; neither is a newer or an older one (a step,
+    // or a rollback that is_rollback reports).
+    let again = AccountState::verify(&wire, identity().verifying_key(), 0).unwrap();
+    assert!(!again.is_fork(&persisted));
+    let newer = AccountState {
+        state_seq: 2,
+        device_set_hash: [7; 32],
+        ..state()
+    };
+    assert!(!newer.is_fork(&persisted));
+    assert!(!persisted.is_fork(&newer));
+    assert!(persisted.is_rollback(newer.state_seq, newer.settings_seq));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -712,6 +850,53 @@ fn record_header_bounds() {
     assert!(SnapshotStatement::verify(&short, device_key().verifying_key()).is_err());
 }
 
+/// `u32` length prefix of `len` bytes.
+fn length_prefix(len: usize) -> [u8; 4] {
+    u32::try_from(len).unwrap().to_be_bytes()
+}
+
+/// The length bounds on untrusted op and snapshot input, on the verify path: the outer bound
+/// on the whole body (checked before any parsing) and the inner bound on the header's own
+/// length prefix. Each wire is validly signed, so only the bound can reject it.
+#[test]
+fn record_header_bounds_on_the_verify_path() {
+    type Verify = fn(&[u8]) -> Result<(), VerifyError>;
+    let op: Verify = |w| OpStatement::verify(w, device_key().verifying_key()).map(|_| ());
+    let snapshot: Verify =
+        |w| SnapshotStatement::verify(w, device_key().verifying_key()).map(|_| ());
+    // bytes(header) ‖ 64 bytes of hashes, with the header's length prefix claiming `claimed`.
+    let body = |claimed: usize, header_len: usize, extra: usize| {
+        let mut body = length_prefix(claimed).to_vec();
+        body.resize(4 + header_len, 1);
+        body.resize(4 + header_len + 64 + extra, 3);
+        body
+    };
+    for (label, max, verify) in [
+        (labels::SIG_OP, OP_HEADER_MAX_LEN, op),
+        (labels::SIG_SNAPSHOT, SNAPSHOT_HEADER_MAX_LEN, snapshot),
+    ] {
+        let wire = |body: &[u8]| raw_wire(label, body, &device_key());
+        // A header at its bound verifies.
+        assert_eq!(verify(&wire(&body(max, max, 0))), Ok(()));
+        // A header one byte over, in a body of that length: too long.
+        assert_eq!(
+            verify(&wire(&body(max + 1, max + 1, 0))),
+            Err(VerifyError::Malformed(ParseError::TooLong))
+        );
+        // A header at its bound with one trailing byte: the outer bound rejects the body as
+        // too long before the reader would find the trailing byte.
+        assert_eq!(
+            verify(&wire(&body(max, max, 1))),
+            Err(VerifyError::Malformed(ParseError::TooLong))
+        );
+        // A short body whose header length prefix claims one byte over: the inner bound.
+        assert_eq!(
+            verify(&wire(&body(max + 1, 100, 0))),
+            Err(VerifyError::Malformed(ParseError::TooLong))
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // key-grant
 // ---------------------------------------------------------------------------------------------
@@ -742,10 +927,20 @@ fn key_grant_known_answer_round_trip_and_tamper() {
     assert!(KeyGrant::verify(&by_identity, identity().verifying_key()).is_ok());
 }
 
+/// A `key-grant` body built by hand: `u16(purpose) ‖ sender id ‖ recipient id ‖
+/// bytes(envelope)`.
+fn grant_body(purpose: u16, sender: &PublicKeyId, recipient: &[u8], envelope: &[u8]) -> Vec<u8> {
+    let mut body = purpose.to_be_bytes().to_vec();
+    body.extend_from_slice(sender.as_bytes());
+    body.extend_from_slice(recipient);
+    crate::encoding::put_bytes(&mut body, envelope).unwrap();
+    body
+}
+
 #[test]
 fn key_grant_structural_rules() {
     let envelope = hex(DEVICE_GRANT_ENVELOPE);
-    // Only the signed-grant purposes, with an HPKE envelope of that purpose's mode.
+    // An envelope whose mode (0x12) is not on the purpose's allow-list.
     for purpose in [
         Purpose::ItemOp,
         Purpose::VaultKeyMemberGrant,
@@ -765,11 +960,7 @@ fn key_grant_structural_rules() {
 
     // Hand-built bodies: recipient id not the envelope's, sender id not the signer's.
     let body = |purpose: u16, sender: &PublicKeyId, recipient: &[u8]| {
-        let mut body = purpose.to_be_bytes().to_vec();
-        body.extend_from_slice(sender.as_bytes());
-        body.extend_from_slice(recipient);
-        crate::encoding::put_bytes(&mut body, &envelope).unwrap();
-        body
+        grant_body(purpose, sender, recipient, &envelope)
     };
     let wrong_recipient = raw_wire(
         labels::SIG_KEY_GRANT,
@@ -795,24 +986,162 @@ fn key_grant_structural_rules() {
         &sender_key(),
     );
     assert!(KeyGrant::verify(&unknown_purpose, sender_key().verifying_key()).is_err());
+
+    // Purposes whose allow-list holds the envelope's mode (0x12) but whose grants are not
+    // signed: only the signed-grant check rejects them.
+    for purpose in [Purpose::ResyncTransfer, Purpose::PairingTransferSealed] {
+        assert_eq!(
+            KeyGrant::sign(purpose, &sender_key(), &envelope),
+            Err(SignError::Encode(EncodeError::InvalidField)),
+            "{}",
+            purpose.name()
+        );
+        let wire = raw_wire(
+            labels::SIG_KEY_GRANT,
+            &body(purpose.id(), &sender_key().key_id(), &envelope[2..18]),
+            &sender_key(),
+        );
+        assert_eq!(
+            KeyGrant::verify(&wire, sender_key().verifying_key()).map(|_| ()),
+            Err(VerifyError::Malformed(ParseError::InvalidValue)),
+            "{}",
+            purpose.name()
+        );
+    }
+}
+
+/// The signer's role must fit the purpose (§10.2 `key-grant` row): a password-verifier grant is
+/// a device key's, a member grant the identity key's, and a device grant either's (the kind-4
+/// case is in [`key_grant_known_answer_round_trip_and_tamper`]).
+#[test]
+fn key_grant_signer_role_fits_the_purpose() {
+    let envelope = hex(DEVICE_GRANT_ENVELOPE);
+    // A member grant is sealed in base mode (0x10) to the grantee's identity X25519 key.
+    let mut member_envelope = envelope.clone();
+    member_envelope[1] = 0x10;
+    let pv = KeyGrant::sign(Purpose::PasswordVerifierGrant, &sender_key(), &envelope).unwrap();
+    let verified = KeyGrant::verify(&pv, sender_key().verifying_key()).unwrap();
+    assert_eq!(verified.purpose(), Purpose::PasswordVerifierGrant);
+    let member =
+        KeyGrant::sign(Purpose::VaultKeyMemberGrant, &identity(), &member_envelope).unwrap();
+    let verified = KeyGrant::verify(&member, identity().verifying_key()).unwrap();
+    assert_eq!(verified.purpose(), Purpose::VaultKeyMemberGrant);
+    // The other roles: the writer refuses, and a hand-signed statement does not verify.
+    assert_eq!(
+        KeyGrant::sign(Purpose::PasswordVerifierGrant, &identity(), &envelope),
+        Err(SignError::Encode(EncodeError::InvalidField))
+    );
+    let pv_by_identity = raw_wire(
+        labels::SIG_KEY_GRANT,
+        &grant_body(
+            Purpose::PasswordVerifierGrant.id(),
+            &identity().key_id(),
+            &envelope[2..18],
+            &envelope,
+        ),
+        &identity(),
+    );
+    assert_eq!(
+        KeyGrant::verify(&pv_by_identity, identity().verifying_key()).map(|_| ()),
+        Err(VerifyError::WrongSigner)
+    );
+    assert_eq!(
+        KeyGrant::sign(
+            Purpose::VaultKeyMemberGrant,
+            &sender_key(),
+            &member_envelope
+        ),
+        Err(SignError::Encode(EncodeError::InvalidField))
+    );
+    let member_by_device = raw_wire(
+        labels::SIG_KEY_GRANT,
+        &grant_body(
+            Purpose::VaultKeyMemberGrant.id(),
+            &sender_key().key_id(),
+            &member_envelope[2..18],
+            &member_envelope,
+        ),
+        &sender_key(),
+    );
+    assert_eq!(
+        KeyGrant::verify(&member_by_device, sender_key().verifying_key()).map(|_| ()),
+        Err(VerifyError::WrongSigner)
+    );
+}
+
+/// The length bound on a key grant's envelope, when signing and on the verify path: the outer
+/// bound on the whole body and the inner bound on the envelope's own length prefix.
+#[test]
+fn key_grant_envelope_bound() {
+    let envelope = hex(DEVICE_GRANT_ENVELOPE);
+    // A valid HPKE header, padded to the given length.
+    let padded = |len: usize| {
+        let mut e = envelope.clone();
+        e.resize(len, 0x5a);
+        e
+    };
+    let oversized = padded(MAX_GRANT_ENVELOPE_LEN + 1);
+    assert_eq!(
+        KeyGrant::sign(Purpose::AccountKeyDeviceGrant, &sender_key(), &oversized),
+        Err(SignError::Encode(EncodeError::InvalidField))
+    );
+    let verify = |body: &[u8]| {
+        let wire = raw_wire(labels::SIG_KEY_GRANT, body, &sender_key());
+        KeyGrant::verify(&wire, sender_key().verifying_key()).map(|_| ())
+    };
+    // purpose ‖ sender id ‖ recipient id ‖ u32 length ‖ `len` envelope bytes ‖ `extra` bytes.
+    let body = |claimed: usize, envelope: &[u8], extra: usize| {
+        let mut body = Purpose::AccountKeyDeviceGrant.id().to_be_bytes().to_vec();
+        body.extend_from_slice(sender_key().key_id().as_bytes());
+        body.extend_from_slice(&envelope[2..18]);
+        body.extend_from_slice(&length_prefix(claimed));
+        body.extend_from_slice(envelope);
+        body.resize(body.len() + extra, 0);
+        body
+    };
+    // An envelope one byte over, in a body of that length.
+    assert_eq!(
+        verify(&body(oversized.len(), &oversized, 0)),
+        Err(VerifyError::Malformed(ParseError::TooLong))
+    );
+    // An envelope of exactly its bound signs and verifies: both bounds are inclusive. (Only
+    // the HPKE header is parsed here, so the padding is accepted.)
+    let at_bound = padded(MAX_GRANT_ENVELOPE_LEN);
+    let signed = KeyGrant::sign(Purpose::AccountKeyDeviceGrant, &sender_key(), &at_bound).unwrap();
+    assert!(KeyGrant::verify(&signed, sender_key().verifying_key()).is_ok());
+    assert_eq!(verify(&body(at_bound.len(), &at_bound, 0)), Ok(()));
+    // An envelope at its bound with one trailing byte: the outer bound.
+    assert_eq!(
+        verify(&body(at_bound.len(), &at_bound, 1)),
+        Err(VerifyError::Malformed(ParseError::TooLong))
+    );
+    // A short body whose length prefix claims one byte over: the inner bound.
+    assert_eq!(
+        verify(&body(MAX_GRANT_ENVELOPE_LEN + 1, &envelope, 0)),
+        Err(VerifyError::Malformed(ParseError::TooLong))
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
 // device-auth and device-request
 // ---------------------------------------------------------------------------------------------
 
-fn auth() -> DeviceAuth<'static> {
+fn vault_origin() -> ServerOrigin {
+    ServerOrigin::parse("https://vault.example").unwrap()
+}
+
+fn auth_for(origin: &ServerOrigin) -> DeviceAuth<'_> {
     DeviceAuth {
-        server_origin: "https://vault.example",
+        server_origin: origin,
         account_id: account(),
         device_id: device(),
         challenge: [0xcc; 32],
     }
 }
 
-fn request() -> DeviceRequest<'static> {
+fn request_for(origin: &ServerOrigin) -> DeviceRequest<'_> {
     DeviceRequest {
-        server_origin: "https://vault.example",
+        server_origin: origin,
         account_id: account(),
         device_id: device(),
         session_id: SessionId::from_bytes([0x5e; 16]),
@@ -825,6 +1154,8 @@ fn request() -> DeviceRequest<'static> {
 
 #[test]
 fn device_auth_known_answer_and_bindings() {
+    let origin = vault_origin();
+    let auth = || auth_for(&origin);
     let container = auth().sign(&device_key()).unwrap();
     assert_eq!(
         container.to_bytes().as_slice(),
@@ -834,8 +1165,9 @@ fn device_auth_known_answer_and_bindings() {
     let pk = *device_key().verifying_key();
     auth().verify(&bytes, &pk).unwrap();
     // The origin binding: a signature for server A does not verify at server B.
+    let evil = ServerOrigin::parse("https://evil.example").unwrap();
     let at_b = DeviceAuth {
-        server_origin: "https://evil.example",
+        server_origin: &evil,
         ..auth()
     };
     assert_eq!(at_b.verify(&bytes, &pk), Err(VerifyError::BadSignature));
@@ -857,18 +1189,59 @@ fn device_auth_known_answer_and_bindings() {
         assert!(other.verify(&bytes, &pk).is_err(), "{other:?}");
     }
     assert_every_bit_is_bound(&bytes, |c| auth().verify(c, &pk).is_ok());
-    assert!(
-        DeviceAuth {
-            server_origin: "",
-            ..auth()
-        }
-        .sign(&device_key())
-        .is_err()
-    );
+}
+
+/// The signed origin is always the §2 canonical form (a [`ServerOrigin`]): every spelling of
+/// the same origin signs and verifies the same bytes, so a client that passes the URL as it was
+/// typed still matches the server's canonical rebuild, and a string that is not an origin
+/// cannot be signed at all.
+#[test]
+fn device_auth_and_request_sign_the_canonical_origin() {
+    let pk = *device_key().verifying_key();
+    for spelling in [
+        "https://vault.example",
+        "HTTPS://Vault.Example",
+        "https://vault.example/",
+        "https://VAULT.example:443",
+        "https://vault.example:443/",
+    ] {
+        let origin = ServerOrigin::parse(spelling).unwrap();
+        assert_eq!(origin.as_str(), "https://vault.example", "{spelling}");
+        let container = auth_for(&origin).sign(&device_key()).unwrap().to_bytes();
+        assert_eq!(
+            container.as_slice(),
+            hex(DEVICE_AUTH_CONTAINER).as_slice(),
+            "{spelling}"
+        );
+        auth_for(&vault_origin()).verify(&container, &pk).unwrap();
+        let container = request_for(&origin).sign(&device_key()).unwrap().to_bytes();
+        assert_eq!(
+            container.as_slice(),
+            hex(DEVICE_REQUEST_CONTAINER).as_slice(),
+            "{spelling}"
+        );
+        request_for(&vault_origin())
+            .verify(&container, &pk)
+            .unwrap();
+    }
+    for not_an_origin in [
+        "",
+        "vault.example",
+        " https://vault.example",
+        "https://vault.example/api",
+        "wss://vault.example",
+    ] {
+        assert!(
+            ServerOrigin::parse(not_an_origin).is_err(),
+            "{not_an_origin:?}"
+        );
+    }
 }
 
 #[test]
 fn device_request_known_answer_and_bindings() {
+    let origin = vault_origin();
+    let request = || request_for(&origin);
     let container = request().sign(&device_key()).unwrap();
     assert_eq!(
         container.to_bytes().as_slice(),
@@ -877,9 +1250,10 @@ fn device_request_known_answer_and_bindings() {
     let bytes = container.to_bytes();
     let pk = *device_key().verifying_key();
     request().verify(&bytes, &pk).unwrap();
+    let port_8443 = ServerOrigin::parse("https://vault.example:8443").unwrap();
     let others = [
         DeviceRequest {
-            server_origin: "https://vault.example:8443",
+            server_origin: &port_8443,
             ..request()
         },
         DeviceRequest {
@@ -913,6 +1287,19 @@ fn device_request_known_answer_and_bindings() {
         assert!(other.verify(&bytes, &pk).is_err(), "{other:?}");
     }
     assert_every_bit_is_bound(&bytes, |c| request().verify(c, &pk).is_ok());
+    // An empty method is refused.
+    let no_method = DeviceRequest {
+        method: "",
+        ..request()
+    };
+    assert_eq!(
+        no_method.sign(&device_key()),
+        Err(SignError::Encode(EncodeError::InvalidField))
+    );
+    assert_eq!(
+        no_method.verify(&bytes, &pk),
+        Err(VerifyError::Malformed(ParseError::InvalidValue))
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -962,7 +1349,8 @@ fn first_bundle_known_answer_round_trip_and_tamper() {
     // Only the identity key inside the bundle may self-sign it.
     let other = IdentitySigningKey::from_seed(&[0x67; 32]);
     assert_eq!(first_bundle().sign(&other), Err(SignError::WrongKey));
-    // The state commits to it.
+    // The state commits to it: account, identity_epoch and bundle_hash, each on its own. Each
+    // negative case differs from the matching state in one field only.
     assert!(state().matches_bundle(&verified));
     assert!(
         !AccountState {
@@ -970,6 +1358,39 @@ fn first_bundle_known_answer_round_trip_and_tamper() {
             ..state()
         }
         .matches_bundle(&verified)
+    );
+    assert!(
+        !AccountState {
+            account_id: AccountId::from_bytes([0x0b; 16]),
+            ..state()
+        }
+        .matches_bundle(&verified)
+    );
+    for bit in 0..256 {
+        let mut bundle_hash = state().bundle_hash;
+        bundle_hash[bit / 8] ^= 1 << (bit % 8);
+        assert!(
+            !AccountState {
+                bundle_hash,
+                ..state()
+            }
+            .matches_bundle(&verified),
+            "bit {bit}"
+        );
+    }
+    // Another valid bundle of the same account and identity_epoch (the silent successor) is
+    // not the one the state names (§15 item 5).
+    let next = successor(&verified, 0, &identity(), x25519(0x77), Some(x25519(0x44)));
+    let (next, _) = verified
+        .verify_successor(&next.sign(&identity()).unwrap())
+        .unwrap();
+    assert!(!state().matches_bundle(&next));
+    assert!(
+        AccountState {
+            bundle_hash: *next.hash(),
+            ..state()
+        }
+        .matches_bundle(&next)
     );
 }
 
@@ -1047,6 +1468,32 @@ fn bundle_structural_rules() {
     ] {
         assert!(bad.sign(&identity()).is_err(), "{bad:?}");
     }
+    // A second container only on a bundle that can be an identity change (bundle_seq ≥ 2 and
+    // identity_epoch ≥ 1): the first bundle, and a later bundle of identity_epoch 0, are
+    // rejected with two, even when the first container verifies.
+    let first_wire = first_bundle().sign(&identity()).unwrap();
+    let extra = [
+        first_wire.as_slice(),
+        &first_wire[first_wire.len() - CONTAINER_LEN..],
+    ]
+    .concat();
+    assert_eq!(
+        PublicKeyBundle::verify_self_signed(&extra).map(|_| ()),
+        Err(VerifyError::Mismatch)
+    );
+    let other = IdentitySigningKey::from_seed(&[0x68; 32]);
+    assert_eq!(
+        PublicKeyBundle::verify_self_signed(&two_signatures(&first_bundle(), &identity(), &other))
+            .map(|_| ()),
+        Err(VerifyError::Mismatch)
+    );
+    let epoch_0 = successor(&pinned_first(), 0, &identity(), x25519(0x77), None);
+    assert_eq!(
+        PublicKeyBundle::verify_self_signed(&two_signatures(&epoch_0, &identity(), &other))
+            .map(|_| ()),
+        Err(VerifyError::Mismatch)
+    );
+
     // pq_required round-trips.
     let pq = PublicKeyBundle {
         pq_required: true,
@@ -1078,18 +1525,18 @@ fn a_silent_successor_keeps_both_identity_keys() {
             .map(|_| ()),
         Err(BundleChainError::IdentityEpochMismatch)
     );
-    // A second signature on a bundle that keeps its keys is rejected.
+    // A second signature on a bundle that keeps its keys: the writer refuses it, and the
+    // reader rejects it (identity_epoch 0 cannot be an identity change).
+    assert_eq!(
+        next.sign_identity_change(&pinned, &identity(), &identity()),
+        Err(SignError::WrongKey)
+    );
     let old = IdentitySigningKey::from_seed(&[0x68; 32]);
-    let doubled = next
-        .sign_identity_change(&identity(), &old)
-        .unwrap_or_default();
-    assert!(doubled.is_empty(), "sign_identity_change refuses epoch 0");
-    let body = next.encode_body().unwrap();
-    let message = signed_message(labels::SIG_PUBLIC_KEY_BUNDLE, &body);
-    let first = identity().sign_message(&message).unwrap();
-    let second = old.sign_message(&message).unwrap();
-    let doubled = encode_wire(&body, &[first, second]).unwrap();
-    assert!(pinned.verify_successor(&doubled).is_err());
+    let doubled = two_signatures(&next, &identity(), &old);
+    assert_eq!(
+        pinned.verify_successor(&doubled).map(|_| ()),
+        Err(BundleChainError::Invalid(VerifyError::Mismatch))
+    );
 }
 
 #[test]
@@ -1100,7 +1547,7 @@ fn an_identity_change_needs_both_signatures() {
 
     // Both signatures, the new key's first: accepted, and reported as an identity change.
     let wire = next
-        .sign_identity_change(&new_identity, &identity())
+        .sign_identity_change(&pinned, &new_identity, &identity())
         .unwrap();
     let standalone = PublicKeyBundle::verify_self_signed(&wire).unwrap();
     assert!(standalone.has_predecessor_signature());
@@ -1117,7 +1564,7 @@ fn an_identity_change_needs_both_signatures() {
     );
     // The second signature by some other key (an attacker's): rejected.
     let attacker = IdentitySigningKey::from_seed(&[0x69; 32]);
-    let by_attacker = next.sign_identity_change(&new_identity, &attacker).unwrap();
+    let by_attacker = two_signatures(&next, &new_identity, &attacker);
     assert_eq!(
         pinned.verify_successor(&by_attacker).map(|_| ()),
         Err(BundleChainError::IdentityChangeNotSigned)
@@ -1134,7 +1581,63 @@ fn an_identity_change_needs_both_signatures() {
         pinned.verify_successor(&swapped).map(|_| ()),
         Err(BundleChainError::Invalid(VerifyError::WrongSigner))
     );
-    // Changing only the X25519 key is an identity change too.
+    // New keys without identity_epoch + 1.
+    let skipped = successor(&pinned, 2, &new_identity, x25519(0x78), None);
+    assert_eq!(
+        pinned
+            .verify_successor(&two_signatures(&skipped, &new_identity, &identity()))
+            .map(|_| ()),
+        Err(BundleChainError::IdentityEpochMismatch)
+    );
+    // The writer refuses a "change" to the same key, or signing with a key not in the bundle,
+    // or a previous key that is not the predecessor's.
+    assert_eq!(
+        next.sign_identity_change(&pinned, &new_identity, &new_identity),
+        Err(SignError::WrongKey)
+    );
+    assert_eq!(
+        next.sign_identity_change(&pinned, &identity(), &new_identity),
+        Err(SignError::WrongKey)
+    );
+    assert_eq!(
+        next.sign_identity_change(&pinned, &new_identity, &attacker),
+        Err(SignError::WrongKey)
+    );
+    // The writer refuses a bundle that is not the predecessor's successor: skipping an
+    // identity_epoch, another account, another position, or another predecessor.
+    let not_successors = [
+        skipped,
+        PublicKeyBundle {
+            account_id: AccountId::from_bytes([0x0b; 16]),
+            ..next.clone()
+        },
+        PublicKeyBundle {
+            bundle_seq: 3,
+            ..next.clone()
+        },
+        PublicKeyBundle {
+            prev_bundle_hash: [0x5a; 32],
+            ..next.clone()
+        },
+    ];
+    for bad in not_successors {
+        assert_eq!(
+            bad.sign_identity_change(&pinned, &new_identity, &identity()),
+            Err(SignError::Encode(EncodeError::InvalidField)),
+            "{bad:?}"
+        );
+    }
+}
+
+/// An identity change (`identity_epoch + 1`) replaces **both** identity keys (§10.2, §11.6
+/// step 2). The reader rejects a change of only one, even when it is properly signed, and the
+/// writer refuses to make one.
+#[test]
+fn an_identity_change_replaces_both_identity_keys() {
+    let pinned = pinned_first();
+    let new_identity = IdentitySigningKey::from_seed(&[0x67; 32]);
+
+    // Only the X25519 key, under the same identity_epoch: an epoch mismatch.
     let x_only = successor(&pinned, 0, &identity(), x25519(0x79), None);
     assert_eq!(
         pinned
@@ -1142,26 +1645,46 @@ fn an_identity_change_needs_both_signatures() {
             .map(|_| ()),
         Err(BundleChainError::IdentityEpochMismatch)
     );
-    // New keys without identity_epoch + 1.
-    let skipped = successor(&pinned, 2, &new_identity, x25519(0x78), None);
+    // Only the X25519 key, under identity_epoch + 1, signed twice by the one kept Ed25519 key.
+    let x_only = successor(&pinned, 1, &identity(), x25519(0x79), None);
     assert_eq!(
         pinned
-            .verify_successor(
-                &skipped
-                    .sign_identity_change(&new_identity, &identity())
-                    .unwrap()
-            )
+            .verify_successor(&two_signatures(&x_only, &identity(), &identity()))
+            .map(|_| ()),
+        Err(BundleChainError::IdentityKeyKept)
+    );
+    assert_eq!(
+        x_only.sign_identity_change(&pinned, &identity(), &identity()),
+        Err(SignError::WrongKey)
+    );
+    // Only the Ed25519 key, under identity_epoch + 1, signed by the new and the pinned key.
+    let ed_only = successor(&pinned, 1, &new_identity, x25519(0x77), None);
+    assert_eq!(
+        pinned
+            .verify_successor(&two_signatures(&ed_only, &new_identity, &identity()))
+            .map(|_| ()),
+        Err(BundleChainError::IdentityKeyKept)
+    );
+    assert_eq!(
+        ed_only.sign_identity_change(&pinned, &new_identity, &identity()),
+        Err(SignError::Encode(EncodeError::InvalidField))
+    );
+    // Only the Ed25519 key, under the same identity_epoch: an epoch mismatch.
+    let ed_only = successor(&pinned, 0, &new_identity, x25519(0x77), None);
+    assert_eq!(
+        pinned
+            .verify_successor(&ed_only.sign(&new_identity).unwrap())
             .map(|_| ()),
         Err(BundleChainError::IdentityEpochMismatch)
     );
-    // The writer refuses a "change" to the same key, or signing with a key not in the bundle.
+    // Both keys: accepted.
+    let both = successor(&pinned, 1, &new_identity, x25519(0x78), None);
+    let wire = both
+        .sign_identity_change(&pinned, &new_identity, &identity())
+        .unwrap();
     assert_eq!(
-        next.sign_identity_change(&new_identity, &new_identity),
-        Err(SignError::WrongKey)
-    );
-    assert_eq!(
-        next.sign_identity_change(&identity(), &new_identity),
-        Err(SignError::WrongKey)
+        pinned.verify_successor(&wire).map(|(_, step)| step),
+        Ok(BundleStep::IdentityChanged)
     );
 }
 
@@ -1230,7 +1753,9 @@ fn a_chain_is_walked_in_order() {
     let (v2, _) = pinned.verify_successor(&b2_wire).unwrap();
     let new_identity = IdentitySigningKey::from_seed(&[0x67; 32]);
     let b3 = successor(&v2, 1, &new_identity, x25519(0x78), Some(x25519(0x44)));
-    let b3_wire = b3.sign_identity_change(&new_identity, &identity()).unwrap();
+    let b3_wire = b3
+        .sign_identity_change(&v2, &new_identity, &identity())
+        .unwrap();
     let (v3, _) = v2.verify_successor(&b3_wire).unwrap();
     let b4 = successor(&v3, 1, &new_identity, x25519(0x78), None);
     let b4_wire = b4.sign(&new_identity).unwrap();
@@ -1270,7 +1795,8 @@ proptest::proptest! {
         let _ = SnapshotStatement::verify(&bytes, &dev);
         let _ = KeyGrant::verify(&bytes, &dev);
         let _ = SignatureContainer::from_bytes(&bytes);
-        let _ = auth().verify(&bytes, &dev);
+        let _ = auth_for(&vault_origin()).verify(&bytes, &dev);
+        let _ = request_for(&vault_origin()).verify(&bytes, &dev);
         let _ = pinned_first().verify_successor(&bytes);
     }
 }

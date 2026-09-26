@@ -3,7 +3,8 @@
 //! **Typed keys.** Every key of the hierarchy is its own type, and a key that has an epoch or a
 //! home carries it: an [`AccountKey`] knows its `account_key_epoch`, a [`VaultKey`] its vault
 //! and `vault_key_epoch`, an [`ItemKey`] the `vault_key_epoch` it was created in (§4.4 "Item-key
-//! creation epoch"). Wrapping checks the context against the keys, so a wrap can never be
+//! creation epoch"), and an unlock key the account (and device) and the `kdf_id` it was
+//! stretched with. Wrapping checks the context against the keys, so a wrap can never be
 //! built for a place it does not belong ([`EncryptError::ContextMismatch`](crate::error::EncryptError::ContextMismatch)), and unwrapping
 //! gives each key the epoch its context names.
 //!
@@ -42,6 +43,10 @@ mod grant;
 mod wrap;
 
 #[cfg(test)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
 mod tests;
 
 pub use derive::{

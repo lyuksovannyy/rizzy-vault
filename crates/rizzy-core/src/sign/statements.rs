@@ -7,7 +7,7 @@
 //! | [`AccountState`] | `account_id ‖ u64 state_seq ‖ u32 identity_epoch ‖ u32 account_key_epoch ‖ account_key_id ‖ u32 password_epoch ‖ u16 kdf_id ‖ u32 recovery_epoch ‖ u8 recovery_enabled ‖ u8 sync_mode ‖ u32 mail_key_epoch ‖ bundle_hash ‖ device_set_hash ‖ u64 settings_seq ‖ settings_hash` | identity key of the state's `identity_epoch` |
 //! | [`OpStatement`] | `bytes(canonical op header) ‖ SHA-256(op envelope) ‖ SHA-256(ITEM_KEY_WRAP envelope) or 32 zero bytes` | device key |
 //! | [`SnapshotStatement`] | the same, with the canonical snapshot header and envelope | device key |
-//! | [`KeyGrant`] | `u16(purpose) ‖ sender public key id ‖ recipient public key id ‖ bytes(hpke_envelope)` (§10.1) | device key, or identity key |
+//! | [`KeyGrant`] | `u16(purpose) ‖ sender public key id ‖ recipient public key id ‖ bytes(hpke_envelope)` (§10.1) | device key (device and password-verifier grants), or identity key (member grants, and device grants from a kind-4 client) |
 //! | [`DeviceAuth`] | `str(server_origin) ‖ account_id ‖ device_id ‖ challenge` (§5.10) | device key |
 //! | [`DeviceRequest`] | `str(server_origin) ‖ account_id ‖ device_id ‖ session_id ‖ u64 request_counter ‖ str(method) ‖ str(path_and_query) ‖ SHA-256(request body)` (§5.10) | device key |
 //!
@@ -35,10 +35,11 @@ use crate::envelope::symmetric::MAX_PLAINTEXT_LEN;
 use crate::error::{EncodeError, ParseError, SignError, VerifyError};
 use crate::hpke::HpkePublicKey;
 use crate::ids::{
-    AccountId, DeviceId, ID_LEN, PUBLIC_KEY_LEN, PublicKeyId, SessionId, SymmetricKeyId,
+    AccountId, DeviceId, ID_LEN, KeyType, PUBLIC_KEY_LEN, PublicKeyId, SessionId, SymmetricKeyId,
 };
 use crate::kdf::KdfId;
 use crate::labels;
+use crate::normalize::ServerOrigin;
 
 /// Upper bound of a web-vault (`device_kind` 4) certificate's lifetime: 12 h in milliseconds
 /// (§10.2, §11.4).
@@ -381,15 +382,22 @@ pub struct AccountState {
 /// What the loser of an `account-state` compare-and-swap does (§10.2 "Device set").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CasRetry {
-    /// Only `state_seq` and `device_set_hash` changed: re-apply the change on top of the
+    /// A newer state in which only `state_seq` and `device_set_hash` changed, or the very state
+    /// the change was built on (a spurious conflict): re-apply the change on top of the
     /// current state and retry.
     Reapply,
-    /// Anything else changed (an epoch, `kdf_id`, `bundle_hash`, `settings_seq`,
-    /// `account_key_id`, or any other field): restart the flow.
+    /// A newer state in which anything else changed (an epoch, `kdf_id`, `bundle_hash`,
+    /// `settings_seq`, `account_key_id`, or any other field): restart the flow.
     Restart,
     /// The server's state is older than the one the change was built on: a rollback. Warn and
     /// go read-only (§11.3 step 2.5).
     Rollback,
+    /// The server's state has the same `state_seq` as the one the change was built on but
+    /// different content: two verified states at one position, a fork of the signed state.
+    /// Never re-applied, because re-applying would silently adopt the other branch (for
+    /// example drop a device the base state enrolled). Alarm and go read-only (§10.2, §11.3
+    /// step 2.5, INV-25).
+    Fork,
 }
 
 impl AccountState {
@@ -437,13 +445,27 @@ impl AccountState {
     /// state the change was built on; `current` is the state re-fetched and re-verified from
     /// the server.
     ///
-    /// [`CasRetry::Reapply`] only if every field other than `state_seq` and `device_set_hash`
-    /// is unchanged and `current` is not older. Equal `state_seq` with other content is a fork
-    /// of the signed state and restarts.
+    /// - A lower `state_seq` is [`CasRetry::Rollback`].
+    /// - The same `state_seq` is [`CasRetry::Reapply`] only for the same state (a spurious
+    ///   conflict), and [`CasRetry::Fork`] for any other content: the body layout is fixed and
+    ///   canonical, so equal fields are exactly equal signed messages.
+    /// - A higher `state_seq` is [`CasRetry::Reapply`] if every field other than `state_seq`
+    ///   and `device_set_hash` is unchanged, and [`CasRetry::Restart`] otherwise.
+    ///
+    /// The caller also checks `current` against its persisted state with
+    /// [`AccountState::is_rollback`] and [`AccountState::is_fork`], as for any state it
+    /// fetches.
     #[must_use]
     pub fn cas_retry(&self, current: &Self) -> CasRetry {
         if current.state_seq < self.state_seq {
             return CasRetry::Rollback;
+        }
+        if current.state_seq == self.state_seq {
+            return if current == self {
+                CasRetry::Reapply
+            } else {
+                CasRetry::Fork
+            };
         }
         let mut probe = current.clone();
         probe.state_seq = self.state_seq;
@@ -461,6 +483,19 @@ impl AccountState {
     #[must_use]
     pub const fn is_rollback(&self, persisted_state_seq: u64, persisted_settings_seq: u64) -> bool {
         self.state_seq < persisted_state_seq || self.settings_seq < persisted_settings_seq
+    }
+
+    /// Whether this state and `persisted`, the last verified state this device persisted, are a
+    /// **fork**: the same `state_seq` with different content (§10.2, §11.3 step 2.5, INV-25).
+    /// The body layout is fixed and canonical, so equal fields are exactly equal signed
+    /// messages.
+    ///
+    /// Both states must have verified. A fork is a hard alarm: the client warns and goes
+    /// read-only, as for a rollback, and never adopts either branch silently. The same state
+    /// fetched again is not a fork.
+    #[must_use]
+    pub fn is_fork(&self, persisted: &Self) -> bool {
+        self.state_seq == persisted.state_seq && self != persisted
     }
 
     /// Whether `bundle` is the bundle this state commits to: same account, same
@@ -739,7 +774,12 @@ pub const MAX_GRANT_ENVELOPE_LEN: usize = MAX_PLAINTEXT_LEN + HPKE_OVERHEAD;
 ///   `PASSWORD_VERIFIER_GRANT` (M4) or `VAULT_KEY_MEMBER_GRANT` (M9);
 /// - the envelope parses as an HPKE envelope whose algorithm is on that purpose's allow-list;
 /// - the envelope header names the recipient public key id of the statement;
-/// - the container's signer and the statement's sender key id are the verifying key's id.
+/// - the container's signer and the statement's sender key id are the verifying key's id;
+/// - the signer's role may sign that purpose (§10.2 `key-grant` row, §10.1): a device key
+///   signs device grants and password-verifier grants, and the identity key signs member
+///   grants and the device grants of a kind-4 client. The role is not in the body (a key id
+///   is a hash), so this is checked in [`KeyGrant::sign`] and [`KeyGrant::verify`], where the
+///   role is the key's type.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct KeyGrant {
     purpose: Purpose,
@@ -755,6 +795,29 @@ impl KeyGrant {
         Purpose::PasswordVerifierGrant,
         Purpose::VaultKeyMemberGrant,
     ];
+
+    /// Whether a key of role `R` may sign a grant of `purpose` (§10.2 `key-grant` row, §10.1
+    /// "Signed grants"):
+    ///
+    /// | Purpose | Device key (`0x04`) | Identity key (`0x01`) |
+    /// |---|---|---|
+    /// | `ACCOUNT_KEY_DEVICE_GRANT` | yes | yes (kind-4 client) |
+    /// | `PASSWORD_VERIFIER_GRANT` | yes | no |
+    /// | `VAULT_KEY_MEMBER_GRANT` | no | yes |
+    ///
+    /// Every other purpose is refused for both roles.
+    const fn signer_allowed<R: SignerRole>(purpose: Purpose) -> bool {
+        matches!(
+            (purpose, R::KEY_TYPE),
+            (
+                Purpose::AccountKeyDeviceGrant | Purpose::PasswordVerifierGrant,
+                KeyType::DeviceEd25519
+            ) | (
+                Purpose::AccountKeyDeviceGrant | Purpose::VaultKeyMemberGrant,
+                KeyType::IdentityEd25519
+            )
+        )
+    }
 
     /// Checks the envelope against the purpose and returns the recipient key id it names.
     fn check_envelope(purpose: Purpose, envelope: &[u8]) -> Result<PublicKeyId, ParseError> {
@@ -775,8 +838,8 @@ impl KeyGrant {
     /// key id is taken from the envelope header, and the sender key id from `sender`.
     ///
     /// # Errors
-    /// [`SignError::Encode`] if the purpose is not a signed-grant purpose or the envelope does
-    /// not fit it.
+    /// [`SignError::Encode`] if the purpose is not a signed-grant purpose, the envelope does
+    /// not fit it, or a key of role `R` may not sign it.
     pub fn sign<R: SignerRole>(
         purpose: Purpose,
         sender: &SigningKey<R>,
@@ -784,6 +847,9 @@ impl KeyGrant {
     ) -> Result<Vec<u8>, SignError> {
         let recipient_key_id = Self::check_envelope(purpose, envelope)
             .map_err(|_| SignError::Encode(EncodeError::InvalidField))?;
+        if !Self::signer_allowed::<R>(purpose) {
+            return Err(SignError::Encode(EncodeError::InvalidField));
+        }
         let grant = Self {
             purpose,
             sender_key_id: sender.key_id(),
@@ -797,13 +863,15 @@ impl KeyGrant {
     /// AAD names (§10.1): a device certificate's key, or an identity key.
     ///
     /// # Errors
-    /// [`VerifyError`]; [`VerifyError::WrongSigner`] if the statement names another sender.
+    /// [`VerifyError`]; [`VerifyError::WrongSigner`] if the statement names another sender, or
+    /// a key of role `R` may not sign its purpose.
     pub fn verify<R: SignerRole>(
         wire: &[u8],
         sender: &VerifyingKey<R>,
     ) -> Result<Verified<Self>, VerifyError> {
         let verified: Verified<Self> = verify_single(wire, sender)?;
-        if verified.sender_key_id != sender.key_id() {
+        let role_allowed = Self::signer_allowed::<R>(verified.purpose);
+        if verified.sender_key_id != sender.key_id() || !role_allowed {
             return Err(VerifyError::WrongSigner);
         }
         Ok(verified)
@@ -904,10 +972,15 @@ fn verify_detached(
 /// challenge it issued, then checks the container with [`DeviceAuth::verify`] against the
 /// registered, non-revoked device key. The origin binding stops a signature for server A from
 /// being replayed at server B.
+///
+/// The origin is a [`ServerOrigin`], so both sides sign and rebuild the one §2 canonical form
+/// and a non-canonical spelling cannot reach the signed bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DeviceAuth<'a> {
-    /// `server_origin` (§2): the origin the client dialled, or the server's canonical origin.
-    pub server_origin: &'a str,
+    /// `server_origin` (§2), canonical. On the client it is the origin the client dialled,
+    /// never one the server supplied (§5.3 step 4); on the server it is its configured
+    /// canonical origin.
+    pub server_origin: &'a ServerOrigin,
     /// The account.
     pub account_id: AccountId,
     /// The authenticating device.
@@ -918,14 +991,12 @@ pub struct DeviceAuth<'a> {
 
 impl DeviceAuth<'_> {
     fn body(&self) -> Result<Vec<u8>, EncodeError> {
-        if self.server_origin.is_empty() {
-            return Err(EncodeError::InvalidField);
-        }
-        let len = crate::encoding::bytes_encoded_len(self.server_origin.len())?
+        let origin = self.server_origin.as_str();
+        let len = crate::encoding::bytes_encoded_len(origin.len())?
             .checked_add(2 * ID_LEN + CHALLENGE_LEN)
             .ok_or(EncodeError::TooLong)?;
         let mut out = Vec::with_capacity(len);
-        put_str(&mut out, self.server_origin)?;
+        put_str(&mut out, origin)?;
         out.extend_from_slice(self.account_id.as_bytes());
         out.extend_from_slice(self.device_id.as_bytes());
         out.extend_from_slice(&self.challenge);
@@ -935,7 +1006,7 @@ impl DeviceAuth<'_> {
     /// Signs the challenge answer with the device key.
     ///
     /// # Errors
-    /// [`SignError::Encode`] for an empty origin.
+    /// [`SignError`] (unreachable: a canonical origin is short and never empty).
     pub fn sign(&self, device: &DeviceSigningKey) -> Result<SignatureContainer, SignError> {
         sign_detached(labels::SIG_DEVICE_AUTH, &self.body()?, device)
     }
@@ -962,8 +1033,8 @@ impl DeviceAuth<'_> {
 /// part of this type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DeviceRequest<'a> {
-    /// `server_origin` (§2).
-    pub server_origin: &'a str,
+    /// `server_origin` (§2), canonical, as for [`DeviceAuth::server_origin`].
+    pub server_origin: &'a ServerOrigin,
     /// The account.
     pub account_id: AccountId,
     /// The device.
@@ -988,11 +1059,11 @@ impl DeviceRequest<'_> {
     }
 
     fn body(&self) -> Result<Vec<u8>, EncodeError> {
-        if self.server_origin.is_empty() || self.method.is_empty() {
+        if self.method.is_empty() {
             return Err(EncodeError::InvalidField);
         }
         let mut out = Vec::new();
-        put_str(&mut out, self.server_origin)?;
+        put_str(&mut out, self.server_origin.as_str())?;
         out.extend_from_slice(self.account_id.as_bytes());
         out.extend_from_slice(self.device_id.as_bytes());
         out.extend_from_slice(self.session_id.as_bytes());
@@ -1006,8 +1077,7 @@ impl DeviceRequest<'_> {
     /// Signs the request with the device key.
     ///
     /// # Errors
-    /// [`SignError::Encode`] for an empty origin or method, or a field longer than
-    /// `u32::MAX` bytes.
+    /// [`SignError::Encode`] for an empty method, or a field longer than `u32::MAX` bytes.
     pub fn sign(&self, device: &DeviceSigningKey) -> Result<SignatureContainer, SignError> {
         sign_detached(labels::SIG_DEVICE_REQUEST, &self.body()?, device)
     }

@@ -509,6 +509,7 @@ checksum = "6e2d0073b297041425c7c3df6eb4792d598a15323fe63346852b092eca02904c"
 dependencies = [
  "cpufeatures 0.3.1",
  "universal-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -637,6 +638,7 @@ version = "0.0.0"
 dependencies = [
  "argon2",
  "base64ct",
+ "blake2",
  "chacha20",
  "chacha20poly1305",
  "ed25519-dalek",
@@ -644,6 +646,7 @@ dependencies = [
  "hmac 0.13.0",
  "hpke",
  "opaque-ke",
+ "poly1305",
  "proptest",
  "rand_core 0.10.1",
  "serde_json",

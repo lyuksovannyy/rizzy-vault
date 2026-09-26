@@ -14,10 +14,9 @@
 //! `⌊log2 ⌊log2 L⌋⌋ + 1` bits may be non-zero. It leaks `O(log log L)` bits of the length for
 //! at most about 12 % overhead.
 //!
-//! **Reader strictness.** CRYPTO.md §8.5 requires rejecting `data_len > len − 4` and any
-//! non-zero padding byte. This reader also rejects a frame whose total length is not exactly
-//! `padded_len(data_len)`: the layout above defines that length, so any other length is not a
-//! frame a conforming writer produces. That makes the encoding canonical (one frame per `data`).
+//! **Reader strictness.** CRYPTO.md §8.5 states all three reader rules: reject
+//! `data_len > len − 4`, a frame whose total length is not exactly `padded_len(data_len)`, and
+//! any non-zero padding byte. The encoding is therefore canonical (one frame per `data`).
 
 use crate::encoding::{Reader, put_u32};
 use crate::error::{EncodeError, ParseError};
@@ -114,6 +113,10 @@ pub fn unframe(frame: &[u8]) -> Result<&[u8], ParseError> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
 mod tests {
     use proptest::prelude::*;
 

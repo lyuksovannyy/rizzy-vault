@@ -5,7 +5,7 @@
 use core::fmt;
 
 use sha2::{Digest as _, Sha256};
-use subtle::ConstantTimeEq as _;
+use subtle::{Choice, ConstantTimeEq};
 use zeroize::Zeroizing;
 
 use super::IdentityPublicKeys;
@@ -34,21 +34,31 @@ fn hkdf_key(ikm: &[u8], label: Label, ctx: &[u8]) -> Result<Key32, DerivationErr
 /// `HKDF(ikm = export_key, salt = empty, info = LABEL("unlock-key/server") ‖ 0x00 ‖ account_id,
 /// 32)`.
 ///
-/// It remembers the account it was derived for; wrapping or unwrapping with a context for
-/// another account fails.
+/// It remembers the account it was derived for and the `kdf_id` of the OPAQUE run whose
+/// `export_key` it comes from; wrapping or unwrapping with a context for another account or
+/// another `kdf_id` fails (§8.4, INV-5).
 pub struct ServerUnlockKey {
     pub(super) key: Key32,
     pub(super) account_id: AccountId,
+    pub(super) kdf_id: KdfId,
 }
 
 impl ServerUnlockKey {
-    /// Derives the key from OPAQUE's 64-byte `export_key`.
+    /// Derives the key from OPAQUE's 64-byte `export_key`. `kdf_id` is the one the OPAQUE
+    /// registration or login that produced `export_key` stretched with, which the `E_srv`
+    /// context must name (§8.4, §11.2 step 6); it does not enter the derivation.
+    ///
+    /// Crate-private: outside this crate the only way to get a `ServerUnlockKey` is
+    /// [`ExportKey::server_unlock_key`](crate::opaque::ExportKey::server_unlock_key), which
+    /// passes the `kdf_id` of its own OPAQUE run, so a caller cannot pair an `export_key` with
+    /// another `kdf_id`.
     ///
     /// # Errors
     /// [`DerivationError`] (unreachable).
-    pub fn derive(
+    pub(crate) fn derive(
         export_key: &SecretArray<EXPORT_KEY_LEN>,
         account_id: AccountId,
+        kdf_id: KdfId,
     ) -> Result<Self, DerivationError> {
         Ok(Self {
             key: hkdf_key(
@@ -57,7 +67,14 @@ impl ServerUnlockKey {
                 account_id.as_bytes(),
             )?,
             account_id,
+            kdf_id,
         })
+    }
+
+    /// The `kdf_id` the `E_srv` context must name.
+    #[must_use]
+    pub const fn kdf_id(&self) -> KdfId {
+        self.kdf_id
     }
 }
 
@@ -66,11 +83,13 @@ impl ServerUnlockKey {
 /// `HKDF(ikm = a, salt = empty, info = LABEL("unlock-key/local") ‖ 0x00 ‖ account_id ‖
 /// device_id, 32)`.
 ///
-/// It remembers the account and device it was derived for.
+/// It remembers the account and device it was derived for and the `kdf_id` it was stretched
+/// with; wrapping or unwrapping with a context that names another one fails (§8.4, INV-5).
 pub struct LocalUnlockKey {
     pub(super) key: Key32,
     pub(super) account_id: AccountId,
     pub(super) device_id: DeviceId,
+    pub(super) kdf_id: KdfId,
 }
 
 impl LocalUnlockKey {
@@ -99,7 +118,14 @@ impl LocalUnlockKey {
             key,
             account_id,
             device_id,
+            kdf_id,
         })
+    }
+
+    /// The `kdf_id` this key was stretched with, which the `E_local` context must name (§5.6).
+    #[must_use]
+    pub const fn kdf_id(&self) -> KdfId {
+        self.kdf_id
     }
 }
 
@@ -290,7 +316,9 @@ pub fn settings_hash(settings_seq: u64, settings_envelope: Option<&[u8]>) -> Opt
 /// The account fingerprint (§4.3, §10.3):
 /// `SHA-256(LABEL("fingerprint") ‖ 0x00 ‖ account_id ‖ identity_ed25519_pk ‖
 /// identity_x25519_pk)`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+///
+/// `==` between two fingerprints, and with 32 raw bytes, is constant-time (§12.3).
+#[derive(Clone, Copy, Debug, Eq)]
 pub struct AccountFingerprint {
     account_id: AccountId,
     hash: [u8; 32],
@@ -347,6 +375,29 @@ impl AccountFingerprint {
             (other, self)
         };
         first.safety_number() + &second.safety_number()
+    }
+}
+
+impl ConstantTimeEq for AccountFingerprint {
+    fn ct_eq(&self, other: &Self) -> Choice {
+        self.account_id
+            .as_bytes()
+            .ct_eq(other.account_id.as_bytes())
+            & self.hash.ct_eq(&other.hash)
+    }
+}
+
+impl PartialEq for AccountFingerprint {
+    /// Constant-time (§12.3).
+    fn eq(&self, other: &Self) -> bool {
+        self.ct_eq(other).into()
+    }
+}
+
+impl core::hash::Hash for AccountFingerprint {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.account_id.hash(state);
+        self.hash.hash(state);
     }
 }
 

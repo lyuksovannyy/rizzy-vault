@@ -5,6 +5,7 @@ use sha2::{Digest as _, Sha256};
 use super::ksf::test_hooks::ksf_runs;
 use super::*;
 use crate::envelope::purpose::AccountKeyServerWrapCtx;
+use crate::error::EncryptError;
 use crate::keys::AccountKey;
 use crate::test_util::{hex, seeded_rng};
 
@@ -238,6 +239,55 @@ fn wrong_password_secret_key_origin_or_kdf_id_fails_like_a_wrong_password() {
         Err(OpaqueError::InvalidLogin)
     );
     assert!(login(&mut rng, &reg, &pw_in, &relabelled, &relabelled).is_ok());
+}
+
+/// §8.4, §11.2 step 6: `export_key` carries the `kdf_id` of the OPAQUE run that produced it
+/// (the registration's, or the login Context's), and so does its `server_unlock_key`, so
+/// `E_srv` cannot be sealed under a context that names another `kdf_id`.
+#[test]
+fn export_key_carries_the_kdf_id_of_its_opaque_run() {
+    let mut rng = seeded_rng(10);
+    let pw_in = pw("pw", &sk(1));
+    let kdf = cheap(0xfff1);
+    let reg = register(&mut rng, &pw_in, kdf);
+    assert_eq!(reg.export_key.kdf_id(), kdf);
+    let ctx = OpaqueContext::new(kdf, &origin());
+    let at_login = login(&mut rng, &reg, &pw_in, &ctx, &ctx).unwrap();
+    assert_eq!(at_login.kdf_id(), kdf);
+
+    let account_key = AccountKey::generate(&mut rng, 0);
+    let wrap_ctx = AccountKeyServerWrapCtx {
+        account_id: reg.account_id,
+        account_key_epoch: 0,
+        password_epoch: 0,
+        kdf_id: kdf,
+    };
+    let unlock = reg.export_key.server_unlock_key(reg.account_id).unwrap();
+    assert_eq!(unlock.kdf_id(), kdf);
+    let e_srv = unlock
+        .wrap_account_key(&mut rng, &wrap_ctx, &account_key)
+        .unwrap();
+    let opened = at_login
+        .server_unlock_key(reg.account_id)
+        .unwrap()
+        .unwrap_account_key(&wrap_ctx, &e_srv)
+        .unwrap();
+    assert_eq!(
+        opened.key().expose_secret(),
+        account_key.key().expose_secret()
+    );
+    for other in [cheap(0xfff2), KdfId::DEFAULT] {
+        let other_ctx = AccountKeyServerWrapCtx {
+            kdf_id: other,
+            ..wrap_ctx
+        };
+        assert_eq!(
+            unlock
+                .wrap_account_key(&mut rng, &other_ctx, &account_key)
+                .map(|_| ()),
+            Err(EncryptError::ContextMismatch)
+        );
+    }
 }
 
 #[test]
@@ -529,6 +579,26 @@ fn password_input_known_answers() {
     assert_eq!(format!("{composed:?}"), "PasswordInput([REDACTED])");
 }
 
+/// CRYPTO.md §2 "New passwords": a newly chosen master password must not be empty (the only rule; no
+/// strength policy). Login and unlock still derive `pw_in` from any password, so no existing
+/// account can be locked out.
+#[test]
+fn an_empty_new_master_password_is_refused() {
+    let secret_key = sk(1);
+    assert_eq!(
+        PasswordInput::derive_for_new_password("", &secret_key).map(|_| ()),
+        Err(KdfError::EmptyPassword)
+    );
+    assert!(PasswordInput::derive("", &secret_key).is_ok());
+    // Not trimmed (ADR 0004): a lone space or a lone combining mark is not empty.
+    for not_empty in [" ", "\u{0301}"] {
+        assert!(
+            PasswordInput::derive_for_new_password(not_empty, &secret_key).is_ok(),
+            "{not_empty:?}"
+        );
+    }
+}
+
 #[test]
 fn server_state_serialisation() {
     let mut rng = seeded_rng(6);
@@ -674,5 +744,106 @@ proptest! {
         let _ = server_registration_finish(&fixed);
         fixed.resize(SERVER_SETUP_LEN, 0);
         let _ = ServerSetup::from_bytes(&fixed);
+    }
+}
+
+/// One honest login up to KE2 against `reg`: the client's state, the KE2 and the server's
+/// pending state.
+fn honest_ke2(
+    rng: &mut impl CryptoRng,
+    reg: &Registered,
+    pw_in: &PasswordInput,
+    ctx: &OpaqueContext,
+) -> (ClientLoginState, Vec<u8>, ServerLoginState) {
+    let name = LoginName::parse("alice").unwrap();
+    let (state, ke1) = client_login_start(rng, pw_in).unwrap();
+    let record = RegisteredCredential {
+        account_id: reg.account_id,
+        password_file: PasswordFile::from_bytes(&reg.file).unwrap(),
+        kdf_id: ctx.kdf_id(),
+    };
+    let start = server_login_start(rng, &reg.setup, &name, Some(record), &ke1, ctx).unwrap();
+    (state, start.ke2, start.state)
+}
+
+/// A single-bit flip anywhere in an honest KE2 makes the client reject it: every byte is either
+/// parsed into a group element, bound into the transcript or checked as the server MAC.
+#[test]
+fn every_single_bit_flip_in_ke2_is_rejected() {
+    let mut rng = seeded_rng(10);
+    let pw_in = pw("pw", &sk(1));
+    let kdf = cheap(0xfff1);
+    let reg = register(&mut rng, &pw_in, kdf);
+    let ctx = OpaqueContext::new(kdf, &origin());
+    // Positive control: the unmodified KE2 logs in.
+    let (state, ke2, _) = honest_ke2(&mut rng, &reg, &pw_in, &ctx);
+    assert!(client_login_finish(&mut rng, state, &pw_in, &ke2, &ctx).is_ok());
+    // One bit per byte, cycling through the eight bit positions.
+    for byte in 0..KE2_LEN {
+        let (state, mut ke2, _) = honest_ke2(&mut rng, &reg, &pw_in, &ctx);
+        ke2[byte] ^= 1 << (byte % 8);
+        assert!(
+            client_login_finish(&mut rng, state, &pw_in, &ke2, &ctx).is_err(),
+            "byte {byte}"
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    /// Right-length random server messages reach opaque-ke's own parsers on the client. A
+    /// random KE2 is always rejected, because it would have to carry the server's MAC. A random
+    /// registration response is only required not to panic: RFC 9807's registration response
+    /// is unauthenticated by design.
+    #[test]
+    fn client_handles_random_right_length_server_messages(
+        ke2 in proptest::collection::vec(any::<u8>(), KE2_LEN),
+        m2 in proptest::collection::vec(any::<u8>(), REGISTRATION_RESPONSE_LEN),
+    ) {
+        let mut rng = seeded_rng(11);
+        let pw_in = pw("pw", &sk(1));
+        let kdf = cheap(0xfff1);
+        let ctx = OpaqueContext::new(kdf, &origin());
+        let (state, _) = client_login_start(&mut rng, &pw_in).unwrap();
+        prop_assert!(client_login_finish(&mut rng, state, &pw_in, &ke2, &ctx).is_err());
+        let (state, _) = client_registration_start(&mut rng, &pw_in).unwrap();
+        let _ = client_registration_finish(&mut rng, state, &pw_in, &m2, kdf);
+    }
+
+    /// A random KE3 against a real pending login (an honest KE1 for a registered account) is
+    /// rejected as a failed login, never as a malformed message or a panic.
+    #[test]
+    fn server_rejects_a_random_ke3(ke3 in proptest::collection::vec(any::<u8>(), KE3_LEN)) {
+        let mut rng = seeded_rng(12);
+        let pw_in = pw("pw", &sk(1));
+        let kdf = cheap(0xfff1);
+        let reg = register(&mut rng, &pw_in, kdf);
+        let ctx = OpaqueContext::new(kdf, &origin());
+        let (_, _, pending) = honest_ke2(&mut rng, &reg, &pw_in, &ctx);
+        prop_assert_eq!(
+            server_login_finish(pending, &ke3, &ctx),
+            Err(OpaqueError::InvalidLogin)
+        );
+    }
+
+    /// The two right lengths `server_parsers_never_panic` does not resize to: a registration
+    /// request, and a KE3 against a real pending login.
+    #[test]
+    fn server_parsers_never_panic_at_the_request_and_ke3_lengths(
+        bytes in proptest::collection::vec(any::<u8>(), 0..400),
+    ) {
+        let mut rng = seeded_rng(13);
+        let pw_in = pw("pw", &sk(1));
+        let kdf = cheap(0xfff1);
+        let reg = register(&mut rng, &pw_in, kdf);
+        let ctx = OpaqueContext::new(kdf, &origin());
+        let cred = CredentialIdentifier::for_account(reg.account_id);
+        let mut fixed = bytes.clone();
+        fixed.resize(REGISTRATION_REQUEST_LEN, 0);
+        let _ = server_registration_start(&reg.setup, &fixed, &cred);
+        fixed.resize(KE3_LEN, 0);
+        let (_, _, pending) = honest_ke2(&mut rng, &reg, &pw_in, &ctx);
+        let _ = server_login_finish(pending, &fixed, &ctx);
     }
 }

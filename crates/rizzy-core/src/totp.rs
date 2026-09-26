@@ -8,12 +8,18 @@
 //! - **No clock.** `rizzy-core` reads no clock (ADR 0016 R1): callers pass the Unix time or the
 //!   time step.
 //! - **otpauth URIs** ([`OtpAuthUri`]). The secret is RFC 4648 Base32 (not the Crockford alphabet
-//!   of §7), parsed case-insensitively with optional padding.
+//!   of §7), parsed case-insensitively with optional padding. Unused trailing bits are ignored;
+//!   spaces and partial padding are rejected (an importer strips spaces first). Output is always
+//!   the canonical form. Every URI that can be built formats to one the parser accepts.
+//! - **Secret lengths.** Item secrets are accepted as issued, [`MIN_SECRET_LEN`] to
+//!   [`MAX_SECRET_LEN`] bytes. A secret the server issues for its own 2FA has at least
+//!   [`MIN_SERVER_SECRET_LEN`] bytes, the RFC 4226 §4 R6 floor.
 //! - **Server verification** ([`TotpParams::verify`]) accepts the current time step or one step
 //!   either side, rejects any step at or below the last step it accepted for the credential, and
 //!   compares codes with `ct_eq`.
-//! - **Secrets** live in zeroizing buffers ([`TotpSecret`]). Base32 decoding and encoding of the
-//!   secret, and the RFC 4226 dynamic truncation, use no secret-indexed lookups (§12.3).
+//! - **Secrets** live in zeroizing buffers ([`TotpSecret`]), and so do an otpauth URI's label and
+//!   issuer, which for an item are decrypted item data (§12.2). Base32 decoding and encoding of
+//!   the secret, and the RFC 4226 dynamic truncation, use no secret-indexed lookups (§12.3).
 
 use core::fmt;
 
@@ -25,15 +31,38 @@ use zeroize::{Zeroize as _, Zeroizing};
 use crate::secret::SecretBytes;
 use crate::secret_key::in_range;
 
-/// Shortest accepted secret, in bytes.
+/// Shortest accepted secret, in bytes. Item secrets are accepted as the issuer made them: RFC 4226
+/// §4 R6 binds the issuer, and many issue 80-bit secrets (CRYPTO.md §11.15).
 pub const MIN_SECRET_LEN: usize = 1;
 /// Longest accepted secret, in bytes (1024 bits, the HMAC-SHA-512 block size).
 pub const MAX_SECRET_LEN: usize = 128;
 /// Length of a secret the server generates for its own 2FA: 160 bits, as RFC 4226 §4 R6
 /// recommends.
 pub const GENERATED_SECRET_LEN: usize = 20;
+/// Shortest secret the server seals or opens for its own 2FA, where rizzy-vault is the issuer, in
+/// bytes: 128 bits, the RFC 4226 §4 R6 floor (CRYPTO.md §11.15). A floor rather than exactly
+/// [`GENERATED_SECRET_LEN`], so changing the generated length later needs no migration.
+pub const MIN_SERVER_SECRET_LEN: usize = 16;
 /// Longest otpauth URI the parser looks at, in bytes.
 pub const MAX_URI_LEN: usize = 4096;
+/// Longest decoded otpauth label, in bytes.
+pub const MAX_LABEL_LEN: usize = 512;
+/// Longest decoded otpauth `issuer`, in bytes.
+pub const MAX_ISSUER_LEN: usize = 512;
+
+/// Longest Base32 text [`TotpSecret::from_base32`] looks at: a padded [`MAX_SECRET_LEN`] secret
+/// (205 characters and 3 `=`). Checked before any arithmetic on the length.
+const MAX_BASE32_LEN: usize = MAX_SECRET_LEN.div_ceil(5) * 8;
+
+// The label and issuer limits are what makes the parser accept every URI `to_uri` writes: its
+// longest output (every label and issuer byte escaped, the longest secret, a 20-digit counter)
+// still fits in MAX_URI_LEN.
+const _: () = assert!(
+    uri_capacity(MAX_LABEL_LEN, Some(MAX_ISSUER_LEN), MAX_SECRET_LEN) <= MAX_URI_LEN
+        && MAX_BASE32_LEN == 208
+        && MIN_SERVER_SECRET_LEN <= GENERATED_SECRET_LEN
+        && GENERATED_SECRET_LEN <= MAX_SECRET_LEN
+);
 
 /// Why a TOTP value or URI was rejected, or a code did not verify. Carries no secret.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -47,10 +76,11 @@ pub enum TotpError {
     InvalidPeriod,
     /// The HOTP counter is not a decimal `u64`.
     InvalidCounter,
-    /// The secret is not canonical RFC 4648 Base32, or its length is outside
+    /// The secret is not RFC 4648 Base32, or its length is outside
     /// [`MIN_SECRET_LEN`]..=[`MAX_SECRET_LEN`] bytes.
     InvalidSecret,
-    /// The URI is malformed: wrong scheme or type, bad percent-encoding, not ASCII, too long.
+    /// The URI is malformed: wrong scheme or type, bad percent-encoding, not ASCII, too long, or
+    /// a label or issuer longer than [`MAX_LABEL_LEN`] or [`MAX_ISSUER_LEN`].
     InvalidUri,
     /// A required URI parameter (`secret`, or `counter` for HOTP) is missing.
     MissingParameter,
@@ -212,11 +242,18 @@ impl TotpSecret {
         })
     }
 
-    /// Parses RFC 4648 Base32, case-insensitively, with or without `=` padding.
+    /// Parses RFC 4648 Base32, case-insensitively, with or without `=` padding (CRYPTO.md
+    /// §11.15).
     ///
-    /// Strict: if padding is present it must be complete and correct; the unpadded length must
-    /// be a valid Base32 length; the unused trailing bits must be zero, so every secret has one
-    /// accepted spelling per case; no spaces or other characters.
+    /// - If padding is present it must be complete and correct, and the unpadded length must be
+    ///   a valid Base32 length.
+    /// - The unused trailing bits of the last character are ignored, so a secret an issuer wrote
+    ///   with non-zero trailing bits still imports. [`TotpSecret::to_base32`] writes the
+    ///   canonical form.
+    /// - No spaces or other characters. An importer or UI that takes secrets typed in groups
+    ///   strips the spaces before calling this.
+    /// - At most 208 characters, the padded form of a [`MAX_SECRET_LEN`] secret, checked before
+    ///   anything else.
     ///
     /// # Errors
     /// [`TotpError::InvalidSecret`].
@@ -256,7 +293,8 @@ impl OtpCode {
     /// The code as exactly `digits` decimal digits, zero-padded, in a buffer wiped on drop.
     ///
     /// The digits come from integer division by public powers of ten; that the division time of
-    /// a CPU might vary with the code's value is an accepted, local-only residual.
+    /// a CPU might vary with the code's value is an accepted, local-only residual (CRYPTO.md
+    /// §12.3).
     #[must_use]
     pub fn to_digits(&self) -> Zeroizing<String> {
         let mut out = Zeroizing::new(String::with_capacity(usize::from(self.digits.get())));
@@ -317,6 +355,8 @@ pub fn hotp(
         Algorithm::Sha512 => hmac_into::<Hmac<sha2::Sha512>>(key, &msg, mac)?,
     }
     let mut word = dynamic_truncation(mac);
+    // A division by a public modulus; its operand-dependent timing on some CPUs is the accepted
+    // residual of CRYPTO.md §12.3, on the server too (three steps per submitted 2FA code).
     let value = word % digits.modulus();
     word.zeroize();
     Ok(OtpCode { value, digits })
@@ -511,10 +551,17 @@ pub enum OtpKind {
 ///   a space (form encoding); in the label it is a literal `+`.
 /// - Numbers are plain decimal without sign or leading zeros (`0` itself is allowed for the
 ///   counter).
+/// - The decoded label is at most [`MAX_LABEL_LEN`] bytes and the decoded issuer at most
+///   [`MAX_ISSUER_LEN`], here and in [`OtpAuthUri::new_totp`]. That bound is what keeps
+///   [`OtpAuthUri::to_uri`] of every value within [`MAX_URI_LEN`], so the parser accepts every
+///   URI this type writes.
+///
+/// The label and issuer are held in wiped buffers: for an item's TOTP they are decrypted item
+/// data (§12.2).
 pub struct OtpAuthUri {
     kind: OtpKind,
-    label: String,
-    issuer: Option<String>,
+    label: Zeroizing<String>,
+    issuer: Option<Zeroizing<String>>,
     algorithm: Algorithm,
     digits: Digits,
     secret: TotpSecret,
@@ -522,14 +569,18 @@ pub struct OtpAuthUri {
 
 impl OtpAuthUri {
     /// Builds a TOTP URI, for example for the server's 2FA enrolment QR code.
-    #[must_use]
+    ///
+    /// # Errors
+    /// [`TotpError::InvalidUri`] if the label is longer than [`MAX_LABEL_LEN`] bytes or the
+    /// issuer longer than [`MAX_ISSUER_LEN`]: the URI would not fit in [`MAX_URI_LEN`].
     pub fn new_totp(
-        label: String,
-        issuer: Option<String>,
+        label: Zeroizing<String>,
+        issuer: Option<Zeroizing<String>>,
         params: TotpParams,
         secret: TotpSecret,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, TotpError> {
+        check_text_lengths(&label, issuer.as_deref().map(String::as_str))?;
+        Ok(Self {
             kind: OtpKind::Totp {
                 period: params.period,
             },
@@ -538,7 +589,7 @@ impl OtpAuthUri {
             algorithm: params.algorithm,
             digits: params.digits,
             secret,
-        }
+        })
     }
 
     /// Parses an otpauth URI.
@@ -587,9 +638,11 @@ impl OtpAuthUri {
             *slot = Some(value);
         }
 
-        let secret_text = percent_decode_secret(secret.ok_or(TotpError::MissingParameter)?)?;
+        // Base32 never needs escapes, but `=` padding is sometimes written `%3D`.
+        let secret_text = percent_decode(secret.ok_or(TotpError::MissingParameter)?, false)?;
         let secret = TotpSecret::from_base32(&secret_text)?;
         let issuer = issuer.map(|v| percent_decode(v, true)).transpose()?;
+        check_text_lengths(&label, issuer.as_deref().map(String::as_str))?;
         let algorithm = match algorithm {
             Some(v) => Algorithm::from_name(&percent_decode(v, true)?)?,
             None => Algorithm::Sha1,
@@ -626,15 +679,16 @@ impl OtpAuthUri {
     }
 
     /// Formats the URI. Label and issuer are percent-encoded (everything but RFC 3986
-    /// unreserved characters), the secret is unpadded uppercase Base32. The result holds the
-    /// secret, so it is wiped on drop.
+    /// unreserved characters), the secret is unpadded uppercase Base32, and `algorithm`,
+    /// `digits` and `period` or `counter` are always written. The result holds the secret, so it
+    /// is wiped on drop.
+    ///
+    /// The result is at most [`MAX_URI_LEN`] bytes and [`OtpAuthUri::parse`] accepts it, giving
+    /// the same values back. The buffer is allocated once, at an upper bound of the output
+    /// length, so the secret is never left behind in a reallocated copy (§12.2).
     #[must_use]
     pub fn to_uri(&self) -> Zeroizing<String> {
-        let mut out = Zeroizing::new(String::with_capacity(
-            64 + 3 * self.label.len()
-                + 3 * self.issuer.as_ref().map_or(0, String::len)
-                + 2 * self.secret.expose_secret().len(),
-        ));
+        let mut out = Zeroizing::new(String::with_capacity(self.uri_capacity()));
         out.push_str(match self.kind {
             OtpKind::Totp { .. } => "otpauth://totp/",
             OtpKind::Hotp { .. } => "otpauth://hotp/",
@@ -672,13 +726,13 @@ impl OtpAuthUri {
     /// The decoded label (often `Issuer:account`).
     #[must_use]
     pub fn label(&self) -> &str {
-        &self.label
+        self.label.as_str()
     }
 
     /// The decoded `issuer` parameter, if present.
     #[must_use]
     pub fn issuer(&self) -> Option<&str> {
-        self.issuer.as_deref()
+        self.issuer.as_deref().map(String::as_str)
     }
 
     /// The HMAC hash.
@@ -711,6 +765,40 @@ impl OtpAuthUri {
             OtpKind::Hotp { .. } => None,
         }
     }
+
+    /// The capacity [`OtpAuthUri::to_uri`] reserves.
+    fn uri_capacity(&self) -> usize {
+        uri_capacity(
+            self.label.len(),
+            self.issuer.as_ref().map(|issuer| issuer.len()),
+            self.secret.expose_secret().len(),
+        )
+    }
+}
+
+/// The longest fixed text [`OtpAuthUri::to_uri`] writes: `otpauth://totp/` or `…hotp/` (15),
+/// `?secret=` (8), `&algorithm=SHA256` or `SHA512` (17), `&digits=` and one digit (9), and
+/// `&counter=` with a 20-digit `u64` (29; `&period=` with up to 3 digits is shorter).
+const URI_FIXED_MAX_LEN: usize = 15 + 8 + 17 + 9 + 29;
+
+/// An upper bound on the length of [`OtpAuthUri::to_uri`]'s output: the fixed text, every label
+/// and issuer byte percent-encoded (3 bytes), `&issuer=` if there is an issuer, and the unpadded
+/// Base32 secret. The lengths are bounded by the constructors, so nothing overflows.
+const fn uri_capacity(label_len: usize, issuer_len: Option<usize>, secret_len: usize) -> usize {
+    let issuer = match issuer_len {
+        Some(len) => 8 + 3 * len,
+        None => 0,
+    };
+    URI_FIXED_MAX_LEN + 3 * label_len + issuer + (secret_len * 8).div_ceil(5)
+}
+
+/// Enforces [`MAX_LABEL_LEN`] and [`MAX_ISSUER_LEN`] on the decoded text. The lengths are public
+/// (the URI shows them), so this branches on them.
+fn check_text_lengths(label: &str, issuer: Option<&str>) -> Result<(), TotpError> {
+    if label.len() > MAX_LABEL_LEN || issuer.is_some_and(|i| i.len() > MAX_ISSUER_LEN) {
+        return Err(TotpError::InvalidUri);
+    }
+    Ok(())
 }
 
 /// Redacts the secret, and also the label and issuer: for an item's TOTP they are decrypted
@@ -746,8 +834,9 @@ fn hex_value(b: u8) -> Option<u8> {
     }
 }
 
-/// Strict percent-decoding into UTF-8. `plus_is_space` applies form encoding (query values).
-fn percent_decode(text: &str, plus_is_space: bool) -> Result<String, TotpError> {
+/// Strict percent-decoding into UTF-8, in a buffer wiped on drop: the text is a label, an issuer
+/// or the secret. `plus_is_space` applies form encoding (query values).
+fn percent_decode(text: &str, plus_is_space: bool) -> Result<Zeroizing<String>, TotpError> {
     let mut out = Zeroizing::new(Vec::with_capacity(text.len()));
     let mut bytes = text.bytes();
     while let Some(b) = bytes.next() {
@@ -767,31 +856,37 @@ fn percent_decode(text: &str, plus_is_space: bool) -> Result<String, TotpError> 
             _ => out.push(b),
         }
     }
-    // The capacity covers the decoded length, so nothing was reallocated. On a UTF-8 error the
-    // bytes (possibly part of a secret) are wiped rather than dropped.
-    String::from_utf8(core::mem::take(&mut *out)).map_err(|e| {
-        e.into_bytes().zeroize();
-        TotpError::InvalidUri
-    })
+    // The capacity covers the decoded length, so nothing was reallocated, and the String takes
+    // the buffer over without a copy. On a UTF-8 error the bytes (possibly part of a secret) are
+    // wiped rather than dropped.
+    String::from_utf8(core::mem::take(&mut *out))
+        .map(Zeroizing::new)
+        .map_err(|e| {
+            e.into_bytes().zeroize();
+            TotpError::InvalidUri
+        })
 }
 
-/// Percent-decodes the secret value into a wiped buffer. Base32 never needs escapes, but `=`
-/// padding is sometimes written `%3D`.
-fn percent_decode_secret(text: &str) -> Result<Zeroizing<String>, TotpError> {
-    let decoded = Zeroizing::new(percent_decode(text, false)?);
-    Ok(decoded)
-}
-
+/// Percent-encodes a label or issuer. The caller reserved room for 3 bytes per input byte.
 fn percent_encode_into(out: &mut String, text: &str) {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     for b in text.bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
             out.push(char::from(b));
         } else {
-            // Labels and issuers are public; indexing by their bytes is fine.
+            // Labels and issuers can be decrypted item data, so they sit in wiped buffers
+            // (§12.2). They are not key material or the TOTP secret: like the decoder, this
+            // branches on their bytes, and it indexes a 16-entry table with them: an accepted
+            // residual (CRYPTO.md §12.3, owner decision of 2026-09-26). The secret's Base32 uses
+            // arithmetic only (§12.3).
+            #[expect(
+                clippy::indexing_slicing,
+                reason = "b >> 4 and b & 0x0f are at most 15, and HEX has 16 entries"
+            )]
+            let (hi, lo) = (HEX[usize::from(b >> 4)], HEX[usize::from(b & 0x0f)]);
             out.push('%');
-            out.push(char::from(HEX[usize::from(b >> 4)]));
-            out.push(char::from(HEX[usize::from(b & 0x0f)]));
+            out.push(char::from(hi));
+            out.push(char::from(lo));
         }
     }
 }
@@ -815,6 +910,11 @@ fn base32_char(v: u8) -> u8 {
 
 fn base32_decode(text: &str) -> Result<SecretBytes, TotpError> {
     let bytes = text.as_bytes();
+    // Before any arithmetic on the length: `data_len * 5` below cannot overflow a 32-bit usize
+    // (wasm32) for any input that gets past this.
+    if bytes.len() > MAX_BASE32_LEN {
+        return Err(TotpError::InvalidSecret);
+    }
     let data_len = bytes.iter().position(|b| *b == b'=').unwrap_or(bytes.len());
     let (data, pad) = bytes.split_at(data_len);
     let expected_pad = match data_len % 8 {
@@ -848,9 +948,11 @@ fn base32_decode(text: &str) -> Result<SecretBytes, TotpError> {
             acc &= (1 << bits) - 1;
         }
     }
-    let trailing_zero = acc == 0;
+    // `acc` now holds the unused trailing bits. They are ignored, not required to be zero
+    // (CRYPTO.md §11.15): a secret an issuer wrote as random Base32 characters usually has some
+    // of them set.
     acc.zeroize();
-    if !valid || !trailing_zero || out.len() != out_len {
+    if !valid || out.len() != out_len {
         return Err(TotpError::InvalidSecret);
     }
     Ok(SecretBytes::from_zeroizing(out))
@@ -895,9 +997,11 @@ mod tests {
         TotpSecret::from_slice(bytes).unwrap()
     }
 
+    /// RFC 2202 §3, all seven HMAC-SHA-1 test cases. Case 5 is compared on the full digest; the
+    /// 96-bit truncation it also lists is not part of any construction here.
     #[test]
     fn rfc2202_hmac_sha1() {
-        for (key, data, expected) in [
+        for (case, (key, data, expected)) in (1..).zip([
             (
                 vec![0x0b; 20],
                 b"Hi There".to_vec(),
@@ -909,14 +1013,35 @@ mod tests {
                 "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79",
             ),
             (
+                vec![0xaa; 20],
+                vec![0xdd; 50],
+                "125d7342b9ac11cd91a39af48aa17b4f63f175d3",
+            ),
+            (
+                (0x01..=0x19).collect(),
+                vec![0xcd; 50],
+                "4c9007f4026250c6bc8414f9bf50c86c2d7235da",
+            ),
+            (
+                vec![0x0c; 20],
+                b"Test With Truncation".to_vec(),
+                "4c1a03424b55e07fe7f27be1d58bb9324a9a5a04",
+            ),
+            (
                 vec![0xaa; 80],
                 b"Test Using Larger Than Block-Size Key - Hash Key First".to_vec(),
                 "aa4ae5e15272d00e95705637ce8a3b55ed402112",
             ),
-        ] {
+            (
+                vec![0xaa; 80],
+                b"Test Using Larger Than Block-Size Key and Larger Than One Block-Size Data"
+                    .to_vec(),
+                "e8e99d0f45237d786d6bbaa7965c7808bbff1a91",
+            ),
+        ]) {
             let mut out = [0u8; 20];
             hmac_into::<Hmac<sha1::Sha1>>(&key, &data, &mut out).unwrap();
-            assert_eq!(out.to_vec(), hex(expected));
+            assert_eq!(out.to_vec(), hex(expected), "RFC 2202 case {case}");
         }
     }
 
@@ -1192,20 +1317,70 @@ mod tests {
             "MY======= ",
             "MY=====",
             "MY======M",
-            "M=Y=====", // bad padding
-            "MZ",
-            "MZXR", // non-zero trailing bits ("MY" and "MZXQ" are canonical)
+            "M=Y=====",
+            "MZXQ==", // bad or partial padding
             "MZXW 6YTB",
+            " MY",
+            "MY ",
             "MZXW-6YTB",
             "MZXW1YTB",
             "MZXW8YTB",
-            "MZXWéYTB", // bad characters
+            "MZXWéYTB", // bad characters, spaces included
             "========",
         ] {
             assert!(TotpSecret::from_base32(bad).is_err(), "{bad:?}");
         }
         let too_long = "A".repeat((MAX_SECRET_LEN + 5) * 8 / 5);
         assert!(TotpSecret::from_base32(&too_long).is_err());
+    }
+
+    /// Owner decision 2026-09-26 (CRYPTO.md §11.15): unused trailing bits are ignored on input,
+    /// and the output is canonical.
+    #[test]
+    fn base32_ignores_trailing_bits() {
+        for (spelling, canonical, plain) in [
+            ("MZ", "MY", &b"f"[..]),
+            ("MZXR", "MZXQ", b"fo"),
+            ("MZXW7", "MZXW6", b"foo"),
+            ("MZXW6YR", "MZXW6YQ", b"foob"),
+            ("m3", "MY", b"f"),
+        ] {
+            let s = TotpSecret::from_base32(spelling).unwrap();
+            assert_eq!(s.expose_secret(), plain, "{spelling}");
+            assert_eq!(s.to_base32().as_str(), canonical);
+            let padded = format!("{spelling}{}", "=".repeat((8 - spelling.len() % 8) % 8));
+            assert_eq!(
+                TotpSecret::from_base32(&padded).unwrap().expose_secret(),
+                plain
+            );
+        }
+    }
+
+    /// The input limit: the longest secret is accepted in both spellings, and anything longer is
+    /// rejected. This does not show that the limit guards `data_len * 5` against overflow on a
+    /// 32-bit `usize` (wasm32): on the 64-bit hosts the tests run on, the later length checks
+    /// reject every over-long input too, and no test runs on a 32-bit target yet (§15 item 8).
+    /// That guard holds by construction: the limit is checked before any arithmetic on the
+    /// length, and the const assertion pins it at 208, so `data_len * 5` is at most 1040.
+    #[test]
+    fn base32_length_limit() {
+        assert_eq!(MAX_BASE32_LEN, 208);
+        let unpadded = "7".repeat(205);
+        let padded = format!("{unpadded}===");
+        assert_eq!(padded.len(), MAX_BASE32_LEN);
+        for text in [&unpadded, &padded] {
+            let s = TotpSecret::from_base32(text).unwrap();
+            assert_eq!(s.expose_secret(), [0xff; MAX_SECRET_LEN]);
+        }
+        for len in [MAX_BASE32_LEN + 1, 213, 10_005, 1 << 20] {
+            let long = "A".repeat(len);
+            assert_eq!(
+                TotpSecret::from_base32(&long).map(|_| ()),
+                Err(TotpError::InvalidSecret)
+            );
+        }
+        let long_padded = format!("{padded}=");
+        assert!(TotpSecret::from_base32(&long_padded).is_err());
     }
 
     #[test]
@@ -1312,23 +1487,157 @@ mod tests {
         assert_eq!(OtpAuthUri::parse(&long).map(|_| ()), Err(E::InvalidUri));
     }
 
+    fn text(s: &str) -> Zeroizing<String> {
+        Zeroizing::new(s.to_owned())
+    }
+
+    /// `to_uri` output parses back to the same values and formats identically again.
+    fn assert_round_trip(uri: &OtpAuthUri) {
+        let formatted = uri.to_uri();
+        assert!(formatted.len() <= MAX_URI_LEN, "{}", formatted.len());
+        let again = OtpAuthUri::parse(&formatted).unwrap();
+        assert_eq!(again.secret().expose_secret(), uri.secret().expose_secret());
+        assert_eq!(again.kind(), uri.kind());
+        assert_eq!(again.algorithm(), uri.algorithm());
+        assert_eq!(again.digits(), uri.digits());
+        assert_eq!(again.label(), uri.label());
+        assert_eq!(again.issuer(), uri.issuer());
+        assert!(
+            *again.to_uri() == *formatted,
+            "the formatted form is canonical"
+        );
+    }
+
     #[test]
     fn otpauth_format_round_trip() {
         let s = TotpSecret::generate(&mut seeded_rng(4));
         let raw = s.expose_secret().to_vec();
         let uri = OtpAuthUri::new_totp(
-            "Rizzy Vault:alice@example.com".into(),
-            Some("Rizzy Vault+".into()),
+            text("Rizzy Vault:alice@example.com"),
+            Some(text("Rizzy Vault+")),
             TotpParams::DEFAULT,
             s,
+        )
+        .unwrap();
+        let formatted = uri.to_uri();
+        assert!(
+            formatted.starts_with("otpauth://totp/Rizzy%20Vault%3Aalice%40example.com?secret=")
         );
-        let text = uri.to_uri();
-        assert!(text.starts_with("otpauth://totp/Rizzy%20Vault%3Aalice%40example.com?secret="));
-        let back = OtpAuthUri::parse(&text).unwrap();
+        let back = OtpAuthUri::parse(&formatted).unwrap();
         assert_eq!(back.label(), "Rizzy Vault:alice@example.com");
         assert_eq!(back.issuer(), Some("Rizzy Vault+"));
         assert_eq!(back.secret().expose_secret(), raw.as_slice());
         assert_eq!(back.totp_params(), Some(TotpParams::DEFAULT));
+        assert_round_trip(&uri);
+    }
+
+    /// Every URI the parser accepts formats to one it accepts again. The label and issuer limits
+    /// apply to the decoded text, so the longest output still fits in `MAX_URI_LEN`.
+    #[test]
+    fn otpauth_accepted_uris_format_to_accepted_uris() {
+        let secret = "7".repeat(205); // MAX_SECRET_LEN bytes
+        let longest = |label: &str, issuer: &str| {
+            format!(
+                "otpauth://hotp/{label}?secret={secret}&issuer={issuer}&algorithm=SHA512\
+                 &digits=8&counter={}",
+                u64::MAX
+            )
+        };
+        // At both limits, every byte escaped on output: the longest `to_uri` output.
+        let max = OtpAuthUri::parse(&longest(
+            &"!".repeat(MAX_LABEL_LEN),
+            &"!".repeat(MAX_ISSUER_LEN),
+        ))
+        .unwrap();
+        assert_round_trip(&max);
+        assert_eq!(
+            max.to_uri().len(),
+            uri_capacity(MAX_LABEL_LEN, Some(MAX_ISSUER_LEN), MAX_SECRET_LEN)
+        );
+        // Decoded length counts: 170 escaped three-byte characters are 510 bytes, 171 are 513.
+        let euro = |n: usize| "%E2%82%AC".repeat(n);
+        assert_round_trip(&OtpAuthUri::parse(&longest(&euro(170), &euro(170))).unwrap());
+
+        // One byte over either limit is rejected. The last two parsed before the limits
+        // existed, and their `to_uri` output was longer than the parser accepts.
+        let pre = "otpauth://totp/";
+        let post = "?secret=GEZDGNBV";
+        for uri in [
+            longest(&"!".repeat(MAX_LABEL_LEN + 1), ""),
+            longest("", &"!".repeat(MAX_ISSUER_LEN + 1)),
+            longest(&euro(171), ""),
+            longest("", &euro(171)),
+            format!("{pre}{}{post}", "!".repeat(1400)),
+            // Exactly MAX_URI_LEN bytes, all unreserved: `to_uri` adds the default parameters.
+            format!(
+                "{pre}{}{post}",
+                "a".repeat(MAX_URI_LEN - pre.len() - post.len())
+            ),
+        ] {
+            assert!(uri.len() <= MAX_URI_LEN);
+            assert_eq!(
+                OtpAuthUri::parse(&uri).map(|_| ()),
+                Err(TotpError::InvalidUri),
+                "{}",
+                uri.len()
+            );
+        }
+    }
+
+    #[test]
+    fn new_totp_enforces_the_text_limits() {
+        let secret = || TotpSecret::from_slice(&[0xff; MAX_SECRET_LEN]).unwrap();
+        let params = TotpParams {
+            algorithm: Algorithm::Sha512,
+            digits: Digits::new(8).unwrap(),
+            period: Period::new(300).unwrap(),
+        };
+        let max = OtpAuthUri::new_totp(
+            text(&"@".repeat(MAX_LABEL_LEN)),
+            Some(text(&"@".repeat(MAX_ISSUER_LEN))),
+            params,
+            secret(),
+        )
+        .unwrap();
+        assert_round_trip(&max);
+        for (label, issuer) in [
+            ("@".repeat(MAX_LABEL_LEN + 1), None),
+            (String::new(), Some("@".repeat(MAX_ISSUER_LEN + 1))),
+        ] {
+            assert_eq!(
+                OtpAuthUri::new_totp(text(&label), issuer.map(|i| text(&i)), params, secret())
+                    .map(|_| ()),
+                Err(TotpError::InvalidUri)
+            );
+        }
+    }
+
+    /// `to_uri` reserves an upper bound of its output up front, so the buffer holding the secret
+    /// never reallocates and leaves an unwiped copy behind (CRYPTO.md §12.2).
+    #[test]
+    fn to_uri_allocates_once() {
+        let secret = |n: usize| TotpSecret::from_slice(&vec![0xa5; n]).unwrap();
+        let mut uris = vec![
+            // Short or empty text with long parameters: the case the old estimate missed.
+            OtpAuthUri::parse(&format!(
+                "otpauth://hotp/?secret=AE&algorithm=SHA512&digits=8&counter={}&issuer=",
+                u64::MAX
+            ))
+            .unwrap(),
+            OtpAuthUri::parse("otpauth://totp/?secret=AE&algorithm=sha256&period=300").unwrap(),
+            OtpAuthUri::parse("otpauth://totp/%20%3A%40?secret=AE&issuer=%2B+%26").unwrap(),
+            OtpAuthUri::parse("otpauth://hotp/a?secret=GEZDGNBV&counter=0").unwrap(),
+        ];
+        for n in [1, 10, GENERATED_SECRET_LEN, MAX_SECRET_LEN] {
+            uris.push(
+                OtpAuthUri::new_totp(text(""), None, TotpParams::DEFAULT, secret(n)).unwrap(),
+            );
+        }
+        for uri in &uris {
+            let formatted = uri.to_uri();
+            assert_eq!(formatted.capacity(), uri.uri_capacity(), "{uri:?}");
+            assert_round_trip(uri);
+        }
     }
 
     proptest! {
@@ -1338,12 +1647,31 @@ mod tests {
         }
 
         #[test]
-        fn otpauth_query_fuzz(q in "[a-z0-9=&%+A-Z]{0,80}", kind in "(totp|hotp|TOTP)") {
-            let uri = format!("otpauth://{kind}/l?{q}");
+        fn otpauth_query_fuzz(
+            label in "[a-zA-Z0-9 !$&'()*+,:;=@._~%-]{0,40}",
+            q in "[a-z0-9=&%+A-Z]{0,80}",
+            kind in "(totp|hotp|TOTP)",
+        ) {
+            let uri = format!("otpauth://{kind}/{label}?{q}");
             if let Ok(parsed) = OtpAuthUri::parse(&uri) {
-                let again = OtpAuthUri::parse(&parsed.to_uri()).unwrap();
-                prop_assert_eq!(again.secret().expose_secret(), parsed.secret().expose_secret());
-                prop_assert_eq!(again.kind(), parsed.kind());
+                assert_round_trip(&parsed);
+            }
+        }
+
+        /// Label and issuer lengths on both sides of the limits: accepted means round-trips.
+        #[test]
+        fn otpauth_long_text_round_trips(
+            label in "[!:@a]{0,700}",
+            issuer in proptest::option::of("[!:@a]{0,700}"),
+        ) {
+            let issuer = issuer.map_or(String::new(), |i| format!("&issuer={i}"));
+            let uri = format!("otpauth://totp/{label}?secret=GEZDGNBV{issuer}");
+            match OtpAuthUri::parse(&uri) {
+                Ok(parsed) => assert_round_trip(&parsed),
+                Err(e) => {
+                    prop_assert_eq!(e, TotpError::InvalidUri);
+                    prop_assert!(label.len() > MAX_LABEL_LEN || issuer.len() > MAX_ISSUER_LEN + 8);
+                }
             }
         }
 

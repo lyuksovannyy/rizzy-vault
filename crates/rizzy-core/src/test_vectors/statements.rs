@@ -22,11 +22,13 @@ use crate::ids::{AccountId, DeviceId, PublicKeyId, SessionId, SymmetricKeyId};
 use crate::kdf::KdfId;
 use crate::keys::{AccountKey, device_set_hash};
 use crate::labels::{self, Label};
+use crate::normalize::ServerOrigin;
 use crate::secret::Key32;
 use crate::sign::{
     AccountState, DeviceAuth, DeviceCertificate, DeviceKind, DeviceRequest, DeviceRevocation,
     DeviceSigningKey, IdentitySigningKey, KeyGrant, OpStatement, PublicKeyBundle,
-    SignatureContainer, SnapshotStatement, SyncMode, Verified, signed_message, split_wire,
+    SignatureContainer, SnapshotStatement, SyncMode, Verified, encode_wire, signed_message,
+    split_wire,
 };
 
 const KIND: &str = "statement";
@@ -443,20 +445,33 @@ pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
     ]
 }
 
-/// The bundles form a chain (first → identity change → silent update), and every state names
-/// one of them.
+/// The bundles form a chain (first → identity change → silent update), the identity change is
+/// what the public writer makes from its predecessor, and every state names one of the
+/// bundles.
 pub(super) fn check_file(vectors: &[Vector]) {
-    let wires: Vec<Vec<u8>> = vectors
+    let bundles: Vec<&Vector> = vectors
         .iter()
         .filter(|v| v.name == "public-key-bundle")
-        .map(|v| bytes(&v.outputs, "wire"))
         .collect();
+    let wires: Vec<Vec<u8>> = bundles.iter().map(|v| bytes(&v.outputs, "wire")).collect();
     let (first, rest) = wires.split_first().expect("bundles");
     let pinned = PublicKeyBundle::verify_self_signed(first).expect("first bundle");
     let rest: Vec<&[u8]> = rest.iter().map(Vec::as_slice).collect();
     let (last, identity_changed) = pinned.verify_chain(&rest).expect("a valid chain");
     assert!(identity_changed);
     assert_eq!(last.bundle().bundle_seq, 3);
+    // `compute` builds a two-signature bundle from the §9.6 formula, because one vector does
+    // not carry its predecessor. The public writer, given the predecessor, makes the same bytes.
+    for (predecessor, v) in wires.iter().zip(bundles.iter().skip(1)) {
+        let (bundle, key, previous) = bundle_inputs(&v.inputs);
+        if let Some(previous) = previous {
+            let predecessor = PublicKeyBundle::verify_self_signed(predecessor).expect("verify");
+            let wire = bundle
+                .sign_identity_change(&predecessor, &key, &previous)
+                .expect("the writer accepts the identity change");
+            assert_eq!(wire, bytes(&v.outputs, "wire"), "{}", v.id);
+        }
+    }
     let hashes: Vec<Vec<u8>> = vectors
         .iter()
         .filter(|v| v.name == "public-key-bundle")
@@ -512,6 +527,45 @@ fn account(m: &Map<String, Value>) -> AccountId {
     AccountId::from_bytes(arr(m, "account_id"))
 }
 
+/// The vector's `server_origin`, which must already be the §2 canonical form: the signed
+/// message carries exactly that text.
+fn server_origin(m: &Map<String, Value>) -> ServerOrigin {
+    let origin = ServerOrigin::parse(text(m, "server_origin")).expect("a server origin");
+    assert_eq!(
+        origin.as_str(),
+        text(m, "server_origin"),
+        "a canonical origin"
+    );
+    origin
+}
+
+/// A `public-key-bundle` vector's bundle, its signing key and, for an identity change, the
+/// preceding identity key.
+fn bundle_inputs(
+    m: &Map<String, Value>,
+) -> (
+    PublicKeyBundle,
+    IdentitySigningKey,
+    Option<IdentitySigningKey>,
+) {
+    let key = IdentitySigningKey::from_seed(&seed(m));
+    let bundle = PublicKeyBundle {
+        account_id: account(m),
+        identity_epoch: num(m, "identity_epoch"),
+        bundle_seq: u64_of(m, "bundle_seq"),
+        identity_ed25519: *key.verifying_key(),
+        identity_x25519: HpkePublicKey::x25519(arr(m, "identity_x25519_public_key")),
+        mail_x25519: opt_bytes(m, "mail_x25519_public_key")
+            .map(|k| HpkePublicKey::x25519(k.try_into().expect("32 bytes"))),
+        pq_required: boolean(m, "pq_required"),
+        created_at_ms: u64_of(m, "created_at_ms"),
+        prev_bundle_hash: arr(m, "prev_bundle_hash"),
+    };
+    let previous = opt_bytes(m, "previous_signer_seed")
+        .map(|s| IdentitySigningKey::from_seed(&s.try_into().expect("a 32-byte seed")));
+    (bundle, key, previous)
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "one match arm per statement type, each short"
@@ -523,26 +577,20 @@ fn account(m: &Map<String, Value>) -> AccountId {
 pub(super) fn compute(name: &str, m: &Map<String, Value>) -> Map<String, Value> {
     match name {
         "public-key-bundle" => {
-            let key = IdentitySigningKey::from_seed(&seed(m));
-            let bundle = PublicKeyBundle {
-                account_id: account(m),
-                identity_epoch: num(m, "identity_epoch"),
-                bundle_seq: u64_of(m, "bundle_seq"),
-                identity_ed25519: *key.verifying_key(),
-                identity_x25519: HpkePublicKey::x25519(arr(m, "identity_x25519_public_key")),
-                mail_x25519: opt_bytes(m, "mail_x25519_public_key")
-                    .map(|k| HpkePublicKey::x25519(k.try_into().expect("32 bytes"))),
-                pq_required: boolean(m, "pq_required"),
-                created_at_ms: u64_of(m, "created_at_ms"),
-                prev_bundle_hash: arr(m, "prev_bundle_hash"),
-            };
-            let previous = opt_bytes(m, "previous_signer_seed")
-                .map(|s| IdentitySigningKey::from_seed(&s.try_into().expect("a 32-byte seed")));
+            let (bundle, key, previous) = bundle_inputs(m);
             let wire = match &previous {
-                None => bundle.sign(&key),
-                Some(prev) => bundle.sign_identity_change(&key, prev),
-            }
-            .expect("sign");
+                None => bundle.sign(&key).expect("sign"),
+                // §9.6: bytes(u16(1) ‖ body) ‖ container(new key) ‖ container(previous key),
+                // both over the one signed message. `check_file` compares it with the public
+                // writer, which needs the predecessor bundle.
+                Some(prev) => {
+                    let body = bundle.encode_body().expect("encode");
+                    let message = signed_message(labels::SIG_PUBLIC_KEY_BUNDLE, &body);
+                    let first = key.sign_message(&message).expect("sign");
+                    let second = prev.sign_message(&message).expect("sign");
+                    encode_wire(&body, &[first, second]).expect("encode")
+                }
+            };
             let verified = PublicKeyBundle::verify_self_signed(&wire).expect("verify");
             assert_eq!(*verified.bundle(), bundle);
             assert_eq!(verified.has_predecessor_signature(), previous.is_some());
@@ -703,8 +751,9 @@ pub(super) fn compute(name: &str, m: &Map<String, Value>) -> Map<String, Value> 
         }
         "device-auth" => {
             let key = DeviceSigningKey::from_seed(&seed(m));
+            let origin = server_origin(m);
             let auth = DeviceAuth {
-                server_origin: text(m, "server_origin"),
+                server_origin: &origin,
                 account_id: account(m),
                 device_id: DeviceId::from_bytes(arr(m, "device_id")),
                 challenge: arr(m, "challenge"),
@@ -714,7 +763,7 @@ pub(super) fn compute(name: &str, m: &Map<String, Value>) -> Map<String, Value> 
                 .expect("verify");
             // §5.10: str(server_origin) ‖ account_id ‖ device_id ‖ challenge.
             let mut body = Vec::new();
-            put_str(&mut body, auth.server_origin).expect("encode");
+            put_str(&mut body, text(m, "server_origin")).expect("encode");
             body.extend_from_slice(auth.account_id.as_bytes());
             body.extend_from_slice(auth.device_id.as_bytes());
             body.extend_from_slice(&auth.challenge);
@@ -723,8 +772,9 @@ pub(super) fn compute(name: &str, m: &Map<String, Value>) -> Map<String, Value> 
         "device-request" => {
             let key = DeviceSigningKey::from_seed(&seed(m));
             let body_hash = DeviceRequest::body_hash(&bytes(m, "request_body"));
+            let origin = server_origin(m);
             let request = DeviceRequest {
-                server_origin: text(m, "server_origin"),
+                server_origin: &origin,
                 account_id: account(m),
                 device_id: DeviceId::from_bytes(arr(m, "device_id")),
                 session_id: SessionId::from_bytes(arr(m, "session_id")),
@@ -740,7 +790,7 @@ pub(super) fn compute(name: &str, m: &Map<String, Value>) -> Map<String, Value> 
             // §10.2: str(server_origin) ‖ account_id ‖ device_id ‖ session_id ‖
             // u64 request_counter ‖ str(method) ‖ str(path_and_query) ‖ SHA-256(body).
             let mut body = Vec::new();
-            put_str(&mut body, request.server_origin).expect("encode");
+            put_str(&mut body, text(m, "server_origin")).expect("encode");
             body.extend_from_slice(request.account_id.as_bytes());
             body.extend_from_slice(request.device_id.as_bytes());
             body.extend_from_slice(request.session_id.as_bytes());

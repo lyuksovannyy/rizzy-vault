@@ -39,11 +39,13 @@ impl Kind {
     }
 }
 
-/// A resolved edge: `to` is a package index, `kinds` every kind it is used as.
+/// A resolved edge: `to` is a package index, `kinds` every kind it is used as, `name` the
+/// crate name the dependent uses for it (the rename, if any, with `-` as `_`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Edge {
     pub(crate) to: usize,
     pub(crate) kinds: Vec<Kind>,
+    pub(crate) name: String,
 }
 
 /// A dependency as declared in a manifest.
@@ -51,9 +53,20 @@ pub(crate) struct Edge {
 pub(crate) struct Declared {
     /// The package name (not the rename).
     pub(crate) name: String,
+    /// The rename (`key = { package = "name" }`), if any.
+    pub(crate) rename: Option<String>,
     pub(crate) kind: Kind,
     pub(crate) features: Vec<String>,
     pub(crate) default_features: bool,
+}
+
+impl Declared {
+    /// The key the manifest uses for it: the rename, or the package name. `[features]` entries
+    /// (`key/feature`) refer to it by this key, and resolved edges ([`Edge::name`]) by this key
+    /// with `-` as `_`.
+    pub(crate) fn key(&self) -> &str {
+        self.rename.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// One package with its resolved features and edges.
@@ -68,6 +81,8 @@ pub(crate) struct Package {
     pub(crate) features: Vec<String>,
     pub(crate) deps: Vec<Edge>,
     pub(crate) declared: Vec<Declared>,
+    /// The package's own `[features]` table: each feature with what it enables, in name order.
+    pub(crate) feature_table: Vec<(String, Vec<String>)>,
 }
 
 impl Package {
@@ -110,6 +125,11 @@ impl Graph {
                 .map(|d| {
                     Ok(Declared {
                         name: string(d, "name")?,
+                        rename: match d.get("rename") {
+                            None | Some(Value::Null) => None,
+                            Some(Value::String(r)) => Some(r.clone()),
+                            Some(_) => return Err("dependency: rename".to_owned()),
+                        },
                         kind: Kind::parse(d.get("kind").unwrap_or(&Value::Null))?,
                         features: strings(d, "features")?,
                         default_features: d
@@ -128,6 +148,7 @@ impl Graph {
                 features: Vec::new(),
                 deps: Vec::new(),
                 declared,
+                feature_table: feature_table(p)?,
                 id,
             });
         }
@@ -140,6 +161,7 @@ impl Graph {
             let mut deps = Vec::new();
             for dep in array(node, "deps")? {
                 let pkg = string(dep, "pkg")?;
+                let name = string(dep, "name")?;
                 let &to = index
                     .get(&pkg)
                     .ok_or_else(|| format!("resolve edge to unknown package {pkg}"))?;
@@ -150,7 +172,7 @@ impl Graph {
                         kinds.push(kind);
                     }
                 }
-                deps.push(Edge { to, kinds });
+                deps.push(Edge { to, kinds, name });
             }
             let features = strings(node, "features")?;
             let package = packages
@@ -257,6 +279,29 @@ fn string(value: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("cargo metadata: `{key}` is not a string"))
 }
 
+/// A package's `features` map (feature name → what it enables).
+fn feature_table(package: &Value) -> Result<Vec<(String, Vec<String>)>, String> {
+    package
+        .get("features")
+        .and_then(Value::as_object)
+        .ok_or("cargo metadata: package `features` is not an object")?
+        .iter()
+        .map(|(name, enables)| {
+            let enables = enables
+                .as_array()
+                .ok_or_else(|| format!("cargo metadata: feature `{name}` is not an array"))?
+                .iter()
+                .map(|v| {
+                    v.as_str().map(str::to_owned).ok_or_else(|| {
+                        format!("cargo metadata: feature `{name}` holds a non-string")
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            Ok((name.clone(), enables))
+        })
+        .collect()
+}
+
 fn strings(value: &Value, key: &str) -> Result<Vec<String>, String> {
     array(value, key)?
         .iter()
@@ -272,8 +317,8 @@ fn strings(value: &Value, key: &str) -> Result<Vec<String>, String> {
 mod tests {
     use super::*;
 
-    /// A trimmed-down `cargo metadata` document: a member `a` with a normal, a dev and a
-    /// target-specific build edge.
+    /// A trimmed-down `cargo metadata` document: a member `a` with a normal, a dev (renamed) and
+    /// a target-specific build edge, and a `[features]` table.
     const SAMPLE: &str = r#"{
       "version": 1,
       "workspace_root": "/ws",
@@ -282,22 +327,28 @@ mod tests {
         {"id": "path+file:///ws/crates/a#0.0.0", "name": "a", "version": "0.0.0",
          "manifest_path": "/ws/crates/a/Cargo.toml",
          "dependencies": [
-           {"name": "b", "kind": null, "features": ["x"], "uses_default_features": false},
-           {"name": "c", "kind": "dev", "features": [], "uses_default_features": true},
+           {"name": "b", "kind": null, "features": ["x"], "uses_default_features": false,
+            "rename": null},
+           {"name": "c", "kind": "dev", "features": [], "uses_default_features": true,
+            "rename": "c-old"},
            {"name": "b", "kind": "build", "features": [], "uses_default_features": true}
-         ]},
+         ],
+         "features": {"web": ["b/y", "c-old?/z"], "default": ["web"]}},
         {"id": "registry+https://github.com/rust-lang/crates.io-index#b@1.2.3", "name": "b",
-         "version": "1.2.3", "manifest_path": "/reg/b/Cargo.toml", "dependencies": []},
+         "version": "1.2.3", "manifest_path": "/reg/b/Cargo.toml", "dependencies": [],
+         "features": {}},
         {"id": "registry+https://github.com/rust-lang/crates.io-index#c@0.4.0", "name": "c",
-         "version": "0.4.0", "manifest_path": "/reg/c/Cargo.toml", "dependencies": []}
+         "version": "0.4.0", "manifest_path": "/reg/c/Cargo.toml", "dependencies": [],
+         "features": {}}
       ],
       "resolve": {"root": null, "nodes": [
         {"id": "path+file:///ws/crates/a#0.0.0", "features": [],
          "deps": [
-           {"pkg": "registry+https://github.com/rust-lang/crates.io-index#b@1.2.3",
+           {"name": "b", "pkg": "registry+https://github.com/rust-lang/crates.io-index#b@1.2.3",
             "dep_kinds": [{"kind": null, "target": null},
                           {"kind": "build", "target": "cfg(unix)"}]},
-           {"pkg": "registry+https://github.com/rust-lang/crates.io-index#c@0.4.0",
+           {"name": "c_old",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#c@0.4.0",
             "dep_kinds": [{"kind": "dev", "target": null}]}
          ]},
         {"id": "registry+https://github.com/rust-lang/crates.io-index#b@1.2.3",
@@ -320,6 +371,19 @@ mod tests {
         assert_eq!(pa.declared[0].features, ["x"]);
         assert!(!pa.declared[0].default_features);
         assert_eq!(pa.declared[1].kind, Kind::Dev);
+        assert_eq!(pa.declared[0].key(), "b");
+        assert_eq!(pa.declared[1].key(), "c-old");
+        assert_eq!(pa.deps[1].name, "c_old");
+        assert_eq!(
+            pa.feature_table,
+            [
+                ("default".to_owned(), vec!["web".to_owned()]),
+                (
+                    "web".to_owned(),
+                    vec!["b/y".to_owned(), "c-old?/z".to_owned()]
+                ),
+            ]
+        );
         let b = pa.deps[0].to;
         assert_eq!(g.package(b).unwrap().label(), "b 1.2.3");
         assert_eq!(g.package(b).unwrap().features, ["default", "x"]);
@@ -361,5 +425,9 @@ mod tests {
             "\"kind\": \"odd\", \"target\"",
         );
         assert!(Graph::from_json(&bad_kind).is_err());
+        let no_features = SAMPLE.replace("\"features\": {}}", "\"features\": []}");
+        assert!(Graph::from_json(&no_features).is_err());
+        let bad_rename = SAMPLE.replace("\"rename\": \"c-old\"", "\"rename\": 1");
+        assert!(Graph::from_json(&bad_rename).is_err());
     }
 }

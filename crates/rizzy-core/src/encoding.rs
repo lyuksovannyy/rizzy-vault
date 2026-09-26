@@ -10,6 +10,8 @@
 //! [`Reader`] is the bounded reader for untrusted input: it never panics, never copies, and
 //! never allocates, so a hostile length field cannot make it reserve memory.
 
+use core::fmt;
+
 use base64ct::{Base64UrlUnpadded, Encoding as _};
 
 use crate::error::{EncodeError, ParseError};
@@ -68,16 +70,34 @@ pub fn bytes_encoded_len(len: usize) -> Result<usize, EncodeError> {
 /// [`ParseError::Truncated`] instead of panicking. Slices are borrowed from the input, so a
 /// length field can never cause an allocation. Call [`Reader::finish`] at the end of a
 /// structure to reject trailing bytes.
-#[derive(Clone, Debug)]
+///
+/// The reader also parses decrypted key material (the `E_id`, `E_dev` and retired-key
+/// plaintexts), so its `Debug` prints only the position and the remaining length, never the
+/// bytes (CRYPTO.md §12.2).
+#[derive(Clone)]
 pub struct Reader<'a> {
     input: &'a [u8],
+    /// Length of the whole input, for the position `Debug` reports.
+    len: usize,
+}
+
+impl fmt::Debug for Reader<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Reader")
+            .field("position", &self.len.saturating_sub(self.input.len()))
+            .field("remaining", &self.input.len())
+            .finish()
+    }
 }
 
 impl<'a> Reader<'a> {
     /// Starts reading `input` from its first byte.
     #[must_use]
     pub const fn new(input: &'a [u8]) -> Self {
-        Self { input }
+        Self {
+            input,
+            len: input.len(),
+        }
     }
 
     /// Number of bytes not read yet.
@@ -243,6 +263,10 @@ pub fn b64url_decode_into<'o>(text: &str, out: &'o mut [u8]) -> Result<&'o [u8],
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
 mod tests {
     use super::*;
 
@@ -305,6 +329,25 @@ mod tests {
         let mut r = Reader::new(&[0, 0, 0, 3, b'a', b'b', b'c']);
         assert_eq!(r.bytes_max(2), Err(ParseError::TooLong));
         assert_eq!(r.bytes_max(3).unwrap(), b"abc");
+    }
+
+    #[test]
+    fn reader_debug_never_prints_the_bytes() {
+        // The reader runs over decrypted key material: `Debug` shows where it is, not what it
+        // holds (CRYPTO.md §12.2).
+        let secret = [0xa5u8, 0x5a, 0xc3, 0x3c, 0x99, 0x66];
+        let mut r = Reader::new(&secret);
+        assert_eq!(format!("{r:?}"), "Reader { position: 0, remaining: 6 }");
+        r.take(2).unwrap();
+        let text = format!("{r:?} {r:#?}");
+        assert!(text.contains("position: 2"), "{text}");
+        assert!(text.contains("remaining: 4"), "{text}");
+        for b in secret {
+            assert!(!text.contains(&b.to_string()), "{text}");
+            assert!(!text.contains(&format!("{b:x}")), "{text}");
+        }
+        r.rest();
+        assert_eq!(format!("{r:?}"), "Reader { position: 6, remaining: 0 }");
     }
 
     #[test]

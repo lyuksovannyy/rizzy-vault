@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! cargo xtask check-deps
+//! cargo xtask check-clippy
 //! ```
 //!
 //! `check-deps` enforces the crate-boundary rules of ADR 0016 (R1–R8) and the dependency rules
@@ -23,11 +24,25 @@
 //!   dev-dependency exception `rizzy-server` → `rizzy-client`.
 //! - **§3** every internal edge is in the crate's "May depend on" column; every member has a
 //!   row in the rules table and sits in `crates/<name>`.
-//! - **R7/R8** every manifest inherits `[lints]`, `publish`, `license` and `rust-version`.
-//! - **§5** the `check-wasm` alias covers every no-I/O crate.
-//! - **ADR 0009** `openssl` only under `rizzy-server` and `rizzy-domain-auth`.
+//! - **R7/R8** every manifest inherits `[lints]`, `publish`, `license` and `rust-version`;
+//!   the workspace lint table sets `unsafe_code = "forbid"`.
+//! - **§5** the `check-wasm` alias covers every no-I/O crate; every no-I/O crate has a
+//!   `clippy.toml` that repeats the root one and carries the R1 disallowed-types and
+//!   disallowed-methods lists (R1, API side).
+//! - **ADR 0009** `openssl` only under `rizzy-server` and `rizzy-domain-auth`; the required
+//!   feature sets of the crypto crates in `rizzy-core`'s closure, `zeroize` above all, turned on
+//!   by `rizzy-core`'s own dependency entries, and none of the forbidden ones anywhere.
 //!
 //! R3, R5 and R6 cover dev-dependencies too. The rules table is in `rules.rs`.
+//!
+//! `check-clippy` runs clippy as `cargo lint` does and fails when its output reports a problem
+//! with a `clippy.toml` entry, such as "found a module" (ADR 0016 §5, R1 API side). Clippy then
+//! ignores the entry, and `-D warnings` does not turn that warning into an error. Run it after
+//! `cargo lint`, which it reuses the results of.
+
+// Also set by the workspace lint table (ADR 0016 R7); repeated here so that no manifest edit
+// alone admits `unsafe` in this crate.
+#![forbid(unsafe_code)]
 
 mod check;
 mod manifest;
@@ -50,22 +65,27 @@ USAGE:
     cargo xtask <COMMAND>
 
 COMMANDS:
-    check-deps    Check the crate-boundary and dependency rules (ADR 0016 R1–R8, ADR 0009)
+    check-deps      Check the crate-boundary and dependency rules (ADR 0016 R1–R8, ADR 0009)
+    check-clippy    Run clippy as `cargo lint` does; fail on any warning about a clippy.toml
+                    entry, such as \"found a module\" (ADR 0016 §5, R1 API side)
 ";
 
 /// The second target the getrandom rule is checked on, besides the host (ADR 0016 R1).
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `args_os`, not `args`: `args` panics on an argument that is not UTF-8. Such an argument
+    // is no command, so it gets the usage error.
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match args
         .iter()
-        .map(String::as_str)
+        .map(|a| a.to_str())
         .collect::<Vec<_>>()
         .as_slice()
     {
-        ["check-deps"] => check_deps(),
-        ["-h" | "--help"] => {
+        [Some("check-deps")] => check_deps(),
+        [Some("check-clippy")] => check_clippy(),
+        [Some("-h" | "--help")] => {
             let _ = write!(io::stdout().lock(), "{USAGE}");
             ExitCode::SUCCESS
         }
@@ -106,6 +126,62 @@ fn check_deps() -> ExitCode {
     ExitCode::FAILURE
 }
 
+fn check_clippy() -> ExitCode {
+    let mut err = io::stderr().lock();
+    let root = workspace_root();
+    let mut cmd = Command::new(cargo());
+    // `cargo lint`'s invocation, so a run after it reuses its results; `--color never` keeps
+    // the output scannable. `CLIPPY_CONF_DIR` would point clippy away from the crate files.
+    cmd.current_dir(&root)
+        .env_remove("CLIPPY_CONF_DIR")
+        .args([
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--locked",
+            "--color",
+            "never",
+        ])
+        .arg("--manifest-path")
+        .arg(root.join("Cargo.toml"))
+        .args(["--", "-D", "warnings"]);
+    let out = match cmd.output() {
+        Ok(out) => out,
+        Err(e) => {
+            let _ = writeln!(err, "check-clippy: error: running {cmd:?}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        let _ = writeln!(
+            err,
+            "{}\ncheck-clippy: clippy failed ({}); fix what `cargo lint` reports first",
+            stderr.trim_end(),
+            out.status
+        );
+        return ExitCode::FAILURE;
+    }
+    let warnings = check::clippy_config_warnings(&stderr);
+    if warnings.is_empty() {
+        let _ = writeln!(
+            io::stdout().lock(),
+            "check-clippy: ok (no clippy.toml entry warnings; ADR 0016 §5, R1 API side)"
+        );
+        return ExitCode::SUCCESS;
+    }
+    for w in &warnings {
+        let _ = writeln!(err, "error: [ADR 0016 §5] {w}");
+    }
+    let _ = writeln!(
+        err,
+        "check-clippy: {} clippy.toml entry warning(s). Clippy ignores such an entry, so the \
+         R1 API-side lists do not hold: name items (`std::fs::read`), never modules (`std::fs`).",
+        warnings.len()
+    );
+    ExitCode::FAILURE
+}
+
 /// The workspace root: two levels above this crate's manifest directory.
 fn workspace_root() -> PathBuf {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -123,18 +199,36 @@ fn load() -> Result<Inputs, String> {
         (host.clone(), metadata(&root, Some(&host))?),
     ];
     let mut manifests = Vec::new();
+    let mut clippy_configs = Vec::new();
+    let mut hidden_clippy_configs = Vec::new();
+    let mut clippy_dirs = vec![root.clone()];
     for i in all_targets.members() {
         let Some(p) = all_targets.package(i) else {
             continue;
         };
-        manifests.push((
-            p.name.clone(),
-            Manifest::parse(&read(Path::new(&p.manifest_path))?),
-        ));
+        let manifest_path = Path::new(&p.manifest_path);
+        manifests.push((p.name.clone(), Manifest::parse(&read(manifest_path)?)));
+        if rules::rule(&p.name).is_some_and(|r| r.no_io) {
+            let dir = manifest_path.parent().unwrap_or(&root);
+            let config = read_optional(&dir.join("clippy.toml"))?;
+            clippy_configs.push((p.name.clone(), config.as_deref().map(Manifest::parse)));
+            clippy_dirs.push(dir.to_path_buf());
+        }
+    }
+    for dir in &clippy_dirs {
+        let hidden = dir.join(".clippy.toml");
+        if read_optional(&hidden)?.is_some() {
+            hidden_clippy_configs.push(hidden.display().to_string());
+        }
     }
     Ok(Inputs {
         workspace_manifest: Manifest::parse(&read(&root.join("Cargo.toml"))?),
         cargo_config: Manifest::parse(&read(&root.join(".cargo").join("config.toml"))?),
+        root_clippy: Manifest::parse(
+            &read_optional(&root.join("clippy.toml"))?.unwrap_or_default(),
+        ),
+        clippy_configs,
+        hidden_clippy_configs,
         all_targets,
         per_target,
         manifests,
@@ -143,6 +237,15 @@ fn load() -> Result<Inputs, String> {
 
 fn read(path: &Path) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))
+}
+
+/// The file's contents, or `None` if it does not exist.
+fn read_optional(path: &Path) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("reading {}: {e}", path.display())),
+    }
 }
 
 /// The cargo that runs us (`cargo xtask` sets `CARGO`), or `cargo` from `PATH`.

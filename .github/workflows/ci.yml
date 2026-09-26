@@ -41,8 +41,12 @@ jobs:
         run: rustup toolchain install || rustup show
       - uses: Swatinem/rust-cache@v2
       - run: cargo lint
-      # Crate-boundary and dependency rules (ADR 0016 §5, R1–R8; ADR 0009).
+      # Crate-boundary and dependency rules (ADR 0016 §5, R1–R8; ADR 0009), including the
+      # no-I/O crates' clippy.toml lists (R1, API side).
       - run: cargo xtask check-deps
+      # clippy.toml entries clippy ignores ("found a module"), which `-D warnings` does not
+      # catch (ADR 0016 §5). Reuses the results of `cargo lint` above.
+      - run: cargo xtask check-clippy
 
   test:
     name: test (${{ matrix.os }})
@@ -59,6 +63,24 @@ jobs:
         run: rustup toolchain install || rustup show
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
+
+  fuzz-check:
+    name: fuzz targets build (stable)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install || rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      # fuzz/ is its own workspace (ADR 0016 §7), so no other job builds it. Type-checking the
+      # targets on stable catches rizzy-core API drift on every PR; running them is the weekly
+      # nightly job in fuzz.yml (ADR 0009 owner decision 4). libfuzzer-sys's build script needs
+      # a C++ compiler, which the runner has.
+      - run: cargo check --manifest-path fuzz/Cargo.toml --locked --bins
 
   wasm:
     name: core builds for wasm32
@@ -95,5 +117,12 @@ jobs:
           persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
+          command: check
+          arguments: --all-features
+      # fuzz/ has its own Cargo.lock, which the root check does not see. Same deny.toml (found
+      # by walking up from fuzz/); its per-crate exception admits libfuzzer-sys's NCSA licence.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: fuzz/Cargo.toml
           command: check
           arguments: --all-features

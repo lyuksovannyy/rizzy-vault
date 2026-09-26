@@ -368,6 +368,173 @@ fn passphrase_word_choice_is_uniform_and_deterministic() {
     }
 }
 
+/// The embedded list's words, in list order.
+fn word_list() -> Vec<&'static str> {
+    core::str::from_utf8(wordlist::RAW)
+        .unwrap()
+        .lines()
+        .map(|l| l.split_once('\t').unwrap().1)
+        .collect()
+}
+
+/// The passphrase `rng` should produce, built the plain way: the named words, first letters
+/// uppercased, joined with the separator. The fixed-width layout must match it byte for byte.
+fn plain_passphrase(rng: &mut impl CryptoRng, options: &PassphraseOptions) -> String {
+    let list = word_list();
+    let words: Vec<String> = (0..options.words)
+        .map(|_| {
+            let mut word = list[uniform_index(rng, 7776).unwrap() as usize].to_owned();
+            if options.capitalize {
+                word[..1].make_ascii_uppercase();
+            }
+            word
+        })
+        .collect();
+    words.join(options.separator.to_string().as_str())
+}
+
+#[test]
+fn passphrase_layout_matches_plain_concatenation() {
+    // The two-pass layout changes how the passphrase is assembled, not what it is: for the same
+    // RNG stream it gives exactly the bytes the plain concatenation gives.
+    for seed in 0..4 {
+        for words in [MIN_WORDS, MAX_WORDS] {
+            for separator in [' ', '#'] {
+                for capitalize in [false, true] {
+                    let options = PassphraseOptions {
+                        words,
+                        separator,
+                        capitalize,
+                    };
+                    let pp = generate_passphrase(&mut seeded_rng(20 + seed), &options).unwrap();
+                    let expected = plain_passphrase(&mut seeded_rng(20 + seed), &options);
+                    assert_eq!(pp.expose_secret(), expected, "{options:?}");
+                    // Allocated once at the fixed-width size and truncated, never grown (§12.2).
+                    assert_eq!(pp.value.capacity(), words * WORD_WIDTH);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn assemble_words_matches_plain_concatenation() {
+    // The helper `generate_passphrase` must assemble through (§12.3); called directly, with
+    // words of every length side by side, the shortest and longest included.
+    let list = word_list();
+    let mut picks: Vec<usize> = (3..=wordlist::MAX_WORD_LEN)
+        .filter_map(|len| list.iter().position(|w| w.len() == len))
+        .collect();
+    let reversed: Vec<usize> = picks.iter().rev().copied().collect();
+    picks.extend(reversed);
+    for words in [1, 2, picks.len()] {
+        for (separator, capitalize) in [(b' ', false), (b'#', true)] {
+            let mut next = picks.iter();
+            let out = assemble_words(words, separator, capitalize, |slot| {
+                let n = *next.next().unwrap();
+                wordlist::select_word(u32::try_from(n).unwrap(), slot);
+                Ok(())
+            })
+            .unwrap();
+            let expected: Vec<String> = picks[..words]
+                .iter()
+                .map(|&n| {
+                    let mut word = list[n].to_owned();
+                    if capitalize {
+                        word[..1].make_ascii_uppercase();
+                    }
+                    word
+                })
+                .collect();
+            let expected = expected.join(char::from(separator).to_string().as_str());
+            assert_eq!(out.as_slice(), expected.as_bytes(), "{words} {separator}");
+            assert_eq!(out.capacity(), words * WORD_WIDTH);
+        }
+    }
+    // A failing selection is passed through.
+    assert_eq!(
+        assemble_words(3, b' ', false, |_| Err(GeneratorError::NoClasses)).map(|_| ()),
+        Err(GeneratorError::NoClasses)
+    );
+}
+
+#[test]
+fn spread_word_puts_every_byte_at_a_fixed_offset() {
+    let list = word_list();
+    // One word of every length in the list, including the longest, whose separator takes the
+    // region's last byte.
+    for len in 3..=wordlist::MAX_WORD_LEN {
+        let n = list.iter().position(|w| w.len() == len).unwrap();
+        let word = list[n].as_bytes();
+        let mut slot = [0u8; wordlist::SLOT];
+        wordlist::select_word(u32::try_from(n).unwrap(), &mut slot);
+        for separator in [Some(b'#'), None] {
+            for capitalize in [false, true] {
+                let mut region = [0xAAu8; WORD_WIDTH];
+                spread_word(&mut region, &slot, separator, capitalize);
+                let mut expected = [0u8; WORD_WIDTH];
+                expected[..len].copy_from_slice(word);
+                if let Some(sep) = separator {
+                    expected[len] = sep;
+                }
+                if capitalize {
+                    expected[0] = expected[0].to_ascii_uppercase();
+                }
+                assert_eq!(region, expected, "{} {separator:?} {capitalize}", list[n]);
+            }
+        }
+    }
+}
+
+#[test]
+fn constant_time_capitalisation_matches_to_ascii_uppercase() {
+    // The select-based case flip agrees with `u8::to_ascii_uppercase` on every byte, so it
+    // stays correct for any list, not only one whose words start with a lowercase letter.
+    for b in 0..=u8::MAX {
+        let mut slot = [0u8; wordlist::SLOT];
+        slot[0] = 1;
+        slot[1] = b;
+        let mut region = [0u8; WORD_WIDTH];
+        spread_word(&mut region, &slot, None, true);
+        assert_eq!(region[0], b.to_ascii_uppercase(), "{b:#04x}");
+        assert!(region[1..].iter().all(|&x| x == 0));
+    }
+}
+
+#[test]
+fn compact_keeps_the_non_zero_bytes_in_order() {
+    let check = |wide: &[u8]| {
+        let expected: Vec<u8> = wide.iter().copied().filter(|&b| b != 0).collect();
+        let mut out = vec![0u8; wide.len()];
+        let len = compact(wide, &mut out);
+        assert_eq!(len, expected.len(), "{wide:?}");
+        assert_eq!(out[..len], expected[..], "{wide:?}");
+        assert!(out[len..].iter().all(|&b| b == 0), "{wide:?}");
+    };
+    check(&[]);
+    check(&[0; 7]);
+    check(b"abcdefg");
+    check(&[0, 0, 0, b'z']);
+    check(&[b'a', 0, 0, 0]);
+    // Random layouts up to the largest passphrase, about half padding.
+    let mut rng = seeded_rng(12);
+    for _ in 0..300 {
+        let len = uniform_index(&mut rng, u32::try_from(MAX_WORDS * WORD_WIDTH + 1).unwrap())
+            .unwrap() as usize;
+        let wide: Vec<u8> = (0..len)
+            .map(|_| {
+                let x = rng.next_u32();
+                if x & 1 == 0 {
+                    0
+                } else {
+                    u8::try_from(x >> 24).unwrap() | 1
+                }
+            })
+            .collect();
+        check(&wide);
+    }
+}
+
 #[test]
 fn ct_select_reads_the_indexed_element() {
     let set = b"abcdef";

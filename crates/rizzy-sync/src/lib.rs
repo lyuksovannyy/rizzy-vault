@@ -7,3 +7,7 @@
 //! `wasm32-unknown-unknown`.
 //!
 //! Status: skeleton. ADR 0012 is accepted; code lands in M1 after the item record ADR.
+
+// Also set by the workspace lint table (ADR 0016 R7); repeated here so that no manifest edit
+// alone admits `unsafe` in this crate.
+#![forbid(unsafe_code)]

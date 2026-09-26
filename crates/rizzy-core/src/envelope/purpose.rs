@@ -578,6 +578,26 @@ context! {
     }
 }
 
+// Test only: `PASSWORD_VERIFIER_GRANT` is an M4 purpose and gets its real context type (and its
+// PSK derivation) in M4. Its §8.4 layout is fully specified and its plaintext is variable
+// length, so the tests use it to exercise the HPKE open-side 16 MiB bound, which the M1 HPKE
+// purposes (all `Fixed(32)`) never reach.
+#[cfg(test)]
+context! {
+    /// `PASSWORD_VERIFIER_GRANT` (HPKE PSK mode, M4; test only in M1):
+    /// `account_id ‖ u32 password_epoch (new) ‖ sender device_id ‖ recipient device_id`.
+    PasswordVerifierGrantCtx: PasswordVerifierGrant, HpkeContext + HpkePskContext {
+        /// The account.
+        account_id: AccountId,
+        /// The new password epoch.
+        password_epoch: u32,
+        /// The device that made the grant.
+        sender_device_id: DeviceId,
+        /// The device the grant is sealed to.
+        recipient_device_id: DeviceId,
+    }
+}
+
 context! {
     /// `IDENTITY_SECRET_KEYS` (`E_id`): `account_id ‖ u32 identity_epoch`.
     IdentitySecretKeysCtx: IdentitySecretKeys, SymmetricContext {

@@ -67,6 +67,10 @@ use crate::secret::{Key32, SecretBytes};
 use crate::{kdf, padding};
 
 #[cfg(test)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
 mod tests;
 
 type X25519PrivateKey = <X25519HkdfSha256 as hpke::Kem>::PrivateKey;
@@ -463,7 +467,8 @@ fn open_with<C: HpkeContext>(
     else {
         return Err(DecryptError);
     };
-    // Length rules of the purpose: exact for fixed-size plaintexts, the M1 bound otherwise.
+    // Length rules of the purpose: exact for fixed-size plaintexts, otherwise the 16 MiB M1
+    // bound, checked before any crypto (CRYPTO.md §9.2).
     let plaintext_len_ok = match purpose.plaintext_rule() {
         PlaintextRule::Fixed(len) => env.ciphertext().len() == len,
         _ => env.ciphertext().len() <= MAX_PLAINTEXT_LEN,

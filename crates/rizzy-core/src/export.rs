@@ -189,7 +189,8 @@ pub(crate) fn password_file_key(
 /// Checks a newly chosen file password: not empty, and no code point that is unassigned in the
 /// pinned Unicode tables (the rule of ADR 0004 owner decision 3, applied here too because the
 /// password goes through NFC the same way, and a later Unicode version could otherwise change
-/// its NFC form and lock the file).
+/// its NFC form and lock the file). CRYPTO.md §2, "New passwords", states both rules for export
+/// and backup passwords.
 pub(crate) fn check_new_file_password(password: &str) -> Result<(), ExportError> {
     if password.is_empty() {
         return Err(ExportError::EmptyPassword);

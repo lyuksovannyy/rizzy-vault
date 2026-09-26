@@ -4,6 +4,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use rizzy_core::normalize::ServerOrigin;
 use rizzy_core::sign::{
     AccountState, DeviceAuth, DeviceCertificate, DeviceRequest, DeviceRevocation,
     DeviceVerifyingKey, IdentityVerifyingKey, KeyGrant, OpStatement, PublicKeyBundle,
@@ -32,15 +33,16 @@ fuzz_target!(|data: &[u8]| {
     let _ = KeyGrant::verify(data, &identity);
     if data.len() >= 32 {
         let (head, container) = data.split_at(32);
+        let origin = ServerOrigin::parse("https://vault.example").expect("a canonical origin");
         let auth = DeviceAuth {
-            server_origin: "https://vault.example",
+            server_origin: &origin,
             account_id: rizzy_core::ids::AccountId::from_bytes([1; 16]),
             device_id: rizzy_core::ids::DeviceId::from_bytes([2; 16]),
             challenge: head.try_into().expect("32 bytes"),
         };
         let _ = auth.verify(container, &device);
         let request = DeviceRequest {
-            server_origin: "https://vault.example",
+            server_origin: &origin,
             account_id: auth.account_id,
             device_id: auth.device_id,
             session_id: rizzy_core::ids::SessionId::from_bytes([3; 16]),

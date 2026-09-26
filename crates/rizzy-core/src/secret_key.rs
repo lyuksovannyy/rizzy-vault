@@ -391,6 +391,10 @@ fn decode_symbol(b: u8) -> (u8, bool) {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
 mod tests {
     use proptest::prelude::*;
 

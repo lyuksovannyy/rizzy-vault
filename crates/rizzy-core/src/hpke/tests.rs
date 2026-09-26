@@ -8,7 +8,9 @@
 //! implementation first reproduced the RFC 9180 A.2.1 and A.2.2 vectors.
 
 use super::*;
-use crate::envelope::purpose::{AccountKeyDeviceGrantCtx, VaultKeyMemberGrantCtx};
+use crate::envelope::purpose::{
+    AccountKeyDeviceGrantCtx, PasswordVerifierGrantCtx, VaultKeyMemberGrantCtx,
+};
 use crate::envelope::{Context, Purpose};
 use crate::ids::{AccountId, DeviceId, VaultId};
 use crate::test_util::{FixedRng, hex, seeded_rng};
@@ -595,6 +597,66 @@ fn truncation_and_extension_never_panic() {
     let (result, opens) = hpke_opens_during(|| open_psk(&rcpt, &psk(), &grant_ctx(), &longer));
     assert!(result.is_err());
     assert_eq!(opens, 0);
+}
+
+/// The M1 plaintext limit (16 MiB, §9.1) on the HPKE open path, which only a variable-length
+/// purpose reaches. No M1 HPKE purpose is one, so this uses the test-only
+/// `PASSWORD_VERIFIER_GRANT` context (M4, unpadded) and a stand-in PSK for that purpose.
+#[test]
+fn a_variable_length_purpose_rejects_a_ciphertext_over_16_mib_before_crypto() {
+    let rcpt = recipient();
+    let verifier_psk = HpkePsk {
+        purpose: Purpose::PasswordVerifierGrant,
+        psk: Key32::from_slice(&[0x5a; 32]).unwrap(),
+    };
+    let ctx = PasswordVerifierGrantCtx {
+        account_id: account(),
+        password_epoch: 1,
+        sender_device_id: DeviceId::from_bytes([0x0d; 16]),
+        recipient_device_id: DeviceId::from_bytes([0x0e; 16]),
+    };
+    // The context and PSK work: a short grant round-trips and reaches the HPKE open once.
+    let short = seal_psk(
+        &mut seeded_rng(10),
+        rcpt.public_key(),
+        &verifier_psk,
+        &ctx,
+        b"E_local",
+    )
+    .unwrap();
+    let (result, opens) = hpke_opens_during(|| open_psk(&rcpt, &verifier_psk, &ctx, &short));
+    assert_eq!(result.unwrap().expose_secret(), b"E_local");
+    assert_eq!(opens, 1);
+
+    // The same header and `enc` with a ciphertext of exactly 16 MiB pass the length rule and
+    // reach the HPKE open (which then fails at the tag); one byte more is rejected before it.
+    let with_ciphertext_len = |len: usize| {
+        let mut env = short[..HEADER_LEN + ENC_LEN].to_vec();
+        env.resize(HEADER_LEN + ENC_LEN + len + TAG_LEN, 0);
+        env
+    };
+    let at_limit = with_ciphertext_len(MAX_PLAINTEXT_LEN);
+    let (result, opens) = hpke_opens_during(|| open_psk(&rcpt, &verifier_psk, &ctx, &at_limit));
+    assert_eq!(result.map(|_| ()), Err(DecryptError));
+    assert_eq!(opens, 1, "exactly 16 MiB is admitted");
+    drop(at_limit);
+    let over = with_ciphertext_len(MAX_PLAINTEXT_LEN + 1);
+    let (result, opens) = hpke_opens_during(|| open_psk(&rcpt, &verifier_psk, &ctx, &over));
+    assert_eq!(result.map(|_| ()), Err(DecryptError));
+    assert_eq!(opens, 0, "rejected by the length rule before any crypto");
+
+    // The seal side refuses the same length before any crypto.
+    assert_eq!(
+        seal_psk(
+            &mut seeded_rng(11),
+            rcpt.public_key(),
+            &verifier_psk,
+            &ctx,
+            &vec![0; MAX_PLAINTEXT_LEN + 1]
+        )
+        .map(|_| ()),
+        Err(EncryptError::PlaintextTooLong)
+    );
 }
 
 #[test]

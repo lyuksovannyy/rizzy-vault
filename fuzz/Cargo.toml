@@ -21,6 +21,9 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4.13"
+# The traits the `opaque_server` target implements for its deterministic RNG. The version
+# rizzy-core already pins ([workspace.dependencies], ADR 0009), so no new crate in this graph.
+rand_core = { version = "=0.10.1", default-features = false }
 rizzy-core = { path = "../crates/rizzy-core" }
 
 [[bin]]
@@ -61,6 +64,13 @@ bench = false
 [[bin]]
 name = "normalize"
 path = "fuzz_targets/normalize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "opaque_server"
+path = "fuzz_targets/opaque_server.rs"
 test = false
 doc = false
 bench = false

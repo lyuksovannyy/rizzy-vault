@@ -1016,6 +1016,311 @@ fn wrong_key_fails_before_any_aead() {
     assert_eq!(aead, 0);
 }
 
+// ---------------------------------------------------------------------------------------------
+// INV-11: a ciphertext crafted to verify under two keys (threat model, CRYPTO.md §8.3)
+// ---------------------------------------------------------------------------------------------
+
+/// Test-only arithmetic in GF(2^130 − 5), the Poly1305 field. An element is `lo + hi·2^128`,
+/// always fully reduced (`hi ≤ 3`).
+///
+/// Hand-written so the INV-11 test needs no bignum crate. The raw AEAD checks the crafted
+/// ciphertext, so a slip here makes the test fail, never pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Fe {
+    lo: u128,
+    hi: u128,
+}
+
+impl Fe {
+    /// `p = 2^130 − 5`.
+    const P: Self = Self {
+        lo: u128::MAX - 4,
+        hi: 3,
+    };
+    const ZERO: Self = Self { lo: 0, hi: 0 };
+    const ONE: Self = Self { lo: 1, hi: 0 };
+
+    /// A full 16-byte message block, little-endian, with its `2^128` pad bit (RFC 8439 §2.5.1).
+    fn block(bytes: &[u8]) -> Self {
+        Self {
+            lo: u128::from_le_bytes(bytes.try_into().unwrap()),
+            hi: 1,
+        }
+    }
+
+    fn add(self, other: Self) -> Self {
+        // Both are below p, so the sum is below 2p and one conditional subtraction reduces it.
+        let (lo, carry) = self.lo.overflowing_add(other.lo);
+        let sum = Self {
+            lo,
+            hi: self.hi + other.hi + u128::from(carry),
+        };
+        if sum.hi > Self::P.hi || (sum.hi == Self::P.hi && sum.lo >= Self::P.lo) {
+            let (lo, borrow) = sum.lo.overflowing_sub(Self::P.lo);
+            Self {
+                lo,
+                hi: sum.hi - Self::P.hi - u128::from(borrow),
+            }
+        } else {
+            sum
+        }
+    }
+
+    fn sub(self, other: Self) -> Self {
+        if other == Self::ZERO {
+            return self;
+        }
+        let (lo, borrow) = Self::P.lo.overflowing_sub(other.lo);
+        self.add(Self {
+            lo,
+            hi: Self::P.hi - other.hi - u128::from(borrow),
+        })
+    }
+
+    fn bit(self, i: u32) -> bool {
+        let (limb, shift) = if i < 128 {
+            (self.lo, i)
+        } else {
+            (self.hi, i - 128)
+        };
+        (limb >> shift) & 1 == 1
+    }
+
+    /// Double-and-add over the 130 bits of `other`.
+    fn mul(self, other: Self) -> Self {
+        (0..130).rev().fold(Self::ZERO, |acc, i| {
+            let acc = acc.add(acc);
+            if other.bit(i) { acc.add(self) } else { acc }
+        })
+    }
+
+    /// `self^(p − 2)`, the inverse of a non-zero element (Fermat).
+    fn inv(self) -> Self {
+        let exponent = Self {
+            lo: u128::MAX - 6,
+            hi: 3,
+        };
+        (0..130).rev().fold(Self::ONE, |acc, i| {
+            let acc = acc.mul(acc);
+            if exponent.bit(i) { acc.mul(self) } else { acc }
+        })
+    }
+}
+
+/// The Poly1305 input of `ChaCha20Poly1305` (RFC 8439 §2.8) as field elements:
+/// `aad ‖ pad16 ‖ ct ‖ pad16 ‖ u64le(len(aad)) ‖ u64le(len(ct))`, in full blocks.
+fn aead_mac_blocks(aad: &[u8], ct: &[u8]) -> Vec<Fe> {
+    let mut data = Vec::new();
+    for part in [aad, ct] {
+        data.extend_from_slice(part);
+        data.resize(data.len().next_multiple_of(16), 0);
+    }
+    for part in [aad, ct] {
+        data.extend_from_slice(&u64::try_from(part.len()).unwrap().to_le_bytes());
+    }
+    data.chunks_exact(16).map(Fe::block).collect()
+}
+
+/// `Σ m_j · r^(q − j + 1) mod p` over the blocks `m_1 … m_q` (RFC 8439 §2.5.1).
+fn poly1305_sum(r: Fe, blocks: &[Fe]) -> Fe {
+    blocks.iter().fold(Fe::ZERO, |acc, m| acc.add(*m).mul(r))
+}
+
+/// `tag = (sum + s) mod 2^128`, taken over the integers, not mod p.
+fn poly1305_tag(sum: Fe, s: Fe) -> [u8; 16] {
+    sum.lo.wrapping_add(s.lo).to_le_bytes()
+}
+
+/// What an attacker who knows the key `K` computes for one nonce and context: the header,
+/// the AAD and the commitment of an envelope under `K`, the AEAD subkey `k_enc` (§8.3), and
+/// the Poly1305 one-time key `(r, s)` that XChaCha20-Poly1305 derives from `k_enc` and the
+/// nonce (keystream block 0, RFC 8439 §2.6).
+struct Inv11Key {
+    header: Vec<u8>,
+    aad: Vec<u8>,
+    commitment: Vec<u8>,
+    k_enc: [u8; 32],
+    r: Fe,
+    s: Fe,
+}
+
+impl Inv11Key {
+    fn new(k: &Key32, nonce: &[u8; symmetric::NONCE_LEN], ctx: &AccountSettingsCtx) -> Self {
+        use chacha20::cipher::{KeyIvInit as _, StreamCipher as _};
+
+        // A real envelope with this nonce gives the header and the commitment.
+        let env = seal(&mut FixedRng::new(nonce), k, ctx, &[]).unwrap();
+        let header = env[..HEADER_LEN].to_vec();
+        let commitment_at = HEADER_LEN + symmetric::NONCE_LEN;
+        let commitment = env[commitment_at..commitment_at + symmetric::COMMITMENT_LEN].to_vec();
+        let aad = build_aad(header.as_slice().try_into().unwrap(), ctx);
+        let mut okm = [0u8; 64];
+        crate::kdf::hkdf_sha256(
+            k.expose_secret(),
+            Some(nonce),
+            crate::labels::ENVELOPE_XCHACHA20POLY1305,
+            &aad,
+            &mut okm,
+        )
+        .unwrap();
+        assert_eq!(
+            okm[32..],
+            commitment,
+            "k_enc and the commitment come from one okm"
+        );
+        let k_enc: [u8; 32] = okm[..32].try_into().unwrap();
+        // `chacha20`'s XChaCha20 is the stream cipher `chacha20poly1305` builds on; its
+        // `xchacha` feature is enabled through that crate.
+        let mut one_time_key = [0u8; 32];
+        chacha20::XChaCha20::new_from_slices(&k_enc, nonce)
+            .unwrap()
+            .apply_keystream(&mut one_time_key);
+        let (r, s) = one_time_key.split_at(16);
+        Self {
+            header,
+            aad,
+            commitment,
+            k_enc,
+            r: Fe {
+                lo: u128::from_le_bytes(r.try_into().unwrap())
+                    & 0x0fff_fffc_0fff_fffc_0fff_fffc_0fff_ffff,
+                hi: 0,
+            },
+            s: Fe {
+                lo: u128::from_le_bytes(s.try_into().unwrap()),
+                hi: 0,
+            },
+        }
+    }
+
+    fn tag(&self, ct: &[u8]) -> [u8; 16] {
+        poly1305_tag(
+            poly1305_sum(self.r, &aead_mac_blocks(&self.aad, ct)),
+            self.s,
+        )
+    }
+}
+
+/// Crafts a two-block ciphertext and one tag that the raw AEAD accepts under both keys'
+/// `k_enc`, each with its own AAD (the AADs differ only in the header key id).
+///
+/// Block 0 is random filler. Block 1 is the unknown `x`: it enters each key's Poly1305 sum as
+/// `m = x + 2^128` with weight `r^2`, so "equal sums plus `s`, modulo p" is one linear equation
+/// in `m`. A solution is usable if `m` is a padded 128-bit block (about one try in four) and
+/// the two tags then agree as integers, not only modulo p. Otherwise the filler changes and
+/// the solve repeats; about one try in five succeeds (measured over 4000 tries).
+fn craft_two_key_ciphertext(
+    keys: &[Inv11Key; 2],
+    rng: &mut impl rand_core::Rng,
+) -> (Vec<u8>, [u8; 16]) {
+    let [one, two] = keys;
+    assert_eq!(
+        one.aad.len(),
+        two.aad.len(),
+        "equal AAD lengths put x at the same weight"
+    );
+    let r2_diff = one.r.mul(one.r).sub(two.r.mul(two.r));
+    let r2_diff_inv = r2_diff.inv();
+    assert_eq!(r2_diff.mul(r2_diff_inv), Fe::ONE);
+    for _ in 0..200 {
+        let mut filler = [0u8; 16];
+        rng.fill_bytes(&mut filler);
+        // Each key's sum without the unknown block, which is second to last (weight r^2).
+        let without_x = |k: &Inv11Key| {
+            let mut blocks = aead_mac_blocks(&k.aad, &[filler, [0; 16]].concat());
+            let x_at = blocks.len() - 2;
+            blocks[x_at] = Fe::ZERO;
+            poly1305_sum(k.r, &blocks)
+        };
+        // sum_1 + m·r_1^2 + s_1 = sum_2 + m·r_2^2 + s_2  (mod p)
+        let m = without_x(two)
+            .sub(without_x(one))
+            .add(two.s)
+            .sub(one.s)
+            .mul(r2_diff_inv);
+        if m.hi != 1 {
+            continue;
+        }
+        let ct = [filler, m.lo.to_le_bytes()].concat();
+        let tag = one.tag(&ct);
+        if tag == two.tag(&ct) {
+            return (ct, tag);
+        }
+    }
+    unreachable!("no two-key ciphertext in 200 tries (about one in five succeeds)")
+}
+
+/// Threat model INV-11: "Test with a ciphertext crafted to collide under two keys for the
+/// underlying AEAD; the commitment check rejects it."
+///
+/// The attacker knows both keys and crafts `(ct, tag)` that XChaCha20-Poly1305 alone accepts
+/// under both envelope subkeys (an "invisible salamander", CRYPTO.md §8.3). Wrapped in any
+/// header and commitment, it still opens under at most one key, and every wrong combination
+/// fails at the key id or the commitment, before the AEAD runs.
+#[test]
+fn inv_11_a_ciphertext_valid_under_two_keys_opens_under_one_only() {
+    use chacha20poly1305::{AeadInOut as _, KeyInit as _, Tag, XChaCha20Poly1305, XNonce};
+
+    let mut rng = seeded_rng(0x11);
+    let keys = [Key32::generate(&mut rng), Key32::generate(&mut rng)];
+    // An unpadded purpose, so every 32-byte plaintext is valid once the AEAD accepts it.
+    let ctx = AccountSettingsCtx {
+        account_id: account(),
+        settings_seq: 1,
+    };
+    let nonce = [0x4e; symmetric::NONCE_LEN];
+    let attacker = keys.each_ref().map(|k| Inv11Key::new(k, &nonce, &ctx));
+    assert_ne!(attacker[0].commitment, attacker[1].commitment);
+    let (ct, tag) = craft_two_key_ciphertext(&attacker, &mut rng);
+
+    // The underlying AEAD accepts (ct, tag) under both subkeys, to two different plaintexts.
+    let plaintexts = attacker.each_ref().map(|k| {
+        let mut buf = ct.clone();
+        XChaCha20Poly1305::new_from_slice(&k.k_enc)
+            .unwrap()
+            .decrypt_inout_detached(
+                &XNonce::from(nonce),
+                &k.aad,
+                buf.as_mut_slice().into(),
+                &Tag::from(tag),
+            )
+            .expect("the crafted ciphertext verifies under this key's k_enc");
+        buf
+    });
+    assert_ne!(plaintexts[0], plaintexts[1]);
+
+    // Every envelope the attacker can build from it: either key's header (key id) with either
+    // key's commitment, opened under either key. Only the honest pairing opens; a header
+    // relabelled for the other key passes the key id check (§9.5 step 4) and fails at the
+    // commitment, although the raw AEAD above accepts its (ct, tag, aad) under that key.
+    for (h, header_of) in attacker.iter().enumerate() {
+        for (c, commitment_of) in attacker.iter().enumerate() {
+            let env = [
+                header_of.header.as_slice(),
+                &nonce,
+                &commitment_of.commitment,
+                &ct,
+                &tag,
+            ]
+            .concat();
+            for (k, key) in keys.iter().enumerate() {
+                let okm_before = test_hooks::okm_derivations();
+                let (result, aead) = aead_opens_during(|| open(key, &ctx, &env));
+                let okm = test_hooks::okm_derivations() - okm_before;
+                let at = format!("header {h}, commitment {c}, key {k}");
+                if h == k && c == k {
+                    assert_eq!(result.unwrap().expose_secret(), plaintexts[k], "{at}");
+                    assert_eq!(aead, 1, "{at}");
+                } else {
+                    assert_eq!(result.map(|_| ()), Err(DecryptError), "{at}");
+                    assert_eq!(aead, 0, "no AEAD opening: {at}");
+                }
+                assert_eq!(okm, usize::from(h == k), "commitment recomputed: {at}");
+            }
+        }
+    }
+}
+
 #[test]
 fn every_single_bit_flip_is_rejected_and_only_ct_or_tag_flips_reach_the_aead() {
     let (k, env) = sealed_op();

@@ -16,12 +16,21 @@
 //!   output to the specification: every envelope opens again, every statement verifies,
 //!   every formatted code parses back, and outputs the API hides (the commitment, the signed
 //!   message) are rebuilt from the CRYPTO.md formula and compared with the bytes the API made.
+//! - **Coverage.** Each file lists every vector it holds ([`VectorFile::contents`]), and every
+//!   registered label has vectors unless its construction ships after M1
+//!   ([`label_coverage_errors`]), so a vector deleted from a file, or from its generator and
+//!   the file together, fails a test instead of dropping out of the cross-platform runs
+//!   (§15 item 8).
 //!
 //! Tier A files are normative format vectors; `transcript.json` is the tier B regression
 //! transcript (signup, login, unlock) and is regenerated, with a note, when a pinned crate
 //! changes.
 
 mod derivations;
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
 mod encodings;
 mod envelopes;
 mod statements;
@@ -31,6 +40,8 @@ use chacha20::ChaCha20Rng;
 use rand_core::{SeedableRng as _, TryCryptoRng, TryRng};
 use serde_json::{Map, Value};
 
+use crate::ids::KeyType;
+use crate::labels::{self, Label};
 use crate::test_util::seeded_rng;
 
 /// The `schema` value of every file.
@@ -58,6 +69,10 @@ struct VectorFile {
     compute: Compute,
     /// Checks across the vectors of one file (a bundle chain, for example).
     check_file: fn(&[Vector]),
+    /// Every vector the file holds, as `(kind, name, count)`: exactly the ids `kind/name/0` to
+    /// `kind/name/{count - 1}` and no others ([`listed_exactly`]). Adding a vector means
+    /// listing it here.
+    contents: &'static [(&'static str, &'static str, usize)],
 }
 
 const FILES: [VectorFile; 5] = [
@@ -70,6 +85,28 @@ const FILES: [VectorFile; 5] = [
         generate: derivations::generate,
         compute: derivations::compute,
         check_file: |_| {},
+        // The M1 rows of the §4.3 table, named after their labels (see `label_coverage_errors`);
+        // `settings` is the settings hash, which has no label.
+        contents: &[
+            ("derivation", "key-id/symmetric", 2),
+            ("derivation", "key-id", KeyType::ALL.len()),
+            ("derivation", "opaque/password", 2),
+            ("derivation", "opaque/context", 3),
+            ("derivation", "opaque/fake-credential-id", 2),
+            ("derivation", "opaque/fake-kdf", 2),
+            ("derivation", "unlock-key/server", 1),
+            ("derivation", "unlock-key/local", 1),
+            ("derivation", "recovery/wrap-key", 1),
+            ("derivation", "recovery/auth-token", 1),
+            ("derivation", "export/key", 1),
+            ("derivation", "server/secrets-backup", 1),
+            ("derivation", "server/totp-secret", 1),
+            ("derivation", "server/login-state", 1),
+            ("derivation", "hpke-psk/device-grant", 1),
+            ("derivation", "fingerprint", 1),
+            ("derivation", "device-set", 3),
+            ("derivation", "settings", 2),
+        ],
     },
     VectorFile {
         name: "envelopes",
@@ -80,6 +117,25 @@ const FILES: [VectorFile; 5] = [
         generate: envelopes::generate,
         compute: envelopes::compute,
         check_file: envelopes::check_file,
+        // The M1 rows of the §8.4 table; two for each padded purpose (§8.5).
+        contents: &[
+            ("envelope", "ACCOUNT_KEY_SERVER_WRAP", 1),
+            ("envelope", "ACCOUNT_KEY_LOCAL_WRAP", 1),
+            ("envelope", "ACCOUNT_KEY_RECOVERY_WRAP", 1),
+            ("envelope", "ACCOUNT_KEY_DEVICE_GRANT", 1),
+            ("envelope", "IDENTITY_SECRET_KEYS", 1),
+            ("envelope", "DEVICE_SECRET_KEYS", 1),
+            ("envelope", "RETIRED_SECRET_KEY", 1),
+            ("envelope", "ACCOUNT_SETTINGS", 1),
+            ("envelope", "VAULT_KEY_SELF_GRANT", 1),
+            ("envelope", "ITEM_KEY_WRAP", 1),
+            ("envelope", "ITEM_OP", 2),
+            ("envelope", "ITEM_SNAPSHOT", 2),
+            ("envelope", "EXPORT_FILE", 1),
+            ("envelope", "SERVER_TOTP_SECRET", 1),
+            ("envelope", "SERVER_LOGIN_STATE", 1),
+            ("envelope", "SERVER_SECRETS_BACKUP", 1),
+        ],
     },
     VectorFile {
         name: "statements",
@@ -90,6 +146,18 @@ const FILES: [VectorFile; 5] = [
         generate: statements::generate,
         compute: statements::compute,
         check_file: statements::check_file,
+        // The §10.2 statement types, named after their `sig/` labels.
+        contents: &[
+            ("statement", "public-key-bundle", 3),
+            ("statement", "device-certificate", 6),
+            ("statement", "device-revocation", 2),
+            ("statement", "account-state", 4),
+            ("statement", "op", 2),
+            ("statement", "snapshot", 1),
+            ("statement", "key-grant", 2),
+            ("statement", "device-auth", 1),
+            ("statement", "device-request", 1),
+        ],
     },
     VectorFile {
         name: "encodings",
@@ -100,6 +168,18 @@ const FILES: [VectorFile; 5] = [
         generate: encodings::generate,
         compute: encodings::compute,
         check_file: |_| {},
+        // §7 and §11.9 codes (formatted, parsed leniently, rejected) and §8.5 Padmé framing.
+        contents: &[
+            ("encoding", "secret-key", 3),
+            ("encoding", "secret-key/parse", 3),
+            ("encoding", "secret-key/reject", 3),
+            ("encoding", "recovery-code", 3),
+            ("encoding", "recovery-code/parse", 3),
+            ("encoding", "recovery-code/reject", 3),
+            ("padding", "padme", 15),
+            ("padding", "frame", 7),
+            ("padding", "frame/reject", 4),
+        ],
     },
     VectorFile {
         name: "transcript",
@@ -110,6 +190,7 @@ const FILES: [VectorFile; 5] = [
         generate: transcript::generate,
         compute: transcript::compute,
         check_file: |_| {},
+        contents: &[("transcript", "signup-login-unlock", 1)],
     },
 ];
 
@@ -174,6 +255,7 @@ fn build_file(file: &VectorFile) -> Value {
     let mut rng = seeded_rng(file.seed);
     let vectors = (file.generate)(&mut rng);
     (file.check_file)(&vectors);
+    assert_eq!(listed_exactly(file, &vectors), Ok(()));
     let mut doc = Map::new();
     doc.insert("schema".into(), SCHEMA.into());
     doc.insert("file".into(), file.name.into());
@@ -250,6 +332,137 @@ fn replay(file: &VectorFile) {
         );
     }
     (file.check_file)(&vectors);
+    assert_eq!(listed_exactly(file, &vectors), Ok(()));
+}
+
+/// The vectors of one committed file.
+fn committed_vectors(file: &VectorFile) -> Vec<Vector> {
+    let doc: Value = serde_json::from_str(file.committed).expect("JSON");
+    doc.get("vectors")
+        .and_then(Value::as_array)
+        .expect("a `vectors` array")
+        .iter()
+        .map(Vector::from_value)
+        .collect()
+}
+
+/// Checks that `vectors` are exactly the ones `file.contents` lists, and that each id is
+/// `kind/name/index` (CRYPTO.md §15 item 1: the coverage of a file never shrinks unnoticed).
+fn listed_exactly(file: &VectorFile, vectors: &[Vector]) -> Result<(), String> {
+    if let Some(v) = vectors
+        .iter()
+        .find(|v| !v.id.starts_with(&format!("{}/{}/", v.kind, v.name)))
+    {
+        return Err(format!("{}.json: vector {} is misnamed", file.name, v.id));
+    }
+    let mut listed: Vec<String> = file
+        .contents
+        .iter()
+        .flat_map(|&(kind, name, count)| (0..count).map(move |i| format!("{kind}/{name}/{i}")))
+        .collect();
+    let mut held: Vec<String> = vectors.iter().map(|v| v.id.clone()).collect();
+    listed.sort_unstable();
+    held.sort_unstable();
+    if listed == held {
+        return Ok(());
+    }
+    let missing: Vec<&String> = listed.iter().filter(|id| !held.contains(id)).collect();
+    let unlisted: Vec<&String> = held.iter().filter(|id| !listed.contains(id)).collect();
+    Err(format!(
+        "{}.json does not hold exactly its listed vectors: missing {missing:?}, unlisted \
+         {unlisted:?}, {} held, {} listed",
+        file.name,
+        held.len(),
+        listed.len()
+    ))
+}
+
+/// Registered labels whose constructions ship after M1, so no vector uses them yet (CRYPTO.md
+/// §15 item 1: "Vectors for M4–M6 constructions are added in the milestone that ships them").
+const LABELS_WITHOUT_VECTORS: [Label; 11] = [
+    labels::RELAY_KEY,
+    labels::LOCAL_INDEX_KEY,
+    labels::SHARE_KEY,
+    labels::SHARE_LINK_TOKEN,
+    labels::SHARE_ACCESS_TOKEN,
+    labels::HPKE_PSK_PASSWORD_VERIFIER,
+    labels::HPKE_PSK_RESYNC,
+    labels::HPKE_PSK_PAIRING,
+    labels::PAIRING_KEY,
+    labels::PAIRING_COMMIT,
+    labels::PAIRING_SAS,
+];
+
+/// Labels whose vectors are not named after them: the file and the vector name that use them.
+const LABELS_USED_ELSEWHERE: [(Label, &str, &str); 4] = [
+    // The subkey and commitment of every symmetric envelope (§8.3); `envelopes::check_file`
+    // requires a vector for every M1 purpose.
+    (
+        labels::ENVELOPE_XCHACHA20POLY1305,
+        "envelopes",
+        "ACCOUNT_KEY_SERVER_WRAP",
+    ),
+    // HPKE's `info` (§10.1), in the device grant.
+    (labels::HPKE, "envelopes", "ACCOUNT_KEY_DEVICE_GRANT"),
+    // The check characters (§7, §11.9), in the formatted codes.
+    (labels::SECRET_KEY_CHECK, "encodings", "secret-key"),
+    (labels::RECOVERY_CODE_CHECK, "encodings", "recovery-code"),
+];
+
+/// The file and vector name that use `label`: a statement's vectors are named after its
+/// `sig/` label (§10.2), every other derivation's after its label (§4.3).
+fn vectors_of(label: Label) -> (&'static str, &'static str) {
+    LABELS_USED_ELSEWHERE
+        .iter()
+        .find(|(l, _, _)| *l == label)
+        .map_or_else(
+            || match label.name().strip_prefix("sig/") {
+                Some(statement) => ("statements", statement),
+                None => ("derivations", label.name()),
+            },
+            |&(_, file, name)| (file, name),
+        )
+}
+
+/// The CRYPTO.md §4.3 and §10.2 lists, through the label registry (every label is defined in
+/// the `labels` module and amending §4.3 means adding one): every registered label has
+/// vectors unless it is in [`LABELS_WITHOUT_VECTORS`], which then really has none, and every
+/// derivation and statement vector belongs to a registered label. Returns what is wrong.
+fn label_coverage_errors(files: &[(&str, Vec<Vector>)]) -> Vec<String> {
+    let has = |file: &str, name: &str| {
+        files
+            .iter()
+            .any(|(f, vectors)| *f == file && vectors.iter().any(|v| v.name == name))
+    };
+    let mut errors = Vec::new();
+    for &label in labels::ALL {
+        let (file, name) = vectors_of(label);
+        match (LABELS_WITHOUT_VECTORS.contains(&label), has(file, name)) {
+            (false, false) => errors.push(format!("{label}: no `{name}` vector in {file}.json")),
+            (true, true) => errors.push(format!(
+                "{label}: `{name}` vectors in {file}.json, but listed as having none"
+            )),
+            _ => {}
+        }
+    }
+    for (file, vectors) in files {
+        for v in vectors {
+            let registered = match *file {
+                // The settings hash is SHA-256 of the envelope bytes, with no label (§4.3).
+                "derivations" => {
+                    v.name == "settings" || labels::ALL.iter().any(|l| l.name() == v.name)
+                }
+                "statements" => labels::ALL
+                    .iter()
+                    .any(|l| l.name().strip_prefix("sig/") == Some(v.name.as_str())),
+                _ => true,
+            };
+            if !registered {
+                errors.push(format!("{file}.json: {} has no registered label", v.id));
+            }
+        }
+    }
+    errors
 }
 
 fn file(name: &str) -> &'static VectorFile {
@@ -299,6 +512,10 @@ fn generate() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors");
     for file in &FILES {
         let path = dir.join(format!("{}.json", file.name));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test-only regenerator, run by hand; ADR 0016 R1 covers normal and build code"
+        )]
         std::fs::write(&path, render(&build_file(file)))
             .unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
     }
@@ -547,12 +764,79 @@ fn exact_rng_yields_exactly_its_bytes() {
 }
 
 /// The committed inputs really come from the documented seeds: regenerating a file from its
-/// seed reproduces it byte for byte. Checked on the files that run no Argon2id; the replay
-/// tests cover the other two.
+/// seed reproduces it byte for byte, so a vector edited or deleted by hand fails here. Every
+/// file, including the two that run Argon2id (`argon2` is built at opt-level 3 in dev and test
+/// profiles, so this takes seconds).
 #[test]
 fn files_regenerate_identically_from_their_seeds() {
-    for name in ["envelopes", "statements", "encodings"] {
-        let f = file(name);
-        assert_eq!(render(&build_file(f)), f.committed, "{name}.json");
+    for f in &FILES {
+        assert_eq!(render(&build_file(f)), f.committed, "{}.json", f.name);
+    }
+}
+
+#[test]
+fn every_file_holds_exactly_its_listed_vectors() {
+    for f in &FILES {
+        let vectors = committed_vectors(f);
+        assert_eq!(listed_exactly(f, &vectors), Ok(()));
+        // Any one vector deleted, or one more added, is caught.
+        for i in 0..vectors.len() {
+            let mut fewer = vectors.clone();
+            let gone = fewer.remove(i);
+            assert!(listed_exactly(f, &fewer).is_err(), "{} deleted", gone.id);
+            let mut more = vectors.clone();
+            let mut extra = gone.clone();
+            extra.id = format!("{}/{}/{}", gone.kind, gone.name, vectors.len());
+            more.push(extra);
+            assert!(listed_exactly(f, &more).is_err(), "{} added", gone.id);
+        }
+        // A vector whose id does not match its kind and name is caught.
+        let mut misnamed = vectors.clone();
+        if let Some(v) = misnamed.first_mut() {
+            v.name.push_str("-other");
+        }
+        assert!(listed_exactly(f, &misnamed).is_err(), "{}", f.name);
+    }
+}
+
+#[test]
+fn every_registered_label_has_vectors_unless_it_ships_later() {
+    let files: Vec<(&str, Vec<Vector>)> = FILES
+        .iter()
+        .map(|f| (f.name, committed_vectors(f)))
+        .collect();
+    assert_eq!(label_coverage_errors(&files), Vec::<String>::new());
+    // Deleting every vector of an M1 construction is caught, for each one.
+    for &label in labels::ALL {
+        if LABELS_WITHOUT_VECTORS.contains(&label) {
+            continue;
+        }
+        let (file, name) = vectors_of(label);
+        let fewer: Vec<(&str, Vec<Vector>)> = files
+            .iter()
+            .map(|(f, vectors)| {
+                let kept = vectors
+                    .iter()
+                    .filter(|v| !(*f == file && v.name == name))
+                    .cloned()
+                    .collect();
+                (*f, kept)
+            })
+            .collect();
+        assert_ne!(
+            label_coverage_errors(&fewer),
+            Vec::<String>::new(),
+            "{label}"
+        );
+    }
+    // A vector for an unregistered construction, or for one listed as shipping later, is
+    // caught.
+    for (file, name) in [("derivations", "relay-key"), ("statements", "made-up")] {
+        let mut more = files.clone();
+        let (_, vectors) = more.iter_mut().find(|(f, _)| *f == file).expect("a file");
+        let mut extra = vectors.first().expect("a vector").clone();
+        extra.name = name.to_owned();
+        vectors.push(extra);
+        assert_ne!(label_coverage_errors(&more), Vec::<String>::new(), "{name}");
     }
 }

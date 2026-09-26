@@ -18,7 +18,7 @@
 //! **Signatures.** The bundle is self-signed by the identity Ed25519 key inside it. A bundle
 //! whose identity keys differ from its predecessor's (a full rotation, `identity_epoch + 1`) is
 //! **also** signed by the preceding identity key, and carries two containers, the new key's
-//! first (§9.6).
+//! first (§9.6). The two signing keys are therefore always distinct.
 //!
 //! **Chain rules** ([`VerifiedBundle::verify_successor`]).
 //! - `bundle_seq` is 1 for the first bundle, and `prev_bundle_hash` is zero exactly then. The
@@ -29,9 +29,12 @@
 //!   same `bundle_seq`, or one at `bundle_seq + 1` that does not name the pinned bundle, is a
 //!   **fork** (a hard alarm, §10.3).
 //! - Keeping both identity keys needs the same `identity_epoch` and one signature: a silent
-//!   update (a PQ key, a new mail key). Changing either identity key needs `identity_epoch + 1`
-//!   and a valid signature by the pinned identity key too; it is a visible "safety number
-//!   changed" event ([`BundleStep::IdentityChanged`]).
+//!   update (a PQ key, a new mail key).
+//! - An identity change replaces **both** identity keys, the Ed25519 and the X25519 key (§10.2,
+//!   §11.6 step 2). It needs `identity_epoch + 1` and a valid signature by the pinned identity
+//!   key too, and it is a visible "safety number changed" event
+//!   ([`BundleStep::IdentityChanged`]). A bundle that changes only one of the two identity keys
+//!   is rejected, whatever its `identity_epoch`; the writer refuses to make one.
 
 use core::fmt;
 use core::ops::Deref;
@@ -193,24 +196,39 @@ impl PublicKeyBundle {
         Ok(encode_wire(&body, &[container])?)
     }
 
-    /// Signs a bundle that changes the identity keys (a full rotation): the self-signature by
-    /// the new identity key first, then the signature by the preceding identity key (§9.6).
+    /// Signs a bundle that changes the identity keys (a full rotation, §11.6 step 2) as the
+    /// successor of `predecessor`, the current bundle: the self-signature by the new identity
+    /// key first, then the signature by the preceding identity key (§9.6).
+    ///
+    /// The bundle must replace **both** identity keys of `predecessor` (§10.2, §11.6 step 2)
+    /// and be its successor, so the writer makes only what
+    /// [`VerifiedBundle::verify_successor`] accepts as [`BundleStep::IdentityChanged`].
     ///
     /// # Errors
-    /// [`SignError::WrongKey`] if `new_identity` is not the bundle's identity key, or the two
-    /// keys are the same; [`SignError::Encode`] if this cannot be an identity change (the first
-    /// bundle, or `identity_epoch` 0) or another rule is broken.
+    /// - [`SignError::WrongKey`] if `new_identity` is not the bundle's identity key,
+    ///   `previous_identity` is not `predecessor`'s, or the two are the same key (the bundle
+    ///   keeps the Ed25519 identity key).
+    /// - [`SignError::Encode`] if the bundle keeps `predecessor`'s identity X25519 key, is not
+    ///   its successor (the same account, `bundle_seq + 1`, `prev_bundle_hash` = its hash,
+    ///   `identity_epoch + 1`), or another rule of the format is broken.
     pub fn sign_identity_change(
         &self,
+        predecessor: &VerifiedBundle,
         new_identity: &IdentitySigningKey,
         previous_identity: &IdentitySigningKey,
     ) -> Result<Vec<u8>, SignError> {
         if new_identity.verifying_key() != &self.identity_ed25519
-            || previous_identity.verifying_key() == &self.identity_ed25519
+            || previous_identity.verifying_key() != &predecessor.identity_ed25519
+            || self.identity_ed25519 == predecessor.identity_ed25519
         {
             return Err(SignError::WrongKey);
         }
-        if self.bundle_seq < 2 || self.identity_epoch == 0 {
+        if self.identity_x25519 == predecessor.identity_x25519
+            || self.account_id != predecessor.account_id
+            || predecessor.bundle_seq.checked_add(1) != Some(self.bundle_seq)
+            || self.prev_bundle_hash != *predecessor.hash()
+            || predecessor.identity_epoch.checked_add(1) != Some(self.identity_epoch)
+        {
             return Err(SignError::Encode(EncodeError::InvalidField));
         }
         let body = self.encode_body()?;
@@ -276,9 +294,9 @@ pub enum BundleStep {
     Unchanged,
     /// The next bundle, with both identity keys kept: accept silently (§10.3).
     Silent,
-    /// The next bundle, with new identity keys, signed by the new and the pinned identity key.
-    /// A visible "safety number changed" event; the user confirms the new fingerprint
-    /// (§10.3, §11.3 step 3).
+    /// The next bundle, with both identity keys replaced, signed by the new and the pinned
+    /// identity key. A visible "safety number changed" event; the user confirms the new
+    /// fingerprint (§10.3, §11.3 step 3).
     IdentityChanged,
 }
 
@@ -302,6 +320,10 @@ pub enum BundleChainError {
     /// The `identity_epoch` does not follow the identity keys: not `+1` on a change, or changed
     /// while the keys stayed, or a second signature on a bundle that keeps its keys.
     IdentityEpochMismatch,
+    /// An identity change (`identity_epoch + 1`) that keeps one of the two identity keys. An
+    /// identity change replaces both the Ed25519 and the X25519 identity key (§10.2, §11.6
+    /// step 2).
+    IdentityKeyKept,
 }
 
 impl fmt::Display for BundleChainError {
@@ -317,6 +339,9 @@ impl fmt::Display for BundleChainError {
             }
             Self::IdentityEpochMismatch => {
                 f.write_str("identity epoch does not match the identity key change")
+            }
+            Self::IdentityKeyKept => {
+                f.write_str("identity change keeps one of the two identity keys")
             }
         }
     }
@@ -386,6 +411,11 @@ impl VerifiedBundle {
         let step = if keys_changed {
             if pinned.identity_epoch.checked_add(1) != Some(candidate.identity_epoch) {
                 return Err(BundleChainError::IdentityEpochMismatch);
+            }
+            if candidate.identity_ed25519 == pinned.identity_ed25519
+                || candidate.identity_x25519 == pinned.identity_x25519
+            {
+                return Err(BundleChainError::IdentityKeyKept);
             }
             let signature = next
                 .predecessor_signature

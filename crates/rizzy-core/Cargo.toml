@@ -13,6 +13,10 @@ publish.workspace = true
 [dependencies]
 argon2.workspace = true
 base64ct.workspace = true
+# Not used in code. Declared only so that feature unification turns on blake2's `zeroize`,
+# which argon2 0.6 does not forward: the Blake2b chaining state then wipes on drop. That state
+# ends holding Argon2's H0 and output tag (CRYPTO.md §12.2; ADR 0009, amendment of 2026-09-26).
+blake2.workspace = true
 chacha20poly1305.workspace = true
 # Ed25519 signed statements (CRYPTO.md §10.2): `fast` and `zeroize` only, never
 # `legacy_compatibility` or `hazmat` (ADR 0009).
@@ -27,6 +31,10 @@ hpke.workspace = true
 # OPAQUE (CRYPTO.md §5): `ristretto255` only, never `argon2` or `std` (ADR 0009). Every call
 # goes through the `opaque` wrapper module; the rand_core 0.6 adapter lives in `rng`.
 opaque-ke.workspace = true
+# Not used in code. Declared only so that feature unification turns on poly1305's `zeroize`,
+# which chacha20poly1305 0.11 does not forward: the Poly1305 state (its r and s key halves) then
+# wipes on drop (CRYPTO.md §12.2; ADR 0009, amendment of 2026-09-26).
+poly1305.workspace = true
 rand_core.workspace = true
 # SHA-1 for HMAC-SHA-1 in HOTP/TOTP only (CRYPTO.md §11.15; ADR 0009 checklist record).
 sha1.workspace = true

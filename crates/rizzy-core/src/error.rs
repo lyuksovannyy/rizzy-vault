@@ -99,8 +99,8 @@ pub enum EncryptError {
     /// The (framed) plaintext exceeds the algorithm's limit (16 MiB for `0x01` in M1,
     /// CRYPTO.md §9.1).
     PlaintextTooLong,
-    /// The purpose has a fixed plaintext size (a key wrap, CRYPTO.md §8.5) and the plaintext
-    /// has a different length.
+    /// The purpose has a fixed or minimum plaintext size (a key wrap, CRYPTO.md §8.5; a server
+    /// TOTP secret, §11.15) and the plaintext does not meet it.
     InvalidPlaintextLength,
     /// The purpose's encrypt algorithm is not the one this function implements, or its
     /// plaintext layout is not specified yet.
@@ -179,7 +179,8 @@ pub enum SignError {
     /// The statement cannot be encoded: a field is too long or not allowed by the format.
     Encode(EncodeError),
     /// The signing key is not the key the statement names (a bundle's own identity key, a
-    /// key grant's sender key), or the keys of a two-signature bundle are not distinct.
+    /// key grant's sender key), the keys of a two-signature bundle are not distinct, or the
+    /// previous key is not the predecessor bundle's identity key.
     WrongKey,
     /// The signature primitive failed. Unreachable for Ed25519 signing keys.
     Internal,
@@ -221,6 +222,8 @@ pub enum KdfError {
     /// A new password contains a code point that is unassigned in the pinned Unicode tables
     /// (ADR 0004, owner decision 3).
     UnassignedCodePoint,
+    /// A newly chosen master password is empty (CRYPTO.md §2, "New passwords").
+    EmptyPassword,
     /// An internal primitive failed. Unreachable for the fixed sizes this crate uses.
     Internal,
 }
@@ -237,6 +240,7 @@ impl fmt::Display for KdfError {
             Self::UnassignedCodePoint => {
                 f.write_str("password contains a character unassigned in this Unicode version")
             }
+            Self::EmptyPassword => f.write_str("password is empty"),
             Self::Internal => f.write_str("internal KDF error"),
         }
     }

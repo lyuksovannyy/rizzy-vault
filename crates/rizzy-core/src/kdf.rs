@@ -266,9 +266,9 @@ fn nfc_utf8(text: &str) -> Result<Vec<u8>, KdfError> {
 ///
 /// Why: once a later Unicode version assigns such a code point, `NFC(password)` can change,
 /// and the password would stop working. Call this when a user sets a new master password;
-/// CRYPTO.md recommends it for every newly chosen password (export password, share passphrase)
-/// for the same reason. Never call it on a password that already exists (login, unlock,
-/// import): that could lock a user out after a table update.
+/// CRYPTO.md §2 ("New passwords") requires it for every newly chosen master, export and
+/// backup password for the same reason. Never call it on a password that already exists
+/// (login, unlock, import): that could lock a user out after a table update.
 ///
 /// "Assigned" means `General_Category ≠ Cn` in the Unicode version of the pinned
 /// `unicode-normalization` (17.0.0 for 0.1.25). Private-use code points are assigned (`Co`)
@@ -332,6 +332,10 @@ fn hkdf_sha256_raw(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
 mod tests {
     use super::*;
     use crate::labels;
@@ -339,6 +343,9 @@ mod tests {
 
     // ---- §6.2: the CI-checked floor and the allow-list ----
 
+    /// CRYPTO.md §6.2: "every enabled entry has m ≥ 65 536, t ≥ 3 and p = 4". Checked against
+    /// the spec's literals, not against [`FLOOR`], so lowering `FLOOR` together with a table
+    /// entry still fails here.
     #[test]
     fn every_enabled_table_entry_meets_the_floor() {
         let enabled: Vec<_> = KDF_TABLE
@@ -348,14 +355,23 @@ mod tests {
         assert!(!enabled.is_empty());
         for entry in enabled {
             let p = entry.params.unwrap();
-            assert!(
-                p.m_kib >= FLOOR.m_kib,
-                "kdf_id {}: m below floor",
-                entry.kdf_id
-            );
-            assert!(p.t >= FLOOR.t, "kdf_id {}: t below floor", entry.kdf_id);
-            assert_eq!(p.p, FLOOR.p, "kdf_id {}: p must be 4", entry.kdf_id);
+            assert!(p.m_kib >= 65_536, "kdf_id {}: m below floor", entry.kdf_id);
+            assert!(p.t >= 3, "kdf_id {}: t below floor", entry.kdf_id);
+            assert_eq!(p.p, 4, "kdf_id {}: p must be 4", entry.kdf_id);
         }
+    }
+
+    /// The documented constant is the §6.2 floor itself.
+    #[test]
+    fn floor_is_the_crypto_md_6_2_floor() {
+        assert_eq!(
+            FLOOR,
+            Argon2Params {
+                m_kib: 65_536,
+                t: 3,
+                p: 4
+            }
+        );
     }
 
     #[test]

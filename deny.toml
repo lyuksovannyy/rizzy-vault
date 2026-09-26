@@ -34,7 +34,13 @@ allow = [
   "AGPL-3.0-only",
   "AGPL-3.0-or-later",
 ]
-exceptions = []
+exceptions = [
+  # Owner decision 2026-09-26. libfuzzer-sys is "(MIT OR Apache-2.0) AND NCSA": LLVM's libFuzzer
+  # sources are under the permissive NCSA licence. It is reachable only from fuzz/, its own
+  # workspace that never ships, so NCSA is allowed for this crate alone and nowhere else. The
+  # root `cargo deny check` warns that it was not encountered; that is expected.
+  { crate = "libfuzzer-sys", allow = ["NCSA"] },
+]
 
 [licenses.private]
 # Our own workspace crates are `publish = false`; their license is set in Cargo.toml.

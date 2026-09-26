@@ -23,12 +23,18 @@ rizzy-sync = { path = "crates/rizzy-sync" }
 # which rizzy-core must never have in its dependency closure (ADR 0016 R1).
 argon2 = { version = "=0.6.0", default-features = false, features = ["zeroize"] }
 base64ct = { version = "=1.8.3", default-features = false, features = ["alloc"] }
+# `blake2` and `poly1305` are never called directly. They are declared only so that feature
+# unification switches on their `zeroize` features, which `argon2` 0.6 and `chacha20poly1305`
+# 0.11 do not forward (CRYPTO.md §12.2; ADR 0009, amendment of 2026-09-26).
+blake2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
 chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "zeroize"] }
 ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["fast", "zeroize"] }
 hkdf = { version = "=0.13.0", default-features = false }
 hmac = { version = "=0.13.0", default-features = false, features = ["zeroize"] }
 hpke = { version = "=0.14.1", default-features = false, features = ["alloc", "x25519", "chacha"] }
 opaque-ke = { version = "=4.0.1", default-features = false, features = ["ristretto255"] }
+# Feature unification only; see `blake2` above.
+poly1305 = { version = "=0.9.1", default-features = false, features = ["zeroize"] }
 rand_core = { version = "=0.10.1", default-features = false }
 sha1 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
 sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }

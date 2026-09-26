@@ -345,7 +345,9 @@ pub(super) fn compute(name: &str, m: &Map<String, Value>) -> Map<String, Value> 
             let export_key =
                 SecretArray::<64>::from_slice(&bytes(m, "export_key")).expect("64 bytes");
             let account = AccountId::from_bytes(arr(m, "account_id"));
-            let key = ServerUnlockKey::derive(&export_key, account).expect("derive");
+            // The kdf_id does not enter the derivation; it only binds the E_srv context.
+            let key =
+                ServerUnlockKey::derive(&export_key, account, KdfId::DEFAULT).expect("derive");
             key_outputs(key.key_for_tests())
         }
         "unlock-key/local" => {

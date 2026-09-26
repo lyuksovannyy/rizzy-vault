@@ -4,7 +4,8 @@
 //! - No I/O: no filesystem, network, clock or randomness source is reached directly; callers
 //!   inject them. This keeps the crate deterministic in tests and portable to
 //!   `wasm32-unknown-unknown` (web vault, browser extension) and to `UniFFI` (mobile).
-//! - No `unsafe` code (`unsafe_code = "forbid"` at the workspace level).
+//! - No `unsafe` code (`unsafe_code = "forbid"` at the workspace level and `#![forbid(unsafe_code)]`
+//!   in this file).
 //! - No cryptographic construction lands here without an accepted ADR in `docs/adr/`.
 //!
 //! Status: M1 in progress. The normative byte-level specification is `docs/CRYPTO.md`; section
@@ -44,6 +45,11 @@
 //!
 //! [ADR 0009]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0009-crypto-dependency-policy.md
 
+// Also set by the workspace lint table (ADR 0016 R7); repeated here so that no manifest edit
+// alone admits `unsafe` in this crate.
+#![forbid(unsafe_code)]
+#![warn(clippy::indexing_slicing, clippy::unreachable)]
+
 pub mod encoding;
 pub mod envelope;
 pub mod error;
@@ -65,6 +71,10 @@ pub mod sign;
 pub mod totp;
 
 #[cfg(test)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
 mod test_util;
 #[cfg(test)]
 mod test_vectors;

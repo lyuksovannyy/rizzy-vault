@@ -22,12 +22,15 @@
 //! `device-request` ([`DeviceAuth`], [`DeviceRequest`]) sign values the verifier already holds
 //! (its own origin, the challenge it issued, the request it received). They travel as a bare
 //! container, and the verifier rebuilds the message from its own values, the same way an
-//! envelope reader rebuilds its AAD.
+//! envelope reader rebuilds its AAD. The origin is a [`crate::normalize::ServerOrigin`], so
+//! signer and verifier always use the one §2 canonical form.
 //!
 //! Roles are types: [`IdentitySigningKey`] and [`DeviceSigningKey`] are different types, and
 //! each statement names the role that signs it, so a device key cannot sign a device
-//! certificate by mistake. The signer key id in a container is
-//! `PublicKeyId(key_type, public_key)` (§4.3) with the role's key type (`0x01` or `0x04`).
+//! certificate by mistake. `key-grant` is the one statement either role signs; it checks the
+//! purpose against the signer's role (the §10.2 table) when signing and when verifying
+//! ([`KeyGrant`]). The signer key id in a container is `PublicKeyId(key_type, public_key)`
+//! (§4.3) with the role's key type (`0x01` or `0x04`).
 
 use core::fmt;
 use core::marker::PhantomData;
@@ -47,6 +50,10 @@ pub mod bundle;
 pub mod statements;
 
 #[cfg(test)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
 mod tests;
 
 pub use bundle::{BundleChainError, BundleStep, PublicKeyBundle, VerifiedBundle};
@@ -442,7 +449,12 @@ pub(crate) fn encode_wire(
 ) -> Result<Vec<u8>, EncodeError> {
     let versioned_len = body.len().checked_add(2).ok_or(EncodeError::TooLong)?;
     let total = crate::encoding::bytes_encoded_len(versioned_len)?
-        .checked_add(containers.len() * CONTAINER_LEN)
+        .checked_add(
+            containers
+                .len()
+                .checked_mul(CONTAINER_LEN)
+                .ok_or(EncodeError::TooLong)?,
+        )
         .ok_or(EncodeError::TooLong)?;
     let mut versioned = Vec::with_capacity(versioned_len);
     versioned.extend_from_slice(&STATEMENT_VERSION.to_be_bytes());

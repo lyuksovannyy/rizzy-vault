@@ -38,12 +38,17 @@ cargo lint                          # alias: clippy --workspace --all-targets --
 cargo test --workspace --locked     # CI runs this on Linux, macOS and Windows
 cargo check-wasm                    # alias: check -p rizzy-core -p rizzy-sync --target wasm32-unknown-unknown --locked
 cargo deny check                    # advisories, licenses, bans, sources (deny.toml)
+cargo xtask check-deps              # crate-boundary and dependency rules (ADR 0016 §5, R1–R8; ADR 0009 feature sets)
+cargo xtask check-clippy            # clippy.toml entries clippy ignores ("found a module", ADR 0016 §5)
+cargo check --manifest-path fuzz/Cargo.toml --locked --bins               # fuzz targets still build
+cargo deny --manifest-path fuzz/Cargo.toml check                          # fuzz/Cargo.lock
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 ```
 
 Notes:
 
-- `cargo lint` and `cargo check-wasm` are aliases defined in [`.cargo/config.toml`](.cargo/config.toml).
+- `cargo lint`, `cargo check-wasm` and `cargo xtask` are aliases defined in [`.cargo/config.toml`](.cargo/config.toml). `cargo xtask` runs the workspace's `xtask` crate.
+- `fuzz/` is its own workspace with its own `Cargo.lock` (ADR 0016 §7), so the workspace commands do not see it. A change to `rizzy-core`'s dependencies refreshes `fuzz/Cargo.lock` in the same change. `libfuzzer-sys` is `(MIT OR Apache-2.0) AND NCSA`. `deny.toml` allows NCSA for that crate alone, because it is reachable only from `fuzz/`, which never ships. Running the fuzz targets needs nightly and `cargo-fuzz`; CI does that in a weekly job ([`.github/workflows/fuzz.yml`](.github/workflows/fuzz.yml)) that never blocks a PR.
 - On Windows PowerShell, set the rustdoc flag with `$env:RUSTDOCFLAGS="-D warnings"` before the last command.
 - CI runs cargo-deny with `--all-features`. `deny.toml` sets `[graph] all-features = true`, so a plain `cargo deny check` checks the same graph.
 - `cargo deny check` also covers the RustSec advisory checks that `cargo audit` would run.
@@ -59,6 +64,7 @@ The workspace lints in [`Cargo.toml`](Cargo.toml) apply to every crate:
 - `clippy::pedantic`, `unwrap_used`, `expect_used`, `panic`, `print_stdout` and `print_stderr` are `warn`. **`cargo lint` passes `-D warnings`, so every one of them fails CI.**
 - `dbg_macro`, `todo` and `unimplemented` are `deny`.
 - [`clippy.toml`](clippy.toml) allows `unwrap`, `expect` and printing inside tests.
+- `rizzy-core` also raises `clippy::indexing_slicing` and `clippy::unreachable` to `warn` with a crate-level `#![warn]` in `src/lib.rs`: ADR 0016 R7 rules out per-crate `[lints]` tables, and raising a level in source is allowed. Non-test code uses `.get()`, `split_at_checked` or iterators instead of `[]`, or justifies a provably safe index with a narrow `#[expect(clippy::indexing_slicing, reason = "...")]`; test modules carry one reasoned `#[expect]` each.
 
 If a lint is wrong for a specific line, silence it at the narrowest scope, with a reason:
 

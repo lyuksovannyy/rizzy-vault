@@ -1,7 +1,7 @@
 # rizzy-vault cryptographic design
 
-- Status: **Normative.** The owner accepted ADRs [0003](adr/0003-authentication-opaque.md), [0004](adr/0004-key-derivation-argon2id-secret-key.md), [0005](adr/0005-symmetric-encryption-aead.md), [0006](adr/0006-key-hierarchy.md), [0007](adr/0007-ciphertext-envelope.md), [0008](adr/0008-account-recovery.md) and [0009](adr/0009-crypto-dependency-policy.md) on 2026-09-25, and decided every question in [§16](#16-open-questions-for-the-owner). Nothing here is implemented yet.
-- Date: 2026-09-25
+- Status: **Normative.** The owner accepted ADRs [0003](adr/0003-authentication-opaque.md), [0004](adr/0004-key-derivation-argon2id-secret-key.md), [0005](adr/0005-symmetric-encryption-aead.md), [0006](adr/0006-key-hierarchy.md), [0007](adr/0007-ciphertext-envelope.md), [0008](adr/0008-account-recovery.md) and [0009](adr/0009-crypto-dependency-policy.md) on 2026-09-25, and decided every question in [§16](#16-open-questions-for-the-owner), plus the readings of 2026-09-26. `rizzy-core` implements the M1 constructions; the M4–M9 parts are not implemented yet.
+- Date: 2026-09-25, amended 2026-09-26
 - Scope: every cryptographic construction in rizzy-vault from M1 to v1.0, plus the hooks that M9 (families) and M10 (business) need.
 - Audience: the people implementing `rizzy-core`, and the external auditor in M8.
 
@@ -64,8 +64,17 @@ This document holds the full constructions. The ADRs record each decision and li
 - `SHA-256(x)` is FIPS 180-4 SHA-256.
 - `Argon2id(P, S, kdf_id, T)` is Argon2id version 0x13 (RFC 9106), with password `P`, salt `S`, the cost parameters for `kdf_id` from [§6](#6-kdf-parameters), no secret value `K`, no associated data `X`, and a tag of `T` bytes.
 - `NFC(s)` is Unicode Normalization Form C. We apply it to master passwords, export passwords and share passphrases before encoding them as UTF-8. There is no trimming and no case folding.
+- **New passwords.** A newly chosen master password, export password ([§11.14](#1114-encrypted-export-m1)) or server-secrets backup passphrase ([§5.11](#511-server-side-encryption-not-zero-knowledge)) must not be empty. It must also contain no code point that is unassigned in the pinned Unicode tables ([ADR 0004](adr/0004-key-derivation-argon2id-secret-key.md) owner decision 3, which names master passwords; export and backup passwords get the same check for the same reason). Both checks run only where the password is chosen: signup, a password change, a new export or backup. Login, unlock and opening a file never run them, so no existing password can be locked out. There is no strength rule; password policies are an M10 item (ROADMAP §4.12).
 - **Login names.** `login_name` is the ASCII-lowercased input. After lowercasing it must be 1–254 bytes from `[a-z0-9._+@-]`; anything else is rejected at signup and at login, before any lookup. This one function is used for the account lookup, the uniqueness check, the fake credential id and the fake `kdf_id` ([§5.9](#59-account-enumeration)), so real and unknown names are always handled with the same string. Restricting to ASCII avoids a dependency on Unicode case-folding tables, which change between releases.
-- **`server_origin`** is `scheme "://" host [":" port]`, with scheme and host ASCII-lowercased, no trailing slash, and the port omitted when it is the scheme's default. On the client it is the origin the client actually connected to (for the web vault, `location.origin`). On the server it is the configured canonical origin. A server reachable under several hostnames has exactly one canonical origin, and clients must use it.
+- **`server_origin`** is `scheme "://" host [":" port]`, with scheme and host ASCII-lowercased, no trailing slash, and the port omitted when it is the scheme's default. On the client it is the origin the client actually connected to (for the web vault, `location.origin`). On the server it is the configured canonical origin. A server reachable under several hostnames has exactly one canonical origin, and clients must use it. Client and server parse it with one function, which fails closed rather than guessing:
+  - **Scheme.** `https` or `http` only, in any case. Their default ports are 443 and 80.
+  - **Input.** At most 512 bytes, ASCII only. It may end in one `/`, which is dropped. Userinfo, any other path, a query or a fragment is rejected, not stripped.
+  - **Host.** One of:
+    - a DNS name of letter-digit-hyphen labels, 1–63 bytes each and at most 253 bytes in total, with no leading or trailing hyphen in a label and no trailing dot. `_` is rejected;
+    - a dotted-quad IPv4 address in canonical form. A name whose last label is decimal or `0x`-hex is read as IPv4, as browsers do, and must then be a canonical dotted quad (`127.1` and `010.0.0.1` are rejected);
+    - a bracketed IPv6 address, rewritten in RFC 5952 form. IPv4-mapped addresses (`::ffff:a.b.c.d`) and zone ids are rejected.
+  - **No IDNA.** An internationalised name must already be in its `xn--` A-label form, and the client converts it before parsing. The parser does not check that an A-label is valid; the binding is an exact string.
+  - **Port.** Decimal, no leading zero, 1–65535. An empty port is rejected.
 - `ct_eq(a, b)` is a constant-time comparison using `subtle::ConstantTimeEq`.
 - **Canonical encoding.** Anything that is signed or used as AAD uses the fixed binary layouts in this document, never a serde-derived encoding. A serde representation can change with a crate update; these layouts cannot.
 
@@ -79,8 +88,8 @@ Versions are the latest stable releases as of 2026-09-25 (fact sheet). Audit sta
 |---|---|---|---|---|
 | Login / PAKE | OPAQUE, RFC 9807. OPRF ristretto255-SHA512, 3DH over ristretto255 with SHA-512 | `opaque-ke` (`default-features = false`, `ristretto255`; **not** `argon2`, **not** `std`) | =4.0.1 | NCC Group, 2021 (sponsored by WhatsApp): reviewed v0.5.0, fixes landed in v1.2.0. **4.x is not audited** (V) |
 | OPAQUE internals | ristretto255 group, VOPRF, SHA-512 | Transitive, even with only `ristretto255`: curve25519-dalek 4.1.3, voprf 0.5.0, rand 0.8.8 (no features) and rand_core 0.6.4, and non-optionally elliptic-curve 0.13.8 (hash2curve, sec1) with crypto-bigint 0.5, der 0.7, sec1 0.7, ff 0.13, group 0.13, base16ct 0.2 and const-oid 0.9, plus digest 0.10 / hkdf 0.12 / hmac 0.12 and generic-array =0.14.7. `sha2` 0.10 is a **direct, renamed** dependency (`sha2_010`), because the ciphersuite names `Sha512` and opaque-ke 4.0.1 does not re-export sha2 (it re-exports only `rand` and `generic_array`, V). All previous RustCrypto generation | `sha2_010` =0.10.9; the rest lockfile-pinned (rand 0.8.8); curve25519-dalek ≥ 4.1.3 (RUSTSEC-2024-0344) | Quarkslab reviewed curve25519-dalek in 2019 (L). voprf: U |
-| Password KDF, and the OPAQUE KSF | Argon2id v0x13, RFC 9106 | `argon2` (`default-features = false`, `zeroize`; deliberately **not** `alloc` or `parallel`) | 0.6.0 | No audit found (U) |
-| Symmetric AEAD | XChaCha20-Poly1305 | `chacha20poly1305` (`default-features = false`, `alloc`, `zeroize`) | 0.11.0 | NCC Group, 2020: "no significant findings", but on a much older version (V) |
+| Password KDF, and the OPAQUE KSF | Argon2id v0x13, RFC 9106 | `argon2` (`default-features = false`, `zeroize`; deliberately **not** `alloc` or `parallel`), plus its `blake2` (`default-features = false`, `zeroize`), declared only to switch on wiping ([§12.2](#122-memory-hygiene)) | 0.6.0 / `blake2` =0.11.0 | No audit found (U) |
+| Symmetric AEAD | XChaCha20-Poly1305 | `chacha20poly1305` (`default-features = false`, `alloc`, `zeroize`), plus its `poly1305` (`default-features = false`, `zeroize`), declared only to switch on wiping ([§12.2](#122-memory-hygiene)) | 0.11.0 / `poly1305` =0.9.1 | NCC Group, 2020: "no significant findings", but on a much older version (V) |
 | KDF, MAC, commitment | HKDF-SHA-256, HMAC-SHA-256 | `hkdf` (the crate has no features), `hmac` (`zeroize`), `sha2` (`zeroize`) | 0.13.0 / 0.13.0 / 0.11.0 | No audit found (U) |
 | Hash (key ids, fingerprints, token hashes) | SHA-256 | `sha2` (`zeroize`) | 0.11.0 | No audit found (U). RUSTSEC-2021-0100 was fixed long ago (V) |
 | HOTP/TOTP only ([§11.15](#1115-totp-m1)); HIBP range queries from M3 | HMAC-SHA-1 (RFC 4226, RFC 6238). The SHA-256 and SHA-512 variants use `sha2` | `sha1` (`zeroize`) | 0.11.0, the digest 0.11 release that matches `hmac` 0.13 (V, crate manifest). Checklist in [ADR 0009](adr/0009-crypto-dependency-policy.md) | No audit found (U). SHA-1 appears only where an external standard fixes it, never in a construction of ours |
@@ -421,12 +430,12 @@ Switching modes:
   - `ServerLogin` state is kept server-side, keyed by a random `login_id`, with a 60 s TTL, sealed as `SERVER_LOGIN_STATE` ([§5.11](#511-server-side-encryption-not-zero-knowledge)).
 - **After an unlock on an enrolled device**, the device authenticates with its key:
   1. The server sends a 32-byte random `challenge` with a 60 s TTL.
-  2. The client returns `Ed25519(device_sk, LABEL("sig/device-auth") ‖ 0x00 ‖ u16(1) ‖ str(server_origin) ‖ account_id ‖ device_id ‖ challenge)`.
-  3. The server checks the signature with `verify_strict` against the registered, non-revoked device key.
+  2. The client returns `Ed25519(device_sk, LABEL("sig/device-auth") ‖ 0x00 ‖ u16(1) ‖ str(server_origin) ‖ account_id ‖ device_id ‖ challenge)` as one signature container ([§9.3](#93-signature-container)), and nothing else: not a raw 64-byte signature, and not the message ([§9.6](#96-encoding-for-transport-and-storage)).
+  3. The server rebuilds the message from its own canonical origin, the account and device the session is for, and the challenge it issued. It checks the signature with `verify_strict` against the registered, non-revoked device key.
   4. The origin binding stops a signature for server A from being replayed at server B.
 - **Device secret keys are wrapped under the account key** (`E_dev`), so device authentication requires a local unlock first. A stolen, locked device cannot talk to the server as that device. `E_dev` never leaves the device: anyone who once held the account key (a revoked device, a finished kit thief) could otherwise open it from server data and read every later grant addressed to that device. Background sync while locked (M3/M7) needs the device key in the OS keystore, which is a separate decision.
-- **Request signing** (M1; decided by the owner on 2026-09-25, [§16](#16-open-questions-for-the-owner) question 15, threat model Q-7). Native clients (kinds 1–3) sign every request made over a device-authenticated session with the device key: the `device-request` statement ([§10.2](#102-ed25519-signatures-and-signed-statements)) over the origin, the account and device ids, the 16-byte `session_id` the server returned with the session, a per-session `request_counter`, the method, the path and query, and `SHA-256(request body)`.
-  - The server verifies it with `verify_strict` against the session's device certificate and accepts each `request_counter` at most once per session, within a sliding window of 64.
+- **Request signing** (M1; decided by the owner on 2026-09-25, [§16](#16-open-questions-for-the-owner) question 15, threat model Q-7). Native clients (kinds 1–3) sign every request made over a device-authenticated session with the device key: the `device-request` statement ([§10.2](#102-ed25519-signatures-and-signed-statements)) over the origin, the account and device ids, the 16-byte `session_id` the server returned with the session, a per-session `request_counter`, the method, the path and query, and `SHA-256(request body)`. Like `device-auth`, it travels as one bare signature container ([§9.6](#96-encoding-for-transport-and-storage)).
+  - The server rebuilds the message from its canonical origin, the session, and the request it received (the `request_counter` the client sends with it, the method, the path and query, and the body). It verifies the container with `verify_strict` against the session's device certificate and accepts each `request_counter` at most once per session, within a sliding window of 64.
   - A stolen bearer token alone is then useless. A MITM that relayed the device-auth challenge can forward the client's own requests but cannot make its own.
   - The web vault (kind 4) keeps short-lived bearer tokens. The OPAQUE `session_key` is not used for this.
   - Without it, a stolen bearer token, or a device-auth session relayed through intercepted TLS, would give ciphertext access and destructive calls until the session ends. That is the residual risk the owner declined to accept on 2026-09-25.
@@ -526,6 +535,9 @@ An optional SK would double the code paths and the analysis. **Rejected.** The o
 - The first 26 characters encode the 128 SK bits followed by 2 zero bits.
 - The last 2 characters encode the SK check value from [§4.3](#43-derivations): 10 bits, for typo detection only.
 - Parsing is case-insensitive, maps `O`→`0` and `I`/`L`→`1`, and ignores dashes and spaces.
+  - The only separators are ASCII `-` (U+002D) and ASCII space (U+0020). They may appear anywhere, or not at all. Any other character is rejected, including Unicode dashes and hyphens, a no-break space, a tab and a line break. The Emergency Kit prints only ASCII `-` as a separator.
+  - The prefix (`RV1`, or `RVR1` for the recovery code, [§11.9](#119-recovery-with-the-emergency-kit)) is required, and the same case folding and mapping apply to it.
+  - Input longer than 128 bytes is rejected without being parsed.
 - A parse is rejected if the pad bits are non-zero or the check value does not match.
 - The encoder and decoder MUST NOT index lookup tables with secret bits; they use arithmetic mapping ([§12.3](#123-side-channels)).
 
@@ -627,7 +639,7 @@ The purpose is **not transmitted**. The reader rebuilds `u16(purpose) ‖ ctx` f
 | `PASSWORD_VERIFIER_GRANT` | 0x0005 | recipient device X25519 / 0x12 (PSK: password-verifier PSK) | account_id ‖ u32 password_epoch (new) ‖ sender device_id ‖ recipient device_id | M4 |
 | `ACCOUNT_KEY_KEYSTORE_WRAP` (`E_ks`) | 0x0006 | keystore unlock secret / 0x01 | account_id ‖ device_id ‖ u32 account_key_epoch | M3/M7 |
 | `ACCOUNT_KEY_FORWARD` | 0x0007 | previous account key / 0x01 | account_id ‖ device_id ‖ u32 from_account_key_epoch ‖ u32 to_account_key_epoch. Plaintext: the new account key. Device-local only ([§11.3](#113-unlock-on-an-enrolled-device) step 4) | M3/M7 |
-| `IDENTITY_SECRET_KEYS` (`E_id`) | 0x0010 | account key / 0x01 | account_id ‖ u32 identity_epoch | M1 |
+| `IDENTITY_SECRET_KEYS` (`E_id`) | 0x0010 | account key / 0x01 | account_id ‖ u32 identity_epoch. Plaintext: `identity Ed25519 seed (32) ‖ identity X25519 secret key (32)`, with no version byte | M1 |
 | `DEVICE_SECRET_KEYS` (`E_dev`) | 0x0011 | account key / 0x01 | account_id ‖ device_id. Plaintext: `u8 version = 1 ‖ device Ed25519 seed (32) ‖ device X25519 secret key (32)` | M1 |
 | `MAIL_SECRET_KEY` | 0x0012 | account key / 0x01 | account_id ‖ u32 mail_key_epoch | M6 |
 | `RETIRED_SECRET_KEY` | 0x0013 | account key / 0x01 | account_id ‖ retired public key id (16). Plaintext: `u8 key_type ‖ secret key (32)` | M1 (rotation) |
@@ -674,8 +686,9 @@ padded_len = max(256, Padmé(4 + data_len))
 ```
 
 - **Padmé.** This is the padding from the PURBs paper (Nikitin et al., PETS 2019; not re-verified for this document). It leaks O(log log L) bits of length for at most about 12% overhead.
-- **The reader** rejects frames where `data_len > len - 4` or where any padding byte is non-zero.
-- **Key-wrap envelopes** are fixed-size and unpadded. A wrapped symmetric key's plaintext is the 32-byte key, except where [§8.4](#84-aad-and-purposes) gives a layout: `ITEM_KEY_WRAP` (37 bytes), `DEVICE_SECRET_KEYS` (65 bytes) and `RETIRED_SECRET_KEY` (33 bytes).
+- **The reader** rejects frames where `data_len > len - 4`, where `len` is not exactly `padded_len(data_len)`, or where any padding byte is non-zero. The encoding is therefore canonical: each `data` has exactly one valid frame, and every writer pads to exactly `padded_len`, the 256-byte floor included.
+- **Size limit.** The 16 MiB M1 plaintext limit ([§9.1](#91-symmetric-envelope-algorithm-0x01), [§9.2](#92-hpke-envelope-algorithms-0x10-and-0x12)) applies to the whole frame, so `data` is at most 16 MiB − 4 bytes.
+- **Key-wrap envelopes** are fixed-size and unpadded. A key-wrap plaintext is the 32-byte key, except where [§8.4](#84-aad-and-purposes) gives a layout: `IDENTITY_SECRET_KEYS` (64 bytes), `ITEM_KEY_WRAP` (37 bytes), `DEVICE_SECRET_KEYS` (65 bytes) and `RETIRED_SECRET_KEY` (33 bytes). A reader rejects any other length.
 - **`ITEM_OP` and `ITEM_SNAPSHOT` `data`** is the canonical item-record encoding ([§8.4](#84-aad-and-purposes), "Op and snapshot plaintexts").
 
 ---
@@ -697,7 +710,7 @@ padded_len = max(256, Padmé(4 + data_len))
 - `header` = bytes `[0, 18)`.
 - `aad = header ‖ u16(purpose) ‖ ctx`.
 - Overhead: **90 bytes**.
-- M1 limit: plaintext ≤ 16 MiB. Larger objects, i.e. attachments, use the reserved chunked algorithm 0x03 from M3.
+- M1 limit: plaintext ≤ 16 MiB. Larger objects, i.e. attachments, use the reserved chunked algorithm 0x03 from M3. "Plaintext" is the AEAD input: for a framed purpose, the whole frame ([§8.5](#85-plaintext-framing-and-padding)). The parser rejects a longer envelope before any crypto.
 
 ### 9.2 HPKE envelope (algorithms 0x10 and 0x12)
 
@@ -715,6 +728,7 @@ padded_len = max(256, Padmé(4 + data_len))
 - `info = LABEL("hpke") ‖ 0x00 ‖ u16(purpose)`.
 - `aad = header ‖ u16(purpose) ‖ ctx`.
 - Overhead: **66 bytes**.
+- M1 limit: plaintext ≤ 16 MiB, as in [§9.1](#91-symmetric-envelope-algorithm-0x01), and for a framed purpose the frame counts. Sealing refuses a longer plaintext, and opening rejects a longer ciphertext before any crypto. A `key-grant` statement ([§10.1](#101-hpke-key-wrapping)) accepts an envelope of at most this limit plus the overhead.
 
 HPKE envelopes carry **no** separate commitment. The key comes from a Diffie-Hellman with the recipient's static key, plus in PSK mode a 256-bit PSK derived from a random key, never from a password, so there is no partitioning oracle. Each envelope is addressed to exactly one recipient key id. Where authorship matters, a signature covers the envelope ([§10.1](#101-hpke-key-wrapping)).
 
@@ -776,12 +790,13 @@ HPKE envelopes carry **no** separate commitment. The key comes from a Diffie-Hel
 - **Storage.** Raw bytes: `BLOB` in SQLite, `bytea` in PostgreSQL, raw in the client cache.
 - **JSON APIs.** base64url without padding (RFC 4648 §5).
 - **Signed statements.** Carried as `bytes(u16(statement_version) ‖ body) ‖ signature container(s)`. The verifier prepends `LABEL("sig/<type>") ‖ 0x00` for the statement type it expects. `bundle_hash` and `prev_bundle_hash` remain over the full signed message. A key bundle that changes the identity keys carries two containers, the new key's first ([§10.2](#102-ed25519-signatures-and-signed-statements)).
+  - **Exception: `device-auth` and `device-request`** ([§5.10](#510-sessions-after-authentication)). Each travels as one bare signature container ([§9.3](#93-signature-container)), with no `bytes(u16(statement_version) ‖ body)`. The verifier rebuilds the whole signed message, `u16(1)` included, from values it holds itself: its canonical origin, the session's account, device and `session_id`, the challenge it issued, and the request it received. A body the client sent could only repeat those values, and the server would have to check them anyway.
 - **Files** (export, M4 backup). Written as JSON, with the envelope base64url-encoded in a `data` field and the header fields repeated in clear for tooling. The repeated header fields are informational only: the bytes that are bound come from the envelope and the ctx, and the tests assert that the two agree.
 
 ### 9.7 How a migration lands (PQ example)
 
 1. Implement `alg_id` 0x11 in `rizzy-core`, decrypt-only first.
-2. Add key type `0x10` (X-Wing public key) to the key bundle schema ([§10.2](#102-ed25519-signatures-and-signed-statements)).
+2. Add key type `0x10` (X-Wing public key) to the key bundle schema ([§10.2](#102-ed25519-signatures-and-signed-statements)). An M1 parser rejects a bundle that carries a key type it does not know, so a verifier without this change would refuse the new bundle and could not advance its pin. Every verifier (own devices, contacts, `smtp`) therefore ships `0x10` parsing, together with a bundle length limit that fits the larger key (the M1 limit fits three 32-byte keys), in a release before any client publishes a bundle that carries `0x10`. That ordering is what makes the change additive ([§13](#13-post-quantum-readiness)).
 3. Clients publish a new bundle (`bundle_seq + 1`, same identity keys, so contacts accept it silently, [§10.3](#103-public-key-authenticity)) that includes the PQ key.
 4. Senders use 0x11 (Base purposes) or 0x13 (PSK purposes) for any recipient whose bundle advertises the PQ key.
 5. Long-lived HPKE objects are re-issued: member vault grants (M9) and pending device grants.
@@ -827,23 +842,34 @@ None of this changes the symmetric envelopes. They are already fine against quan
 
 | Statement (`<type>`) | Body | Signed by |
 |---|---|---|
-| `public-key-bundle` | account_id ‖ u32 identity_epoch ‖ u64 bundle_seq ‖ u8 n ‖ n × (u8 key_type ‖ bytes(public_key)) ‖ u8 flags (bit 0 = `pq_required`) ‖ u64 created_at_ms ‖ prev_bundle_hash (32 B: the hash of the immediately preceding bundle; zero only for `bundle_seq` 1) | The identity Ed25519 key inside the bundle (self-signature). When the identity keys differ from the preceding bundle's (`identity_epoch + 1`), **also** the preceding identity key |
+| `public-key-bundle` | account_id ‖ u32 identity_epoch ‖ u64 bundle_seq ‖ u8 n ‖ n × (u8 key_type ‖ bytes(public_key)) ‖ u8 flags (bit 0 = `pq_required`) ‖ u64 created_at_ms ‖ prev_bundle_hash (32 B: the hash of the immediately preceding bundle; zero only for `bundle_seq` 1) | The identity Ed25519 key inside the bundle (self-signature). When the identity keys differ from the preceding bundle's (`identity_epoch + 1`, both keys replaced), **also** the preceding identity key |
 | `device-certificate` | account_id ‖ device_id ‖ u32 identity_epoch ‖ device Ed25519 pk (32) ‖ device X25519 pk (32) ‖ u8 device_kind (1 desktop/CLI, 2 extension, 3 mobile, 4 web-ephemeral) ‖ u64 created_at_ms ‖ u64 expires_at_ms (0 = none; for kind 4 at most created_at_ms + 12 h) | Identity key of that `identity_epoch` |
 | `device-revocation` | account_id ‖ device_id ‖ u64 last_accepted_device_seq ‖ u64 revoked_at_ms | Identity key |
 | `account-state` | account_id ‖ u64 state_seq ‖ u32 identity_epoch ‖ u32 account_key_epoch ‖ account_key_id (16) ‖ u32 password_epoch ‖ u16 kdf_id ‖ u32 recovery_epoch ‖ u8 recovery_enabled ‖ u8 sync_mode ‖ u32 mail_key_epoch ‖ bundle_hash (32) ‖ device_set_hash (32) ‖ u64 settings_seq ‖ settings_hash (32) | The identity key of the state's own `identity_epoch`. After a full rotation that is the **new** key |
 | `op` | bytes(canonical op header) ‖ SHA-256(op envelope) ‖ SHA-256(`ITEM_KEY_WRAP` envelope carried with the op), or 32 zero bytes in place of the second hash when the op carries no wrap. The body and the wrap are signed by hash so the server can delete a compacted op's body and keep its signed header ([ADR 0012](adr/0012-sync-engine.md) §3, §7). A receiver that holds the body or the wrap checks it against the signed hash before anything else | Device key of the authoring device |
 | `snapshot` | bytes(canonical snapshot header) ‖ SHA-256(snapshot envelope) ‖ SHA-256(`ITEM_KEY_WRAP` envelope carried with the snapshot), or 32 zero bytes in place of the second hash when it carries none. As for `op`, a receiver that holds the envelope or the wrap checks it against the signed hash before anything else, and the server can serve the record without a superseded wrap ([§4.2](#42-key-inventory)) | Device key |
-| `key-grant` | see [§10.1](#101-hpke-key-wrapping) | Device key (device grants) or identity key (member grants, M9; device grants from a kind-4 client) |
+| `key-grant` | see [§10.1](#101-hpke-key-wrapping) | Device key (`ACCOUNT_KEY_DEVICE_GRANT`, `PASSWORD_VERIFIER_GRANT`) or identity key (`VAULT_KEY_MEMBER_GRANT`, M9; an `ACCOUNT_KEY_DEVICE_GRANT` from a kind-4 client). Writer and verifier reject any other pairing of purpose and signer role |
 | `device-auth` | see [§5.10](#510-sessions-after-authentication) | Device key |
 | `device-request` (M1, decided 2026-09-25, [§16](#16-open-questions-for-the-owner) question 15) | str(server_origin) ‖ account_id ‖ device_id ‖ session_id (16) ‖ u64 request_counter ‖ str(method) ‖ str(path_and_query) ‖ SHA-256(request body) ([§5.10](#510-sessions-after-authentication)) | Device key |
 
 **Field values.** `sync_mode`: 0 invalid, 1 Server, 2 On-device. `recovery_enabled`: 0 or 1. Any other value is rejected. `account_key_id` is the symmetric key id ([§4.4](#44-identifiers-epochs-and-key-ids)) of the current account key. In a `public-key-bundle`, entries are sorted by `key_type`, strictly ascending (one key per type); parsers reject anything else.
 
+**Key types in a bundle (M1).** A bundle carries the identity Ed25519 key (`0x01`) and the identity X25519 key (`0x02`), both required, and the mail X25519 key (`0x03`, from M6), optional. Each is exactly 32 bytes. Parsers reject every other `key_type` ([§4.4](#44-identifiers-epochs-and-key-ids)): the device types `0x04` and `0x05`, which device certificates carry and a bundle never lists, the reserved PQ range `0x10`–`0x1F`, and unknown values. They do not skip an entry they cannot read. So a new key type is a parser change that every verifier ships before any bundle carries it ([§9.7](#97-how-a-migration-lands-pq-example) step 2). Flag bits other than bit 0 must be zero.
+
 `bundle_hash` and `prev_bundle_hash` are `SHA-256` over the full signed message.
 
 **Bundles are a chain.** Every bundle names its immediate predecessor, and `bundle_seq` orders bundles within an identity epoch as well as across epochs. A new bundle is published whenever a public key changes: identity keys (full rotation), a PQ key ([§9.7](#97-how-a-migration-lands-pq-example)), the mail key (M6). Every verifier, whether own device, contact (M9) or `smtp` (M6), pins the highest `bundle_seq` it has accepted and rejects lower ones, so the server cannot serve an older validly signed bundle to strip `pq_required` or withhold the current mail key. How other people's clients treat an identity-key change is in [§10.3](#103-public-key-authenticity).
 
-**Device set.** `device_set_hash` = `SHA-256(LABEL("device-set") ‖ 0x00 ‖ h_1 ‖ … ‖ h_n)`. Here `h_i` is the SHA-256 of the signed message of each non-revoked device certificate **with `device_kind` ≠ 4**, and the list is sorted bytewise. Enrolling or revoking a durable device therefore always publishes a new `account-state` with `state_seq + 1`. The server applies state updates as compare-and-swap on `state_seq`. The loser of a compare-and-swap re-fetches and re-verifies the state. If only `state_seq` and `device_set_hash` changed, it re-applies its change on top and retries. If any epoch, `kdf_id`, `bundle_hash`, `settings_seq` or `account_key_id` changed, it restarts its flow: an enrolling device discards its local `E_local` and `E_dev` and restarts from [§11.2](#112-login-on-a-new-device-server-mode) step 2. The server cannot hide a device without rolling back the signed state, which any device that has seen the newer state detects (threat model INV-14, INV-25).
+**Identity changes replace both keys.** A bundle either keeps both identity keys and its predecessor's `identity_epoch`, with one signature, or replaces both, the Ed25519 and the X25519 key, with `identity_epoch + 1` and the second signature by the preceding identity key. A bundle that replaces only one of the two is rejected: the writer refuses to sign it, and a verifier rejects it as a successor. So the two signatures of an identity change always come from two different keys.
+
+**Device set.** `device_set_hash` = `SHA-256(LABEL("device-set") ‖ 0x00 ‖ h_1 ‖ … ‖ h_n)`. Here `h_i` is the SHA-256 of the signed message of each non-revoked device certificate **with `device_kind` ≠ 4**, and the list is sorted bytewise. Enrolling or revoking a durable device therefore always publishes a new `account-state` with `state_seq + 1`. The server applies state updates as compare-and-swap on `state_seq`. The loser of a compare-and-swap re-fetches and re-verifies the state, and compares it with the state its change was built on:
+- a lower `state_seq` is a rollback: warn and go read-only ([§11.3](#113-unlock-on-an-enrolled-device) step 2.5);
+- the same `state_seq` and the same body: the conflict was spurious, and it retries;
+- the same `state_seq` and a different body is a **fork** (below): it does not re-apply its change on top of that state, it warns and goes read-only;
+- a higher `state_seq` where only `state_seq` and `device_set_hash` changed: it re-applies its change on top and retries;
+- a higher `state_seq` where anything else changed (an epoch, `kdf_id`, `bundle_hash`, `settings_seq`, `account_key_id` or any other field): it restarts its flow. An enrolling device discards its local `E_local` and `E_dev` and restarts from [§11.2](#112-login-on-a-new-device-server-mode) step 2.
+
+**Forks of the signed state.** Two verified `account-state`s with the same `state_seq` but different bodies are a fork: the server has shown two versions of the account. Every device compares each verified state it fetches with the last state it accepted and persisted (threat model INV-25), never with a change it proposed that the server did not commit. The same `state_seq` with a different body is a fork alarm, and the device goes read-only ([§11.3](#113-unlock-on-an-enrolled-device) step 2.5). The server cannot hide a device without rolling back or forking the signed state, which any device that has seen the other state detects (threat model INV-14, INV-25). For example, a compare-and-swap loser's rejected but validly signed state, served in place of the winner's to a device that already accepted the winner's, raises the fork alarm.
 
 **Web-vault certificates (`device_kind` 4) are never in the device set.** Putting them in would mean a state CAS and a "new device" alarm on every web login, and a set that only grows, because expired certificates are never revoked. Instead, peers accept an op or snapshot from a kind-4 device only if (a) its certificate verifies under the identity key of the current `identity_epoch`, (b) `expires_at_ms ≤ created_at_ms + 12 h`, and (c) the op's HLC, read as milliseconds (its top 48 bits), is ≤ `expires_at_ms`. [ADR 0012](adr/0012-sync-engine.md) already checks (c) against the HLC so that replicas agree. The server refuses uploads from an expired certificate. Ending a web session early is server-enforced only (threat model AR-9), with two exceptions: a switch to On-device mode ([ADR 0012](adr/0012-sync-engine.md) §10) and a full rotation ([§11.6](#116-key-rotation) step 7) sign a `device-revocation` for every unexpired kind-4 certificate, and peers reject later ops from it. Otherwise the certificate dies after 12 h regardless. Every other `device_kind` must be in the set, or its ops are rejected.
 
@@ -875,7 +901,7 @@ For **other people's keys** (M9 invites and member grants):
 2. **TOFU with pinning.**
    - The first bundle seen for a contact is pinned in the user's encrypted `ACCOUNT_SETTINGS` (whose freshness the signed state guarantees, [§10.2](#102-ed25519-signatures-and-signed-statements)): the identity Ed25519 key, the identity X25519 key, the highest `bundle_seq` seen and that bundle's hash.
    - **Silent update.** A later bundle is accepted without asking only if it chains from the pinned one (`prev_bundle_hash` links, `bundle_seq` increasing by one per step, every self-signature valid) **and keeps both identity keys**. That covers adding a PQ key and rotating the mail key.
-   - **Identity change.** A bundle that changes either identity key is a visible "safety number changed" event at every contact, even when the previous identity key signed it. A full rotation exists because the old key may be compromised, for example on a stolen device, and whoever holds it can sign a chained bundle carrying their own keys. A verified contact drops to unverified, and threat model INV-17 blocks new grants to that contact until the user re-verifies the fingerprint.
+   - **Identity change.** A bundle that changes the identity keys (always both, [§10.2](#102-ed25519-signatures-and-signed-statements)) is a visible "safety number changed" event at every contact, even when the previous identity key signed it. A full rotation exists because the old key may be compromised, for example on a stolen device, and whoever holds it can sign a chained bundle carrying their own keys. A verified contact drops to unverified, and threat model INV-17 blocks new grants to that contact until the user re-verifies the fingerprint.
    - **Fork.** Two different bundles with the same `prev_bundle_hash` or the same `bundle_seq` are a hard alarm: "the server has shown you two versions of this person's keys". No grants go to that contact until the user resolves it out of band.
    - **Rollback.** A bundle with a lower `bundle_seq` than the pinned one is rejected.
 3. **Invites (M9)** must verify the fingerprint, or explicitly accept TOFU with a visible "not verified" badge, *before* any vault key is granted. The server-mediated invite acceptance that let a server hijack an org vault in the ETH analysis (L) must not be reproducible: grants are made only to keys the granter has verified or pinned.
@@ -984,7 +1010,7 @@ The server stores `kdf_id` and `password_epoch` from that state with the OPAQUE 
    2. Fetch `account-state`, every bundle with `bundle_seq` above the cached one, the device certificates and revocations, and `ACCOUNT_SETTINGS` if `settings_seq` changed.
    3. If the state's `identity_epoch` is higher than the cached one, run step 3 before anything else. Otherwise verify the state with the cached identity key.
    4. Check, as in [§11.2](#112-login-on-a-new-device-server-mode) step 6: `account_id`, `bundle_hash`, `device_set_hash`, `settings_hash`, and, unless `account_key_epoch` increased (step 4), that the account key this device holds has key id `state.account_key_id`.
-   5. If `state_seq` or `settings_seq` is lower than the stored value, warn "possible rollback by the server" and go read-only.
+   5. If `state_seq` or `settings_seq` is lower than the stored value, warn "possible rollback by the server" and go read-only. If `state_seq` equals the stored value but the state's body differs from the stored state, it is a fork ([§10.2](#102-ed25519-signatures-and-signed-statements)): warn "the server has shown two versions of this account" and go read-only.
 3. **If `identity_epoch` increased** (a full rotation happened elsewhere):
    1. Walk the fetched bundles from the cached `bundle_seq` upwards. Each must name its predecessor in `prev_bundle_hash`, carry a valid self-signature, and, where the identity keys change, also a valid signature by the preceding identity key.
    2. Show the new identity fingerprint ([§10.3](#103-public-key-authenticity)) and require the user to confirm it on this device. A revoked-but-compromised device holds the old identity key and could have produced this chain ([§11.6](#116-key-rotation), "Known limitation"); the user's confirmation, ideally against another of their devices, is the check.
@@ -1070,7 +1096,7 @@ The verifier grants carry a password-derived wrap, but sealed to device keys wit
 - **Full:** also the identity keys. This is the default when a lost or stolen device is revoked.
 
 1. **Re-authenticate.** A fresh OPAQUE session in Server mode; an unlocked device in On-device mode.
-2. **Generate new keys:** account key' (`account_key_epoch + 1`), and for each owned vault a vault key' (`vault_key_epoch + 1`). For full rotation, also new identity keys (`identity_epoch + 1`).
+2. **Generate new keys:** account key' (`account_key_epoch + 1`), and for each owned vault a vault key' (`vault_key_epoch + 1`). For full rotation, also new identity keys (`identity_epoch + 1`): a new Ed25519 key **and** a new X25519 key, since an identity change replaces both ([§10.2](#102-ed25519-signatures-and-signed-statements)).
 3. **Re-wrap**:
    - every item key under its vault key' (`ITEM_KEY_WRAP` at the new `vault_key_epoch`), **copying its `created_vault_key_epoch` unchanged**. This is O(items) small envelopes, and item contents are not re-encrypted.
    - vault self-grants under account key' (context `account_key_epoch + 1`, `vault_key_epoch + 1`).
@@ -1254,8 +1280,17 @@ One implementation in `rizzy-core` serves two uses: codes for items that hold a 
 - **Standards.** HOTP (RFC 4226) and TOTP (RFC 6238).
 - **Allow-lists.** Algorithm SHA1, SHA256 or SHA512 (HMAC from `hmac` over `sha1` or `sha2`, [§3](#3-primitives)); digits 6–8; period 1–300 s, default 30. Anything else is rejected, never clamped.
 - **otpauth URIs.** The secret is RFC 4648 Base32 (not the Crockford alphabet of [§7](#7-secret-key)), parsed case-insensitively with optional padding. The URI parser is fuzzed ([§15](#15-testing) item 7).
+- **Base32 secrets.** The decoder:
+  - accepts padding only when it is complete (`=` up to a multiple of 8 characters), and rejects a data length of 1, 3 or 6 characters modulo 8;
+  - accepts non-zero unused trailing bits and ignores them, because third-party issuers produce such secrets;
+  - rejects every character outside the alphabet, spaces included. The importer and the UI strip spaces before parsing.
+
+  The encoder always emits the canonical form: uppercase, unpadded, unused bits zero. A secret imported with non-zero trailing bits keeps its bytes but changes its spelling.
+- **Secret lengths.**
+  - **Item secrets** are accepted as issued, 1–128 bytes. RFC 4226's 128-bit minimum (§4 R6) binds the issuer, and many issuers use 80-bit secrets; rejecting them would not add entropy.
+  - **Server 2FA secrets** are issued by rizzy-vault itself: generated at 20 bytes (160 bits), and sealing or opening a `SERVER_TOTP_SECRET` rejects a secret shorter than 16 bytes. The check on open is defence in depth, since the sealed secret is already authenticated under the server data key.
 - **Item TOTP secrets** stay in item data, encrypted like any other field, and are held in `Zeroizing` buffers while in use.
-- **Server 2FA.** The secret is sealed as `SERVER_TOTP_SECRET` ([§5.11](#511-server-side-encryption-not-zero-knowledge)). The server accepts the current time step or one step either side (±1), rejects a time step it has already accepted for that credential, and compares codes with `ct_eq`.
+- **Server 2FA.** The secret is sealed as `SERVER_TOTP_SECRET` ([§5.11](#511-server-side-encryption-not-zero-knowledge)). The server computes the codes of the current time step and of one step either side (±1) and compares each with the submitted code using `ct_eq`. It accepts a matching step only if that step is above the last step it accepted for that credential, and stores the accepted step in the same transaction as the login. So every step at or below the last accepted one is rejected, including an older step whose code was never used. If several steps match, the highest is accepted.
 - **Neither kind of TOTP feeds key derivation** ([§5.10](#510-sessions-after-authentication)).
 
 ---
@@ -1281,8 +1316,12 @@ One implementation in `rizzy-core` serves two uses: codes for items that hold a 
   - `Debug` is implemented by hand and prints `[REDACTED]`. This is compatible with the workspace lint `missing_debug_implementations`.
   - Exposing a secret takes an explicit `expose_secret()` call, which is easy to grep for.
   - Secret `Vec`s are allocated at their final capacity; a reallocation leaves the old copy behind.
-- **Argon2 memory is our job.** `argon2` 0.6.0's `hash_password_into` allocates the m-KiB block matrix internally and frees it **without wiping it**, even with the `zeroize` feature; that feature wipes only the initial and final hash. This was verified by reading `src/block.rs` and `src/lib.rs`. Our KSF and local KDF therefore call `hash_password_into_with_memory` with our own `Zeroizing<Vec<argon2::Block>>`, which is wiped on drop. There is a test for this. We build argon2 without its `alloc` feature. That feature gates only `hash_password_into` and its non-wiping internal buffer, so the forbidden call does not compile in our build, and `hash_password_into_with_memory` with our `Zeroizing<Vec<argon2::Block>>` is the only entry point.
-- **Crate features.** `chacha20poly1305`, `argon2`, `ed25519-dalek`, `hmac` 0.13 and `sha2` 0.11 are built with their `zeroize` features. `hkdf` 0.13 has no such feature (see Limits).
+- **Argon2 memory is our job.** `argon2` 0.6.0's `hash_password_into` allocates the m-KiB block matrix internally and frees it **without wiping it**, even with the `zeroize` feature; that feature wipes only argon2's own `H0` array and final-block buffers, not the other copies listed under Limits below. This was verified by reading `src/block.rs` and `src/lib.rs`. Our KSF and local KDF therefore call `hash_password_into_with_memory` with our own `Zeroizing<Vec<argon2::Block>>`, which is wiped on drop. There is a test for this. We build argon2 without its `alloc` feature. That feature gates only `hash_password_into` and its non-wiping internal buffer, so the forbidden call does not compile in our build, and `hash_password_into_with_memory` with our `Zeroizing<Vec<argon2::Block>>` is the only entry point.
+- **Crate features.** `chacha20poly1305`, `argon2`, `ed25519-dalek`, `hmac` 0.13, `sha1` 0.11 and `sha2` 0.11 are built with their `zeroize` features. So are two transitive crates whose parents do not forward the feature:
+  - `blake2` 0.11.0, under argon2. Its hasher state ends up holding `H0` and the Argon2 tag.
+  - `poly1305` 0.9.1, under chacha20poly1305. Its state holds the one-time Poly1305 key.
+
+  `rizzy-core` depends on these two directly, exact-pinned, only to switch their `zeroize` features on through Cargo feature unification ([ADR 0009](adr/0009-crypto-dependency-policy.md#amendments), amendment of 2026-09-26). `hkdf` 0.13 has no such feature (see Limits).
 - **Logs and panics.**
   - No secret or plaintext is ever logged, formatted into an error, or included in a panic message.
   - Release builds use `panic = "abort"`, as the workspace profile already sets.
@@ -1293,6 +1332,8 @@ One implementation in `rizzy-core` serves two uses: codes for items that hold a 
   - **wasm linear memory** can be wiped from Rust, but the engine may copy it when memory grows (U). A 64 MiB Argon2 run grows the memory, and wasm memory never shrinks.
   - **No `mlock`.** It needs `unsafe` or a libc wrapper, and does not exist in wasm. Swap and hibernation files can hold secrets. We assume OS full-disk encryption.
   - **hkdf 0.13.** It keeps its PRK and its T(i) expand blocks in plain arrays and never wipes them, so copies of HKDF state keyed by an envelope key, SK or `pw_in` are freed unwiped. opaque-ke's own hash stack is covered in the opaque-ke bullet.
+  - **hmac 0.13 key block.** `new_from_slice` builds the padded key block (key ⊕ ipad, then key ⊕ opad) in a stack buffer and never wipes it; the `zeroize` feature covers the hash states, not this buffer. The block gives back the key, or for a key longer than the hash block its hash, which works as the key. This holds for every HMAC key: the TOTP secret, `enum_key`, and the salts and PRKs that hkdf 0.13 passes to HMAC, among them the SK in `pw_in`.
+  - **argon2 0.6.0 locals.** Whatever features are set, three stack copies are never wiped: in `blake2b_long`, `full_out`, which holds the Argon2 tag (the local-unlock `a`, the KSF output, the export and backup keys' `e` and `b`), and the H' chain values (`last_output`); and in the block initialisation, the 1 KiB `hash` buffer that holds each lane's first two blocks, `H'(H0 ‖ LE32(j) ‖ LE32(lane))` for j = 0, 1. The tag, or those blocks, gives the stretched result without the password.
   - **opaque-ke internals.** In `get_password_derived_key`, opaque-ke 4.0.1 holds the OPRF output and the stretched output (both password-equivalents) in plain `GenericArray`s and feeds them to its own HKDF-SHA-512 (hkdf 0.12 / hmac 0.12 / sha2 0.10, which have no zeroize support). None of these is wiped. Our KSF gets a by-value copy and wipes only that copy. The same holds for the `export_key` and `session_key` arrays opaque-ke returns before we move them into `Zeroizing`. Tracked upstream; listed for the M8 audit.
   - **Allocators.** Bitwarden's SDK ships a zeroizing global allocator. Writing one needs `unsafe` (`GlobalAlloc`), which the workspace forbids. The owner decided against one for v1.0 on 2026-09-25 ([ADR 0009](adr/0009-crypto-dependency-policy.md)).
 
@@ -1301,6 +1342,8 @@ One implementation in `rizzy-core` serves two uses: codes for items that hold a 
 - **Constant-time comparisons.** Every comparison of secret or secret-derived values uses `subtle::ConstantTimeEq`: envelope commitments, token hashes (share, recovery), SK and recovery-code check values, and fingerprints when compared programmatically. `==` on such bytes is a review blocker.
 - **Tags inside libraries.** Tag checks inside `chacha20poly1305`, `hmac` and opaque-ke are the libraries' own constant-time code.
 - **No secret-dependent branches or lookups** in our code. This includes the Crockford Base32 encoder and decoder for the SK and recovery code (arithmetic mapping, no tables) and base64url for share fragments (`base64ct`).
+- **Accepted residual: TOTP digit arithmetic.** HOTP reduces the truncated HMAC value modulo 10^digits, and showing a code divides it by powers of ten ([§11.15](#1115-totp-m1)). `digits` is public, but the compiler may emit a hardware divide, and on some CPUs the latency of a divide depends on its operands; we have not checked which CPUs. The reduction also runs on the server, once for each of the three candidate steps of a submitted 2FA code; the display path is client-only. The operand is a fresh HMAC output for each step, and the variation is that of one 32-bit division. We accept it.
+- **Accepted residual: otpauth label and issuer** (owner decision, 2026-09-26). Percent-encoding and decoding an otpauth URI's label and issuer ([§11.15](#1115-totp-m1)) branch on their bytes, and the encoder indexes a 16-entry hex table with them. That departs from the rule above, because they are decrypted item data. They are item metadata, held in wiped buffers ([§12.2](#122-memory-hygiene)), not the TOTP secret or key material. The table fits in one cache line, and the secret's Base32 uses arithmetic only.
 - **Server-side token lookups** go by `SHA-256(token)` as an index key. Index timing reveals at most hash-prefix information, which is useless to an attacker.
 - **Argon2id** uses data-independent addressing in its first half-pass. That is why the algorithm is Argon2id and not Argon2d.
 - **Only the hard failure is observable.** A decryption failure returns the same error, and to a remote peer the same response, whether the commitment or the tag failed. [§8.3](#83-key-commitment) removes the multi-key oracle; this removes the "which check failed" oracle.
@@ -1399,6 +1442,7 @@ All of this lands with the code in M1. None of it is optional.
    - It returns `kdf_id` 0 or 2 (not allowed) → the client aborts before running the KSF.
    - It swaps item A's envelope into item B → rejected.
    - It serves an older `account-state` → rollback warning.
+   - It serves a second, validly signed `account-state` with a `state_seq` the device already accepted, for example a compare-and-swap loser's state that leaves out a device the winner enrolled → fork alarm and read-only; a compare-and-swap loser does not re-apply its change on top of it.
    - It substitutes the bundle public key → login aborts.
    - It hides an enrolled device from a new device's certificate list → `device_set_hash` mismatch, login aborts.
    - It serves a state whose `account_id` or `bundle_hash` does not match → login aborts.
@@ -1427,6 +1471,9 @@ All of this lands with the code in M1. None of it is optional.
    - Padmé frame parser
    - export-file parser
    - otpauth URI parser ([§11.15](#1115-totp-m1))
+   - the OPAQUE message deserialisers on the server side ([§5](#5-opaque-integration)): the registration request, the registration upload, KE1 and KE3, which arrive in unauthenticated API bodies, and the stored password file and `ServerLogin` state as defence in depth
+
+   The client-side OPAQUE messages (KE2 and the registration response) are not fuzzed. Fuzzing them at a useful rate would need a cheap KSF inside `rizzy-core`, even one behind a `cfg`. The owner decided on 2026-09-26 that no weakened KSF path may exist. Property tests cover the client's handling of random and bit-flipped server messages instead.
 
    cargo-fuzz needs nightly, while the repository pins 1.94.1, so fuzzing runs as a separate scheduled job with its own toolchain (owner decision, [§16](#16-open-questions-for-the-owner)). ROADMAP §4.1 lists fuzzing as a Should for M1–M6.
 8. **Cross-platform equality.** The same vector files are run:
@@ -1465,6 +1512,19 @@ The owner decided every question below on 2026-09-25, in each case as recommende
 15. **Decided 2026-09-25:** yes. From M1, native clients (kinds 1–3) sign every request with the device key using the `device-request` statement ([§5.10](#510-sessions-after-authentication), [§10.2](#102-ed25519-signatures-and-signed-statements)); the web vault keeps short-lived bearer tokens ([ADR 0002](adr/0002-own-protocol.md)). **Request signing for native clients from M1** (threat model Q-7, [ADR 0002](adr/0002-own-protocol.md) open question 2). This must be decided before M1 auth work starts. [§5.10](#510-sessions-after-authentication) specifies the construction (the `device-request` statement, [§10.2](#102-ed25519-signatures-and-signed-statements)) so that M1 does not have to invent one. *Recommendation:* yes, as specified. If declined, §5.10 states the residual risk: a stolen bearer token or a relayed device-auth session gives ciphertext access and destructive calls until the session ends.
 
 Dependency-policy questions (webauthn-rs and the openssl ban, cargo-vet, a zeroizing allocator) are in [ADR 0009](adr/0009-crypto-dependency-policy.md), and were decided when it was accepted on 2026-09-25.
+
+**Decided 2026-09-26**, after the first review of the M1 `rizzy-core` code. Each point settles a reading the code had to take, and is written into the section it belongs to:
+- The strict readings the code enforces are normative: the `server_origin` grammar ([§2](#2-conventions)), the SK and recovery-code separators ([§7](#7-secret-key)), the `IDENTITY_SECRET_KEYS` layout ([§8.4](#84-aad-and-purposes)), the canonical Padmé frame length and the 16 MiB bound on frames and HPKE envelopes ([§8.5](#85-plaintext-framing-and-padding), [§9.2](#92-hpke-envelope-algorithms-0x10-and-0x12)), the bare container of `device-auth` and `device-request` ([§9.6](#96-encoding-for-transport-and-storage)), the M1 bundle key types ([§10.2](#102-ed25519-signatures-and-signed-statements), [§9.7](#97-how-a-migration-lands-pq-example)), the TOTP replay rule ([§11.15](#1115-totp-m1)), the memory residues listed in [§12.2](#122-memory-hygiene), and the TOTP digit arithmetic and otpauth label and issuer residuals in [§12.3](#123-side-channels).
+- The owner also confirmed readings the review fixes took:
+  - the `key-grant` signer-role table ([§10.2](#102-ed25519-signatures-and-signed-statements));
+  - the writer refusing an identity-change bundle that is not its predecessor's direct successor;
+  - the unassigned-code-point rule for new export and backup passwords as well as master passwords ([§2](#2-conventions)).
+- No cheap-KSF hook for fuzzing: the client side of OPAQUE is covered by property tests, not fuzzing ([§15](#15-testing) item 7).
+- Two verified `account-state`s with the same `state_seq` and different bodies are a fork: clients alarm and go read-only, and a compare-and-swap loser never re-applies on top of one ([§10.2](#102-ed25519-signatures-and-signed-statements), [§11.3](#113-unlock-on-an-enrolled-device) step 2.5, threat model INV-25).
+- An identity change replaces both identity keys ([§10.2](#102-ed25519-signatures-and-signed-statements), [§11.6](#116-key-rotation)).
+- New master, export and backup passwords must not be empty; there is no strength rule ([§2](#2-conventions)).
+- TOTP Base32 ignores non-zero trailing bits, item secrets are accepted as issued, and server 2FA secrets are at least 16 bytes ([§11.15](#1115-totp-m1)).
+- `blake2` and `poly1305` are pinned in `rizzy-core` only to switch on their `zeroize` features ([§12.2](#122-memory-hygiene), [ADR 0009](adr/0009-crypto-dependency-policy.md)).
 
 ---
 

@@ -242,23 +242,64 @@ pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
     out
 }
 
-/// Every M1 purpose with a context type has a vector, and every vector is for a registered
+/// Every M1 purpose of the §8.4 table has exactly one vector, or two for a padded purpose (one
+/// frame at the 256-byte minimum and one past it), and every vector is for a registered
 /// purpose.
-pub(super) fn check_file(vectors: &[super::Vector]) {
-    let names: Vec<&str> = vectors.iter().map(|v| v.name.as_str()).collect();
+pub(super) fn check_file(vectors: &[Vector]) {
     for p in Purpose::ALL {
         // VAULT_KEY_MEMBER_GRANT is M9; its context exists only in tests.
-        if p.spec().first_used == Milestone::M1 {
+        if p.spec().first_used != Milestone::M1 {
+            continue;
+        }
+        let of_purpose: Vec<&Vector> = vectors.iter().filter(|v| v.name == p.name()).collect();
+        if p.spec().plaintext == PlaintextRule::Padded {
+            // padded_len = max(256, Padmé(4 + data_len)) (§8.5).
+            let frames: Vec<usize> = of_purpose
+                .iter()
+                .map(|v| 4 + bytes(&v.inputs, "plaintext").len())
+                .collect();
             assert!(
-                names.contains(&p.name()),
-                "no envelope vector for {}",
+                frames.len() == 2
+                    && frames.iter().any(|&n| n <= 256)
+                    && frames.iter().any(|&n| n > 256),
+                "{}: frames of {frames:?} bytes",
                 p.name()
             );
+        } else {
+            assert_eq!(of_purpose.len(), 1, "envelope vectors for {}", p.name());
         }
     }
-    for name in names {
-        assert!(Purpose::ALL.iter().any(|p| p.name() == name), "{name}");
+    for v in vectors {
+        assert!(
+            Purpose::ALL.iter().any(|p| p.name() == v.name),
+            "{}",
+            v.name
+        );
     }
+}
+
+#[test]
+fn check_file_requires_every_m1_purpose_and_both_padded_frames() {
+    let vectors = super::committed_vectors(super::file("envelopes"));
+    check_file(&vectors);
+    for id in [
+        "envelope/ACCOUNT_KEY_SERVER_WRAP/0",
+        "envelope/ITEM_OP/1",
+        "envelope/ITEM_SNAPSHOT/0",
+    ] {
+        let fewer: Vec<Vector> = vectors.iter().filter(|v| v.id != id).cloned().collect();
+        assert!(
+            std::panic::catch_unwind(|| check_file(&fewer)).is_err(),
+            "{id} deleted"
+        );
+    }
+    // Two padded frames on the same side of the 256-byte minimum are not enough.
+    let mut same_side = vectors.clone();
+    for v in same_side.iter_mut().filter(|v| v.name == "ITEM_OP") {
+        v.inputs
+            .insert("plaintext".into(), Value::String("00".repeat(40)));
+    }
+    assert!(std::panic::catch_unwind(|| check_file(&same_side)).is_err());
 }
 
 // ---------------------------------------------------------------------------------------------

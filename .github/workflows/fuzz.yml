@@ -1,0 +1,81 @@
+name: Fuzz
+
+# The cargo-fuzz targets in fuzz/ (CRYPTO.md §15 item 7), on nightly, in a separate scheduled job
+# that never blocks a PR (ADR 0009 owner decision 4). CI's `fuzz-check` job type-checks the
+# targets on stable on every PR.
+on:
+  schedule:
+    # Weekly, Monday 04:17 UTC.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: short
+
+jobs:
+  targets:
+    name: list fuzz targets
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.list.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install || rustup show
+      # Every [[bin]] of fuzz/Cargo.toml, so a new target is fuzzed without editing this file.
+      - id: list
+        # `shell: bash` runs with `-eo pipefail`, so a failing `cargo metadata` fails the step.
+        shell: bash
+        run: |
+          targets=$(cargo metadata --manifest-path fuzz/Cargo.toml --no-deps --format-version 1 --locked \
+            | jq -c '[.packages[] | select(.name == "rizzy-fuzz") | .targets[] | select(.kind == ["bin"]) | .name]')
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+
+  fuzz:
+    name: fuzz ${{ matrix.target }} (nightly)
+    needs: targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.targets) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Nightly for fuzzing only (ADR 0009 owner decision 4); everything else uses the pinned
+      # toolchain from rust-toolchain.toml.
+      - name: Install nightly toolchain
+        run: rustup toolchain install nightly --profile minimal --no-self-update
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked
+      # `cargo fuzz run` has no `--locked`, and a stale fuzz/Cargo.lock would be re-resolved
+      # silently: the job would fuzz a graph that neither review nor cargo-deny saw. Fail on a
+      # stale lockfile first, and check afterwards that the build did not rewrite it
+      # (THREAT_MODEL INV-57).
+      - name: Check that fuzz/Cargo.lock is current
+        run: cargo +nightly fetch --locked --manifest-path fuzz/Cargo.toml
+      # A bounded run per target: 15 minutes of fuzzing after the build.
+      - name: Fuzz ${{ matrix.target }}
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=900
+      - name: Check that the fuzz build left fuzz/Cargo.lock unchanged
+        run: git diff --exit-code -- fuzz/Cargo.lock
+      - name: Upload the crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore

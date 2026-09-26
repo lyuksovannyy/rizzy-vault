@@ -23,8 +23,17 @@ pub mod purpose;
 pub mod symmetric;
 
 #[cfg(test)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
 mod proptests;
 #[cfg(test)]
+#[expect(
+    clippy::indexing_slicing,
+    clippy::unreachable,
+    reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
 mod tests;
 
 pub use parse::{EnvelopeRef, HpkeEnvelopeRef, SymmetricEnvelopeRef};
