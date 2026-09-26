@@ -99,6 +99,12 @@ packages/
 - `apps/android` and `apps/ios` arrive in M7, with native UI over `rizzy-ffi` ([ADR 0013](0013-shared-client-core.md)).
 - As with crates, a directory is created only when real code goes into it.
 
+### Owner decisions (2026-09-25, 2026-09-26)
+
+1. **Framework** → React (2026-09-25).
+2. **Share recipient page (M5)** → framework-free TypeScript (2026-09-26). It renders one decrypted snapshot, so keeping it tiny keeps it auditable.
+3. **Desktop** → reuses the `apps/web` views: one SPA with two shells, over the two backends of `packages/core` (2026-09-26).
+
 ## Consequences
 
 ### Positive
@@ -130,6 +136,8 @@ packages/
 - **A different framework per surface.** Ruled out by ROADMAP §4.5 (one shared design system).
 
 ## Open questions for the owner
+
+All three were answered by the owner; see [Owner decisions](#owner-decisions-2026-09-25-2026-09-26) in the Decision section.
 
 1. **Framework: React (recommended) or Svelte 5?** The deciding question is who writes most of the UI.
    - If it is the owner alone, and the owner prefers Svelte, Svelte's productivity may outweigh React's ecosystem.

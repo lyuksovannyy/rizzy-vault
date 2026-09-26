@@ -244,6 +244,18 @@ elem      = 2*128( DIGIT / %x61-66 )           ; even count; a random 16-byte id
 - **Fuzz targets,** in the scheduled job (ADR 0009, owner decision 4): op data, snapshot data, tombstone, the value decoder and the key grammar. Once this ADR is accepted, CRYPTO.md §15 item 7 lists them, and §8.4 "Op and snapshot plaintexts" links here.
 - **Cross-platform byte equality:** CRYPTO.md §15 item 8.
 
+### Owner decisions (2026-09-26)
+
+The owner answered the open questions on 2026-09-26, each as recommended:
+
+1. **The encoding** → the hand-written canonical layout of §1–§5. No CBOR, no protobuf, no new dependency.
+2. **Per-URI match mode** → item data (`uri/<id>/match`). Item ops are encrypted, device-signed (INV-22), rollback-checked (INV-25) and gap-checked (INV-27). [INV-14](../THREAT_MODEL.md#8-security-invariants) and [CRYPTO.md §8.4](../CRYPTO.md#84-aad-and-purposes) are amended to name account-level match defaults, equivalence groups and autofill rules instead of per-URI match modes. M2 assigns the values.
+3. **Item VV and item id** → carried only in the snapshot header, which the AAD binds. `data` does not repeat them.
+4. **Cleared value against a concurrent edit** → the edit displays, marked as a conflict (§6). The merge and the converged state are unchanged.
+5. **Limits** → accepted as in §10: 64 KiB per value, 1 MiB per op, 12 MiB per snapshot, 1,024 writes per op, 4,096 registers. Revisit with M3 data.
+6. **Passkeys** → both are reserved: the standalone type `0x000A` and the `passkey/` list on Login. The M7 passkey ADR uses one and releases the other.
+7. **Tags keyed by name** → yes for M1. A tag registry for colours or one-op renames is an M3 decision.
+
 ## Consequences
 
 ### Positive
@@ -288,6 +300,8 @@ elem      = 2*128( DIGIT / %x61-66 )           ; even count; a random 16-byte id
 - **Random tag ids with a tag registry.** This allows renaming a tag in one op, and tag colours. But the same tag added on two devices becomes two tags, and the registry is one more object to sync. It can be revisited in M3.
 
 ## Open questions for the owner
+
+All seven were answered by the owner on 2026-09-26, each as recommended; see [Owner decisions (2026-09-26)](#owner-decisions-2026-09-26) in the Decision section. The answers keep the question numbers, so "open question N" means owner decision N.
 
 1. **The encoding.** Should it be the hand-written layout, or deterministic CBOR (minicbor with a BlueOak-1.0.0 license addition, or cbor4ii)? *Recommendation:* hand-written (§1). It adds no dependency, and it is the same style as the op header.
 2. **Per-URI match mode.** ADR 0012 §1 names `uri/<id>/match` as an item field. CRYPTO.md §8.4 and [INV-14](../THREAT_MODEL.md#8-security-invariants) list "per-URI match modes" among the settings that live in `ACCOUNT_SETTINGS` or the signed `account-state`. This is an invariant-level conflict, so this ADR only reserves the key. *Recommendation:* keep the mode in item data, and amend INV-14 and §8.4 to name account-level match defaults, equivalence groups and autofill rules. Item ops are encrypted, never visible to the server, device-signed (INV-22), rollback-checked (INV-25) and gap-checked (INV-27). Decide before M2.
