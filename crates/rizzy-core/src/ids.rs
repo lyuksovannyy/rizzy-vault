@@ -130,9 +130,9 @@ random_ids! {
     ShareId;
     /// `message_id` of a stored mail message (M6).
     MessageId;
-    /// `pairing_id` (M4).
+    /// `pairing_id` (reserved, On-device parked (ADR 0022)).
     PairingId;
-    /// `transfer_id` of a re-sync transfer (M4).
+    /// `transfer_id` of a re-sync transfer (reserved, On-device parked (ADR 0022)).
     TransferId;
     /// `export_id` of an encrypted export (§11.14).
     ExportId;

@@ -36,10 +36,12 @@
 //! Secret Key and recovery code, server-side sealing, the encrypted export, TOTP and the
 //! password generator.
 //!
-//! Not here yet: the item schema and item-record encoding (ADR 0018, still Proposed), and the
-//! constructions of later milestones (pairing, relay, shares, mail). Their envelope purposes
-//! are registered so their ids stay reserved, but they have no context type, so nothing can
-//! seal or open them until their milestone defines the layout ([`envelope::purpose`]).
+//! Not here yet: the item schema and item-record encoding (ADR 0018, still Proposed), the
+//! constructions of later milestones (shares, mail), and pairing and relay (reserved,
+//! On-device parked (ADR 0022)). Their envelope purposes are registered so their ids stay
+//! reserved, but they have no context type, so nothing can seal or open them until their
+//! milestone, or the ADR that revives On-device mode, defines the layout
+//! ([`envelope::purpose`]).
 //!
 //! # Conventions
 //!

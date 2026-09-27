@@ -5,7 +5,8 @@
 //! start doing I/O, or an ingress crate would get a route to the database.
 //!
 //! Every crate of ADR 0016 §2 and §3 has a row, including the planned ones, so the checks apply
-//! the moment a crate is created. A workspace member without a row is itself a violation.
+//! the moment a crate is created; ADR 0022 removes the `rizzy-domain-relay` row of §3. A
+//! workspace member without a row is itself a violation.
 //!
 //! What is here:
 //!
@@ -22,11 +23,11 @@
 //! - The R1 API-side clippy lists: [`NO_IO_CLIPPY_LISTS`].
 //!
 //! The unit tests restate the rights ADR 0016 and ADR 0009 assign (`rows_match_adr_0016`: the
-//! no-I/O crates, the getrandom leaves, `wasm_js`, sqlx, the one dev-only edge and openssl;
-//! `crypto_crates_match_adr_0009`: the crates of ADR 0009's required feature sets), so
-//! changing one of those in a row also means changing a test. Otherwise, internal edges are
-//! checked for well-formedness plus R4 and the R5 server-wired edges, and allow-list entries for
-//! well-formedness and against the forbidden and `rand` rules
+//! no-I/O crates, the getrandom leaves, `wasm_js`, sqlx, the one dev-only edge, openssl and the
+//! row ADR 0022 removes; `crypto_crates_match_adr_0009`: the crates of ADR 0009's required
+//! feature sets), so changing one of those in a row also means changing a test. Otherwise,
+//! internal edges are checked for well-formedness plus R4 and the R5 server-wired edges, and
+//! allow-list entries for well-formedness and against the forbidden and `rand` rules
 //! (`rand_and_getrandom_are_never_allow_listed_by_accident`).
 
 /// Which side of the client/server split a crate is on (ADR 0016 R6).
@@ -236,7 +237,6 @@ pub(crate) const CRATES: &[CrateRule] = &[
             .internal(&[
                 "rizzy-domain-auth",
                 "rizzy-domain-vault",
-                "rizzy-domain-relay",
                 "rizzy-domain-share",
                 "rizzy-domain-mail",
                 "rizzy-domain-org",
@@ -311,13 +311,6 @@ pub(crate) const CRATES: &[CrateRule] = &[
         .leaf()
         .internal(&["rizzy-client"])
         .sqlx(Sqlx::SqliteOnly),
-    CrateRule::new(
-        "rizzy-domain-relay",
-        "crates/rizzy-domain-relay",
-        Side::Server,
-    )
-    .internal(&["rizzy-sync", "rizzy-proto", "rizzy-storage", "rizzy-bus"])
-    .sqlx(Sqlx::Server),
     CrateRule::new(
         "rizzy-domain-share",
         "crates/rizzy-domain-share",
@@ -701,9 +694,12 @@ mod tests {
         }
     }
 
-    /// The ADR 0016 §3 table and notes, restated: a change to the table must change this test.
+    /// The ADR 0016 §3 table and notes, less the row ADR 0022 removes, restated: a change to
+    /// the table must change this test.
     #[test]
     fn rows_match_adr_0016() {
+        assert!(rule("rizzy-domain-relay").is_none(), "ADR 0022 §1");
+
         let no_io: HashSet<&str> = CRATES.iter().filter(|r| r.no_io).map(|r| r.name).collect();
         let expected: HashSet<&str> = [
             "rizzy-core",

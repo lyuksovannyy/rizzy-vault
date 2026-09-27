@@ -402,7 +402,7 @@ impl Statement for DeviceRevocation {
 pub enum SyncMode {
     /// 1: Server mode.
     Server = 1,
-    /// 2: On-device mode (M4).
+    /// 2: On-device mode (reserved, On-device parked (ADR 0022)).
     OnDevice = 2,
 }
 
@@ -950,7 +950,8 @@ pub const MAX_GRANT_ENVELOPE_LEN: usize = MAX_PLAINTEXT_LEN + HPKE_OVERHEAD;
 ///
 /// Checked when signing and when verifying:
 /// - the purpose is one of the signed-grant purposes: `ACCOUNT_KEY_DEVICE_GRANT`,
-///   `PASSWORD_VERIFIER_GRANT` (M4) or `VAULT_KEY_MEMBER_GRANT` (M9);
+///   `PASSWORD_VERIFIER_GRANT` (reserved, On-device parked (ADR 0022)) or
+///   `VAULT_KEY_MEMBER_GRANT` (M9);
 /// - the envelope parses as an HPKE envelope whose algorithm is on that purpose's allow-list;
 /// - the envelope header names the recipient public key id of the statement;
 /// - the container's signer and the statement's sender key id are the verifying key's id;

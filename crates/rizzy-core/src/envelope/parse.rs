@@ -1,8 +1,8 @@
 //! Strict envelope parsing (CRYPTO.md §9.1, §9.2, §9.5).
 //!
-//! Envelope bytes come from the server, the relay, a file or the local cache, so they are
-//! untrusted input. This module turns them into borrowed, typed views ([`EnvelopeRef`]) or
-//! rejects them. It never decrypts and never sees a key.
+//! Envelope bytes come from the server, a file or the local cache, so they are untrusted
+//! input. This module turns them into borrowed, typed views ([`EnvelopeRef`]) or rejects them.
+//! It never decrypts and never sees a key.
 //!
 //! Two entry points:
 //! - [`parse`] is the pure, purpose-agnostic layout parser `&[u8] -> Result<EnvelopeRef<'_>,

@@ -5,8 +5,8 @@
 //! who does not share a symmetric key with the recipient can still wrap for it. In M1 that is
 //! the device grant: after an account-key rotation, the rotating device seals the new account
 //! key to each remaining device (`ACCOUNT_KEY_DEVICE_GRANT`, §11.6). Of the PSK derivations,
-//! only the device-grant PSK exists in M1; the password-verifier, re-sync and pairing PSKs
-//! arrive with M4.
+//! only the device-grant PSK exists in M1; the password-verifier, re-sync and pairing PSKs are
+//! reserved, On-device parked (ADR 0022).
 //!
 //! ```text
 //! header   = u8(0x01) ‖ u8(alg_id) ‖ key_id(recipient public key)            (18 bytes)
@@ -428,7 +428,8 @@ fn recipient_key_id(purpose: Purpose, recipient: &HpkePublicKey) -> Option<Publi
 /// Seals `plaintext` for a PSK-mode purpose (`0x12`) to `recipient`, with `psk`.
 ///
 /// For a [`PlaintextRule::Fixed`] purpose the plaintext must have exactly that length; a
-/// [`PlaintextRule::Padded`] purpose (M4) is framed first (§8.5).
+/// [`PlaintextRule::Padded`] purpose (reserved, On-device parked (ADR 0022)) is framed first
+/// (§8.5).
 ///
 /// `recipient` must be an authenticated public key of the recipient the context names (for a
 /// device grant, the X25519 key in that device's certificate). The ephemeral key comes from

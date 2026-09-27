@@ -1,15 +1,17 @@
 //! The purpose registry (CRYPTO.md §8.4, §5.11, §9.5) and the typed contexts.
 //!
 //! Every purpose in §8.4 is registered here with its `u16` id, its one encrypt algorithm, its
-//! decrypt allow-list, its plaintext rule (§8.5) and the milestone that first uses it. The
-//! server-only range `0x0100`–`0x01FF` (§5.11) is part of the registry, but those purposes
-//! appear only in the server's allow-list table, never in a client's.
+//! decrypt allow-list, its plaintext rule (§8.5) and the milestone that first uses it, or
+//! [`Milestone::Parked`] for the reserved On-device purposes (ADR 0022). The server-only range
+//! `0x0100`–`0x01FF` (§5.11) is part of the registry, but those purposes appear only in the
+//! server's allow-list table, never in a client's.
 //!
 //! A context (`ctx`) is the ordered list of fields that says where a ciphertext belongs. Each
 //! M1 purpose has a context type implementing [`Context`]; the type fixes the purpose, so a
-//! caller cannot pair a context with the wrong purpose id. Purposes of later milestones are
-//! registered (their ids are reserved) but have no context type yet, so nothing can seal or
-//! open them until their milestone defines and reviews the layout.
+//! caller cannot pair a context with the wrong purpose id. Purposes of later milestones, and
+//! the parked ones, are registered (their ids are reserved) but have no context type yet, so
+//! nothing can seal or open them until their milestone, or the ADR that revives On-device
+//! mode, defines and reviews the layout.
 //!
 //! # Why the purpose and context exist
 //!
@@ -63,12 +65,13 @@ pub enum PlaintextRule {
     Padded,
     /// Variable length, not padded. The exact length is visible to whoever sees the envelope.
     Unpadded,
-    /// Defined by a later ADR (the M3 attachments ADR, the M4 backup ADR). Neither seal nor open
+    /// Defined by a later ADR (the M3 attachments ADR, the M8 backup ADR). Neither seal nor open
     /// accepts it.
     Unspecified,
 }
 
-/// The milestone that first uses a purpose (CRYPTO.md §8.4, "First used").
+/// The milestone that first uses a purpose (CRYPTO.md §8.4, "First used"), or
+/// [`Milestone::Parked`].
 ///
 /// Informational: it documents the registry and lets tests check that every M1 symmetric
 /// purpose has a context type. It gates nothing at run time.
@@ -80,14 +83,17 @@ pub enum Milestone {
     M3,
     /// M3 on desktop, M7 on mobile.
     M3M7,
-    /// M4.
-    M4,
     /// M5.
     M5,
     /// M6.
     M6,
+    /// M8.
+    M8,
     /// M9.
     M9,
+    /// Reserved, On-device parked (ADR 0022): no milestone uses the purpose, and only an ADR
+    /// that revives On-device mode may.
+    Parked,
 }
 
 /// Which allow-list table a purpose's decryption belongs to (CRYPTO.md §9.5 rule 2).
@@ -119,7 +125,7 @@ pub struct PurposeSpec {
     pub decrypt: &'static [AlgId],
     /// The plaintext rule.
     pub plaintext: PlaintextRule,
-    /// First milestone.
+    /// First milestone, or [`Milestone::Parked`].
     pub first_used: Milestone,
 }
 
@@ -158,7 +164,8 @@ pub enum Purpose {
     AccountKeyRecoveryWrap = 0x0003,
     /// The account key sealed to a device (HPKE PSK mode).
     AccountKeyDeviceGrant = 0x0004,
-    /// A password verifier sealed to a device (HPKE PSK mode, M4).
+    /// A password verifier sealed to a device (HPKE PSK mode; reserved, On-device parked
+    /// (ADR 0022)).
     PasswordVerifierGrant = 0x0005,
     /// `E_ks`: the account key under the keystore unlock secret (M3/M7).
     AccountKeyKeystoreWrap = 0x0006,
@@ -188,13 +195,15 @@ pub enum Purpose {
     AttachmentChunk = 0x0033,
     /// An attachment key under the item key (M3).
     AttachmentKeyWrap = 0x0034,
-    /// A relay batch under the relay key (M4).
+    /// A relay batch under the relay key (reserved, On-device parked (ADR 0022)).
     RelayBatch = 0x0040,
-    /// A pairing message under `k_pair` (M4).
+    /// A pairing message under `k_pair` (reserved, On-device parked (ADR 0022)).
     PairingTransfer = 0x0041,
-    /// A pairing transfer chunk sealed to the new device (HPKE PSK mode, M4).
+    /// A pairing transfer chunk sealed to the new device (HPKE PSK mode; reserved, On-device
+    /// parked (ADR 0022)).
     PairingTransferSealed = 0x0042,
-    /// A re-sync transfer chunk sealed to a stale device (HPKE PSK mode, M4).
+    /// A re-sync transfer chunk sealed to a stale device (HPKE PSK mode; reserved, On-device
+    /// parked (ADR 0022)).
     ResyncTransfer = 0x0043,
     /// A share snapshot under the share key (M5).
     ShareSnapshot = 0x0050,
@@ -202,7 +211,7 @@ pub enum Purpose {
     MailMessage = 0x0060,
     /// An encrypted export file.
     ExportFile = 0x0070,
-    /// A backup file (M4, layout by the M4 backup ADR).
+    /// A backup file (M8, layout by the M8 backup ADR).
     BackupFile = 0x0071,
     /// The local cache index (M3).
     LocalCacheIndex = 0x0090,
@@ -263,8 +272,9 @@ impl Purpose {
             Self::AccountKeyLocalWrap => ("ACCOUNT_KEY_LOCAL_WRAP", SYM, SYMMETRIC, Fixed(32), M::M1),
             Self::AccountKeyRecoveryWrap => ("ACCOUNT_KEY_RECOVERY_WRAP", SYM, SYMMETRIC, Fixed(32), M::M1),
             Self::AccountKeyDeviceGrant => ("ACCOUNT_KEY_DEVICE_GRANT", PSK, HPKE_PSK, Fixed(32), M::M1),
-            // Carries an `E_local` record and possibly the new SK (§11.5); layout set in M4.
-            Self::PasswordVerifierGrant => ("PASSWORD_VERIFIER_GRANT", PSK, HPKE_PSK, Unpadded, M::M4),
+            // Carries an `E_local` record and possibly the new SK (§11.5). Reserved, On-device
+            // parked (ADR 0022).
+            Self::PasswordVerifierGrant => ("PASSWORD_VERIFIER_GRANT", PSK, HPKE_PSK, Unpadded, M::Parked),
             Self::AccountKeyKeystoreWrap => ("ACCOUNT_KEY_KEYSTORE_WRAP", SYM, SYMMETRIC, Fixed(32), M::M3M7),
             Self::AccountKeyForward => ("ACCOUNT_KEY_FORWARD", SYM, SYMMETRIC, Fixed(32), M::M3M7),
             // `ed25519_seed (32) ‖ x25519_sk (32)` (§11.1 step 5).
@@ -284,14 +294,14 @@ impl Purpose {
             Self::ItemSnapshot => ("ITEM_SNAPSHOT", SYM, SYMMETRIC, Padded, M::M1),
             Self::AttachmentChunk => ("ATTACHMENT_CHUNK", CHUNK, CHUNKED, Unspecified, M::M3),
             Self::AttachmentKeyWrap => ("ATTACHMENT_KEY_WRAP", SYM, SYMMETRIC, Fixed(32), M::M3),
-            Self::RelayBatch => ("RELAY_BATCH", SYM, SYMMETRIC, Padded, M::M4),
-            Self::PairingTransfer => ("PAIRING_TRANSFER", SYM, SYMMETRIC, Unpadded, M::M4),
-            Self::PairingTransferSealed => ("PAIRING_TRANSFER_SEALED", PSK, HPKE_PSK, Padded, M::M4),
-            Self::ResyncTransfer => ("RESYNC_TRANSFER", PSK, HPKE_PSK, Padded, M::M4),
+            Self::RelayBatch => ("RELAY_BATCH", SYM, SYMMETRIC, Padded, M::Parked),
+            Self::PairingTransfer => ("PAIRING_TRANSFER", SYM, SYMMETRIC, Unpadded, M::Parked),
+            Self::PairingTransferSealed => ("PAIRING_TRANSFER_SEALED", PSK, HPKE_PSK, Padded, M::Parked),
+            Self::ResyncTransfer => ("RESYNC_TRANSFER", PSK, HPKE_PSK, Padded, M::Parked),
             Self::ShareSnapshot => ("SHARE_SNAPSHOT", SYM, SYMMETRIC, Padded, M::M5),
             Self::MailMessage => ("MAIL_MESSAGE", BASE, HPKE_BASE, Padded, M::M6),
             Self::ExportFile => ("EXPORT_FILE", SYM, SYMMETRIC, Unpadded, M::M1),
-            Self::BackupFile => ("BACKUP_FILE", SYM, SYMMETRIC, Unspecified, M::M4),
+            Self::BackupFile => ("BACKUP_FILE", SYM, SYMMETRIC, Unspecified, M::M8),
             Self::LocalCacheIndex => ("LOCAL_CACHE_INDEX", SYM, SYMMETRIC, Unpadded, M::M3),
             Self::ServerTotpSecret => ("SERVER_TOTP_SECRET", SYM, SYMMETRIC, Unpadded, M::M1),
             Self::ServerLoginState => ("SERVER_LOGIN_STATE", SYM, SYMMETRIC, Unpadded, M::M1),
@@ -467,8 +477,8 @@ pub trait HpkeBaseContext: HpkeContext {}
 
 /// An HPKE purpose whose one encrypt algorithm and whole decrypt allow-list are PSK mode
 /// (`0x12`): `ACCOUNT_KEY_DEVICE_GRANT` in M1; `PASSWORD_VERIFIER_GRANT`,
-/// `PAIRING_TRANSFER_SEALED` and `RESYNC_TRANSFER` in M4. A PSK-mode purpose never accepts
-/// Base mode (§9.5 rule 2).
+/// `PAIRING_TRANSFER_SEALED` and `RESYNC_TRANSFER`, reserved, On-device parked (ADR 0022).
+/// A PSK-mode purpose never accepts Base mode (§9.5 rule 2).
 pub trait HpkePskContext: HpkeContext {}
 
 /// A fixed-width field of a context.
@@ -668,13 +678,15 @@ context! {
     }
 }
 
-// Test only: `PASSWORD_VERIFIER_GRANT` is an M4 purpose and gets its real context type (and its
-// PSK derivation) in M4. Its §8.4 layout is fully specified and its plaintext is variable
-// length, so the tests use it to exercise the HPKE open-side 16 MiB bound, which the M1 HPKE
-// purposes (all `Fixed(32)`) never reach.
+// Test only: `PASSWORD_VERIFIER_GRANT` is reserved, On-device parked (ADR 0022), and gets its
+// real context type (and its PSK derivation) only with the ADR that revives On-device mode.
+// Its §8.4 layout is fully specified and its plaintext is variable length, so the tests use it
+// to exercise the HPKE open-side 16 MiB bound, which the M1 HPKE purposes (all `Fixed(32)`)
+// never reach.
 #[cfg(test)]
 context! {
-    /// `PASSWORD_VERIFIER_GRANT` (HPKE PSK mode, M4; test only in M1):
+    /// `PASSWORD_VERIFIER_GRANT` (HPKE PSK mode; reserved, On-device parked (ADR 0022); test
+    /// only):
     /// `account_id ‖ u32 password_epoch (new) ‖ sender device_id ‖ recipient device_id`.
     PasswordVerifierGrantCtx: PasswordVerifierGrant, HpkeContext + HpkePskContext {
         /// The account.

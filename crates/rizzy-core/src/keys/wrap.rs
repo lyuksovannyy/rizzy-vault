@@ -258,8 +258,8 @@ impl AccountKey {
     /// Builds `E_id`: `ed25519_seed ‖ x25519_sk` under the account key
     /// (`IDENTITY_SECRET_KEYS`, ctx `account_id ‖ u32 identity_epoch`).
     ///
-    /// Stored on the server (both sync modes) and re-wrapped under the new account key in every
-    /// rotation (§4.2, §11.6 step 3). The plaintext has no version byte (§8.4).
+    /// Stored on the server and re-wrapped under the new account key in every rotation (§4.2,
+    /// §11.6 step 3). The plaintext has no version byte (§8.4).
     ///
     /// # Errors
     /// [`EncryptError::ContextMismatch`] if `ctx` names another identity epoch than the keys'.
@@ -368,8 +368,7 @@ impl AccountKey {
     ///
     /// Binding both epochs lets a reader learn the current vault epoch from the one grant that
     /// opens under the current account key (§11.6). A rotation writes a new grant for the new
-    /// vault key under the new account key (§11.6 step 3). Stored on the server in Server mode,
-    /// on devices only in On-device mode (§4.2).
+    /// vault key under the new account key (§11.6 step 3). Stored on the server (§4.2).
     ///
     /// # Errors
     /// [`EncryptError::ContextMismatch`] if `ctx` names another vault, vault-key epoch or

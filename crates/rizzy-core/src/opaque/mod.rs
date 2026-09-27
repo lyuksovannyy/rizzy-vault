@@ -658,9 +658,8 @@ impl fmt::Debug for ServerSetup {
 /// account. It holds the client's public key, the masking key and the envelope.
 ///
 /// Together with the server's OPRF seed it is a password-guessing target, which is why the
-/// Secret Key is mixed into `pw_in` (§5.5), and why On-device mode stores none (§5.7). The
-/// server stores it with the `kdf_id` and `password_epoch` of the signed account state
-/// (§11.1 step 8). `Debug` prints `[REDACTED]`.
+/// Secret Key is mixed into `pw_in` (§5.5). The server stores it with the `kdf_id` and
+/// `password_epoch` of the signed account state (§11.1 step 8). `Debug` prints `[REDACTED]`.
 pub struct PasswordFile {
     /// opaque-ke's record.
     inner: ServerRegistration<Suite>,

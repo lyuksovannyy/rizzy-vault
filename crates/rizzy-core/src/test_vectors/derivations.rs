@@ -1,9 +1,9 @@
 //! `derivations.json`: every §4.3 derivation M1 implements, with the derived value itself.
 //!
-//! Not here: the M3–M6 derivations (relay key, local index key, shares, pairing, the
-//! password-verifier and re-sync PSKs), which have no code yet. The envelope subkey and
-//! commitment are in `envelopes.json`, next to the envelopes they belong to, and the SK and
-//! recovery-code check characters in `encodings.json`.
+//! Not here: the M3 and M5 derivations (local index key, shares), which have no code yet, and
+//! those reserved, On-device parked (ADR 0022). The envelope subkey and commitment are in
+//! `envelopes.json`, next to the envelopes they belong to, and the SK and recovery-code check
+//! characters in `encodings.json`.
 
 use chacha20::ChaCha20Rng;
 use serde_json::{Map, Value};

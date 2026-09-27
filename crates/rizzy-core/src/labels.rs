@@ -154,7 +154,7 @@ registry! {
     ENVELOPE_XCHACHA20POLY1305 = "envelope/xchacha20poly1305";
 
     // --- Account-key derived keys (§4.3) ---
-    /// Relay key (M4):
+    /// Relay key (reserved, On-device parked (ADR 0022)):
     /// `HKDF(account_key, salt = empty, LABEL ‖ 0x00 ‖ account_id ‖ u32(account_key_epoch), 32)`.
     RELAY_KEY = "relay-key";
     /// Local index key (M3):
@@ -200,17 +200,18 @@ registry! {
     /// Device-grant PSK derivation label and `psk_id`: `HKDF(previous account key, salt = empty,
     /// LABEL ‖ 0x00 ‖ account_id ‖ u32(new account_key_epoch) ‖ recipient device_id, 32)`.
     HPKE_PSK_DEVICE_GRANT = "hpke-psk/device-grant";
-    /// Password-verifier PSK derivation label and `psk_id` (M4): `HKDF(account key, salt =
-    /// empty, LABEL ‖ 0x00 ‖ account_id ‖ u32(new password_epoch) ‖ recipient device_id, 32)`.
+    /// Password-verifier PSK derivation label and `psk_id` (reserved, On-device parked
+    /// (ADR 0022)): `HKDF(account key, salt = empty, LABEL ‖ 0x00 ‖ account_id ‖
+    /// u32(new password_epoch) ‖ recipient device_id, 32)`.
     HPKE_PSK_PASSWORD_VERIFIER = "hpke-psk/password-verifier";
-    /// Re-sync PSK derivation label and `psk_id` (M4): `HKDF(account key, salt = empty,
-    /// LABEL ‖ 0x00 ‖ account_id ‖ u32(account_key_epoch) ‖ transfer_id ‖ recipient device_id,
-    /// 32)`.
+    /// Re-sync PSK derivation label and `psk_id` (reserved, On-device parked (ADR 0022)):
+    /// `HKDF(account key, salt = empty, LABEL ‖ 0x00 ‖ account_id ‖ u32(account_key_epoch) ‖
+    /// transfer_id ‖ recipient device_id, 32)`.
     HPKE_PSK_RESYNC = "hpke-psk/resync";
-    /// Pairing transfer `psk_id`; the PSK is `k_pair` (M4).
+    /// Pairing transfer `psk_id`; the PSK is `k_pair` (reserved, On-device parked (ADR 0022)).
     HPKE_PSK_PAIRING = "hpke-psk/pairing";
 
-    // --- Pairing (§4.3, §11.7, M4) ---
+    // --- Pairing (§4.3, §11.7; reserved, On-device parked (ADR 0022)) ---
     /// Pairing key `k_pair`: `HKDF(pairing_secret, salt = pairing_id, LABEL ‖ 0x00, 32)`.
     PAIRING_KEY = "pairing/key";
     /// Pairing commitment `c_N`: `SHA-256(LABEL ‖ 0x00 ‖ pairing_id ‖ new-device Ed25519 pk ‖

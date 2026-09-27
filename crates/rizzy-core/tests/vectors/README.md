@@ -61,7 +61,7 @@ cargo test -p rizzy-core --lib test_vectors::generate -- --ignored --exact
 
 ## Not covered yet
 
-- Constructions of M3–M6: the relay key, local index key, shares, pairing, and the password-verifier and re-sync PSKs.
+- Constructions of M3 and M5: the local index key and shares. Those reserved, On-device parked ([ADR 0022](../../../../docs/adr/0022-server-mode-only.md)) get vectors with the ADR that revives them.
 - HPKE Base mode (`0x10`), which no M1 purpose uses.
 - The canonical op and snapshot headers (ADR 0012 §3) and the item-record encoding. Neither is implemented. The `op`, `snapshot` and `ITEM_OP`/`ITEM_SNAPSHOT` vectors carry placeholder bytes of a valid length in their place.
 - Running these files on wasm32 and through UniFFI (§15 item 8).

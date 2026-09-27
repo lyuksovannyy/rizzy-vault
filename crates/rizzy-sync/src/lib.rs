@@ -1,4 +1,4 @@
-//! `rizzy-sync` — the mode-agnostic sync engine (Server mode and On-device mode, roadmap M1/M4).
+//! `rizzy-sync` — the sync engine (Server mode, roadmap M1).
 //!
 //! Everything the server uses from this crate is ciphertext only. The field merge, however,
 //! receives decrypted field writes from `rizzy-client` as opaque bytes in zeroizing types, so
@@ -45,9 +45,9 @@
 //! reach only what `rizzy-core`'s list allows).
 //!
 //! Because it is a pure state machine, ADR 0012 §12 tests it inside one process: 3 to 7
-//! simulated devices, a simulated server or relay, a seeded scheduler and real `rizzy-core`
-//! crypto, with proptest properties for convergence, no silent loss, idempotence,
-//! monotonicity, staleness, revocation and gap detection.
+//! simulated devices, a simulated server, a seeded scheduler and real `rizzy-core` crypto, with
+//! proptest properties for convergence, no silent loss, idempotence, monotonicity, revocation
+//! and gap detection.
 
 // Also set by the workspace lint table (ADR 0016 R7); repeated here so that no manifest edit
 // alone admits `unsafe` in this crate.

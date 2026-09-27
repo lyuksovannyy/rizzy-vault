@@ -601,7 +601,8 @@ fn truncation_and_extension_never_panic() {
 
 /// The M1 plaintext limit (16 MiB, §9.1) on the HPKE open path, which only a variable-length
 /// purpose reaches. No M1 HPKE purpose is one, so this uses the test-only
-/// `PASSWORD_VERIFIER_GRANT` context (M4, unpadded) and a stand-in PSK for that purpose.
+/// `PASSWORD_VERIFIER_GRANT` context (reserved, On-device parked (ADR 0022); unpadded) and a
+/// stand-in PSK for that purpose.
 #[test]
 fn a_variable_length_purpose_rejects_a_ciphertext_over_16_mib_before_crypto() {
     let rcpt = recipient();

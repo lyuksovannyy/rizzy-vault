@@ -402,8 +402,9 @@ fn listed_exactly(file: &VectorFile, vectors: &[Vector]) -> Result<(), String> {
     ))
 }
 
-/// Registered labels whose constructions ship after M1, so no vector uses them yet (CRYPTO.md
-/// §15 item 1: "Vectors for M4–M6 constructions are added in the milestone that ships them").
+/// Registered labels no vector uses yet (CRYPTO.md §15 item 1): those of constructions that ship
+/// after M1 get vectors in the milestone that ships them, and those reserved, On-device parked
+/// (ADR 0022) with the ADR that revives them.
 const LABELS_WITHOUT_VECTORS: [Label; 11] = [
     labels::RELAY_KEY,
     labels::LOCAL_INDEX_KEY,
@@ -875,8 +876,7 @@ fn every_registered_label_has_vectors_unless_it_ships_later() {
             "{label}"
         );
     }
-    // A vector for an unregistered construction, or for one listed as shipping later, is
-    // caught.
+    // A vector for an unregistered construction, or for one listed as having none, is caught.
     for (file, name) in [("derivations", "relay-key"), ("statements", "made-up")] {
         let mut more = files.clone();
         let (_, vectors) = more.iter_mut().find(|(f, _)| *f == file).expect("a file");

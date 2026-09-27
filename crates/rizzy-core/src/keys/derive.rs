@@ -213,8 +213,7 @@ impl LocalUnlockKey {
 /// The derivation has no context: the key depends on the code alone and records nothing, so
 /// the `E_rec` context's `account_id` and `recovery_epoch` are the caller's to get right. The
 /// wrap is symmetric on purpose, so a stored `E_rec` is not exposed to harvest-now-decrypt-later
-/// (ADR 0008 decision 3, CRYPTO.md §13). In On-device mode (M4) the same key wraps the backup
-/// key of the backup file (§11.9).
+/// (ADR 0008 decision 3, CRYPTO.md §13).
 pub struct RecoveryWrapKey {
     /// The 32 derived key bytes, wiped on drop.
     pub(super) key: Key32,
