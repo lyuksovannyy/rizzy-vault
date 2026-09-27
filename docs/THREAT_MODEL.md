@@ -32,7 +32,7 @@ This document is normative. The invariants in [§8](#8-security-invariants) are 
 
 ### 1.1 In scope
 
-- All components in [§3](#3-components-and-trust-boundaries) for M1–M8, in both sync modes ([ROADMAP §4.6](ROADMAP.md#46-sync-modes-m4)).
+- All components in [§3](#3-components-and-trust-boundaries) for M1–M8, in Server mode, the only sync mode ([ROADMAP §4.6](ROADMAP.md#46-sync-m1-onward)).
 - Deployment profile A (one container) and profile B (the `smtp` role in its own container with no DB access, [ROADMAP §4.9](ROADMAP.md#49-server-self-hosting--ops-m1-onward)). Profile C (HA, M10) inherits profile B's boundaries.
 - M9/M10 threats that the M1 key hierarchy must already handle: key distribution to other users, shared vaults, org invites and admin recovery ([ADR 0006](adr/0006-key-hierarchy.md), [ROADMAP §6.7](ROADMAP.md#6-risks--hard-truths)).
 
@@ -57,7 +57,7 @@ This document is normative. The invariants in [§8](#8-security-invariants) are 
 | G-3 | **Freshness.** A device never accepts a vault state older than one it has already seen. We do not claim that a brand-new device can detect a stale state. |
 | G-4 | **Password secrecy.** The server never receives the master password or a password equivalent. Offline guessing requires the DB *and* the OPRF seed, plus the Secret Key if it is adopted. Exception: when the web vault remembers the Secret Key ("this is my browser"), JavaScript served by an *active* server reads it at the next page load, so those users are protected against that server by the password alone ([§4.2.1](#421-the-web-vault-delivery-problem), [Q-21](#10-open-questions-for-the-owner)). |
 | G-5 | **Client-enforced parameters.** The server cannot lower KDF cost or pick a weaker or older envelope or algorithm. |
-| G-6 | **Authenticated key distribution.** Whenever a key is wrapped for another device or user, the user can check whose key it is. A user who verifies (pairing SAS in M4, fingerprints in M9) detects substitution. |
+| G-6 | **Authenticated key distribution.** Whenever a key is wrapped for another device or user, the user can check whose key it is. A user who verifies (fingerprints in M9) detects substitution. |
 | G-7 | **Phishing-resistant autofill.** A credential is never filled into an origin that does not match under [ROADMAP §4.4](ROADMAP.md#44-url-matching--autofill-m2). Cross-domain matches are always visible to the user. |
 | G-8 | **Share links.** Only holders of the full link can read a share, and the protocol never gives the server the key. Expiry, view limits and revoke work against an honest server. |
 | G-9 | **Mail at rest.** Only the alias owner can read stored alias mail. Plaintext exposure is limited to the ingress window ([§6](#6-email-ingress-m6)). |
@@ -74,10 +74,10 @@ This document is normative. The invariants in [§8](#8-security-invariants) are 
 | NG-2 | Malware on a locked device that survives until the next unlock. It captures the master password at that unlock. The outcome is the same as NG-1, one unlock later. Keystore (biometric) unlock must not shorten "one unlock later" to "now" ([INV-62](#8-security-invariants)). |
 | NG-3 | A compromised OS, browser, firmware, hardware keyboard or OS keystore, including rooted or jailbroken phones. |
 | NG-4 | Loss of availability caused by a malicious server or admin. The server can delete, withhold or refuse service. We detect this where we can ([§5.6](#56-rollback-withholding-and-forks)). Backups are the remedy. |
-| NG-5 | Hiding metadata from the server: account existence, IP addresses, connection times, device count, approximate item count and sizes, edit frequency. Padding and batching in M4 ([ROADMAP §4.6](ROADMAP.md#46-sync-modes-m4), Should) reduce some of it. Anonymity networks are not supported. |
+| NG-5 | Hiding metadata from the server: account existence, IP addresses, connection times, device count, approximate item count and sizes, edit frequency. Padmé size padding from M1 ([ADR 0005](adr/0005-symmetric-encryption-aead.md)) reduces some of it. Anonymity networks are not supported. |
 | NG-6 | Keeping incoming alias mail secret from the server during ingress ([§6](#6-email-ingress-m6)). |
 | NG-7 | A weak master password when the attacker has the DB and the OPRF seed and the account has no Secret Key. |
-| NG-8 | Recovery after losing both the master password (or the Secret Key) and the recovery code. In On-device mode this also covers losing every device. The data is gone, and the UI says so ([ROADMAP §4.3](ROADMAP.md#43-cryptography--authentication-m0m1-audited-in-m8)). |
+| NG-8 | Recovery after losing both the master password (or the Secret Key) and the recovery code. The data is gone, and the UI says so ([ROADMAP §4.3](ROADMAP.md#43-cryptography--authentication-m0m1-audited-in-m8)). |
 | NG-9 | The integrity of server-delivered client code, meaning the web vault and share page, against the server that delivers it ([§4.2.1](#421-the-web-vault-delivery-problem)). |
 | NG-10 | Physical side channels (power, EM, acoustic), cold-boot and DMA attacks, and microarchitectural attacks across processes or VMs, beyond our use of constant-time primitives. |
 | NG-11 | Coercion. Travel mode is M9, Could. |
@@ -105,7 +105,7 @@ This document is normative. The invariants in [§8](#8-security-invariants) are 
 | AST-12 | Device keys, session tokens, refresh tokens | Devices; token hashes on the server | Network, other users | API access as the user: download ciphertext, delete data, try to enroll devices (limited by [§5.5](#55-forged-device-registrations)). |
 | AST-13 | Metadata: account identifier, IPs, user agents, timestamps, device list, item and op counts and sizes, share view counts, alias addresses, domains requested from the icons role | Server DB, server logs, proxy logs | Outsiders. Kept to a minimum even for the server. | Profiling the user, linking aliases to a person, learning which sites the user uses. |
 | AST-14 | OPAQUE server setup: OPRF seed and server static keypair | Server secrets store, outside the DB ([INV-50](#8-security-invariants)) | Everything except the `api` process | If leaked: offline guessing against every account's OPAQUE record ([RFC 9807](#11-references)). If lost: nobody can log in or unwrap the password-wrapped account key; users need the recovery code or an existing device. |
-| AST-15 | Other server secrets: deletion-receipt signing key (M4), server data key ([CRYPTO.md §5.11](CRYPTO.md#511-server-side-encryption-not-zero-knowledge)), TLS private key | Server secrets store; reverse proxy | Everything except the owning process | Forged receipts; 2FA bypass after DB theft; TLS impersonation (see [A4](#a4-network-attacker-mitm)). |
+| AST-15 | Other server secrets: server data key ([CRYPTO.md §5.11](CRYPTO.md#511-server-side-encryption-not-zero-knowledge)), TLS private key | Server secrets store; reverse proxy | Everything except the owning process | 2FA bypass after DB theft; TLS impersonation (see [A4](#a4-network-attacker-mitm)). |
 | AST-16 | Release credentials: GitHub accounts, CI secrets, container registry, Chrome Web Store / AMO / App Store / Play accounts, desktop updater key, cosign identity (M8), equivalence-list signing key | Maintainers' hardware keys, CI protected environments | Everyone else | A malicious update to every user of that channel, which is NG-1 for all of them. |
 | AST-17 | DB and backups | Server, backup storage | Outsiders | Ciphertext, metadata and OPAQUE records ([A1](#a1-passive-server-compromise-db-or-backup-theft)). |
 | AST-18 | Logs | Server, proxy, log sinks | Outsiders | Metadata. Secrets too, if [INV-48](#8-security-invariants) is broken. |
@@ -127,17 +127,16 @@ This document is normative. The invariants in [§8](#8-security-invariants) are 
 | Desktop app | Tauri: Rust backend linked to `rizzy-core`, webview UI ([ADR 0015](adr/0015-desktop-tauri.md)) | Signed releases and the updater feed | Yes: keys in the Rust process, displayed plaintext in the webview | M3 |
 | Mobile apps | Native UI plus `rizzy-core` through UniFFI; OS autofill extensions | App Store, Play | Yes | M7 |
 | CLI `rv` | Native Rust | Release binaries, or built from source | Yes | M1 |
-| `api` role | OPAQUE auth, sessions, vault and op-log storage (Server mode), relay (On-device mode), shares, device registry, admin API ([ADR 0010](adr/0010-server-shape.md)) | Server image | No: ciphertext and metadata only | M1 |
+| `api` role | OPAQUE auth, sessions, vault and op-log storage (Server mode), shares, device registry, admin API ([ADR 0010](adr/0010-server-shape.md)) | Server image | No: ciphertext and metadata only | M1 |
 | `web` role | Serves the web vault and the share recipient page as static assets | Server image | No | M1 (share page M5) |
 | `notify` role | WebSocket/SSE "something changed" signals; mobile push through APNs/FCM | Server image | No | M3 |
-| `worker` role | Purges (shares, relay TTL, mail retention, expired auth state) and op-log compaction bookkeeping. Never trash: lifecycle is encrypted, and clients purge trash with signed `Purge` ops ([ADR 0010](adr/0010-server-shape.md) §1, [ADR 0012](adr/0012-sync-engine.md) §5) | Server image | No | M1 |
+| `worker` role | Purges (shares, mail retention, expired auth state) and op-log compaction bookkeeping. Never trash: lifecycle is encrypted, and clients purge trash with signed `Purge` ops ([ADR 0010](adr/0010-server-shape.md) §1, [ADR 0012](adr/0012-sync-engine.md) §5) | Server image | No | M1 |
 | `smtp` role, with rspamd | Receive-only SMTP on port 25; calls rspamd; encrypts to the recipient's public key; hands ciphertext to `api` | Server image; rspamd from its own image | **Plaintext mail, briefly** | M6 |
 | `icons` role | Fetches favicons from the internet, re-encodes them, caches them | Server image | No; sees domains | M3 |
 | Database | SQLite (default) or PostgreSQL through sqlx ([ADR 0011](adr/0011-storage.md)) | Operator | Ciphertext, OPAQUE records, metadata | M1 / M3 |
-| Server secrets | OPAQUE server setup, receipt signing key, server data key | Generated at first start | Server-side secrets ([AST-14](#2-assets), [AST-15](#2-assets)) | M1 |
+| Server secrets | OPAQUE server setup, server data key | Generated at first start | Server-side secrets ([AST-14](#2-assets), [AST-15](#2-assets)) | M1 |
 | Backups | DB dumps and a separate secrets backup | Operator | Same as the DB and secrets | M1 |
 | Reverse proxy / TLS terminator | Caddy, Traefik, nginx or similar; the operator's choice | Operator | Sees tokens, ciphertext, IPs | M1 |
-| Relay | The `api` and `notify` roles in On-device mode: store-and-forward for encrypted ops, device registry, version vectors. Not a separate binary. | Server image | No | M4 |
 | Mail ingress path | MX record, port 25, `smtp` role, rspamd, `api` | DNS and operator | Plaintext during ingress | M6 |
 | Share recipient page | Page served by the `web` role; runs in the recipient's browser without an account | **The instance, at every load** | The share plaintext, in the recipient's browser | M5 |
 | Distribution channels | Container registry, extension stores, app stores, GitHub releases, desktop updater feed. The signed equivalence list and a PSL snapshot ship inside client builds. | CI | Code for every client | M1+ |
@@ -156,10 +155,10 @@ This document is normative. The invariants in [§8](#8-security-invariants) are 
  |  code comes FROM THE SERVER   |<==TB-2====| web role: web vault + share page assets   |
  +-------------------------------+ code from +-------------------------------------------+
  | extension      (store)        | server    | api role: OPAQUE, sessions, vault/op log, |
- | desktop Tauri  (signed rel.)  |--TB-1---->|  relay, shares, devices, admin API        |
+ | desktop Tauri  (signed rel.)  |--TB-1---->|  shares, devices, admin API               |
  | mobile         (app stores)   |  OPAQUE + +-------------------------------------------+
  | CLI rv         (release bins) |  E2EE     | notify role (WS/SSE, push)                |
- +-------------------------------+           | worker role (purge, TTL, retention)       |
+ +-------------------------------+           | worker role (purge, retention)            |
  | local: encrypted cache,       |           +---------------------+---------------------+
  | Secret Key, device key,       |                          TB-4   |   TB-5
  | session token, clipboard      |           +---------------------v---------------------+
@@ -202,34 +201,34 @@ This document is normative. The invariants in [§8](#8-security-invariants) are 
 | TB-8 | `icons` to internet | Arbitrary HTTP responses from arbitrary hosts (icon links and redirects point anywhere) | Allow-list of globally routable addresses and ports 80/443, re-encoding, limits ([INV-51](#8-security-invariants)) |
 | TB-9 | Extension to web page | Filled values; page DOM events | Isolated worlds, gesture-only fill, extension-origin UI ([INV-36](#8-security-invariants) to [INV-40](#8-security-invariants)) |
 | TB-10 | `rizzy-core` to UI code within one client | Item plaintext for display | In the browser this is **not** a security boundary: JS in the same page can read wasm memory. It is an audit boundary. In Tauri and mobile it is a process or IPC boundary, and keys stay on the Rust side. |
-| TB-11 | Device to device of the same user (pairing, relay) | Keys, snapshots, ops through the relay | SAS on pairing, device keys certified by the identity key ([INV-16](#8-security-invariants), [INV-29](#8-security-invariants)) |
+| TB-11 | Parked with On-device mode ([ADR 0022](adr/0022-server-mode-only.md)) | – | – |
 | TB-12 | Share owner to share recipient | The link, through whatever channel the owner picks | Short expiry, view limits, optional passphrase |
 | TB-13 | Source to build to distribution | Dependencies in, artifacts out | cargo-deny, lockfile, CI permissions, signing (M8) |
 | TB-14 | Instance admin to users of the instance | Admin actions, instance configuration | Client-enforced crypto ([§5](#5-server-controlled-parameter-attacks)); no escrow before M10 |
 
 ### 3.4 What the server holds, by sync mode
 
-This table is the source for the M4 transparency page ([ROADMAP §4.6](ROADMAP.md#46-sync-modes-m4)).
+This table is the source for the M3 transparency page ([ROADMAP §4.5](ROADMAP.md#45-design-ui--ux--1password-feel-m3)).
 
-| Data | Server mode | On-device mode | Note |
-|---|---|---|---|
-| Account identifier (email or username) | Stored | Stored | Needed for login and routing |
-| OPAQUE record (envelope, masking key, client public key) | Stored | **Deleted at the switch point** ([CRYPTO.md §5.7](CRYPTO.md#57-on-device-sync-mode), [INV-28](#8-security-invariants), [Q-3](#10-open-questions-for-the-owner)) | Combined with the OPRF seed, it is a password-guessing target |
-| Account key wrapped under a password-derived key | Stored | None ([INV-28](#8-security-invariants)) | |
-| Account key wrapped under the recovery code | Stored | None | A 128-bit code is not guessable |
-| Public keys: identity, encryption, devices (signed) | Stored | Stored | |
-| Encrypted vault snapshots | Stored | None | |
-| Encrypted op log | Stored, compacted into client-made snapshots; the signed op headers are kept for the life of the vault ([ADR 0012](adr/0012-sync-engine.md) §7) | Only relay batches that some active device has not acked, and never beyond the TTL | |
-| Vault self-grants and item-key wraps | Stored | None: they travel inside relay batches and pairing transfers ([CRYPTO.md §4.2](CRYPTO.md#42-key-inventory)) | On the server they would reveal vault and item IDs |
-| Per-device version vectors and cursors | Stored | Per-device ack cursors only (highest `batch_seq` per sender) | Reveal edit counts per device |
-| Item IDs, op counts, ciphertext sizes, timestamps | Visible | Not visible: ops travel inside relay batches. Per batch: sender device, `batch_seq`, padded size, time ([ADR 0012](adr/0012-sync-engine.md) §11) | Padmé padding reduces sizes ([CRYPTO.md §8.5](CRYPTO.md#85-plaintext-framing-and-padding)) |
-| IPs, user agents, connection times | Logs | Logs | Retention is configurable ([ROADMAP §4.9](ROADMAP.md#49-server-self-hosting--ops-m1-onward)) |
-| Share ciphertexts, expiry, view counts | Stored | Stored | Shares are server-stored by nature ([ROADMAP §4.6](ROADMAP.md#46-sync-modes-m4)) |
-| Alias addresses and alias-to-account mapping | Stored | Stored | Mail routing needs them |
-| Alias mail | Plaintext during ingress; ciphertext until deletion or retention expiry | Plaintext during ingress; ciphertext until every device acks | [§6](#6-email-ingress-m6) |
-| Server-side 2FA secrets | Encrypted under a server key kept outside the DB | Same | [INV-8](#8-security-invariants) |
-| Session tokens | Hashes only | Hashes only | [INV-8](#8-security-invariants) |
-| Domains requested from `icons` | Seen by the `icons` role if enabled | Same | [INV-51](#8-security-invariants) |
+| Data | Server mode | Note |
+|---|---|---|
+| Account identifier (email or username) | Stored | Needed for login and routing |
+| OPAQUE record (envelope, masking key, client public key) | Stored | Combined with the OPRF seed, it is a password-guessing target |
+| Account key wrapped under a password-derived key | Stored | |
+| Account key wrapped under the recovery code | Stored | A 128-bit code is not guessable |
+| Public keys: identity, encryption, devices (signed) | Stored | |
+| Encrypted vault snapshots | Stored | |
+| Encrypted op log | Stored, compacted into client-made snapshots; the signed op headers are kept for the life of the vault ([ADR 0012](adr/0012-sync-engine.md) §7) | |
+| Vault self-grants and item-key wraps | Stored | They reveal vault and item IDs |
+| Per-device version vectors and cursors | Stored | Reveal edit counts per device |
+| Item IDs, op counts, ciphertext sizes, timestamps | Visible | Padmé padding reduces sizes ([CRYPTO.md §8.5](CRYPTO.md#85-plaintext-framing-and-padding)) |
+| IPs, user agents, connection times | Logs | Retention is configurable ([ROADMAP §4.9](ROADMAP.md#49-server-self-hosting--ops-m1-onward)) |
+| Share ciphertexts, expiry, view counts | Stored | Shares are server-stored by nature ([ROADMAP §4.6](ROADMAP.md#46-sync-m1-onward)) |
+| Alias addresses and alias-to-account mapping | Stored | Mail routing needs them |
+| Alias mail | Plaintext during ingress; ciphertext until deletion or retention expiry | [§6](#6-email-ingress-m6) |
+| Server-side 2FA secrets | Encrypted under a server key kept outside the DB | [INV-8](#8-security-invariants) |
+| Session tokens | Hashes only | [INV-8](#8-security-invariants) |
+| Domains requested from `icons` | Seen by the `icons` role if enabled | [INV-51](#8-security-invariants) |
 
 ---
 
@@ -251,7 +250,7 @@ This table is the source for the M4 transparency page ([ROADMAP §4.6](ROADMAP.m
 | A10 | Compromised CI or release credentials | Malicious update to every user of a channel, including tag-following server auto-updates | Hardware 2FA, protected release jobs, signing (M8) | Single maintainer as a single point of failure |
 | A11 | Malicious email senders | RCE in `smtp` (profile A: whole server), XSS in the mailbox UI, alias probing | Safe-Rust parser, fuzzing, profile B, sandboxed rendering, alias entropy | rspamd is C code parsing hostile input; active aliases are distinguishable |
 | A12 | Share-link leakage | Share plaintext read by a third party | Short expiry, view limits, explicit reveal, passphrase | Channel logs until expiry; page code served by the server; burn by a full-link holder |
-| A13 | Relay operator (On-device mode) | Metadata, withholding, forks | Signed ops, gap detection, SAS pairing | Metadata; availability |
+| A13 | Parked with On-device mode ([ADR 0022](adr/0022-server-mode-only.md)) | – | – | – |
 | A14 | Shoulder surfing, clipboard, screen capture, input-field leaks | A single secret; the master password through a keyboard or spell-check service | Masking, clipboard clearing, screenshot blocking, secret-field attributes | Clipboard history and sync in the OS |
 | A15 | Other users and the anonymous internet | Online guessing, enumeration, DoS including login lockout, IDOR, SSRF | Backoff without lockout, dummy records, authz tests, quotas, SSRF allow-list | Registration reveals which identifiers are taken; floods slow new-device and web-vault logins |
 | A16 | Malicious import files and shared content | Parser DoS, XSS, `javascript:` URLs | Fuzzing, text rendering, URL scheme allow-list | Parser bugs |
@@ -284,7 +283,7 @@ This table is the source for the M4 transparency page ([ROADMAP §4.6](ROADMAP.m
 
 ### A2. Active malicious or compromised server
 
-**Capabilities.** Everything A1 has, plus control over every response: arbitrary replies to any client request, and arbitrary code served to browsers. It can lie about KDF parameters, envelope versions, public keys, device lists and vault state. It can drop, withhold, reorder or replay ops, fork devices, bypass its own rate limits and 2FA checks, keep "deleted" data, sign false deletion receipts, read alias mail at ingress, and correlate IPs and timing. This covers the operator turning malicious and an attacker who has taken over the host.
+**Capabilities.** Everything A1 has, plus control over every response: arbitrary replies to any client request, and arbitrary code served to browsers. It can lie about KDF parameters, envelope versions, public keys, device lists and vault state. It can drop, withhold, reorder or replay ops, fork devices, bypass its own rate limits and 2FA checks, keep "deleted" data, read alias mail at ingress, and correlate IPs and timing. This covers the operator turning malicious and an attacker who has taken over the host.
 
 **What they obtain.**
 - From native clients: nothing beyond A1 plus metadata, **if** the invariants in [§5](#5-server-controlled-parameter-attacks) hold.
@@ -329,12 +328,12 @@ The protocol cannot detect this, because any detection code would itself be serv
 
 WAICT (Cloudflare with Mozilla and others; prototype in Firefox Nightly) and WEBCAT (Freedom of the Press Foundation; alpha, needs a browser extension) aim to fix this class of problem. Neither can be deployed to general users today (secondary sources). Revisit both post-1.0.
 
-**Residual risk: accepted ([AR-1](#9-accepted-risks-and-out-of-scope)).** People who do not control the server should not unlock their vault in the web vault. On-device mode already disables the web vault ([ROADMAP §4.6](ROADMAP.md#46-sync-modes-m4), Won't).
+**Residual risk: accepted ([AR-1](#9-accepted-risks-and-out-of-scope)).** People who do not control the server should not unlock their vault in the web vault.
 
 ### A3. Malicious instance admin
 
 **Capabilities.** Everything A2 has, plus the admin's legitimate powers:
-- Admin panel (M3): list, disable and delete users; invite-only signup; restrict sync modes.
+- Admin panel (M3): list, disable and delete users; invite-only signup.
 - Instance-wide KDF defaults. Clients ignore anything below the floor.
 - Access to logs, backups and TLS keys.
 - Restoring an old backup, which rolls back every account and brings back superseded credentials ([§5.8](#58-server-restore-from-backup)).
@@ -349,7 +348,7 @@ The admin may be a family member (M9) or an employer (M10). The social context m
 
 **The family case.** An M9 family admin often lives in the same house as the printed Emergency Kits. With the recovery wait set to 0, admin access plus a kit is an immediate account takeover: the enrolled devices are notified but get no time to cancel. The admin needs neither the password nor any server compromise ([ASM-7](#12-assumptions)). A 0 wait belongs on single-account instances only ([Q-15](#10-open-questions-for-the-owner)), and every change to the wait goes into the affected users' security event log ([INV-69](#8-security-invariants)).
 
-**Mitigations.** The same as A2. There is no server-side "reset password and decrypt" function; that is Won't forever ([ROADMAP §4.3](ROADMAP.md#43-cryptography--authentication-m0m1-audited-in-m8)). M10 escrow is opt-in per user, performed by the client, and wraps to an org recovery key that is authenticated like any other user key ([INV-17](#8-security-invariants), [INV-18](#8-security-invariants)). The M4 transparency page shows what the server stores, but it is only accurate on an honest server. The admin panel itself is an attack surface for outsiders; [§7.19](#719-admin-panel-and-admin-api-m3) covers it.
+**Mitigations.** The same as A2. There is no server-side "reset password and decrypt" function; that is Won't forever ([ROADMAP §4.3](ROADMAP.md#43-cryptography--authentication-m0m1-audited-in-m8)). M10 escrow is opt-in per user, performed by the client, and wraps to an org recovery key that is authenticated like any other user key ([INV-17](#8-security-invariants), [INV-18](#8-security-invariants)). The M3 transparency page shows what the server stores, but it is only accurate on an honest server. The admin panel itself is an attack surface for outsiders; [§7.19](#719-admin-panel-and-admin-api-m3) covers it.
 
 **Residual risk.** Using someone else's instance means trusting them with availability, metadata, alias mail and web-vault integrity. It does not mean trusting them with item contents seen through native clients. The docs for family and SMB deployments should say this in one sentence.
 
@@ -483,7 +482,7 @@ This includes a copy of the device's storage taken from a backup.
 **Mitigations.**
 - The local wrap uses the same Argon2id floor ([INV-3](#8-security-invariants)).
 - The local wrap is bound to a hardware-backed key where the platform has one (iOS/macOS Secure Enclave, Android StrongBox/TEE, Windows TPM). Guessing then needs the device's secure element, and that element enforces its own rate limits. A backup copy is then useless.
-- Device state and the cache are excluded from OS and cloud backups ([INV-61](#8-security-invariants)). The price: a phone or laptop restored from backup comes back without the vault. In Server mode it logs in again. In On-device mode the M4 encrypted backup file is the backup path, not the OS backup.
+- Device state and the cache are excluded from OS and cloud backups ([INV-61](#8-security-invariants)). The price: a phone or laptop restored from backup comes back without the vault. In Server mode it logs in again.
 - Keystore unlock only behind OS-enforced user presence, invalidated when biometric enrolment changes ([INV-62](#8-security-invariants)).
 - Auto-lock timeouts.
 - Device revocation (M3) and short-lived, device-bound tokens.
@@ -491,9 +490,8 @@ This includes a copy of the device's storage taken from a backup.
 
 **Residual risk.**
 - Revocation cannot pull back data already cached on the device. Key rotation protects only data written later. For items that matter, the user has to change the site passwords.
-- **The rotation race.** A thief who has unlocked the stolen device holds the account key and the identity signing key. Until the remaining devices publish the rotation, the thief can sign device certificates and `account-state` of their own, and race the owner's rotation. Remaining devices accept a rotation only from a non-revoked device and ask the user to confirm the new identity fingerprint on each device ([CRYPTO.md §11.6](CRYPTO.md#116-key-rotation), "Known limitation"). The M4 device-management ADR settles the rest ([AR-18](#9-accepted-risks-and-out-of-scope)).
+- **The rotation race.** A thief who has unlocked the stolen device holds the account key and the identity signing key. Until the remaining devices publish the rotation, the thief can sign device certificates and `account-state` of their own, and race the owner's rotation. Remaining devices accept a rotation only from a non-revoked device and ask the user to confirm the new identity fingerprint on each device ([CRYPTO.md §11.6](CRYPTO.md#116-key-rotation), "Known limitation"). The M3 device-management ADR settles the rest ([AR-18](#9-accepted-risks-and-out-of-scope)).
 - The CLI, the browser extension and desktop Linux have no hardware binding ([AR-14](#9-accepted-risks-and-out-of-scope)). The CLI cannot keep its state file out of the user's backups; its docs say so.
-- In On-device mode, losing the last device loses the vault ([AR-13](#9-accepted-risks-and-out-of-scope)).
 
 ### A9. Supply chain
 
@@ -591,31 +589,7 @@ Separately, a malicious server can serve share-page code that reads the fragment
 
 ### A13. Relay operator in On-device mode (M4)
 
-**Capabilities.** It is an A2 server restricted to relaying, because it holds no snapshot. It can:
-- see metadata: device count, IPs, relay batch sizes and times, ack patterns;
-- drop, delay, reorder, replay or withhold ops;
-- purge ops before every device has acked them;
-- show different devices different histories (fork);
-- inject device entries;
-- MITM pairing traffic;
-- keep data it claims to have deleted after a mode switch, and sign a receipt saying it deleted it.
-
-**What they obtain.**
-- Metadata.
-- Availability: it can stop sync or make a device go stale.
-- Nothing readable, if the invariants hold. Forged ops fail signature checks. Replays are idempotent. Reordering does not matter because merge is order-independent. Injected devices are not certified by the identity key. Pairing MITM fails the SAS.
-
-**Mitigations.**
-- Signed, AEAD-encrypted ops ([INV-22](#8-security-invariants)) with idempotent, order-independent merge ([INV-23](#8-security-invariants)).
-- A gap-free sequence per device, so drops are detected ([INV-27](#8-security-invariants)).
-- Device keys certified by the identity key ([INV-16](#8-security-invariants)), and SAS on pairing ([INV-29](#8-security-invariants)).
-- A stale device re-syncs from a peer, never from the server ([ROADMAP §4.6](ROADMAP.md#46-sync-modes-m4)).
-- Re-keying on a Server-to-On-device switch ([INV-31](#8-security-invariants)), so wraps the server kept stop covering new data.
-- Padding and batching (Should).
-
-**Residual risk.**
-- Withholding a *suffix* of ops cannot be told apart from "no new edits" until devices compare state through another path.
-- **The signed deletion receipt is a signed claim, not a proof.** It is useful as accountability evidence and nothing more. The ROADMAP's word "proves" should become "attests" ([AR-9](#9-accepted-risks-and-out-of-scope)).
+Parked with On-device mode ([ADR 0022](adr/0022-server-mode-only.md)). The heading and the id are kept.
 
 ### A14. Shoulder surfing, clipboard and screen capture
 
@@ -744,7 +718,7 @@ Two pieces of prior work set the bar here. Palant (2023) showed that Bitwarden c
 ### 5.4 Public-key substitution
 
 - **Where it bites.**
-  - M4: device pairing and any "approve this device" flow. A relayed public key is the classic MITM point. AliasVault's "Login with Mobile" relays an RSA public key through its server.
+  - Any "approve this device" flow. A relayed public key is the classic MITM point. AliasVault's "Login with Mobile" relays an RSA public key through its server.
   - M5: nowhere for link shares, because they use fragment keys.
   - M6: the mail encryption key. Substituting it gains a fully malicious server nothing, since it reads mail at ingress anyway. An attacker who controls only `api` or the DB would gain the mail, which is why `smtp` pins each account's identity key ([CRYPTO.md §11.13](CRYPTO.md#1113-mail-ingress-m6)).
   - M9: shared-vault and family keys.
@@ -756,11 +730,11 @@ Two pieces of prior work set the bar here. Palant (2023) showed that Bitwarden c
   - Device-to-device transfers need SAS confirmation ([INV-29](#8-security-invariants)).
   - Key transparency (Proton publishes one design) is a post-1.0 candidate ([Q-8](#10-open-questions-for-the-owner)).
 - **Residual risk.** A server that substitutes keys on *first* contact beats users who never verify fingerprints (TOFU, [AR-6](#9-accepted-risks-and-out-of-scope)). 1Password's white paper states the same limitation for its own design (secondary source).
-- **Milestone.** M1 for key generation and signing; M4 for SAS; M9 for pinning and verification UX. **ETH class:** 3.
+- **Milestone.** M1 for key generation and signing; M9 for pinning and verification UX. **ETH class:** 3.
 
 ### 5.5 Forged device registrations
 
-- **Attack.** The server adds a device entry so other devices encrypt new vault keys to it during revocation or rotation, pairing, or op fan-out. It can also hide a device (the thief's) from the device list.
+- **Attack.** The server adds a device entry so other devices encrypt new vault keys to it during revocation or rotation. It can also hide a device (the thief's) from the device list.
 - **Required client-side mitigations.**
   - Clients accept a device key only when the account identity key certifies it. Only a device holding the unlocked account key can issue that certificate ([INV-16](#8-security-invariants)).
   - The device set is part of the signed `account-state` ([INV-14](#8-security-invariants)), so hiding a device means rolling that state back, or serving a second, validly signed state with the same `state_seq` (a fork, such as a compare-and-swap loser's rejected state). [INV-25](#8-security-invariants) catches both on any device that has seen the other state, and a compare-and-swap loser never re-applies its change on top of a fork.
@@ -769,7 +743,7 @@ Two pieces of prior work set the bar here. Palant (2023) showed that Bitwarden c
 - **Residual risk.**
   - An attacker who holds the password and Secret Key, or an unlocked device, can enroll a real device. We can only make that visible.
   - A compromised device that is then revoked still holds the old identity key, and can sign certificates or state before the rotation reaches the other devices. It can race its own rotation ([A8](#a8-stolen-or-lost-device), [AR-18](#9-accepted-risks-and-out-of-scope)).
-- **Milestone.** M3 (device list, Should), M4 (relay fan-out, Must).
+- **Milestone.** M3 (device list, Should).
 
 ### 5.6 Rollback, withholding and forks
 
@@ -785,7 +759,7 @@ Two pieces of prior work set the bar here. Palant (2023) showed that Bitwarden c
   - A brand-new device has no earlier state to compare against.
   - A fork in which each device only ever sees its own branch, of the vault or of `account-state`, is invisible until the devices exchange heads through another path.
   - Withholding a suffix looks the same as silence ([AR-5](#9-accepted-risks-and-out-of-scope)).
-- **Milestone.** M1 (Server mode), M4 (relay).
+- **Milestone.** M1.
 
 ### 5.7 Escrow, recovery and org-invite abuse (M9/M10)
 
@@ -822,9 +796,9 @@ This one needs no malicious server. Honest operators restore backups after disk 
 | KDF parameter downgrade | 5 | Compiled-in floor, explicit KSF, params bound into context and AAD, no path cheaper than one Argon2id | INV-3 to INV-6 | M1 |
 | Envelope/algorithm downgrade | 4 | Header in AAD, allow-list, no legacy paths, key commitment | INV-9 to INV-11 | M1 |
 | Item/settings swap or stale settings | 2 | AAD binds IDs and version; signed state and encrypted settings; settings committed in the signed state | INV-13, INV-14, INV-25 | M1 |
-| Public-key substitution | 3 | Signed keys, pinning, fingerprints, SAS | INV-16, INV-17, INV-29 | M1 / M4 / M9 |
-| Forged device registration | 3 | Identity-key certificates, signed device set, notifications, old identity key rejected after rotation | INV-14, INV-16, INV-30 | M3 / M4 |
-| Rollback / withholding / fork | – | Monotonic checks, signed ops, sequences, client-made snapshots | INV-22, INV-25 to INV-27 | M1 / M4 |
+| Public-key substitution | 3 | Signed keys, pinning, fingerprints, SAS | INV-16, INV-17, INV-29 | M1 / M9 |
+| Forged device registration | 3 | Identity-key certificates, signed device set, notifications, old identity key rejected after rotation | INV-14, INV-16, INV-30 | M3 |
+| Rollback / withholding / fork | – | Monotonic checks, signed ops, sequences, client-made snapshots | INV-22, INV-25 to INV-27 | M1 |
 | Restore reopens old credentials | – | Reconciliation epoch; server refuses credentials older than the newest signed state | INV-59 | M1 |
 | Escrow and invite abuse | 1, 3 | No escrow; consented, authenticated, visible enrollment | INV-17, INV-18 | M9 / M10 |
 | Member edits beyond role | – | Client-checked signed membership roles | INV-67 | M9 |
@@ -858,7 +832,6 @@ The mail subsystem is optional ([ROADMAP §2](ROADMAP.md#2-guiding-principles-no
 - **A compromised `smtp` can also map aliases to people.** Through `resolve` it can enumerate aliases, slowly because `api` rate-limits the call. The mail key is per account ([CRYPTO.md §4.2](CRYPTO.md#42-key-inventory)), so two aliases that return the same mail key belong to the same person, even if neither ever receives mail. That is the [AST-11](#2-assets) linkage ([AR-21](#9-accepted-risks-and-out-of-scope), [Q-19](#10-open-questions-for-the-owner)).
 - Someone with the server can take over any account whose reset mail goes to an alias on that server. This is a reason to keep high-value accounts (bank, primary email) off aliases on instances you do not control.
 - Anyone can encrypt to a public key, so the ciphertext does not prove where the mail came from. The SPF, DKIM and DMARC results shown in the UI are only as trustworthy as the `smtp` role that produced them.
-- In On-device mode, stored mail stays on the server until every device acks it, the same relay rule as ops ([ROADMAP §4.6](ROADMAP.md#46-sync-modes-m4)).
 
 ### 6.4 Mitigations
 
@@ -975,7 +948,7 @@ S = spoofing, T = tampering, R = repudiation, I = information disclosure, D = de
 | T | A compaction bug corrupts history. | Compaction discards only ops covered by a snapshot a client produced and signed. | INV-26 |
 | R | – | – | – |
 | I | "Deleted" data survives in DB free pages, WAL files or backups. | SQLite secure-delete settings to be evaluated ([ADR 0011](adr/0011-storage.md)). Deletion from backups follows backup retention; the docs say so. | AR-11 |
-| D | Purging too early (unacked relay ops) or too late (expired shares). Trash is not the worker's: clients purge it with signed `Purge` ops, because the server cannot see lifecycle ([ADR 0010](adr/0010-server-shape.md) §1). | Relay purge only after every active device has acked or the TTL has passed. Share expiry enforced even without visits. Purge rules have tests. | INV-34 |
+| D | Purging too late (expired shares). Trash is not the worker's: clients purge it with signed `Purge` ops, because the server cannot see lifecycle ([ADR 0010](adr/0010-server-shape.md) §1). | Share expiry enforced even without visits. Purge rules have tests. | INV-34 |
 | E | – | – | – |
 
 ### 7.10 `smtp` role and rspamd (M6)
@@ -1035,14 +1008,7 @@ S = spoofing, T = tampering, R = repudiation, I = information disclosure, D = de
 
 ### 7.15 Relay, On-device mode (M4)
 
-| | Threat | Mitigation | Inv. |
-|---|---|---|---|
-| S | Injected devices; impersonation during pairing. | Identity-key certificates; SAS. | INV-16, INV-29 |
-| T | Forged, dropped, reordered or replayed ops. | Signed ops; idempotent, order-independent merge; per-device sequences. | INV-22, INV-23, INV-27 |
-| R | "We deleted your data" backed by a signed receipt. | The receipt is a signed claim, not proof. | AR-9 |
-| I | Device count, IPs, relay batch sizes and times, ack patterns. | Padding and batching (Should). | NG-5 |
-| D | Withholding; purging before ack; stranding stale devices. | Gap detection; TTL; re-sync from a peer. | INV-27 |
-| E | – | – | – |
+Parked with On-device mode ([ADR 0022](adr/0022-server-mode-only.md)). The heading and the id are kept.
 
 ### 7.16 Share recipient page (M5)
 
@@ -1105,7 +1071,7 @@ Each line is a testable statement that every later milestone must keep. "From" i
 | INV-3 | Clients refuse to register, log in, change the password, set up or perform local unlock, or create an encrypted export with Argon2id parameters below the compiled-in floor for that KDF version. Server-supplied parameters below the floor abort the flow before the password is processed. | M1 | Mock server returning sub-floor parameters for each flow. |
 | INV-4 | Every opaque-ke call site passes an explicit Argon2id KSF with the account's parameters. The crate's default KSF is never used, and our KSF's `Default` fails closed. | M1 | Unit test: a call with `ksf: None` returns `KsfError`. Review rule. |
 | INV-5 | The KDF version and parameters are bound into the OPAQUE context and into the AAD of every password-derived wrap. Tampering with stored parameters makes login or unwrap fail. It never succeeds with different parameters. | M1 | Tamper test on the stored parameters. |
-| INV-6 | No path from the master password to a key or an authenticator is cheaper than one Argon2id evaluation at an allowed `kdf_id`. Each flow runs a fixed number of evaluations ([CRYPTO.md §5.4](CRYPTO.md#54-where-the-unlock-key-comes-from), [§11](CRYPTO.md#11-flows)): unlock on an enrolled device and web-vault login, one; signup on a durable client and first login on a new device, two (OPAQUE KSF, then the local wrap); signup in the web vault, one; re-enrolment of a device that knows only the new password after a rotation ([CRYPTO.md §11.3](CRYPTO.md#113-unlock-on-an-enrolled-device) step 5), two (the OPAQUE KSF and the new local wrap); password change in Server mode, three (re-authentication with the old password, then registration and the local wrap with the new one); password change in On-device mode, two on the changing device and two on each other device ([CRYPTO.md §11.5](CRYPTO.md#115-master-password-or-secret-key-change)). A keystore unlock through `E_ks` runs none, because it does not start from the master password ([INV-62](#8-security-invariants)). | M1 | Instrumented test counting KSF calls per flow against that table. |
+| INV-6 | No path from the master password to a key or an authenticator is cheaper than one Argon2id evaluation at an allowed `kdf_id`. Each flow runs a fixed number of evaluations ([CRYPTO.md §5.4](CRYPTO.md#54-where-the-unlock-key-comes-from), [§11](CRYPTO.md#11-flows)): unlock on an enrolled device and web-vault login, one; signup on a durable client and first login on a new device, two (OPAQUE KSF, then the local wrap); signup in the web vault, one; re-enrolment of a device that knows only the new password after a rotation ([CRYPTO.md §11.3](CRYPTO.md#113-unlock-on-an-enrolled-device) step 5), two (the OPAQUE KSF and the new local wrap); password change in Server mode ([CRYPTO.md §11.5](CRYPTO.md#115-master-password-or-secret-key-change)), three (re-authentication with the old password, then registration and the local wrap with the new one). A keystore unlock through `E_ks` runs none, because it does not start from the master password ([INV-62](#8-security-invariants)). | M1 | Instrumented test counting KSF calls per flow against that table. |
 | INV-7 | A login attempt does not reveal whether the account exists (dummy record, same error and timing). Unauthenticated login and registration attempts get exponential backoff per (account identifier, source IP) and a per-account cap on their rate, never a hard lockout. OPAQUE re-authentication from a device-authenticated session uses a separate bucket that unauthenticated attempts cannot exhaust. | M1 | Integration tests comparing existing and unknown accounts; rate-limit tests; a flood of unauthenticated attempts against one account does not block re-authentication, rotation or revocation from an enrolled device. |
 | INV-8 | Server-side 2FA secrets are stored encrypted under a server key kept outside the DB. Session and refresh tokens are stored only as hashes. | M1 | DB-dump inspection test. |
 | INV-66 | If an email-based login reset exists ([Q-16](#10-open-questions-for-the-owner)), it never replaces the OPAQUE record, `E_srv` or `E_rec`, grants no access to ciphertext, devices, shares or recovery, and is announced to and cancellable by every enrolled device. | M1 (only if the feature exists) | Integration test of the reset flow against each forbidden action. |
@@ -1142,11 +1108,11 @@ Each line is a testable statement that every later milestone must keep. "From" i
 | INV-24 | Conflicting edits are kept as item history. No op is dropped silently. | M1 | Property tests. |
 | INV-25 | Clients persist the highest version vector they have accepted per item, the last verified `account-state` (the whole signed state, not only its `state_seq`) and the highest `settings_seq`. `account-state` commits to `settings_seq` and to the SHA-256 of the current `ACCOUNT_SETTINGS` envelope, and every settings change publishes a new `account-state` with `state_seq + 1`. A server response that moves any of these backwards, or an `ACCOUNT_SETTINGS` envelope whose `settings_seq` or hash differs from the verified state, is rejected and reported, never applied. A verified `account-state` with the same `state_seq` as the persisted one but a different body is a fork: it is rejected and reported, and the client goes read-only. The loser of an `account-state` compare-and-swap never re-applies its change on top of such a state ([CRYPTO.md §10.2](CRYPTO.md#102-ed25519-signatures-and-signed-statements)). | M1 | Mock-server rollback tests: an older item version; an older `account-state`; an older, validly encrypted `ACCOUNT_SETTINGS` (for example one that restores a deleted equivalence group). Fork tests: a second, validly signed `account-state` with an accepted `state_seq` that differs only in `device_set_hash`, served at unlock and to a compare-and-swap loser. |
 | INV-26 | Server-side compaction discards only ops covered by a snapshot a client produced and signed. | M1 | Test. |
-| INV-27 | Each device's op stream carries a gap-free sequence (`device_seq`, and `vault_prev_seq` per vault, [ADR 0012](adr/0012-sync-engine.md)). A gap is reported as missing data, never skipped, and nothing from that device past the gap is applied. | M1 (Server mode) / M4 (relay) | Server mode: the server omits op *n* from a device and serves *n+1*; the client reports missing data and applies nothing past the gap. M4: the same through the relay. |
-| INV-28 | In On-device mode the server stores no vault snapshot, no op older than the TTL, and nothing that lets anyone check a master-password guess offline: no OPAQUE record and no password-derived wrap. | M4 ([Q-3](#10-open-questions-for-the-owner)) | DB inspection after a mode switch. |
-| INV-29 | Pairing and any "approve this device" flow transfer key material only after both devices confirm the same SAS. | M4 | Test with a relay that swaps keys. |
-| INV-30 | Revoking a device publishes a signed `device-revocation` and a new `account-state`, and rotates the account key and every owned vault key. Revoking a lost or stolen device runs a full rotation that also replaces the identity keys ([CRYPTO.md §11.6](CRYPTO.md#116-key-rotation), [§11.8](CRYPTO.md#118-device-revocation)). Data written after the revocation cannot be read with the revoked device's keys. Once a client has accepted the rotation's `account-state`, it rejects any device certificate, `device-revocation`, bundle or `account-state` signed only by a superseded identity key; the full rotation re-issues every certificate and revocation under the new key ([CRYPTO.md §11.6](CRYPTO.md#116-key-rotation) step 7). In On-device mode the device also leaves the relay ack set. A device that re-enrols itself under a new `device_id` revokes its old one without a rotation, because those keys never left it ([CRYPTO.md §11.3](CRYPTO.md#113-unlock-on-an-enrolled-device) step 5). | M3 (Server-mode revocation from the device list) / M4 (relay) | Tests: after a standard rotation, the revoked device's account key opens no new wrap; after a full rotation, a certificate and an `account-state` signed with the old identity key are rejected; after a full rotation, a device enrolled afterwards verifies every retained op of the revoked device and of an expired web session. |
-| INV-31 | Switching from Server mode to On-device mode rotates the account key and the vault keys, and item keys are replaced on their next write (the lazy rule in [CRYPTO.md §11.6](CRYPTO.md#116-key-rotation)), so any copy of old wraps the server kept does not cover data written after the switch. | M4 | Test: old server-side wraps cannot open ops written after the switch. |
+| INV-27 | Each device's op stream carries a gap-free sequence (`device_seq`, and `vault_prev_seq` per vault, [ADR 0012](adr/0012-sync-engine.md)). A gap is reported as missing data, never skipped, and nothing from that device past the gap is applied. | M1 | The server omits op *n* from a device and serves *n+1*; the client reports missing data and applies nothing past the gap. |
+| INV-28 | Parked with On-device mode ([ADR 0022](adr/0022-server-mode-only.md)). | – | – |
+| INV-29 | Any "approve this device" flow transfers key material only after both devices confirm the same SAS. | – | Test with a server that swaps keys. |
+| INV-30 | Revoking a device publishes a signed `device-revocation` and a new `account-state`, and rotates the account key and every owned vault key. Revoking a lost or stolen device runs a full rotation that also replaces the identity keys ([CRYPTO.md §11.6](CRYPTO.md#116-key-rotation), [§11.8](CRYPTO.md#118-device-revocation)). Data written after the revocation cannot be read with the revoked device's keys. Once a client has accepted the rotation's `account-state`, it rejects any device certificate, `device-revocation`, bundle or `account-state` signed only by a superseded identity key; the full rotation re-issues every certificate and revocation under the new key ([CRYPTO.md §11.6](CRYPTO.md#116-key-rotation) step 7). A device that re-enrols itself under a new `device_id` revokes its old one without a rotation, because those keys never left it ([CRYPTO.md §11.3](CRYPTO.md#113-unlock-on-an-enrolled-device) step 5). | M3 | Tests: after a standard rotation, the revoked device's account key opens no new wrap; after a full rotation, a certificate and an `account-state` signed with the old identity key are rejected; after a full rotation, a device enrolled afterwards verifies every retained op of the revoked device and of an expired web session. |
+| INV-31 | Parked with On-device mode ([ADR 0022](adr/0022-server-mode-only.md)). | – | – |
 | INV-67 | In a shared vault, clients accept an op only if its author holds, in a membership statement signed by a vault manager and verified by the client, a role that allows that op. A view-only member's edits are rejected even when the server accepts them. The statement format belongs to the M9 ADR. | M9 | Test: an op signed by a view-only member's device is rejected by the other members' clients. |
 
 ### 8.5 Sharing
@@ -1235,22 +1201,22 @@ The invariants above were stricter than some mechanisms as first written. This t
 |---|---|---|---|
 | AR-1 | A malicious or compromised server can backdoor the web vault and the share recipient page ([§4.2.1](#421-the-web-vault-delivery-problem)). | No deployable fix exists today. Native clients avoid the problem. | When WAICT or WEBCAT can be deployed; post-1.0 |
 | AR-2 | The server sees alias mail in plaintext at ingress ([§6](#6-email-ingress-m6)). | Spam filtering has to run before encryption. | – |
-| AR-3 | The server sees metadata: account existence, IPs, timing, counts, sizes ([NG-5](#14-non-goals)). | Hiding it needs anonymity infrastructure that is out of scope. | Padmé size padding from M1 ([ADR 0005](adr/0005-symmetric-encryption-aead.md)); batching of relayed ops in M4 |
+| AR-3 | The server sees metadata: account existence, IPs, timing, counts, sizes ([NG-5](#14-non-goals)). | Hiding it needs anonymity infrastructure that is out of scope. | Padmé size padding from M1 ([ADR 0005](adr/0005-symmetric-encryption-aead.md)) |
 | AR-4 | A weak password with no Secret Key falls to a DB-plus-OPRF-seed attacker. | The Secret Key is the fix ([Q-1](#10-open-questions-for-the-owner)). | Decided 2026-09-25: the Secret Key is mandatory for every account from M1 |
 | AR-5 | A new device can be frozen on a stale state. Forks and withheld suffixes stay hidden until devices compare heads. | Fork consistency is the best a single untrusted server allows. | Post-1.0 (LAN or P2P sync) |
 | AR-6 | Trust on first use for other users' keys (M9) when nobody verifies fingerprints. | Key transparency is too big for v1.0. | [Q-8](#10-open-questions-for-the-owner) |
 | AR-7 | Once a share is opened, the plaintext cannot be recalled; the link stays live in chat logs until it expires. | This is how link sharing works. | – |
-| AR-8 | Harvest-now-decrypt-later against X25519 wraps (M6 mail, M9 sharing, M4 pairing) and against OPAQUE's group. 256-bit symmetric encryption is not materially affected. | ML-KEM and X-Wing crates are unaudited, and X-Wing and HPKE-PQ are still drafts (fact sheet). The envelope reserves algorithm IDs. | [Q-12](#10-open-questions-for-the-owner) |
-| AR-9 | Server-enforced controls (2FA, rate limits, view limits, expiry, email-restricted shares, device suspension, deletion, deletion receipts) hold only against an honest server. | Nothing but cryptography constrains a malicious server, and these controls are not cryptographic. | – |
+| AR-8 | Harvest-now-decrypt-later against X25519 wraps (M6 mail, M9 sharing) and against OPAQUE's group. 256-bit symmetric encryption is not materially affected. | ML-KEM and X-Wing crates are unaudited, and X-Wing and HPKE-PQ are still drafts (fact sheet). The envelope reserves algorithm IDs. | [Q-12](#10-open-questions-for-the-owner) |
+| AR-9 | Server-enforced controls (2FA, rate limits, view limits, expiry, email-restricted shares, device suspension, deletion) hold only against an honest server. | Nothing but cryptography constrains a malicious server, and these controls are not cryptographic. | – |
 | AR-10 | Keys can reach swap and hibernation files. Our crates forbid `unsafe`, so they cannot `mlock`. | zeroize shortens the window. OS full-disk encryption protects swap against a thief with a powered-off machine and nothing else: not against later same-user or root access, and not against anything that copies the files while the OS runs. Crash dumps are not accepted here; they are disabled ([INV-60](#8-security-invariants)). In a container the kernel's `core_pattern` is host-global; with a pipe handler and `fs.suid_dumpable = 2` the host may still collect a root-readable dump (U, confirm in M1), so the operator docs say to disable core collection for the container. | Could use a vetted mlock crate ([ADR 0009](adr/0009-crypto-dependency-policy.md)) |
 | AR-11 | Old backups keep old wraps and deleted data. A password change does not invalidate old wraps. | Account-key rotation exists ([INV-19](#8-security-invariants)); backup retention is the operator's decision. | – |
 | AR-12 | One maintainer holds all release credentials. | That is the project's size today. | Before M8 |
-| AR-13 | On-device mode: losing every device loses the vault. | That is the point of the mode; the UI warns about it ([ROADMAP §4.6](ROADMAP.md#46-sync-modes-m4)). | – |
+| AR-13 | Parked with On-device mode ([ADR 0022](adr/0022-server-mode-only.md)). | – | – |
 | AR-14 | Stolen devices without a hardware keystore allow offline guessing at the Argon2id floor: the CLI (and its state file in the user's own backups), the browser extension (SK, `E_local` and `E_dev` in the browser profile), and desktop Linux. The web vault keeps no `E_local` ([CRYPTO.md §11.4](CRYPTO.md#114-web-vault)), so a stolen browser yields at most a remembered SK. | There is no platform mechanism to use. | – |
 | AR-15 | Old clients carry old PSL snapshots and equivalence lists. | Clients that never update cannot be fixed. | – |
 | AR-16 | OS clipboard history and cross-device clipboard sync can ignore the sensitive flag. | Outside our control. | – |
 | AR-17 | iOS AutoFill unlocks through `E_ks`, with an unlock secret held in the keychain behind biometry, instead of running the full KDF ([CRYPTO.md §6.4](CRYPTO.md#64-feasibility)). | The memory cap leaves no alternative; the keychain and biometry are the boundary ([INV-62](#8-security-invariants)). | M7 ([Q-13](#10-open-questions-for-the-owner)) |
-| AR-18 | A compromised device that is later revoked holds the old identity key and can race its own rotation, signing certificates or state before the remaining devices see the rotation. | Remaining devices accept a rotation only from a non-revoked device and ask the user to confirm the new fingerprint. Nothing stops a device that already holds the identity key from signing first. | M4 device-management ADR |
+| AR-18 | A compromised device that is later revoked holds the old identity key and can race its own rotation, signing certificates or state before the remaining devices see the rotation. | Remaining devices accept a rotation only from a non-revoked device and ask the user to confirm the new fingerprint. Nothing stops a device that already holds the identity key from signing first. | M3 device-management ADR |
 | AR-19 | A restore from backup reopens superseded passwords, recovery codes and revoked devices until a device presents the newer signed state ([§5.8](#58-server-restore-from-backup), [INV-59](#8-security-invariants)). Accounts whose devices never reconnect stay exposed. | The server has no other source for the newer state. The restore command and docs warn the operator. | – |
 | AR-20 | RCPT probing tells an active alias from a non-existent one. User-chosen aliases can be confirmed by guessing. | Accepting mail for active aliases requires it. Generated aliases are unguessable ([INV-65](#8-security-invariants)). | [Q-18](#10-open-questions-for-the-owner) |
 | AR-21 | A compromised `smtp` can enumerate aliases slowly through `resolve`, and link aliases of one account because they share the mail key. | It already reads all later mail ([AR-2](#9-accepted-risks-and-out-of-scope)), which links aliases that receive mail anyway. | [Q-19](#10-open-questions-for-the-owner) |
@@ -1271,7 +1237,7 @@ The invariants above were stricter than some mechanisms as first written. This t
 |---|---|---|
 | Q-1 | **Ship the Secret Key in M1?** [ROADMAP §4.3](ROADMAP.md#43-cryptography--authentication-m0m1-audited-in-m8) contradicts itself. The M1 Emergency Kit is "printable Secret Key + recovery code" (Must, M1), but the Secret Key itself is "Should, M1 decision, M3 ship". | **Decided 2026-09-25:** the Secret Key is mandatory for every account from M1 (derivation and Emergency Kit), per [ADR 0004](adr/0004-key-derivation-argon2id-secret-key.md) and [CRYPTO.md §7](CRYPTO.md#7-secret-key); the ROADMAP §4.3 row is fixed. **Ship it in M1.** It is what makes a DB-plus-seed breach harmless ([A1](#a1-passive-server-compromise-db-or-backup-theft)). Mixed into the OPAQUE input, adding it later means every account has to re-register and every Emergency Kit has to be reprinted. Fix the ROADMAP row either way. |
 | Q-2 | Mix the Secret Key into the OPAQUE password input, or only into the vault-key derivation? | **Decided 2026-09-25:** into the OPAQUE input, per [ADR 0003](adr/0003-authentication-opaque.md) decision 4 and [ADR 0004](adr/0004-key-derivation-argon2id-secret-key.md) decision 6 (both Accepted). **Into the OPAQUE input** (and so into `export_key`). If it goes only into the vault key, a DB-plus-seed attacker can still guess the password against the OPAQUE record, which defeats 2SKD for authentication. Mechanism in [ADR 0003](adr/0003-authentication-opaque.md) and [ADR 0004](adr/0004-key-derivation-argon2id-secret-key.md). |
-| Q-3 | **How do devices authenticate in On-device mode?** [ROADMAP §4.6](ROADMAP.md#46-sync-modes-m4) says a breach "yields nothing to brute-force against the master password". That is false if the server keeps the OPAQUE record or a password wrap. | **Decided 2026-09-25:** adopted as below, now that [ADR 0003](adr/0003-authentication-opaque.md) and [ADR 0012](adr/0012-sync-engine.md) are Accepted and CRYPTO.md is normative. **Adopted** in [CRYPTO.md §5.7](CRYPTO.md#57-on-device-sync-mode), [ADR 0003](adr/0003-authentication-opaque.md) decision 10 and [ADR 0012](adr/0012-sync-engine.md) §10 (all accepted 2026-09-25): delete the OPAQUE record and the password wraps at the switch point, authenticate devices to the relay with their device keys, and re-register OPAQUE from an unlocked device when switching back ([INV-28](#8-security-invariants)). If the owner rejects this, the ROADMAP wording has to change. |
+| Q-3 | **How do devices authenticate in On-device mode?** [ROADMAP §4.6](ROADMAP.md#46-sync-modes-m4) says a breach "yields nothing to brute-force against the master password". That is false if the server keeps the OPAQUE record or a password wrap. | **Parked with On-device mode ([ADR 0022](adr/0022-server-mode-only.md)).** **Decided 2026-09-25:** adopted as below, now that [ADR 0003](adr/0003-authentication-opaque.md) and [ADR 0012](adr/0012-sync-engine.md) are Accepted and CRYPTO.md is normative. **Adopted** in [CRYPTO.md §5.7](CRYPTO.md#57-on-device-sync-mode), [ADR 0003](adr/0003-authentication-opaque.md) decision 10 and [ADR 0012](adr/0012-sync-engine.md) §10 (all accepted 2026-09-25): delete the OPAQUE record and the password wraps at the switch point, authenticate devices to the relay with their device keys, and re-register OPAQUE from an unlocked device when switching back ([INV-28](#8-security-invariants)). If the owner rejects this, the ROADMAP wording has to change. |
 | Q-4 | Serve the share recipient page and rendered mail from a **separate origin** (for example `share.<domain>`), so an XSS there cannot reach web-vault storage? | Require a second hostname when M5 ships. [INV-35](#8-security-invariants) is the minimum; a separate origin is defence in depth. It costs self-hosters one DNS name and one certificate. |
 | Q-5 | Allow the `smtp` role in profile A (same process or container as `api` and the DB)? | **Decided 2026-09-25:** no; `smtp` refuses to start when DB configuration is visible, and profile B is required for mail ([ADR 0010](adr/0010-server-shape.md) §2 and owner decision 2). **No.** The `smtp` role refuses to start with DB credentials present. Profile B becomes a hard requirement for mail, not a recommendation. |
 | Q-6 | Web vault on by default in Server mode, and with an admin switch to turn it off? | On by default (M1 needs it), with an admin switch and a one-line trust notice in the UI. Recommend the extension or desktop app during onboarding. |
