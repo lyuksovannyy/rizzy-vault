@@ -23,7 +23,7 @@ Scope and milestones are defined in [docs/ROADMAP.md](docs/ROADMAP.md#3-mileston
 
 | Milestone | State |
 |---|---|
-| **M0** Foundations | **Deliverables in place, not formally closed.** The workspace, toolchain pin, lints, CI, cargo-deny policy, crypto design, ADRs, and security and contribution policy exist. M0 has no tag or "what we learned" note yet ([ROADMAP §3](docs/ROADMAP.md#3-milestones)), and one of its deliverables is still Proposed: [ADR 0017](docs/adr/0017-licensing.md) (licensing). [THREAT_MODEL.md](docs/THREAT_MODEL.md) became normative on 2026-09-27. |
+| **M0** Foundations | **Deliverables in place, not formally closed.** The workspace, toolchain pin, lints, CI, cargo-deny policy, crypto design, ADRs, and security and contribution policy exist. M0 has no tag or "what we learned" note yet ([ROADMAP §3](docs/ROADMAP.md#3-milestones)). [ADR 0017](docs/adr/0017-licensing.md) (licensing) was Accepted on 2026-09-27; its App Store permission text and CI sign-off check are not done yet. [THREAT_MODEL.md](docs/THREAT_MODEL.md) became normative on 2026-09-27. |
 | **M1** Core vault (MVP) | **In progress.** Step 1, the `rizzy-core` cryptography, is implemented, with known-answer vectors, property tests and fuzz targets. It has been through an independent review, and every confirmed finding is fixed. The remaining steps, in planned order, are below. |
 | **M2–M10** | Not started. M4 is removed: Server mode is the only sync mode, and On-device sync is parked post-1.0 ([ROADMAP §3](docs/ROADMAP.md#3-milestones)). |
 
@@ -84,7 +84,7 @@ Never report a vulnerability in a public issue, pull request or discussion. Foll
 
 ## License
 
-rizzy-vault is licensed under the GNU Affero General Public License, version 3 ([LICENSE](LICENSE)). The crate manifests declare `AGPL-3.0-only`. The final choice between "only" and "or later", and the contribution terms (DCO or CLA), belong to [ADR 0017](docs/adr/0017-licensing.md), which is still Proposed.
+rizzy-vault is licensed under the GNU Affero General Public License, version 3 only (`AGPL-3.0-only`; [LICENSE](LICENSE)), as [ADR 0017](docs/adr/0017-licensing.md) decides. Contributions come in under the same license, with a Developer Certificate of Origin 1.1 sign-off ([CONTRIBUTING.md](CONTRIBUTING.md#sign-off)). Copyright the rizzy-vault contributors; see the git history.
 
 ## Third-party notices
 

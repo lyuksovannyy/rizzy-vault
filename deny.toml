@@ -18,6 +18,9 @@ confidence-threshold = 0.93
 # The allow-list is policy for future dependencies; not every entry is used yet.
 unused-allowed-license = "allow"
 # Permissive and weak-copyleft licenses compatible with shipping AGPL-3.0 binaries.
+# No GPL, LGPL or AGPL: a third-party crate under one of them needs a per-crate `exceptions`
+# entry, added by an ADR 0017 amendment, and must never be reachable from an app-store client
+# build (ADR 0017 owner decision 6). Our own crates need none: `[licenses.private]` skips them.
 allow = [
   "MIT",
   "MIT-0",
@@ -31,8 +34,6 @@ allow = [
   "Unicode-3.0",
   "MPL-2.0",
   "CDLA-Permissive-2.0",
-  "AGPL-3.0-only",
-  "AGPL-3.0-or-later",
 ]
 exceptions = [
   # Owner decision 2026-09-26. libfuzzer-sys is "(MIT OR Apache-2.0) AND NCSA": LLVM's libFuzzer

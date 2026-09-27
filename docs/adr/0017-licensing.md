@@ -70,7 +70,7 @@ So every distributed client is a combined work that contains AGPL code, whatever
   - 1Password's assets and trade dress are never used (ROADMAP §4.5, Won't).
 - **Trademarks.** The AGPL grants no trademark rights. A trademark policy comes with the public product name, which ROADMAP §6.9 says must be decided before M8.
 
-### 2. `AGPL-3.0-only`, stated explicitly (owner to confirm)
+### 2. `AGPL-3.0-only`, stated explicitly
 
 | Option | What it means | For | Against |
 |---|---|---|---|
@@ -78,9 +78,9 @@ So every distributed client is a combined work that contains AGPL code, whatever
 | AGPL-3.0-or-later | Recipients may choose any later FSF version (§14) | A future version can be adopted without chasing contributors. Our own later releases can still narrow to "only"; the reverse is impossible without consent | Delegates future terms to the FSF, and nobody knows what a v4 would say. We are not aware of any AGPLv4 work (U) |
 | AGPL-3.0-only plus a §14 proxy | The owner (or a later foundation) is named as the proxy who can accept future versions | Keeps the upgrade path inside the project without a CLA | There is no standard SPDX id, so it needs a `LicenseRef-` expression, which SBOM tools and license scanners handle poorly. KDE is reported to use this model (U) |
 
-**Recommendation: keep `AGPL-3.0-only`.** The flexibility "or later" buys is speculative. Control over the terms is concrete. If the owner wants a path to future versions without a CLA, use the §14 proxy instead of "or later".
+**Decided: `AGPL-3.0-only`** (owner decision 1); no §14 proxy is named. The flexibility "or later" buys is speculative. Control over the terms is concrete.
 
-Whichever option is picked:
+Where it is stated:
 
 - `LICENSE` stays the verbatim text, so license detectors keep working.
 - The README gets a "License" section that states the version choice in words, names any additional permission (Decision 3), and says "Copyright the rizzy-vault contributors; see the git history".
@@ -95,7 +95,7 @@ Whichever option is picked:
 - **Wording.** The text is drafted and reviewed by a lawyer before it is committed. This ADR is not legal advice.
 - **SPDX.** The exact SPDX expression for a custom addition is to be confirmed (U). Our crates are `publish = false` and excluded from cargo-deny's license check, so this affects only SBOM and scanning tools.
 
-### 4. Contribution terms: DCO recommended, CLA if dual licensing is wanted (owner decides)
+### 4. Contribution terms: DCO 1.1
 
 | | DCO 1.1 (`Signed-off-by`) | CLA: a license grant with relicensing rights, not an assignment | Copyright assignment |
 |---|---|---|---|
@@ -107,19 +107,18 @@ Whichever option is picked:
 | Trust signal | Strong: the owner cannot take the code proprietary | Weaker. Companies have used CLA rights to move to non-open licenses (e.g. HashiCorp, 2023; U) | Weakest |
 | Tooling | A CI check that every commit has a `Signed-off-by` line | A CLA bot and a signature record | Legal process |
 
-**Recommendation: DCO, plus the Decision 3 permission, plus an all-AGPL M10.**
+**Decided: DCO 1.1, plus the Decision 3 permission, plus an all-AGPL M10** (owner decisions 2–4).
 
 - For a zero-knowledge password manager, being verifiably unable to close the code is part of what we sell.
 - The one concrete distribution need, the App Store, is solved by Decision 3.
 - ROADMAP scopes M10 as features of the same product, not a separate proprietary edition.
 
-**When to pick a CLA instead:** if the owner wants to keep the option to sell community-contributed code under non-AGPL terms (dual licensing or an open-core business edition). In that case, pick the CLA now, as a license grant with a written promise that the code stays available under the AGPL. A CLA cannot be imposed retroactively. It covers earlier contributions only from contributors who sign it; the rest are rewritten.
+**No CLA.** A CLA was needed only to keep the option to sell community-contributed code under non-AGPL terms (dual licensing or an open-core business edition); owner decision 4 rules that out. A CLA cannot be imposed retroactively: one adopted later covers earlier contributions only from contributors who sign it, and the rest are rewritten.
 
-**Until this ADR is Accepted:**
+**Sign-off:**
 
 - Contributors add `Signed-off-by` to every commit ([CONTRIBUTING.md](../../CONTRIBUTING.md)).
-- If the owner picks a CLA, contributors whose code was merged before that are asked to sign it, or their code is rewritten.
-- A CI check for sign-offs is a separate change that lands with acceptance; M0 does not change CI. The check covers the PR's commits and also verifies that the squash commit on `main` keeps the trailers.
+- A CI check for sign-offs is a separate change, not made yet. It covers the PR's commits and also verifies that the squash commit on `main` keeps the trailers.
 - Only a human signs off. AI coding agents never add `Signed-off-by`; the human who opens the PR adds it after review ([CLAUDE.md](../../CLAUDE.md)).
 
 **Keeping the DCO record in `main` (owner action, repository settings).** The DCO record is the `Signed-off-by:` trailers, and authorship is the `Co-authored-by:` trailers. A squash merge keeps them only if the squash commit message includes the commit messages.
@@ -145,17 +144,16 @@ Whichever option is picked:
   | Unicode-3.0 | Unicode data crates |
   | MPL-2.0 | e.g. `uniffi`, `webauthn-rs`. File-level copyleft, compatible via MPL §3.3. `MPL-2.0-no-copyleft-exception` is **not** allowed |
   | CDLA-Permissive-2.0 | Data licenses, such as bundled root-certificate lists (U: which crate uses it) |
-  | AGPL-3.0-only, AGPL-3.0-or-later | Affects third-party crates only: our own crates are skipped by `[licenses.private] ignore = true`. The only effect of these two entries is to let third-party AGPL crates pass CI. See open question 6 |
 
 - Other `[licenses]` settings in `deny.toml`:
   - `confidence-threshold = 0.93`
-  - `exceptions = []`
+  - `exceptions`: NCSA for `libfuzzer-sys` alone, which only `fuzz/` reaches and which never ships (owner decision, 2026-09-26, recorded in `deny.toml`)
   - `unused-allowed-license = "allow"`
   - `[licenses.private] ignore = true`
 - **Not allowed, and why:**
   - GPL-2.0-only: incompatible with (A)GPLv3.
   - GPL-3.0 and LGPL (any version): third-party copyleft is not covered by the Decision 3 permission or by a CLA. Only the holder of that code can grant either, so one such crate in a client build blocks App Store distribution (M7) and any later relicensing. License compatibility is not the reason: GPL-3.0 combines with AGPL through §13, and shipping complete Corresponding Source already meets LGPL's relinking requirement. Adding either takes an amendment and a per-crate `exceptions` entry.
-  - Third-party AGPL: same reason. `deny.toml` currently lets it through (see the table and open question 6).
+  - Third-party AGPL: same reason. `AGPL-3.0-only` and `AGPL-3.0-or-later` are off `allow` (owner decision 6). Our own crates never needed them: `[licenses.private] ignore = true` skips them.
   - SSPL, BUSL and Commons Clause: not open source.
   - Crates with no license at all.
 - **Changing the list** is an amendment to this ADR (ADR 0001 point 4). The PR states the crate that needs the license and why. A per-crate `exceptions` entry is preferred over widening `allow`. `deny.toml`'s own header rule applies too: "Changing this file is a security decision: it needs a reason in the PR description."
@@ -199,6 +197,19 @@ Whichever option is picked:
   - An operator who runs a modified server must point that URL at their modified source. The operator docs say so in one sentence.
 - **Not an SBOM.** The notices file is not the SBOM. The SBOM (SPDX or CycloneDX) is an M8 Should (ROADMAP §4.9).
 
+### Owner decisions (2026-09-27)
+
+The owner accepted this ADR on 2026-09-27 and answered open questions 1–6 as recommended. The numbers are kept, and the question text is at commit 4a81b6e.
+
+1. **"Only", "or later", or a proxy** → `AGPL-3.0-only`, the first row of the §2 table; no §14 proxy is named.
+2. **DCO or CLA** → DCO 1.1 (§4).
+3. **The §7 App Store permission** → adopted. It is drafted with a lawyer and committed before the first external code contribution is merged (§3).
+4. **M10 intent** → no: community-contributed code is never sold under non-AGPL terms. M10 stays all-AGPL; support and hosting may be sold, not licenses.
+5. **Legal review budget** → one paid review of the README license notice, the §7 permission text and the DCO terms, before any App Store submission (M7) and preferably before the first external code contribution.
+6. **The AGPL entries in `deny.toml` `allow`** → both removed, in the change that records these decisions (§5). A third-party copyleft crate (GPL, LGPL, AGPL) is admitted only through a per-crate `exceptions` entry added by an amendment, and only if it is never reachable from an app-store client build. cargo-deny checks the whole graph and cannot tell server-only crates from client crates, so review checks reachability.
+
+Not done yet: the §3 permission text (decisions 3 and 5) and the §4 sign-off check in CI. Until the permission is committed, only documentation PRs from outside contributors are merged (§3, "Timing").
+
 ## Consequences
 
 ### Positive
@@ -218,9 +229,9 @@ Whichever option is picked:
 
 ### Risks
 
-- **Waiting has a cost.** If the owner has not decided by the first external PR, the choice narrows. A contribution merged under DCO without the App Store permission can block App Store distribution until its author consents or the code is rewritten. **Mitigation:** do not merge external code PRs until this ADR is Accepted. Documentation PRs are fine.
+- **Waiting has a cost.** If the owner has not decided by the first external PR, the choice narrows. A contribution merged under DCO without the App Store permission can block App Store distribution until its author consents or the code is rewritten. **Mitigation:** do not merge external code PRs until this ADR is Accepted and the Decision 3 permission is committed. Documentation PRs are fine.
 - **The permission may not settle it.** A court or Apple might not treat the §7 permission as resolving the conflict (U). The fallback is that only the owner submits the iOS app, and the permission gives the owner the rights for every contributed file.
-- **Copyleft leaking in.** An MPL-2.0 dependency with file-level copyleft, or a JS package with a mislabelled license, could slip through. cargo-deny checks declared metadata, not file contents. Worse, today's `allow` list admits third-party AGPL crates outright: one reachable from `rizzy-core` or any client blocks M7 App Store distribution, and CI stays green (open question 6). Review of new dependencies ([ADR 0009](0009-crypto-dependency-policy.md), [CONTRIBUTING.md](../../CONTRIBUTING.md)) is the backstop.
+- **Copyleft leaking in.** An MPL-2.0 dependency with file-level copyleft, or a JS package with a mislabelled license, could slip through. cargo-deny checks declared metadata, not file contents, and it cannot tell whether a crate admitted by an `exceptions` entry is reachable from an app-store client build (owner decision 6). Review of new dependencies ([ADR 0009](0009-crypto-dependency-policy.md), [CONTRIBUTING.md](../../CONTRIBUTING.md)) is the backstop.
 
 ## Alternatives considered
 
@@ -235,12 +246,10 @@ Whichever option is picked:
 
 ## Open questions for the owner
 
-1. **"Only", "or later", or a proxy?** *Recommendation:* keep `AGPL-3.0-only`. Use the §14 proxy only if you want a path to a future version without a CLA.
-2. **DCO or CLA?** This depends on question 4. *Recommendation:* DCO 1.1.
-3. **Adopt the §7 App Store permission?** *Recommendation:* yes, drafted with a lawyer, committed before the first external code contribution is merged. If you pick a CLA, it becomes optional but still helps forks and packagers.
-4. **M10 intent.** Will community-contributed code ever be sold under non-AGPL terms (dual license or open core)? Answer yes or no now. "Yes" means a CLA. "No" means DCO. *Recommendation:* no. Keep M10 all-AGPL. If needed, sell support and hosting, not licenses.
-5. **Legal review budget.** *Recommendation:* one paid review of the README license notice, the §7 permission text and the DCO/CLA text before any App Store submission (M7). It is better done before the first external code contribution, because that is when the terms become hard to change.
-6. **Remove `AGPL-3.0-only` and `AGPL-3.0-or-later` from `deny.toml` `allow`?** They do nothing for our own crates, which `[licenses.private] ignore = true` skips. Their only effect is to let third-party AGPL crates pass CI, and neither Decision 3 nor a CLA covers third-party code. *Recommendation:* yes, remove both in the PR that accepts this ADR. Admit a third-party copyleft crate (GPL, LGPL, AGPL) only through a per-crate `exceptions` entry, added by an amendment, and only if it is never reachable from an app-store client build. cargo-deny checks the whole graph and cannot tell server-only crates from client crates, so reachability is checked in review.
+None open: questions 1–6 are owner decisions 1–6 (2026-09-27), under the same numbers.
+
+- Answers: [Owner decisions (2026-09-27)](#owner-decisions-2026-09-27); applied in §2 (1), §3 (3), §4 (2 and 4), and §5 and `deny.toml` (6).
+- Not covered by these answers: the licensing items [ADR 0019](0019-native-clients.md) §15 lists for the native-client repositories.
 
 ## References
 
