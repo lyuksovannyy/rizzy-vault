@@ -1,6 +1,6 @@
 # ADR 0021: Server-side compaction with concurrent snapshots
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-26
 - Deciders: project owner
 - Milestone: M1 (server; Accepted before M1 step 3)

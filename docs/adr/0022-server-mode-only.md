@@ -1,6 +1,6 @@
 # ADR 0022: Server mode only: On-device sync parked
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-27
 - Deciders: project owner
 - Milestone: M1 (scope) / post-1.0 (parked)
