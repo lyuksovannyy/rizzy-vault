@@ -72,7 +72,7 @@ Symmetric encryption and the envelope are decided in [ADR 0005](adr/0005-symmetr
 | Topic | Where |
 |---|---|
 | Workspace layout, crate boundaries, dependency direction | [ADR 0016](adr/0016-workspace-layout.md) (Accepted), with the binding crates in [ADR 0019](adr/0019-native-clients.md) §1.4; enforced by `cargo xtask check-deps` and `cargo xtask check-clippy` ([`crates/xtask`](../crates/xtask/src/main.rs)) |
-| Licensing and contribution terms | [ADR 0017](adr/0017-licensing.md) (**Proposed**); [LICENSE](../LICENSE); license allow-list in [`deny.toml`](../deny.toml) |
+| Licensing and contribution terms | [ADR 0017](adr/0017-licensing.md) (Accepted); [LICENSE](../LICENSE); license allow-list in [`deny.toml`](../deny.toml) |
 | Third-party material in the repository | [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) |
 | How decisions are recorded | [ADR 0020](adr/0020-partial-supersession.md) (Accepted; carries [ADR 0001](adr/0001-record-architecture-decisions.md) forward and adds partial supersession); [adr/README.md](adr/README.md) (index, lifecycle, gates); [template](adr/0000-template.md) |
 | Scope and milestones | [ROADMAP.md](ROADMAP.md): [§3](ROADMAP.md#3-milestones) milestones, [§4](ROADMAP.md#4-moscow-by-area) MoSCoW, [§6](ROADMAP.md#6-risks--hard-truths) risks |

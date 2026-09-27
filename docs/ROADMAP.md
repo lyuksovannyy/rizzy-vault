@@ -32,7 +32,7 @@ Target users by phase: **Personal → Enthusiasts/Families → Small & medium bu
 | **M1** | Core vault (MVP) | Register/login, E2EE vault CRUD, sync, web vault, CLI, import/export, generator, TOTP. Author uses it daily. | Personal (dogfood) |
 | **M2** | Browser extension & URL matching | Autofill in Chromium + Firefox, save-on-submit, domain equivalence (youtube.com ≡ youtu.be), match modes. | Personal |
 | **M3** | 1Password-grade UX & desktop | Design system (shared tokens; React components for web), native desktop app for macOS (Windows and Linux: §4.5), quick-access search, Watchtower-style health report, tags/favorites. | Personal |
-| **M4** | *Removed* | Removed on 2026-09-27: On-device sync is parked as a post-1.0 idea (§4.6; ADR 0022, Proposed). The number is kept, so M5–M10 keep theirs. Its conflict UI and transparency page moved to M3, scheduled encrypted backups to M8. | — |
+| **M4** | *Removed* | Removed on 2026-09-27: On-device sync is parked as a post-1.0 idea (§4.6; ADR 0022). The number is kept, so M5–M10 keep theirs. Its conflict UI and transparency page moved to M3, scheduled encrypted backups to M8. | — |
 | **M5** | Public sharing | Share an item by link with fragment-held key, expiry, view limits, optional recipient verification. | Personal |
 | **M6** | Aliases & email receiving | Generate alias identities, receive-only mailbox in UI, ingress encryption, autofill integration. | Personal / enthusiasts |
 | **M7** | Mobile & passkeys | Native iOS (SwiftUI) and Android (Kotlin) apps in their own repositories, over the Rust core through UniFFI, with OS autofill, passkey (WebAuthn) storage and use. | Personal |

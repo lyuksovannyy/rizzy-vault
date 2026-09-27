@@ -1,7 +1,7 @@
 # ADR 0021: Server-side compaction with concurrent snapshots
 
 - Status: Accepted
-- Date: 2026-09-26
+- Date: 2026-09-27
 - Deciders: project owner
 - Milestone: M1 (server; Accepted before M1 step 3)
 - Supersedes: [ADR 0012](0012-sync-engine.md) (§6 in part, §7 in part), on acceptance and only once [ADR 0020](0020-partial-supersession.md) (Record architecture decisions, with partial supersession) is Accepted. §1 lists the parts.

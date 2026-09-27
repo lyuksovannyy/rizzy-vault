@@ -1,7 +1,7 @@
 # ADR 0009: Cryptographic dependency and memory-hygiene policy
 
-- Status: Accepted
-- Date: 2026-09-25
+- Status: Partially superseded by [ADR 0019](0019-native-clients.md) ("RNG rules" in part)
+- Date: 2026-09-27
 - Deciders: project owner
 - Milestone: M1 (applies from the first crypto dependency in `rizzy-core`)
 

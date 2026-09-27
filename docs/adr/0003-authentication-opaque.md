@@ -1,7 +1,7 @@
 # ADR 0003: Authentication: OPAQUE
 
-- Status: Accepted
-- Date: 2026-09-25
+- Status: Partially superseded by [ADR 0022](0022-server-mode-only.md) (point 10)
+- Date: 2026-09-27
 - Deciders: project owner
 - Milestone: M1
 

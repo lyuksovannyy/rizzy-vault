@@ -1,7 +1,7 @@
 # ADR 0017: Licensing and contribution terms
 
 - Status: Accepted
-- Date: 2026-09-25
+- Date: 2026-09-27
 - Deciders: project owner
 - Milestone: M0 (must be Accepted before the first external code contribution is merged)
 

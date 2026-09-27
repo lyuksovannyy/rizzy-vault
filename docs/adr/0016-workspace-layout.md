@@ -1,7 +1,7 @@
 # ADR 0016: Workspace layout and crate boundaries
 
-- Status: Accepted
-- Date: 2026-09-25
+- Status: Partially superseded by [ADR 0022](0022-server-mode-only.md) (§3 in part); [ADR 0019](0019-native-clients.md) (§3 in part, R2 in part, R5, R6, R7 in part, §5 in part, §7, Risks in part, Alternatives considered in part)
+- Date: 2026-09-27
 - Deciders: project owner
 - Milestone: M0 (rules and current crates) / M1–M9 (planned crates)
 

@@ -1,7 +1,7 @@
 # ADR 0019: Native desktop and mobile clients in separate repositories
 
 - Status: Accepted
-- Date: 2026-09-26
+- Date: 2026-09-27
 - Deciders: project owner
 - Milestone: M3 (desktop) / M7 (mobile)
 - Supersedes: [ADR 0015](0015-desktop-tauri.md) in full; [ADR 0013](0013-shared-client-core.md) (Milestone line, Context in part, §1 in part, §2 in part, §3 in part, §5, §6 in part, Negative in part, Risks in part); [ADR 0016](0016-workspace-layout.md) (§3 in part, R2 in part, R5, R6, R7 in part, §5 in part, §7, Risks in part, Alternatives considered in part); [ADR 0009](0009-crypto-dependency-policy.md) ("RNG rules" in part). §1 lists the parts, under [ADR 0020](0020-partial-supersession.md) point 9 (owner decision 6).

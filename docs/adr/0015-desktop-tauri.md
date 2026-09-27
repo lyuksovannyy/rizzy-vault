@@ -1,7 +1,7 @@
 # ADR 0015: Desktop shell: Tauri
 
-- Status: Accepted
-- Date: 2026-09-25
+- Status: Superseded by [ADR 0019](0019-native-clients.md)
+- Date: 2026-09-27
 - Deciders: project owner
 - Milestone: M3
 

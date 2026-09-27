@@ -1,7 +1,7 @@
 # ADR 0002: Own protocol, not Bitwarden-API compatible
 
-- Status: Accepted
-- Date: 2026-09-25
+- Status: Partially superseded by [ADR 0022](0022-server-mode-only.md) (point 3 in part)
+- Date: 2026-09-27
 - Deciders: project owner
 - Milestone: M1
 

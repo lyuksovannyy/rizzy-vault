@@ -1,7 +1,7 @@
 # ADR 0018: Item-record encoding: canonical binary layout and the M1 item schema
 
 - Status: Accepted
-- Date: 2026-09-25
+- Date: 2026-09-27
 - Deciders: project owner
 - Milestone: M1 (encoding, M1 item types) / M2, M3, M5, M7 (keys and type ids reserved here)
 - Supersedes: [ADR 0012](0012-sync-engine.md) in part (§1, §3, §4, §5, §6, §7, §12), on acceptance and once [ADR 0020](0020-partial-supersession.md) is Accepted. On acceptance item 1 names the parts.

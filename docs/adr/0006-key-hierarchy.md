@@ -1,7 +1,7 @@
 # ADR 0006: Key hierarchy, per-user keypairs and key wrapping
 
-- Status: Accepted
-- Date: 2026-09-25
+- Status: Partially superseded by [ADR 0022](0022-server-mode-only.md) (point 1 in part, point 11 in part, Risks in part)
+- Date: 2026-09-27
 - Deciders: project owner
 - Milestone: M1
 

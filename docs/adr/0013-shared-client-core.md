@@ -1,7 +1,7 @@
 # ADR 0013: Shared Rust client core (wasm + UniFFI)
 
-- Status: Accepted
-- Date: 2026-09-25
+- Status: Partially superseded by [ADR 0022](0022-server-mode-only.md) (§3 in part); [ADR 0019](0019-native-clients.md) (Milestone line, Context in part, §1 in part, §2 in part, §3 in part, §5, §6 in part, Negative in part, Risks in part)
+- Date: 2026-09-27
 - Deciders: project owner
 - Milestone: M1 (wasm for the web vault, native for the CLI) / M3 (Tauri) / M7 (UniFFI)
 
