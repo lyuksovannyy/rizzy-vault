@@ -560,6 +560,140 @@ fn adr0009_forbidden_features_fail_on_the_unified_graph() {
     );
 }
 
+// ---- ADR 0009: crypto crates declared with `default-features = false` ----------------------
+
+/// Turns default features back on in `from`'s `kind` entries for the package `name`.
+fn keep_defaults(t: &mut Tree, from: usize, name: &str, kind: Kind) {
+    for d in &mut t.g.packages[from].declared {
+        if d.name == name && d.kind == kind {
+            d.default_features = true;
+        }
+    }
+}
+
+/// [`with_crypto_crates`] plus crypto entries of every kind outside rizzy-core, all with
+/// default features off: rizzy-cli's `hpke`, xtask's dev-dependency on `sha2` 0.11 and its
+/// build-dependency on `sha2` 0.10 renamed `sha2_010`.
+fn with_crypto_entries_everywhere() -> Tree {
+    let mut t = with_crypto_crates();
+    let cli = t.id("rizzy-cli");
+    let xtask = t.id("xtask");
+    let hpke = t.external("hpke", "0.14.1");
+    let sha2 = t.external("sha2", "0.11.0");
+    let sha2_010 = t.external("sha2", "0.10.9");
+    t.edge(cli, hpke, &[Kind::Normal]);
+    t.edge(xtask, sha2, &[Kind::Dev]);
+    t.edge_named(xtask, sha2_010, &[Kind::Build], "sha2_010");
+    t.declare(cli, "hpke", Kind::Normal, &["alloc", "x25519", "chacha"]);
+    t.declare(xtask, "sha2", Kind::Dev, &["zeroize"]);
+    t.declare(xtask, "sha2", Kind::Build, &[]);
+    t.g.packages[xtask].declared.last_mut().unwrap().rename = Some("sha2_010".to_owned());
+    t
+}
+
+#[test]
+fn adr0009_crypto_crates_without_default_features_pass() {
+    assert_eq!(with_crypto_crates().run(), []);
+    assert_eq!(with_crypto_entries_everywhere().run(), []);
+    // The rule covers the ADR 0009 crypto crates only: other crates may keep their defaults.
+    let mut t = with_crypto_entries_everywhere();
+    let core = t.id("rizzy-core");
+    let xtask = t.id("xtask");
+    t.declare(xtask, "serde_json", Kind::Normal, &["std"]);
+    keep_defaults(&mut t, xtask, "serde_json", Kind::Normal);
+    keep_defaults(&mut t, core, "proptest", Kind::Dev);
+    assert_eq!(t.run(), []);
+}
+
+#[test]
+fn adr0009_blake2_and_poly1305_with_default_features_as_normal_dependencies() {
+    for name in ["blake2", "poly1305"] {
+        let mut t = with_crypto_crates();
+        let core = t.id("rizzy-core");
+        keep_defaults(&mut t, core, name, Kind::Normal);
+        let v = t.run();
+        assert_only(
+            &v,
+            "ADR 0009 required feature sets",
+            "rizzy-core",
+            &format!(
+                "declares the dependency `{name}` with default features on: `default-features` \
+                 is not `false`"
+            ),
+        );
+        assert_eq!(v.len(), 1, "{v:#?}");
+    }
+}
+
+#[test]
+fn adr0009_default_features_on_a_dev_dependency() {
+    // Tests that want the RNG-less hpke API would pull getrandom and mlkem into rizzy-core's
+    // test build, where the known-answer vectors run.
+    let mut t = with_crypto_crates();
+    let core = t.id("rizzy-core");
+    let hpke = t.external("hpke", "0.14.1");
+    t.edge(core, hpke, &[Kind::Dev]);
+    t.declare(core, "hpke", Kind::Dev, &[]);
+    keep_defaults(&mut t, core, "hpke", Kind::Dev);
+    assert_only(
+        &t.run(),
+        "ADR 0009 required feature sets",
+        "rizzy-core",
+        "declares the dev-dependency `hpke` with default features on",
+    );
+}
+
+#[test]
+fn adr0009_default_features_in_members_other_than_rizzy_core() {
+    let cases = [
+        ("rizzy-cli", "hpke", Kind::Normal, "dependency `hpke`"),
+        ("xtask", "sha2", Kind::Dev, "dev-dependency `sha2`"),
+        (
+            "xtask",
+            "sha2",
+            Kind::Build,
+            "build-dependency `sha2_010` (package `sha2`)",
+        ),
+    ];
+    for (member, name, kind, needle) in cases {
+        let mut t = with_crypto_entries_everywhere();
+        let from = t.id(member);
+        keep_defaults(&mut t, from, name, kind);
+        let v = t.run();
+        assert_only(&v, "ADR 0009 required feature sets", member, needle);
+        assert!(v.iter().all(|x| x.krate == member), "{v:#?}");
+    }
+}
+
+#[test]
+fn adr0009_default_feature_turned_on_by_name() {
+    // `default-features = false` in the entry, then `default` named in the entry itself or in
+    // the member's `[features]` table: the defaults are on all the same.
+    let mut t = with_crypto_crates();
+    let core = t.id("rizzy-core");
+    t.feature(core, "extras", &["poly1305?/default"]);
+    assert_only(
+        &t.run(),
+        "ADR 0009 required feature sets",
+        "rizzy-core",
+        "`poly1305` with default features on: the entry or the `[features]` table",
+    );
+
+    let mut t = with_crypto_entries_everywhere();
+    let cli = t.id("rizzy-cli");
+    for d in &mut t.g.packages[cli].declared {
+        if d.name == "hpke" {
+            d.features.push("default".to_owned());
+        }
+    }
+    assert_only(
+        &t.run(),
+        "ADR 0009 required feature sets",
+        "rizzy-cli",
+        "`hpke` with default features on",
+    );
+}
+
 // ---- R2: getrandom and wasm_js ------------------------------------------------------------
 
 #[test]

@@ -72,9 +72,9 @@ pub(crate) struct Declared {
     pub(crate) kind: Kind,
     /// The features the entry itself lists (not those turned on through `[features]`).
     pub(crate) features: Vec<String>,
-    /// Whether the entry keeps default features (`default-features` not set to `false`). Read,
-    /// but no check uses it today: the ADR 0009 rules catch a harmful default through its
-    /// resolved features ([`crate::rules::FEATURE_RULES`], the R1 getrandom rule).
+    /// Whether the entry keeps default features (`default-features` not set to `false`). The
+    /// ADR 0009 default-features check in `check.rs` requires `false` for every crate that
+    /// [`crate::rules::defaults_off`] names, in every member and every dependency kind.
     pub(crate) default_features: bool,
 }
 

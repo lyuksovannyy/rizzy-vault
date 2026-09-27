@@ -31,7 +31,9 @@
 //!   disallowed-methods lists (R1, API side).
 //! - **ADR 0009** `openssl` only under `rizzy-server` and `rizzy-domain-auth`; the required
 //!   feature sets of the crypto crates in `rizzy-core`'s closure, `zeroize` above all, turned on
-//!   by `rizzy-core`'s own dependency entries, and none of the forbidden ones anywhere.
+//!   by `rizzy-core`'s own dependency entries, and none of the forbidden ones anywhere; every
+//!   member declares those crypto crates, `blake2` and `poly1305` included, with
+//!   `default-features = false` in every dependency kind, and never turns `default` back on.
 //!
 //! R3, R5 and R6 cover dev-dependencies too. The rules table is in `rules.rs`.
 //!

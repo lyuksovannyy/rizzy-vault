@@ -18,7 +18,9 @@
 //! getrandom and feature checks use normal and build edges throughout, because tests may use
 //! dev-only helpers (ADR 0016 §4). R3, R6 and the openssl rule also follow the crate's own
 //! dev edges, then normal and build edges below them: a dependency's dev-dependencies are
-//! never built for its dependents, so they are not followed.
+//! never built for its dependents, so they are not followed. The checks on declarations (R1's
+//! direct `rand` and getrandom, R2, R5, the `openapi` feature, and ADR 0009's
+//! `default-features = false` on the crypto crates) read every member's entries of every kind.
 //!
 //! **What this does not check.** Whether a no-I/O crate calls an I/O API is the job of its
 //! `clippy.toml` lists under `cargo lint` (checked here only for their contents) and of
@@ -95,6 +97,7 @@ pub(crate) fn run(inputs: &Inputs) -> Vec<Violation> {
     }
     direct_dependencies(g, &mut out);
     crypto_features(g, &mut out);
+    crypto_default_features(g, &mut out);
     internal_edges(g, &mut out);
     isolated_ingress(g, &mut out);
     client_server_split(g, &mut out);
@@ -394,6 +397,56 @@ fn crypto_features(g: &Graph, out: &mut Vec<Violation>) {
                     dep.label(),
                     forbidden.join(", "),
                     unification_hint(krate, &dep.name)
+                ),
+            ));
+        }
+    }
+}
+
+/// The default-features check on the crates of ADR 0009 "Required feature sets"
+/// ([`rules::FEATURE_RULES`], [`rules::defaults_off`]). The ADR names those crates; the scope
+/// is this check's: every workspace member declares each of them with
+/// `default-features = false`, in every dependency kind, and never turns its `default` feature
+/// back on, whether in the entry or through its `[features]` table ([`declared_features`]).
+///
+/// Dev and build entries count too. ADR 0009 states the feature sets with no exception for a
+/// dependency kind, and cargo unifies a crate's dev-dependency features into its test builds,
+/// where the known-answer vectors run: `hpke` with defaults as a dev-dependency of `rizzy-core`
+/// would build those tests with getrandom and `mlkem`. This reads the members' declarations,
+/// not the resolved graph. A default that a third-party crate turns on is caught, where it
+/// matters, by the forbidden half of [`crypto_features`] and by the R1 getrandom rule.
+fn crypto_default_features(g: &Graph, out: &mut Vec<Violation>) {
+    for i in g.members() {
+        let Some(p) = g.package(i) else { continue };
+        for dep in &p.declared {
+            if !rules::defaults_off(&dep.name) {
+                continue;
+            }
+            let how = if dep.default_features {
+                "`default-features` is not `false`"
+            } else if declared_features(p, dep).contains(&"default") {
+                "the entry or the `[features]` table turns on its `default` feature"
+            } else {
+                continue;
+            };
+            let key = dep.key();
+            let package = if key == dep.name {
+                String::new()
+            } else {
+                format!(" (package `{}`)", dep.name)
+            };
+            out.push(violation(
+                "ADR 0009 required feature sets",
+                &p.name,
+                format!(
+                    "declares the {} `{key}`{package} with default features on: {how}. \
+                     `{}` is a crate of ADR 0009's required feature sets; this check requires \
+                     `default-features = false` on every declaration of those crates, by every \
+                     member and in every dependency kind. Use `{key}.workspace = true`, keep \
+                     `default-features = false` on its `[workspace.dependencies]` entry in the \
+                     root Cargo.toml, and do not name `{key}/default`.",
+                    dep.kind.section(),
+                    dep.name,
                 ),
             ));
         }

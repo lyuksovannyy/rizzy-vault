@@ -17,11 +17,13 @@
 //!   [`SQLX`] (R5), [`OPENSSL`].
 //! - The `rand` and getrandom rules: [`RAND`], [`RANDOMNESS_CRATES`],
 //!   [`GETRANDOM_WASM_FEATURES`].
-//! - ADR 0009's required and forbidden feature sets: [`FEATURE_RULES`].
+//! - ADR 0009's required and forbidden feature sets: [`FEATURE_RULES`]. The same list names the
+//!   crypto crates every member declares with `default-features = false` ([`defaults_off`]).
 //! - The R1 API-side clippy lists: [`NO_IO_CLIPPY_LISTS`].
 //!
 //! The unit tests restate the rights ADR 0016 and ADR 0009 assign (`rows_match_adr_0016`: the
-//! no-I/O crates, the getrandom leaves, `wasm_js`, sqlx, the one dev-only edge and openssl), so
+//! no-I/O crates, the getrandom leaves, `wasm_js`, sqlx, the one dev-only edge and openssl;
+//! `crypto_crates_match_adr_0009`: the crates of ADR 0009's required feature sets), so
 //! changing one of those in a row also means changing a test. Otherwise, internal edges are
 //! checked for well-formedness plus R4 and the R5 server-wired edges, and allow-list entries for
 //! well-formedness and against the forbidden and `rand` rules
@@ -400,6 +402,9 @@ pub(crate) const RAND: RandRule = RandRule {
 pub(crate) const RANDOMNESS_CRATES: &[&str] = &["rand", "getrandom"];
 
 /// ADR 0009 "Required feature sets" for one crypto crate in `rizzy-core`'s closure.
+///
+/// Every declaration of the crate, by any member and in any dependency kind, must also turn
+/// default features off ([`defaults_off`]).
 pub(crate) struct FeatureRule {
     /// `name@compat` of the resolved package ([`compat`]).
     pub(crate) package: &'static str,
@@ -412,6 +417,15 @@ pub(crate) struct FeatureRule {
     pub(crate) forbidden: &'static [&'static str],
 }
 
+impl FeatureRule {
+    /// The package name: [`FeatureRule::package`] without its `@compat` suffix.
+    pub(crate) fn crate_name(&self) -> &'static str {
+        self.package
+            .split_once('@')
+            .map_or(self.package, |(name, _)| name)
+    }
+}
+
 /// The crate whose dependency entries [`FeatureRule::required`] is checked against.
 pub(crate) const FEATURE_RULES_CRATE: &str = "rizzy-core";
 
@@ -419,7 +433,9 @@ pub(crate) const FEATURE_RULES_CRATE: &str = "rizzy-core";
 /// package is in `rizzy-core`'s normal and build closure. `blake2` and `poly1305` are never
 /// called; `rizzy-core` declares them only so that feature unification turns on their `zeroize`,
 /// which `argon2` and `chacha20poly1305` do not forward. Such a declaration looks unused, so
-/// this rule is what stops a cleanup from dropping it.
+/// this rule is what stops a cleanup from dropping it. `hkdf` 0.13 has no features, so its
+/// entry checks nothing here; it is listed because that section names it, which puts it under
+/// [`defaults_off`].
 pub(crate) const FEATURE_RULES: &[FeatureRule] = &[
     FeatureRule {
         package: "opaque-ke@4",
@@ -457,6 +473,11 @@ pub(crate) const FEATURE_RULES: &[FeatureRule] = &[
         forbidden: &[],
     },
     FeatureRule {
+        package: "hkdf@0.13",
+        required: &[],
+        forbidden: &[],
+    },
+    FeatureRule {
         package: "chacha20poly1305@0.11",
         required: &["alloc", "zeroize"],
         forbidden: &[],
@@ -472,6 +493,24 @@ pub(crate) const FEATURE_RULES: &[FeatureRule] = &[
         forbidden: &["legacy_compatibility", "hazmat"],
     },
 ];
+
+/// Whether every declaration of the package `name`, by every workspace member and in every
+/// dependency kind, must turn default features off (ADR 0009 "Required feature sets"): true for
+/// the crates of [`FEATURE_RULES`], `blake2` and `poly1305` included.
+///
+/// ADR 0009 writes `default-features = false` for `opaque-ke`, `hpke`, `argon2`,
+/// `chacha20poly1305`, `ed25519-dalek`, `blake2` and `poly1305`. For `sha2`, `hmac`, `sha1` and
+/// `hkdf` it gives the feature set alone (`["zeroize"]`, or none for `hkdf`); the workspace
+/// declares them with defaults off too (root `Cargo.toml`), so they are held to the same rule.
+/// With the pinned versions, the defaults of `hpke`, `argon2` and `chacha20poly1305` turn on
+/// their `getrandom` feature, `hpke`'s also `mlkem` and `argon2`'s also the forbidden `alloc`;
+/// `opaque-ke`'s add `serde`, `blake2`'s `alloc`, and `sha2`'s and `sha1`'s `alloc` and `oid`
+/// (crate manifests). The match is by package name, so every version counts: `sha2` also
+/// covers the 0.10 copy OPAQUE uses, whose ADR 0009 row says `default-features = false` too,
+/// and a new version is covered before anyone updates its row.
+pub(crate) fn defaults_off(name: &str) -> bool {
+    FEATURE_RULES.iter().any(|r| r.crate_name() == name)
+}
 
 /// R3: `rizzy-smtp-ingress` and `rizzy-icon-proxy` reach none of these, over normal, build and
 /// dev dependencies. `rizzy-icon-proxy` also does not reach `rizzy-core` (it handles no keys).
@@ -744,6 +783,43 @@ mod tests {
             ["rizzy-server", "rizzy-domain-auth"].into(),
             "ADR 0009 owner decision 1"
         );
+    }
+
+    /// ADR 0009 "Required feature sets" and its 2026-09-26 amendment, restated: these are the
+    /// crates every member declares with default features off. A change to the list must
+    /// change this test.
+    #[test]
+    fn crypto_crates_match_adr_0009() {
+        let names: HashSet<&str> = FEATURE_RULES.iter().map(FeatureRule::crate_name).collect();
+        let expected: HashSet<&str> = [
+            "opaque-ke",
+            "hpke",
+            "argon2",
+            "blake2",
+            "sha2",
+            "hmac",
+            "sha1",
+            "hkdf",
+            "chacha20poly1305",
+            "poly1305",
+            "ed25519-dalek",
+        ]
+        .into();
+        assert_eq!(names, expected);
+        for name in expected {
+            assert!(defaults_off(name), "{name}");
+        }
+        // Not crypto crates of that section, or not crates at all.
+        for name in [
+            "serde_json",
+            "proptest",
+            "sha",
+            "sha2_010",
+            "blake2@0.11",
+            "",
+        ] {
+            assert!(!defaults_off(name), "{name}");
+        }
     }
 
     #[test]
