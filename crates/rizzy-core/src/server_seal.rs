@@ -40,6 +40,13 @@
 //! - **Cheap offline guessing on a stolen backup.** Each guess at the operator passphrase costs
 //!   one Argon2id run at the `kdf_id` cost, behind a random salt. A new backup's passphrase is
 //!   checked like a new export password: not empty, no unassigned code point (§2).
+//! - **A hostile backup header.** [`BackupHeader::from_fields`] reads the backup file's clear
+//!   fields like the export file's: `kdf_id` must be on the allow-list (§11.14 "Import"), and a
+//!   salt or id that is not exactly 22 characters is refused before it is decoded
+//!   (§11.14 "Field sizes"), so no field costs work in proportion to its length.
+//!   [`ServerSecretsBackupKey::open`] takes the envelope as bytes; the caller that decodes the
+//!   file's `data` text must refuse text over [`crate::export::MAX_DATA_FIELD_LEN`] first, since
+//!   the backup envelope has the export envelope's 16 MiB limit.
 //!
 //! What it does not do:
 //! - Anyone who holds the secrets file and the database can open everything here. This is not
@@ -293,12 +300,13 @@ impl BackupHeader {
     }
 
     /// Builds a header from its stored fields: `kdf_id` must be on the allow-list, and the salt
-    /// and id are base64url of 16 bytes.
+    /// and id are base64url of 16 bytes, exactly 22 characters each.
     ///
-    /// The fields are untrusted (they come from a backup file). A `kdf_id` too large for a
-    /// `u16` is reported as [`KdfError::NotAllowed`] with `kdf_id = u16::MAX`. The file only
-    /// names a `kdf_id`; the Argon2id parameters are the compiled ones for an allow-listed id
-    /// (CRYPTO.md §1 rule 5).
+    /// The fields are untrusted (they come from a backup file). A salt or id of any other length
+    /// is refused before it is decoded, like the export file's
+    /// (CRYPTO.md §11.14 "Field sizes"). A `kdf_id` too large for a `u16` is reported as
+    /// [`KdfError::NotAllowed`] with `kdf_id = u16::MAX`. The file only names a `kdf_id`; the
+    /// Argon2id parameters are the compiled ones for an allow-listed id (CRYPTO.md §1 rule 5).
     ///
     /// # Errors
     /// [`ExportError::Kdf`] or [`ExportError::InvalidField`].
@@ -717,6 +725,39 @@ mod tests {
         assert_eq!(parsed.kdf_id, KdfId::DEFAULT);
         assert!(BackupHeader::from_fields(2, "", "", 5).is_err());
         assert!(!format!("{key:?}").contains("operator"));
+    }
+
+    /// CRYPTO.md §11.14 "Field sizes", which the backup file follows (§5.11): a salt or id of
+    /// 22 characters parses, and one of any other length is refused, however long.
+    #[test]
+    fn backup_header_fields_are_length_checked() {
+        use crate::encoding::b64url_encode;
+
+        let salt = b64url_encode(&[0xff; 16]);
+        let id = b64url_encode(&[0x66; 16]);
+        assert_eq!((salt.len(), id.len()), (22, 22));
+        let h = BackupHeader::from_fields(1, &salt, &id, 5).unwrap();
+        assert_eq!(h.backup_salt, [0xff; 16]);
+        assert_eq!(h.backup_id, BackupId::from_bytes([0x66; 16]));
+
+        for bad in [
+            String::new(),
+            salt[1..].to_owned(),
+            format!("{salt}A"),
+            format!("{salt}AA"),
+            "A".repeat(1 << 20),
+        ] {
+            assert_eq!(
+                BackupHeader::from_fields(1, &bad, &id, 5),
+                Err(ExportError::InvalidField),
+                "salt {bad:.30}"
+            );
+            assert_eq!(
+                BackupHeader::from_fields(1, &salt, &bad, 5),
+                Err(ExportError::InvalidField),
+                "id {bad:.30}"
+            );
+        }
     }
 
     #[test]

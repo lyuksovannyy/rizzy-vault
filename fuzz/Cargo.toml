@@ -19,10 +19,13 @@
 #   padding_unframe    Padmé frame parser (§8.5)
 #   otpauth_uri        otpauth URI and Base32 secret parsers (§11.15)
 #   opaque_server      server-side OPAQUE messages and stored state (§5)
+#   export_fields      export-file header and `data` field decoders, and the server-secrets
+#                      backup header (§11.14, §5.11); the Argon2id key is derived once per process
 #   normalize          login-name and server-origin normalisers (§2); not in the §15 list
 #
-# Not covered yet: the share-URL fragment parser (M5, not written) and the export-file parser
-# (§11.14: its JSON reader is not written, and `ExportHeader::from_json_fields` has no target).
+# Not covered yet: the share-URL fragment parser (M5, not written) and the export file's JSON
+# document reader (§11.14, not written). `export_fields` covers the field decoders it will call;
+# the reader gets its own target when it is written.
 [package]
 name = "rizzy-fuzz"
 version = "0.0.0"
@@ -89,6 +92,13 @@ bench = false
 [[bin]]
 name = "opaque_server"
 path = "fuzz_targets/opaque_server.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "export_fields"
+path = "fuzz_targets/export_fields.rs"
 test = false
 doc = false
 bench = false

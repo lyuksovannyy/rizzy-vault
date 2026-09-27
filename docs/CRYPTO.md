@@ -1271,6 +1271,7 @@ So a new device can recover with the backup file plus either (password + SK) or 
 - **File.** JSON: `{"format":"rizzy-vault-export","version":1,"kdf_id":1,"export_salt":…,"export_id":…,"created_at":…,"data":"<b64url Envelope(file_key, EXPORT_FILE, …)>"}`.
 - **`created_at`** is a JSON integer, milliseconds since the Unix epoch, and is the `created_at_ms` of the ctx.
 - **Import.** The importer rejects any `kdf_id` not on its allow-list.
+- **Field sizes.** The importer checks each field's length before decoding it, so a hostile file cannot make it allocate or decode in proportion to a length the file chooses. `export_salt` and `export_id` MUST be exactly 22 characters, the base64url of 16 bytes ([§9.6](#96-encoding-for-transport-and-storage)). `data` MUST be at most 22 369 742 characters, the base64url length of the longest `EXPORT_FILE` envelope: 16 MiB of plaintext plus the 90-byte overhead ([§9.1](#91-symmetric-envelope-algorithm-0x01); `EXPORT_FILE` is not framed). Every file a writer can produce fits, and a longer `data` could only fail later, as malformed base64url or as an over-long envelope. The server-secrets backup file follows the same rules ([§5.11](#511-server-side-encryption-not-zero-knowledge)).
 - **Plaintext export** (JSON or CSV) exists, behind the "scary warning" from ROADMAP §4.2.
 
 ### 11.15 TOTP (M1)
@@ -1469,7 +1470,7 @@ All of this lands with the code in M1. None of it is optional.
    - SK and recovery-code parsers
    - share-URL fragment parser
    - Padmé frame parser
-   - export-file parser
+   - export-file parser ([§11.14](#1114-encrypted-export-m1)): the JSON document reader, the header and `data` field decoders it calls, and the server-secrets backup header, which shares the header decoder ([§5.11](#511-server-side-encryption-not-zero-knowledge))
    - otpauth URI parser ([§11.15](#1115-totp-m1))
    - the OPAQUE message deserialisers on the server side ([§5](#5-opaque-integration)): the registration request, the registration upload, KE1 and KE3, which arrive in unauthenticated API bodies, and the stored password file and `ServerLogin` state as defence in depth
 

@@ -38,6 +38,11 @@
 //! the version and the `kdf_id` allow-list), [`ExportFileKey::derive`] with the password, then
 //! [`ExportFileKey::open_data_field`].
 //!
+//! Every field is length-checked before it is decoded (§11.14 "Field sizes"): `export_salt`
+//! and `export_id` must be exactly 22 characters, the base64url of 16 bytes, and `data` at most
+//! [`MAX_DATA_FIELD_LEN`] characters, the base64url of the longest envelope the writer can
+//! produce.
+//!
 //! # Attacker model
 //!
 //! What this defends against:
@@ -51,6 +56,10 @@
 //!   context binds every header field.
 //! - **Partitioning-oracle attacks** on the password-derived key: the envelope is key-committing
 //!   (§8.3), so one crafted file cannot test many password guesses at once.
+//! - **Oversized fields.** The length checks above run before the base64url decoder, so a
+//!   hostile file cannot make the reader allocate or decode in proportion to a length it
+//!   chooses: a salt or id costs at most 16 bytes, and `data` at most the 16 MiB + 90 bytes of
+//!   the longest envelope (§9.1).
 //!
 //! What it does not do:
 //! - **Hide the size.** `EXPORT_FILE` is not padded, so the file reveals the exact length of
@@ -65,10 +74,11 @@ use core::fmt;
 use rand_core::CryptoRng;
 use zeroize::Zeroizing;
 
-use crate::encoding::{b64url_decode_into, b64url_encode};
+use crate::encoding::{b64url_decode, b64url_decode_into, b64url_encode};
+use crate::envelope::parse::MAX_SYMMETRIC_ENVELOPE_LEN;
 use crate::envelope::purpose::ExportFileCtx;
 use crate::envelope::{open, seal};
-use crate::error::{DecryptError, EncryptError, KdfError};
+use crate::error::{DecryptError, EncryptError, KdfError, ParseError};
 use crate::ids::{ExportId, ID_LEN};
 use crate::kdf::{self, KdfId};
 use crate::labels::{self, Label};
@@ -83,13 +93,43 @@ pub const VERSION: u64 = 1;
 /// Length of `export_salt`.
 pub const SALT_LEN: usize = kdf::SALT_LEN;
 
+/// Longest accepted JSON `data` value: 22 369 742 characters (bytes; base64url is ASCII), the
+/// base64url length without padding of the longest `EXPORT_FILE` envelope (CRYPTO.md §11.14
+/// "Field sizes").
+///
+/// `EXPORT_FILE` is an unpadded symmetric purpose, so its envelope is the plaintext plus the
+/// 90-byte overhead, and the plaintext is at most 16 MiB (§9.1). That longest envelope,
+/// [`MAX_SYMMETRIC_ENVELOPE_LEN`] bytes, is both the longest [`ExportFileKey::seal`] produces
+/// (so [`ExportFileKey::seal_data_field`] never returns more than this many characters) and the
+/// longest the envelope parser accepts. So the bound refuses no file the writer makes, and any
+/// text over it would fail later anyway, as malformed base64url or as an over-long envelope.
+/// What it changes is when: [`ExportFileKey::open_data_field`] checks it before the base64url
+/// decoder allocates or reads anything.
+///
+/// The server-secrets backup file has the same shape (§5.11), and its `SERVER_SECRETS_BACKUP`
+/// envelope the same limit, so this bound fits its `data` field too.
+pub const MAX_DATA_FIELD_LEN: usize = b64url_len(MAX_SYMMETRIC_ENVELOPE_LEN);
+
+/// Length of a 16-byte field (`export_salt`, `export_id`, and the backup's salt and id) in the
+/// JSON: base64url without padding of 16 bytes is exactly 22 characters. Any other length is
+/// refused before decoding.
+const FIELD_16_TEXT_LEN: usize = b64url_len(ID_LEN);
+
+/// Length of the base64url encoding without padding of `n` bytes: `ceil(4n / 3)` (RFC 4648 §5,
+/// padding dropped).
+///
+/// Used only to compute constants, so an overflow would be a compile error, never a panic.
+const fn b64url_len(n: usize) -> usize {
+    (n * 4).div_ceil(3)
+}
+
 /// Why an export file's header or password was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ExportError {
     /// `format` is not [`FORMAT`] or `version` is not [`VERSION`].
     UnsupportedFormat,
-    /// `export_salt` or `export_id` is not base64url of exactly 16 bytes.
+    /// `export_salt` or `export_id` is not base64url of exactly 16 bytes (22 characters).
     InvalidField,
     /// The export password is empty.
     EmptyPassword,
@@ -133,6 +173,9 @@ pub struct ExportHeader {
 
 impl ExportHeader {
     /// Builds a header from the JSON fields of an export file.
+    ///
+    /// `export_salt` and `export_id` must be exactly 22 characters of strict base64url; a field
+    /// of any other length is refused before it is decoded.
     ///
     /// # Errors
     /// [`ExportError::UnsupportedFormat`] for another format or version,
@@ -186,13 +229,20 @@ impl ExportHeader {
 
 /// Decodes base64url without padding into exactly 16 bytes.
 ///
-/// Strict (see [`b64url_decode_into`]): padding, other alphabets and non-zero trailing bits
-/// are rejected, and the output buffer is fixed at 16 bytes whatever the input says. Shared
-/// with the server-secrets backup header.
+/// Text that is not exactly [`FIELD_16_TEXT_LEN`] (22) characters long is refused first, so
+/// the work never depends on an attacker-chosen length (§11.14 "Field sizes"). base64ct 1.8.3
+/// would also refuse longer text before decoding (its `decode` compares the decoded length with
+/// the 16-byte buffer first), but the bound here does not rely on that. Then strict (see
+/// [`b64url_decode_into`]): padding, other alphabets and non-zero trailing bits are rejected,
+/// and the output buffer is fixed at 16 bytes. Shared with the server-secrets backup header.
 ///
 /// # Errors
-/// [`ExportError::InvalidField`] for malformed text or a decoded length other than 16.
+/// [`ExportError::InvalidField`] for text of another length, malformed text or a decoded
+/// length other than 16.
 pub(crate) fn decode_16(text: &str) -> Result<[u8; ID_LEN], ExportError> {
+    if text.len() != FIELD_16_TEXT_LEN {
+        return Err(ExportError::InvalidField);
+    }
     let mut out = [0u8; ID_LEN];
     let decoded = b64url_decode_into(text, &mut out).map_err(|_| ExportError::InvalidField)?;
     if decoded.len() != ID_LEN {
@@ -343,7 +393,8 @@ impl ExportFileKey {
         open(&self.key, &self.header.ctx(), envelope)
     }
 
-    /// Seals the payload and returns the JSON `data` value: base64url without padding.
+    /// Seals the payload and returns the JSON `data` value: base64url without padding, at most
+    /// [`MAX_DATA_FIELD_LEN`] characters, so the reader accepts every value this returns.
     ///
     /// # Errors
     /// As [`ExportFileKey::seal`].
@@ -357,15 +408,30 @@ impl ExportFileKey {
 
     /// Opens the JSON `data` value.
     ///
-    /// The base64url is decoded strictly into a buffer sized from the text's length; the
-    /// envelope parser then applies the 16 MiB limit before any crypto.
+    /// Text longer than [`MAX_DATA_FIELD_LEN`] is refused before anything is decoded. Shorter
+    /// text is decoded strictly into a buffer sized from its length, so at most 16 MiB + 90
+    /// bytes, and the envelope parser then runs its §9.5 checks before any crypto.
     ///
     /// # Errors
-    /// [`DecryptError`], also for malformed base64url.
+    /// [`DecryptError`], also for text over [`MAX_DATA_FIELD_LEN`] and for malformed
+    /// base64url: on the decryption path every failure is the same error (§9.5).
     pub fn open_data_field(&self, data: &str) -> Result<SecretBytes, DecryptError> {
-        let envelope = crate::encoding::b64url_decode(data)?;
+        let envelope = decode_data_field(data)?;
         self.open(&envelope)
     }
+}
+
+/// Decodes a JSON `data` value into envelope bytes, refusing text over [`MAX_DATA_FIELD_LEN`]
+/// before the base64url decoder allocates or reads anything.
+///
+/// # Errors
+/// [`ParseError::TooLong`] over the bound, [`ParseError::InvalidEncoding`] for malformed
+/// base64url.
+fn decode_data_field(data: &str) -> Result<Vec<u8>, ParseError> {
+    if data.len() > MAX_DATA_FIELD_LEN {
+        return Err(ParseError::TooLong);
+    }
+    b64url_decode(data)
 }
 
 impl fmt::Debug for ExportFileKey {
@@ -517,6 +583,91 @@ mod tests {
                 Err(err)
             );
         }
+    }
+
+    /// §11.14 "Field sizes": a salt or id of any length but 22 is refused, however long, and so
+    /// is malformed text of exactly 22 bytes; the 22-character encoding of a 16-byte value is
+    /// accepted.
+    #[test]
+    fn header_fields_are_length_checked() {
+        assert_eq!(FIELD_16_TEXT_LEN, 22);
+        let salt = b64url_encode(&[0xff; 16]);
+        let id = b64url_encode(&[0x44; 16]);
+        assert_eq!(salt.len(), FIELD_16_TEXT_LEN);
+        assert_eq!(decode_16(&salt), Ok([0xff; 16]));
+
+        let one_mib = "A".repeat(1 << 20);
+        let too_long = [
+            format!("{salt}A"),
+            format!("{salt}AA"),
+            format!("{salt}AAAA"),
+            one_mib,
+        ];
+        let too_short = [String::new(), salt[1..].to_owned(), "AAAA".to_owned()];
+        // 22 bytes that are not canonical base64url: non-zero trailing bits, another alphabet,
+        // padding, and 11 two-byte characters.
+        let malformed = [
+            format!("{}B", &salt[..21]),
+            format!("{}+", &salt[..21]),
+            format!("{}==", &salt[..20]),
+            "é".repeat(11),
+        ];
+        for bad in too_long.iter().chain(&too_short).chain(&malformed) {
+            assert_eq!(decode_16(bad), Err(ExportError::InvalidField), "{bad:.30}");
+            assert_eq!(
+                ExportHeader::from_json_fields(FORMAT, VERSION, 1, bad, &id, 0),
+                Err(ExportError::InvalidField),
+                "salt {bad:.30}"
+            );
+            assert_eq!(
+                ExportHeader::from_json_fields(FORMAT, VERSION, 1, &salt, bad, 0),
+                Err(ExportError::InvalidField),
+                "id {bad:.30}"
+            );
+        }
+        for bad in &malformed {
+            assert_eq!(bad.len(), FIELD_16_TEXT_LEN, "{bad}");
+        }
+    }
+
+    /// §11.14 "Field sizes": the `data` bound is the base64url length of the longest envelope
+    /// the writer produces, text of that length gets through to the decoder, and one character
+    /// more is refused before decoding.
+    ///
+    /// A real 16 MiB export is not sealed and opened here: unoptimised XChaCha20-Poly1305 takes
+    /// about 5 s per 16 MiB pass in a test build (the envelope tests' note), and a round trip
+    /// needs two. The chain is checked in two steps instead: `the_16_mib_limit_is_enforced` in
+    /// the envelope tests seals a 16 MiB plaintext of an unpadded purpose, as `EXPORT_FILE` is,
+    /// into exactly [`MAX_SYMMETRIC_ENVELOPE_LEN`] bytes, and this test shows that such an
+    /// envelope encodes to exactly [`MAX_DATA_FIELD_LEN`] characters and passes the bound.
+    #[test]
+    fn data_field_bound() {
+        assert_eq!(MAX_SYMMETRIC_ENVELOPE_LEN, 16 * 1024 * 1024 + 90);
+        assert_eq!(MAX_DATA_FIELD_LEN, 22_369_742);
+        // `b64url_len` against the encoder, for every remainder mod 3.
+        for n in 0..=7 {
+            assert_eq!(b64url_len(n), b64url_encode(&vec![0; n]).len(), "{n}");
+        }
+
+        // The writer's longest `data` value is exactly at the bound and decodes.
+        let longest = b64url_encode(&vec![0; MAX_SYMMETRIC_ENVELOPE_LEN]);
+        assert_eq!(longest.len(), MAX_DATA_FIELD_LEN);
+        assert_eq!(
+            decode_data_field(&longest).map(|envelope| envelope.len()),
+            Ok(MAX_SYMMETRIC_ENVELOPE_LEN)
+        );
+        drop(longest);
+
+        // One character more is still well-formed base64url (the length is 3 mod 4), so the
+        // decoder alone would accept it; the bound refuses it first, with `TooLong` rather than
+        // the decoder's `InvalidEncoding`.
+        let over = "A".repeat(MAX_DATA_FIELD_LEN + 1);
+        assert_eq!(over.len() % 4, 3);
+        assert_eq!(decode_data_field(&over), Err(ParseError::TooLong));
+        assert_eq!(decode_data_field("!!"), Err(ParseError::InvalidEncoding));
+
+        let key = ExportFileKey::derive_new(&mut seeded_rng(3), "pw", 0, cheap()).unwrap();
+        assert_eq!(key.open_data_field(&over).map(|_| ()), Err(DecryptError));
     }
 
     #[test]
