@@ -59,11 +59,12 @@
 //! algorithm id ([`suite`]), and the key types carry their KEM. M1 has only X25519; X-Wing
 //! (`0x11`, `0x13`) adds a variant post-1.0.
 //!
-//! **Memory.** §9.2 names `single_shot_seal_with_rng` and `single_shot_open`. This module calls
-//! their in-place forms, `single_shot_seal_inout_detached_with_rng` and
-//! `single_shot_open_inout_detached`: the same setup and the same AEAD, so the bytes are
-//! identical (a test checks both directions against the named calls), but the plaintext is
-//! encrypted and decrypted inside one zeroizing buffer instead of an unwiped `Vec`. Limit:
+//! **Memory.** As §9.2 specifies, this module calls hpke's in-place forms,
+//! `single_shot_seal_inout_detached_with_rng` and `single_shot_open_inout_detached`, rather
+//! than `single_shot_seal_with_rng` and `single_shot_open`: the same setup and the same AEAD,
+//! so the bytes are identical (a test checks both directions against the allocating calls),
+//! but the plaintext is encrypted and decrypted inside one zeroizing buffer instead of an
+//! unwiped `Vec`. Limit:
 //! hpke's key schedule and its HKDF state are not wiped by us (CRYPTO.md §12.2); X25519 secret
 //! keys are (`x25519-dalek`'s `StaticSecret` is zeroize-on-drop in hpke's build).
 

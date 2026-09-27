@@ -263,8 +263,8 @@ fn device_grant_envelope_known_answer() {
     assert_eq!(opened.expose_secret(), &[0x22; 32]);
 }
 
-/// §9.2 names `single_shot_seal_with_rng` and `single_shot_open`; this module uses their
-/// in-place forms. Both directions give the same bytes.
+/// The in-place calls of §9.2 give the same bytes as `single_shot_seal_with_rng` and
+/// `single_shot_open`, in both directions.
 #[test]
 fn in_place_calls_match_the_calls_named_in_crypto_md() {
     let ours = seal_psk(

@@ -258,8 +258,8 @@ pub(crate) fn decode_16(text: &str) -> Result<[u8; ID_LEN], ExportError> {
 /// Nothing is derived from the password before stretching, so the key id that later goes in
 /// the envelope header (computed from the returned key) is no cheaper a guess verifier than
 /// the commitment (§4.4). `kdf_id` has already been checked against the allow-list by its
-/// type. Upstream copies that are not wiped (`argon2`'s tag locals, `hkdf`'s state, the `hmac`
-/// key block) are listed in CRYPTO.md §12.2.
+/// type. Upstream copies that are not wiped (`unicode-normalization`'s NFC buffers,
+/// `argon2`'s tag locals, `hkdf`'s state, the `hmac` key block) are listed in CRYPTO.md §12.2.
 ///
 /// # Errors
 /// [`KdfError`] if normalisation or Argon2id fails; [`KdfError::Internal`] if HKDF fails

@@ -272,9 +272,10 @@ impl fmt::Debug for ServerDataKey {
 /// `SERVER_SECRETS_BACKUP` context need. All public.
 ///
 /// The backup file follows the export file's shape (§5.11, §11.14): JSON with these fields in
-/// clear and the envelope base64url-encoded in `data`. CRYPTO.md does not name its `format`
-/// string, so none is defined here; the byte fields use base64url without padding like the
-/// export's.
+/// clear and the envelope base64url-encoded in `data`. This crate defines only these fields,
+/// the context and the key; CRYPTO.md §5.11 places the file's `format` string and its JSON
+/// writer and reader in `rizzy-server`, with the `rizzy-vault backup-secrets` command. The
+/// byte fields use base64url without padding like the export's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BackupHeader {
     /// The backup's random id; also the HKDF context of the backup key.

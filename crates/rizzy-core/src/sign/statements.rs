@@ -250,8 +250,8 @@ impl DeviceCertificate {
     /// within the certificate's validity: `hlc_ms ≤ expires_at_ms`, or no expiry (§10.2 rule
     /// (c) for kind 4).
     ///
-    /// The rule is written for kind 4. A durable certificate with an expiry is treated the same
-    /// way, which is the conservative reading.
+    /// The rule is written for kind 4. A durable certificate (kinds 1–3) may also carry an
+    /// expiry, and then the same rule applies to it (§10.2, owner decision of 2026-09-27).
     ///
     /// The rule reads the HLC the op header carries, not a local clock, so every replica
     /// reaches the same answer (§10.2; HLC layout in [ADR 0012] §2). Rules (a) and (b) of §10.2

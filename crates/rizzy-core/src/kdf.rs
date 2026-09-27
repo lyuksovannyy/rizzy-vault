@@ -362,7 +362,7 @@ fn new_block_memory(argon: &Argon2<'_>) -> Zeroizing<Vec<Block>> {
 ///
 /// The output buffer is allocated once at its exact final size and wiped on drop. Limit: the
 /// normalisation iterator of `unicode-normalization` buffers characters internally and does
-/// not wipe them, like the other upstream limits listed in CRYPTO.md §12.2.
+/// not wipe them (CRYPTO.md §12.2, Limits).
 ///
 /// # Errors
 /// [`KdfError::InvalidInput`] if the normalised length overflows `usize`.

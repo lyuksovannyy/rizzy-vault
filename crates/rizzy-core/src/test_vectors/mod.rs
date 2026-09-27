@@ -8,8 +8,8 @@
 //!   own API, and writes one JSON file per group. Random values an operation draws internally
 //!   (the 24-byte envelope nonce, HPKE's ephemeral key material) are drawn first and stored as
 //!   explicit inputs, then fed back through [`ExactRng`], which yields exactly those bytes and
-//!   fails the test if the operation asks for more or fewer. No function takes a nonce, in test
-//!   builds either (INV-12).
+//!   fails the test if the operation asks for more or fewer. No seal function takes a nonce or
+//!   `ikm_e` parameter, in test builds either (INV-12).
 //! - **Replay** (one test per file) reads the committed file, recomputes every vector's
 //!   outputs from its inputs with the same code, and compares them with the committed outputs.
 //!   Any change in behaviour fails here. The computation also runs the checks that tie an

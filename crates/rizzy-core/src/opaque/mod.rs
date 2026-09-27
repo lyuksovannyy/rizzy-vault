@@ -353,8 +353,8 @@ pub struct OpaqueContext {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum LoginHintError {
-    /// "The server asked for KDF settings this client does not allow" (§6.2): the `kdf_id` is
-    /// not on this client's allow-list.
+    /// The `kdf_id` is not on this client's allow-list (§6.2); the message is the inner
+    /// [`KdfError::NotAllowed`]'s.
     KdfNotAllowed(KdfError),
     /// "This is not the server's configured address" (§5.3): the server's canonical origin is
     /// not the origin the client dialled. Unauthenticated; it only drives the message, the

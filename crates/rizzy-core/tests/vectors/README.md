@@ -31,7 +31,7 @@ The field names inside `inputs` and `outputs` are the ones the replay code in `s
 The generator (`src/test_vectors/`) works like this:
 - It draws every input from `ChaCha20Rng::seed_from_u64(seed)` (`chacha20` =0.10.2, ADR 0009). The seed is in each file.
 - It computes the outputs through `rizzy-core`'s own API.
-- In the tier A files, random values an operation draws internally are drawn first and stored as inputs: the envelope `nonce`, and HPKE's ephemeral `ikm_e`. They are then fed back through a test RNG that yields exactly those bytes and fails if the operation draws more or fewer. No function takes a nonce, in test builds either (INV-12).
+- In the tier A files, random values an operation draws internally are drawn first and stored as inputs: the envelope `nonce`, and HPKE's ephemeral `ikm_e`. They are then fed back through a test RNG that yields exactly those bytes and fails if the operation draws more or fewer. No seal function takes a nonce or `ikm_e` parameter, in test builds either (INV-12).
 - `transcript.json` instead stores a second seed as an input. One `ChaCha20Rng` seeded from it drives the whole flow, opaque-ke included.
 
 The replay tests (`cargo test -p rizzy-core --lib test_vectors`) recompute every output from its inputs with the same code and compare byte for byte. The computation also checks each output against the specification:
