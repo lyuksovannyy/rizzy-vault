@@ -1,7 +1,7 @@
-//! Rule evaluation for `cargo xtask check-deps` (ADR 0016 §4, §5; ADR 0009).
+//! Rule evaluation for `cargo xtask check-deps` (ADR 0016 §4, §5; ADR 0009; ADR 0019 §4.1).
 //!
-//! Every check is a pure function of the resolved graphs and the manifests, so the unit tests
-//! run them on synthetic metadata.
+//! Every check is a pure function of the resolved graphs, the manifests and the first-party Rust
+//! sources, so the unit tests run them on synthetic inputs.
 //!
 //! **Which graph.** `cargo metadata --all-features` resolves the whole workspace at once, so
 //! each package's features are the union over every member and every dependency kind (dev
@@ -35,13 +35,14 @@ use std::fmt;
 use crate::manifest::{self, Manifest, TomlValue};
 use crate::metadata::{Declared, Graph, Kind, Package};
 use crate::rules::{self, CrateRule, Side, Sqlx};
+use crate::unsafe_scan;
 
 /// One broken rule.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Violation {
-    /// The rule, as ADR 0016 or ADR 0009 names it.
+    /// The rule, as ADR 0016, ADR 0009 or ADR 0019 names it.
     pub(crate) rule: &'static str,
-    /// The crate that breaks it.
+    /// The crate that breaks it, `workspace`, or for the `unsafe` token scan the file.
     pub(crate) krate: String,
     /// What is wrong and what to do.
     pub(crate) message: String,
@@ -73,6 +74,9 @@ pub(crate) struct Inputs {
     /// Every `.clippy.toml` at the workspace root or in a no-I/O crate's directory. Clippy reads
     /// it in preference to `clippy.toml`, so it would replace the checked file.
     pub(crate) hidden_clippy_configs: Vec<String>,
+    /// Every first-party `.rs` file, as (path relative to the workspace root, text), for the
+    /// `unsafe` token scan ([`unsafe_scan`]).
+    pub(crate) rust_sources: Vec<(String, String)>,
 }
 
 /// Normal and build dependencies: what ships in, or runs to build, a crate.
@@ -106,6 +110,7 @@ pub(crate) fn run(inputs: &Inputs) -> Vec<Violation> {
     workspace_files(inputs, &mut out);
     clippy_configs(inputs, &mut out);
     wasm_alias(g, &inputs.cargo_config, &mut out);
+    unsafe_tokens(&inputs.rust_sources, &mut out);
     out.sort();
     out.dedup();
     out
@@ -1165,6 +1170,35 @@ fn wasm_alias(g: &Graph, config: &Manifest, out: &mut Vec<Violation>) {
                  (`-p <crate>`)"
                     .to_owned(),
             ));
+        }
+    }
+}
+
+/// ADR 0019 §4.1: no `unsafe` keyword token in a first-party `.rs` file ([`unsafe_scan`]). Each
+/// token is one violation, located by file, line and column. A file the scan cannot read to its
+/// end fails closed.
+fn unsafe_tokens(sources: &[(String, String)], out: &mut Vec<Violation>) {
+    let rule = "ADR 0019 §4.1";
+    for (path, text) in sources {
+        match unsafe_scan::unsafe_tokens(text) {
+            Ok(found) => out.extend(found.into_iter().map(|at| {
+                violation(
+                    rule,
+                    path,
+                    format!(
+                        "line {}, column {}: the `unsafe` keyword in first-party source. Our \
+                         code gets no `unsafe` exception (ADR 0013 owner decision 1, ADR 0019 \
+                         owner decision 7), and `forbid(unsafe_code)` can miss `unsafe` in a \
+                         macro's input",
+                        at.line, at.column
+                    ),
+                )
+            })),
+            Err(e) => out.push(violation(
+                rule,
+                path,
+                format!("{e}; the rest of the file cannot be scanned, so it cannot pass"),
+            )),
         }
     }
 }

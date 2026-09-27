@@ -6,7 +6,8 @@
 //! ```
 //!
 //! `check-deps` enforces the crate-boundary rules of ADR 0016 (R1–R8) and the dependency rules
-//! of ADR 0009 on the resolved graph and the manifests:
+//! of ADR 0009 on the resolved graph and the manifests, as ADR 0022 and ADR 0019 partially
+//! supersede them, and runs the `unsafe` token scan of ADR 0019 §4.1 on the sources:
 //!
 //! - **R1** no-I/O crates (`rizzy-core`, `rizzy-sync`, and the planned `rizzy-proto`,
 //!   `rizzy-client`, `rizzy-import`, `rizzy-match`): only allow-listed external crates over
@@ -34,6 +35,9 @@
 //!   by `rizzy-core`'s own dependency entries, and none of the forbidden ones anywhere; every
 //!   member declares those crypto crates, `blake2` and `poly1305` included, with
 //!   `default-features = false` in every dependency kind, and never turns `default` back on.
+//! - **ADR 0019 §4.1** no `unsafe` keyword token in any first-party `.rs` file, comments and
+//!   literals excluded, including `unsafe` that `forbid(unsafe_code)` can miss in a macro's
+//!   input ([`mod@unsafe_scan`]).
 //!
 //! R3, R5 and R6 cover dev-dependencies too. The rules table is in `rules.rs`.
 //!
@@ -47,8 +51,10 @@
 //! 1. [`load`] gathers every input: `cargo metadata --all-features --locked` three times (all
 //!    targets, then filtered to `wasm32-unknown-unknown` and to the host triple from
 //!    `rustc -vV`), every member's `Cargo.toml`, the root `Cargo.toml`, `.cargo/config.toml`,
-//!    the root `clippy.toml`, each no-I/O crate's `clippy.toml`, and any `.clippy.toml` that
-//!    would shadow one of those.
+//!    the root `clippy.toml`, each no-I/O crate's `clippy.toml`, any `.clippy.toml` that
+//!    would shadow one of those, and every first-party `.rs` file that
+//!    `git ls-files --cached --others --exclude-standard` lists, so `check-deps` needs a git
+//!    checkout.
 //! 2. [`check::run`] evaluates every rule as a pure function of those inputs and returns the
 //!    sorted, de-duplicated violations. The rules themselves are data in [`rules`].
 //! 3. Each violation is printed as `error: [rule] crate: message`.
@@ -73,7 +79,9 @@ mod check;
 mod manifest;
 mod metadata;
 mod rules;
+mod unsafe_scan;
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -91,7 +99,8 @@ USAGE:
     cargo xtask <COMMAND>
 
 COMMANDS:
-    check-deps      Check the crate-boundary and dependency rules (ADR 0016 R1–R8, ADR 0009)
+    check-deps      Check the crate-boundary and dependency rules (ADR 0016 R1–R8, ADR 0009),
+                    and scan first-party .rs files for the `unsafe` keyword (ADR 0019 §4.1)
     check-clippy    Run clippy as `cargo lint` does; fail on any warning about a clippy.toml
                     entry, such as \"found a module\" (ADR 0016 §5, R1 API side)
 ";
@@ -141,9 +150,11 @@ fn check_deps() -> ExitCode {
     let violations = check::run(&inputs);
     if violations.is_empty() {
         let members = inputs.all_targets.members().count();
+        let sources = inputs.rust_sources.len();
         let _ = writeln!(
             io::stdout().lock(),
-            "check-deps: ok ({members} workspace crates; ADR 0016 R1–R8, ADR 0009)"
+            "check-deps: ok ({members} workspace crates, {sources} first-party .rs files; \
+             ADR 0016 R1–R8, ADR 0009, ADR 0019 §4.1)"
         );
         return ExitCode::SUCCESS;
     }
@@ -152,8 +163,9 @@ fn check_deps() -> ExitCode {
     }
     let _ = writeln!(
         err,
-        "check-deps: {} violation(s) of the crate-boundary rules (ADR 0016 §4, ADR 0009). \
-         The rules table is crates/xtask/src/rules.rs; changing it is a security review.",
+        "check-deps: {} violation(s) of the crate-boundary rules (ADR 0016 §4, ADR 0009) or \
+         the `unsafe` token scan (ADR 0019 §4.1). The rules table is crates/xtask/src/rules.rs; \
+         changing it is a security review.",
         violations.len()
     );
     ExitCode::FAILURE
@@ -235,12 +247,13 @@ fn workspace_root() -> PathBuf {
 /// the host; R1 forbids getrandom on any target. A `clippy.toml` is read only for members whose
 /// row is a no-I/O crate; a missing one is recorded as `None` and reported by the checks. A
 /// `.clippy.toml` is looked for at the workspace root and in each of those crates' directories,
-/// because clippy would read it instead of `clippy.toml`.
+/// because clippy would read it instead of `clippy.toml`. The first-party `.rs` files come from
+/// [`rust_sources`].
 ///
 /// # Errors
 ///
-/// Returns a message when a `cargo metadata` or `rustc` run fails, when its output cannot be
-/// read, or when a required file cannot be read. The root `clippy.toml` is optional.
+/// Returns a message when a `cargo metadata`, `rustc` or `git` run fails, when its output cannot
+/// be read, or when a required file cannot be read. The root `clippy.toml` is optional.
 fn load() -> Result<Inputs, String> {
     let root = workspace_root();
     let host = host_target(&root)?;
@@ -283,7 +296,43 @@ fn load() -> Result<Inputs, String> {
         all_targets,
         per_target,
         manifests,
+        rust_sources: rust_sources(&root)?,
     })
+}
+
+/// Every first-party `.rs` file under `root`, as (path relative to `root`, text), for the
+/// `unsafe` token scan of ADR 0019 §4.1 ([`mod@unsafe_scan`]).
+///
+/// The candidates are what `git ls-files --cached --others --exclude-standard` lists: tracked
+/// files, and untracked files that are not ignored, so a new file is scanned before it is
+/// committed and build output under `target/` is not. [`unsafe_scan::first_party`] keeps the
+/// `.rs` files outside [`rules::GENERATED_RUST`]. A tracked file deleted from the working tree
+/// is skipped: there is nothing left to compile.
+///
+/// # Errors
+///
+/// Returns a message when git fails (for example outside a git checkout), when it lists a path
+/// that is not UTF-8, or when a listed file cannot be read, including one that is not UTF-8.
+fn rust_sources(root: &Path) -> Result<Vec<(String, String)>, String> {
+    let listing = run(Command::new("git").current_dir(root).args([
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+    ]))?;
+    // A path is listed once per index stage during a merge conflict.
+    let paths: BTreeSet<&str> = listing
+        .split('\0')
+        .filter(|path| unsafe_scan::first_party(path, rules::GENERATED_RUST))
+        .collect();
+    let mut sources = Vec::new();
+    for path in paths {
+        if let Some(text) = read_optional(&root.join(path))? {
+            sources.push((path.to_owned(), text));
+        }
+    }
+    Ok(sources)
 }
 
 /// The file's contents.

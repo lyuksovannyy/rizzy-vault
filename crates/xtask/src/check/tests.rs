@@ -16,6 +16,7 @@ struct Tree {
     root_clippy: Manifest,
     clippy_configs: Vec<(String, Option<Manifest>)>,
     hidden_clippy_configs: Vec<String>,
+    rust_sources: Vec<(String, String)>,
 }
 
 const GOOD_MANIFEST: &str = "[package]\nname = \"x\"\nlicense.workspace = true\n\
@@ -47,7 +48,8 @@ fn good_clippy() -> String {
 
 impl Tree {
     /// The current workspace in miniature: rizzy-core with part of its real closure, rizzy-sync,
-    /// rizzy-server, rizzy-cli and xtask.
+    /// rizzy-server, rizzy-cli and xtask, and one first-party source with `unsafe` only in a
+    /// comment and a longer word.
     fn current() -> Self {
         let mut t = Self {
             g: Graph {
@@ -64,6 +66,10 @@ impl Tree {
             root_clippy: Manifest::parse(ROOT_CLIPPY),
             clippy_configs: Vec::new(),
             hidden_clippy_configs: Vec::new(),
+            rust_sources: vec![(
+                "crates/rizzy-core/src/lib.rs".to_owned(),
+                "//! No `unsafe` code.\n#![forbid(unsafe_code)]\n".to_owned(),
+            )],
         };
         let core = t.member("rizzy-core");
         let sync = t.member("rizzy-sync");
@@ -187,6 +193,7 @@ impl Tree {
             root_clippy: self.root_clippy.clone(),
             clippy_configs: self.clippy_configs.clone(),
             hidden_clippy_configs: self.hidden_clippy_configs.clone(),
+            rust_sources: self.rust_sources.clone(),
         })
     }
 }
@@ -1535,4 +1542,61 @@ fn clippy_output_with_config_warnings_fails() {
                  --> crates/rizzy-core/src/lib.rs:74:5\n\
                  note: see clippy.toml:3 for the list\n    Finished `dev` profile\n";
     assert_eq!(clippy_config_warnings(clean), Vec::<String>::new());
+}
+
+// ---- ADR 0019 §4.1: the first-party `unsafe` token scan ------------------------------------
+
+#[test]
+fn unsafe_token_in_first_party_source_fails() {
+    let mut t = Tree::current();
+    t.rust_sources.push((
+        "crates/rizzy-cli/src/ffi.rs".to_owned(),
+        "// no unsafe here\n#[unsafe(no_mangle)]\npub extern \"C\" fn f() {}\n".to_owned(),
+    ));
+    assert_only(
+        &t.run(),
+        "ADR 0019 §4.1",
+        "crates/rizzy-cli/src/ffi.rs",
+        "line 2, column 3: the `unsafe` keyword",
+    );
+
+    // In a macro's input, where `forbid(unsafe_code)` can miss it (ADR 0019, Context).
+    let mut t = Tree::current();
+    t.rust_sources.push((
+        "fuzz/fuzz_targets/x.rs".to_owned(),
+        "bridge! { unsafe extern \"C++\" { fn g(); } }\n".to_owned(),
+    ));
+    assert_only(
+        &t.run(),
+        "ADR 0019 §4.1",
+        "fuzz/fuzz_targets/x.rs",
+        "line 1, column 11",
+    );
+}
+
+#[test]
+fn unsafe_in_comments_strings_and_other_words_passes() {
+    let mut t = Tree::current();
+    t.rust_sources.push((
+        "crates/rizzy-core/src/x.rs".to_owned(),
+        "#![forbid(unsafe_code)]\n/// No `unsafe`.\nconst S: &str = r#\"unsafe {\"#;\n\
+         fn r#unsafe() {}\n"
+            .to_owned(),
+    ));
+    assert_eq!(t.run(), []);
+}
+
+#[test]
+fn unsafe_scan_fails_closed_on_an_unterminated_literal() {
+    let mut t = Tree::current();
+    t.rust_sources.push((
+        "crates/rizzy-sync/src/x.rs".to_owned(),
+        "const S: &str = \"\\\";\nunsafe fn f() {}\n".to_owned(),
+    ));
+    assert_only(
+        &t.run(),
+        "ADR 0019 §4.1",
+        "crates/rizzy-sync/src/x.rs",
+        "unterminated string literal at line 1, column 17; the rest of the file cannot be scanned",
+    );
 }

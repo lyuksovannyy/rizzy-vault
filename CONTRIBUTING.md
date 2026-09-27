@@ -38,7 +38,7 @@ cargo lint                          # alias: clippy --workspace --all-targets --
 cargo test --workspace --locked     # CI runs this on Linux, macOS and Windows
 cargo check-wasm                    # alias: check -p rizzy-core -p rizzy-sync --target wasm32-unknown-unknown --locked
 cargo deny check                    # advisories, licenses, bans, sources (deny.toml)
-cargo xtask check-deps              # crate-boundary and dependency rules (ADR 0016 §5, R1–R8; ADR 0009 feature sets, crypto crates with default-features = false)
+cargo xtask check-deps              # crate-boundary and dependency rules (ADR 0016 §5, R1–R8; ADR 0009 feature sets, crypto crates with default-features = false); no unsafe keyword in first-party .rs files (ADR 0019 §4.1)
 cargo xtask check-clippy            # clippy.toml entries clippy ignores ("found a module", ADR 0016 §5)
 cargo check --manifest-path fuzz/Cargo.toml --locked --bins               # fuzz targets still build
 cargo deny --manifest-path fuzz/Cargo.toml check                          # fuzz/Cargo.lock

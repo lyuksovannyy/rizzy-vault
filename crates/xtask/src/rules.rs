@@ -5,7 +5,8 @@
 //! start doing I/O, or an ingress crate would get a route to the database.
 //!
 //! Every crate of ADR 0016 §2 and §3 has a row, including the planned ones, so the checks apply
-//! the moment a crate is created; ADR 0022 removes the `rizzy-domain-relay` row of §3. A
+//! the moment a crate is created. ADR 0022 removes the `rizzy-domain-relay` row of §3. ADR 0019
+//! (§1.3, §1.4) withdraws `rizzy-desktop`, moves `rizzy-ffi` to M3 and adds `rizzy-ffi-cpp`. A
 //! workspace member without a row is itself a violation.
 //!
 //! What is here:
@@ -21,13 +22,15 @@
 //! - ADR 0009's required and forbidden feature sets: [`FEATURE_RULES`]. The same list names the
 //!   crypto crates every member declares with `default-features = false` ([`defaults_off`]).
 //! - The R1 API-side clippy lists: [`NO_IO_CLIPPY_LISTS`].
+//! - The generated Rust that ADR 0019 §4.1's `unsafe` token scan skips: [`GENERATED_RUST`].
 //!
-//! The unit tests restate the rights ADR 0016 and ADR 0009 assign (`rows_match_adr_0016`: the
-//! no-I/O crates, the getrandom leaves, `wasm_js`, sqlx, the one dev-only edge, openssl and the
-//! row ADR 0022 removes; `crypto_crates_match_adr_0009`: the crates of ADR 0009's required
-//! feature sets), so changing one of those in a row also means changing a test. Otherwise,
-//! internal edges are checked for well-formedness plus R4 and the R5 server-wired edges, and
-//! allow-list entries for well-formedness and against the forbidden and `rand` rules
+//! The unit tests restate the rights ADR 0016 and ADR 0009 assign, with ADR 0019 §1.4's
+//! replacing rows (`rows_match_adr_0016`: the no-I/O crates, the getrandom leaves, `wasm_js`,
+//! sqlx, the one dev-only edge, openssl and the rows ADR 0022 and ADR 0019 remove;
+//! `sides_match_adr_0016_r6`: the R6 sides; `crypto_crates_match_adr_0009`: the crates of ADR
+//! 0009's required feature sets), so changing one of those in a row also means changing a test.
+//! Otherwise, internal edges are checked for well-formedness plus R4 and the R5 server-wired
+//! edges, and allow-list entries for well-formedness and against the forbidden and `rand` rules
 //! (`rand_and_getrandom_are_never_allow_listed_by_accident`).
 
 /// Which side of the client/server split a crate is on (ADR 0016 R6).
@@ -64,7 +67,7 @@ pub(crate) struct CrateRule {
     /// Package name.
     pub(crate) name: &'static str,
     /// Manifest directory, relative to the workspace root (§1: the directory name equals the
-    /// crate name, except the Tauri crate, which lives in the desktop app, §7).
+    /// crate name).
     pub(crate) dir: &'static str,
     /// Client, server, shared or tooling (R6).
     pub(crate) side: Side,
@@ -307,10 +310,6 @@ pub(crate) const CRATES: &[CrateRule] = &[
         .internal(&["rizzy-core"]),
     CrateRule::new("rizzy-icon-proxy", "crates/rizzy-icon-proxy", Side::Server)
         .internal(&["rizzy-proto"]),
-    CrateRule::new("rizzy-desktop", "apps/desktop/src-tauri", Side::Client)
-        .leaf()
-        .internal(&["rizzy-client"])
-        .sqlx(Sqlx::SqliteOnly),
     CrateRule::new(
         "rizzy-domain-share",
         "crates/rizzy-domain-share",
@@ -331,7 +330,14 @@ pub(crate) const CRATES: &[CrateRule] = &[
         Side::Server,
     )
     .internal(&["rizzy-core", "rizzy-proto"]),
+    // The native binding crates, as ADR 0019 §1.4 restates their §3 rows: `rizzy-ffi` from M3
+    // (UniFFI), `rizzy-ffi-cpp` with the Linux client (Diplomat). Both are leaves (R2 (c)),
+    // sqlite-only sqlx holders (R5) and client-side (R6).
     CrateRule::new("rizzy-ffi", "crates/rizzy-ffi", Side::Client)
+        .leaf()
+        .internal(&["rizzy-client"])
+        .sqlx(Sqlx::SqliteOnly),
+    CrateRule::new("rizzy-ffi-cpp", "crates/rizzy-ffi-cpp", Side::Client)
         .leaf()
         .internal(&["rizzy-client"])
         .sqlx(Sqlx::SqliteOnly),
@@ -553,6 +559,13 @@ pub(crate) const OPENSSL: &[&str] = &["openssl", "openssl-sys"];
 /// `unsafe_code` changed. Adding one takes a new ADR; there are none.
 pub(crate) const LINT_EXCEPTIONS: &[&str] = &[];
 
+/// ADR 0019 §4.1: directories of generated Rust, relative to the workspace root, that the
+/// first-party `unsafe` token scan skips ([`crate::unsafe_scan`]). §4.1 commits the
+/// macro-expanded binding crate as a reviewed baseline under the binding crate's directory; that
+/// code is not first party, and §4.1's baseline diff reviews its `unsafe`. Empty: no baseline is
+/// committed yet. An entry is reviewed like the rest of this table.
+pub(crate) const GENERATED_RUST: &[&str] = &[];
+
 /// ADR 0016 §3 notes: only `xtask` enables `rizzy-proto`'s `openapi` feature.
 pub(crate) const OPENAPI_FEATURE: (&str, &str, &str) = ("rizzy-proto", "openapi", "xtask");
 
@@ -665,22 +678,23 @@ mod tests {
                 "{}",
                 r.name
             );
-            assert!(
-                r.dir.ends_with(r.name) || r.name == "rizzy-desktop",
-                "{}: directory name equals crate name (ADR 0016 §1)",
+            assert_eq!(
+                r.dir,
+                format!("crates/{}", r.name),
+                "{}: lives in crates/<name> (ADR 0016 §1; §7 as ADR 0019 §1.4 restates it)",
                 r.name
             );
             for dep in r.internal.iter().chain(r.dev_internal) {
                 assert!(names.contains(dep), "{} names unknown crate {dep}", r.name);
                 assert_ne!(*dep, r.name);
             }
-            // Leaf binaries are never dependencies (CLAUDE.md, ADR 0016 §2).
+            // Leaf crates are never dependencies (CLAUDE.md, ADR 0016 §2, ADR 0019 §1.4).
             for leaf in [
                 "rizzy-server",
                 "rizzy-cli",
-                "rizzy-desktop",
                 "rizzy-wasm",
                 "rizzy-ffi",
+                "rizzy-ffi-cpp",
             ] {
                 assert!(
                     !r.internal.contains(&leaf),
@@ -694,11 +708,13 @@ mod tests {
         }
     }
 
-    /// The ADR 0016 §3 table and notes, less the row ADR 0022 removes, restated: a change to
-    /// the table must change this test.
+    /// The ADR 0016 §3 table and notes, R2 (c) and R5, as partially superseded by ADR 0022 (the
+    /// `rizzy-domain-relay` row) and ADR 0019 (§1.4's replacing rows), restated: a change to the
+    /// table must change this test.
     #[test]
     fn rows_match_adr_0016() {
         assert!(rule("rizzy-domain-relay").is_none(), "ADR 0022 §1");
+        assert!(rule("rizzy-desktop").is_none(), "ADR 0019 §1.3: withdrawn");
 
         let no_io: HashSet<&str> = CRATES.iter().filter(|r| r.no_io).map(|r| r.name).collect();
         let expected: HashSet<&str> = [
@@ -720,9 +736,9 @@ mod tests {
         let expected: HashSet<&str> = [
             "rizzy-server",
             "rizzy-cli",
-            "rizzy-desktop",
             "rizzy-wasm",
             "rizzy-ffi",
+            "rizzy-ffi-cpp",
             "xtask",
         ]
         .into();
@@ -742,7 +758,7 @@ mod tests {
             .collect();
         assert_eq!(
             sqlite_only,
-            ["rizzy-cli", "rizzy-desktop", "rizzy-ffi"].into(),
+            ["rizzy-cli", "rizzy-ffi", "rizzy-ffi-cpp"].into(),
             "R5"
         );
         for r in CRATES {
@@ -779,6 +795,59 @@ mod tests {
             ["rizzy-server", "rizzy-domain-auth"].into(),
             "ADR 0009 owner decision 1"
         );
+    }
+
+    /// ADR 0016 R6's client-side, server-side and shared crates, as ADR 0019 §1.4 restates the
+    /// rule, restated: a change to a row's side must change this test.
+    #[test]
+    fn sides_match_adr_0016_r6() {
+        let side = |s: Side| -> HashSet<&str> {
+            CRATES
+                .iter()
+                .filter(|r| r.side == s)
+                .map(|r| r.name)
+                .collect()
+        };
+        let client: HashSet<&str> = [
+            "rizzy-client",
+            "rizzy-import",
+            "rizzy-match",
+            "rizzy-wasm",
+            "rizzy-ffi",
+            "rizzy-ffi-cpp",
+            "rizzy-cli",
+        ]
+        .into();
+        assert_eq!(side(Side::Client), client, "R6");
+        let server: HashSet<&str> = [
+            "rizzy-storage",
+            "rizzy-bus",
+            "rizzy-smtp-ingress",
+            "rizzy-icon-proxy",
+            "rizzy-server",
+        ]
+        .into();
+        let (domains, others): (HashSet<&str>, HashSet<&str>) = side(Side::Server)
+            .into_iter()
+            .partition(|n| n.starts_with(DOMAIN_PREFIX));
+        assert_eq!(others, server, "R6");
+        assert!(
+            CRATES
+                .iter()
+                .filter(|r| r.name.starts_with(DOMAIN_PREFIX))
+                .all(|r| domains.contains(r.name)),
+            "R6: every rizzy-domain-* crate is server-side"
+        );
+        let shared: HashSet<&str> = ["rizzy-core", "rizzy-sync", "rizzy-proto"].into();
+        assert_eq!(side(Side::Shared), shared, "R6");
+        assert_eq!(side(Side::Tool), ["xtask"].into(), "R6");
+    }
+
+    /// ADR 0019 §4.1: no generated baseline is committed yet, so the `unsafe` token scan skips
+    /// no directory. The PR that commits one changes this test.
+    #[test]
+    fn no_generated_rust_is_skipped_yet() {
+        assert!(GENERATED_RUST.is_empty(), "{GENERATED_RUST:?}");
     }
 
     /// ADR 0009 "Required feature sets" and its 2026-09-26 amendment, restated: these are the
