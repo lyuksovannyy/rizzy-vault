@@ -1,7 +1,7 @@
 # ADR NNNN: Title
 
 <!--
-How to use this template (the process is in ADR 0001 and docs/adr/README.md):
+How to use this template (the process is in ADR 0020 and docs/adr/README.md):
 
 1. Copy to docs/adr/NNNN-kebab-title.md, where NNNN is the next free number. Numbers are never reused.
 2. Title: a short noun phrase naming the decision, e.g. "Storage: SQLite and PostgreSQL via sqlx".
@@ -21,13 +21,13 @@ Writing rules:
 -->
 
 - Status: Proposed
-<!-- One of: Proposed | Accepted | Rejected | Superseded by ADR NNNN (written as a relative link to that ADR's file).
+<!-- One of: Proposed | Accepted | Rejected | Partially superseded by ADR NNNN (§…) | Superseded by ADR NNNN (written as a relative link to that ADR's file).
      Only the project owner moves an ADR out of Proposed. -->
 - Date: YYYY-MM-DD
 <!-- The date of the current status. Earlier history is in git. -->
 - Deciders: project owner
 - Milestone: M1
-<!-- The first milestone where this decision constrains code, e.g. "M1" or "M1 (engine) / M4 (modes)". -->
+<!-- The first milestone where this decision constrains code, e.g. "M1" or "M1 (engine) / M9 (shared vaults)". -->
 
 ## Context
 

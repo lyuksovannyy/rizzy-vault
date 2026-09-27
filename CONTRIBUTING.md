@@ -3,7 +3,7 @@
 rizzy-vault is at **M0 done, M1 in progress**. M1 step 1, the `rizzy-core` cryptography, is implemented. Steps 2–5 (the item schema and sync engine, the server, the client core and `rv` CLI, the wasm bindings and web vault) are not started, and `rizzy-sync`, the server and the CLI are still skeletons. The [README](README.md#status) has the details.
 
 - **Most useful now:** review of [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), [docs/CRYPTO.md](docs/CRYPTO.md) and the [ADRs](docs/adr/README.md).
-- **Code PRs** in the ADR-first areas (see [ADR first](#adr-first)) are accepted only when an **Accepted** ADR covers them. ADRs [0001](docs/adr/0001-record-architecture-decisions.md) and [0016](docs/adr/0016-workspace-layout.md) are Accepted; until [0017](docs/adr/0017-licensing.md) (licensing and contribution terms) is Accepted too, only documentation PRs from outside contributors are merged.
+- **Code PRs** in the ADR-first areas (see [ADR first](#adr-first)) are accepted only when an **Accepted** ADR covers them. ADRs [0020](docs/adr/0020-partial-supersession.md) (which carries ADR 0001 forward) and [0016](docs/adr/0016-workspace-layout.md) are Accepted; until [0017](docs/adr/0017-licensing.md) (licensing and contribution terms) is Accepted too, only documentation PRs from outside contributors are merged.
 
 Security vulnerabilities are **never** reported in public issues or PRs. See [SECURITY.md](SECURITY.md).
 

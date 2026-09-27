@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-This directory holds rizzy-vault's Architecture Decision Records (ADRs). Each ADR is one decision: the context, what was decided, what it costs, what else was considered, and what the owner still has to answer. The format and the rules come from [ADR 0001](0001-record-architecture-decisions.md). New ADRs start from the [template](0000-template.md).
+This directory holds rizzy-vault's Architecture Decision Records (ADRs). Each ADR is one decision: the context, what was decided, what it costs, what else was considered, and what the owner still has to answer. The format and the rules come from [ADR 0020](0020-partial-supersession.md), which carries ADR 0001's rules forward and adds partial supersession. New ADRs start from the [template](0000-template.md).
 
 Related documents:
 
@@ -11,8 +11,9 @@ Related documents:
 ## Lifecycle
 
 ```text
-Proposed ──► Accepted ──► Superseded by ADR NNNN
-    │
+Proposed ──► Accepted ──► Partially superseded by ADR NNNN (§…)
+    │            │
+    │            └──────► Superseded by ADR NNNN
     └──────► Rejected
 ```
 
@@ -21,11 +22,12 @@ Proposed ──► Accepted ──► Superseded by ADR NNNN
 | **Proposed** | Written and open for review. May be merged to `main` for discussion. **Not binding: code must not rely on it.** |
 | **Accepted** | Binding. Only the project owner accepts. The owner's answers to "Open questions for the owner" go into the Decision section first. |
 | **Rejected** | Declined by the owner. The file stays so that nobody has to reconstruct the reasoning. |
+| **Partially superseded by ADR NNNN (§…)** | The parts ADR NNNN names are replaced and no longer bind. Everything else stays binding. Only the status line changes; the old text stays. |
 | **Superseded by ADR NNNN** | Replaced by a newer Accepted ADR. Only the status line changes. |
 
 **Who decides:** the project owner accepts or rejects every ADR.
 
-**Accepted ADRs are immutable.** Allowed edits are the status line, typo and link fixes, and dated `## Amendments` entries for changes the ADR itself provides for (for example, the crate table in ADR 0009 or the license allow-list in ADR 0017). Anything else is a new ADR that supersedes the old one.
+**Accepted ADRs are immutable.** Allowed edits are the status line, typo and link fixes, and dated `## Amendments` entries for changes the ADR itself provides for (for example, the crate table in ADR 0009 or the license allow-list in ADR 0017). Anything else is a new ADR that supersedes the old one, in full or in the parts it names ([ADR 0020](0020-partial-supersession.md) point 9).
 
 ## The ADR-first rule
 
@@ -39,7 +41,7 @@ Proposed ──► Accepted ──► Superseded by ADR NNNN
 - crate boundaries and dependency direction ([ADR 0016](0016-workspace-layout.md));
 - licensing and contribution terms ([ADR 0017](0017-licensing.md)).
 
-Proposed is not enough. If the relevant ADR is Proposed, or no ADR exists, stop: write or update the ADR and get it accepted first. Spikes that inform an ADR live on a branch or outside `crates/`, and are never merged into a shipped crate.
+The parts of a Partially superseded ADR that no later Accepted ADR names count as Accepted. Proposed is not enough. If the relevant ADR is Proposed, or no ADR exists, stop: write or update the ADR and get it accepted first. Spikes that inform an ADR live on a branch or outside `crates/`, and are never merged into a shipped crate.
 
 Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepted stack and non-crypto dependencies do not need an ADR. They follow [CONTRIBUTING.md](../../CONTRIBUTING.md).
 
@@ -68,19 +70,19 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0011 | [Storage: SQLite and PostgreSQL via sqlx](0011-storage.md) | Accepted | M1 (SQLite) / M3 (PostgreSQL supported) |
 | 0012 | [Sync engine: op log, HLC and version vectors](0012-sync-engine.md) | Accepted | M1 (engine, Server mode) / M4 (On-device mode) |
 | 0013 | [Shared Rust client core (wasm + UniFFI)](0013-shared-client-core.md) | Accepted | M1 (wasm, CLI) / M3 (Tauri) / M7 (UniFFI) |
-| 0014 | [UI stack for the web platforms](0014-ui-stack.md) | Proposed (framework decided: React) | M1 (web vault) / M2 (extensions) / M3 (design system) / M5 (share page) |
+| 0014 | [UI stack for the web platforms](0014-ui-stack.md) | Accepted | M1 (web vault) / M2 (extensions) / M3 (design system) / M5 (share page) |
 | 0015 | [Desktop shell: Tauri](0015-desktop-tauri.md) | Accepted | M3 |
 | 0016 | [Workspace layout and crate boundaries](0016-workspace-layout.md) | Accepted | M0 (rules, current crates) / M1–M9 (planned crates) |
 | 0017 | [Licensing and contribution terms](0017-licensing.md) | Proposed | M0 |
-| 0018 | [Item-record encoding: canonical binary layout and the M1 item schema](0018-item-record-encoding.md) | Proposed | M1 |
+| 0018 | [Item-record encoding: canonical binary layout and the M1 item schema](0018-item-record-encoding.md) | Accepted | M1 |
 | 0019 | [Native desktop and mobile clients in separate repositories](0019-native-clients.md) | Proposed | M3 (desktop) / M7 (mobile) |
-| 0020 | [Record architecture decisions, with partial supersession](0020-partial-supersession.md) | Proposed | M0 |
+| 0020 | [Record architecture decisions, with partial supersession](0020-partial-supersession.md) | Accepted | M0 |
 | 0021 | [Server-side compaction with concurrent snapshots](0021-server-compaction.md) | Proposed | M1 (server; Accepted before step 3) |
 | 0022 | [Server mode only: On-device sync parked](0022-server-mode-only.md) | Proposed | M1 (scope) / post-1.0 (parked) |
 
 ## Gates
 
-- **Before external contributions are merged:** 0001, 0016 and 0017 Accepted. Documentation PRs are exempt.
+- **Before external contributions are merged:** 0020, 0016 and 0017 Accepted. Documentation PRs are exempt.
 - **Before any vault code in M1:** 0002–0009 and 0016 Accepted. 0002–0009 are reviewed as one set against [CRYPTO.md](../CRYPTO.md). A Rejected ADR blocks its area until an Accepted replacement exists.
 - **Before server and client scaffolding in M1:** 0010–0014 Accepted.
 - **Before desktop work in M3:** 0015 Accepted.

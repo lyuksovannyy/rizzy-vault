@@ -6,7 +6,7 @@ This page says where each topic is documented and which code implements it. It i
 - [ROADMAP.md](ROADMAP.md) is the source of truth for scope.
 - [CRYPTO.md](CRYPTO.md) is the normative cryptographic specification.
 - The invariants in [THREAT_MODEL.md §8](THREAT_MODEL.md#8-security-invariants) are requirements.
-- Only **Accepted** ADRs bind. A Proposed ADR is open for review, and no code may rely on it. The lifecycle and the ADR-first rule are in [adr/README.md](adr/README.md).
+- Only **Accepted** ADRs bind, and the parts of a Partially superseded ADR that no later Accepted ADR names ([ADR 0020](adr/0020-partial-supersession.md) point 9). A Proposed ADR is open for review, and no code may rely on it. The lifecycle and the ADR-first rule are in [adr/README.md](adr/README.md).
 
 "Not implemented" below means that no code exists for that part yet. The state of each milestone is in the [top-level README](../README.md#status).
 
@@ -61,9 +61,9 @@ Symmetric encryption and the envelope are decided in [ADR 0005](adr/0005-symmetr
 | Server shape and roles (`api`, `web`, `notify`, `worker`, `smtp`, `icons`), deployment profiles | [ADR 0010](adr/0010-server-shape.md) (Accepted) | **The server is not implemented yet.** It arrives in M1 step 3. [`crates/rizzy-server`](../crates/rizzy-server/src/main.rs) is a skeleton (`--help`, `--version`). Per-role threats: [THREAT_MODEL §7](THREAT_MODEL.md#7-stride-per-component). |
 | Storage (SQLite, PostgreSQL, migrations, backups) | [ADR 0011](adr/0011-storage.md) (Accepted) | Not implemented (M1 step 3) |
 | Sync engine: op log, HLC, version vectors, merge | [ADR 0012](adr/0012-sync-engine.md) (Accepted) | Not implemented (M1 step 2). [`crates/rizzy-sync`](../crates/rizzy-sync/src/lib.rs) is a skeleton. Server mode is the only sync mode; On-device sync is parked post-1.0 ([ROADMAP §4.6](ROADMAP.md#46-sync-m1-onward)). Sync invariants: [THREAT_MODEL §8.4](THREAT_MODEL.md#84-sync-and-state). |
-| Item-record encoding and the M1 item schema | [ADR 0018](adr/0018-item-record-encoding.md) (**Proposed**) | Blocks M1 step 2 until Accepted |
+| Item-record encoding and the M1 item schema | [ADR 0018](adr/0018-item-record-encoding.md) (Accepted) | Not implemented (M1 step 2) |
 | Shared Rust client core (wasm, UniFFI) | [ADR 0013](adr/0013-shared-client-core.md) (Accepted) | `rizzy-client` and `rizzy-wasm` not implemented (M1 steps 4–5) |
-| UI stack for the web platforms | [ADR 0014](adr/0014-ui-stack.md) (**Proposed**; React chosen) | Blocks server and client scaffolding in M1 until Accepted ([gates](adr/README.md#gates)) |
+| UI stack for the web platforms | [ADR 0014](adr/0014-ui-stack.md) (Accepted; React) | Not implemented (M1 step 5). With 0010–0014 Accepted, the gate for server and client scaffolding is open ([gates](adr/README.md#gates)) |
 | Desktop shell | [ADR 0015](adr/0015-desktop-tauri.md) (Accepted) | M3 |
 | Command-line client `rv` | [ADR 0013](adr/0013-shared-client-core.md) (Accepted) | [`crates/rizzy-cli`](../crates/rizzy-cli/src/main.rs) is a skeleton (`--help`, `--version`); M1 step 4. Threats: [THREAT_MODEL §7.5](THREAT_MODEL.md#75-cli-rv-m1). |
 
@@ -74,7 +74,7 @@ Symmetric encryption and the envelope are decided in [ADR 0005](adr/0005-symmetr
 | Workspace layout, crate boundaries, dependency direction | [ADR 0016](adr/0016-workspace-layout.md) (Accepted); enforced by `cargo xtask check-deps` and `cargo xtask check-clippy` ([`crates/xtask`](../crates/xtask/src/main.rs)) |
 | Licensing and contribution terms | [ADR 0017](adr/0017-licensing.md) (**Proposed**); [LICENSE](../LICENSE); license allow-list in [`deny.toml`](../deny.toml) |
 | Third-party material in the repository | [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) |
-| How decisions are recorded | [ADR 0001](adr/0001-record-architecture-decisions.md) (Accepted); [adr/README.md](adr/README.md) (index, lifecycle, gates); [template](adr/0000-template.md) |
+| How decisions are recorded | [ADR 0020](adr/0020-partial-supersession.md) (Accepted; carries [ADR 0001](adr/0001-record-architecture-decisions.md) forward and adds partial supersession); [adr/README.md](adr/README.md) (index, lifecycle, gates); [template](adr/0000-template.md) |
 | Scope and milestones | [ROADMAP.md](ROADMAP.md): [§3](ROADMAP.md#3-milestones) milestones, [§4](ROADMAP.md#4-moscow-by-area) MoSCoW, [§6](ROADMAP.md#6-risks--hard-truths) risks |
 | Contributing: prerequisites, pre-push gate, lints, documentation rules, workflow | [CONTRIBUTING.md](../CONTRIBUTING.md) |
 | Rules for AI coding agents | [CLAUDE.md](../CLAUDE.md) |

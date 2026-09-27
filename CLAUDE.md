@@ -9,15 +9,15 @@ rizzy-vault is a self-hostable, end-to-end encrypted, zero-knowledge password ma
    - Find the row your task implements.
    - If there is no row, the task is out of scope. Ask.
 2. Read [docs/adr/README.md](docs/adr/README.md), then every ADR your task touches. For security work, also read the relevant parts of [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and [docs/CRYPTO.md](docs/CRYPTO.md).
-3. Check the ADR's **Status** line. Only `Accepted` is binding.
-   - As of 2026-09-25, ADRs 0001–0013, 0015 and 0016 are Accepted; 0014 (UI stack: React chosen, the rest open) and 0017 are Proposed.
+3. Check the ADR's **Status** line. Only `Accepted` is binding, and so are the parts of a `Partially superseded` ADR that no later Accepted ADR names ([ADR 0020](docs/adr/0020-partial-supersession.md) point 9).
+   - As of 2026-09-27, ADRs 0001–0016, 0018 and 0020 are Accepted (0020 carries 0001 forward); 0017, 0019, 0021 and 0022 are Proposed.
 4. Do not recreate `docs/ARCHITECTURE.md`. It was deliberately removed; do not link to it either.
 
 ## The ADR gate (hard stop)
 
 - **Code only with an Accepted ADR.** Never implement cryptography, authentication, protocol or wire formats, persistent formats (envelope, op log, export, cache), security boundaries, crate boundaries or licensing changes without one.
 - **Proposed is not enough.** If the ADR is Proposed or missing, stop and ask the owner. You may draft or update a Proposed ADR from [0000-template.md](docs/adr/0000-template.md), as a separate change, if asked.
-- **Never change an ADR's Status.** Setting or changing `Accepted`, `Rejected` or `Superseded` is the owner's act alone ([ADR 0001](docs/adr/0001-record-architecture-decisions.md) points 3-4). Never edit the Context, Decision or Consequences of an Accepted ADR. A change to an Accepted decision is a new ADR with `Status: Proposed`. Any ADR you draft is `Status: Proposed` and gets a row in [docs/adr/README.md](docs/adr/README.md) in the same change.
+- **Never change an ADR's Status.** Setting or changing `Accepted`, `Rejected`, `Partially superseded` or `Superseded` is the owner's act alone ([ADR 0020](docs/adr/0020-partial-supersession.md) points 3, 4 and 9). Never edit the Context, Decision or Consequences of an Accepted ADR. A change to an Accepted decision is a new ADR with `Status: Proposed`, which supersedes it in full or only in the parts it names (ADR 0020 point 9). Any ADR you draft is `Status: Proposed` and gets a row in [docs/adr/README.md](docs/adr/README.md) in the same change.
 - **No home-made crypto.** No new constructions, no "simple" custom schemes, no parameter changes below the floors in CRYPTO.md. The server's word is never trusted for KDF parameters, algorithm ids or public keys.
 - **When they disagree:** an Accepted ADR wins over CRYPTO.md and THREAT_MODEL.md on a *mechanism*. Fix the doc in the same change. A conflict about a *goal or invariant* means stop and ask.
 
