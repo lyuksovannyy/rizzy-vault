@@ -59,7 +59,7 @@ Notes:
 
 The workspace lints in [`Cargo.toml`](Cargo.toml) apply to every crate:
 
-- `unsafe_code = "forbid"`. There is no exception mechanism. `unsafe` is not accepted, in any crate, for any reason.
+- `unsafe_code = "forbid"`. `unsafe` is not accepted in our code, in any crate, for any reason, and `cargo xtask check-deps` rejects the `unsafe` keyword in first-party `.rs` files. The one accepted case is `unsafe` that an admitted binding generator emits into generated glue, audited as third-party code ([ADR 0019](docs/adr/0019-native-clients.md) §4.1).
 - `clippy::all` is `deny`.
 - `clippy::pedantic`, `unwrap_used`, `expect_used`, `panic`, `print_stdout` and `print_stderr` are `warn`. **`cargo lint` passes `-D warnings`, so every one of them fails CI.**
 - `dbg_macro`, `todo` and `unimplemented` are `deny`.
@@ -154,7 +154,7 @@ Copy the relevant items into the PR description and tick them. A PR is security-
 - **Logging and errors**
   - [ ] No secrets, plaintext, keys, tokens, master passwords, Secret Keys or recovery codes in logs, error messages or panic messages. Server log fields come from an allow-list.
 - **`unsafe`**
-  - [ ] None. It is forbidden workspace-wide. A PR that needs it is redesigned.
+  - [ ] None in our source: `forbid` workspace-wide, and `cargo xtask check-deps` rejects the `unsafe` keyword in first-party `.rs` files. A PR that needs it is redesigned. A generator or toolchain bump shows the reviewed diff of generated `unsafe` counts (ADR 0019 §4.1).
 - **CI, workflows, `deny.toml`, release tooling**
   - [ ] The reason is in the PR description. No new secrets in PR workflows, no `pull_request_target`, and permissions stay `contents: read` unless an ADR says otherwise.
 
