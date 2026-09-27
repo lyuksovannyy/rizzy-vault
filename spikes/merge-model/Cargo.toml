@@ -1,0 +1,20 @@
+[package]
+name = "merge-model"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "AGPL-3.0-only"
+description = "Spike: executable model of the rizzy-vault sync merge (ADR 0012, ADR 0018, ADR 0021). Never shipped, never a dependency, not run by CI."
+
+# Its own workspace: never a member of the root workspace (ADR 0020 point 6, docs/adr/README.md
+# "The ADR-first rule": spikes live outside crates/ and are never merged into a shipped crate).
+[workspace]
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+debug = false
+
+[profile.test]
+opt-level = 3
