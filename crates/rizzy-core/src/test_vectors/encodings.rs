@@ -10,6 +10,8 @@ use crate::labels::{self, Label};
 use crate::padding;
 use crate::secret_key::{RecoveryCode, SecretKey};
 
+/// The Crockford Base32 alphabet of §7 (no `I`, `L`, `O`, `U`), written out here so the
+/// replay decodes codes independently of the crate's arithmetic decoder.
 const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 /// The two code kinds: vector name, prefix, check label.
@@ -18,6 +20,7 @@ const KINDS: [(&str, &str, Label); 2] = [
     ("recovery-code", "RVR1-", labels::RECOVERY_CODE_CHECK),
 ];
 
+/// The code kind of a vector name, ignoring a `/parse` or `/reject` suffix.
 fn kind_of(name: &str) -> (&'static str, &'static str, Label) {
     let base = name.split('/').next().unwrap_or(name);
     KINDS
@@ -26,6 +29,8 @@ fn kind_of(name: &str) -> (&'static str, &'static str, Label) {
         .unwrap_or_else(|| panic!("no code kind {name}"))
 }
 
+/// Builds vector `<kind>/<name>/<index>`; this file holds two kinds, `encoding` and
+/// `padding`.
 fn vector(kind: &str, name: &str, index: usize, inputs: Obj) -> Vector {
     Vector::build(compute, kind, name, index, inputs)
 }
@@ -73,6 +78,9 @@ fn with_symbol(formatted: &str, prefix: &str, index: usize, f: impl Fn(u8) -> u8
     format!("{prefix}{}", groups.join("-"))
 }
 
+/// Draws the codes and frame data from the file's seeded RNG and builds the accepted,
+/// leniently parsed and rejected inputs from them. The Padmé lengths are fixed edge cases:
+/// small values, values around 256 and around powers of two, up to 2^32.
 pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
     let mut out = Vec::new();
     for (name, prefix, _) in KINDS {
@@ -220,6 +228,8 @@ fn decode(formatted: &str, prefix: &str) -> ([u8; 16], u8, u16) {
     (code, pad, check)
 }
 
+/// Computes one encoding or padding vector through the API, and checks formatted codes and
+/// frames against an independent decoder and the §4.3 and §8.5 formulas.
 pub(super) fn compute(name: &str, m: &Map<String, Value>) -> Map<String, Value> {
     match name {
         "secret-key" | "recovery-code" => {

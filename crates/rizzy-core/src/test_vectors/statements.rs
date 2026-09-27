@@ -31,26 +31,37 @@ use crate::sign::{
     split_wire,
 };
 
+/// The `kind` of every vector in this file.
 const KIND: &str = "statement";
 
+/// Builds vector `statement/<name>/<index>` from its inputs.
 fn vector(name: &str, index: usize, inputs: Obj) -> Vector {
     Vector::build(compute, KIND, name, index, inputs)
 }
 
+/// The story's start time, in milliseconds since the Unix epoch.
 const T0: u64 = 1_780_000_000_000;
+/// One hour in milliseconds.
 const HOUR: u64 = 3_600_000;
 
 /// A device of the story: its seeds and certificate fields.
 struct Device {
+    /// The device id.
     id: [u8; 16],
+    /// The Ed25519 signing-key seed.
     seed: [u8; 32],
+    /// The X25519 secret key.
     x25519_secret: [u8; 32],
+    /// The certificate's `device_kind`.
     kind: DeviceKind,
+    /// The certificate's `created_at_ms`.
     created: u64,
+    /// The certificate's `expires_at_ms` (0 = none).
     expires: u64,
 }
 
 impl Device {
+    /// Draws a device's id and keys from the generator's RNG.
     fn new(rng: &mut ChaCha20Rng, kind: DeviceKind, created: u64, expires: u64) -> Self {
         Self {
             id: random(rng),
@@ -62,10 +73,12 @@ impl Device {
         }
     }
 
+    /// The device's Ed25519 signing key.
     fn signing(&self) -> DeviceSigningKey {
         DeviceSigningKey::from_seed(&self.seed)
     }
 
+    /// The device's X25519 public key.
     fn x25519_public(&self) -> [u8; 32] {
         *HpkeSecretKey::from_x25519_bytes(&self.x25519_secret)
             .expect("a key")
@@ -73,6 +86,8 @@ impl Device {
             .as_bytes()
     }
 
+    /// The inputs of this device's certificate, signed by the identity key of `identity_seed`
+    /// in `epoch`.
     fn certificate(&self, account: &[u8; 16], identity_seed: &[u8; 32], epoch: u32) -> Obj {
         Obj::new()
             .bytes("signer_seed", identity_seed)
@@ -90,12 +105,13 @@ impl Device {
     }
 }
 
-/// `{key, key_id}` of a random account key: only the id goes into a state.
+/// The key id of a random account key: only the id goes into a state.
 fn account_key_id(rng: &mut ChaCha20Rng) -> [u8; 16] {
     let key = Key32::generate(rng);
     *key.key_id().expect("key id").as_bytes()
 }
 
+/// A fresh identity X25519 public key.
 fn identity_x25519(rng: &mut ChaCha20Rng) -> [u8; 32] {
     *HpkeSecretKey::generate_x25519(rng).public_key().as_bytes()
 }
@@ -120,6 +136,8 @@ fn set_hash(
     device_set_hash(AccountId::from_bytes(*account), &certs, &revocations).expect("a set")
 }
 
+/// Builds the story's statements in order (see the module documentation), each state
+/// referring to the bundle and device set that came before it.
 #[expect(
     clippy::too_many_lines,
     reason = "one linear story; splitting it would scatter the cross-references"
@@ -519,10 +537,12 @@ fn single_outputs(
         .bytes("wire", wire)
 }
 
+/// The signer's 32-byte Ed25519 seed.
 fn seed(m: &Map<String, Value>) -> [u8; 32] {
     arr(m, "signer_seed")
 }
 
+/// The statement's `account_id`.
 fn account(m: &Map<String, Value>) -> AccountId {
     AccountId::from_bytes(arr(m, "account_id"))
 }
@@ -566,6 +586,9 @@ fn bundle_inputs(
     (bundle, key, previous)
 }
 
+/// Computes one statement vector: signs through the public API, verifies the result, and
+/// rebuilds the body and signed message from the §5.10, §9.6, §10.1 and §10.2 text to compare
+/// with the bytes the API made.
 #[expect(
     clippy::too_many_lines,
     reason = "one match arm per statement type, each short"

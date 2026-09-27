@@ -33,8 +33,10 @@ use crate::sign::{
     IdentityVerifyingKey, Verified,
 };
 
+/// The `kind` of every vector in this file.
 const KIND: &str = "derivation";
 
+/// Builds vector `derivation/<name>/<index>` from its inputs.
 fn vector(name: &str, index: usize, inputs: Obj) -> Vector {
     Vector::build(compute, KIND, name, index, inputs)
 }
@@ -44,6 +46,8 @@ fn x25519_public(rng: &mut ChaCha20Rng) -> [u8; 32] {
     *HpkeSecretKey::generate_x25519(rng).public_key().as_bytes()
 }
 
+/// Draws the inputs of every derivation vector, in a fixed order, from the file's seeded RNG.
+/// Changing the order or adding a draw in the middle changes every later input.
 #[expect(
     clippy::too_many_lines,
     reason = "one flat table of test vectors reads best as one function"
@@ -288,10 +292,14 @@ fn key_outputs(key: &Key32) -> Map<String, Value> {
         .done()
 }
 
+/// The vector's `kdf_id`, which must be on the client allow-list.
 fn kdf(m: &Map<String, Value>) -> KdfId {
     KdfId::from_u16(num(m, "kdf_id")).expect("an allowed kdf_id")
 }
 
+/// Computes one derivation vector's outputs through the public (or test-only) API. Some arms
+/// also rebuild a value from its §4.3 formula (the recovery token's server hash, the
+/// device-set hash) or through a second API path, and assert that the two agree.
 #[expect(
     clippy::too_many_lines,
     reason = "one flat table of test vectors reads best as one function"
@@ -427,6 +435,8 @@ pub(super) fn compute(name: &str, m: &Map<String, Value>) -> Map<String, Value> 
     }
 }
 
+/// The device-grant PSK (§4.3, §10.1), derived from the previous account key, and a check
+/// that it does not depend on the sender device.
 fn device_grant_psk(m: &Map<String, Value>) -> Map<String, Value> {
     let epoch: u32 = num(m, "account_key_epoch");
     let previous = AccountKey::generate(
@@ -449,6 +459,8 @@ fn device_grant_psk(m: &Map<String, Value>) -> Map<String, Value> {
         .done()
 }
 
+/// Two accounts' fingerprints (§4.3) with their safety numbers, and the pair safety number,
+/// checked to be the same from either side (§10.3).
 fn fingerprint(m: &Map<String, Value>) -> Map<String, Value> {
     let one = |prefix: &str| {
         let keys = IdentityPublicKeys {
@@ -475,6 +487,8 @@ fn fingerprint(m: &Map<String, Value>) -> Map<String, Value> {
         .done()
 }
 
+/// The device-set hash (§4.3, §10.2) of verified certificates and revocations, checked
+/// against the hash rebuilt from the text, with the sorted members as outputs.
 fn device_set(m: &Map<String, Value>) -> Map<String, Value> {
     let account = AccountId::from_bytes(arr(m, "account_id"));
     let identity =

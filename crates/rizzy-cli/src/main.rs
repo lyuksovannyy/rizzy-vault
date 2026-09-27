@@ -1,15 +1,56 @@
 //! `rv` — rizzy-vault command-line client.
 //!
-//! Status: M0 skeleton. Only `--version` and `--help` are implemented.
+//! # Status
+//!
+//! M0 skeleton. Only `--version` and `--help` are implemented; there is no vault access, no
+//! network, no storage and no cryptography in this binary yet. The crate depends on
+//! `rizzy-core` (ADR 0016 §2) but calls nothing from it.
+//!
+//! What the binary does today:
+//!
+//! - It looks at the first argument only; any further arguments are ignored.
+//! - `-V` or `--version` prints `rv <version>` to stdout and exits 0.
+//! - `-h` or `--help` prints the usage text to stdout and exits 0.
+//! - No argument, any other argument, or an argument that is not valid UTF-8 prints the usage
+//!   text to stderr and exits 2. A non-UTF-8 argument never panics (`args_os`, not `args`).
+//! - If writing to stdout fails (for example a closed pipe), it exits 1. Output goes through
+//!   `write!`/`writeln!` on a locked handle, never `println!`, which would panic there instead
+//!   (CLAUDE.md: no `println!` in non-test code).
+//!
+//! `tests/cli.rs` runs the built binary and checks the version and help output and the usage
+//! errors, including the non-UTF-8 case.
+//!
+//! # Planned (M1)
+//!
+//! ROADMAP §4.2 makes `rv` an M1 Must: list, get, add, generate, copy TOTP. The accepted
+//! design it will follow, none of which exists yet:
+//!
+//! - **A native host over `rizzy-client`** ([ADR 0013] §1, §2). `rv` moves its dependency from
+//!   `rizzy-core` to the sans-I/O `rizzy-client` (ADR 0016 §3 notes) and supplies the host
+//!   capabilities: a Rust HTTP client on rustls, `SQLite` through sqlx with the `sqlite` driver
+//!   only (ADR 0016 R5), the std clock, and device state in the OS keyring or a 0600 file.
+//! - **Randomness.** As a leaf crate it is one of the few crates allowed to depend on getrandom
+//!   directly, and it passes `rand_core::UnwrapErr(getrandom::SysRng)` to the library crates
+//!   (ADR 0009 "RNG rules", ADR 0016 R2).
+//! - **Secret handling** (threat model INV-56, INV-60, INV-61, INV-62). Secrets are never
+//!   taken from argv or environment variables, only from a TTY prompt or stdin; a secret is
+//!   printed to a terminal only when asked explicitly, and copied to the clipboard by default;
+//!   core dumps are disabled at startup; the docs say where the state file lives and that it
+//!   must stay out of backups; no keystore (biometric) unlock is offered, because neither the
+//!   OS keyring nor a file enforces user presence.
+//!
+//! [ADR 0013]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0013-shared-client-core.md
 
 // Also set by the workspace lint table (ADR 0016 R7); repeated here so that no manifest edit
 // alone admits `unsafe` in this crate.
 #![forbid(unsafe_code)]
+#![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
 use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
+/// The help text, printed on `--help` (stdout) and on a usage error (stderr).
 const USAGE: &str = "\
 rv — rizzy-vault command-line client
 
@@ -21,6 +62,7 @@ OPTIONS:
     -V, --version    Print version
 ";
 
+/// Handles `--version` and `--help`; everything else is a usage error (exit code 2).
 fn main() -> ExitCode {
     // `args_os`, not `args`: `args` panics on an argument that is not UTF-8. Such an argument
     // is no known option, so it gets the usage error.

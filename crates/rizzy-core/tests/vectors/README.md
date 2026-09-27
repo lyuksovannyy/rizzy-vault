@@ -6,7 +6,7 @@ The committed vector files of [CRYPTO.md §15](../../../../docs/CRYPTO.md#15-tes
 |---|---|---|
 | `derivations.json` | A | Every §4.3 derivation implemented in M1, with the derived value itself: symmetric and public key ids, `pw_in` (with NFC), the OPAQUE context, the fake credential id and fake `kdf_id` selector, `server_unlock_key`, `local_unlock_key`, the recovery wrap key and auth token, the export file key, the server data subkeys, the server-secrets backup key, the device-grant PSK, the fingerprint and safety numbers, the device-set hash and the settings hash |
 | `envelopes.json` | A | One envelope for each M1 purpose of §8.4 (two for `ITEM_OP` and `ITEM_SNAPSHOT`), with the context bytes, AAD, `k_enc` and commitment; the HPKE PSK device grant with its PSK, `info` and AAD |
-| `statements.json` | A | Every §10.2 statement: the bundle chain (first, two-signature identity change, silent update), device certificates (kinds 1–4, and certificates re-issued under a new identity key), revocations, `account-state` at signup, after a standard rotation, after a full rotation (all three with `settings_seq = 0`) and with settings, `op` and `snapshot` with and without a wrap, device-signed and identity-signed `key-grant`, `device-auth`, `device-request` |
+| `statements.json` | A | Every §10.2 statement: the bundle chain (first, two-signature identity change, silent update), device certificates (kinds 1–4, and certificates re-issued under a new identity key), revocations, `account-state` at signup, after a standard rotation, after a full rotation (all three with `settings_seq = 0`) and with settings, `op` with and without an item-key wrap, `snapshot` with one, device-signed and identity-signed `key-grant`, `device-auth`, `device-request` |
 | `encodings.json` | A | Secret Key and recovery-code formatting with check values, lenient parsing, rejected inputs; Padmé lengths, frames and rejected frames (§7, §8.5) |
 | `transcript.json` | B | Signup → login → unlock at `kdf_id` 1 with `RizzySuiteV1`: every OPAQUE message, `E_srv`, `E_local` |
 
@@ -31,7 +31,8 @@ The field names inside `inputs` and `outputs` are the ones the replay code in `s
 The generator (`src/test_vectors/`) works like this:
 - It draws every input from `ChaCha20Rng::seed_from_u64(seed)` (`chacha20` =0.10.2, ADR 0009). The seed is in each file.
 - It computes the outputs through `rizzy-core`'s own API.
-- Random values an operation draws internally are drawn first and stored as inputs: the envelope `nonce`, and HPKE's ephemeral `ikm_e`. They are then fed back through a test RNG that yields exactly those bytes and fails if the operation draws more or fewer. No function takes a nonce, in test builds either (INV-12).
+- In the tier A files, random values an operation draws internally are drawn first and stored as inputs: the envelope `nonce`, and HPKE's ephemeral `ikm_e`. They are then fed back through a test RNG that yields exactly those bytes and fails if the operation draws more or fewer. No function takes a nonce, in test builds either (INV-12).
+- `transcript.json` instead stores a second seed as an input. One `ChaCha20Rng` seeded from it drives the whole flow, opaque-ke included.
 
 The replay tests (`cargo test -p rizzy-core --lib test_vectors`) recompute every output from its inputs with the same code and compare byte for byte. The computation also checks each output against the specification:
 - every envelope opens again, and the typed wrap functions give the same bytes;
@@ -39,9 +40,9 @@ The replay tests (`cargo test -p rizzy-core --lib test_vectors`) recompute every
 - every statement verifies, and the bundles form a valid chain;
 - every formatted code parses back and decodes to the same bits.
 
-A separate test regenerates the three files that run no Argon2id from their seeds and compares them with the committed files.
+A separate test regenerates every file from its seed and compares it with the committed file. That includes `derivations.json` and `transcript.json`, which run Argon2id.
 
-When the files were generated on 2026-09-25, a separate Python implementation written from CRYPTO.md recomputed every tier A output. It used Python `cryptography` 50.0.1, argon2-cffi 25.1.0, and a hand-written HChaCha20 and RFC 9180 implementation checked against the published test vectors. That script is not in the repository. Tier B values come only from this implementation.
+When the files were generated on 2026-09-25, a separate Python implementation written from CRYPTO.md recomputed every tier A output. It used Python `cryptography` 50.0.1, argon2-cffi 25.1.0, and a hand-written HChaCha20 and RFC 9180 implementation checked against the published test vectors. That script is not in the repository. The one vector added since, `padding/frame/reject/3` (2026-09-26), was not part of that cross-check. Tier B values come only from this implementation.
 
 ## Changing a vector
 

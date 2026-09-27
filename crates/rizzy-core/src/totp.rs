@@ -1,7 +1,28 @@
-//! HOTP and TOTP (CRYPTO.md §11.15; RFC 4226, RFC 6238).
+//! HOTP and TOTP, `otpauth://` URIs, and server-side 2FA verification (CRYPTO.md §11.15;
+//! RFC 4226, RFC 6238).
 //!
 //! One implementation serves both uses: codes for items that hold a TOTP secret, and the
-//! server's own 2FA (§5.10). Neither kind of TOTP ever feeds key derivation.
+//! server's own 2FA (§5.10). Neither kind of TOTP ever feeds key derivation: a code gates
+//! server access only, so an attacker who defeats it still needs the master password and the
+//! Secret Key to decrypt anything.
+//!
+//! # Construction
+//!
+//! ```text
+//! mac    = HMAC-H(key = secret, msg = u64(counter))    H = SHA-1, SHA-256 or SHA-512
+//! offset = mac[len(mac) - 1] & 0x0f                    RFC 4226 §5.3 dynamic truncation
+//! word   = u32(mac[offset .. offset + 4]) & 0x7fff_ffff
+//! code   = word mod 10^digits                          shown zero-padded to `digits`
+//! TOTP:    counter = floor(unix_seconds / period)      RFC 6238 §4.2, T0 = 0
+//! ```
+//!
+//! [`hotp`] computes one code. [`TotpParams`] maps a caller-supplied Unix time to its time
+//! step, computes the code of a step, and verifies a submitted code on the server
+//! ([`TotpParams::verify`]). [`OtpAuthUri`] parses and formats the URIs that authenticator apps
+//! exchange. [`TotpSecret`] holds the shared secret and converts it to and from RFC 4648
+//! Base32.
+//!
+//! # Rules
 //!
 //! - **Allow-lists.** Algorithm SHA1, SHA256 or SHA512 (HMAC from `hmac` over `sha1` or `sha2`);
 //!   digits 6–8; period 1–300 s, default 30. Anything else is rejected, never clamped.
@@ -20,6 +41,47 @@
 //! - **Secrets** live in zeroizing buffers ([`TotpSecret`]), and so do an otpauth URI's label and
 //!   issuer, which for an item are decrypted item data (§12.2). Base32 decoding and encoding of
 //!   the secret, and the RFC 4226 dynamic truncation, use no secret-indexed lookups (§12.3).
+//!
+//! # Attacker model
+//!
+//! What this module defends against:
+//! - **Replayed codes.** [`TotpParams::verify`] accepts a step only if it is above the last
+//!   step accepted for the credential, so a code seen on the wire or over a shoulder cannot be
+//!   used again, and neither can an older code that was never used.
+//! - **Timing on the comparison.** Every candidate code of the window is computed and compared
+//!   with `ct_eq`, and the matching step is selected in constant time.
+//! - **Timing on the secret.** Base32 of the secret uses arithmetic, not table lookups, and the
+//!   dynamic truncation reads every 4-byte window and keeps the one at the secret-derived
+//!   offset with a constant-time select (§12.3).
+//! - **Leftover copies and logs.** The secret, codes, Base32 text, formatted URIs and the
+//!   decoded label and issuer sit in buffers wiped on drop, each allocated once with enough
+//!   capacity that it never grows and leaves a copy behind (§12.2). `Debug` on
+//!   [`TotpSecret`] and [`OtpCode`] prints `[REDACTED]`, and on [`OtpAuthUri`] it redacts the
+//!   secret, label and issuer (the kind and parameters still print). The
+//!   `Zeroizing<String>` values returned by [`TotpSecret::to_base32`], [`OtpCode::to_digits`]
+//!   and [`OtpAuthUri::to_uri`] are wiped on drop but are not redacted: `Zeroizing` derives
+//!   `Debug`, so `{:?}` prints them in clear. Never format or log them.
+//! - **Hostile input.** URIs and Base32 text are length-checked before any other work and
+//!   parsed without panics; the parser is fuzzed (`fuzz/fuzz_targets/otpauth_uri.rs`, §15
+//!   item 7). An out-of-range parameter is rejected, never clamped.
+//!
+//! What it does not do:
+//! - **Rate limiting.** A 6-digit code has 10^6 values and the ±1 window accepts up to three
+//!   of them per attempt. Nothing here counts failures; the server must limit attempts.
+//! - **Persisting the replay state.** The caller stores the step [`TotpParams::verify`]
+//!   returns, in the same transaction as the login. Without that the replay rule does not hold.
+//! - **A malicious server.** Server-side 2FA is enforced by the server, so it holds only
+//!   against an honest one (threat model AR-9).
+//! - **Accepted residuals** (§12.3). The reduction modulo `10^digits` and the digit formatting
+//!   may compile to a hardware divide whose latency can depend on its operands. Percent-encoding
+//!   and percent-decoding of the label and issuer branch on their bytes, and the encoder
+//!   indexes a 16-entry table with them.
+//! - **Upstream limits** (§12.2). `hmac` 0.13 builds the padded key block on the stack and never
+//!   wipes it. That block gives back the secret (or, for a secret longer than the hash block,
+//!   its hash, which works as the secret), so every HMAC computation here frees such a copy
+//!   unwiped.
+//! - **One factor.** An item that stores a site's TOTP seed next to its password collapses that
+//!   site's 2FA into one factor (threat model NG-13).
 
 use core::fmt;
 
@@ -144,6 +206,8 @@ impl Algorithm {
             .ok_or(TotpError::UnsupportedAlgorithm)
     }
 
+    /// The HMAC output length in bytes: the hash's output size (20, 32 or 64). Every length is
+    /// at least 19, which dynamic truncation needs for its largest offset, 15, plus 4 bytes.
     const fn mac_len(self) -> usize {
         match self {
             Self::Sha1 => 20,
@@ -178,6 +242,8 @@ impl Digits {
         self.0
     }
 
+    /// `10^digits`, the modulus of RFC 4226 §5.3. Only 6, 7 and 8 occur, because
+    /// [`Digits::new`] and [`Digits::DEFAULT`] are the only constructors; the last arm is 8.
     const fn modulus(self) -> u32 {
         match self.0 {
             6 => 1_000_000,
@@ -214,12 +280,22 @@ impl Period {
 }
 
 /// A HOTP/TOTP shared secret, wiped on drop.
+///
+/// Every constructor enforces [`MIN_SECRET_LEN`]..=[`MAX_SECRET_LEN`] bytes, so an existing
+/// `TotpSecret` always has a length HMAC accepts. The type has no `Clone` and no `Display`, and
+/// `Debug` prints `TotpSecret([REDACTED])` (CRYPTO.md §12.2). An item secret comes from
+/// decrypted item data; a server secret is opened from a `SERVER_TOTP_SECRET` envelope
+/// ([`crate::server_seal::ServerDataKey::open_totp_secret`], §5.11).
 pub struct TotpSecret {
+    /// The raw secret bytes, [`MIN_SECRET_LEN`] to [`MAX_SECRET_LEN`] long, wiped on drop.
     bytes: SecretBytes,
 }
 
 impl TotpSecret {
     /// Draws a new 20-byte secret from the injected CSPRNG, for the server's own 2FA.
+    ///
+    /// [`GENERATED_SECRET_LEN`] is 160 bits, as RFC 4226 §4 R6 recommends. The RNG is the
+    /// caller's (CRYPTO.md §12.1): `rizzy-core` reaches no randomness source itself.
     #[must_use]
     pub fn generate<R: CryptoRng + ?Sized>(rng: &mut R) -> Self {
         let mut bytes = Zeroizing::new(vec![0u8; GENERATED_SECRET_LEN]);
@@ -231,8 +307,13 @@ impl TotpSecret {
 
     /// Takes a raw secret (for example one opened from `SERVER_TOTP_SECRET` or item data).
     ///
+    /// The bytes are copied into a new wiped buffer; the caller still owns, and should wipe,
+    /// its own copy. The range is that of item secrets; the server's stricter floor
+    /// ([`MIN_SERVER_SECRET_LEN`]) is checked where it seals and opens them.
+    ///
     /// # Errors
-    /// [`TotpError::InvalidSecret`] if the length is outside the allowed range.
+    /// [`TotpError::InvalidSecret`] if the length is outside
+    /// [`MIN_SECRET_LEN`]..=[`MAX_SECRET_LEN`].
     pub fn from_slice(bytes: &[u8]) -> Result<Self, TotpError> {
         if !(MIN_SECRET_LEN..=MAX_SECRET_LEN).contains(&bytes.len()) {
             return Err(TotpError::InvalidSecret);
@@ -264,12 +345,19 @@ impl TotpSecret {
     }
 
     /// The unpadded, uppercase RFC 4648 Base32 form, in a buffer wiped on drop.
+    ///
+    /// This is the canonical spelling: unused trailing bits are zero. A secret imported with
+    /// non-zero trailing bits keeps its bytes but comes back with a different spelling
+    /// (CRYPTO.md §11.15).
     #[must_use]
     pub fn to_base32(&self) -> Zeroizing<String> {
         base32_encode(self.bytes.expose_secret())
     }
 
     /// The raw secret bytes.
+    ///
+    /// The explicit name marks every place the secret leaves its wrapper (CRYPTO.md §12.2).
+    /// Do not copy the slice into a buffer that is not wiped.
     #[must_use]
     pub fn expose_secret(&self) -> &[u8] {
         self.bytes.expose_secret()
@@ -284,8 +372,14 @@ impl fmt::Debug for TotpSecret {
 
 /// A one-time code. It is a short-lived credential: `Debug` is redacted and the value is wiped
 /// on drop.
+///
+/// Get one from [`hotp`] or [`TotpParams::code_at`]; show it with [`OtpCode::to_digits`], or
+/// check a submission against it with [`OtpCode::matches`]. The server's 2FA does not compare
+/// single codes: it uses [`TotpParams::verify`], which adds the step window and replay rule.
 pub struct OtpCode {
+    /// The code as an integer, `word mod 10^digits`, so below `10^digits`. Zeroized on drop.
     value: u32,
+    /// How many decimal digits the code is shown with; it also fixed the modulus.
     digits: Digits,
 }
 
@@ -298,8 +392,11 @@ impl OtpCode {
     #[must_use]
     pub fn to_digits(&self) -> Zeroizing<String> {
         let mut out = Zeroizing::new(String::with_capacity(usize::from(self.digits.get())));
+        // Most significant digit first: 10^(digits - 1) down to 1. The loop count depends only
+        // on `digits`, and leading zeros are written like any other digit.
         let mut divisor = self.digits.modulus() / 10;
         while divisor > 0 {
+            // A decimal digit, 0–9, so the conversion to `u8` never fails.
             let d = (self.value / divisor) % 10;
             out.push(char::from(b'0' + u8::try_from(d).unwrap_or(0)));
             divisor /= 10;
@@ -315,6 +412,10 @@ impl OtpCode {
 
     /// Whether `submitted` is this code, compared in constant time. The submission must be
     /// exactly `digits` ASCII digits.
+    ///
+    /// The format check branches (the submission is attacker-chosen and public); only the
+    /// comparison with the expected value is constant-time. This checks one code with no replay
+    /// state: server 2FA uses [`TotpParams::verify`] instead.
     #[must_use]
     pub fn matches(&self, submitted: &str) -> bool {
         parse_code(submitted, self.digits).is_some_and(|v| bool::from(v.ct_eq(&self.value)))
@@ -335,6 +436,14 @@ impl fmt::Debug for OtpCode {
 
 /// HOTP (RFC 4226): the code for `counter`.
 ///
+/// Steps (RFC 4226 §5.3): compute `HMAC-H(secret, u64(counter))` into a wiped buffer, apply
+/// dynamic truncation without a read indexed by the secret-derived offset, and reduce the
+/// 31-bit result modulo `10^digits`. TOTP is this function with the time step as the counter
+/// ([`TotpParams::code_at_step`]).
+///
+/// For HOTP the counter is the caller's state: an otpauth URI carries the next value
+/// ([`OtpKind::Hotp`]), and nothing here advances or stores it.
+///
 /// # Errors
 /// [`TotpError::Internal`] (unreachable).
 pub fn hotp(
@@ -343,11 +452,14 @@ pub fn hotp(
     digits: Digits,
     counter: u64,
 ) -> Result<OtpCode, TotpError> {
+    // Room for the longest MAC (HMAC-SHA-512, 64 bytes); `mac` is the prefix of this
+    // algorithm's length, and the whole buffer is wiped on return.
     let mut buf = Zeroizing::new([0u8; 64]);
     let mac = buf
         .get_mut(..algorithm.mac_len())
         .ok_or(TotpError::Internal)?;
     let key = secret.expose_secret();
+    // The moving factor is the counter as 8 big-endian bytes (RFC 4226 §5.1).
     let msg = counter.to_be_bytes();
     match algorithm {
         Algorithm::Sha1 => hmac_into::<Hmac<sha1::Sha1>>(key, &msg, mac)?,
@@ -362,6 +474,15 @@ pub fn hotp(
     Ok(OtpCode { value, digits })
 }
 
+/// `HMAC(key, msg)` written into `out`, which must be exactly the MAC length.
+///
+/// The tag the `hmac` crate returns is wiped after the copy, whether or not the copy happened.
+/// HMAC accepts keys of any length, so `new_from_slice` cannot fail for a valid secret; a
+/// length mismatch of `out` is a bug in the caller. The padded key block that `hmac` 0.13
+/// builds inside `new_from_slice` is not wiped (CRYPTO.md §12.2, Limits).
+///
+/// # Errors
+/// [`TotpError::Internal`] if the key is refused or `out` has the wrong length (unreachable).
 fn hmac_into<M: Mac + KeyInit>(key: &[u8], msg: &[u8], out: &mut [u8]) -> Result<(), TotpError> {
     let mut mac = <M as KeyInit>::new_from_slice(key).map_err(|_| TotpError::Internal)?;
     mac.update(msg);
@@ -379,14 +500,19 @@ fn hmac_into<M: Mac + KeyInit>(key: &[u8], msg: &[u8], out: &mut [u8]) -> Result
 /// RFC 4226 §5.3 dynamic truncation, without indexing by the secret-derived offset: every
 /// possible 4-byte window is read and the one at the offset is selected in constant time.
 fn dynamic_truncation(mac: &[u8]) -> u32 {
+    // The low 4 bits of the last byte are the offset, 0–15. The last byte is at a public
+    // position; its value is secret.
     let offset = u32::from(mac.last().copied().unwrap_or(0) & 0x0f);
     let mut word = 0u32;
+    // Windows 0 to 15 all exist because every MAC is at least 20 bytes long. Every window is
+    // read the same way; only the constant-time select depends on the offset.
     for (o, window) in (0u32..16).zip(mac.windows(4)) {
         let mut bytes = [0u8; 4];
         bytes.copy_from_slice(window);
         let candidate = u32::from_be_bytes(bytes);
         word.conditional_assign(&candidate, o.ct_eq(&offset));
     }
+    // RFC 4226 §5.3 drops the top bit, so signed and unsigned readings of the word agree.
     word & 0x7fff_ffff
 }
 
@@ -397,6 +523,7 @@ fn parse_code(submitted: &str, digits: Digits) -> Option<u32> {
     if bytes.len() != usize::from(digits.get()) || !bytes.iter().all(u8::is_ascii_digit) {
         return None;
     }
+    // At most 8 digits, so the value is at most 99,999,999 and cannot overflow a `u32`.
     Some(
         bytes
             .iter()
@@ -460,9 +587,17 @@ impl TotpParams {
     /// - **Several matches.** All three candidates are always computed and compared in constant
     ///   time. If two steps have the same code, the highest one is accepted, so the same code
     ///   string cannot be replayed in the next step.
+    /// - **Malformed submissions.** The candidates are still computed and compared (against 0)
+    ///   before the rejection, so a malformed code costs the same HMAC work as a wrong one.
+    ///
+    /// What the caller must do: compute `current_step` with [`TotpParams::time_step`] from its
+    /// own clock, read `last_accepted_step` and write the returned step in the same transaction
+    /// as the login (CRYPTO.md §11.15), and rate-limit attempts. Every rejection is the same
+    /// [`TotpError::CodeRejected`], which says nothing about which check failed.
     ///
     /// # Errors
-    /// [`TotpError::CodeRejected`] for a malformed, wrong, out-of-window or replayed code.
+    /// [`TotpError::CodeRejected`] for a malformed, wrong, out-of-window or replayed code;
+    /// [`TotpError::Internal`] if an HMAC computation fails (unreachable).
     pub fn verify(
         &self,
         secret: &TotpSecret,
@@ -471,6 +606,8 @@ impl TotpParams {
         last_accepted_step: Option<u64>,
     ) -> Result<u64, TotpError> {
         let parsed = parse_code(submitted, self.digits);
+        // The window, in increasing order. At step 0 there is no predecessor and at
+        // `u64::MAX` no successor; those slots stay `None` rather than wrapping.
         let steps = [
             current_step.checked_sub(1),
             Some(current_step),
@@ -482,6 +619,9 @@ impl TotpParams {
                 *slot = Some((step, self.code_at_step(secret, step)?));
             }
         }
+        // A malformed submission is compared as 0, so the HMAC and comparison work does not
+        // depend on whether it parsed; the `parsed` check below rejects it even if a candidate
+        // code happens to be 0.
         let accepted = select_step(
             candidates
                 .iter()
@@ -540,6 +680,14 @@ pub enum OtpKind {
 
 /// A parsed `otpauth://` URI (the Key Uri Format used by authenticator apps).
 ///
+/// [`OtpAuthUri::to_uri`] writes
+/// `otpauth://{totp|hotp}/<label>?secret=<Base32>[&issuer=…]&algorithm=…&digits=…` followed by
+/// `&period=…` (TOTP) or `&counter=…` (HOTP). The parser takes the parameters in any order,
+/// and only `secret` (and `counter` for HOTP) is required. Use [`OtpAuthUri::parse`] when an
+/// item or an importer brings a URI (for example from a QR code), and
+/// [`OtpAuthUri::new_totp`] with [`OtpAuthUri::to_uri`] to build the server's enrolment QR
+/// code. Parsing checks every value it reads against its allow-list or length limit.
+///
 /// Readings, chosen to fail closed:
 /// - The URI must be ASCII (non-ASCII text must be percent-encoded) and at most
 ///   [`MAX_URI_LEN`] bytes; a fragment is rejected.
@@ -559,16 +707,27 @@ pub enum OtpKind {
 /// The label and issuer are held in wiped buffers: for an item's TOTP they are decrypted item
 /// data (§12.2).
 pub struct OtpAuthUri {
+    /// TOTP with its period, or HOTP with its counter.
     kind: OtpKind,
+    /// The percent-decoded label, at most [`MAX_LABEL_LEN`] bytes, wiped on drop.
     label: Zeroizing<String>,
+    /// The percent-decoded `issuer` parameter, at most [`MAX_ISSUER_LEN`] bytes, wiped on drop.
     issuer: Option<Zeroizing<String>>,
+    /// The HMAC hash; SHA1 when a parsed URI names none.
     algorithm: Algorithm,
+    /// The number of digits; 6 when a parsed URI names none.
     digits: Digits,
+    /// The shared secret.
     secret: TotpSecret,
 }
 
 impl OtpAuthUri {
     /// Builds a TOTP URI, for example for the server's 2FA enrolment QR code.
+    ///
+    /// `params` are already allow-listed by their types. The secret is taken as it is: the
+    /// server's floor ([`MIN_SERVER_SECRET_LEN`]) is checked when the secret is sealed, not
+    /// here. The resulting URI, like the secret, belongs only in wiped buffers and on the
+    /// user's screen.
     ///
     /// # Errors
     /// [`TotpError::InvalidUri`] if the label is longer than [`MAX_LABEL_LEN`] bytes or the
@@ -594,9 +753,20 @@ impl OtpAuthUri {
 
     /// Parses an otpauth URI.
     ///
+    /// The input is untrusted (a scanned QR code, an import file). The readings in the type's
+    /// documentation apply. Steps: check the length, ASCII and the absence of a fragment
+    /// before anything else; split off the scheme, the type and the label; collect the
+    /// parameters this parser reads, refusing duplicates; then decode and check each value,
+    /// secret first. Every intermediate buffer that holds the secret, the label or the issuer
+    /// is wiped.
+    ///
     /// # Errors
-    /// A [`TotpError`] naming the problem.
+    /// A [`TotpError`] naming the problem: [`TotpError::InvalidUri`] for the structure, the
+    /// percent-encoding and the text limits, [`TotpError::DuplicateParameter`],
+    /// [`TotpError::MissingParameter`], [`TotpError::InvalidSecret`], and the allow-list errors
+    /// of the algorithm, digits, period and counter.
     pub fn parse(uri: &str) -> Result<Self, TotpError> {
+        // Limits first: nothing below looks at more than MAX_URI_LEN ASCII bytes.
         if uri.len() > MAX_URI_LEN || !uri.is_ascii() || uri.contains('#') {
             return Err(TotpError::InvalidUri);
         }
@@ -604,6 +774,8 @@ impl OtpAuthUri {
         if !scheme.eq_ignore_ascii_case("otpauth") {
             return Err(TotpError::InvalidUri);
         }
+        // The type is the first path segment; everything after it up to `?` is the label,
+        // which may itself contain `/`.
         let (kind_text, rest) = rest.split_once('/').ok_or(TotpError::InvalidUri)?;
         let is_totp = if kind_text.eq_ignore_ascii_case("totp") {
             true
@@ -615,6 +787,10 @@ impl OtpAuthUri {
         let (label, query) = rest.split_once('?').unwrap_or((rest, ""));
         let label = percent_decode(label, false)?;
 
+        // Collect the raw values of the parameters this parser reads. Unknown names are
+        // skipped (and may repeat); a known name twice is an error rather than first-wins or
+        // last-wins, so two readers cannot disagree about which value counts. A pair without
+        // `=` has an empty value.
         let mut secret = None;
         let mut issuer = None;
         let mut algorithm = None;
@@ -642,11 +818,18 @@ impl OtpAuthUri {
         let secret_text = percent_decode(secret.ok_or(TotpError::MissingParameter)?, false)?;
         let secret = TotpSecret::from_base32(&secret_text)?;
         let issuer = issuer.map(|v| percent_decode(v, true)).transpose()?;
+        // The limits apply to the decoded text; they are what keeps `to_uri` within
+        // MAX_URI_LEN.
         check_text_lengths(&label, issuer.as_deref().map(String::as_str))?;
         let algorithm = match algorithm {
             Some(v) => Algorithm::from_name(&percent_decode(v, true)?)?,
             None => Algorithm::Sha1,
         };
+        // Numeric values are not percent-decoded: an escaped digit is not plain decimal, so
+        // `parse_decimal` rejects it. The digit limits are the longest valid values: one
+        // digit for `digits`, three for `period` (300) and twenty for `counter` (`u64::MAX`;
+        // a twenty-digit value above it fails to parse). The allow-lists are then checked on
+        // the number, so nothing is clamped.
         let digits = match digits {
             Some(v) => Digits::new(
                 u8::try_from(parse_decimal(v, 1).ok_or(TotpError::InvalidDigits)?)
@@ -724,12 +907,14 @@ impl OtpAuthUri {
     }
 
     /// The decoded label (often `Issuer:account`).
+    ///
+    /// For an item this is decrypted item data: show it, but do not log it.
     #[must_use]
     pub fn label(&self) -> &str {
         self.label.as_str()
     }
 
-    /// The decoded `issuer` parameter, if present.
+    /// The decoded `issuer` parameter, if present. Item data like the label: do not log it.
     #[must_use]
     pub fn issuer(&self) -> Option<&str> {
         self.issuer.as_deref().map(String::as_str)
@@ -825,6 +1010,9 @@ fn parse_decimal(text: &str, max_digits: usize) -> Option<u64> {
     if ok { text.parse().ok() } else { None }
 }
 
+/// The value of one ASCII hex digit, either case; `None` for any other byte. Used only by
+/// [`percent_decode`], whose branching on label and issuer bytes is the accepted residual of
+/// CRYPTO.md §12.3.
 fn hex_value(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
@@ -836,11 +1024,20 @@ fn hex_value(b: u8) -> Option<u8> {
 
 /// Strict percent-decoding into UTF-8, in a buffer wiped on drop: the text is a label, an issuer
 /// or the secret. `plus_is_space` applies form encoding (query values).
+///
+/// A `%` must be followed by two hex digits; a truncated or non-hex escape is an error, not
+/// passed through. Every other byte is copied as it is.
+///
+/// # Errors
+/// [`TotpError::InvalidUri`] for a bad escape, or if the decoded bytes are not UTF-8.
 fn percent_decode(text: &str, plus_is_space: bool) -> Result<Zeroizing<String>, TotpError> {
+    // Decoding never lengthens the text, so this capacity is enough and the buffer never
+    // reallocates.
     let mut out = Zeroizing::new(Vec::with_capacity(text.len()));
     let mut bytes = text.bytes();
     while let Some(b) = bytes.next() {
         match b {
+            // `%XY`: the two hex digits give the high and low nibble of one byte.
             b'%' => {
                 let hi = bytes
                     .next()
@@ -868,6 +1065,10 @@ fn percent_decode(text: &str, plus_is_space: bool) -> Result<Zeroizing<String>, 
 }
 
 /// Percent-encodes a label or issuer. The caller reserved room for 3 bytes per input byte.
+///
+/// RFC 3986 unreserved characters (`A`–`Z`, `a`–`z`, `0`–`9`, `-`, `.`, `_`, `~`) are copied;
+/// every other byte, including each byte of a multi-byte UTF-8 character, becomes `%XY` with
+/// uppercase hex. The output is ASCII.
 fn percent_encode_into(out: &mut String, text: &str) {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     for b in text.bytes() {
@@ -892,10 +1093,16 @@ fn percent_encode_into(out: &mut String, text: &str) {
 }
 
 /// RFC 4648 Base32 character → 5-bit value, case-insensitive, with arithmetic only.
+///
+/// Returns the value and whether `b` was in the alphabet; for a byte outside it the value is
+/// 0 and the flag false. `in_range` yields a mask of `0xFF` or `0x00`, so no step branches on
+/// or indexes by `b` (CRYPTO.md §12.3).
 fn base32_value(b: u8) -> (u8, bool) {
+    // Fold `a`–`z` to `A`–`Z` by clearing bit 5 (0x20) only for lowercase letters.
     let c = b ^ (in_range(b, b'a', b'z') & 0x20);
     let letter = in_range(c, b'A', b'Z');
     let digit = in_range(c, b'2', b'7');
+    // `A`–`Z` are 0–25 and `2`–`7` are 26–31; the masks keep at most one of the two terms.
     let value = (letter & c.wrapping_sub(b'A')) | (digit & c.wrapping_sub(b'2').wrapping_add(26));
     (value, (letter | digit) != 0)
 }
@@ -908,6 +1115,28 @@ fn base32_char(v: u8) -> u8 {
         .wrapping_sub(in_range(v, 26, 31) & 0x29)
 }
 
+/// Decodes RFC 4648 Base32 into a wiped buffer (the implementation of
+/// [`TotpSecret::from_base32`], CRYPTO.md §11.15).
+///
+/// Steps:
+/// 1. Reject anything longer than `MAX_BASE32_LEN` (208) characters.
+/// 2. Split at the first `=` into data and padding. A data length of 1, 3 or 6 modulo 8 can
+///    never be valid Base32; the others fix the padding length (0, 6, 4, 3 or 1). Padding is
+///    optional, but if present it must be exactly that many `=` and nothing else.
+/// 3. The decoded length, `floor(5 × data_len / 8)`, must be
+///    [`MIN_SECRET_LEN`]..=[`MAX_SECRET_LEN`].
+/// 4. Decode every data character with `base32_value`, accumulating 5 bits at a time and
+///    emitting a byte whenever 8 are available. Invalid characters only clear a flag, so the
+///    loop does the same work for every input of a given length.
+/// 5. Wipe the unused trailing bits (ignored, not checked), then fail if any character was
+///    invalid.
+///
+/// The length and padding checks branch on public information (the lengths). Apart from the
+/// search for the first `=`, whose outcome is the data length, the data characters, which
+/// spell the secret, are never branched on or used as an index.
+///
+/// # Errors
+/// [`TotpError::InvalidSecret`] for every failure.
 fn base32_decode(text: &str) -> Result<SecretBytes, TotpError> {
     let bytes = text.as_bytes();
     // Before any arithmetic on the length: `data_len * 5` below cannot overflow a 32-bit usize
@@ -917,6 +1146,8 @@ fn base32_decode(text: &str) -> Result<SecretBytes, TotpError> {
     }
     let data_len = bytes.iter().position(|b| *b == b'=').unwrap_or(bytes.len());
     let (data, pad) = bytes.split_at(data_len);
+    // 8 characters carry 40 bits = 5 bytes. A final group of 2, 4, 5 or 7 characters carries
+    // 1, 2, 3 or 4 bytes; 1, 3 or 6 characters cannot end a valid encoding.
     let expected_pad = match data_len % 8 {
         0 => 0,
         2 => 6,
@@ -934,6 +1165,7 @@ fn base32_decode(text: &str) -> Result<SecretBytes, TotpError> {
     }
 
     let mut out = Zeroizing::new(Vec::with_capacity(out_len));
+    // `acc` holds fewer than 8 pending bits between iterations, so it never exceeds 12 bits.
     let mut acc: u32 = 0;
     let mut bits = 0u32;
     let mut valid = true;
@@ -958,6 +1190,13 @@ fn base32_decode(text: &str) -> Result<SecretBytes, TotpError> {
     Ok(SecretBytes::from_zeroizing(out))
 }
 
+/// Encodes bytes as canonical RFC 4648 Base32: uppercase, no padding, unused trailing bits
+/// zero (the implementation of [`TotpSecret::to_base32`]).
+///
+/// Bits are taken 5 at a time, most significant first; a final partial group is shifted left
+/// so its unused low bits are zero. Characters come from `base32_char`, which uses
+/// arithmetic, not a table (CRYPTO.md §12.3). The capacity is the padded length, an upper
+/// bound, so the buffer never reallocates.
 fn base32_encode(bytes: &[u8]) -> Zeroizing<String> {
     let mut out = Zeroizing::new(String::with_capacity(bytes.len().div_ceil(5) * 8));
     let mut acc: u32 = 0;
@@ -984,6 +1223,10 @@ fn base32_encode(bytes: &[u8]) -> Zeroizing<String> {
 
 #[cfg(test)]
 mod tests {
+    //! Upstream vectors (RFC 2202, RFC 4226 Appendix D, RFC 6238 Appendix B, RFC 4648), the
+    //! allow-lists, the verification window and replay rule, Base32 and otpauth parsing and
+    //! formatting, and property tests (CRYPTO.md §15 items 2 and 7).
+
     use proptest::prelude::*;
 
     use super::*;

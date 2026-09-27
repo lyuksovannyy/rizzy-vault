@@ -12,6 +12,19 @@
 //! of rand 0.8, which re-exports `rand_core` 0.6), so there is no separate `rand_core` 0.6 or
 //! rand dependency. The adapter contains no cryptography: it forwards every call. No other
 //! `rand_core` 0.6 use is allowed (§12.1).
+//!
+//! **Why injection.** It keeps `rizzy-core` free of I/O and portable to
+//! `wasm32-unknown-unknown`, where only the wasm bindings crate may pick the browser's
+//! `crypto.getRandomValues` backend (ADR 0016 R1–R2). It makes every transcript reproducible
+//! from a seeded RNG, which the known-answer and transcript vectors rely on (§15 item 1). And
+//! it puts the one decision "which randomness source" in the leaf crates, where CI checks it:
+//! `getrandom` must never appear in this crate's dependency closure.
+//!
+//! **What the caller must supply.** A cryptographically secure generator: the OS CSPRNG in
+//! every release build. The `CryptoRng` bound is a marker the type system cannot verify, so
+//! passing a weak generator here would silently weaken every key, nonce, id and salt drawn
+//! from it (§12.1 lists what the RNG produces). There is no fallback source and no reseeding
+//! logic in this crate.
 
 use core::fmt;
 
@@ -23,16 +36,22 @@ pub use rand_core::CryptoRng;
 /// It borrows the injected RNG for the duration of one opaque-ke call and forwards every
 /// request unchanged, so opaque-ke draws exactly the bytes the injected RNG produces.
 pub struct OpaqueRng<'a, R: CryptoRng + ?Sized> {
+    /// The injected `rand_core` 0.10 CSPRNG, borrowed mutably so its state advances exactly
+    /// as if opaque-ke had called it directly.
     inner: &'a mut R,
 }
 
 impl<'a, R: CryptoRng + ?Sized> OpaqueRng<'a, R> {
     /// Wraps the injected RNG.
+    ///
+    /// Create one per opaque-ke call inside the OPAQUE wrapper module ([`crate::opaque`]);
+    /// it holds no state of its own.
     pub fn new(inner: &'a mut R) -> Self {
         Self { inner }
     }
 }
 
+// `Debug` names the type only; RNG state is never printed.
 impl<R: CryptoRng + ?Sized> fmt::Debug for OpaqueRng<'_, R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("OpaqueRng")
@@ -65,6 +84,8 @@ impl<R: CryptoRng + ?Sized> opaque_ke::rand::CryptoRng for OpaqueRng<'_, R> {}
 
 #[cfg(test)]
 mod tests {
+    //! The adapter forwards the injected byte stream and integers unchanged.
+
     use opaque_ke::rand::RngCore as RngCore06;
     use rand_core::Rng as _;
 

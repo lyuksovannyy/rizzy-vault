@@ -1,13 +1,34 @@
 //! The label registry (CRYPTO.md §2, §4.3 "Label registry rule").
 //!
-//! `LABEL(x)` is the ASCII string `"rizzy-vault/v1/" + x`. Every HKDF `info`, signed message,
-//! hash domain and HPKE `info`/`psk_id` in CRYPTO.md starts with one. This module is the only
+//! `LABEL(x)` is the ASCII string `"rizzy-vault/v1/" + x`. Every HKDF `info`, signed message
+//! and HPKE `info`/`psk_id` in CRYPTO.md starts with one, and so does every hash input that
+//! CRYPTO.md writes with a `LABEL` (for example public key ids, the account fingerprint and the
+//! pairing commitment). Not every hash is labelled: see "Why labels matter". This module is the only
 //! place a label is defined: code never spells a label string anywhere else. Adding a label
 //! means amending the CRYPTO.md §4.3 table in the same change.
 //!
 //! Labels never contain `0x00`, so `LABEL(x) ‖ 0x00 ‖ ctx` is prefix-free: no two labels, and
 //! no label with two different contexts, produce the same encoding. The unit tests assert that
 //! every label is unique, is ASCII and contains no `0x00`.
+//!
+//! **Why labels matter.** Domain separation: every HKDF `info`, every signed message and every
+//! hash input that CRYPTO.md defines with a `LABEL` starts with a distinct label, so such a
+//! value computed for one purpose can never be accepted for another (a symmetric key id is not
+//! an envelope subkey, a `device-auth` signature is not an `op` signature). The claim does not
+//! extend to every hash: CRYPTO.md also defines plain, unlabelled SHA-256 values, such as
+//! `settings_hash` over the settings envelope, `H_rec` and the share token hashes, the bundle
+//! hashes and the hashes of op envelopes and request bodies (§4.3, §10.2). This is CRYPTO.md
+//! §1 rule 4 ("every use of a key passes through HKDF with a unique label") made mechanical:
+//! [`Label`] has no public constructor, so code can only use a label defined here. The registry
+//! tests compare the list with a hand-maintained copy of every `LABEL("…")` that CRYPTO.md
+//! spells out; they do not read CRYPTO.md, so a label added to the spec must also be added to
+//! that copy by hand.
+//!
+//! **Versioning.** The `v1` in the prefix versions the whole label set (§13 item 5). A future
+//! incompatible change to a construction gets a new label rather than a reinterpretation of an
+//! old one.
+//!
+//! Labels are public constants, not secrets.
 
 use core::fmt;
 
@@ -19,7 +40,9 @@ pub const PREFIX: &str = "rizzy-vault/v1/";
 /// Only the constants in this module exist; there is no way to build a label at run time.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Label {
+    /// The full ASCII label, `"rizzy-vault/v1/" + name`, built at compile time by `concat!`.
     full: &'static str,
+    /// The name `x` of `LABEL(x)`, without the prefix.
     name: &'static str,
 }
 
@@ -47,6 +70,10 @@ impl Label {
     ///
     /// The result is allocated at its final size. Do not pass secrets as `ctx`: contexts are
     /// public identifiers and counters.
+    ///
+    /// The crate's HKDF helper passes `LABEL`, `0x00` and `ctx` as separate `info` parts
+    /// instead of calling this; both give the same bytes. This form is used where one buffer
+    /// is needed, such as the HPKE `info`.
     #[must_use]
     pub fn info(self, ctx: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.full.len() + 1 + ctx.len());
@@ -70,7 +97,8 @@ impl fmt::Display for Label {
 }
 
 /// Defines each label constant and the [`ALL`] list from one table, so the list cannot miss
-/// a label.
+/// a label. Each entry is `IDENT = "name";`; the full string is built at compile time with
+/// `concat!` from the same prefix as [`PREFIX`], which a unit test cross-checks.
 macro_rules! registry {
     ($( $(#[$doc:meta])* $ident:ident = $name:literal; )+) => {
         $(
@@ -103,13 +131,16 @@ registry! {
     KEY_ID_SYMMETRIC = "key-id/symmetric";
     /// Public key id: `SHA-256(LABEL ‖ 0x00 ‖ u8(key_type) ‖ public_key)[0..16]`.
     KEY_ID = "key-id";
-    /// Account fingerprint (safety numbers).
+    /// Account fingerprint (safety numbers):
+    /// `SHA-256(LABEL ‖ 0x00 ‖ account_id ‖ identity Ed25519 pk ‖ identity X25519 pk)`.
     FINGERPRINT = "fingerprint";
-    /// Device set hash in `account-state`.
+    /// Device set hash in `account-state`: `SHA-256(LABEL ‖ 0x00 ‖ h_1 ‖ … ‖ h_n)` over the
+    /// sorted certificate-message hashes of the durable, non-revoked devices (§10.2).
     DEVICE_SET = "device-set";
-    /// Secret Key check characters (§7).
+    /// Secret Key check characters (§7): the top 10 bits of `SHA-256(LABEL ‖ 0x00 ‖ SK)`.
     SECRET_KEY_CHECK = "secret-key/check";
-    /// Recovery code check characters (§11.9).
+    /// Recovery code check characters (§11.9): the top 10 bits of
+    /// `SHA-256(LABEL ‖ 0x00 ‖ recovery_code)`.
     RECOVERY_CODE_CHECK = "recovery-code/check";
 
     // --- Unlock keys (§4.3, §5.4) ---
@@ -123,58 +154,74 @@ registry! {
     ENVELOPE_XCHACHA20POLY1305 = "envelope/xchacha20poly1305";
 
     // --- Account-key derived keys (§4.3) ---
-    /// Relay key (M4).
+    /// Relay key (M4):
+    /// `HKDF(account_key, salt = empty, LABEL ‖ 0x00 ‖ account_id ‖ u32(account_key_epoch), 32)`.
     RELAY_KEY = "relay-key";
-    /// Local index key (M3).
+    /// Local index key (M3):
+    /// `HKDF(account_key, salt = empty, LABEL ‖ 0x00 ‖ account_id ‖ device_id, 32)`.
     LOCAL_INDEX_KEY = "local-index-key";
 
     // --- Recovery (§4.3, §11.9) ---
-    /// Recovery wrap key.
+    /// Recovery wrap key: `HKDF(recovery_code, salt = empty, LABEL ‖ 0x00, 32)`, the key of
+    /// `E_rec`.
     RECOVERY_WRAP_KEY = "recovery/wrap-key";
-    /// Recovery auth token; the server stores its SHA-256.
+    /// Recovery auth token: `HKDF(recovery_code, salt = empty, LABEL ‖ 0x00, 32)`; the server
+    /// stores its SHA-256.
     RECOVERY_AUTH_TOKEN = "recovery/auth-token";
 
     // --- Shares (§4.3, §11.10, M5) ---
-    /// Share key.
+    /// Share key: `HKDF(share_secret [‖ pp_key], salt = share_id, LABEL ‖ 0x00, 32)`.
     SHARE_KEY = "share/key";
-    /// Share link token.
+    /// Share link token: `HKDF(share_secret, salt = share_id, LABEL ‖ 0x00, 32)`; the server
+    /// stores its SHA-256.
     SHARE_LINK_TOKEN = "share/link-token";
-    /// Share access token.
+    /// Share access token: `HKDF(share_secret [‖ pp_key], salt = share_id, LABEL ‖ 0x00, 32)`;
+    /// the server stores its SHA-256.
     SHARE_ACCESS_TOKEN = "share/access-token";
 
     // --- Export (§4.3, §11.14) ---
-    /// Export file key.
+    /// Export file key: `HKDF(e, salt = empty, LABEL ‖ 0x00 ‖ export_id, 32)`, where `e` is
+    /// Argon2id of the export password with the file's `export_salt`.
     EXPORT_KEY = "export/key";
 
     // --- Server-side sealing (§4.3, §5.11); `LABEL("server/<purpose>")` ---
-    /// Server data subkey for `SERVER_TOTP_SECRET`.
+    /// Server data subkey for `SERVER_TOTP_SECRET`:
+    /// `HKDF(server_data_key, salt = empty, LABEL ‖ 0x00 ‖ u32(data_key_id), 32)`.
     SERVER_TOTP_SECRET = "server/totp-secret";
-    /// Server data subkey for `SERVER_LOGIN_STATE`.
+    /// Server data subkey for `SERVER_LOGIN_STATE`, derived like the TOTP subkey.
     SERVER_LOGIN_STATE = "server/login-state";
-    /// Server-secrets backup key.
+    /// Server-secrets backup key: `HKDF(b, salt = empty, LABEL ‖ 0x00 ‖ backup_id, 32)`, where
+    /// `b` is Argon2id of the operator passphrase with the file's `backup_salt`.
     SERVER_SECRETS_BACKUP = "server/secrets-backup";
 
     // --- HPKE (§4.3, §9.2, §10.1) ---
     /// HPKE `info = LABEL ‖ 0x00 ‖ u16(purpose)`.
     HPKE = "hpke";
-    /// Device-grant PSK derivation label and `psk_id`.
+    /// Device-grant PSK derivation label and `psk_id`: `HKDF(previous account key, salt = empty,
+    /// LABEL ‖ 0x00 ‖ account_id ‖ u32(new account_key_epoch) ‖ recipient device_id, 32)`.
     HPKE_PSK_DEVICE_GRANT = "hpke-psk/device-grant";
-    /// Password-verifier PSK derivation label and `psk_id` (M4).
+    /// Password-verifier PSK derivation label and `psk_id` (M4): `HKDF(account key, salt =
+    /// empty, LABEL ‖ 0x00 ‖ account_id ‖ u32(new password_epoch) ‖ recipient device_id, 32)`.
     HPKE_PSK_PASSWORD_VERIFIER = "hpke-psk/password-verifier";
-    /// Re-sync PSK derivation label and `psk_id` (M4).
+    /// Re-sync PSK derivation label and `psk_id` (M4): `HKDF(account key, salt = empty,
+    /// LABEL ‖ 0x00 ‖ account_id ‖ u32(account_key_epoch) ‖ transfer_id ‖ recipient device_id,
+    /// 32)`.
     HPKE_PSK_RESYNC = "hpke-psk/resync";
     /// Pairing transfer `psk_id`; the PSK is `k_pair` (M4).
     HPKE_PSK_PAIRING = "hpke-psk/pairing";
 
     // --- Pairing (§4.3, §11.7, M4) ---
-    /// Pairing key `k_pair`.
+    /// Pairing key `k_pair`: `HKDF(pairing_secret, salt = pairing_id, LABEL ‖ 0x00, 32)`.
     PAIRING_KEY = "pairing/key";
-    /// Pairing commitment `c_N`.
+    /// Pairing commitment `c_N`: `SHA-256(LABEL ‖ 0x00 ‖ pairing_id ‖ new-device Ed25519 pk ‖
+    /// new-device X25519 pk ‖ r_N)`.
     PAIRING_COMMIT = "pairing/commit";
-    /// Pairing short authentication string.
+    /// Pairing short authentication string: `u32(HKDF(k_pair, salt = empty, LABEL ‖ 0x00 ‖
+    /// pairing_id ‖ new-device Ed25519 pk ‖ new-device X25519 pk ‖ r_N ‖ r_E, 4)) mod 10^6`.
     PAIRING_SAS = "pairing/sas";
 
     // --- Signed statements (§5.10, §10.1, §10.2); `LABEL("sig/<type>")` ---
+    // Every signed message is `LABEL ‖ 0x00 ‖ u16(statement_version = 1) ‖ body` (§10.2).
     /// `public-key-bundle` statement.
     SIG_PUBLIC_KEY_BUNDLE = "sig/public-key-bundle";
     /// `device-certificate` statement.
@@ -197,6 +244,10 @@ registry! {
 
 #[cfg(test)]
 mod tests {
+    //! The label invariants: prefix plus name, uniqueness, printable ASCII without `0x00`,
+    //! prefix-free `info` encodings, the `info` layout, and coverage of every label CRYPTO.md
+    //! spells out.
+
     use std::collections::HashSet;
 
     use super::*;

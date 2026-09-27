@@ -9,6 +9,21 @@
 //!
 //! Fixed-size secrets live on the heap ([`SecretArray`]), so moving the owner moves a pointer,
 //! not the bytes.
+//!
+//! **What this defends against.** Accidental disclosure by this crate's own code: a secret
+//! formatted into a log line, an error or a panic message; a copy left behind by `Clone`, by a
+//! move of a stack array, or by a reallocating `Vec`; freed memory that still holds key bytes
+//! when a later bug or a core dump exposes it.
+//!
+//! **What it does not.** Copies made inside third-party crates (the HKDF state in `hkdf`, the
+//! HMAC key block in `hmac`, Argon2 locals, opaque-ke's own buffers), memory the operating
+//! system swaps or hibernates to disk (there is no `mlock`, which would need `unsafe`), copies a
+//! wasm engine makes when linear memory grows, and anything a caller copies out of
+//! `expose_secret()`. CRYPTO.md §12.2 "Limits" lists these. Malware on an unlocked client is
+//! out of scope (CRYPTO.md §1 non-goals).
+//!
+//! In test builds the drops report each wipe to `wipe_hooks`, so tests can check that secrets
+//! are wiped before they are freed (CRYPTO.md §15 item 9). Release builds contain no hook.
 
 use core::fmt;
 
@@ -22,7 +37,14 @@ use crate::ids::SymmetricKeyId;
 pub const KEY_LEN: usize = 32;
 
 /// A fixed-size secret of `N` bytes, heap-allocated and wiped on drop.
+///
+/// Used for every symmetric key of the hierarchy ([`Key32`]), the 16-byte Secret Key and recovery code,
+/// and OPAQUE's 64-byte `export_key`. Build one in place ([`SecretArray::generate`],
+/// [`SecretArray::try_init_with`]) wherever possible, so the bytes never exist outside the
+/// final buffer.
 pub struct SecretArray<const N: usize> {
+    /// The secret bytes, on the heap so that moving the owner never copies them. Wiped in
+    /// `Drop`.
     bytes: Box<[u8; N]>,
 }
 
@@ -32,6 +54,9 @@ pub type Key32 = SecretArray<KEY_LEN>;
 
 impl<const N: usize> SecretArray<N> {
     /// All-zero secret, filled in place by the constructors below.
+    ///
+    /// The zero array may be built on the stack before it is boxed; it holds no secret, so
+    /// that copy is harmless.
     fn zeroed() -> Self {
         Self {
             bytes: Box::new([0u8; N]),
@@ -39,6 +64,9 @@ impl<const N: usize> SecretArray<N> {
     }
 
     /// Draws `N` fresh bytes from the injected CSPRNG, directly into the final buffer.
+    ///
+    /// `rng` must be the platform CSPRNG supplied by a leaf crate (or a seeded test RNG in
+    /// tests); see [`crate::rng`].
     #[must_use]
     pub fn generate<R: CryptoRng + ?Sized>(rng: &mut R) -> Self {
         let mut secret = Self::zeroed();
@@ -73,6 +101,9 @@ impl<const N: usize> SecretArray<N> {
     }
 
     /// The secret bytes. Every call site is a place where the secret is used; keep them few.
+    ///
+    /// The borrow must not be copied into a plain buffer, formatted or logged; pass it straight
+    /// to the primitive that needs it.
     #[must_use]
     pub fn expose_secret(&self) -> &[u8; N] {
         &self.bytes
@@ -83,6 +114,9 @@ impl SecretArray<KEY_LEN> {
     /// The key's symmetric key id, `HKDF(K, salt = empty, LABEL("key-id/symmetric") ‖ 0x00, 16)`
     /// (CRYPTO.md §4.3, §4.4).
     ///
+    /// The id goes into envelope headers in the clear. Only call it on a stretched or random
+    /// key, never on anything computed from the password before Argon2id (§4.4).
+    ///
     /// # Errors
     /// [`DerivationError`], which cannot happen for this fixed output length.
     pub fn key_id(&self) -> Result<SymmetricKeyId, DerivationError> {
@@ -90,6 +124,8 @@ impl SecretArray<KEY_LEN> {
     }
 }
 
+// Wipes the heap buffer before it is freed. `zeroize` uses volatile writes, so the compiler
+// cannot drop them as dead stores. The `cfg(test)` lines only observe the wipe.
 impl<const N: usize> Drop for SecretArray<N> {
     fn drop(&mut self) {
         #[cfg(test)]
@@ -114,7 +150,10 @@ impl<const N: usize> fmt::Debug for SecretArray<N> {
 }
 
 /// A variable-length secret: plaintext, a normalised password, a serialized secret key.
+///
+/// Every decrypted plaintext comes back from the envelope and HPKE layers in this type.
 pub struct SecretBytes {
+    /// The secret bytes in a vector that is wiped (including spare capacity) on drop.
     bytes: Zeroizing<Vec<u8>>,
 }
 
@@ -142,12 +181,15 @@ impl SecretBytes {
     }
 
     /// The secret bytes.
+    ///
+    /// As for [`SecretArray::expose_secret`]: do not copy the bytes into a plain buffer,
+    /// format or log them.
     #[must_use]
     pub fn expose_secret(&self) -> &[u8] {
         &self.bytes
     }
 
-    /// Length in bytes.
+    /// Length in bytes. The length is not treated as secret (envelopes reveal padded sizes).
     #[must_use]
     pub fn len(&self) -> usize {
         self.bytes.len()
@@ -248,6 +290,10 @@ pub(crate) mod wipe_hooks {
 
 #[cfg(test)]
 mod tests {
+    //! Redacted `Debug`, generation from the injected RNG, length checks, in-place
+    //! construction, compile-time proof that the secret types lack `Clone`, `Copy` and
+    //! `Display`, and the wipe-on-drop observations of CRYPTO.md §15 item 9.
+
     use super::wipe_hooks::{Observation, capture};
     use super::*;
     use crate::test_util::seeded_rng;

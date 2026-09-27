@@ -6,7 +6,23 @@
 #
 #     cargo +nightly fuzz run envelope_parse
 #
-# `cargo check` from this directory also works on the pinned stable toolchain.
+# `cargo check` from this directory also works on the pinned stable toolchain; CI's `fuzz-check`
+# job type-checks every target that way on each PR. The scheduled job (.github/workflows/
+# fuzz.yml) runs every [[bin]] below for a bounded time each week and uploads crashing inputs.
+#
+# Targets and the CRYPTO.md §15 item 7 parsers they cover (each file's header says what it
+# asserts):
+#
+#   envelope_parse     envelope parser (§9.5)
+#   signed_statements  signature container and signed-statement parsers (§9.3, §9.6, §10.2)
+#   secret_key_parse   Secret Key and recovery-code parsers (§7)
+#   padding_unframe    Padmé frame parser (§8.5)
+#   otpauth_uri        otpauth URI and Base32 secret parsers (§11.15)
+#   opaque_server      server-side OPAQUE messages and stored state (§5)
+#   normalize          login-name and server-origin normalisers (§2); not in the §15 list
+#
+# Not covered yet: the share-URL fragment parser (M5, not written) and the export-file parser
+# (§11.14: its JSON reader is not written, and `ExportHeader::from_json_fields` has no target).
 [package]
 name = "rizzy-fuzz"
 version = "0.0.0"
@@ -26,6 +42,8 @@ libfuzzer-sys = "0.4.13"
 rand_core = { version = "=0.10.1", default-features = false }
 rizzy-core = { path = "../crates/rizzy-core" }
 
+# One [[bin]] per target. `test`, `doc` and `bench` are off because a libFuzzer entry point
+# (`#![no_main]` with `fuzz_target!`) is not a test, has no API to document and is not a benchmark.
 [[bin]]
 name = "envelope_parse"
 path = "fuzz_targets/envelope_parse.rs"

@@ -49,8 +49,16 @@ fn lines() -> impl Iterator<Item = &'static [u8]> {
 
 /// Writes word number `index` into `slot` (length byte, then the letters, zero-filled),
 /// touching every line of the list the same way whatever `index` is.
+///
+/// For every line, the length byte and every letter position of the slot get a constant-time
+/// conditional assignment whose condition is "this line is word `index`". On the chosen line
+/// every position is assigned, with 0 past the word's end, so whatever the slot held before
+/// (the previous word, when the caller reuses it) is fully overwritten. An `index` past the
+/// end matches no line and leaves the slot unchanged.
 pub(super) fn select_word(index: u32, slot: &mut [u8; SLOT]) {
     use subtle::{ConditionallySelectable as _, ConstantTimeEq as _};
+    // The loop structure depends only on the public list: 7,776 lines, each word's length
+    // known from the file. Only the `hit` choice depends on the secret index.
     for (n, line) in (0u32..).zip(lines()) {
         let word = line.get(DICE_PREFIX..).unwrap_or_default();
         let hit = n.ct_eq(&index);
@@ -115,6 +123,9 @@ const fn validate(mut raw: &[u8]) -> bool {
     reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
 )]
 mod tests {
+    //! The embedded file's pinned SHA-256 and structure, the validator's rejections, and the
+    //! constant-time selection against plain indexing.
+
     use sha2::{Digest as _, Sha256};
 
     use super::*;

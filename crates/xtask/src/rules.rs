@@ -6,6 +6,26 @@
 //!
 //! Every crate of ADR 0016 §2 and §3 has a row, including the planned ones, so the checks apply
 //! the moment a crate is created. A workspace member without a row is itself a violation.
+//!
+//! What is here:
+//!
+//! - [`CRATES`]: one [`CrateRule`] per crate: its side (R6), whether it is a no-I/O crate and
+//!   its external allow-list (R1), getrandom and `wasm_js` rights (R2), its allowed internal
+//!   dependencies (§3), its sqlx rights (R5) and openssl rights (ADR 0009).
+//! - [`CORE_EXTERNAL_ALLOW`]: `rizzy-core`'s R1 allow-list, as `name@compat` ([`compat`]).
+//! - The deny-lists: [`NO_IO_FORBIDDEN`] (R1), [`ISOLATED_INGRESS`] (R3), [`SERVER_WIRED`] and
+//!   [`SQLX`] (R5), [`OPENSSL`].
+//! - The `rand` and getrandom rules: [`RAND`], [`RANDOMNESS_CRATES`],
+//!   [`GETRANDOM_WASM_FEATURES`].
+//! - ADR 0009's required and forbidden feature sets: [`FEATURE_RULES`].
+//! - The R1 API-side clippy lists: [`NO_IO_CLIPPY_LISTS`].
+//!
+//! The unit tests restate the rights ADR 0016 and ADR 0009 assign (`rows_match_adr_0016`: the
+//! no-I/O crates, the getrandom leaves, `wasm_js`, sqlx, the one dev-only edge and openssl), so
+//! changing one of those in a row also means changing a test. Otherwise, internal edges are
+//! checked for well-formedness plus R4 and the R5 server-wired edges, and allow-list entries for
+//! well-formedness and against the forbidden and `rand` rules
+//! (`rand_and_getrandom_are_never_allow_listed_by_accident`).
 
 /// Which side of the client/server split a crate is on (ADR 0016 R6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +89,8 @@ pub(crate) struct CrateRule {
 }
 
 impl CrateRule {
+    /// A row with every right off: no internal dependencies, no getrandom, no sqlx, no openssl,
+    /// and not a no-I/O crate. The builder methods below turn rights on one by one.
     const fn new(name: &'static str, dir: &'static str, side: Side) -> Self {
         Self {
             name,
@@ -85,22 +107,26 @@ impl CrateRule {
         }
     }
 
+    /// Marks the crate as a no-I/O crate (R1) with this external allow-list.
     const fn no_io(mut self, external_allow: &'static [&'static str]) -> Self {
         self.no_io = true;
         self.external_allow = external_allow;
         self
     }
 
+    /// Sets the internal crates it may depend on, for every dependency kind (§3).
     const fn internal(mut self, internal: &'static [&'static str]) -> Self {
         self.internal = internal;
         self
     }
 
+    /// Marks the crate as a leaf that may depend on getrandom directly (R2 (c)).
     const fn leaf(mut self) -> Self {
         self.getrandom_direct = true;
         self
     }
 
+    /// Sets its direct sqlx rights (R5).
     const fn sqlx(mut self, sqlx: Sqlx) -> Self {
         self.sqlx = sqlx;
         self
@@ -578,6 +604,8 @@ pub(crate) fn matches_any(patterns: &[&str], name: &str) -> bool {
 
 /// The semver-compatibility key of a version: `0.x` for `0.x.y`, the major version otherwise.
 /// `0.0.z` versions are compatible only with themselves, so they keep all three parts.
+/// Pre-release and build suffixes (`-rc.1`, `+meta`) are dropped first, so `2.0.0-rc.1` keys as
+/// `2`.
 pub(crate) fn compat(version: &str) -> String {
     let core = version.split(['-', '+']).next().unwrap_or(version);
     let mut parts = core.split('.');

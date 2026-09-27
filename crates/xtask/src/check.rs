@@ -12,6 +12,20 @@
 //! feature of a crate that an R1 crate also uses (ADR 0016 §5's example: `rand`'s `std`), this
 //! check fails although the R1 crate built alone is clean. The failure message says how to
 //! tell the two apart, and resolving it is a reviewed change to this tool (ADR 0016, Risks).
+//!
+//! **Which dependency kinds.** A crate's closure is walked with [`Graph::closure`], which takes
+//! one set of kinds for the crate's own edges and another for every edge after that. The R1,
+//! getrandom and feature checks use normal and build edges throughout, because tests may use
+//! dev-only helpers (ADR 0016 §4). R3, R6 and the openssl rule also follow the crate's own
+//! dev edges, then normal and build edges below them: a dependency's dev-dependencies are
+//! never built for its dependents, so they are not followed.
+//!
+//! **What this does not check.** Whether a no-I/O crate calls an I/O API is the job of its
+//! `clippy.toml` lists under `cargo lint` (checked here only for their contents) and of
+//! `cargo check-wasm`. Table ownership (R4, tables) belongs to the planned
+//! `cargo xtask check-tables` (ADR 0011, ADR 0016 §5), which does not exist yet. The unit
+//! tests in `check/tests.rs` start from a clean tree shaped like the workspace and break one
+//! rule at a time; a rule this module misses is a hole in a security boundary.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
@@ -59,10 +73,18 @@ pub(crate) struct Inputs {
     pub(crate) hidden_clippy_configs: Vec<String>,
 }
 
+/// Normal and build dependencies: what ships in, or runs to build, a crate.
 const NORMAL_BUILD: &[Kind] = &[Kind::Normal, Kind::Build];
+/// Every dependency kind, for the closures that cover dev-dependencies too (R3, R6, openssl).
+/// R5 and the §3 internal edges look at direct edges of every kind without it.
 const ALL_KINDS: &[Kind] = &[Kind::Normal, Kind::Build, Kind::Dev];
 
 /// Runs every check. An empty result means the tree passes.
+///
+/// The R1 closure check runs on the all-targets graph, so a dependency that appears only under
+/// some `cfg(target)` still counts; the getrandom check also runs on each graph in
+/// [`Inputs::per_target`]. The result is sorted and de-duplicated, so the same problem found
+/// on two graphs is printed once.
 pub(crate) fn run(inputs: &Inputs) -> Vec<Violation> {
     let g = &inputs.all_targets;
     let mut out = Vec::new();
@@ -86,6 +108,7 @@ pub(crate) fn run(inputs: &Inputs) -> Vec<Violation> {
     out
 }
 
+/// Builds a [`Violation`].
 fn violation(rule: &'static str, krate: &str, message: String) -> Violation {
     Violation {
         rule,
@@ -102,6 +125,8 @@ fn members(g: &Graph) -> Vec<(usize, &'static CrateRule)> {
         .collect()
 }
 
+/// The package name at index `i`, or `?` for an index outside the graph (never the case for
+/// indices the graph itself produced).
 fn name(g: &Graph, i: usize) -> &str {
     g.package(i).map_or("?", |p| p.name.as_str())
 }
@@ -138,11 +163,15 @@ fn known_crates(g: &Graph, out: &mut Vec<Violation>) {
     }
 }
 
+/// The path with Windows separators turned into `/`, so manifest paths compare on every OS.
 fn normalise_path(path: &str) -> String {
     path.replace('\\', "/")
 }
 
 /// The union of a crate's R1 allow-list and those of its internal dependencies.
+///
+/// Walks the rules table's "may depend on" edges, not the resolved graph: a crate may reach
+/// what its allowed internal dependencies may reach. `seen` stops the walk on a cycle.
 fn allow_list(rule: &CrateRule) -> BTreeSet<&'static str> {
     let mut set: BTreeSet<&'static str> = rule.external_allow.iter().copied().collect();
     let mut stack: Vec<&str> = rule.internal.to_vec();
@@ -161,6 +190,11 @@ fn allow_list(rule: &CrateRule) -> BTreeSet<&'static str> {
 
 /// R1: the normal and build closure of each no-I/O crate holds only allow-listed external
 /// crates, nothing from [`rules::NO_IO_FORBIDDEN`], and `rand` only as [`rules::RAND`] allows.
+///
+/// An external package is keyed as `name@compat` ([`rules::compat`]), so a semver-compatible
+/// update passes and a new major (or new `0.x`) version fails until it is allow-listed. A
+/// forbidden crate is reported with its reason and not also as "not allow-listed". `target`
+/// only names the graph in the message.
 fn no_io_closure(g: &Graph, target: &str, out: &mut Vec<Violation>) {
     for (root, rule) in members(g) {
         if !rule.no_io {
@@ -216,6 +250,10 @@ fn no_io_closure(g: &Graph, target: &str, out: &mut Vec<Violation>) {
 }
 
 /// ADR 0009 "RNG rules": `rand` 0.8 only through opaque-ke, with no features.
+///
+/// Checks three things for the `rand` package at index `rand`, reached by the no-I/O crate
+/// `krate`: its version is the allowed one, every package in `reach` with a normal or build
+/// edge to it is an allowed parent, and no feature is enabled on it in the unified graph.
 fn rand_rule(
     g: &Graph,
     reach: &HashMap<usize, Option<usize>>,
@@ -314,6 +352,9 @@ fn crypto_features(g: &Graph, out: &mut Vec<Violation>) {
                     })
             })
             .collect();
+        // A required feature is missing when rizzy-core has no entry of its own for the package
+        // (it is reached only through another crate, so nothing in rizzy-core's manifest turns
+        // the feature on when it is built alone), or when any of its own entries leaves it off.
         let missing: Vec<&str> = rule
             .required
             .iter()
@@ -359,6 +400,8 @@ fn crypto_features(g: &Graph, out: &mut Vec<Violation>) {
     }
 }
 
+/// The sentence appended to a failure found on the unified graph: how to check with
+/// `cargo tree` whether `krate` built alone also reaches `dep` (module docs, "Which graph").
 fn unification_hint(krate: &str, dep: &str) -> String {
     format!(
         " (This check reads the workspace-unified graph. To see whether {krate} built alone \
@@ -367,6 +410,9 @@ fn unification_hint(krate: &str, dep: &str) -> String {
 }
 
 /// R1 and R2 (a): getrandom never in a no-I/O crate's closure, per named target.
+///
+/// `g` is one of the `--filter-platform` graphs, so a getrandom edge that exists only on
+/// wasm32 or only on the host is caught on that target, with the target in the message.
 fn getrandom_closure(g: &Graph, target: &str, out: &mut Vec<Violation>) {
     for (root, rule) in members(g) {
         if !rule.no_io {
@@ -655,6 +701,10 @@ fn client_server_split(g: &Graph, out: &mut Vec<Violation>) {
             Side::Server => Side::Client,
             Side::Shared | Side::Tool => continue,
         };
+        // The one exception (ADR 0016 owner decision 4): the root's own dev edge to a
+        // `dev_internal` crate is not followed, so what rizzy-server reaches only through its
+        // dev-dependency on rizzy-client is not reported. A normal or build edge to the same
+        // crate is still followed.
         let skip = |from: usize, to: usize, kind: Kind| {
             from == root && kind == Kind::Dev && rule.dev_internal.contains(&name(g, to))
         };
@@ -709,6 +759,11 @@ fn openssl(g: &Graph, out: &mut Vec<Violation>) {
 }
 
 /// R7 and R8, read from each member's manifest.
+///
+/// A line the TOML reader could not read fails the crate, since it could hide the tables
+/// checked here. R8: `publish`, `license` and `rust-version` are inherited from the workspace.
+/// R7: `[lints]` holds exactly `workspace = true`, unless the crate is on
+/// [`rules::LINT_EXCEPTIONS`] (empty), in which case [`lint_copy`] compares its table.
 fn manifests(inputs: &Inputs, out: &mut Vec<Violation>) {
     for (krate, manifest) in &inputs.manifests {
         for error in &manifest.errors {
@@ -993,6 +1048,10 @@ pub(crate) fn clippy_config_warnings(output: &str) -> Vec<String> {
     // The current diagnostic's first line, and whether it still has to be reported.
     let mut message = "";
     let mut pending = false;
+    // Clippy prints a diagnostic as a `warning: ...` or `error: ...` line, usually followed by
+    // a `--> path:line:column` location line. A diagnostic whose location is a clippy.toml is
+    // reported with that location; a "found a module" diagnostic is reported even without
+    // one, and so is any other line that says "found a module".
     for line in output.lines() {
         let location = line.trim_start().strip_prefix("--> ");
         if line.starts_with("warning") || line.starts_with("error") {
@@ -1016,6 +1075,7 @@ pub(crate) fn clippy_config_warnings(output: &str) -> Vec<String> {
 
 /// Whether a diagnostic location `path:line:column` is in a `clippy.toml` or `.clippy.toml`.
 fn in_clippy_toml(location: &str) -> bool {
+    // Split from the right: the path itself may contain `:` (a Windows drive letter).
     let mut parts = location.trim().rsplitn(3, ':');
     let (column, line, path) = (parts.next(), parts.next(), parts.next());
     let number =

@@ -10,19 +10,36 @@
 //! itself for those purposes ([`crate::envelope::PlaintextRule::Padded`]), so callers never
 //! frame by hand.
 //!
-//! Padmé (Nikitin et al., PETS 2019) rounds a length `L` up so that only its top
-//! `⌊log2 ⌊log2 L⌋⌋ + 1` bits may be non-zero. It leaks `O(log log L)` bits of the length for
-//! at most about 12 % overhead.
+//! Padmé (Nikitin et al., PETS 2019) rounds a length `L` up so that, below its leading 1 bit,
+//! only the next `S = ⌊log2 ⌊log2 L⌋⌋ + 1` bits may be non-zero: the low `⌊log2 L⌋ − S` bits
+//! become zero. It leaks `O(log log L)` bits of the length for at most about 12 % overhead.
+//!
+//! **Why.** An envelope's length is visible to the server. Without padding, an item op or
+//! snapshot would reveal the exact size of what was saved. With the frame, only the Padmé
+//! bucket of the length leaks, and the 256-byte floor puts every small object (up to 252 bytes
+//! of data) in the same bucket (ADR 0005 decision 5, CRYPTO.md §14 "Metadata the server
+//! sees").
 //!
 //! **Reader strictness.** CRYPTO.md §8.5 states all three reader rules: reject
 //! `data_len > len − 4`, a frame whose total length is not exactly `padded_len(data_len)`, and
 //! any non-zero padding byte. The encoding is therefore canonical (one frame per `data`).
+//! Inside the envelopes a frame is unframed only after the AEAD has authenticated it, so there
+//! the strictness is defence in depth; it also means every writer must pad to exactly
+//! `padded_len`, the 256-byte floor included.
+//!
+//! **Limits.** The 16 MiB M1 envelope limit applies to the whole frame (§8.5 "Size limit"), so
+//! `data` is at most 16 MiB − 4 bytes; the envelope checks that, not this module. The `u32`
+//! prefix bounds `data` at `u32::MAX` bytes here.
+//!
+//! **What it does not hide.** Padding hides the exact length within a bucket, not the bucket,
+//! the number of objects, or when they change.
 
 use crate::encoding::{Reader, put_u32};
 use crate::error::{EncodeError, ParseError};
 use crate::secret::SecretBytes;
 
-/// Smallest padded frame, in bytes.
+/// Smallest padded frame, in bytes. Every frame of up to 252 bytes of data is exactly this
+/// long (§8.5).
 pub const MIN_PADDED_LEN: usize = 256;
 
 /// Length of the `u32(data_len)` prefix.
@@ -36,6 +53,11 @@ pub const LEN_PREFIX: usize = 4;
 ///
 /// Lengths 0 and 1 are returned unchanged (the formula needs `L ≥ 2`; framing never asks for
 /// less than 4). Returns `None` only if the result would overflow `u64`.
+///
+/// The result is at least `len`, idempotent (`padme(padme(L)) = padme(L)`) and monotone in
+/// `len`; the unit tests check these properties and the overhead bound. Pure integer
+/// arithmetic, no table lookups. Most callers want [`padded_len`], which adds the prefix and
+/// the 256-byte floor.
 #[must_use]
 pub const fn padme(len: u64) -> Option<u64> {
     if len < 2 {
@@ -43,8 +65,10 @@ pub const fn padme(len: u64) -> Option<u64> {
     }
     let e = u64::BITS - 1 - len.leading_zeros(); // ⌊log2 L⌋ ≥ 1
     let s = u32::BITS - e.leading_zeros(); // ⌊log2 E⌋ + 1, and S ≤ E for E ≥ 1
+    // Number of low bits that are rounded away (zero in the result).
     let last_bits = e - s;
     let mask = (1u64 << last_bits) - 1;
+    // Round up to the next multiple of 2^last_bits; only the addition can overflow.
     match len.checked_add(mask) {
         Some(sum) => Some(sum & !mask),
         None => None,
@@ -53,11 +77,16 @@ pub const fn padme(len: u64) -> Option<u64> {
 
 /// `padded_len = max(256, Padmé(4 + data_len))` for `data_len` bytes of data.
 ///
+/// The total frame length a writer produces and a reader requires. It depends only on
+/// `data_len`, which is not secret beyond its bucket: the result is exactly what the envelope
+/// length reveals.
+///
 /// # Errors
 /// [`EncodeError::TooLong`] if `data_len` does not fit the `u32` prefix or the padded length
 /// does not fit `usize`.
 pub fn padded_len(data_len: usize) -> Result<usize, EncodeError> {
     let data_len = u32::try_from(data_len).map_err(|_| EncodeError::TooLong)?;
+    // Computed in `u64`, so `u32::MAX + 4` cannot overflow.
     let framed = u64::from(data_len) + 4; // + LEN_PREFIX
     let padded = padme(framed).ok_or(EncodeError::TooLong)?;
     let padded = usize::try_from(padded).map_err(|_| EncodeError::TooLong)?;
@@ -65,6 +94,10 @@ pub fn padded_len(data_len: usize) -> Result<usize, EncodeError> {
 }
 
 /// Frames `data` into a new zeroizing buffer of exactly `padded_len(data.len())` bytes.
+///
+/// Public for test vectors, fuzzing and tooling: the envelopes frame padded purposes
+/// themselves, straight into their output buffer (CRYPTO.md §8.5), so callers never frame by
+/// hand. The buffer is allocated at its final size before `data` is copied in.
 ///
 /// # Errors
 /// As [`padded_len`].
@@ -78,6 +111,14 @@ pub fn frame(data: &[u8]) -> Result<SecretBytes, EncodeError> {
 /// Appends the frame of `data`, padded to `total` bytes, to `out`. `total` must be
 /// [`padded_len`]`(data.len())`. Reserve the space first: `out` must not reallocate while it
 /// holds plaintext.
+///
+/// The envelopes call this with `out` already holding their prefix (header, nonce, commitment
+/// or `enc`) and reserved at the final envelope size, so the frame is written where it is then
+/// encrypted in place. Writes `u32(data_len) ‖ data`, then zero bytes up to `total`.
+///
+/// # Errors
+/// [`EncodeError::TooLong`] if `total` is not `padded_len(data.len())` (a caller bug), or if
+/// [`padded_len`] itself fails. Nothing is written to `out` on error.
 pub(crate) fn write_frame(out: &mut Vec<u8>, data: &[u8], total: usize) -> Result<(), EncodeError> {
     if padded_len(data.len())? != total {
         return Err(EncodeError::TooLong);
@@ -86,26 +127,39 @@ pub(crate) fn write_frame(out: &mut Vec<u8>, data: &[u8], total: usize) -> Resul
     let end = out.len().checked_add(total).ok_or(EncodeError::TooLong)?;
     put_u32(out, data_len);
     out.extend_from_slice(data);
+    // Zero padding up to exactly `total` bytes of frame; the only padding value a reader
+    // accepts.
     out.resize(end, 0);
     Ok(())
 }
 
 /// Reads a frame strictly and returns `data`, borrowed from `frame`.
 ///
+/// The checks run in this order: the prefix is present, `data_len` fits in the rest, the total
+/// length is exactly `padded_len(data_len)`, and every padding byte is zero. The length field
+/// is checked against the input before anything is taken, so a hostile `data_len` costs
+/// nothing and nothing is allocated. This is a fuzz target
+/// (`fuzz/fuzz_targets/padding_unframe.rs`).
+///
 /// # Errors
 /// - [`ParseError::Truncated`]: shorter than the prefix, or `data_len > len − 4`;
 /// - [`ParseError::InvalidLength`]: the frame is not exactly `padded_len(data_len)` bytes;
-/// - [`ParseError::NonZeroPadding`]: a padding byte is not zero.
+/// - [`ParseError::NonZeroPadding`]: a padding byte is not zero;
+/// - [`ParseError::TooLong`]: `data_len` or its padded length does not fit `usize`
+///   (unreachable on the 32- and 64-bit targets this crate builds for, because a `data_len`
+///   that passed the `Truncated` check fits in memory).
 ///
 /// Every padding byte is examined, with no early exit.
 pub fn unframe(frame: &[u8]) -> Result<&[u8], ParseError> {
     let mut r = Reader::new(frame);
     let data_len = usize::try_from(r.u32()?).map_err(|_| ParseError::TooLong)?;
+    // `take` fails with `Truncated` if fewer than `data_len` bytes remain.
     let data = r.take(data_len)?;
     let padding = r.rest();
     if padded_len(data_len).map_err(|_| ParseError::TooLong)? != frame.len() {
         return Err(ParseError::InvalidLength);
     }
+    // OR every padding byte together: one pass over all of them, whatever their values.
     if padding.iter().fold(0u8, |acc, b| acc | b) != 0 {
         return Err(ParseError::NonZeroPadding);
     }

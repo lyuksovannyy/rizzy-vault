@@ -1,6 +1,13 @@
 //! HPKE envelopes: algorithms `0x10` (Base mode) and `0x12` (PSK mode) (CRYPTO.md §9.2, §10.1;
 //! ADR 0006 decision 9), the HPKE key types, and the HPKE PSK derivations (§4.3).
 //!
+//! HPKE (RFC 9180) seals a key or a transfer to a recipient's X25519 public key, so a sender
+//! who does not share a symmetric key with the recipient can still wrap for it. In M1 that is
+//! the device grant: after an account-key rotation, the rotating device seals the new account
+//! key to each remaining device (`ACCOUNT_KEY_DEVICE_GRANT`, §11.6). Of the PSK derivations,
+//! only the device-grant PSK exists in M1; the password-verifier, re-sync and pairing PSKs
+//! arrive with M4.
+//!
 //! ```text
 //! header   = u8(0x01) ‖ u8(alg_id) ‖ key_id(recipient public key)            (18 bytes)
 //! info     = LABEL("hpke") ‖ 0x00 ‖ u16(purpose)
@@ -24,12 +31,29 @@
 //! **Checks on open (§9.5).** Length, `format_version`, the allow-list, then the key id: the
 //! header's key id must be the id of the caller's own public key, derived with the key type the
 //! purpose's recipient has ([`Purpose::hpke_recipient_key_type`]). A fixed-size purpose must
-//! also have exactly its envelope length. Every failure is the same [`DecryptError`].
+//! also have exactly its envelope length, and any other purpose at most 16 MiB of ciphertext,
+//! both checked before any crypto (§9.2). Every failure is the same [`DecryptError`].
 //!
 //! **No commitment.** HPKE envelopes carry no separate key commitment: the key comes from a
 //! Diffie-Hellman with the recipient's static key (plus a 256-bit PSK derived from a random key
 //! in PSK mode), never from a password, so there is no partitioning oracle (§9.2). Authorship
 //! comes from the signed `key-grant` ([`crate::sign::KeyGrant`]) where it matters.
+//!
+//! **Why PSK mode for device grants (§10.1).** A grant can wait on the server for weeks until
+//! an offline device fetches it. With PSK mode, opening it needs both the recipient device's
+//! X25519 secret key and a PSK derived from the *previous* account key:
+//! - an attacker with a database snapshot and a future quantum computer breaks the X25519 half
+//!   but still lacks the PSK (CRYPTO.md §13);
+//! - a revoked device knows the previous account key, but not the remaining device's X25519
+//!   secret key, which never leaves that device.
+//!
+//! **What an envelope binds.** The header names the recipient public key id, `info` binds the
+//! purpose into the HPKE key schedule, and the AAD binds the header, the purpose and the
+//! context (sender and recipient ids for grants). A grant moved to another recipient, account,
+//! epoch or purpose fails. What HPKE alone does not give: sender authentication (anyone with
+//! the recipient's public key can seal in Base mode, and anyone who also holds the PSK in PSK
+//! mode) and freshness. The caller verifies the `key-grant` signature and, for a grant chain,
+//! checks the delivered key against the signed `account-state` ([`crate::keys`]).
 //!
 //! **KEM agility (§13 item 4).** The code dispatches on the [`Kem`] enum, chosen from the
 //! algorithm id ([`suite`]), and the key types carry their KEM. M1 has only X25519; X-Wing
@@ -73,14 +97,22 @@ use crate::{kdf, padding};
 )]
 mod tests;
 
+/// hpke's X25519 secret key: an `x25519-dalek` `StaticSecret`, wiped on drop.
 type X25519PrivateKey = <X25519HkdfSha256 as hpke::Kem>::PrivateKey;
+/// hpke's X25519 public key.
 type X25519PublicKey = <X25519HkdfSha256 as hpke::Kem>::PublicKey;
+/// hpke's encapsulated key (`enc`): the sender's ephemeral X25519 public key.
 type X25519EncappedKey = <X25519HkdfSha256 as hpke::Kem>::EncappedKey;
 
-/// Length of an X25519 secret key.
+/// Length of an X25519 secret key: the size of the secret-key slot in the `E_id`, `E_dev` and
+/// `RETIRED_SECRET_KEY` plaintexts (§8.4).
 pub const X25519_SECRET_KEY_LEN: usize = 32;
 
 /// The HPKE KEMs (§9.4). Only DHKEM(X25519, HKDF-SHA256) exists in M1.
+///
+/// The code dispatches on this enum rather than on X25519 directly, so X-Wing can be added as
+/// a variant post-1.0 (CRYPTO.md §13 item 4). A key's KEM must match the KEM of the envelope's
+/// algorithm, or seal and open refuse it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Kem {
@@ -99,6 +131,10 @@ impl Kem {
 }
 
 /// The HPKE modes this crate uses (§10.1). Auth and `AuthPSK` do not exist here.
+///
+/// Auth modes are not used: the post-quantum KEMs in hpke do not support them, and where
+/// authorship matters an Ed25519 signature covers the envelope instead (§10.1 "Why not Auth
+/// mode").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Mode {
     /// `mode_base` (0x00).
@@ -109,6 +145,9 @@ pub enum Mode {
 
 /// The KEM and mode of an HPKE algorithm id, or `None` for anything that is not an implemented
 /// HPKE algorithm (§9.4).
+///
+/// Seal and open both require `suite(alg) == Some((key's KEM, mode of the function called))`,
+/// so an envelope can never be processed in a mode other than the one its algorithm id names.
 #[must_use]
 pub const fn suite(alg: AlgId) -> Option<(Kem, Mode)> {
     match alg {
@@ -118,8 +157,12 @@ pub const fn suite(alg: AlgId) -> Option<(Kem, Mode)> {
     }
 }
 
-/// The `psk_id` of each PSK-mode purpose: the PSK's derivation label itself (§4.3). `None` for
-/// every other purpose.
+/// The `psk_id` of each PSK-mode purpose, as a label (§4.3). `None` for every other purpose.
+///
+/// For the device-grant, password-verifier and re-sync PSKs the `psk_id` is the PSK's own
+/// derivation label. The pairing PSK is `k_pair` itself, so `LABEL("hpke-psk/pairing")` is only
+/// its `psk_id`. The `psk_id` enters the HPKE key schedule, so a PSK presented under another
+/// purpose's id gives a different key.
 #[must_use]
 pub const fn psk_id_label(purpose: Purpose) -> Option<Label> {
     match purpose {
@@ -132,15 +175,23 @@ pub const fn psk_id_label(purpose: Purpose) -> Option<Label> {
 }
 
 /// An HPKE recipient public key. Public: compares with `==` and prints as hex.
+///
+/// Holding one proves nothing about whose key it is. Before sealing to it, the caller must have
+/// authenticated it: a device key through its certificate from the account's identity key, an
+/// identity key through the signed key bundle and pinning (§10.3). The server's word alone is
+/// never enough.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HpkePublicKey {
+    /// The KEM the key belongs to.
     kem: Kem,
+    /// The encoded key: the 32-byte X25519 u-coordinate.
     bytes: [u8; PUBLIC_KEY_LEN],
 }
 
 impl HpkePublicKey {
     /// An X25519 public key from its 32 bytes (RFC 7748). Every 32-byte string is accepted
-    /// here; a small-order point fails when sealing ([`EncryptError::InvalidPublicKey`]).
+    /// here; a small-order point fails when sealing ([`EncryptError::InvalidPublicKey`]),
+    /// because the X25519 shared secret with it is all zero (RFC 9180 §7.1.4).
     #[must_use]
     pub const fn x25519(bytes: [u8; PUBLIC_KEY_LEN]) -> Self {
         Self {
@@ -161,7 +212,12 @@ impl HpkePublicKey {
         &self.bytes
     }
 
-    /// The public key id for a key of type `key_type` (§4.3).
+    /// The public key id for a key of type `key_type` (§4.3):
+    /// `SHA-256(LABEL("key-id") ‖ 0x00 ‖ u8(key_type) ‖ public_key)[0..16]`.
+    ///
+    /// The type is part of the hash, so the same 32 bytes used in two roles give two ids. The
+    /// envelope code always passes the type the purpose's recipient has
+    /// ([`Purpose::hpke_recipient_key_type`]).
     #[must_use]
     pub fn key_id(&self, key_type: KeyType) -> PublicKeyId {
         PublicKeyId::derive(key_type, &self.bytes)
@@ -176,7 +232,10 @@ impl fmt::Debug for HpkePublicKey {
     }
 }
 
+/// The secret key, one variant per [`Kem`]. Private so that the secret bytes can only leave
+/// through [`HpkeSecretKey::write_secret`].
 enum SecretInner {
+    /// A DHKEM(X25519, HKDF-SHA256) secret key.
     X25519(X25519PrivateKey),
 }
 
@@ -184,15 +243,21 @@ enum SecretInner {
 ///
 /// The X25519 secret lives in `x25519-dalek`'s `StaticSecret`, which is wiped on drop. No
 /// `Clone`, `Copy` or `Display`; `Debug` is redacted.
+///
+/// In M1 these are the identity X25519 key (inside `E_id`), each device's X25519 key (inside
+/// `E_dev`, which never leaves that device, §4.2), and retired keys kept inside
+/// `RETIRED_SECRET_KEY`.
 pub struct HpkeSecretKey {
+    /// The secret half.
     secret: SecretInner,
+    /// The matching public key, computed from the secret when the key is built.
     public: HpkePublicKey,
 }
 
 impl HpkeSecretKey {
     /// Generates an X25519 key pair from the injected CSPRNG:
     /// `<X25519HkdfSha256 as hpke::Kem>::gen_keypair_with_rng` (§10.1), which is RFC 9180's
-    /// `DeriveKeyPair` over 32 random bytes.
+    /// `DeriveKeyPair` over 32 random bytes. hpke wipes those 32 bytes after the derivation.
     #[must_use]
     pub fn generate_x25519<R: CryptoRng + ?Sized>(rng: &mut R) -> Self {
         let (secret, public) = X25519HkdfSha256::gen_keypair_with_rng(&mut &mut *rng);
@@ -203,10 +268,12 @@ impl HpkeSecretKey {
     }
 
     /// Rebuilds an X25519 secret key from its 32 bytes, as stored inside `E_id`, `E_dev` or a
-    /// `RETIRED_SECRET_KEY`. The caller wipes `bytes`.
+    /// `RETIRED_SECRET_KEY`. The caller wipes `bytes`. The public key is recomputed from the
+    /// secret, never read from storage, so the pair is always consistent.
     ///
     /// # Errors
-    /// [`ParseError::InvalidLength`] (unreachable for a 32-byte input).
+    /// [`ParseError::InvalidLength`] (unreachable for a 32-byte input: hpke's X25519 decoding
+    /// checks only the length).
     pub fn from_x25519_bytes(bytes: &[u8; X25519_SECRET_KEY_LEN]) -> Result<Self, ParseError> {
         let secret = X25519PrivateKey::from_bytes(bytes).map_err(|_| ParseError::InvalidLength)?;
         let public = X25519HkdfSha256::sk_to_pk(&secret);
@@ -243,6 +310,7 @@ impl fmt::Debug for HpkeSecretKey {
     }
 }
 
+/// The 32 encoded bytes of an hpke X25519 public key.
 fn x25519_public_bytes(public: &X25519PublicKey) -> [u8; PUBLIC_KEY_LEN] {
     let mut bytes = [0u8; PUBLIC_KEY_LEN];
     public.write_exact(&mut bytes);
@@ -255,8 +323,13 @@ fn x25519_public_bytes(public: &X25519PublicKey) -> [u8; PUBLIC_KEY_LEN] {
 ///
 /// A PSK is bound to the purpose it was derived for; sealing or opening another purpose with it
 /// fails before any crypto.
+///
+/// Secret: the 32 bytes live in a [`Key32`], wiped on drop. No `Clone`, `Copy` or `Display`;
+/// `Debug` prints only the purpose. The only constructor in M1 is [`HpkePsk::device_grant`].
 pub struct HpkePsk {
+    /// The PSK-mode purpose this PSK was derived for; it selects the `psk_id`.
     purpose: Purpose,
+    /// The 32 PSK bytes.
     psk: Key32,
 }
 
@@ -268,9 +341,18 @@ impl HpkePsk {
     ///
     /// The fields come from the grant's own context, so the PSK always matches it.
     ///
+    /// Both sides call this: the rotating device with the key it is rotating away from, and the
+    /// recipient with that same previous key, which it already holds. Because the PSK comes
+    /// from the *previous* key, only devices that held that key can open the grant, which is
+    /// what makes a stored grant safe against a future break of X25519 (§10.1, §13). Only the
+    /// epoch is checked against the context; that `previous_account_key` is the right
+    /// account's key is the caller's responsibility (a wrong key yields a PSK that fails to
+    /// open the grant).
+    ///
     /// # Errors
     /// [`EncryptError::ContextMismatch`] unless `previous_account_key` is the key of the epoch
-    /// just before `ctx.account_key_epoch`; [`EncryptError::Internal`] (unreachable).
+    /// just before `ctx.account_key_epoch` (including when that epoch would overflow `u32`);
+    /// [`EncryptError::Internal`] (unreachable).
     pub fn device_grant(
         previous_account_key: &AccountKey,
         ctx: &AccountKeyDeviceGrantCtx,
@@ -278,10 +360,14 @@ impl HpkePsk {
         if previous_account_key.epoch().checked_add(1) != Some(ctx.account_key_epoch) {
             return Err(EncryptError::ContextMismatch);
         }
+        // `info` context after `LABEL("hpke-psk/device-grant") ‖ 0x00`, which `hkdf_sha256`
+        // prepends: `account_id ‖ u32(new account_key_epoch) ‖ recipient device_id`. The sender
+        // device id is not part of the PSK; it is bound by the AAD instead.
         let mut info = Vec::with_capacity(2 * ID_LEN + 4);
         info.extend_from_slice(ctx.account_id.as_bytes());
         info.extend_from_slice(&ctx.account_key_epoch.to_be_bytes());
         info.extend_from_slice(ctx.recipient_device_id.as_bytes());
+        // Derived straight into the final zeroizing buffer; `salt = None` is the empty salt.
         let psk = Key32::try_init_with(|out| {
             kdf::hkdf_sha256(
                 previous_account_key.key().expose_secret(),
@@ -304,7 +390,9 @@ impl HpkePsk {
         self.purpose
     }
 
-    /// `(psk, psk_id)` for hpke's `PskBundle`.
+    /// `(psk, psk_id)` for hpke's `PskBundle`. `None` if the purpose has no `psk_id`, which
+    /// cannot happen for a PSK built by this type's constructors. The PSK bytes are borrowed,
+    /// not copied.
     fn parts(&self) -> Option<(&[u8], &[u8])> {
         let psk_id = psk_id_label(self.purpose)?;
         Some((self.psk.expose_secret().as_slice(), psk_id.as_bytes()))
@@ -323,11 +411,15 @@ impl fmt::Debug for HpkePsk {
 }
 
 /// `info = LABEL("hpke") ‖ 0x00 ‖ u16(purpose)` (§9.2).
+///
+/// `info` enters the HPKE key schedule, so the purpose is bound twice: into the derived AEAD
+/// key through `info`, and into the AAD.
 fn info(purpose: Purpose) -> Vec<u8> {
     labels::HPKE.info(&purpose.id().to_be_bytes())
 }
 
-/// The recipient key id a purpose puts in its header.
+/// The recipient key id a purpose puts in its header: the recipient key's id derived with the
+/// purpose's recipient key type. `None` for a purpose that is not HPKE.
 fn recipient_key_id(purpose: Purpose, recipient: &HpkePublicKey) -> Option<PublicKeyId> {
     Some(recipient.key_id(purpose.hpke_recipient_key_type()?))
 }
@@ -337,10 +429,18 @@ fn recipient_key_id(purpose: Purpose, recipient: &HpkePublicKey) -> Option<Publi
 /// For a [`PlaintextRule::Fixed`] purpose the plaintext must have exactly that length; a
 /// [`PlaintextRule::Padded`] purpose (M4) is framed first (§8.5).
 ///
+/// `recipient` must be an authenticated public key of the recipient the context names (for a
+/// device grant, the X25519 key in that device's certificate). The ephemeral key comes from
+/// `rng`. The result is not signed; a device grant must still be signed as a `key-grant`
+/// ([`crate::keys::seal_account_key_device_grant`] does both).
+///
 /// # Errors
 /// [`EncryptError::ContextMismatch`] if `psk` belongs to another purpose;
 /// [`EncryptError::InvalidPublicKey`] for a small-order recipient key; the plaintext-rule
-/// errors; [`EncryptError::Internal`] (unreachable).
+/// errors ([`EncryptError::InvalidPlaintextLength`], [`EncryptError::PlaintextTooLong`]);
+/// [`EncryptError::UnsupportedPurpose`] if the purpose, the recipient key's KEM and the mode
+/// disagree (unreachable for the context types that exist); [`EncryptError::Internal`]
+/// (unreachable).
 pub fn seal_psk<C: HpkePskContext, R: CryptoRng + ?Sized>(
     rng: &mut R,
     recipient: &HpkePublicKey,
@@ -357,6 +457,13 @@ pub fn seal_psk<C: HpkePskContext, R: CryptoRng + ?Sized>(
 /// Opens a PSK-mode envelope (`0x12`) with the recipient's secret key and `psk`, rebuilding
 /// the AAD from `ctx`. A Base-mode envelope is rejected before any crypto.
 ///
+/// Build `ctx` from values the recipient knows or verifies (its own device id, its account,
+/// the epoch after the key it holds, and a sender whose certificate it checks), never from
+/// unchecked fields sent alongside the envelope. A successful open does not authenticate the
+/// sender: verify the `key-grant` signature separately
+/// ([`crate::keys::open_account_key_device_grant`] does both for device grants). The plaintext
+/// comes back in a zeroizing buffer.
+///
 /// # Errors
 /// [`DecryptError`] for every failure.
 pub fn open_psk<C: HpkePskContext>(
@@ -372,6 +479,10 @@ pub fn open_psk<C: HpkePskContext>(
 }
 
 /// Seals `plaintext` for a Base-mode purpose (`0x10`) to `recipient`.
+///
+/// No M1 purpose uses Base mode ([`HpkeBaseContext`] has no implementation outside tests yet);
+/// member grants (M9) and mail (M6) will. Base mode authenticates nothing about the sender:
+/// anyone with the recipient's public key can produce a valid envelope.
 ///
 /// # Errors
 /// As [`seal_psk`], without the PSK check.
@@ -396,10 +507,21 @@ pub fn open_base<C: HpkeBaseContext>(
     open_with(recipient, None, ctx, envelope)
 }
 
+/// The mode a call runs in: PSK mode exactly when a PSK was passed.
 fn mode_of(psk: Option<&HpkePsk>) -> Mode {
     if psk.is_some() { Mode::Psk } else { Mode::Base }
 }
 
+/// The seal path shared by [`seal_psk`] and [`seal_base`].
+///
+/// Steps: check that the purpose is a client purpose whose encrypt algorithm matches the
+/// recipient key's KEM and the call's mode; derive the header's recipient key id; apply the
+/// plaintext rule and the 16 MiB limit; build the header, AAD and `info`; then write
+/// `header ‖ enc placeholder ‖ plaintext (or its frame)` into one zeroizing buffer of the final
+/// size, seal the plaintext part in place, fill in `enc` and append the tag.
+///
+/// # Errors
+/// As [`seal_psk`].
 fn seal_with<C: HpkeContext, R: CryptoRng + ?Sized>(
     rng: &mut R,
     recipient: &HpkePublicKey,
@@ -418,6 +540,8 @@ fn seal_with<C: HpkeContext, R: CryptoRng + ?Sized>(
         None => None,
     };
     let rule = purpose.plaintext_rule();
+    // The AEAD plaintext length (the frame, for a padded purpose); the 16 MiB limit applies to
+    // it (§9.2).
     let body_len = match rule {
         PlaintextRule::Fixed(len) if plaintext.len() == len => len,
         PlaintextRule::Fixed(_) => return Err(EncryptError::InvalidPlaintextLength),
@@ -447,13 +571,26 @@ fn seal_with<C: HpkeContext, R: CryptoRng + ?Sized>(
     }
     let (head, body) = out.split_at_mut(HEADER_LEN + ENC_LEN);
     let (enc, tag) = raw_seal_in_place(rng, recipient, psk_parts, &info, &aad, body)?;
+    // `enc` is only known after encapsulation; write it into its reserved bytes [18, 50).
     head.get_mut(HEADER_LEN..)
         .ok_or(EncryptError::Internal)?
         .copy_from_slice(&enc);
+    // Fills the last 16 bytes of the reserved capacity; no reallocation.
     out.extend_from_slice(&tag);
+    // Only ciphertext and public values remain; move the buffer out of its wrapper.
     Ok(core::mem::take(&mut *out))
 }
 
+/// The open path shared by [`open_psk`] and [`open_base`].
+///
+/// Steps, all before any crypto: the §9.5 checks against the purpose's client allow-list; the
+/// ciphertext length (exact for a fixed-size purpose, at most 16 MiB otherwise); the algorithm
+/// must be the call's mode and the recipient key's KEM; the header's key id must be the
+/// caller's own public key id. Then decapsulate and open in place in a zeroizing copy of the
+/// ciphertext, and apply the plaintext rule.
+///
+/// # Errors
+/// [`DecryptError`] for every failure.
 fn open_with<C: HpkeContext>(
     recipient: &HpkeSecretKey,
     psk: Option<&HpkePsk>,
@@ -479,7 +616,8 @@ fn open_with<C: HpkeContext>(
     if !plaintext_len_ok || !mode_ok {
         return Err(DecryptError);
     }
-    // §9.5 step 4: the header names the caller's own public key.
+    // §9.5 step 4: the header names the caller's own public key. A public key id is public,
+    // so a plain comparison is fine here.
     let expected_id = recipient_key_id(purpose, recipient.public_key()).ok_or(DecryptError)?;
     if env.key_id() != expected_id.as_bytes() {
         return Err(DecryptError);
@@ -491,6 +629,7 @@ fn open_with<C: HpkeContext>(
 
     let aad = build_aad(env.header(), ctx);
     let info = info(purpose);
+    // Opened in place in a zeroizing copy of exactly the ciphertext's size.
     let mut body = Zeroizing::new(env.ciphertext().to_vec());
     raw_open_in_place(
         recipient,
@@ -504,7 +643,7 @@ fn open_with<C: HpkeContext>(
     finish_plaintext(purpose.plaintext_rule(), body)
 }
 
-/// `format_version ‖ alg_id ‖ key_id`.
+/// `format_version ‖ alg_id ‖ key_id`, with the recipient public key id (§9.2).
 fn header(alg: AlgId, key_id: &PublicKeyId) -> [u8; HEADER_LEN] {
     let mut header = [0u8; HEADER_LEN];
     let (prefix, id) = header.split_at_mut(2);
@@ -515,6 +654,15 @@ fn header(alg: AlgId, key_id: &PublicKeyId) -> [u8; HEADER_LEN] {
 
 /// One HPKE single-shot seal in place (RFC 9180 §6.1). Returns `enc` and the tag. Crate-private
 /// so the RFC 9180 vectors can run through exactly the code the envelope uses.
+///
+/// `psk = None` is `mode_base`, `Some((psk, psk_id))` is `mode_psk`. `buffer` holds the
+/// plaintext on entry and the ciphertext on success. The ephemeral key pair is drawn from
+/// `rng` inside hpke.
+///
+/// # Errors
+/// [`EncryptError::InvalidPublicKey`] if hpke rejects the recipient key or the encapsulation
+/// (an all-zero shared secret); [`EncryptError::Internal`] for any other hpke error (an invalid
+/// PSK bundle, a seal failure), unreachable for the inputs the envelope passes.
 pub(crate) fn raw_seal_in_place<R: CryptoRng + ?Sized>(
     rng: &mut R,
     recipient: &HpkePublicKey,
@@ -553,6 +701,14 @@ pub(crate) fn raw_seal_in_place<R: CryptoRng + ?Sized>(
 }
 
 /// One HPKE single-shot open in place (RFC 9180 §6.1).
+///
+/// `psk` selects the mode as in [`raw_seal_in_place`]. `buffer` holds the ciphertext on entry
+/// and the plaintext on success; on failure its contents are undefined, so callers pass a
+/// zeroizing buffer.
+///
+/// # Errors
+/// [`DecryptError`] for an unparsable `enc` or tag, an invalid PSK bundle, a failed
+/// decapsulation (an all-zero shared secret) or a failed tag check.
 pub(crate) fn raw_open_in_place(
     recipient: &HpkeSecretKey,
     psk: Option<(&[u8], &[u8])>,
@@ -589,7 +745,8 @@ pub(crate) fn raw_open_in_place(
     }
 }
 
-// The hpke types this module serialises have the sizes of the §9.2 layout.
+// The hpke types this module serialises have the sizes of the §9.2 layout: `enc` is an
+// X25519 public key, and the `ChaCha20Poly1305` tag is 16 bytes like the Poly1305 tag of `0x01`.
 const _: () = assert!(ENC_LEN == PUBLIC_KEY_LEN && TAG_LEN == 16);
 
 /// Test-only instrumentation: counts how often an HPKE open (decapsulation and AEAD) is

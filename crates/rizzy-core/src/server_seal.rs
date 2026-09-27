@@ -17,6 +17,37 @@
 //!   opens them, and the server functions here accept only these contexts.
 //! - The database records the `data_key_id` of every sealed row. The envelope header carries the
 //!   subkey's key id, so opening under the wrong data key fails at the key-id check.
+//!
+//! Sealing, step by step: check the purpose-specific preconditions (a TOTP enrolment counts
+//! from 1 and its secret has at least [`MIN_SERVER_SECRET_LEN`] bytes; a login state's context
+//! names its own credential identifier), derive the purpose's subkey, then seal with a fresh
+//! nonce from the injected RNG. Opening refuses an expired login state before any crypto,
+//! derives the same subkey, runs the envelope's checks in the §9.5 order (length, version, the
+//! server's allow-list, key id, then the commitment and the AEAD), and then the
+//! purpose-specific checks on the plaintext. Every opening failure is the same
+//! [`DecryptError`].
+//!
+//! # Attacker model
+//!
+//! What this defends against:
+//! - **A reader of the database or its backups** without the secrets file: TOTP secrets
+//!   (threat model INV-8) and pending login states (CRYPTO.md §5.11) are ciphertext, and the
+//!   subkeys come from a key that is not in the database.
+//! - **A writer to the database** without the secrets file: every context field is in the
+//!   AAD, so a sealed row moved to another account, another TOTP enrolment or another login,
+//!   or given a later `expires_at_ms`, fails to open. Each purpose has its own subkey and its
+//!   purpose id in the AAD, so a row cannot be opened as another purpose either.
+//! - **Cheap offline guessing on a stolen backup.** Each guess at the operator passphrase costs
+//!   one Argon2id run at the `kdf_id` cost, behind a random salt. A new backup's passphrase is
+//!   checked like a new export password: not empty, no unassigned code point (§2).
+//!
+//! What it does not do:
+//! - Anyone who holds the secrets file and the database can open everything here. This is not
+//!   zero knowledge (§5.11), and a malicious server can read its own secrets at will.
+//! - Replay of a login-state row within its TTL is prevented by the caller reading and
+//!   deleting the row in one transaction, not by this module.
+//! - The secrets file's own format, its storage outside the database, rotation of the current
+//!   data key and re-sealing are the server's job.
 
 use core::fmt;
 
@@ -34,16 +65,28 @@ use crate::secret::{KEY_LEN, Key32, SecretBytes};
 use crate::totp::{MIN_SERVER_SECRET_LEN, TotpSecret};
 
 /// How long a pending OPAQUE login may be kept (§5.10): 60 s.
+///
+/// When sealing a state, set `expires_at_ms` of its [`ServerLoginStateCtx`] to the server's
+/// clock plus this value; [`ServerDataKey::open_login_state`] refuses the state from then on.
 pub const LOGIN_STATE_TTL_MS: u64 = 60_000;
 
 /// One `server_data_key` from the secrets file, with its `data_key_id`.
+///
+/// Server code only. The key belongs in the secrets file, outside the database (threat model
+/// INV-8); the database records only the `data_key_id` of each row. The key is wiped on drop
+/// and `Debug` shows only the id. Build one per key listed in the secrets file, and seal new
+/// rows under the one marked current.
 pub struct ServerDataKey {
+    /// The 32 random key bytes, wiped on drop. Used only as HKDF input for the subkeys.
     key: Key32,
+    /// The id the secrets file and the database use for this key; bound into every subkey.
     data_key_id: u32,
 }
 
 impl ServerDataKey {
     /// Draws a new data key from the injected CSPRNG (`rizzy-vault secrets rotate --data-key`).
+    ///
+    /// Choosing a `data_key_id` that no other key in the secrets file uses is the caller's job.
     #[must_use]
     pub fn generate<R: CryptoRng + ?Sized>(rng: &mut R, data_key_id: u32) -> Self {
         Self {
@@ -70,6 +113,8 @@ impl ServerDataKey {
     }
 
     /// The 32 key bytes, for writing the secrets file.
+    ///
+    /// Write them only to the secrets file, never to the database, a log or an error.
     #[must_use]
     pub fn expose_secret(&self) -> &[u8; KEY_LEN] {
         self.key.expose_secret()
@@ -77,6 +122,12 @@ impl ServerDataKey {
 
     /// `HKDF(server_data_key, salt = empty, LABEL("server/<purpose>") ‖ 0x00 ‖ u32(data_key_id),
     /// 32)`.
+    ///
+    /// One subkey per purpose, so the raw data key is never a cipher key (CRYPTO.md §1 rule 4).
+    /// Binding `data_key_id` gives each key generation its own subkeys and key ids.
+    ///
+    /// # Errors
+    /// [`DerivationError`] if HKDF fails (unreachable for a 32-byte output).
     fn subkey(&self, label: Label) -> Result<Key32, DerivationError> {
         Key32::try_init_with(|out| {
             kdf::hkdf_sha256(
@@ -108,6 +159,7 @@ impl ServerDataKey {
         ctx: &ServerTotpSecretCtx,
         secret: &TotpSecret,
     ) -> Result<Vec<u8>, EncryptError> {
+        // Preconditions first, before any key material is touched.
         if ctx.totp_credential_seq == 0 {
             return Err(EncryptError::ContextMismatch);
         }
@@ -134,6 +186,8 @@ impl ServerDataKey {
         let key = self.subkey(labels::SERVER_TOTP_SECRET)?;
         let plaintext = server_open(&key, ctx, envelope)?;
         let bytes = plaintext.expose_secret();
+        // Only authenticated plaintext reaches these checks. `from_slice` also enforces the
+        // upper bound, MAX_SECRET_LEN.
         if bytes.len() < MIN_SERVER_SECRET_LEN {
             return Err(DecryptError);
         }
@@ -153,6 +207,8 @@ impl ServerDataKey {
         ctx: &ServerLoginStateCtx,
         state: &ServerLoginState,
     ) -> Result<Vec<u8>, EncryptError> {
+        // The opener rebuilds the state with the credential identifier from the ctx, so the
+        // two must agree when sealing. The identifier is public, so `!=` is fine here.
         if ctx.credential_identifier != *state.credential_identifier().as_bytes() {
             return Err(EncryptError::ContextMismatch);
         }
@@ -172,6 +228,8 @@ impl ServerDataKey {
         envelope: &[u8],
         now_ms: u64,
     ) -> Result<ServerLoginState, DecryptError> {
+        // `expires_at_ms` comes from the row, but it is in the AAD: a row whose expiry was
+        // moved later fails the commitment below, so checking it before the crypto is safe.
         if now_ms >= ctx.expires_at_ms {
             return Err(DecryptError);
         }
@@ -237,6 +295,11 @@ impl BackupHeader {
     /// Builds a header from its stored fields: `kdf_id` must be on the allow-list, and the salt
     /// and id are base64url of 16 bytes.
     ///
+    /// The fields are untrusted (they come from a backup file). A `kdf_id` too large for a
+    /// `u16` is reported as [`KdfError::NotAllowed`] with `kdf_id = u16::MAX`. The file only
+    /// names a `kdf_id`; the Argon2id parameters are the compiled ones for an allow-listed id
+    /// (CRYPTO.md §1 rule 5).
+    ///
     /// # Errors
     /// [`ExportError::Kdf`] or [`ExportError::InvalidField`].
     pub fn from_fields(
@@ -260,8 +323,16 @@ impl BackupHeader {
 /// The server-secrets backup key (§4.3, §5.11):
 /// `b = Argon2id(P = UTF-8(NFC(passphrase)), S = backup_salt, kdf_id, T = 32)`, then
 /// `HKDF(ikm = b, salt = empty, info = LABEL("server/secrets-backup") ‖ 0x00 ‖ backup_id, 32)`.
+///
+/// It encrypts a backup copy of the secrets file under an operator passphrase. The
+/// construction is the export file key's with a different label; the key is bound to its
+/// header, and sealing and opening use that header's context.
+/// A wrong passphrase, a header that does not match the envelope and a tampered envelope all
+/// give the same [`DecryptError`].
 pub struct ServerSecretsBackupKey {
+    /// The derived 32-byte key, wiped on drop.
     key: Key32,
+    /// The public header the key was derived for; its context binds every seal and open.
     header: BackupHeader,
 }
 
@@ -292,6 +363,10 @@ impl ServerSecretsBackupKey {
 
     /// Derives the key of an existing backup from its header (one Argon2id run).
     ///
+    /// The new-password checks are not run here, so a passphrase accepted when the backup was
+    /// made keeps working after a Unicode table update (§2, "New passwords"). Build the header
+    /// with [`BackupHeader::from_fields`], which checks `kdf_id` against the allow-list.
+    ///
     /// # Errors
     /// [`KdfError`].
     pub fn derive(passphrase: &str, header: &BackupHeader) -> Result<Self, KdfError> {
@@ -313,10 +388,12 @@ impl ServerSecretsBackupKey {
         &self.header
     }
 
-    /// Seals the secrets file as `SERVER_SECRETS_BACKUP`.
+    /// Seals the secrets file as `SERVER_SECRETS_BACKUP`, with a fresh nonce from `rng`.
+    ///
+    /// The plaintext is not padded, so the envelope reveals the secrets file's exact length.
     ///
     /// # Errors
-    /// [`EncryptError`].
+    /// [`EncryptError`], for example [`EncryptError::PlaintextTooLong`] above 16 MiB.
     pub fn seal<R: CryptoRng + ?Sized>(
         &self,
         rng: &mut R,
@@ -325,10 +402,10 @@ impl ServerSecretsBackupKey {
         server_seal(rng, &self.key, &self.header.ctx(), secrets_file)
     }
 
-    /// Opens a `SERVER_SECRETS_BACKUP` envelope.
+    /// Opens a `SERVER_SECRETS_BACKUP` envelope. The plaintext comes back in a wiped buffer.
     ///
     /// # Errors
-    /// [`DecryptError`].
+    /// [`DecryptError`] for every failure, without saying which check failed.
     pub fn open(&self, envelope: &[u8]) -> Result<SecretBytes, DecryptError> {
         server_open(&self.key, &self.header.ctx(), envelope)
     }
@@ -349,6 +426,9 @@ impl fmt::Debug for ServerSecretsBackupKey {
     reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
 )]
 mod tests {
+    //! Known answers for the subkeys and the backup key, round trips, context and purpose
+    //! binding, the 2FA secret floor, the login-state TTL and the server-only allow-lists.
+
     use super::*;
     use crate::envelope::Purpose;
     use crate::envelope::symmetric::test_hooks::aead_opens;

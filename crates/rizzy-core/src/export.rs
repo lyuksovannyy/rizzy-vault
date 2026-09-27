@@ -28,7 +28,37 @@
 //! informational here: the reader rebuilds the key and the envelope context from them, so a
 //! header that disagrees with what the envelope was sealed under fails to open (§9.6: the two
 //! must agree). Changing the salt or `export_id` changes the key; changing `created_at` or
-//! `kdf_id` changes the context and fails the commitment.
+//! `kdf_id` changes the context and fails the commitment. (Another `kdf_id` with other
+//! Argon2id parameters also changes the key, which the key-id check catches first; M1 allows
+//! only `kdf_id` 1, so an importer rejects any other value before deriving anything.)
+//!
+//! Writing a file: [`ExportFileKey::derive_new`] with the export password, then
+//! [`ExportFileKey::seal_data_field`] for `data`, and the header's fields for the rest.
+//! Reading one: [`ExportHeader::from_json_fields`] on the clear fields (this checks the format,
+//! the version and the `kdf_id` allow-list), [`ExportFileKey::derive`] with the password, then
+//! [`ExportFileKey::open_data_field`].
+//!
+//! # Attacker model
+//!
+//! What this defends against:
+//! - **Anyone who gets the file** (a cloud drive, a lost USB stick): the content is one
+//!   committing envelope under a key stretched from the export password, so each guess costs
+//!   one Argon2id run at the `kdf_id` cost behind a random salt (threat model AST-20).
+//! - **Downgraded stretching.** The file only names a `kdf_id`. Its parameters are compiled
+//!   in, and an id off the client's allow-list is rejected before any password is processed
+//!   (§11.14 "Import", threat model INV-3).
+//! - **Tampering and header edits.** The commitment and the AEAD tag cover the envelope; the
+//!   context binds every header field.
+//! - **Partitioning-oracle attacks** on the password-derived key: the envelope is key-committing
+//!   (§8.3), so one crafted file cannot test many password guesses at once.
+//!
+//! What it does not do:
+//! - **Hide the size.** `EXPORT_FILE` is not padded, so the file reveals the exact length of
+//!   the exported plaintext.
+//! - **Protect a weak export password.** There is no strength rule (§2); only the Argon2id cost
+//!   slows guessing. The Secret Key is deliberately not involved, so the file is portable.
+//! - **Plaintext export** (JSON or CSV, behind the warning of ROADMAP §4.2) is not here, and the
+//!   JSON document itself is written and parsed elsewhere.
 
 use core::fmt;
 
@@ -155,6 +185,13 @@ impl ExportHeader {
 }
 
 /// Decodes base64url without padding into exactly 16 bytes.
+///
+/// Strict (see [`b64url_decode_into`]): padding, other alphabets and non-zero trailing bits
+/// are rejected, and the output buffer is fixed at 16 bytes whatever the input says. Shared
+/// with the server-secrets backup header.
+///
+/// # Errors
+/// [`ExportError::InvalidField`] for malformed text or a decoded length other than 16.
 pub(crate) fn decode_16(text: &str) -> Result<[u8; ID_LEN], ExportError> {
     let mut out = [0u8; ID_LEN];
     let decoded = b64url_decode_into(text, &mut out).map_err(|_| ExportError::InvalidField)?;
@@ -167,6 +204,16 @@ pub(crate) fn decode_16(text: &str) -> Result<[u8; ID_LEN], ExportError> {
 /// `HKDF(Argon2id(UTF-8(NFC(password)), salt, kdf_id, 32), salt = empty, LABEL ‖ 0x00 ‖ id, 32)`:
 /// the shape shared by the export file key and the server-secrets backup key (§4.3, §5.11). The
 /// NFC buffer and the Argon2id output are wiped.
+///
+/// Nothing is derived from the password before stretching, so the key id that later goes in
+/// the envelope header (computed from the returned key) is no cheaper a guess verifier than
+/// the commitment (§4.4). `kdf_id` has already been checked against the allow-list by its
+/// type. Upstream copies that are not wiped (`argon2`'s tag locals, `hkdf`'s state, the `hmac`
+/// key block) are listed in CRYPTO.md §12.2.
+///
+/// # Errors
+/// [`KdfError`] if normalisation or Argon2id fails; [`KdfError::Internal`] if HKDF fails
+/// (unreachable for a 32-byte output).
 pub(crate) fn password_file_key(
     password: &str,
     salt: &[u8; SALT_LEN],
@@ -174,7 +221,9 @@ pub(crate) fn password_file_key(
     label: Label,
     id: &[u8; ID_LEN],
 ) -> Result<Key32, KdfError> {
+    // 1. `UTF-8(NFC(password))`, into a wiped buffer allocated at its exact size.
     let normalized = kdf::normalize_password(password)?;
+    // 2. `e = Argon2id(P, S = salt, kdf_id, T = 32)`, into a wiped buffer.
     let mut stretched = Zeroizing::new([0u8; kdf::OUTPUT_LEN]);
     kdf::argon2id(
         kdf_id,
@@ -182,6 +231,8 @@ pub(crate) fn password_file_key(
         salt,
         stretched.as_mut_slice(),
     )?;
+    // 3. `HKDF(ikm = e, salt = empty, info = LABEL ‖ 0x00 ‖ id, 32)`, written straight into the
+    //    key's wiped storage.
     Key32::try_init_with(|out| kdf::hkdf_sha256(stretched.as_slice(), None, label, id, out))
         .map_err(|_| KdfError::Internal)
 }
@@ -200,14 +251,26 @@ pub(crate) fn check_new_file_password(password: &str) -> Result<(), ExportError>
 }
 
 /// The export file key, bound to the header it was derived for.
+///
+/// Sealing and opening always use this header's `EXPORT_FILE` context, so a key cannot be
+/// used with a context other than the one it was derived for. The key is wiped on drop and
+/// `Debug` shows only the header. The envelope's key id and commitment let an attacker test a
+/// password guess, but only after the full derivation: one Argon2id run per guess (§4.4).
 pub struct ExportFileKey {
+    /// The derived 32-byte file key, wiped on drop.
     key: Key32,
+    /// The public header the key was derived for; its context binds every seal and open.
     header: ExportHeader,
 }
 
 impl ExportFileKey {
     /// Starts a new export: draws `export_id` and `export_salt` from the injected CSPRNG and
     /// derives the key (one Argon2id run at the cost of `kdf_id`).
+    ///
+    /// The password gets the new-password checks of CRYPTO.md §2 first: not empty, and no code
+    /// point unassigned in the pinned Unicode tables. `created_at_ms` is the caller's clock
+    /// (`rizzy-core` reads none); it is bound into the envelope context. Use
+    /// [`KdfId::DEFAULT`] unless there is a reason not to.
     ///
     /// # Errors
     /// [`ExportError::EmptyPassword`], or [`ExportError::Kdf`] for an unassigned code point
@@ -232,6 +295,10 @@ impl ExportFileKey {
 
     /// Derives the key for an existing file from its header (one Argon2id run).
     ///
+    /// The new-password checks are deliberately not run, so a file made before a Unicode table
+    /// update still opens (§2, "New passwords"). Build the header with
+    /// [`ExportHeader::from_json_fields`], which enforces the `kdf_id` allow-list.
+    ///
     /// # Errors
     /// [`KdfError`].
     pub fn derive(export_password: &str, header: &ExportHeader) -> Result<Self, KdfError> {
@@ -253,7 +320,9 @@ impl ExportFileKey {
         &self.header
     }
 
-    /// Seals the export payload as `EXPORT_FILE`.
+    /// Seals the export payload as `EXPORT_FILE`, with a fresh nonce from `rng`.
+    ///
+    /// The payload is not padded: the envelope is exactly 90 bytes longer than it.
     ///
     /// # Errors
     /// [`EncryptError`], for example [`EncryptError::PlaintextTooLong`] above 16 MiB.
@@ -288,6 +357,9 @@ impl ExportFileKey {
 
     /// Opens the JSON `data` value.
     ///
+    /// The base64url is decoded strictly into a buffer sized from the text's length; the
+    /// envelope parser then applies the 16 MiB limit before any crypto.
+    ///
     /// # Errors
     /// [`DecryptError`], also for malformed base64url.
     pub fn open_data_field(&self, data: &str) -> Result<SecretBytes, DecryptError> {
@@ -307,6 +379,9 @@ impl fmt::Debug for ExportFileKey {
 
 #[cfg(test)]
 mod tests {
+    //! A known answer for the file key, round trips, binding of every header field, the JSON
+    //! field rules and the new-password checks.
+
     use super::*;
     use crate::test_util::{hex, seeded_rng};
 

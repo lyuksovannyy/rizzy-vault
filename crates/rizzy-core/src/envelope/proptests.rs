@@ -1,4 +1,4 @@
-//! Property tests of CRYPTO.md §15 item 4 over every implemented purpose: the 13 client
+//! Property tests of CRYPTO.md §15 item 4 over every implemented purpose: the 12 client
 //! symmetric purposes of M1, the 3 server-only purposes, and the HPKE PSK device grant.
 //!
 //! For random contexts, keys and plaintexts, each purpose must:

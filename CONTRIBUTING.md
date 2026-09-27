@@ -65,6 +65,7 @@ The workspace lints in [`Cargo.toml`](Cargo.toml) apply to every crate:
 - `dbg_macro`, `todo` and `unimplemented` are `deny`.
 - [`clippy.toml`](clippy.toml) allows `unwrap`, `expect` and printing inside tests.
 - `rizzy-core` also raises `clippy::indexing_slicing` and `clippy::unreachable` to `warn` with a crate-level `#![warn]` in `src/lib.rs`: ADR 0016 R7 rules out per-crate `[lints]` tables, and raising a level in source is allowed. Non-test code uses `.get()`, `split_at_checked` or iterators instead of `[]`, or justifies a provably safe index with a narrow `#[expect(clippy::indexing_slicing, reason = "...")]`; test modules carry one reasoned `#[expect]` each.
+- `missing_docs` (workspace lint table) and `clippy::missing_docs_in_private_items` (raised with `#![cfg_attr(not(test), warn(...))]` in each crate root) are `warn`, so every undocumented public or private non-test item fails `cargo lint`; see [Documentation](#documentation).
 
 If a lint is wrong for a specific line, silence it at the narrowest scope, with a reason:
 
@@ -182,6 +183,18 @@ Copy the relevant items into the PR description and tick them. A PR is security-
 
   The same vectors must pass natively and on wasm32. The full list is in [CRYPTO.md §15](docs/CRYPTO.md#15-testing).
 - **Test-only dependencies** (proptest, cargo-fuzz targets) are dev-dependencies and follow the same dependency rules.
+
+## Documentation
+
+A change is not done until its documentation is. [docs/README.md](docs/README.md) is the index of where each topic is documented. The rules:
+
+- **Every item is documented.** Every public and private item outside test code has a doc comment: modules, types, traits, fields, variants, functions, methods, constants and statics. `missing_docs` and `clippy::missing_docs_in_private_items` enforce this under `cargo lint` (see [Lints](#lints)). Clippy's pedantic group also requires an `# Errors` section on every public function that returns a `Result`, and a `# Panics` section on any that can panic. The rustdoc step of the gate fails on broken intra-doc links in the public documentation.
+- **Module docs explain the logic.** A module's `//!` comment says what the module does, which rules it enforces and why, and which specification sections it implements. Cite them by number: `CRYPTO.md §8.3`, `ADR 0012 §4`, `INV-12`. Link the specification instead of restating it. Where the code resolves an ambiguous point of the specification, the comment says so and cites the section.
+- **Normative documents change with the behaviour.** A change to behaviour that [CRYPTO.md](docs/CRYPTO.md), [THREAT_MODEL.md](docs/THREAT_MODEL.md), an ADR or [ROADMAP.md](docs/ROADMAP.md) describes updates that document in the same change. The limits still apply: an Accepted ADR changes only as its [lifecycle](docs/adr/README.md#lifecycle) allows, and otherwise through a new ADR ([ADR first](#adr-first)); a scope change is a ROADMAP edit the owner approves.
+- **Descriptive documents stay current.** The README files, this file, the [vector README](crates/rizzy-core/tests/vectors/README.md) and the crate docs change in the same change as the code they describe. A new document, ADR or crate is added to [docs/README.md](docs/README.md), a new crate also to the layout in [README.md](README.md#repository-layout), and a new ADR also to the index in [docs/adr/README.md](docs/adr/README.md).
+- **The server ships with operator documentation.** When the server lands (M1 step 3), the same change documents self-hosting, the compose files for Docker and Podman, configuration, and backup and restore. The backup and restore procedure is tested, not just written ([ROADMAP §4.9](docs/ROADMAP.md#49-server-self-hosting--ops-m1-onward)).
+- **Clients ship with user documentation.** Each client (`rv`, the web vault, the extensions, and later the desktop and mobile apps) ships with user documentation in the change that makes it usable.
+- **A CHANGELOG starts with the first tagged release.** From then on, every PR with a user-visible or security-relevant change adds an entry to `CHANGELOG.md`. Security fixes keep neutral wording until the advisory is public, as in [commit messages](#commit-messages).
 
 ## Adding dependencies
 

@@ -6,6 +6,25 @@
 //! - **Symmetric key ids** are derived from the key: `HKDF(K, salt = empty,
 //!   LABEL("key-id/symmetric") ‖ 0x00, 16)`, for every symmetric key, generated or derived.
 //! - **Public key ids** are `SHA-256(LABEL("key-id") ‖ 0x00 ‖ u8(key_type) ‖ public_key)[0..16]`.
+//!
+//! **Why ids look like this.** Object ids are random rather than counters or hashes of content,
+//! so they reveal nothing about the object and can be created offline on any device without
+//! coordination; 128 bits make a collision negligible, and the server rejects duplicates
+//! (§2). Every id type is its own newtype, so an `ItemId` cannot be passed where a `VaultId`
+//! belongs. Ids appear in AAD contexts and signed statements, which is what binds ciphertext to
+//! the object it belongs to (§8.4).
+//!
+//! **Key ids.** Nothing stores a symmetric key id next to its key: the reader derives the id of
+//! each key it holds and compares it with an envelope header or with the signed
+//! `account_key_id` (§4.4, §9.5). Because a symmetric key id is derived from a secret (and for a
+//! password-derived key is a guess verifier costing one Argon2id per guess), it compares in
+//! constant time. A public key id binds the key type, so the same 32 bytes under another type
+//! give another id; this is what lets a signature container or HPKE header name a key without
+//! ambiguity.
+//!
+//! **Fail closed.** [`KeyType::from_u8`] rejects `0x00`, the reserved post-quantum range
+//! `0x10`–`0x1F` and every undefined value, so a parser never guesses the meaning of a key type
+//! it does not know (§9.7, §13).
 
 use core::fmt;
 
@@ -20,11 +39,15 @@ use crate::secret::Key32;
 /// Length of every id and key id.
 pub const ID_LEN: usize = 16;
 
+/// Writes `bytes` as lowercase hex, two digits per byte, for the `Debug` impls of the id types.
+/// Only public identifiers are passed to it, never key material.
 fn write_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
     bytes.iter().try_for_each(|b| write!(f, "{b:02x}"))
 }
 
-/// Defines one 16-byte random id type per entry.
+/// Defines one 16-byte random id type per entry: a `Copy` newtype over `[u8; 16]` with a
+/// CSPRNG constructor, byte constructors and accessors, `AsRef<[u8]>`, ordering by bytes, and a
+/// hex `Debug`. Equality is ordinary `==`: these ids are public.
 macro_rules! random_ids {
     ($( $(#[$doc:meta])* $name:ident; )+) => {$(
         $(#[$doc])*
@@ -41,6 +64,9 @@ macro_rules! random_ids {
             }
 
             /// Wraps 16 bytes received from elsewhere (the wire, storage).
+            ///
+            /// An id read from untrusted input is only a claim: it gains meaning when it is
+            /// bound into an AAD context or a signed statement that then verifies.
             #[must_use]
             pub const fn from_bytes(bytes: [u8; ID_LEN]) -> Self {
                 Self(bytes)
@@ -123,11 +149,18 @@ random_ids! {
 ///
 /// It goes in envelope headers so a reader can find the key; the reader derives the id of each
 /// key it holds and compares. Because it is derived from a secret, equality is constant-time.
+///
+/// It reveals nothing useful about a random key: HKDF under its own label is independent of
+/// every other use of the key (CRYPTO.md §1 rule 4). The signed `account-state` commits to the
+/// current account key's id (`account_key_id`, §10.2).
 #[derive(Clone, Copy, Eq)]
 pub struct SymmetricKeyId([u8; ID_LEN]);
 
 impl SymmetricKeyId {
     /// Derives the id of `key`.
+    ///
+    /// HKDF with `L = 16` is the first 16 bytes of HKDF-Expand's first block. The id is written
+    /// into a plain array: it is public by design.
     ///
     /// # Errors
     /// [`DerivationError`], which cannot happen for this fixed output length.
@@ -144,6 +177,8 @@ impl SymmetricKeyId {
     }
 
     /// Wraps 16 key-id bytes read from an envelope header or a signed statement.
+    ///
+    /// Such a value is only a claim; compare it with the id derived from a key the caller holds.
     #[must_use]
     pub const fn from_bytes(bytes: [u8; ID_LEN]) -> Self {
         Self(bytes)
@@ -156,6 +191,8 @@ impl SymmetricKeyId {
     }
 }
 
+// Constant-time equality (CRYPTO.md §12.3); `PartialEq` below delegates to it, and `Hash` hashes
+// the same bytes, so the type is usable as a map key consistently with `Eq`.
 impl ConstantTimeEq for SymmetricKeyId {
     fn ct_eq(&self, other: &Self) -> Choice {
         self.0.ct_eq(&other.0)
@@ -185,24 +222,28 @@ impl fmt::Debug for SymmetricKeyId {
 
 /// Public key types (CRYPTO.md §4.4). `0x10`–`0x1F` are reserved for post-quantum keys and
 /// are rejected until they are specified.
+///
+/// The type byte enters every public key id, and a key bundle lists its keys by type, sorted
+/// strictly ascending (§10.2). A bundle carries only `0x01`–`0x03`; device certificates carry
+/// `0x04` and `0x05`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 #[non_exhaustive]
 pub enum KeyType {
     /// Identity Ed25519 signing key.
     IdentityEd25519 = 0x01,
-    /// Identity X25519 key (HPKE `0x10`).
+    /// Identity X25519 key: the recipient of HPKE Base-mode (`alg_id` `0x10`) member grants.
     IdentityX25519 = 0x02,
     /// Mail X25519 key (M6).
     MailX25519 = 0x03,
     /// Device Ed25519 signing key.
     DeviceEd25519 = 0x04,
-    /// Device X25519 key.
+    /// Device X25519 key: the recipient of device grants.
     DeviceX25519 = 0x05,
 }
 
 impl KeyType {
-    /// Every defined key type.
+    /// Every defined key type, in ascending order of its byte.
     pub const ALL: [Self; 5] = [
         Self::IdentityEd25519,
         Self::IdentityX25519,
@@ -239,11 +280,19 @@ pub const PUBLIC_KEY_LEN: usize = 32;
 
 /// The id of a public key (CRYPTO.md §4.3):
 /// `SHA-256(LABEL("key-id") ‖ 0x00 ‖ u8(key_type) ‖ public_key)[0..16]`.
+///
+/// It names the recipient key in an HPKE envelope header (§9.2), the signer in a signature
+/// container (§9.3), and a retired key in the `RETIRED_SECRET_KEY` context. Derived from public
+/// data only, so `==` is an ordinary comparison. A 128-bit truncation is enough to name a key;
+/// authenticity always comes from the signature or decryption that follows, not from the id.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PublicKeyId([u8; ID_LEN]);
 
 impl PublicKeyId {
     /// Derives the id of a public key of the given type.
+    ///
+    /// The caller supplies the type; it is part of the hash input, so passing the wrong type
+    /// gives an id that matches nothing.
     #[must_use]
     pub fn derive(key_type: KeyType, public_key: &[u8; PUBLIC_KEY_LEN]) -> Self {
         // The id is a prefix of the 32-byte digest, so the copy below writes every byte of it.
@@ -254,6 +303,7 @@ impl PublicKeyId {
             .chain_update(public_key)
             .finalize();
         let digest: [u8; 32] = digest.into();
+        // Keep digest[0..16]: `zip` stops at the shorter `id`, so no indexing is needed.
         let mut id = [0u8; ID_LEN];
         id.iter_mut().zip(digest).for_each(|(dst, src)| *dst = src);
         Self(id)
@@ -286,6 +336,10 @@ impl fmt::Debug for PublicKeyId {
     reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
 )]
 mod tests {
+    //! Id generation from the injected RNG, parsing and `Debug`, the symmetric key id against
+    //! an independent HKDF computation and a known answer, the public key id layout, and the
+    //! key-type parser's rejection of reserved and undefined values.
+
     use super::*;
     use crate::test_util::{hex, seeded_rng};
 

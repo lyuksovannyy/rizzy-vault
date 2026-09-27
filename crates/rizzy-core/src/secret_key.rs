@@ -23,6 +23,41 @@
 //! and characters with branch-free arithmetic, never with a table indexed by secret bits, and the
 //! check value is compared with `ct_eq`. What a parse reveals through its timing is only which
 //! input positions are separators, which is formatting, not secret.
+//!
+//! # What the two codes are for
+//!
+//! - The **Secret Key** keys the OPAQUE password input `pw_in` (§5.2,
+//!   [`crate::opaque::PasswordInput`]). Checking a master-password guess against server data
+//!   therefore needs the Secret Key as well as the server's OPRF seed, so a leaked database
+//!   plus secrets file gives nothing to brute-force (§5.5, threat model INV-2). It is mandatory
+//!   for every account (ADR 0004 decision 6 and owner decision 1).
+//! - The **recovery code** derives the recovery wrap key, which opens `E_rec`, and the
+//!   recovery auth token, of which the server stores only `SHA-256(token)` (§4.3, §11.9).
+//!
+//! # Encoding, step by step
+//!
+//! 1. Read the 16 bytes as one 128-bit big-endian integer.
+//! 2. Cut it into 25 five-bit symbols from the most significant end; the 26th symbol holds the
+//!    last 3 bits followed by the 2 zero pad bits.
+//! 3. Compute the 10-bit check value and split it into two symbols, high 5 bits first.
+//! 4. Map each of the 28 symbols to its Crockford character by arithmetic, and write the prefix
+//!    followed by the characters in dash-separated groups of four.
+//!
+//! Parsing reverses these steps. It first rejects input longer than [`MAX_INPUT_LEN`] bytes
+//! without looking at it, skips separators, and checks the prefix. It then decodes every
+//! remaining character, rejects an invalid character or a count other than 28, reassembles the
+//! 128 bits, and rejects non-zero pad bits or a check value that does not match.
+//!
+//! # What the check value is not
+//!
+//! Ten bits catch typos: a single-character change or an adjacent transposition slips through
+//! with probability at most about 2^-10. It is not an integrity or authenticity check. A
+//! well-formed but wrong Secret Key surfaces as a failed login, and a wrong recovery code as a
+//! failed recovery.
+//!
+//! This module only generates and encodes the codes. Where the Secret Key is kept (the
+//! Emergency Kit, every enrolled device's state file, optionally the web vault's storage) and
+//! what that costs are in §7 and §5.5; no client ever persists the recovery code (§11).
 
 use core::fmt;
 
@@ -44,14 +79,23 @@ pub const SYMBOLS: usize = 28;
 
 /// Longest input a parser looks at, in bytes. A formatted code is at most 39 bytes; this leaves
 /// room for extra separators and spaces without letting a caller feed megabytes.
+///
+/// CRYPTO.md §7 fixes the limit: longer input is rejected without being parsed.
 pub const MAX_INPUT_LEN: usize = 128;
 
+/// Symbols that carry data: 25 whole symbols of secret bits, then one with the last 3 secret
+/// bits and the 2 zero pad bits.
 const DATA_SYMBOLS: usize = 26;
+/// Characters per dash-separated group in the printable form.
 const GROUP: usize = 4;
 
+// Compile-time check: this module and `keys` agree on the recovery code's length.
 const _: () = assert!(CODE_LEN == RECOVERY_CODE_LEN);
 
 /// Why a typed Secret Key or recovery code was rejected. Carries no part of the input.
+///
+/// [`CodeParseError::NonZeroPadding`] and [`CodeParseError::CheckMismatch`] share one message,
+/// "code is mistyped": both mean the characters are valid but the code is not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum CodeParseError {
@@ -88,14 +132,19 @@ impl core::error::Error for CodeParseError {}
 struct Kind {
     /// The prefix without its dash, as it reads after the O/I/L mapping.
     prefix: &'static str,
+    /// The label of the check-value hash (CRYPTO.md §4.3). The two kinds use different
+    /// labels, so the same 16 bytes get different check characters.
     check_label: Label,
 }
 
+/// The Secret Key format: prefix `RV1`, check label `secret-key/check` (CRYPTO.md §7).
 const SECRET_KEY: Kind = Kind {
     prefix: "RV1",
     check_label: labels::SECRET_KEY_CHECK,
 };
 
+/// The recovery-code format: prefix `RVR1`, check label `recovery-code/check`
+/// (CRYPTO.md §11.9).
 const RECOVERY_CODE: Kind = Kind {
     prefix: "RVR1",
     check_label: labels::RECOVERY_CODE_CHECK,
@@ -103,16 +152,30 @@ const RECOVERY_CODE: Kind = Kind {
 
 /// The Secret Key (SK): 128 random bits mixed into the OPAQUE password input
 /// ([`crate::opaque::PasswordInput`], CRYPTO.md §5.2) and printed on the Emergency Kit.
+///
+/// Generated on the client at signup, and again at an SK change or a recovery, and never sent
+/// to the server (§7, §11.5, §11.9). A secret: wiped on drop, no `Clone`, `Debug` prints
+/// `[REDACTED]`.
 pub struct SecretKey {
+    /// The 16 secret bytes, wiped on drop.
     bytes: SecretArray<CODE_LEN>,
 }
 
 /// The recovery code: 128 random bits from which the recovery wrap key and the recovery auth
 /// token are derived (CRYPTO.md §4.3, §11.9). It exists only on the Emergency Kit.
+///
+/// Generated on the client and never persisted by a client (§11, "Secrets before commit");
+/// the server sees only the auth token derived from it. A secret: wiped on drop, no `Clone`,
+/// `Debug` prints `[REDACTED]`.
 pub struct RecoveryCode {
+    /// The 16 secret bytes, wiped on drop.
     bytes: SecretArray<CODE_LEN>,
 }
 
+/// Generates the shared API of [`SecretKey`] and [`RecoveryCode`] for one code kind:
+/// generation, raw bytes, parsing, formatting, the last-group confirmation, `expose_secret`
+/// and the redacted `Debug`. One definition keeps the two types identical except for their
+/// [`Kind`] and their name.
 macro_rules! code_type {
     ($name:ident, $kind:expr, $what:literal) => {
         impl $name {
@@ -126,6 +189,9 @@ macro_rules! code_type {
 
             #[doc = concat!("Rebuilds a ", $what, " from its 16 raw bytes (device state).")]
             ///
+            /// Only the Secret Key is kept in device state; no client persists a recovery code
+            /// (CRYPTO.md §11). The bytes are copied; wiping `bytes` is the caller's job.
+            ///
             /// # Errors
             /// [`crate::error::ParseError::InvalidLength`] unless `bytes` is 16 bytes long.
             pub fn from_slice(bytes: &[u8]) -> Result<Self, crate::error::ParseError> {
@@ -136,6 +202,11 @@ macro_rules! code_type {
 
             #[doc = concat!("Parses a typed ", $what, " (CRYPTO.md §7).")]
             ///
+            /// Case-insensitive; `O` reads as `0` and `I` or `L` as `1`; ASCII dashes and
+            /// spaces are ignored wherever they appear. The prefix is required. Input longer
+            /// than [`MAX_INPUT_LEN`] bytes is rejected without being parsed. No error carries
+            /// any part of the input.
+            ///
             /// # Errors
             /// [`CodeParseError`].
             pub fn parse(input: &str) -> Result<Self, CodeParseError> {
@@ -145,6 +216,10 @@ macro_rules! code_type {
             }
 
             #[doc = concat!("The printable form of the ", $what, ", in a buffer wiped on drop.")]
+            ///
+            /// This is the Emergency Kit form, with its prefix and dash-separated groups of
+            /// four. The types implement no `Display`, so this call is the only way to print
+            /// the code.
             #[must_use]
             pub fn to_formatted(&self) -> Zeroizing<String> {
                 format_code($kind, self.bytes.expose_secret())
@@ -158,7 +233,8 @@ macro_rules! code_type {
                 last_group_matches($kind, self.bytes.expose_secret(), typed)
             }
 
-            /// The 16 raw bytes.
+            /// The 16 raw bytes. Do not log, store or send them outside the uses §7 and §11.9
+            /// describe.
             #[must_use]
             pub fn expose_secret(&self) -> &[u8; CODE_LEN] {
                 self.bytes.expose_secret()
@@ -187,6 +263,9 @@ impl RecoveryCode {
 
     /// The recovery auth token the client sends to the server (CRYPTO.md §4.3, §11.9).
     ///
+    /// The server stores only `SHA-256(token)` and compares in constant time. The token proves
+    /// possession of the code but cannot open `E_rec`; only the wrap key can.
+    ///
     /// # Errors
     /// [`DerivationError`] (unreachable).
     pub fn auth_token(&self) -> Result<RecoveryAuthToken, DerivationError> {
@@ -195,18 +274,25 @@ impl RecoveryCode {
 }
 
 /// The 10-bit check value: the top 10 bits of `SHA-256(LABEL(check) ‖ 0x00 ‖ code)`.
+///
+/// Secret-derived, so callers compare it only with `ct_eq` (CRYPTO.md §12.3).
 fn check_value(kind: Kind, code: &[u8; CODE_LEN]) -> u16 {
     let digest = Sha256::new()
         .chain_update(kind.check_label.as_bytes())
         .chain_update([0x00])
         .chain_update(code)
         .finalize();
+    // All 8 bits of byte 0 and the top 2 bits of byte 1. A SHA-256 digest always has both
+    // bytes, so the `unwrap_or` fallbacks are never taken.
     let (first, second) = (digest.first().copied(), digest.get(1).copied());
     (u16::from(first.unwrap_or(0)) << 2) | (u16::from(second.unwrap_or(0)) >> 6)
 }
 
 /// The 28 symbol values: 26 data symbols (128 bits, then 2 zero bits) and 2 check symbols.
 /// Only public shift amounts are used.
+///
+/// The symbols are the code itself in another form, so they are returned in a buffer wiped on
+/// drop, and the working copy of the 128 bits is wiped before returning.
 fn symbols_of(kind: Kind, code: &[u8; CODE_LEN]) -> Zeroizing<[u8; SYMBOLS]> {
     let mut x = u128::from_be_bytes(*code);
     let mut out = Zeroizing::new([0u8; SYMBOLS]);
@@ -220,6 +306,8 @@ fn symbols_of(kind: Kind, code: &[u8; CODE_LEN]) -> Zeroizing<[u8; SYMBOLS]> {
         };
         *symbol = u8::try_from(bits).unwrap_or(0);
     }
+    // The 10-bit check value as two symbols, high 5 bits first. `check` always has exactly two
+    // elements, and both values fit in 5 bits, so the fallbacks are never taken.
     let c = check_value(kind, code);
     if let [hi, lo] = check {
         *hi = u8::try_from(c >> 5).unwrap_or(0);
@@ -229,6 +317,9 @@ fn symbols_of(kind: Kind, code: &[u8; CODE_LEN]) -> Zeroizing<[u8; SYMBOLS]> {
     out
 }
 
+/// The printable form of `code`: the prefix, then the 28 characters with a `-` before each
+/// group of four (38 bytes for `RV1`, 39 for `RVR1`). Built in a wiped `String` allocated at
+/// its final length, so it never reallocates.
 fn format_code(kind: Kind, code: &[u8; CODE_LEN]) -> Zeroizing<String> {
     let symbols = symbols_of(kind, code);
     let len = kind.prefix.len() + SYMBOLS + SYMBOLS / GROUP;
@@ -243,31 +334,56 @@ fn format_code(kind: Kind, code: &[u8; CODE_LEN]) -> Zeroizing<String> {
     out
 }
 
+/// Whether `typed` is the last group of four characters of `code`'s printable form: two data
+/// symbols and the two check symbols.
+///
+/// Separators are skipped and characters are decoded as in parsing (case, `O`, `I`, `L`).
+/// Every character is decoded, with no early exit, and the four values are compared with
+/// `ct_eq`. The result is `true` only if every character was valid, exactly four remained, the
+/// input was at most [`MAX_INPUT_LEN`] bytes, and the values match.
 fn last_group_matches(kind: Kind, code: &[u8; CODE_LEN], typed: &str) -> bool {
     let symbols = symbols_of(kind, code);
     let mut typed_values = Zeroizing::new([0u8; GROUP]);
     let mut count = 0usize;
     let mut valid = true;
+    // At most `MAX_INPUT_LEN` bytes are read; a longer input fails the length test below.
     for b in typed.bytes().take(MAX_INPUT_LEN) {
         if is_separator(b) {
             continue;
         }
         let (value, ok) = decode_symbol(b);
         valid &= ok;
+        // Only the first four values are kept; `count` keeps counting, so extra characters
+        // make the count test fail.
         if let Some(slot) = typed_values.get_mut(count) {
             *slot = value;
         }
         count += 1;
     }
+    // The last four of the 28 symbols; `SYMBOLS - GROUP` is in range, so the fallback (an
+    // empty slice, which never matches) is never taken.
     let expected = symbols.get(SYMBOLS - GROUP..).unwrap_or_default();
     let equal: bool = typed_values.as_slice().ct_eq(expected).into();
     valid && count == GROUP && typed.len() <= MAX_INPUT_LEN && equal
 }
 
+/// Whether `b` is one of the two separators of CRYPTO.md §7: ASCII `-` (U+002D) or ASCII
+/// space (U+0020). Unicode dashes, a no-break space, tabs and line breaks are not separators;
+/// they are rejected as invalid characters.
 fn is_separator(b: u8) -> bool {
     b == b'-' || b == b' '
 }
 
+/// Parses the printable form of one code kind into its 16 bytes (CRYPTO.md §7).
+///
+/// Steps: refuse over-long input unread; drop separators; match the prefix; decode every
+/// remaining character without an early exit; check the character count; reassemble the 128
+/// bits; compute the expected check value and compare it with `ct_eq`; only then report bad pad
+/// bits or a check mismatch. The decoded symbols and the 128-bit working value are wiped.
+///
+/// # Errors
+/// [`CodeParseError`], in this order of precedence: `TooLong`, `WrongPrefix`,
+/// `InvalidCharacter`, `WrongLength`, `NonZeroPadding`, `CheckMismatch`.
 fn parse_code(kind: Kind, input: &str) -> Result<SecretArray<CODE_LEN>, CodeParseError> {
     if input.len() > MAX_INPUT_LEN {
         return Err(CodeParseError::TooLong);
@@ -283,6 +399,9 @@ fn parse_code(kind: Kind, input: &str) -> Result<SecretArray<CODE_LEN>, CodePars
         }
     }
 
+    // The payload: decode every character, keeping validity in a flag rather than returning
+    // early, so the position of a bad character does not show in the timing. Only the first 28
+    // values are stored; `count` keeps counting for the length check.
     let mut values = Zeroizing::new([0u8; SYMBOLS]);
     let mut count = 0usize;
     let mut all_valid = true;
@@ -309,17 +428,21 @@ fn parse_code(kind: Kind, input: &str) -> Result<SecretArray<CODE_LEN>, CodePars
     }
     let last = data.last().copied().unwrap_or(0);
     x = (x << 3) | u128::from(last >> 2);
+    // The low 2 bits of the 26th symbol are the pad bits, which must be zero.
     let pad = last & 0b11;
+    // `check` always has two elements (28 - 26), so the second arm is never taken.
     let typed_check = match check {
         [hi, lo] => (u16::from(*hi) << 5) | u16::from(*lo),
         _ => return Err(CodeParseError::WrongLength),
     };
 
+    // Put the 16 bytes into their final wiped buffer, then wipe the working copy.
     let bytes = SecretArray::try_init_with(|out| {
         *out = x.to_be_bytes();
         Ok::<(), CodeParseError>(())
     })?;
     x.zeroize();
+    // Both checks are computed before either result is acted on.
     let expected_check = check_value(kind, bytes.expose_secret());
     let check_ok: bool = typed_check.ct_eq(&expected_check).into();
     if pad != 0 {
@@ -332,6 +455,9 @@ fn parse_code(kind: Kind, input: &str) -> Result<SecretArray<CODE_LEN>, CodePars
 }
 
 /// The O/I/L mapping and case folding applied to the (public) prefix characters.
+///
+/// The prefix is not secret, so this uses an ordinary `match`; the payload goes through the
+/// branch-free [`decode_symbol`] instead.
 fn map_prefix_char(b: u8) -> u8 {
     match b.to_ascii_uppercase() {
         b'O' => b'0',
@@ -379,6 +505,9 @@ fn decode_symbol(b: u8) -> (u8, bool) {
     let v_z = in_range(c, b'V', b'Z');
     let o = in_range(c, b'O', b'O');
     let i_l = in_range(c, b'I', b'I') | in_range(c, b'L', b'L');
+    // Each mask is 0xFF for its range and 0x00 otherwise, and at most one is set, so OR-ing the
+    // masked offsets selects the value without a branch. `O` adds nothing (value 0) and `I`/`L`
+    // add 1; an invalid character leaves every mask clear and gives 0.
     let value = (digit & c.wrapping_sub(b'0'))
         | (a_h & c.wrapping_sub(b'A').wrapping_add(10))
         | (j_k & c.wrapping_sub(b'J').wrapping_add(18))

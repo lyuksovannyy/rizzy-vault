@@ -41,8 +41,10 @@ use crate::padding;
 use crate::secret::Key32;
 use crate::sign::IdentitySigningKey;
 
+/// The `kind` of every vector in this file.
 const KIND: &str = "envelope";
 
+/// Builds vector `envelope/<name>/<index>` from its inputs.
 fn vector(name: &str, index: usize, inputs: Obj) -> Vector {
     Vector::build(compute, KIND, name, index, inputs)
 }
@@ -65,6 +67,9 @@ fn symmetric(rng: &mut ChaCha20Rng, ctx: Obj, plaintext: &[u8]) -> Obj {
         .bytes("nonce", &random::<24>(rng))
 }
 
+/// Draws the inputs of one envelope per M1 purpose (two per padded purpose), in §8.4 table
+/// order, from the file's seeded RNG. Key-wrap plaintexts with a §8.4 layout are built in
+/// that layout; the others are random or placeholder bytes (see the module documentation).
 #[expect(
     clippy::too_many_lines,
     reason = "one flat table of test vectors reads best as one function"
@@ -306,22 +311,27 @@ fn check_file_requires_every_m1_purpose_and_both_padded_frames() {
 // Replay
 // ---------------------------------------------------------------------------------------------
 
+/// The context's `account_id`.
 fn account(c: &Map<String, Value>) -> AccountId {
     AccountId::from_bytes(arr(c, "account_id"))
 }
 
+/// The context's device id under `key` (`device_id`, `sender_device_id`, …).
 fn device(c: &Map<String, Value>, key: &str) -> DeviceId {
     DeviceId::from_bytes(arr(c, key))
 }
 
+/// The context's `vault_id`.
 fn vault(c: &Map<String, Value>) -> VaultId {
     VaultId::from_bytes(arr(c, "vault_id"))
 }
 
+/// The context's `kdf_id`, which must be on the client allow-list.
 fn kdf_id(c: &Map<String, Value>) -> KdfId {
     KdfId::from_u16(num(c, "kdf_id")).expect("an allowed kdf_id")
 }
 
+/// The vector's raw 32-byte wrapping key.
 fn key(m: &Map<String, Value>) -> Key32 {
     Key32::from_slice(&bytes(m, "key")).expect("32 bytes")
 }
@@ -342,6 +352,10 @@ fn with_nonce(m: &Map<String, Value>, f: impl FnOnce(&mut ExactRng) -> Vec<u8>) 
     out
 }
 
+/// Computes one envelope vector: builds the purpose's typed context from `ctx`, seals with
+/// the vector's nonce, opens again, checks the bytes against the §8.3 formula, and, where a
+/// typed key can be rebuilt from the raw key, requires the typed wrap function to produce the
+/// same envelope. The HPKE device grant is checked against §9.2 instead (`device_grant`).
 #[expect(
     clippy::too_many_lines,
     reason = "one flat table of test vectors reads best as one function"

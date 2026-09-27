@@ -2,7 +2,11 @@
 //!
 //! Only the fields the checks need are kept. The JSON is read through `serde_json::Value`, and
 //! a missing or mistyped field is an error: the check fails closed rather than skipping a
-//! package it could not read.
+//! package it could not read. The two exceptions are fields cargo itself leaves out or sets to
+//! `null` for the default: a dependency's `kind` (normal) and its `rename` (none).
+//!
+//! Packages are stored in a `Vec` and referred to by index; resolved edges point at those
+//! indices. The `resolve` section is required, so `cargo metadata --no-deps` output is refused.
 
 use std::collections::HashMap;
 
@@ -20,6 +24,11 @@ pub(crate) enum Kind {
 }
 
 impl Kind {
+    /// Reads a `kind` value: `null` is a normal dependency, `"build"` and `"dev"` the others.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message for any other value.
     fn parse(value: &Value) -> Result<Self, String> {
         match value {
             Value::Null => Ok(Self::Normal),
@@ -43,8 +52,12 @@ impl Kind {
 /// crate name the dependent uses for it (the rename, if any, with `-` as `_`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Edge {
+    /// Index of the dependency in [`Graph::packages`].
     pub(crate) to: usize,
+    /// Every kind the edge is used as, each once, over all targets of the graph.
     pub(crate) kinds: Vec<Kind>,
+    /// The extern crate name the dependent uses: the rename if any, else the package name,
+    /// with `-` as `_`.
     pub(crate) name: String,
 }
 
@@ -55,8 +68,13 @@ pub(crate) struct Declared {
     pub(crate) name: String,
     /// The rename (`key = { package = "name" }`), if any.
     pub(crate) rename: Option<String>,
+    /// The manifest section it is declared in.
     pub(crate) kind: Kind,
+    /// The features the entry itself lists (not those turned on through `[features]`).
     pub(crate) features: Vec<String>,
+    /// Whether the entry keeps default features (`default-features` not set to `false`). Read,
+    /// but no check uses it today: the ADR 0009 rules catch a harmful default through its
+    /// resolved features ([`crate::rules::FEATURE_RULES`], the R1 getrandom rule).
     pub(crate) default_features: bool,
 }
 
@@ -72,14 +90,21 @@ impl Declared {
 /// One package with its resolved features and edges.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Package {
+    /// Cargo's package id, the key that links `packages` and `resolve.nodes`.
     pub(crate) id: String,
+    /// The package name.
     pub(crate) name: String,
+    /// The exact version, as `cargo metadata` prints it.
     pub(crate) version: String,
+    /// Absolute path of its `Cargo.toml`.
     pub(crate) manifest_path: String,
+    /// Whether it is a workspace member (listed in `workspace_members`).
     pub(crate) is_member: bool,
     /// Resolved features, unified across the workspace.
     pub(crate) features: Vec<String>,
+    /// Resolved edges from its `resolve` node. Empty for a package the graph does not resolve.
     pub(crate) deps: Vec<Edge>,
+    /// Its dependencies as its manifest declares them, every kind and target.
     pub(crate) declared: Vec<Declared>,
     /// The package's own `[features]` table: each feature with what it enables, in name order.
     pub(crate) feature_table: Vec<(String, Vec<String>)>,
@@ -95,12 +120,23 @@ impl Package {
 /// The resolved graph.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Graph {
+    /// Every package, in `cargo metadata` order; all indices refer to this list.
     pub(crate) packages: Vec<Package>,
+    /// The workspace root directory, used to check where each member lives.
     pub(crate) workspace_root: String,
 }
 
 impl Graph {
     /// Parses `cargo metadata --format-version 1` output.
+    ///
+    /// Reads `packages` first (names, versions, declared dependencies, `[features]` tables),
+    /// then fills each package's resolved features and edges from `resolve.nodes`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the JSON is invalid, the format version is not 1, the resolve
+    /// graph is missing, a required field is missing or has the wrong type, a dependency kind
+    /// is unknown, or a node, edge or workspace member names a package that is not listed.
     pub(crate) fn from_json(text: &str) -> Result<Self, String> {
         let root: Value =
             serde_json::from_str(text).map_err(|e| format!("cargo metadata JSON: {e}"))?;
@@ -264,6 +300,11 @@ impl Graph {
     }
 }
 
+/// The array at `value[key]`.
+///
+/// # Errors
+///
+/// Returns a message when the key is missing or not an array.
 fn array<'a>(value: &'a Value, key: &str) -> Result<&'a Vec<Value>, String> {
     value
         .get(key)
@@ -271,6 +312,11 @@ fn array<'a>(value: &'a Value, key: &str) -> Result<&'a Vec<Value>, String> {
         .ok_or_else(|| format!("cargo metadata: `{key}` is not an array"))
 }
 
+/// The string at `value[key]`, copied.
+///
+/// # Errors
+///
+/// Returns a message when the key is missing or not a string.
 fn string(value: &Value, key: &str) -> Result<String, String> {
     value
         .get(key)
@@ -279,7 +325,11 @@ fn string(value: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("cargo metadata: `{key}` is not a string"))
 }
 
-/// A package's `features` map (feature name → what it enables).
+/// A package's `features` map (feature name → what it enables), in name order.
+///
+/// # Errors
+///
+/// Returns a message when the map is missing, or a feature is not an array of strings.
 fn feature_table(package: &Value) -> Result<Vec<(String, Vec<String>)>, String> {
     package
         .get("features")
@@ -302,6 +352,11 @@ fn feature_table(package: &Value) -> Result<Vec<(String, Vec<String>)>, String> 
         .collect()
 }
 
+/// The array of strings at `value[key]`.
+///
+/// # Errors
+///
+/// Returns a message when the key is missing, not an array, or holds a non-string.
 fn strings(value: &Value, key: &str) -> Result<Vec<String>, String> {
     array(value, key)?
         .iter()

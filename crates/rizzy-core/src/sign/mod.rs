@@ -1,5 +1,11 @@
 //! Ed25519 signatures and signed statements (CRYPTO.md §9.3, §9.6, §10.2; ADR 0006 decision 10).
 //!
+//! This module is the one place in `rizzy-core` that makes or checks an Ed25519 signature. It
+//! holds the role-typed keys ([`SigningKey`], [`VerifyingKey`]), the 82-byte
+//! [`SignatureContainer`], the framing every statement shares, and the generic single-signer
+//! sign and verify paths. The statements themselves live in [`bundle`] (the key bundle and its
+//! chain) and [`statements`] (every other statement of §10.2).
+//!
 //! **Library rules (§10.2).**
 //! - `ed25519-dalek` 3.0.0, pure Ed25519 (RFC 8032).
 //! - Verification always uses `verify_strict`, which rejects small-order keys, small-order `R`
@@ -10,13 +16,32 @@
 //! **Message framing (§10.2).** Every signed message is
 //! `LABEL("sig/<type>") ‖ 0x00 ‖ u16(statement_version = 1) ‖ body`, with `body` a fixed
 //! canonical layout. The label is never transmitted: the verifier prepends the label of the
-//! statement type it expects, so a statement of one type never verifies as another.
+//! statement type it expects, so a statement of one type never verifies as another. Labels
+//! contain no `0x00` (§2), so the framing is prefix-free.
 //!
 //! **Wire form (§9.6).** `bytes(u16(statement_version) ‖ body) ‖ container(s)`, where each
 //! container is the 82-byte [`SignatureContainer`] of §9.3. Every statement carries exactly one
 //! container, except a key bundle that changes the identity keys, which carries two: the new
-//! key's first ([`bundle`]). `bundle_hash`, `prev_bundle_hash` and the device-set hash are
-//! `SHA-256` of the full signed message (label, `0x00`, version and body), never of the wire.
+//! key's first ([`bundle`]). `bundle_hash`, `prev_bundle_hash` and each certificate hash `h_i`
+//! that goes into the device-set hash are `SHA-256` of the full signed message (label, `0x00`,
+//! version and body), never of the wire. So the same statement with other containers has the
+//! same hash.
+//!
+//! **Signing, step by step** (the crate-private `sign_single`):
+//! 1. The statement encodes its canonical body and refuses values the format does not allow,
+//!    so a writer never produces a statement every reader would reject.
+//! 2. The body length is checked against the statement type's upper bound.
+//! 3. The key signs `LABEL ‖ 0x00 ‖ u16(1) ‖ body`.
+//! 4. The wire form `bytes(u16(1) ‖ body) ‖ container` is returned.
+//!
+//! **Verifying, step by step** (the crate-private `verify_single`):
+//! 1. The length prefix is compared with the statement type's upper bound before any body byte
+//!    is read, then `statement_version` must be 1.
+//! 2. The rest must be exactly one container with `sig_format_version` and `sig_alg` `0x01`.
+//! 3. The body is decoded strictly: every field in its allowed set, no trailing bytes.
+//! 4. The verifier rebuilds the message with the label of the type it expects, checks that the
+//!    container names the key it expects, and runs `verify_strict`.
+//! 5. Only then is a [`Verified`] returned, carrying `SHA-256` of the signed message.
 //!
 //! **Two statements are verified against a rebuilt message.** `device-auth` and
 //! `device-request` ([`DeviceAuth`], [`DeviceRequest`]) sign values the verifier already holds
@@ -31,6 +56,33 @@
 //! purpose against the signer's role (the §10.2 table) when signing and when verifying
 //! ([`KeyGrant`]). The signer key id in a container is `PublicKeyId(key_type, public_key)`
 //! (§4.3) with the role's key type (`0x01` or `0x04`).
+//!
+//! **Invariants.**
+//! - Nothing unverified leaves a verifier: [`Verified`] and [`bundle::VerifiedBundle`] are
+//!   built only after the signature check passed.
+//! - Decoders are pure, bounded before parsing, and never panic. They read through the bounded
+//!   [`Reader`], so a length field is checked against its bound and against the bytes
+//!   actually present before anything is copied, and no allocation exceeds the input's size
+//!   (fuzz target `signed_statements`).
+//! - A [`VerifyingKey`] never holds a key that `verify_strict` would reject for every
+//!   signature: non-canonical and small-order encodings are refused at parse time.
+//! - Randomness is injected ([`SigningKey::generate`]); Ed25519 signing itself is
+//!   deterministic (RFC 8032) and draws none.
+//!
+//! **What this defends against.** A server or network attacker who forges or alters a
+//! statement (every body byte is signed), relabels it as another type (the label is the
+//! verifier's), or presents a statement of one role as another (the key types differ, and the
+//! container's signer key id must be the expected key's). Malleable and small-order signatures
+//! (`verify_strict`). Replay of `device-auth` and `device-request` at another server (the
+//! canonical origin is signed).
+//!
+//! **What it does not defend against.** Replay of an old, validly signed statement: freshness
+//! is the caller's, through the sequence numbers and chain rules ([`AccountState::is_rollback`],
+//! [`AccountState::is_fork`], [`VerifiedBundle::verify_successor`]) and the server's challenge
+//! and request-counter state. Picking the right verifying key is the caller's too: from the
+//! pinned bundle, a verified certificate or its cached identity key. And whoever holds a
+//! signing key, for example on a stolen unlocked device, can sign anything that key's role may
+//! sign; revocation and rotation (§11.6, §11.8) are the answer to that, not this module.
 
 use core::fmt;
 use core::marker::PhantomData;
@@ -83,15 +135,25 @@ pub const SEED_LEN: usize = 32;
 /// Length of the signature container: version, algorithm, signer key id, signature (§9.3).
 pub const CONTAINER_LEN: usize = 2 + ID_LEN + SIGNATURE_LEN;
 
+// The §9.3 table fixes the container at 82 bytes; this fails the build if a constant drifts.
 const _: () = assert!(CONTAINER_LEN == 82);
 
+/// Seals [`SignerRole`]: code outside this module cannot name `Sealed`, so it cannot add a role.
 mod sealed {
+    /// The supertrait of [`super::SignerRole`]; implemented only for the two role types.
     pub trait Sealed {}
 }
 
 /// The role of an Ed25519 key: which key type (§4.4) it is, and so which key id it has.
 ///
-/// Sealed: the roles are [`Identity`] and [`Device`].
+/// Sealed: the roles are [`Identity`] and [`Device`]. The role is a type parameter of
+/// [`SigningKey`] and [`VerifyingKey`], so each statement's `sign` and `verify` take exactly the
+/// role §10.2 names for it, and a key of the wrong role does not compile. [`KeyGrant`], the one
+/// statement either role signs, checks the role against the purpose at run time.
+///
+/// The key type also enters the key id, `PublicKeyId(key_type, public_key)` (§4.3), so the same
+/// 32 bytes used as an identity key and as a device key would have two different ids, and a
+/// container made by one role never names the other.
 pub trait SignerRole: sealed::Sealed {
     /// The key type of this role's Ed25519 key.
     const KEY_TYPE: KeyType;
@@ -100,12 +162,18 @@ pub trait SignerRole: sealed::Sealed {
 }
 
 /// The identity signing role (`key_type` `0x01`): bundles, certificates, revocations, the
-/// account state, and key grants from a web-vault client.
+/// account state, and key grants (member grants, M9, and the device grants of a web-vault
+/// client).
+///
+/// An uninhabited marker type: it only ever appears as the `R` of [`SigningKey`] and
+/// [`VerifyingKey`].
 #[derive(Debug)]
 pub enum Identity {}
 
-/// The device signing role (`key_type` `0x04`): ops, snapshots, key grants, device
-/// authentication and request signing.
+/// The device signing role (`key_type` `0x04`): ops, snapshots, key grants (device grants and
+/// password-verifier grants), device authentication and request signing.
+///
+/// An uninhabited marker type, like [`Identity`].
 #[derive(Debug)]
 pub enum Device {}
 
@@ -122,27 +190,43 @@ impl SignerRole for Device {
     const NAME: &'static str = "Device";
 }
 
-/// The identity Ed25519 signing key.
+/// The identity Ed25519 signing key. Its seed is stored in `E_id`, under the account key
+/// (§4.2).
 pub type IdentitySigningKey = SigningKey<Identity>;
-/// The identity Ed25519 public key.
+/// The identity Ed25519 public key, as the key bundle publishes it (`key_type` `0x01`).
 pub type IdentityVerifyingKey = VerifyingKey<Identity>;
-/// A device Ed25519 signing key.
+/// A device Ed25519 signing key. Its seed is stored in `E_dev`, under the account key, on that
+/// device only: `E_dev` is never uploaded (§4.2, §5.10).
 pub type DeviceSigningKey = SigningKey<Device>;
-/// A device Ed25519 public key.
+/// A device Ed25519 public key, as a device certificate carries it (`key_type` `0x04`).
 pub type DeviceVerifyingKey = VerifyingKey<Device>;
 
 /// An Ed25519 signing key of role `R`.
 ///
 /// Wraps `ed25519_dalek::SigningKey`, which holds the matching public key and wipes its seed on
 /// drop (`zeroize` feature). No `Clone`, `Copy` or `Display`; `Debug` prints only the key id.
+///
+/// There is no public way to sign arbitrary bytes: signing goes through the `sign` functions of
+/// the statement types, which frame the message with their own label (§10.2). So a signing key
+/// is never a general signing oracle, and a signature made for one statement type cannot be
+/// passed off as another.
+///
+/// The seed leaves this type only through the crate-private `write_seed`, into a buffer the
+/// caller wipes (the `E_id` or `E_dev` plaintext, §4.2).
 pub struct SigningKey<R: SignerRole> {
+    /// The `ed25519-dalek` key: the seed and the public key derived from it. Zeroized on drop.
     inner: ed25519_dalek::SigningKey,
+    /// The public key with its role-typed key id, derived from `inner` once at construction, so
+    /// the id a container names always belongs to the key that signed it.
     public: VerifyingKey<R>,
 }
 
 impl<R: SignerRole> SigningKey<R> {
     /// Generates a key from a 32-byte seed drawn from the injected CSPRNG (§4.2). The seed
     /// buffer is wiped after use.
+    ///
+    /// The RNG is the caller's (`rizzy-core` reaches no OS randomness, §12.1): pass the
+    /// platform CSPRNG, never a seeded test RNG outside tests.
     #[must_use]
     pub fn generate<G: CryptoRng + ?Sized>(rng: &mut G) -> Self {
         let mut seed = Zeroizing::new([0u8; SEED_LEN]);
@@ -152,6 +236,9 @@ impl<R: SignerRole> SigningKey<R> {
 
     /// Rebuilds a key from its seed, as stored inside `E_id` or `E_dev`. The caller wipes
     /// `seed`.
+    ///
+    /// The public key is derived here, once, from the seed; nothing else can set it
+    /// (RUSTSEC-2022-0093).
     pub(crate) fn from_seed(seed: &[u8; SEED_LEN]) -> Self {
         let inner = ed25519_dalek::SigningKey::from_bytes(seed);
         let public = VerifyingKey::from_dalek(inner.verifying_key());
@@ -160,6 +247,9 @@ impl<R: SignerRole> SigningKey<R> {
 
     /// Writes the seed into `out`, a buffer the caller wipes (the `E_id` or `E_dev`
     /// plaintext).
+    ///
+    /// Security: `out` then holds the secret key. It must be a zeroizing buffer that is
+    /// encrypted straight away and never logged.
     pub(crate) fn write_seed(&self, out: &mut [u8; SEED_LEN]) {
         out.copy_from_slice(self.inner.as_bytes());
     }
@@ -178,6 +268,13 @@ impl<R: SignerRole> SigningKey<R> {
 
     /// Signs `message` and returns the container. Crate-private: signing happens only through
     /// the statement types, which build the framed message.
+    ///
+    /// The container names this key's own id, so a verifier that expects another key rejects
+    /// it with [`VerifyError::WrongSigner`] before any curve arithmetic.
+    ///
+    /// # Errors
+    /// [`SignError::Internal`] if `ed25519-dalek` reports a failure, which it does not for a
+    /// valid signing key.
     pub(crate) fn sign_message(&self, message: &[u8]) -> Result<SignatureContainer, SignError> {
         let signature = self
             .inner
@@ -206,13 +303,23 @@ impl<R: SignerRole> fmt::Debug for SigningKey<R> {
 /// Construction from bytes rejects encodings that do not decompress, non-canonical encodings
 /// and small-order ("weak") keys, so a bundle or certificate can never carry a key that
 /// `verify_strict` would reject for every signature.
+///
+/// Public data: `==` and `Hash` compare the 32-byte encoding in variable time, and `Debug`
+/// prints it as hex.
 pub struct VerifyingKey<R: SignerRole> {
+    /// The decompressed `ed25519-dalek` public key.
     inner: ed25519_dalek::VerifyingKey,
+    /// `PublicKeyId(R::KEY_TYPE, public_key)` (§4.3), computed once at construction.
     id: PublicKeyId,
+    /// The role, at the type level only. `fn() -> R` stores no `R` (the roles are uninhabited)
+    /// and keeps the type `Send` and `Sync` whatever `R` is.
     role: PhantomData<fn() -> R>,
 }
 
 impl<R: SignerRole> VerifyingKey<R> {
+    /// Wraps a key `ed25519-dalek` already accepted and derives its key id for role `R`.
+    /// Callers have either checked the key ([`VerifyingKey::from_bytes`]) or derived it from a
+    /// seed.
     fn from_dalek(inner: ed25519_dalek::VerifyingKey) -> Self {
         Self {
             id: PublicKeyId::derive(R::KEY_TYPE, inner.as_bytes()),
@@ -229,6 +336,9 @@ impl<R: SignerRole> VerifyingKey<R> {
     pub fn from_bytes(bytes: &[u8; PUBLIC_KEY_LEN]) -> Result<Self, ParseError> {
         let inner =
             ed25519_dalek::VerifyingKey::from_bytes(bytes).map_err(|_| ParseError::InvalidValue)?;
+        // Decompression alone accepts some non-canonical encodings of a point. Re-compressing
+        // the point and comparing with the input rejects them, so each key has exactly one
+        // encoding and one key id.
         let canonical = inner.to_edwards().compress().to_bytes() == *bytes;
         if !canonical || inner.is_weak() {
             return Err(ParseError::InvalidValue);
@@ -250,6 +360,13 @@ impl<R: SignerRole> VerifyingKey<R> {
 
     /// Checks one container over `message`: the container must name this key, and the
     /// signature must pass `verify_strict`.
+    ///
+    /// `message` is the full framed message (label, `0x00`, version, body), which the caller
+    /// rebuilt; this function adds nothing to it.
+    ///
+    /// # Errors
+    /// [`VerifyError::WrongSigner`] if the container names another key id;
+    /// [`VerifyError::BadSignature`] if `verify_strict` rejects the signature.
     pub(crate) fn verify_container(
         &self,
         message: &[u8],
@@ -265,6 +382,8 @@ impl<R: SignerRole> VerifyingKey<R> {
     }
 }
 
+// `Clone`, `Copy`, `PartialEq`, `Eq` and `Hash` are written by hand: `derive` would require them
+// of the role type `R`, which is an uninhabited marker.
 impl<R: SignerRole> Clone for VerifyingKey<R> {
     fn clone(&self) -> Self {
         *self
@@ -305,17 +424,32 @@ impl<R: SignerRole> fmt::Debug for VerifyingKey<R> {
 /// | 1 | 1 | `sig_alg` = `0x01` (Ed25519) |
 /// | 2 | 16 | signer public key id |
 /// | 18 | 64 | signature |
+///
+/// The signer key id lets a verifier pick the key it expects and reject a container made by
+/// any other key before running the curve arithmetic. It is a claim, not a proof: only the
+/// signature check under the expected key authenticates anything. Parsing a container checks
+/// its layout, never its signature.
+///
+/// `sig_alg` `0x02` (hybrid Ed25519 + ML-DSA, §13) is reserved and rejected, like every other
+/// value but `0x01`. There is no negotiation: a verifier accepts exactly the one algorithm it
+/// knows.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SignatureContainer {
+    /// The signer's public key id, `PublicKeyId(key_type, public_key)` (§4.3).
     signer: PublicKeyId,
+    /// The 64-byte Ed25519 signature `R ‖ s` (RFC 8032).
     signature: [u8; SIGNATURE_LEN],
 }
 
 impl SignatureContainer {
     /// Parses exactly one 82-byte container.
     ///
+    /// Every `verify` function in this module parses its containers itself, so a verifier
+    /// does not need this; it is for inspecting a container, for example its signer key id.
+    ///
     /// # Errors
-    /// [`VerifyError::Malformed`] for a wrong length; [`VerifyError::UnsupportedVersion`] for a
+    /// [`VerifyError::Malformed`] for a wrong length ([`ParseError::Truncated`] if shorter,
+    /// [`ParseError::TrailingBytes`] if longer); [`VerifyError::UnsupportedVersion`] for a
     /// `sig_format_version` other than `0x01` or a `sig_alg` other than `0x01` (including the
     /// reserved hybrid `0x02`).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, VerifyError> {
@@ -326,6 +460,8 @@ impl SignatureContainer {
                 ParseError::TrailingBytes
             })
         })?;
+        // The length is exactly 82 from here on, so the reads below cannot fail; they go through
+        // the reader anyway, which keeps the parser free of indexing.
         let mut r = Reader::new(bytes);
         let version = r.u8()?;
         let alg = r.u8()?;
@@ -338,7 +474,8 @@ impl SignatureContainer {
         Ok(Self { signer, signature })
     }
 
-    /// The 82-byte encoding.
+    /// The 82-byte encoding. For [`DeviceAuth`] and [`DeviceRequest`] these bytes are all that
+    /// is sent (§9.6).
     #[must_use]
     pub fn to_bytes(&self) -> [u8; CONTAINER_LEN] {
         let mut out = [0u8; CONTAINER_LEN];
@@ -377,13 +514,24 @@ impl fmt::Debug for SignatureContainer {
 ///
 /// Only the verifiers in this module construct it, so holding one proves the signature and the
 /// structural checks passed.
+///
+/// It proves no more than that: the statement was signed by the key the caller passed to
+/// `verify`. Whether that key was the right one, and whether the statement is current rather
+/// than replayed, is still the caller's to decide (for example with
+/// [`AccountState::is_rollback`] and [`AccountState::is_fork`]). It dereferences to the
+/// statement, so its fields read directly.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verified<S> {
+    /// The decoded, verified statement.
     statement: S,
+    /// `SHA-256` of the full signed message the signature covered.
     message_hash: [u8; 32],
 }
 
 impl<S> Verified<S> {
+    /// Wraps a statement whose signature over `message` has just verified, and hashes
+    /// `message`. Private to this module and its children: call it only after
+    /// `verify_container` succeeded.
     fn new(statement: S, message: &[u8]) -> Self {
         Self {
             statement,
@@ -421,6 +569,13 @@ impl<S> Deref for Verified<S> {
 
 /// A statement type with a fixed canonical body (§10.2). Crate-private: the public API is the
 /// typed `sign` and `verify` functions of each statement.
+///
+/// Implemented by every single-signer statement that travels in the §9.6 wire form. The key
+/// bundle, which may carry two containers, and `device-auth` and `device-request`, which
+/// travel as bare containers, have their own paths.
+///
+/// The two directions must agree: `decode_body(encode_body(s)) == s` for every statement a
+/// writer accepts, and the decoder rejects every body the encoder would refuse to write.
 pub(crate) trait Statement: Sized {
     /// `LABEL("sig/<type>")`.
     const LABEL: Label;
@@ -433,6 +588,10 @@ pub(crate) trait Statement: Sized {
 }
 
 /// `LABEL("sig/<type>") ‖ 0x00 ‖ u16(statement_version) ‖ body`, allocated at its final size.
+///
+/// Both signer and verifier build the message with this one function, so they cannot frame it
+/// differently. The result is also what `bundle_hash`, `prev_bundle_hash` and the device-set
+/// `h_i` hash.
 pub(crate) fn signed_message(label: Label, body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(label.as_bytes().len() + 3 + body.len());
     out.extend_from_slice(label.as_bytes());
@@ -443,6 +602,11 @@ pub(crate) fn signed_message(label: Label, body: &[u8]) -> Vec<u8> {
 }
 
 /// Encodes `bytes(u16(statement_version) ‖ body) ‖ container(s)` (§9.6).
+///
+/// The label and `0x00` are not written: the verifier supplies them.
+///
+/// # Errors
+/// [`EncodeError::TooLong`] if `body` does not fit the `u32` length prefix or a size overflows.
 pub(crate) fn encode_wire(
     body: &[u8],
     containers: &[SignatureContainer],
@@ -469,8 +633,18 @@ pub(crate) fn encode_wire(
 
 /// Splits a wire statement into its body and its container bytes. Checks the length prefix
 /// against `max_body_len` before reading, and the `statement_version`.
+///
+/// The container bytes are everything after the length-prefixed part, unchecked; the caller
+/// parses them and so decides how many containers it accepts.
+///
+/// # Errors
+/// [`VerifyError::Malformed`] with [`ParseError::TooLong`] if the length prefix exceeds
+/// `max_body_len + 2`, or [`ParseError::Truncated`] if the input is shorter than the prefix
+/// says or holds no version; [`VerifyError::UnsupportedVersion`] for a `statement_version`
+/// other than 1.
 pub(crate) fn split_wire(wire: &[u8], max_body_len: usize) -> Result<(&[u8], &[u8]), VerifyError> {
     let mut r = Reader::new(wire);
+    // `+ 2` for the `u16` version inside the length-prefixed part.
     let versioned = r.bytes_max(max_body_len.saturating_add(2))?;
     let containers = r.rest();
     let mut v = Reader::new(versioned);
@@ -481,6 +655,14 @@ pub(crate) fn split_wire(wire: &[u8], max_body_len: usize) -> Result<(&[u8], &[u
 }
 
 /// Signs a single-signer statement and returns its wire form.
+///
+/// Steps: encode the body (the statement's rules run here), check it against
+/// `S::MAX_BODY_LEN` so a writer never makes what its own verifier would refuse, sign the
+/// message framed with `S::LABEL`, and encode the wire form with one container.
+///
+/// # Errors
+/// [`SignError::Encode`] if the body breaks a rule of the format or exceeds the bound;
+/// [`SignError::Internal`] if the signature primitive fails (unreachable).
 pub(crate) fn sign_single<S: Statement, R: SignerRole>(
     statement: &S,
     key: &SigningKey<R>,
@@ -499,6 +681,15 @@ pub(crate) fn sign_single<S: Statement, R: SignerRole>(
 /// Parsing comes first, as for envelopes (§9.5): the decoders are pure, bounded and
 /// non-panicking, a malformed statement is rejected before the signature check, and the fuzz
 /// target reaches every decoder. Nothing is returned unless the signature verifies.
+///
+/// The message is rebuilt from the body bytes as received, not re-encoded from the decoded
+/// statement. The decoders are strict and canonical, so the two are the same.
+///
+/// # Errors
+/// [`VerifyError::Malformed`] for a bad layout, a missing or extra container, or a disallowed
+/// field value; [`VerifyError::UnsupportedVersion`] for an unknown `statement_version`,
+/// `sig_format_version` or `sig_alg`; [`VerifyError::WrongSigner`] if the container names
+/// another key; [`VerifyError::BadSignature`] if `verify_strict` fails.
 pub(crate) fn verify_single<S: Statement, R: SignerRole>(
     wire: &[u8],
     key: &VerifyingKey<R>,
@@ -512,6 +703,12 @@ pub(crate) fn verify_single<S: Statement, R: SignerRole>(
 }
 
 /// Reads a 32-byte public key encoded as `bytes(public_key)` (a bundle entry).
+///
+/// Every M1 key type is 32 bytes (§10.2), so any other length is refused rather than skipped.
+///
+/// # Errors
+/// [`ParseError::TooLong`] if the length prefix exceeds 32, [`ParseError::InvalidLength`] if it
+/// is below 32, [`ParseError::Truncated`] if the input ends early.
 pub(crate) fn read_key_bytes<'a>(r: &mut Reader<'a>) -> Result<&'a [u8; 32], ParseError> {
     r.bytes_max(PUBLIC_KEY_LEN)?
         .try_into()

@@ -11,6 +11,32 @@
 //!
 //! Neither function allocates in proportion to anything but its (bounded) input, and neither
 //! panics.
+//!
+//! # Why exactly one function each
+//!
+//! - **Login names.** The server looks a name up and, for an unknown name, derives the fake
+//!   credential id and the fake `kdf_id` from it (§5.9). If those steps saw different spellings,
+//!   a real name and an unknown one could behave differently to a prober. With one function the
+//!   name is either found or faked under exactly the same string. Names are ASCII only, so the
+//!   result never depends on Unicode case-folding tables, which change between releases (§16
+//!   question 13).
+//! - **Origins.** The client binds the origin it dialled, the server binds its configured
+//!   canonical origin, and a login succeeds only if the two strings are byte-for-byte equal
+//!   (§5.3). A parser that guessed could turn one origin into two strings (a login that always
+//!   fails) or two origins into one string (a relay that passes the check). So the parser fails
+//!   closed: it rejects what it cannot canonicalise without ambiguity. These strict readings are
+//!   normative (owner decision of 2026-09-26, §16).
+//!
+//! # What this does not do
+//!
+//! - No IDNA: an internationalised host must already be in its `xn--` form, and an A-label is
+//!   not checked for validity. The binding is an exact string (§2).
+//! - No defence against a look-alike domain the user dials directly: that site has its own
+//!   origin and its own Context. The origin binding stops a server under another origin from
+//!   relaying the OPAQUE messages to the real server (§5.3) and a device-auth signature for one
+//!   server from being replayed at another (§5.10).
+//! - Neither value is secret. Login names appear on the Emergency Kit and in the server's
+//!   records, and both types print their value in `Debug` and `Display`.
 
 use core::fmt;
 use core::net::{Ipv4Addr, Ipv6Addr};
@@ -67,15 +93,26 @@ impl core::error::Error for NormalizeError {}
 
 /// A normalised login name (CRYPTO.md §2).
 ///
+/// Not secret: `Debug` and `Display` show the name.
+///
 /// `login_name` is the ASCII-lowercased input. After lowercasing it must be 1–254 bytes from
 /// `[a-z0-9._+@-]`. Anything else, including any non-ASCII character, is rejected at signup and at
 /// login, before any lookup. ASCII-only avoids a dependency on Unicode case-folding tables, which
 /// change between releases (owner decision, CRYPTO.md §16 question 13).
+///
+/// Holding a `LoginName` proves the string went through [`LoginName::parse`]. The functions
+/// that feed the enumeration defence take this type, not a `&str`
+/// ([`crate::opaque::CredentialIdentifier::fake`], [`crate::opaque::EnumKey::fake_kdf_selector`],
+/// [`crate::opaque::server_login_start`]), so they cannot be handed an unnormalised name.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LoginName(String);
 
 impl LoginName {
     /// Normalises and validates a login name.
+    ///
+    /// Steps: check the byte length (1–254), check that every byte is in `[a-z0-9._+@-]` after
+    /// ASCII lowercasing, then lowercase. Any byte of a non-ASCII character fails the second
+    /// check. The function is idempotent: parsing a parsed name gives the same name.
     ///
     /// # Errors
     /// [`NormalizeError::LoginNameLength`] or [`NormalizeError::LoginNameCharacter`].
@@ -85,6 +122,7 @@ impl LoginName {
         if input.is_empty() || input.len() > LOGIN_NAME_MAX_LEN {
             return Err(NormalizeError::LoginNameLength);
         }
+        // Validate before allocating the lowercased copy.
         if !input
             .bytes()
             .all(|b| is_login_name_byte(b.to_ascii_lowercase()))
@@ -101,6 +139,8 @@ impl LoginName {
     }
 }
 
+/// Whether `b`, already ASCII-lowercased, is in the login-name set `[a-z0-9._+@-]`
+/// (CRYPTO.md §2).
 fn is_login_name_byte(b: u8) -> bool {
     matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'+' | b'@' | b'-')
 }
@@ -124,6 +164,9 @@ pub enum Scheme {
     Https,
     /// `http`, default port 80. Allowed for local and development servers; the scheme is part of
     /// the origin, so an `http` origin never matches an `https` one.
+    ///
+    /// The parser accepts `http` with any host. Refusing `http://` server URLs other than
+    /// `localhost` is a client rule (threat model A4 mitigations), not enforced here.
     Http,
 }
 
@@ -169,21 +212,34 @@ impl Scheme {
 ///   as an IPv4 address, as browsers do, and must be a canonical dotted quad. IPv4-mapped IPv6
 ///   addresses are rejected, because browsers and Rust serialise them differently.
 /// - **Ports.** Decimal, no leading zero, `1..=65535`. An empty port (`host:`) is rejected.
+///
+/// Two `ServerOrigin`s are equal exactly when their canonical strings are equal, which is the
+/// comparison the OPAQUE Context and [`crate::opaque::OpaqueContext::for_login`] rely on.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ServerOrigin {
+    /// The canonical origin string, `scheme "://" host [":" port]`.
     text: String,
+    /// The scheme, kept typed next to the string.
     scheme: Scheme,
 }
 
 impl ServerOrigin {
     /// Parses and canonicalises an origin.
     ///
+    /// Steps: bound the length and require ASCII; split off and match the scheme; cut the
+    /// authority at the first `/`, `?` or `#` and allow only a single trailing `/` after it;
+    /// reject user information; split host and port; canonicalise the host; drop the port if
+    /// it is the scheme's default. The result is idempotent: parsing a canonical origin gives
+    /// the same origin.
+    ///
     /// # Errors
     /// A [`NormalizeError`] naming the part that is wrong.
     pub fn parse(input: &str) -> Result<Self, NormalizeError> {
+        // Bound the work first; non-ASCII is rejected outright because no IDNA mapping is done.
         if input.len() > ORIGIN_INPUT_MAX_LEN || !input.is_ascii() {
             return Err(NormalizeError::OriginSyntax);
         }
+        // The scheme is matched case-insensitively and written back in lowercase.
         let (scheme_text, rest) = input
             .split_once("://")
             .ok_or(NormalizeError::OriginSyntax)?;
@@ -201,17 +257,20 @@ impl ServerOrigin {
         if !(tail.is_empty() || tail == "/") {
             return Err(NormalizeError::OriginComponent);
         }
+        // User information (`user@` or `user:pw@`) is rejected, not stripped.
         if authority.contains('@') {
             return Err(NormalizeError::OriginComponent);
         }
 
         let (host, port) = split_host_port(authority)?;
         let host = canonical_host(host)?;
+        // An explicit default port (`:443` for https, `:80` for http) is dropped.
         let port = match port {
             None => None,
             Some(text) => Some(parse_port(text)?).filter(|p| *p != scheme.default_port()),
         };
 
+        // scheme "://" host [":" port]; the 6 extra bytes cover ":65535".
         let mut text = String::with_capacity(scheme.as_str().len() + 3 + host.len() + 6);
         text.push_str(scheme.as_str());
         text.push_str("://");
@@ -249,8 +308,14 @@ impl fmt::Display for ServerOrigin {
 }
 
 /// Splits `host[:port]` or `[v6][:port]`. The host part keeps its brackets.
+///
+/// # Errors
+/// [`NormalizeError::OriginHost`] for an unclosed bracket, anything but `:port` after a
+/// bracketed host, or a second `:` in an unbracketed authority (such as a bare IPv6 address).
 fn split_host_port(authority: &str) -> Result<(&str, Option<&str>), NormalizeError> {
     if authority.starts_with('[') {
+        // Bracketed IPv6: the host runs to the first `]`, and only `:port` or nothing may
+        // follow it.
         let close = authority.find(']').ok_or(NormalizeError::OriginHost)?;
         let (host, after) = authority.split_at(close + 1);
         return match after.strip_prefix(':') {
@@ -266,6 +331,11 @@ fn split_host_port(authority: &str) -> Result<(&str, Option<&str>), NormalizeErr
     }
 }
 
+/// Parses a port: decimal digits only, no leading zero (which also rules out `0`), at most
+/// five digits, and at most 65535.
+///
+/// # Errors
+/// [`NormalizeError::OriginPort`], including for an empty port (`host:`).
 fn parse_port(text: &str) -> Result<u16, NormalizeError> {
     let digits_only = !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
     if !digits_only || text.starts_with('0') || text.len() > 5 {
@@ -275,9 +345,18 @@ fn parse_port(text: &str) -> Result<u16, NormalizeError> {
 }
 
 /// The canonical, lowercased host, or an error.
+///
+/// Three shapes, tried in this order: a bracketed IPv6 address, rewritten in the RFC 5952 form
+/// that Rust's `Ipv6Addr` display produces; a host whose last label is numeric, which must be a
+/// canonical dotted-quad IPv4 address; otherwise a DNS name of letter-digit-hyphen labels.
+///
+/// # Errors
+/// [`NormalizeError::OriginHost`].
 fn canonical_host(host: &str) -> Result<String, NormalizeError> {
     if let Some(inner) = host.strip_prefix('[') {
         let inner = inner.strip_suffix(']').ok_or(NormalizeError::OriginHost)?;
+        // Rust's parser rejects zone ids (`%25eth0`); IPv4-mapped addresses are rejected here
+        // because browsers and Rust write them differently.
         let addr: Ipv6Addr = inner.parse().map_err(|_| NormalizeError::OriginHost)?;
         if addr.to_ipv4_mapped().is_some() {
             return Err(NormalizeError::OriginHost);
@@ -300,6 +379,8 @@ fn canonical_host(host: &str) -> Result<String, NormalizeError> {
             Err(NormalizeError::OriginHost)
         };
     }
+    // Every label, including the last, must be a DNS label. An empty label (`a..b`, or a
+    // trailing dot) fails here.
     if host.split('.').all(is_dns_label) {
         Ok(host)
     } else {

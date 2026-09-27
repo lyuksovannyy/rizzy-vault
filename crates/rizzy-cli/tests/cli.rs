@@ -1,3 +1,6 @@
+//! The `rv` command line: `--version` and `--help` succeed, and usage errors exit with code 2
+//! and never panic, even on an argument that is not UTF-8 (CLAUDE.md: no panics).
+
 use std::ffi::OsString;
 use std::process::Command;
 

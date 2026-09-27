@@ -10,8 +10,30 @@
 //! bytes and works in a login; the fake-record path answers every KE1 exactly as the
 //! real-record path does (§5.9); and no KE3 completes an honest pending login.
 //!
-//! The client side (M2, KE2) is not here: a well-formed message runs the production Argon2id,
-//! and no cheap KSF exists outside `rizzy-core`'s own tests.
+//! In detail, for each (possibly resized) input:
+//!
+//! - **M1** (`server_registration_start`): accepted only at the registration-request length,
+//!   and the answer has the registration-response length.
+//! - **Registration upload / stored record** (`server_registration_finish`,
+//!   `PasswordFile::from_bytes`): both readers accept or refuse alike; an accepted record
+//!   serialises back unchanged and answers an honest KE1 with a KE2 of the right length.
+//! - **KE1** (`server_login_start`): an unknown login name (no record) gets the same outcome as a
+//!   real account: the same error, or a KE2 of the same length. Only the outcome and the KE2
+//!   length are compared, not the KE2 bytes. An accepted KE1 has the KE1 length and gets a KE2
+//!   of the KE2 length. This is the part of the account-enumeration property (§5.9) that a
+//!   fuzzer can check.
+//! - **KE3** (`server_login_finish`) against the two honest pending logins (fake and real
+//!   record): never accepted. A KE3 of the right length fails as a wrong password does
+//!   (`InvalidLogin`); any other length is `MalformedMessage`.
+//! - **Stored login state and server setup** (`ServerLoginState::from_bytes`,
+//!   `ServerSetup::from_bytes`): an accepted value serialises back unchanged, and an accepted
+//!   setup still answers an honest M1 and KE1.
+//!
+//! The fixture (one server setup, one honest client's M1 and KE1, one parseable record and the
+//! two pending logins) is built once per process. Its RNG counts upward: it is deterministic,
+//! so a crash reproduces from its input alone, and it is not a CSPRNG, which nothing here
+//! needs. The client side (M2, KE2) is not here: a well-formed message runs the production
+//! Argon2id, and no cheap KSF exists outside `rizzy-core`'s own tests.
 #![no_main]
 
 use std::convert::Infallible;

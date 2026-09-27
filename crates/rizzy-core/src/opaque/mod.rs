@@ -34,6 +34,55 @@
 //! - `export_key` becomes `server_unlock_key` through [`ExportKey::server_unlock_key`] (§4.3).
 //!   The OPAQUE `session_key` is used only for OPAQUE's own key confirmation (§5.10), so this
 //!   module never returns it and wipes it.
+//!
+//! # The two flows, step by step
+//!
+//! Registration (signup §11.1, a password or Secret Key change §11.5, and the same-password
+//! re-registrations of §5.8 and §6.3):
+//!
+//! 1. The client derives `pw_in` ([`PasswordInput::derive_for_new_password`] for a newly chosen
+//!    password) and blinds it with a fresh random scalar: M1.
+//! 2. The server evaluates the OPRF on M1 under the per-user OPRF key, which opaque-ke derives
+//!    from the server's OPRF seed and the `credential_identifier` (the `account_id`), and keeps
+//!    no state: M2.
+//! 3. The client unblinds, runs the KSF with the `kdf_id` it chose, builds its envelope and
+//!    returns the upload and `export_key`. This is the one Argon2id run of the registration.
+//! 4. The server turns the upload into the [`PasswordFile`] it stores, together with the
+//!    `kdf_id` the new signed account state names (§11.1 step 8).
+//!
+//! Login (first login on a device §11.2, every web-vault session §11.4, re-authentication):
+//!
+//! 1. The client blinds `pw_in` ([`PasswordInput::derive`]): KE1.
+//! 2. The server looks up the normalised login name. With a record it answers under the
+//!    account's id and the record's `kdf_id`; without one it runs the fake-record path (§5.9).
+//!    It returns KE2, and next to it (outside this module) the `kdf_id` and its canonical
+//!    origin, and seals its pending state.
+//! 3. The client checks the `kdf_id` and the origin ([`OpaqueContext::for_login`]) before any
+//!    stretching, runs the KSF once, opens its envelope, verifies the server's MAC over a
+//!    transcript that includes the Context, and returns KE3 and `export_key`.
+//! 4. The server checks KE3 against the pending state, in constant time inside opaque-ke.
+//!
+//! # Security properties
+//!
+//! - The server receives only OPAQUE protocol messages, never a value it could check a
+//!   password guess against without its OPRF seed (threat model INV-1).
+//! - Stolen database plus secrets file: every guess still needs the 128-bit Secret Key,
+//!   because it keys `pw_in` (§5.5, INV-2).
+//! - A server that names another `kdf_id`, or a phishing origin that relays the three messages
+//!   to the real server, makes the client's KE2 check fail before KE3 is sent (§5.3, INV-5).
+//! - A call without the KSF fails closed: the `Default` of [`RizzyArgon2idKsf`] refuses to run,
+//!   and this module always passes `Some(..)` (§5.1, INV-4).
+//! - An unknown login name gets a KE2 built like a real account's, from a dummy record and a
+//!   deterministic fake credential id (§5.9, INV-7).
+//! - The client sees one error, [`OpaqueError::InvalidLogin`], for a wrong password, a wrong
+//!   Secret Key, a mismatched Context and an unknown account alike (§11.2 step 4).
+//!
+//! What this module does not do: sealing the pending login state and enforcing its 60 s TTL
+//! ([`crate::server_seal`], §5.11); and, in the server, rate limiting and backoff (INV-7), the
+//! single use of the pending login state (the row is read and deleted in one transaction,
+//! §5.11), invite checks on registration, choosing an unknown name's `kdf_id` from the record
+//! population during a KDF migration (§5.9), storage, and 2FA. It also cannot wipe the copies that opaque-ke keeps of the OPRF output, the
+//! stretched output, `export_key` and `session_key` (§12.2, "opaque-ke internals").
 
 mod ksf;
 
@@ -75,7 +124,12 @@ use crate::rng::OpaqueRng;
 use crate::secret::{Key32, SecretArray, SecretBytes};
 use crate::secret_key::SecretKey;
 
+/// Short name for the one ciphersuite every opaque-ke type in this module is instantiated with.
 type Suite = RizzySuiteV1;
+
+// The six message lengths below are opaque-ke's own type-level lengths for `RizzySuiteV1`; the
+// two state lengths are written out. Every parser in this module checks the exact length first
+// (`exact`).
 
 /// Length of the registration request M1.
 pub const REGISTRATION_REQUEST_LEN: usize = <RegistrationRequestLen<Suite> as Unsigned>::USIZE;
@@ -97,6 +151,9 @@ pub const SERVER_LOGIN_STATE_LEN: usize = 128;
 pub const SERVER_SETUP_LEN: usize = 128;
 
 /// Why an OPAQUE step failed. Carries no secret and never says which secret was wrong.
+///
+/// Built from opaque-ke's `ProtocolError` by the `From` impl below, so every failure inside
+/// opaque-ke lands in one of these variants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum OpaqueError {
@@ -129,6 +186,9 @@ impl fmt::Display for OpaqueError {
 
 impl core::error::Error for OpaqueError {}
 
+/// Maps opaque-ke's errors onto [`OpaqueError`]. Only the KSF's own failure keeps its identity
+/// among the library errors; every other internal error, a reflected OPRF element and a
+/// custom error become [`OpaqueError::Protocol`].
 impl From<ProtocolError> for OpaqueError {
     fn from(e: ProtocolError) -> Self {
         match e {
@@ -164,7 +224,17 @@ fn exact(bytes: &[u8], len: usize) -> Result<&[u8], OpaqueError> {
 ///
 /// The extract step is `HMAC-SHA-256(key = SK, msg = password)`, a PRF of the password keyed by
 /// the 128-bit Secret Key, so a server breach alone gives nothing to guess against (§5.5).
+///
+/// `pw_in` feeds both paths of §5.4: it is the OPAQUE password (blinded, then stretched by the
+/// KSF on the client) and the input of the device's local Argon2id
+/// ([`PasswordInput::local_unlock_key`]). It is not stretched itself, so it is a cheap
+/// function of the password and the Secret Key: it must never leave the client, and nothing
+/// may be derived from it without a full Argon2id first (§4.4, INV-6). This composition is
+/// audit target 2 (§1).
+///
+/// A secret: wiped on drop, no `Clone`, `Debug` prints `[REDACTED]`.
 pub struct PasswordInput {
+    /// The 32 bytes of `pw_in`, in a buffer wiped on drop.
     key: Key32,
 }
 
@@ -172,11 +242,18 @@ impl PasswordInput {
     /// Derives `pw_in` for login and unlock. It never rejects a password: the password was
     /// accepted when it was set.
     ///
+    /// Steps: `UTF-8(NFC(password))` into a wiped buffer ([`kdf::normalize_password`]), then
+    /// HKDF-SHA-256 with the Secret Key as salt, `LABEL("opaque/password") ‖ 0x00` as info and
+    /// a 32-byte output written straight into the final buffer. The normalised copy is wiped
+    /// when the function returns. hkdf and hmac keep unwiped copies of the Secret Key and of
+    /// the extract output inside their own state (§12.2, "hkdf 0.13", "hmac 0.13 key block").
+    ///
     /// # Errors
     /// [`KdfError::InvalidInput`] for an absurdly long password, [`KdfError::Internal`]
     /// (unreachable).
     pub fn derive(password: &str, secret_key: &SecretKey) -> Result<Self, KdfError> {
         let normalized = kdf::normalize_password(password)?;
+        // salt = SK, ctx empty: info is exactly `LABEL("opaque/password") ‖ 0x00`.
         let key = Key32::try_init_with(|out| {
             kdf::hkdf_sha256(
                 normalized.expose_secret(),
@@ -214,8 +291,14 @@ impl PasswordInput {
     /// The device path's `local_unlock_key` (§4.3, §5.4): one Argon2id run over `pw_in` with the
     /// device's own salt and `kdf_id`.
     ///
+    /// `device_salt` and `kdf_id` come from the device's own state, never from the server
+    /// (§5.6). The key is bound to `account_id` and `device_id` through its HKDF context, and
+    /// remembers `kdf_id` so the `E_local` context must name it (§8.4). See
+    /// [`LocalUnlockKey::derive`].
+    ///
     /// # Errors
-    /// [`KdfError`].
+    /// [`KdfError`] from [`kdf::argon2id`]; none is reachable for a 32-byte `pw_in` and an
+    /// allowed `kdf_id`.
     pub fn local_unlock_key(
         &self,
         device_salt: &[u8; DEVICE_SALT_LEN],
@@ -226,7 +309,8 @@ impl PasswordInput {
         LocalUnlockKey::derive(&self.key, device_salt, kdf_id, account_id, device_id)
     }
 
-    /// The 32 bytes of `pw_in`.
+    /// The 32 bytes of `pw_in`. In this crate only the OPAQUE calls of this module and the
+    /// test vectors read them; do not store, log or send them.
     #[must_use]
     pub fn expose_secret(&self) -> &[u8; 32] {
         self.key.expose_secret()
@@ -245,9 +329,23 @@ impl fmt::Debug for PasswordInput {
 /// It is passed on both sides (`ClientLoginFinishParameters.context`,
 /// `ServerLoginParameters.context`) and enters only the AKE transcript. It also fixes the
 /// `kdf_id` the client's KSF runs with, so the stretching and the binding cannot disagree.
+///
+/// Why each field is there (§5.3):
+/// - `suite_id` and `kdf_id`: if the server names another `kdf_id` than the record's, the
+///   client stretches with other parameters and binds another Context, and the login fails
+///   like a wrong password. Since only allow-listed ids get this far, the worst a lie
+///   achieves is denial of service.
+/// - `server_origin`: a phishing server under another origin that relays KE1, KE2 and KE3
+///   unchanged gets a KE2 that the client rejects, so the real server never sees a valid KE3.
+///
+/// The Context is not in the OPAQUE envelope, so changing the server's canonical origin needs
+/// no re-registration. Registration takes no Context at all. The value is public; `Debug`
+/// shows the `kdf_id` and the length.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct OpaqueContext {
+    /// The encoded Context, exactly as §5.3 lays it out.
     bytes: Vec<u8>,
+    /// The `kdf_id` encoded in `bytes`, kept typed so the client's KSF runs with this id.
     kdf_id: KdfId,
 }
 
@@ -277,15 +375,21 @@ impl core::error::Error for LoginHintError {}
 
 impl OpaqueContext {
     /// Builds the Context for `kdf_id` and a canonical origin.
+    ///
+    /// The server calls it with the record's `kdf_id` (for an unknown name, the `kdf_id` of
+    /// §5.9) and its configured canonical origin. A client building a login Context should use
+    /// [`OpaqueContext::for_login`], which checks the server's hints first.
     #[must_use]
     pub fn new(kdf_id: KdfId, server_origin: &ServerOrigin) -> Self {
         let origin = server_origin.as_str().as_bytes();
         let label = labels::OPAQUE_CONTEXT.as_bytes();
+        // label ‖ 0x00 ‖ u16 suite_id ‖ u16 kdf_id ‖ u32 length ‖ origin: one allocation.
         let mut bytes = Vec::with_capacity(label.len() + 1 + 2 + 2 + 4 + origin.len());
         bytes.extend_from_slice(label);
         bytes.push(0x00);
         encoding::put_u16(&mut bytes, SUITE_ID);
         encoding::put_u16(&mut bytes, kdf_id.get());
+        // `str(server_origin)` = u32 length ‖ UTF-8 bytes (CRYPTO.md §2).
         // A canonical origin is at most a few hundred bytes (normalize::ORIGIN_INPUT_MAX_LEN),
         // far below the u32 prefix and opaque-ke's 2^16-byte Context limit.
         let origin_len = u32::try_from(origin.len()).unwrap_or(u32::MAX);
@@ -299,6 +403,12 @@ impl OpaqueContext {
     /// `kdf_id` is on its allow-list and that the origin equals the one it dialled, and aborts
     /// with the matching error otherwise. The Context then binds the dialled origin.
     ///
+    /// Both served values are unauthenticated. The `kdf_id` check is a real control (a refused
+    /// id never reaches the KSF, INV-3); the origin comparison only picks a clearer message
+    /// than "wrong password", and the Context check inside KE2 verification is what stops a
+    /// relay. `dialled` must be the origin the client actually connected to (for the web vault,
+    /// `location.origin`), never one taken from the server's answer.
+    ///
     /// # Errors
     /// [`LoginHintError`].
     pub fn for_login(
@@ -307,6 +417,7 @@ impl OpaqueContext {
         served_origin: &str,
     ) -> Result<Self, LoginHintError> {
         let kdf_id = KdfId::from_u16(served_kdf_id).map_err(LoginHintError::KdfNotAllowed)?;
+        // A served origin that does not even parse is reported as a mismatch too.
         match ServerOrigin::parse(served_origin) {
             Ok(served) if served == *dialled => Ok(Self::new(kdf_id, dialled)),
             _ => Err(LoginHintError::OriginMismatch),
@@ -337,6 +448,9 @@ impl fmt::Debug for OpaqueContext {
 
 /// An OPAQUE `credential_identifier` (CRYPTO.md §5.3, §5.9): the `account_id` of a real
 /// account, or the fake id of an unknown login name. It selects the per-user OPRF key.
+///
+/// Using the `account_id` rather than the login name means renaming an account needs no
+/// re-registration (ADR 0003 decision 5). The value is not secret; `Debug` prints it in hex.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CredentialIdentifier([u8; ID_LEN]);
 
@@ -350,16 +464,24 @@ impl CredentialIdentifier {
     /// The fake credential id of an unknown login name (§4.3):
     /// `SHA-256(LABEL("opaque/fake-credential-id") ‖ 0x00 ‖ str(login_name))[0..16]`.
     /// Deterministic, so repeated probes of one name get consistent answers.
+    ///
+    /// Anyone can compute it from the name; it hides nothing and needs to hide nothing. What a
+    /// prober sees is the OPRF evaluation under the key it selects, which depends on the
+    /// server's secret OPRF seed. Taking a [`LoginName`] makes sure the fake id is computed
+    /// from the same normalised string the lookup used (§5.9).
     #[must_use]
     pub fn fake(login_name: &LoginName) -> Self {
         let name = login_name.as_str().as_bytes();
+        // A normalised login name is at most 254 bytes, so the fallback is never taken.
         let name_len = u32::try_from(name.len()).unwrap_or(u32::MAX);
+        // LABEL ‖ 0x00 ‖ str(login_name), with str(x) = u32 length ‖ bytes.
         let digest = Sha256::new()
             .chain_update(labels::OPAQUE_FAKE_CREDENTIAL_ID.as_bytes())
             .chain_update([0x00])
             .chain_update(name_len.to_be_bytes())
             .chain_update(name)
             .finalize();
+        // Keep the first 16 bytes of the digest.
         let mut id = [0u8; ID_LEN];
         for (dst, src) in id.iter_mut().zip(digest.iter()) {
             *dst = *src;
@@ -390,7 +512,13 @@ impl fmt::Debug for CredentialIdentifier {
 
 /// `enum_key`: 32 random bytes in the server secrets file (§5.9, §5.11), which keys the fake
 /// `kdf_id` selector.
+///
+/// Server-only. Keying the selector stops a prober from predicting on which day an unknown
+/// name would flip to a newer `kdf_id` during a KDF migration. Losing or rotating the key only
+/// reshuffles which fake `kdf_id` unknown names get (§5.8). A secret: wiped on drop, no
+/// `Clone`, `Debug` prints `[REDACTED]`.
 pub struct EnumKey {
+    /// The 32 key bytes, wiped on drop.
     key: SecretArray<32>,
 }
 
@@ -427,6 +555,10 @@ impl EnumKey {
     /// fraction of records already on it. In M1 every record is on `kdf_id` 1, so unknown names
     /// always get 1 and the selector is not consulted yet.
     ///
+    /// The comparison with the record fraction, and recomputing that fraction daily, are the
+    /// server's job (§5.9). Limit: hmac 0.13 leaves its padded key block, which gives back
+    /// `enum_key`, unwiped on the stack (§12.2, "hmac 0.13 key block").
+    ///
     /// # Errors
     /// [`DerivationError`] (unreachable: HMAC accepts keys of any length).
     pub fn fake_kdf_selector(&self, login_name: &LoginName) -> Result<u64, DerivationError> {
@@ -434,11 +566,14 @@ impl EnumKey {
         let name_len = u32::try_from(name.len()).map_err(|_| DerivationError)?;
         let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(self.expose_secret())
             .map_err(|_| DerivationError)?;
+        // msg = LABEL ‖ 0x00 ‖ str(login_name), with str(x) = u32 length ‖ bytes.
         mac.update(labels::OPAQUE_FAKE_KDF.as_bytes());
         mac.update(&[0x00]);
         mac.update(&name_len.to_be_bytes());
         mac.update(name);
         let mut tag = mac.finalize().into_bytes();
+        // The selector is the first 8 bytes of the tag, read big-endian; the full tag is then
+        // wiped.
         let mut first = [0u8; 8];
         for (dst, src) in first.iter_mut().zip(tag.iter()) {
             *dst = *src;
@@ -460,12 +595,20 @@ impl fmt::Debug for EnumKey {
 
 /// opaque-ke's `ServerSetup` (§5.8): the OPRF seed, the server's AKE keypair and the fake
 /// keypair. It lives in the server secrets file, never in the database.
+///
+/// Leaked together with the database, it would allow offline guessing against every record;
+/// the Secret Key inside `pw_in` is what prevents that (§5.5). Losing it makes every OPAQUE
+/// login fail (§5.8). It never changes unless rotated, so the admin backs it up once,
+/// separately from database backups. `Debug` prints `[REDACTED]`; opaque-ke's OPRF-seed and
+/// private-key types wipe themselves on drop (opaque-ke 4.0.1 source).
 pub struct ServerSetup {
+    /// opaque-ke's setup for [`RizzySuiteV1`].
     inner: opaque_ke::ServerSetup<Suite>,
 }
 
 impl ServerSetup {
-    /// Generates a new setup from the injected CSPRNG.
+    /// Generates a new setup from the injected CSPRNG: a random OPRF seed, AKE keypair and
+    /// fake keypair, drawn through the `rand_core` 0.6 adapter ([`OpaqueRng`]).
     #[must_use]
     pub fn generate<R: CryptoRng + ?Sized>(rng: &mut R) -> Self {
         Self {
@@ -473,7 +616,8 @@ impl ServerSetup {
         }
     }
 
-    /// The serialised setup, for the secrets file, in a buffer wiped on drop.
+    /// The serialised setup ([`SERVER_SETUP_LEN`] bytes), for the secrets file, in a buffer
+    /// wiped on drop. opaque-ke's intermediate array is wiped too.
     #[must_use]
     pub fn to_bytes(&self) -> SecretBytes {
         let mut bytes = self.inner.serialize();
@@ -482,7 +626,11 @@ impl ServerSetup {
         out
     }
 
-    /// Reads a setup back from the secrets file.
+    /// Reads a setup back from the secrets file. The length is checked before opaque-ke
+    /// parses anything.
+    ///
+    /// Before serving logins with it, the server compares [`ServerSetup::public_key_hash`]
+    /// with the hash stored in the database and refuses to start on a mismatch (§5.8).
     ///
     /// # Errors
     /// [`OpaqueError::MalformedMessage`].
@@ -508,18 +656,24 @@ impl fmt::Debug for ServerSetup {
 
 /// A registered OPAQUE record (opaque-ke's `ServerRegistration`): what the server stores per
 /// account. It holds the client's public key, the masking key and the envelope.
+///
+/// Together with the server's OPRF seed it is a password-guessing target, which is why the
+/// Secret Key is mixed into `pw_in` (§5.5), and why On-device mode stores none (§5.7). The
+/// server stores it with the `kdf_id` and `password_epoch` of the signed account state
+/// (§11.1 step 8). `Debug` prints `[REDACTED]`.
 pub struct PasswordFile {
+    /// opaque-ke's record.
     inner: ServerRegistration<Suite>,
 }
 
 impl PasswordFile {
-    /// The stored form.
+    /// The stored form, [`REGISTRATION_UPLOAD_LEN`] bytes.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         self.inner.serialize().to_vec()
     }
 
-    /// Reads a stored record.
+    /// Reads a stored record. The length is checked before opaque-ke parses anything.
     ///
     /// # Errors
     /// [`OpaqueError::MalformedMessage`].
@@ -540,8 +694,16 @@ impl fmt::Debug for PasswordFile {
 /// The server's pending login (opaque-ke's `ServerLogin`): the session key and the expected
 /// client MAC. Kept between KE2 and KE3 for at most 60 s, sealed as `SERVER_LOGIN_STATE`
 /// ([`crate::server_seal`], §5.10, §5.11) under a `ctx` that names its credential identifier.
+///
+/// This type only carries the state. Sealing it and refusing it once expired are done by
+/// [`crate::server_seal::ServerDataKey`], with a clock the caller supplies; reading and
+/// deleting the row in one transaction is the server's job. The fake-record path produces a
+/// state too, so both paths are stored the same way. The expected MAC lets anyone who holds it
+/// pass KE3, so it is a secret: `Debug` redacts it, and opaque-ke wipes it on drop.
 pub struct ServerLoginState {
+    /// opaque-ke's pending login: the session key and the expected client MAC.
     inner: ServerLogin<Suite>,
+    /// The credential identifier `inner` was created under: the account's id or the fake id.
     credential_identifier: CredentialIdentifier,
 }
 
@@ -558,6 +720,11 @@ impl ServerLoginState {
 
     /// Rebuilds the state from the opened `SERVER_LOGIN_STATE` plaintext and the credential
     /// identifier its context named.
+    ///
+    /// Pass the credential identifier from the context the envelope was opened under, as
+    /// [`crate::server_seal::ServerDataKey::open_login_state`] does, so a database writer
+    /// cannot pair one login's state with another credential. The length is checked before
+    /// opaque-ke parses anything.
     ///
     /// # Errors
     /// [`OpaqueError::MalformedMessage`].
@@ -598,14 +765,25 @@ impl fmt::Debug for ServerLoginState {
 /// It remembers the `kdf_id` its KSF ran with (the registration's, or the login Context's),
 /// and passes it on to the [`ServerUnlockKey`], so `E_srv` can only be sealed under a context
 /// that names it (§8.4).
+///
+/// Using `export_key` for client-only data is what RFC 9807 intends it for (§5.4). A secret:
+/// wiped on drop, no `Clone`, `Debug` prints `[REDACTED]`.
 pub struct ExportKey {
+    /// The 64 bytes of `export_key`, wiped on drop.
     key: SecretArray<EXPORT_KEY_LEN>,
+    /// The `kdf_id` of the OPAQUE run that produced `key`.
     kdf_id: KdfId,
 }
 
 impl ExportKey {
+    /// Moves opaque-ke's `export_key` output into a wiped buffer and wipes `output`, on
+    /// success and on failure alike.
+    ///
+    /// # Errors
+    /// [`OpaqueError::Protocol`] if `output` is not 64 bytes (unreachable for this suite).
     fn from_output(output: &mut [u8], kdf_id: KdfId) -> Result<Self, OpaqueError> {
         let key = SecretArray::from_slice(output).map_err(|_| OpaqueError::Protocol);
+        // Wipe the source before the error, if any, is propagated.
         output.zeroize();
         Ok(Self { key: key?, kdf_id })
     }
@@ -630,7 +808,7 @@ impl ExportKey {
         self.kdf_id
     }
 
-    /// The 64 bytes.
+    /// The 64 bytes. Its one use is deriving `server_unlock_key`; never store or send it.
     #[must_use]
     pub fn expose_secret(&self) -> &[u8; EXPORT_KEY_LEN] {
         self.key.expose_secret()
@@ -644,7 +822,10 @@ impl fmt::Debug for ExportKey {
 }
 
 /// The client's state between M1 and M2 (holds the OPRF blind; wiped on drop).
+///
+/// Consumed by [`client_registration_finish`], so it is used at most once.
 pub struct ClientRegistrationState {
+    /// opaque-ke's registration state, which wipes itself on drop.
     inner: ClientRegistration<Suite>,
 }
 
@@ -656,7 +837,10 @@ impl fmt::Debug for ClientRegistrationState {
 
 /// The client's state between KE1 and KE2 (holds the OPRF blind and the ephemeral key; wiped on
 /// drop).
+///
+/// Consumed by [`client_login_finish`], so it is used at most once.
 pub struct ClientLoginState {
+    /// opaque-ke's login state, which wipes itself on drop.
     inner: ClientLogin<Suite>,
 }
 
@@ -690,7 +874,8 @@ pub struct ServerLoginStart {
     pub state: ServerLoginState,
 }
 
-/// A found account for [`server_login_start`].
+/// A found account for [`server_login_start`]: the three values the server loads from the
+/// account's record row.
 #[derive(Debug)]
 pub struct RegisteredCredential {
     /// The account; its id is the credential identifier.
@@ -730,6 +915,8 @@ impl fmt::Debug for ServerLoginStart {
     }
 }
 
+/// The KSF for `kdf_id`. Every opaque-ke call in this module that stretches gets its KSF
+/// here and passes it as `Some(&ksf)`, never `None` (§5.1).
 fn ksf_for(kdf_id: KdfId) -> RizzyArgon2idKsf {
     RizzyArgon2idKsf::new(kdf_id)
 }
@@ -739,6 +926,10 @@ fn ksf_for(kdf_id: KdfId) -> RizzyArgon2idKsf {
 // ---------------------------------------------------------------------------------------------
 
 /// Client, registration step 1: blinds `pw_in` and returns the state and M1.
+///
+/// The blind comes from the injected RNG. M1 ([`REGISTRATION_REQUEST_LEN`] bytes) goes to the
+/// server with the login name and the new `account_id` (§11.1 step 4); it reveals nothing
+/// about the password.
 ///
 /// # Errors
 /// [`OpaqueError::Protocol`] (unreachable for this suite).
@@ -754,6 +945,9 @@ pub fn client_registration_start<R: CryptoRng + ?Sized>(
 
 /// Server, registration step 2: evaluates the OPRF on M1 under the key for
 /// `credential_identifier` (the new `account_id`) and returns M2. The server keeps no state.
+///
+/// Registration is an enumeration oracle ("name taken"); invite checks and rate limits are the
+/// caller's job (§5.9).
 ///
 /// # Errors
 /// [`OpaqueError::MalformedMessage`] for a malformed M1.
@@ -775,6 +969,12 @@ pub fn server_registration_start(
 
 /// Client, registration step 3: runs the KSF (`kdf_id` from the client's allow-list; this is the
 /// signup's Argon2id run) and returns the upload and `export_key`.
+///
+/// `kdf_id` must be the one the new signed account state names: the server stores that value
+/// with the record, and later logins stretch with it (§11, "Replacing credentials"). For a new
+/// account in M1 that is [`KdfId::DEFAULT`] (§11.1 step 4). The returned `export_key` carries
+/// `kdf_id`. Identifiers stay at their defaults, so the login name is not bound and renaming
+/// needs no re-registration (§5.3).
 ///
 /// # Errors
 /// [`OpaqueError::MalformedMessage`] for a malformed M2, [`OpaqueError::KsfFailed`],
@@ -804,6 +1004,10 @@ pub fn client_registration_finish<R: CryptoRng + ?Sized>(
 
 /// Server, registration step 4: turns the client's upload into the record to store.
 ///
+/// This checks only the length and the encoding. When a record may replace another, and what
+/// must arrive in the same request (a new signed account state, a fresh session), is the
+/// server's rule (§11, "Replacing credentials").
+///
 /// # Errors
 /// [`OpaqueError::MalformedMessage`].
 pub fn server_registration_finish(upload: &[u8]) -> Result<PasswordFile, OpaqueError> {
@@ -819,6 +1023,9 @@ pub fn server_registration_finish(upload: &[u8]) -> Result<PasswordFile, OpaqueE
 // ---------------------------------------------------------------------------------------------
 
 /// Client, login step 1: blinds `pw_in` and returns the state and KE1.
+///
+/// The blind and the ephemeral AKE key come from the injected RNG. KE1 ([`KE1_LEN`] bytes)
+/// goes to the server with the login name (§11.2 step 2).
 ///
 /// # Errors
 /// [`OpaqueError::Protocol`] (unreachable for this suite).
@@ -842,6 +1049,11 @@ pub fn client_login_start<R: CryptoRng + ?Sized>(
 /// `kdf_id`, or for an unknown name the `kdf_id` of §5.9 (always 1 in M1), and the server's
 /// canonical origin.
 ///
+/// The returned KE2 goes to the client with the `kdf_id` and the canonical origin next to it
+/// (§11.2 step 3); the returned state is sealed as `SERVER_LOGIN_STATE` until KE3 arrives.
+/// Nothing that differs between a real and an unknown account may be sent before KE3
+/// verifies (§5.9); that is the caller's side of the enumeration defence.
+///
 /// # Errors
 /// [`OpaqueError::MalformedMessage`] for a malformed KE1, [`OpaqueError::ContextMismatch`] if
 /// the Context's `kdf_id` is not the record's.
@@ -855,12 +1067,17 @@ pub fn server_login_start<R: CryptoRng + ?Sized>(
 ) -> Result<ServerLoginStart, OpaqueError> {
     let request = CredentialRequest::<Suite>::deserialize(exact(ke1, KE1_LEN)?)
         .map_err(|_| OpaqueError::MalformedMessage)?;
+    // A server wiring error, not reachable from a client's input: refuse rather than answer
+    // under parameters the record was not registered with.
     if record
         .as_ref()
         .is_some_and(|r| r.kdf_id != context.kdf_id())
     {
         return Err(OpaqueError::ContextMismatch);
     }
+    // The fake id is computed on both paths, then either it or the account id is selected
+    // byte by byte with `subtle`. Apart from the check above, the only branch on whether the
+    // name was found is the `match` that moves the record's fields out.
     let fake = CredentialIdentifier::fake(login_name);
     let found = Choice::from(u8::from(record.is_some()));
     let (real, password_file) = match record {
@@ -872,10 +1089,14 @@ pub fn server_login_start<R: CryptoRng + ?Sized>(
         *dst = u8::conditional_select(fake_byte, real_byte, found);
     }
     let credential_identifier = CredentialIdentifier(id);
+    // The Context enters the AKE transcript here, so the expected client MAC that the state
+    // keeps already covers it.
     let params = ServerLoginParameters {
         context: Some(context.as_bytes()),
         identifiers: Identifiers::default(),
     };
+    // opaque-ke (≥ 4.0.0) always builds a dummy record and uses it when `password_file` is
+    // `None`, so both paths do the same work.
     let result = ServerLogin::start(
         &mut OpaqueRng::new(rng),
         &setup.inner,
@@ -900,6 +1121,11 @@ pub fn server_login_start<R: CryptoRng + ?Sized>(
 /// Build `context` with [`OpaqueContext::for_login`], which refuses a `kdf_id` outside the
 /// allow-list and a foreign origin before any stretching.
 ///
+/// KE3 and `export_key` come back only when both checks pass: the envelope opened, so the
+/// password and the Secret Key were right, and the KE2 MAC verified, so the server holds the
+/// private key matching the server public key in the envelope and bound the same Context.
+/// Show every failure as "wrong password or Secret Key" (§11.2 step 4).
+///
 /// # Errors
 /// [`OpaqueError::InvalidLogin`] for a wrong password or Secret Key, a Context mismatch or an
 /// unknown account (all alike); [`OpaqueError::MalformedMessage`]; [`OpaqueError::KsfFailed`];
@@ -913,6 +1139,7 @@ pub fn client_login_finish<R: CryptoRng + ?Sized>(
 ) -> Result<ClientLoginFinish, OpaqueError> {
     let response = CredentialResponse::<Suite>::deserialize(exact(ke2, KE2_LEN)?)
         .map_err(|_| OpaqueError::MalformedMessage)?;
+    // The KSF runs with the Context's `kdf_id`, so the stretching and the binding agree.
     let ksf = ksf_for(context.kdf_id());
     let params = ClientLoginFinishParameters::new(
         Some(context.as_bytes()),
@@ -935,6 +1162,12 @@ pub fn client_login_finish<R: CryptoRng + ?Sized>(
 /// Server, login step 4 (§11.2 step 5): checks KE3 against the pending state. Success means the
 /// client knew `pw_in` for this record under the same Context.
 ///
+/// The KE3 MAC is compared with the expected MAC in constant time inside opaque-ke. The Context
+/// was bound when [`server_login_start`] computed that expected MAC; opaque-ke 4.0.1's 3DH
+/// ignores the Context passed here beyond a length check, so pass the same Context, but do
+/// not rely on this argument for the binding. After success the caller checks 2FA and issues
+/// the session (§5.10); the OPAQUE session key is wiped here, unused.
+///
 /// # Errors
 /// [`OpaqueError::InvalidLogin`] (always, on the fake-record path),
 /// [`OpaqueError::MalformedMessage`].
@@ -950,6 +1183,7 @@ pub fn server_login_finish(
         identifiers: Identifiers::default(),
     };
     let mut result = state.inner.finish(message, params)?;
+    // The session key only confirms keys inside OPAQUE (§5.10); it is not used.
     result.session_key.as_mut_slice().zeroize();
     Ok(())
 }

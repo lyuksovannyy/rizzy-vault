@@ -6,6 +6,25 @@
 //!   failed" oracle.
 //! - No error carries key material, plaintext or anything derived from a secret. The only
 //!   values an error may carry are public protocol values, such as a `kdf_id` the server named.
+//!
+//! **The types and where they come from.**
+//!
+//! | Type | Raised by |
+//! |---|---|
+//! | [`DecryptError`] | Every envelope and HPKE open, every key unwrap, the plaintext-frame and key-layout checks after decryption |
+//! | [`ParseError`] | The bounded [`Reader`](crate::encoding::Reader), base64url, the envelope layout parser, the Padmé frame reader, id and key-type parsers |
+//! | [`EncodeError`] | The canonical writers when a value does not fit its length prefix or format |
+//! | [`EncryptError`] | Sealing: plaintext size rules, a context that does not match the keys, an unusable recipient key |
+//! | [`VerifyError`] | Signature containers and signed statements |
+//! | [`SignError`] | Building and signing a statement |
+//! | [`KdfError`] | The `kdf_id` allow-list, Argon2id, password normalisation |
+//! | [`DerivationError`] | HKDF output lengths (unreachable for the lengths this crate uses) |
+//!
+//! Every type is `Copy`, builds its `Display` text only from constant strings and public
+//! values (a nested error, a `kdf_id`), and implements `core::error::Error`. The
+//! `From` impls at the bottom collapse the unreachable [`DerivationError`] and every
+//! [`ParseError`] into [`DecryptError`] on the decryption path, so a parser detail can never
+//! leak out of an open.
 
 use core::fmt;
 
@@ -14,6 +33,13 @@ use core::fmt;
 /// Returned for a malformed envelope, a wrong format version, an algorithm outside the
 /// purpose's allow-list, a key id that does not match the caller's key, a failed commitment,
 /// a failed AEAD tag and a malformed plaintext frame alike (CRYPTO.md §8.3, §9.5).
+///
+/// The key unwraps of [`crate::keys`] also return it for a context that names another account,
+/// device, `kdf_id`, vault or epoch than the unwrapping key records, and for a wrong version
+/// byte or layout inside a decrypted key. A wrong password or recovery code shows up as this
+/// error too, when opening `E_local` or `E_rec`; the UI decides how to word it (§5.6, §11.9
+/// step 4). A failed OPAQUE login is a different error, reported by the OPAQUE module. Details
+/// may go to local debug logs only, never with key material (§9.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DecryptError;
 
@@ -30,6 +56,9 @@ impl core::error::Error for DecryptError {}
 /// Used by the purpose-agnostic parsers (the envelope layout parser, the frame reader, the
 /// bounded [`Reader`](crate::encoding::Reader), base64url). The decryption path maps every one
 /// of these to [`DecryptError`].
+///
+/// Parsing public structures (signed statements, ids, key types) reports it as is, or wrapped
+/// in [`VerifyError::Malformed`]; that is safe because those inputs carry no secret.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ParseError {
@@ -263,6 +292,9 @@ impl fmt::Display for DerivationError {
 
 impl core::error::Error for DerivationError {}
 
+// Conversions for `?`. None of them carries detail across: an unreachable HKDF length error
+// becomes `EncryptError::Internal` on the sealing side, and both HKDF and parse errors become
+// the single `DecryptError` on the opening side (§9.5).
 impl From<DerivationError> for EncryptError {
     fn from(_: DerivationError) -> Self {
         Self::Internal

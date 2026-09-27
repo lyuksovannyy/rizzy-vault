@@ -1,3 +1,8 @@
+//! Tests of the generator (CRYPTO.md §12.1): chi-square bias checks on index draws,
+//! characters, required-class candidates and word choice, entropy values, option validation,
+//! and checks that the constant-time passphrase layout matches plain concatenation byte for
+//! byte.
+
 use std::collections::HashMap;
 
 use rand_core::Rng as _;

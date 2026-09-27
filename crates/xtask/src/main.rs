@@ -39,10 +39,33 @@
 //! with a `clippy.toml` entry, such as "found a module" (ADR 0016 §5, R1 API side). Clippy then
 //! ignores the entry, and `-D warnings` does not turn that warning into an error. Run it after
 //! `cargo lint`, which it reuses the results of.
+//!
+//! # How `check-deps` works
+//!
+//! 1. [`load`] gathers every input: `cargo metadata --all-features --locked` three times (all
+//!    targets, then filtered to `wasm32-unknown-unknown` and to the host triple from
+//!    `rustc -vV`), every member's `Cargo.toml`, the root `Cargo.toml`, `.cargo/config.toml`,
+//!    the root `clippy.toml`, each no-I/O crate's `clippy.toml`, and any `.clippy.toml` that
+//!    would shadow one of those.
+//! 2. [`check::run`] evaluates every rule as a pure function of those inputs and returns the
+//!    sorted, de-duplicated violations. The rules themselves are data in [`rules`].
+//! 3. Each violation is printed as `error: [rule] crate: message`.
+//!
+//! Every reader fails closed: JSON it cannot read ([`mod@metadata`]) and TOML lines it cannot
+//! read ([`mod@manifest`]) are errors or violations, never skipped. `--locked` makes a stale
+//! `Cargo.lock` fail instead of being rewritten before it is checked (threat model INV-57).
+//!
+//! # Exit codes
+//!
+//! `0` when every check passes (and for `-h`/`--help`), `1` on a violation or when an input
+//! cannot be read or a command fails, `2` on a usage error (no command, an unknown command, an
+//! extra argument, or an argument that is not UTF-8). Both commands are CI steps; xtask is
+//! never shipped and never reads secrets.
 
 // Also set by the workspace lint table (ADR 0016 R7); repeated here so that no manifest edit
 // alone admits `unsafe` in this crate.
 #![forbid(unsafe_code)]
+#![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
 mod check;
 mod manifest;
@@ -58,6 +81,7 @@ use check::Inputs;
 use manifest::Manifest;
 use metadata::Graph;
 
+/// The help text, printed on `--help` (stdout) and on a usage error (stderr).
 const USAGE: &str = "\
 cargo xtask — rizzy-vault repository checks (ADR 0016 §5)
 
@@ -73,6 +97,8 @@ COMMANDS:
 /// The second target the getrandom rule is checked on, besides the host (ADR 0016 R1).
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
+/// Dispatches on the one command-line argument. Exactly one argument is accepted; anything
+/// else is a usage error with exit code 2.
 fn main() -> ExitCode {
     // `args_os`, not `args`: `args` panics on an argument that is not UTF-8. Such an argument
     // is no command, so it gets the usage error.
@@ -96,6 +122,11 @@ fn main() -> ExitCode {
     }
 }
 
+/// `cargo xtask check-deps`: loads the inputs, runs every rule and prints the result.
+///
+/// Prints `check-deps: ok (...)` to stdout and exits 0 when there is no violation. Otherwise
+/// prints each violation and a summary to stderr and exits 1; an input that cannot be loaded
+/// also exits 1, with the reason.
 fn check_deps() -> ExitCode {
     let mut err = io::stderr().lock();
     let inputs = match load() {
@@ -126,6 +157,12 @@ fn check_deps() -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// `cargo xtask check-clippy`: runs `cargo clippy` with `cargo lint`'s arguments and scans its
+/// stderr for problems with `clippy.toml` entries ([`check::clippy_config_warnings`]).
+///
+/// Exits 1 if clippy itself fails (fix what `cargo lint` reports first) or if any entry warning
+/// is found, and 0 otherwise. `CLIPPY_CONF_DIR` is removed from the child's environment, so
+/// clippy reads each crate's own `clippy.toml`, the files `check-deps` checks.
 fn check_clippy() -> ExitCode {
     let mut err = io::stderr().lock();
     let root = workspace_root();
@@ -190,6 +227,18 @@ fn workspace_root() -> PathBuf {
         .map_or_else(|| here.to_path_buf(), Path::to_path_buf)
 }
 
+/// Reads every input the checks need ([`Inputs`]).
+///
+/// The per-target graphs are wasm32 (the target ADR 0016 §5 names for the getrandom rule) and
+/// the host; R1 forbids getrandom on any target. A `clippy.toml` is read only for members whose
+/// row is a no-I/O crate; a missing one is recorded as `None` and reported by the checks. A
+/// `.clippy.toml` is looked for at the workspace root and in each of those crates' directories,
+/// because clippy would read it instead of `clippy.toml`.
+///
+/// # Errors
+///
+/// Returns a message when a `cargo metadata` or `rustc` run fails, when its output cannot be
+/// read, or when a required file cannot be read. The root `clippy.toml` is optional.
 fn load() -> Result<Inputs, String> {
     let root = workspace_root();
     let host = host_target(&root)?;
@@ -235,11 +284,21 @@ fn load() -> Result<Inputs, String> {
     })
 }
 
+/// The file's contents.
+///
+/// # Errors
+///
+/// Returns a message naming the path when the file cannot be read, including when it is
+/// missing.
 fn read(path: &Path) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))
 }
 
 /// The file's contents, or `None` if it does not exist.
+///
+/// # Errors
+///
+/// Returns a message naming the path for any read error other than "not found".
 fn read_optional(path: &Path) -> Result<Option<String>, String> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
@@ -255,6 +314,14 @@ fn cargo() -> OsString {
 
 /// `cargo metadata --format-version 1 --all-features --locked`, optionally with
 /// `--filter-platform`.
+///
+/// `--all-features` gives the workspace-unified graph, a superset of any single build, which
+/// is what the checks rely on (see the `check` module docs).
+///
+/// # Errors
+///
+/// Returns a message when cargo fails (for example on a stale `Cargo.lock`) or when its JSON
+/// cannot be read ([`Graph::from_json`]).
 fn metadata(root: &Path, target: Option<&str>) -> Result<Graph, String> {
     let mut cmd = Command::new(cargo());
     cmd.current_dir(root).args([
@@ -273,7 +340,11 @@ fn metadata(root: &Path, target: Option<&str>) -> Result<Graph, String> {
     Graph::from_json(&stdout)
 }
 
-/// The host target triple, from `rustc -vV`.
+/// The host target triple, from `rustc -vV` (`RUSTC` if set, else `rustc` from `PATH`).
+///
+/// # Errors
+///
+/// Returns a message when rustc fails or prints no `host:` line.
 fn host_target(root: &Path) -> Result<String, String> {
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
     let out = run(Command::new(rustc).current_dir(root).arg("-vV"))?;
@@ -283,6 +354,12 @@ fn host_target(root: &Path) -> Result<String, String> {
         .ok_or_else(|| "rustc -vV printed no host triple".to_owned())
 }
 
+/// Runs `cmd` and returns its stdout.
+///
+/// # Errors
+///
+/// Returns a message when the command cannot be started, exits unsuccessfully (with its
+/// trimmed stderr), or prints stdout that is not UTF-8.
 fn run(cmd: &mut Command) -> Result<String, String> {
     let out = cmd.output().map_err(|e| format!("running {cmd:?}: {e}"))?;
     if !out.status.success() {

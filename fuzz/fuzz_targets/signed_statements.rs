@@ -1,6 +1,18 @@
 //! Fuzzes the signature container and the signed-statement parsers (CRYPTO.md §9.3, §9.6,
 //! §10.2, §15 item 7): they never panic and never allocate in proportion to a length field.
 //! Every statement decoder runs before its signature check, so arbitrary input reaches it.
+//!
+//! Each input is fed, whole, to the signature container parser and to the verify function of
+//! every statement type: the self-signed public-key bundle (and, if it ever verifies, the
+//! bundle chain step against itself), device certificate, device revocation, `account-state`,
+//! `op`, `snapshot`, and `key-grant` under both a device and an identity key. The verifying
+//! key is a fixed valid Ed25519 public key (RFC 8032 §7.1 test 1), so a fuzzed signature
+//! practically never verifies; what is exercised is the length checks and body decoders in
+//! front of it. With at least 32 bytes of input, the first 32 bytes also become the challenge
+//! of a `device-auth` and the body hash of a `device-request`, and the rest is verified as the
+//! bare container those two statements travel as.
+//!
+//! The only property asserted is that every call returns; results are ignored.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;

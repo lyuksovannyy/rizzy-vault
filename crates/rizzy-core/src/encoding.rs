@@ -9,6 +9,24 @@
 //!
 //! [`Reader`] is the bounded reader for untrusted input: it never panics, never copies, and
 //! never allocates, so a hostile length field cannot make it reserve memory.
+//!
+//! **Why fixed layouts.** A signature or an AAD must cover exactly one byte string for one
+//! value. A serde representation can change with a crate update, and a self-describing format
+//! offers several encodings of the same value; these layouts cannot drift and have exactly one
+//! encoding (CRYPTO.md §2 "Canonical encoding"). Length prefixes make concatenations
+//! unambiguous: `bytes(a) ‖ bytes(b)` can be split in only one way.
+//!
+//! **Parsing untrusted input.** Every structure is read field by field with a [`Reader`] and
+//! ended with [`Reader::finish`], so truncation and trailing bytes are both errors. A length
+//! field is compared with the bytes actually present before anything is read, and
+//! [`Reader::bytes_max`] applies a per-field limit on top. Failed reads leave the reader where
+//! it was. The parsers built on it (envelope, Padmé frame, signed statements) are fuzzed
+//! (§15 item 7).
+//!
+//! **Transport.** JSON APIs and files carry binary values as base64url without padding
+//! (§9.6). The decoder is strict, so every byte string has exactly one accepted text form, and
+//! [`b64url_decode_into`] lets a secret be decoded straight into a caller-owned zeroizing
+//! buffer.
 
 use core::fmt;
 
@@ -76,6 +94,7 @@ pub fn bytes_encoded_len(len: usize) -> Result<usize, EncodeError> {
 /// bytes (CRYPTO.md §12.2).
 #[derive(Clone)]
 pub struct Reader<'a> {
+    /// The bytes not read yet: a suffix of the original input, shortened by each read.
     input: &'a [u8],
     /// Length of the whole input, for the position `Debug` reports.
     len: usize,
@@ -127,8 +146,11 @@ impl<'a> Reader<'a> {
 
     /// Reads the next `N` bytes as a fixed-size array reference.
     ///
+    /// The reference borrows the input; copy it into a zeroizing buffer when it is key
+    /// material.
+    ///
     /// # Errors
-    /// [`ParseError::Truncated`] if fewer than `N` bytes remain.
+    /// [`ParseError::Truncated`] if fewer than `N` bytes remain. The reader is unchanged then.
     pub fn array<const N: usize>(&mut self) -> Result<&'a [u8; N], ParseError> {
         let (head, tail) = self
             .input
@@ -189,6 +211,9 @@ impl<'a> Reader<'a> {
     /// [`ParseError::Truncated`] if the prefix or the value is incomplete. The reader is
     /// unchanged on error.
     pub fn bytes_max(&mut self, max: usize) -> Result<&'a [u8], ParseError> {
+        // Read through a copy and commit it only on success, so every error leaves `self`
+        // untouched. On a target where `usize` is narrower than `u32`, a length that does not
+        // fit is `TooLong`.
         let mut probe = self.clone();
         let len = usize::try_from(probe.u32()?).map_err(|_| ParseError::TooLong)?;
         if len > max {
@@ -211,11 +236,17 @@ impl<'a> Reader<'a> {
     }
 
     /// Returns every remaining byte and leaves the reader empty.
+    ///
+    /// For a trailing field that runs to the end of the structure (for example an envelope's
+    /// ciphertext); its length must then be checked by the caller.
     pub fn rest(&mut self) -> &'a [u8] {
         core::mem::take(&mut self.input)
     }
 
     /// Ends the structure.
+    ///
+    /// Call it after the last field of every structure: accepting trailing bytes would give
+    /// one value several encodings.
     ///
     /// # Errors
     /// [`ParseError::TrailingBytes`] if any byte remains.
@@ -268,6 +299,10 @@ pub fn b64url_decode_into<'o>(text: &str, out: &'o mut [u8]) -> Result<&'o [u8],
     reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
 )]
 mod tests {
+    //! Byte layouts of the writers, the reader's error behaviour on truncated, hostile and
+    //! invalid input (no panic, no movement on error), its redacted `Debug`, and base64url
+    //! against the RFC 4648 vectors and its strictness rules.
+
     use super::*;
 
     #[test]

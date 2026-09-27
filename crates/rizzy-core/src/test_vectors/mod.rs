@@ -25,6 +25,13 @@
 //! Tier A files are normative format vectors; `transcript.json` is the tier B regression
 //! transcript (signup, login, unlock) and is regenerated, with a note, when a pinned crate
 //! changes.
+//!
+//! Layout: this module holds the file registry ([`FILES`]), the JSON value helpers and the
+//! exact RNG; each submodule is one file, with a `generate` function that draws the inputs and
+//! a `compute` function that turns one vector's inputs into its outputs. Generation and replay
+//! share `compute`, so every run recomputes the outputs with the current code and repeats the
+//! specification checks inside `compute`. The vectors hold only test values drawn from the
+//! documented seeds or written as fixtures; none is a real credential.
 
 mod derivations;
 #[expect(
@@ -65,7 +72,9 @@ struct VectorFile {
     seed: u64,
     /// The committed file.
     committed: &'static str,
+    /// Draws every input from the seeded RNG and builds the file's vectors.
     generate: fn(&mut ChaCha20Rng) -> Vec<Vector>,
+    /// Recomputes one vector's outputs; used by both generation and replay.
     compute: Compute,
     /// Checks across the vectors of one file (a bundle chain, for example).
     check_file: fn(&[Vector]),
@@ -197,10 +206,17 @@ const FILES: [VectorFile; 5] = [
 /// One vector: `{id, kind, name, inputs, outputs}`.
 #[derive(Clone, Debug, PartialEq)]
 struct Vector {
+    /// `<kind>/<name>/<index>`, unique within its file.
     id: String,
+    /// The group: `derivation`, `envelope`, `statement`, `encoding`, `padding` or
+    /// `transcript`.
     kind: String,
+    /// The §4.3 label, §8.4 purpose, §10.2 statement type or encoding the vector exercises;
+    /// `compute` dispatches on it.
     name: String,
+    /// The inputs, in the value encoding of the README (hex bytes, decimal-string `u64`s).
     inputs: Map<String, Value>,
+    /// The outputs `compute` derives from the inputs.
     outputs: Map<String, Value>,
 }
 
@@ -217,6 +233,7 @@ impl Vector {
         }
     }
 
+    /// The vector as a JSON object, keys in the committed order.
     fn to_value(&self) -> Value {
         let mut m = Map::new();
         m.insert("id".into(), Value::String(self.id.clone()));
@@ -227,6 +244,8 @@ impl Vector {
         Value::Object(m)
     }
 
+    /// Reads a vector from a committed file; panics (failing the test) on a missing field or
+    /// an id with characters outside `[A-Za-z0-9._/-]`.
     fn from_value(v: &Value) -> Self {
         let field = |key: &str| {
             v.get(key)
@@ -278,6 +297,12 @@ fn render(doc: &Value) -> String {
 }
 
 /// Replays one committed file.
+///
+/// Checks, in order: the header fields match the registry entry; the file is byte for byte
+/// in its canonical rendering (so it was generated, not hand-edited); it has vectors, their
+/// ids are unique and each starts with its kind; every vector's recomputed outputs equal the
+/// committed ones, with the same set of keys; the file-level checks pass; and the file holds
+/// exactly its listed vectors.
 fn replay(file: &VectorFile) {
     let doc: Value = serde_json::from_str(file.committed)
         .unwrap_or_else(|e| panic!("{}.json is not JSON: {e}", file.name));
@@ -465,6 +490,7 @@ fn label_coverage_errors(files: &[(&str, Vec<Vector>)]) -> Vec<String> {
     errors
 }
 
+/// The registry entry of the file called `name`; panics for an unknown name.
 fn file(name: &str) -> &'static VectorFile {
     FILES
         .iter()
@@ -529,6 +555,7 @@ fn generate() {
 struct Obj(Map<String, Value>);
 
 impl Obj {
+    /// An empty object.
     fn new() -> Self {
         Self(Map::new())
     }
@@ -564,26 +591,31 @@ impl Obj {
         self
     }
 
+    /// A JSON boolean.
     fn bool(mut self, key: &str, value: bool) -> Self {
         self.0.insert(key.into(), Value::Bool(value));
         self
     }
 
+    /// A JSON `null`, for an absent optional value.
     fn null(mut self, key: &str) -> Self {
         self.0.insert(key.into(), Value::Null);
         self
     }
 
+    /// A nested object (an envelope's `ctx`, for example).
     fn obj(mut self, key: &str, value: Self) -> Self {
         self.0.insert(key.into(), Value::Object(value.0));
         self
     }
 
+    /// The finished map.
     fn done(self) -> Map<String, Value> {
         self.0
     }
 }
 
+/// Lowercase hex, the byte-string encoding of the vector files.
 fn to_hex(bytes: &[u8]) -> String {
     use core::fmt::Write as _;
     bytes.iter().fold(String::new(), |mut s, b| {
@@ -592,6 +624,7 @@ fn to_hex(bytes: &[u8]) -> String {
     })
 }
 
+/// The value at `key`; panics (failing the test) if it is missing.
 fn field<'a>(m: &'a Map<String, Value>, key: &str) -> &'a Value {
     m.get(key)
         .unwrap_or_else(|| panic!("missing field `{key}` in {m:?}"))
@@ -630,6 +663,7 @@ fn bytes_list(m: &Map<String, Value>, key: &str) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// A text value, unchanged.
 fn text<'a>(m: &'a Map<String, Value>, key: &str) -> &'a str {
     field(m, key).as_str().expect("a text field")
 }
@@ -645,10 +679,12 @@ fn u64_of(m: &Map<String, Value>, key: &str) -> u64 {
     text(m, key).parse().expect("a decimal u64 string")
 }
 
+/// A JSON boolean.
 fn boolean(m: &Map<String, Value>, key: &str) -> bool {
     field(m, key).as_bool().expect("a boolean")
 }
 
+/// A nested object.
 fn object<'a>(m: &'a Map<String, Value>, key: &str) -> &'a Map<String, Value> {
     field(m, key).as_object().expect("an object")
 }
@@ -668,6 +704,9 @@ fn random_vec(rng: &mut ChaCha20Rng, len: usize) -> Vec<u8> {
 }
 
 /// A `u32` below `bound` from the generator's RNG (a small epoch or counter).
+///
+/// The `%` is slightly biased. That is harmless for choosing a test input, and nothing secret
+/// is drawn this way.
 fn small(rng: &mut ChaCha20Rng, bound: u32) -> u32 {
     rand_core::Rng::next_u32(rng) % bound
 }
@@ -686,11 +725,14 @@ fn child_rng(rng: &mut ChaCha20Rng) -> ChaCha20Rng {
 /// input an operation consumes. `next_u32` and `next_u64` read little-endian.
 #[derive(Debug)]
 struct ExactRng {
+    /// The bytes the operation must draw, all of them, in order.
     bytes: Vec<u8>,
+    /// How many have been drawn.
     pos: usize,
 }
 
 impl ExactRng {
+    /// An RNG that yields exactly `bytes`.
     fn new(bytes: &[u8]) -> Self {
         Self {
             bytes: bytes.to_vec(),
@@ -698,6 +740,7 @@ impl ExactRng {
         }
     }
 
+    /// Asserts that every byte was drawn; the panic points at the caller.
     #[track_caller]
     fn finish(self) {
         assert_eq!(
@@ -709,6 +752,7 @@ impl ExactRng {
         );
     }
 
+    /// Fills `dst` with the next bytes; panics if fewer remain.
     fn take(&mut self, dst: &mut [u8]) {
         let end = self.pos + dst.len();
         let src = self.bytes.get(self.pos..end).unwrap_or_else(|| {
@@ -722,6 +766,8 @@ impl ExactRng {
     }
 }
 
+// As for `FixedRng`: an infallible `TryRng` plus the `TryCryptoRng` marker is a rand_core 0.10
+// `CryptoRng`, the bound of every function in the crate that needs randomness.
 impl TryRng for ExactRng {
     type Error = core::convert::Infallible;
 

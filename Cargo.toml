@@ -58,6 +58,9 @@ proptest = { version = "1.11", default-features = false, features = ["std"] }
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"
 unreachable_pub = "warn"
+# Every public item is documented; `cargo lint` (-D warnings) makes this a gate. Crate roots
+# add clippy::missing_docs_in_private_items for internal logic outside test builds.
+missing_docs = "warn"
 unused_must_use = "deny"
 
 [workspace.lints.clippy]

@@ -29,6 +29,8 @@ use crate::opaque::{
 };
 use crate::secret_key::SecretKey;
 
+/// The single transcript vector. Its only random input is one `u64` seed, drawn from the
+/// file's RNG; `compute` seeds a fresh `ChaCha20Rng` from it and draws everything else.
 pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
     vec![Vector::build(
         compute,
@@ -44,6 +46,10 @@ pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
     )]
 }
 
+/// Runs signup, login on a new device and unlock with one RNG stream, asserting at each step
+/// that the flow works (the login's `export_key` equals the registration's, and `E_srv` and
+/// `E_local` open to the same account key), and returns every intermediate value. The order
+/// of RNG draws is part of the vector: reordering a draw changes the outputs.
 #[expect(
     clippy::too_many_lines,
     reason = "one flat table of test vectors reads best as one function"

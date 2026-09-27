@@ -32,7 +32,8 @@ pub(crate) struct Manifest {
 }
 
 impl Manifest {
-    /// Parses `text`.
+    /// Parses `text`. Never fails: every line it cannot read is recorded in
+    /// [`Manifest::errors`] and the rest of the file is still read.
     pub(crate) fn parse(text: &str) -> Self {
         let mut out = Self::default();
         // `None` after a header this reader could not read: its keys are skipped (the header's
@@ -190,6 +191,7 @@ fn has_multi_line_delimiter(line: &str) -> bool {
     line.contains("\"\"\"") || line.contains("'''")
 }
 
+/// The error recorded for a line (0-based `index`) holding a multi-line string delimiter.
 fn multi_line_error(index: usize) -> String {
     format!(
         "line {}: multi-line string (`\"\"\"` or `'''`), which this reader does not read",
@@ -253,6 +255,10 @@ pub(crate) enum TomlValue {
 }
 
 /// Reads a value as [`Manifest`] stores it (whitespace outside strings removed).
+///
+/// # Errors
+///
+/// Returns a message when the value is malformed ([`value`]) or when anything follows it.
 pub(crate) fn parse_value(normalised: &str) -> Result<TomlValue, String> {
     let mut rest = normalised;
     let value = value(&mut rest)?;
@@ -263,6 +269,14 @@ pub(crate) fn parse_value(normalised: &str) -> Result<TomlValue, String> {
     }
 }
 
+/// Reads one value from the front of `rest` and advances `rest` past it: a string, an array,
+/// an inline table (recursively), or a bare value up to the next `,`, `]` or `}`.
+///
+/// # Errors
+///
+/// Returns a message for a missing value, an unterminated string, array or table, a missing
+/// `,` between items, an empty, dotted or `=`-less inline-table key, or a bare value that holds
+/// a bracket, brace, quote or `=`.
 fn value(rest: &mut &str) -> Result<TomlValue, String> {
     let mut chars = rest.chars();
     match chars.next() {
@@ -327,6 +341,13 @@ fn value(rest: &mut &str) -> Result<TomlValue, String> {
 }
 
 /// Reads the string that `rest` starts with (quote `q`), leaving `rest` after its closing quote.
+///
+/// A backslash escapes the next character in a basic (`"`) string only; a literal (`'`) string
+/// has no escapes. The content is returned as written, escapes included.
+///
+/// # Errors
+///
+/// Returns a message when the closing quote is missing.
 fn string(rest: &mut &str, q: char) -> Result<String, String> {
     let body = rest.get(1..).unwrap_or_default();
     let mut escaped = false;

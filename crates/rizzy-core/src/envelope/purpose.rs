@@ -10,6 +10,34 @@
 //! caller cannot pair a context with the wrong purpose id. Purposes of later milestones are
 //! registered (their ids are reserved) but have no context type yet, so nothing can seal or
 //! open them until their milestone defines and reviews the layout.
+//!
+//! # Why the purpose and context exist
+//!
+//! A key such as the account key wraps many kinds of object, and an item key encrypts many ops.
+//! Without a purpose and context in the AAD, a server could move any envelope under a key to
+//! any other place that uses the same key: serve one item's op as another's, an old epoch's
+//! wrap as the current one, or one vault's self-grant as another vault's. Both are bound into
+//! every envelope's AAD and neither is transmitted, so the reader's own expectation decides
+//! what opens (§8.4). Purpose ids are unique, so the same `ctx` bytes under two purposes still
+//! give different AADs.
+//!
+//! # Registry rules
+//!
+//! - **One encrypt algorithm per purpose, and a decrypt allow-list of one family** (§9.5 rule
+//!   2). In M1 every list has one entry: `{0x01}` for symmetric purposes, `{0x12}` for the
+//!   PSK-mode purposes, `{0x10}` for the Base-mode purposes. A PSK-mode purpose never accepts
+//!   Base mode, which would silently drop the PSK's protection.
+//! - **Two tables.** [`Purpose::client_decrypt_allow_list`] is empty for the server-only range
+//!   and [`Purpose::server_decrypt_allow_list`] is empty for everything else, so neither side
+//!   can open the other's objects, even with the right key.
+//! - **Plaintext rules** (§8.5): fixed-size key wraps, Padmé-padded frames, or plain variable
+//!   length. The envelope enforces them on both seal and open.
+//! - **Canonical `ctx` bytes** (§2 "Canonical encoding"): fixed-width big-endian fields in
+//!   §8.4 order, no length prefixes, never a serde encoding. Every M1 context has a fixed total
+//!   length, so the encoding is unambiguous without separators.
+//!
+//! The unit tests assert purpose-id uniqueness, one family per purpose, and that the registry
+//! matches CRYPTO.md §8.4 (ADR 0007 "Risks"; CRYPTO.md §15 item 10).
 
 use sha2::{Digest as _, Sha256};
 
@@ -21,20 +49,29 @@ use crate::ids::{
 use crate::kdf::KdfId;
 
 /// What a purpose's plaintext looks like (CRYPTO.md §8.5).
+///
+/// Callers never apply the rule themselves: the envelope functions check or apply it on seal
+/// and on open, so the plaintext a caller passes and gets back is always the unframed data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PlaintextRule {
-    /// Key wraps and other fixed-size secrets: unpadded, exactly this many bytes.
+    /// Key wraps and other fixed-size secrets: unpadded, exactly this many bytes. Their length
+    /// is fixed anyway, so padding would add nothing; any other length is rejected on seal and
+    /// on open.
     Fixed(usize),
     /// Framed and Padmé-padded ([`crate::padding`]). The envelope frames on seal and unframes
     /// on open.
     Padded,
-    /// Variable length, not padded.
+    /// Variable length, not padded. The exact length is visible to whoever sees the envelope.
     Unpadded,
-    /// Defined by a later ADR (the M3 attachments ADR, the M4 backup ADR).
+    /// Defined by a later ADR (the M3 attachments ADR, the M4 backup ADR). Neither seal nor open
+    /// accepts it.
     Unspecified,
 }
 
 /// The milestone that first uses a purpose (CRYPTO.md §8.4, "First used").
+///
+/// Informational: it documents the registry and lets tests check that every M1 symmetric
+/// purpose has a context type. It gates nothing at run time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Milestone {
     /// M1.
@@ -54,6 +91,9 @@ pub enum Milestone {
 }
 
 /// Which allow-list table a purpose's decryption belongs to (CRYPTO.md §9.5 rule 2).
+///
+/// Derived from the purpose id alone ([`Purpose::side`]). The symmetric seal path also refuses
+/// a purpose of the other side.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Side {
     /// Client purposes: every purpose outside `0x0100`–`0x01FF`.
@@ -62,7 +102,11 @@ pub enum Side {
     Server,
 }
 
-/// The registry row of one purpose.
+/// The registry row of one purpose, as returned by [`Purpose::spec`].
+///
+/// A plain data view of the table. Decryption code should call
+/// [`Purpose::client_decrypt_allow_list`] or [`Purpose::server_decrypt_allow_list`] rather than
+/// read `decrypt` directly, because those also apply the client/server split.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PurposeSpec {
     /// The `u16` purpose id bound into the AAD.
@@ -71,7 +115,7 @@ pub struct PurposeSpec {
     pub name: &'static str,
     /// The one algorithm this purpose encrypts with.
     pub encrypt: AlgId,
-    /// The algorithms this purpose accepts on decryption.
+    /// The algorithms this purpose accepts on decryption, before the client/server split.
     pub decrypt: &'static [AlgId],
     /// The plaintext rule.
     pub plaintext: PlaintextRule,
@@ -79,9 +123,14 @@ pub struct PurposeSpec {
     pub first_used: Milestone,
 }
 
+/// Decrypt allow-list of every symmetric purpose: `{0x01}` (§9.5 rule 2).
 const SYMMETRIC: &[AlgId] = &[AlgId::XChaCha20Poly1305Committed];
+/// Decrypt allow-list of `ATTACHMENT_CHUNK`: `{0x03}`, reserved for M3. No layout exists yet,
+/// so the parser rejects every envelope against it.
 const CHUNKED: &[AlgId] = &[AlgId::ChunkedXChaCha20Poly1305];
+/// Decrypt allow-list of the HPKE Base-mode purposes: `{0x10}`.
 const HPKE_BASE: &[AlgId] = &[AlgId::HpkeBaseX25519];
+/// Decrypt allow-list of the HPKE PSK-mode purposes: `{0x12}`.
 const HPKE_PSK: &[AlgId] = &[AlgId::HpkePskX25519];
 
 /// First id of the server-only range (§5.11).
@@ -90,6 +139,13 @@ pub const SERVER_ONLY_FIRST: u16 = 0x0100;
 pub const SERVER_ONLY_LAST: u16 = 0x01FF;
 
 /// Every purpose in CRYPTO.md §8.4.
+///
+/// The discriminant is the `u16` purpose id bound into the AAD. The §8.4 table groups ids by
+/// area: `0x000x` account-key wraps and grants to devices, `0x001x` objects under the account
+/// key, `0x002x` vault keys, `0x003x` item data, `0x004x` device-to-device transfers, `0x0050`
+/// shares, `0x0060` mail, `0x007x` files, `0x0090` the local cache, and `0x0100`–`0x01FF`
+/// server-only objects. Registering a purpose reserves its id; only purposes with a context
+/// type can be sealed or opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u16)]
 #[non_exhaustive]
@@ -258,6 +314,11 @@ impl Purpose {
     }
 
     /// Looks up a purpose by id. Unregistered ids give `None`.
+    ///
+    /// Used where a purpose id is itself a field of a signed message (the `key-grant`
+    /// statement, §10.1) and by tooling. The envelope decryption path never reads a purpose id
+    /// from the wire: it takes the purpose from the context type. A linear search over
+    /// [`Purpose::ALL`].
     #[must_use]
     pub fn from_id(id: u16) -> Option<Self> {
         Self::ALL.into_iter().find(|p| p.id() == id)
@@ -281,7 +342,8 @@ impl Purpose {
         self.spec().plaintext
     }
 
-    /// Whether the purpose is in the server-only range `0x0100`–`0x01FF` (§5.11).
+    /// Whether the purpose is in the server-only range `0x0100`–`0x01FF` (§5.11):
+    /// [`Side::Server`] for those ids, [`Side::Client`] for every other id.
     #[must_use]
     pub const fn side(self) -> Side {
         let id = self.id();
@@ -293,7 +355,8 @@ impl Purpose {
     }
 
     /// The client's decrypt allow-list for this purpose. Empty for server-only purposes: no
-    /// client allow-list contains them (§9.5 rule 2).
+    /// client allow-list contains them (§9.5 rule 2). An empty list makes
+    /// [`parse_for_purpose`](super::parse::parse_for_purpose) reject every envelope.
     #[must_use]
     pub const fn client_decrypt_allow_list(self) -> &'static [AlgId] {
         match self.side() {
@@ -335,11 +398,18 @@ impl Purpose {
 }
 
 // Short names for the registry rows above.
+/// Encrypt algorithm `0x01`, for the registry rows.
 const SYM: AlgId = AlgId::XChaCha20Poly1305Committed;
+/// Encrypt algorithm `0x03` (reserved, M3), for the registry rows.
 const CHUNK: AlgId = AlgId::ChunkedXChaCha20Poly1305;
+/// Encrypt algorithm `0x10`, for the registry rows.
 const BASE: AlgId = AlgId::HpkeBaseX25519;
+/// Encrypt algorithm `0x12`, for the registry rows.
 const PSK: AlgId = AlgId::HpkePskX25519;
 
+/// The sealed-trait pattern: [`Context`] requires `sealed::Sealed`, which is nameable only
+/// inside this module, so no other module or crate can define a context and pair arbitrary
+/// `ctx` bytes with a purpose.
 mod sealed {
     /// Only this module defines contexts.
     pub trait Sealed {}
@@ -351,6 +421,11 @@ mod sealed {
 ///
 /// Sealed: every implementation is a context type in this module, and each one fixes its
 /// purpose.
+///
+/// Context values are not secret (ids, epochs, sequence numbers, hashes of server-visible
+/// headers, salts stored in clear), so the context types derive `Debug`, `Clone` and `Copy`.
+/// What matters is where their values come from: a writer fills in where the object will live,
+/// and a reader fills in where it expected the object, from state it already trusts.
 pub trait Context: sealed::Sealed {
     /// The purpose this context belongs to.
     const PURPOSE: Purpose;
@@ -362,7 +437,8 @@ pub trait Context: sealed::Sealed {
     /// The exact length of the `ctx` bytes.
     fn ctx_len(&self) -> usize;
 
-    /// The `ctx` bytes as a new vector.
+    /// The `ctx` bytes as a new vector, allocated at [`Context::ctx_len`]. Used by tests and
+    /// vectors; the envelopes write `ctx` straight into the AAD buffer instead.
     fn ctx_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.ctx_len());
         self.write_ctx(&mut out);
@@ -396,8 +472,14 @@ pub trait HpkeBaseContext: HpkeContext {}
 pub trait HpkePskContext: HpkeContext {}
 
 /// A fixed-width field of a context.
+///
+/// Every field type has one canonical encoding of a constant length: big-endian integers, raw
+/// byte arrays, 16-byte ids. That is what lets a context be the plain concatenation of its
+/// fields with no length prefixes (§2 "Canonical encoding").
 trait CtxField {
+    /// The encoded length in bytes, the same for every value.
     const LEN: usize;
+    /// Appends exactly [`CtxField::LEN`] bytes to `out`.
     fn put(&self, out: &mut Vec<u8>);
 }
 
@@ -444,6 +526,7 @@ impl CtxField for KdfId {
     }
 }
 
+/// The 16 bytes of a public key id (`RETIRED_SECRET_KEY`'s context).
 impl CtxField for PublicKeyId {
     const LEN: usize = crate::ids::ID_LEN;
     fn put(&self, out: &mut Vec<u8>) {
@@ -451,6 +534,7 @@ impl CtxField for PublicKeyId {
     }
 }
 
+/// Implements [`CtxField`] for 16-byte random id types: the raw id bytes, no prefix.
 macro_rules! id_ctx_fields {
     ($($id:ty),+) => {$(
         impl CtxField for $id {
@@ -467,6 +551,12 @@ id_ctx_fields!(
 );
 
 /// Defines one context type: its fields in §8.4 order, its purpose and its marker traits.
+///
+/// The field order in the invocation is the byte order of `ctx`; `write_ctx` puts the fields
+/// in exactly that order and `ctx_len` is the sum of their fixed lengths. The first marker is
+/// the envelope family (`SymmetricContext`, `ServerContext` or `HpkeContext`); an HPKE context
+/// adds its mode (`HpkeBaseContext` or `HpkePskContext`). The tests compare every context's
+/// bytes with the §8.4 layout.
 macro_rules! context {
     (
         $(#[$doc:meta])*
@@ -670,7 +760,10 @@ context! {
     /// u64 device_seq ‖ u64 hlc ‖ SHA-256(canonical op header)`.
     ///
     /// The canonical op header is defined by ADR 0012 §3; hash it with
-    /// [`ItemOpCtx::header_hash`].
+    /// [`ItemOpCtx::header_hash`]. Through the hash, every server-visible field of the op
+    /// header is bound, so an op moved to another item, vault or version fails to open
+    /// (INV-13). There is deliberately no `account_id`: vaults are shared between accounts in
+    /// M9 (§8.4).
     ItemOpCtx: ItemOp, SymmetricContext {
         /// The vault.
         vault_id: VaultId,
@@ -694,6 +787,9 @@ context! {
 context! {
     /// `ITEM_SNAPSHOT`: `vault_id ‖ item_id ‖ u16 item_schema_version ‖ snapshot_id ‖
     /// SHA-256(canonical snapshot header)`.
+    ///
+    /// The snapshot header (ADR 0012 §3) covers the version vector and the author
+    /// `device_id`; hash it with [`ItemSnapshotCtx::header_hash`] (INV-13).
     ItemSnapshotCtx: ItemSnapshot, SymmetricContext {
         /// The vault.
         vault_id: VaultId,
@@ -762,6 +858,9 @@ context! {
 
 impl ItemOpCtx {
     /// `SHA-256(canonical op header)` for [`ItemOpCtx::op_header_hash`].
+    ///
+    /// The input must be the canonical encoding of ADR 0012 §3, not a serde form; this
+    /// function only hashes what it is given.
     #[must_use]
     pub fn header_hash(canonical_op_header: &[u8]) -> [u8; 32] {
         Sha256::digest(canonical_op_header).into()
@@ -770,6 +869,8 @@ impl ItemOpCtx {
 
 impl ItemSnapshotCtx {
     /// `SHA-256(canonical snapshot header)` for [`ItemSnapshotCtx::snapshot_header_hash`].
+    ///
+    /// As for ops, the input must be the canonical encoding of ADR 0012 §3.
     #[must_use]
     pub fn header_hash(canonical_snapshot_header: &[u8]) -> [u8; 32] {
         Sha256::digest(canonical_snapshot_header).into()

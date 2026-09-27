@@ -1,5 +1,23 @@
 //! Password and passphrase generator (CRYPTO.md §12.1 "Password generator (M1)", §12.3).
 //!
+//! Two modes. [`generate_password`] draws `length` characters from the alphabet that the
+//! enabled character classes make up ([`CharacterOptions`]). [`generate_passphrase`] draws
+//! `words` words from the embedded wordlist and joins them with a separator
+//! ([`PassphraseOptions`]). Both take the caller's CSPRNG (§12.1: `rizzy-core` reaches no
+//! randomness source itself) and return a [`Generated`] value with its entropy. The options'
+//! `entropy_bits` methods give the same number before generating, for the UI.
+//!
+//! Character mode, step by step:
+//! 1. Check the options and build the alphabet: the enabled classes in the fixed order
+//!    lowercase, uppercase, digits, symbols, minus [`AMBIGUOUS`] if asked.
+//! 2. Draw each position as a uniform index into the alphabet, read the character with a
+//!    constant-time scan, and note in constant time which class the index falls in.
+//! 3. If a required class is missing, discard the whole candidate and start again.
+//!
+//! Passphrase mode draws each word as a uniform index into the 7,776-word list, copies it
+//! into a fixed-width slot with a constant-time scan, and assembles the result with the
+//! two-pass layout described below.
+//!
 //! - **Uniform draws.** Every character and word is drawn uniformly from the injected CSPRNG by
 //!   rejection sampling: a 32-bit draw is masked to the next power of two above the set size and
 //!   redrawn when it falls outside. There is no `%` on raw random bytes.
@@ -25,6 +43,30 @@
 //!   result's length reveals anyway.
 //! - **Allocation.** Every secret buffer is allocated once at its final capacity and never
 //!   grows (§12.2): a passphrase's at the fixed-width size, then truncated in place.
+//!
+//! # Attacker model
+//!
+//! What this module defends against:
+//! - **Bias.** Masked rejection sampling and whole-candidate rejection keep the result uniform
+//!   over the reported space, so the entropy figure is exact, not an estimate. Unit tests
+//!   check the distributions with a chi-square bound.
+//! - **Timing and cache side channels** on the chosen characters and words, as described
+//!   above.
+//! - **Leftover copies and logs.** Buffers are wiped on drop and never reallocated, and
+//!   `Debug` on [`Generated`] prints `[REDACTED]`.
+//! - **Ambiguous passphrases.** The separator may not be a letter or `-`, the only
+//!   characters words contain, so every passphrase splits back into exactly one word
+//!   sequence and the reported space is the real one.
+//!
+//! What it does not do:
+//! - **Judge the RNG.** The output is only as unpredictable as the injected RNG. An RNG that
+//!   rejects implausibly often is reported ([`GeneratorError::RngExhausted`]); a predictable
+//!   one is not detected.
+//! - **Protect the value after it leaves.** [`Generated::expose_secret`] returns a borrowed
+//!   `&str`; a copy the caller makes (a UI string, the clipboard) is outside this crate's
+//!   wiping (§12.2 Limits).
+//! - **Add entropy from formatting.** The separator and capitalisation are fixed by the
+//!   options, so they add nothing, and the entropy figure does not count them.
 
 pub mod wordlist;
 
@@ -166,19 +208,29 @@ impl Default for PassphraseOptions {
 }
 
 /// A generated password or passphrase, wiped on drop, with its entropy.
+///
+/// A generated value is a secret (CRYPTO.md §12.1): the type has no `Clone` and no `Display`,
+/// and `Debug` prints `[REDACTED]` for the value and shows only the entropy.
 pub struct Generated {
+    /// The password or passphrase, ASCII only, wiped on drop.
     value: Zeroizing<String>,
+    /// `log2` of the number of values it was drawn from, uniformly. Public.
     entropy_bits: f64,
 }
 
 impl Generated {
     /// The password or passphrase.
+    ///
+    /// The explicit name marks every place the secret leaves its wrapper (§12.2). A copy the
+    /// caller makes is not wiped by this crate.
     #[must_use]
     pub fn expose_secret(&self) -> &str {
         &self.value
     }
 
     /// `log2` of the size of the space it was drawn from, uniformly.
+    ///
+    /// This is what the UI reports (§12.1). It assumes the injected RNG is a CSPRNG.
     #[must_use]
     pub const fn entropy_bits(&self) -> f64 {
         self.entropy_bits
@@ -197,14 +249,24 @@ impl fmt::Debug for Generated {
 /// The alphabet of one request: the enabled classes, concatenated in a fixed order, with each
 /// class's index range. Public (it depends only on the options).
 struct Alphabet {
+    /// The characters, in the first `len` bytes; room for all 94 (26 + 26 + 10 + 32).
     chars: [u8; 94],
+    /// How many bytes of `chars` are in use.
     len: u32,
     /// `(start, end, required)` per enabled class, as indices into `chars`.
     classes: [(u32, u32, bool); 4],
+    /// How many entries of `classes` are in use.
     class_count: usize,
 }
 
 impl Alphabet {
+    /// Builds the alphabet for `options`: each class not [`ClassRule::Excluded`], in the fixed
+    /// order lowercase, uppercase, digits, symbols, without [`AMBIGUOUS`] characters if
+    /// requested. The class ranges are contiguous and do not overlap.
+    ///
+    /// # Errors
+    /// [`GeneratorError::NoClasses`] if no character is left. The other `NoClasses` returns
+    /// cannot happen: 94 characters and 4 classes always fit.
     fn new(options: &CharacterOptions) -> Result<Self, GeneratorError> {
         let mut alphabet = Self {
             chars: [0; 94],
@@ -222,6 +284,7 @@ impl Alphabet {
                 continue;
             }
             let start = alphabet.len;
+            // The options and the character sets are public, so this loop may branch freely.
             for &c in set {
                 if options.exclude_ambiguous && AMBIGUOUS.contains(&c) {
                     continue;
@@ -246,22 +309,32 @@ impl Alphabet {
         Ok(alphabet)
     }
 
+    /// The characters in use, `chars[..len]`.
     fn chars(&self) -> &[u8] {
         self.chars
             .get(..usize::try_from(self.len).unwrap_or(0))
             .unwrap_or_default()
     }
 
+    /// The enabled classes, `classes[..class_count]`.
     fn classes(&self) -> &[(u32, u32, bool)] {
         self.classes.get(..self.class_count).unwrap_or_default()
     }
 
+    /// How many enabled classes are [`ClassRule::Required`].
     fn required_count(&self) -> usize {
         self.classes().iter().filter(|c| c.2).count()
     }
 }
 
 impl CharacterOptions {
+    /// Validates the options and builds their alphabet: the length must be in
+    /// [`MIN_LENGTH`]..=[`MAX_LENGTH`], at least one character must remain, and there must
+    /// be no more required classes than characters (otherwise no candidate could pass).
+    ///
+    /// # Errors
+    /// [`GeneratorError::InvalidLength`], [`GeneratorError::NoClasses`] or
+    /// [`GeneratorError::TooManyRequiredClasses`].
     fn checked_alphabet(&self) -> Result<Alphabet, GeneratorError> {
         if !(MIN_LENGTH..=MAX_LENGTH).contains(&self.length) {
             return Err(GeneratorError::InvalidLength);
@@ -296,6 +369,9 @@ fn character_entropy(alphabet: &Alphabet, length: usize) -> f64 {
         .filter(|c| c.2)
         .map(|c| f64::from(c.1 - c.0))
         .collect();
+    // `fraction` is the share of all `N^L` strings that contain every required class, a value
+    // in (0, 1]; each subset `S` of the required classes adds or removes the strings that
+    // avoid every class in `S`.
     let mut fraction = 0.0f64;
     for subset in 0u32..(1 << required.len()) {
         let excluded: f64 = required
@@ -315,6 +391,15 @@ fn character_entropy(alphabet: &Alphabet, length: usize) -> f64 {
 }
 
 impl PassphraseOptions {
+    /// Validates the options and returns the separator as its ASCII byte.
+    ///
+    /// The word count must be in [`MIN_WORDS`]..=[`MAX_WORDS`]. The separator must be
+    /// printable ASCII (space to `~`), not a letter and not `-`: words consist of lowercase
+    /// letters and `-`, so any other separator keeps the passphrase splittable into exactly
+    /// one word sequence, and a non-zero byte keeps the compaction pass correct.
+    ///
+    /// # Errors
+    /// [`GeneratorError::InvalidWordCount`] or [`GeneratorError::InvalidSeparator`].
     fn check(&self) -> Result<u8, GeneratorError> {
         if !(MIN_WORDS..=MAX_WORDS).contains(&self.words) {
             return Err(GeneratorError::InvalidWordCount);
@@ -336,6 +421,9 @@ impl PassphraseOptions {
     }
 }
 
+/// `words × log2(7776)`: each word is an independent uniform choice from the list. The
+/// separator and capitalisation are fixed by the options and add nothing. `words` is already
+/// checked to be at most [`MAX_WORDS`], so the conversions cannot fail.
 fn passphrase_entropy(words: usize) -> f64 {
     let words = u32::try_from(words).unwrap_or(0);
     let count = u32::try_from(wordlist::WORD_COUNT).unwrap_or(0);
@@ -343,10 +431,20 @@ fn passphrase_entropy(words: usize) -> f64 {
 }
 
 /// Draws a uniform index in `0..n` by masked rejection sampling (no `%`).
+///
+/// A 32-bit draw is masked into `0..2^k`, where `2^k` is the smallest power of two `≥ n`, so
+/// every masked value is equally likely, and a value `≥ n` is thrown away and redrawn. Each draw is accepted with
+/// probability above 1/2, so [`MAX_DRAWS`] failures in a row mean a broken RNG. The only
+/// branch is on accept or reject, which says nothing about the accepted value.
+///
+/// # Errors
+/// [`GeneratorError::NoClasses`] for `n = 0`, [`GeneratorError::RngExhausted`] after
+/// [`MAX_DRAWS`] rejections.
 fn uniform_index<R: CryptoRng + ?Sized>(rng: &mut R, n: u32) -> Result<u32, GeneratorError> {
     if n == 0 {
         return Err(GeneratorError::NoClasses);
     }
+    // The smallest `2^k - 1 ≥ n - 1`; `u32::MAX` when `2^k` would not fit in a `u32`.
     let mask = n.checked_next_power_of_two().map_or(u32::MAX, |p| p - 1);
     for _ in 0..MAX_DRAWS {
         let x = rng.next_u32() & mask;
@@ -358,6 +456,9 @@ fn uniform_index<R: CryptoRng + ?Sized>(rng: &mut R, n: u32) -> Result<u32, Gene
 }
 
 /// `set[index]`, read by scanning every element and selecting in constant time.
+///
+/// Every element is read once whatever `index` is, so neither the memory access pattern nor
+/// the timing depends on the secret index (§12.3). An index past the end yields 0.
 fn ct_select(set: &[u8], index: u32) -> u8 {
     let mut out = 0u8;
     for (i, c) in (0u32..).zip(set) {
@@ -367,6 +468,13 @@ fn ct_select(set: &[u8], index: u32) -> u8 {
 }
 
 /// Generates a password in character mode.
+///
+/// The result is uniform over the strings of `options.length` characters from the enabled
+/// classes that contain at least one character of each required class, and its entropy is
+/// `log2` of their number ([`CharacterOptions::entropy_bits`]). Each candidate is drawn in
+/// full and kept or discarded as a whole; positions are never patched to satisfy a class.
+///
+/// `rng` must be a CSPRNG; the platform crates pass one backed by the OS (§12.1).
 ///
 /// # Errors
 /// [`GeneratorError`] for invalid options, or [`GeneratorError::RngExhausted`] if the injected
@@ -379,15 +487,20 @@ pub fn generate_password<R: CryptoRng + ?Sized>(
     let chars = alphabet.chars();
     let mut buf = Zeroizing::new(vec![0u8; options.length]);
     for _ in 0..MAX_CANDIDATES {
+        // `present[k]` becomes 1 once a character of enabled class `k` is drawn.
         let mut present = [Choice::from(0); 4];
         for slot in buf.iter_mut() {
             let mut index = uniform_index(rng, alphabet.len)?;
             *slot = ct_select(chars, index);
+            // Class membership from the index, `start ≤ index < end`, with constant-time
+            // comparisons against every class's range.
             for (seen, (start, end, _)) in present.iter_mut().zip(alphabet.classes()) {
                 *seen |= !index.ct_lt(start) & index.ct_lt(end);
             }
             index.zeroize();
         }
+        // Every required class seen; classes that are only included count as satisfied.
+        // A rejected candidate is overwritten in place by the next one.
         let mut all_required = Choice::from(1);
         for (seen, (_, _, required)) in present.iter().zip(alphabet.classes()) {
             all_required &= *seen | Choice::from(u8::from(!*required));
@@ -404,6 +517,15 @@ pub fn generate_password<R: CryptoRng + ?Sized>(
 }
 
 /// Generates a passphrase from the embedded wordlist.
+///
+/// `options.words` words are drawn independently and uniformly from the
+/// [`wordlist::WORD_COUNT`] words of [`wordlist::NAME`], joined by the separator, with the
+/// first letter of each word uppercased if `capitalize` is set. The entropy is
+/// `words × log2(7776)` ([`PassphraseOptions::entropy_bits`]). The assembly's memory access
+/// pattern depends only on the word count (see the module documentation); the total length
+/// of the result is not hidden.
+///
+/// `rng` must be a CSPRNG; the platform crates pass one backed by the OS (§12.1).
 ///
 /// # Errors
 /// [`GeneratorError`] for invalid options, or [`GeneratorError::RngExhausted`] if the injected
