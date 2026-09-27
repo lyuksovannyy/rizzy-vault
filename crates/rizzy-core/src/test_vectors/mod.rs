@@ -40,6 +40,7 @@ mod derivations;
 )]
 mod encodings;
 mod envelopes;
+mod items;
 mod statements;
 mod transcript;
 
@@ -84,7 +85,7 @@ struct VectorFile {
     contents: &'static [(&'static str, &'static str, usize)],
 }
 
-const FILES: [VectorFile; 5] = [
+const FILES: [VectorFile; 6] = [
     VectorFile {
         name: "derivations",
         tier: "A",
@@ -191,6 +192,26 @@ const FILES: [VectorFile; 5] = [
         ],
     },
     VectorFile {
+        name: "items",
+        tier: "A",
+        spec: "ADR 0018 §6, §7, §10 (the schema layer: values, field keys, tag keys); CRYPTO.md §15 item 1",
+        seed: 0x0018,
+        committed: include_str!("../../tests/vectors/items.json"),
+        generate: items::generate,
+        compute: items::compute,
+        check_file: |_| {},
+        // ADR 0018 §6 values (every type, and unsupported ones), §7 and §10 keys (accepted and
+        // rejected, with the four rejections §12 names) and §7 tag keys.
+        contents: &[
+            ("item", "value", 15),
+            ("item", "value/unsupported", 14),
+            ("item", "field-key", 14),
+            ("item", "field-key/reject", 16),
+            ("item", "tag-key", 8),
+            ("item", "tag-key/reject", 5),
+        ],
+    },
+    VectorFile {
         name: "transcript",
         tier: "B",
         spec: "CRYPTO.md §5, §11.1, §11.2, §11.3, §15 item 1 (B)",
@@ -208,7 +229,7 @@ const FILES: [VectorFile; 5] = [
 struct Vector {
     /// `<kind>/<name>/<index>`, unique within its file.
     id: String,
-    /// The group: `derivation`, `envelope`, `statement`, `encoding`, `padding` or
+    /// The group: `derivation`, `envelope`, `statement`, `encoding`, `padding`, `item` or
     /// `transcript`.
     kind: String,
     /// The §4.3 label, §8.4 purpose, §10.2 statement type or encoding the vector exercises;
@@ -517,6 +538,11 @@ fn replay_statements() {
 #[test]
 fn replay_encodings() {
     replay(file("encodings"));
+}
+
+#[test]
+fn replay_items() {
+    replay(file("items"));
 }
 
 #[test]

@@ -374,9 +374,12 @@ pub fn normalize_password(password: &str) -> Result<SecretBytes, KdfError> {
 /// reallocation leaves a partial copy behind (CRYPTO.md §12.2, "Secret `Vec`s are allocated at
 /// their final capacity"). The caller wraps the result in a wiping type at once.
 ///
+/// Also the one NFC implementation behind tag keys (ADR 0018 §7, [`crate::item::tag`]), so a
+/// tag name and a password are normalised by the same pinned tables.
+///
 /// # Errors
 /// [`KdfError::InvalidInput`] if the normalised length overflows `usize`.
-fn nfc_utf8(text: &str) -> Result<Vec<u8>, KdfError> {
+pub(crate) fn nfc_utf8(text: &str) -> Result<Vec<u8>, KdfError> {
     // First pass: the exact output length, so the buffer never reallocates. NFC can expand
     // text (for example U+0344 becomes U+0308 U+0301), so the input length is not enough.
     let len = text

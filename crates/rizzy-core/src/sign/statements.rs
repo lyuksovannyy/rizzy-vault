@@ -22,8 +22,11 @@
 //! the op and snapshot record formats in `rizzy-sync`. This module therefore takes each header
 //! as an opaque canonical byte string. It only bounds its length by the ADR 0012 layout: the
 //! fixed part (97 bytes for an op, 73 for a snapshot) plus at most `u16::MAX` version-vector
-//! entries of 24 bytes. The caller (`rizzy-sync`) parses the header and picks the verifying key
-//! from the certificate of the device the header names.
+//! entries of 24 bytes. No header field is read before the signature is checked: the caller
+//! picks the verifying key from the device certificate that the container's signer key id (or
+//! the session) names, verifies, parses the verified header strictly with `rizzy-sync`
+//! (`header::OpHeader::parse_statement` or `header::SnapshotHeader::parse_statement`), and
+//! then checks that the device the header names is that certificate's device.
 //!
 //! **Rules checked here.** Each statement's field rules run both when signing and when
 //! verifying, so a conforming writer never produces what a verifier rejects:

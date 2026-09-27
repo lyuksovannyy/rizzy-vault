@@ -33,15 +33,16 @@
 //! secret types, the RNG bound, identifiers, the KDF table and Argon2id, the symmetric
 //! committing envelope with its purpose registry, and Padmé framing. On it sit the HPKE
 //! envelopes, the Ed25519 signed statements and the key hierarchy, the OPAQUE wrapper with the
-//! Secret Key and recovery code, server-side sealing, the encrypted export, TOTP and the
-//! password generator.
+//! Secret Key and recovery code, server-side sealing, the encrypted export, TOTP, the
+//! password generator, and the item schema: the schema layer of the item record ([ADR 0018]
+//! §2), with the M1 item types, field keys, values and display rules.
 //!
-//! Not here yet: the item schema and item-record encoding (ADR 0018, still Proposed), the
-//! constructions of later milestones (shares, mail), and pairing and relay (reserved,
-//! On-device parked (ADR 0022)). Their envelope purposes are registered so their ids stay
-//! reserved, but they have no context type, so nothing can seal or open them until their
-//! milestone, or the ADR that revives On-device mode, defines the layout
-//! ([`envelope::purpose`]).
+//! Not here: the record layer of the item record (ADR 0018 §3–§5: op, snapshot and tombstone
+//! data), which is `rizzy-sync`'s. Not here yet: the constructions of later milestones
+//! (shares, mail), and pairing and relay (reserved, On-device parked (ADR 0022)). Their
+//! envelope purposes are registered so their ids stay reserved, but they have no context type,
+//! so nothing can seal or open them until their milestone, or the ADR that revives On-device
+//! mode, defines the layout ([`envelope::purpose`]).
 //!
 //! # Conventions
 //!
@@ -72,10 +73,10 @@
 //!   check failed" oracle (§9.5, §12.3). No error, and no `Debug` output, carries key material,
 //!   plaintext or anything derived from a secret.
 //! - **Untrusted input is bounded.** Parsers of envelopes, signed statements, Secret Keys and
-//!   recovery codes, Padmé frames, otpauth URIs, login names, origins and the server-side
-//!   OPAQUE messages check lengths before reading, never panic, and never allocate in
-//!   proportion to a length field ([`encoding::Reader`]). Each of these has a fuzz target under
-//!   `fuzz/` (§15 item 7).
+//!   recovery codes, Padmé frames, otpauth URIs, login names, origins, item values and field
+//!   keys, and the server-side OPAQUE messages check lengths before reading, never panic, and
+//!   never allocate in proportion to a length field ([`encoding::Reader`]). Each of these has a
+//!   fuzz target under `fuzz/` (§15 item 7).
 //! - **Constant time** (§12.3). Every comparison of secret or secret-derived bytes uses
 //!   `subtle::ConstantTimeEq` (`ct_eq` in the spec): envelope commitments, Secret Key and
 //!   recovery-code check values, the recovery token hash, fingerprints, TOTP codes. `==` on
@@ -99,16 +100,16 @@
 //!   there is never a fallback to a legacy path.
 //! - **Known-answer vectors** (§15 item 1). The JSON files under `tests/vectors/` hold the
 //!   normative format vectors (tier A: the M1 derivations, envelope purposes and signed
-//!   statements, and the Secret Key, recovery-code and Padmé encodings) and a signup → login →
-//!   unlock transcript (tier B). The test-only `test_vectors` module
-//!   replays every file byte for byte on each `cargo test`, and rebuilds hidden outputs (the
-//!   commitment, the signed message) from the CRYPTO.md formulas. Its generator draws inputs
-//!   from a seeded `ChaCha20Rng`; the random values an operation draws internally, such as the
-//!   envelope nonce, are drawn first, stored as inputs and fed back through the RNG, so tests
-//!   too never pass a nonce. A crypto change needs vectors (CLAUDE.md); changing a tier A
-//!   vector needs a version bump and an ADR note. Upstream vectors (RFCs), property tests and
-//!   the test-only hooks that prove the §9.5 checks fail before any crypto live in the module
-//!   tests.
+//!   statements, the Secret Key, recovery-code and Padmé encodings, and the item values, field
+//!   keys and tag keys of [ADR 0018]) and a signup → login → unlock transcript (tier B). The
+//!   test-only `test_vectors` module replays every file byte for byte on each `cargo test`,
+//!   and rebuilds hidden outputs (the commitment, the signed message) from the CRYPTO.md
+//!   formulas. Its generator draws inputs from a seeded `ChaCha20Rng`; the random values an
+//!   operation draws internally, such as the envelope nonce, are drawn first, stored as inputs
+//!   and fed back through the RNG, so tests too never pass a nonce. A crypto change needs
+//!   vectors (CLAUDE.md); changing a tier A vector needs a version bump and an ADR note.
+//!   Upstream vectors (RFCs), property tests and the test-only hooks that prove the §9.5 checks
+//!   fail before any crypto live in the module tests.
 //!
 //! # Module map
 //!
@@ -133,10 +134,12 @@
 //! | [`export`] | §11.14 | The export file key and the `EXPORT_FILE` envelope with its header fields | A separate export password, no Secret Key; the header fields rebuild the key and the context, so a changed header fails to open |
 //! | [`totp`] | §11.15 | HOTP/TOTP, otpauth URIs, server-side verification | Allow-lists for algorithm, digits and period, rejected never clamped; no clock; verification accepts ±1 step, refuses replays and compares with `ct_eq` |
 //! | [`generator`] | §12.1, §12.3 | Password and passphrase generator with the embedded EFF wordlist | Uniform rejection sampling from the injected CSPRNG; required classes by redrawing whole candidates; constant-time selection; entropy of the space actually sampled |
+//! | [`item`] | §8.4 "Op and snapshot plaintexts"; [ADR 0018] §2, §6–§11 | The item schema: item types, the field-key grammar, tag keys, value types with their decoder and encoder, the key registry and writer checks, display rules, item times, list order and sort keys | An invalid value never rejects a record, it shows as unsupported; unknown keys and types are carried, and a writer never invents a value for them; keys and values are zeroizing and never in `Debug`; the key grammar and value decoder never panic or allocate; one encoding per value |
 //!
 //! [ADR 0009]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0009-crypto-dependency-policy.md
 //! [ADR 0013]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0013-shared-client-core.md
 //! [ADR 0016]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0016-workspace-layout.md
+//! [ADR 0018]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0018-item-record-encoding.md
 
 // Also set by the workspace lint table (ADR 0016 R7); repeated here so that no manifest edit
 // alone admits `unsafe` in this crate.
@@ -151,6 +154,7 @@ pub mod export;
 pub mod generator;
 pub mod hpke;
 pub mod ids;
+pub mod item;
 pub mod kdf;
 pub mod keys;
 pub mod labels;

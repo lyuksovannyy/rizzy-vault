@@ -8,6 +8,7 @@ The committed vector files of [CRYPTO.md §15](../../../../docs/CRYPTO.md#15-tes
 | `envelopes.json` | A | One envelope for each M1 purpose of §8.4 (two for `ITEM_OP` and `ITEM_SNAPSHOT`), with the context bytes, AAD, `k_enc` and commitment; the HPKE PSK device grant with its PSK, `info` and AAD |
 | `statements.json` | A | Every §10.2 statement: the bundle chain (first, two-signature identity change, silent update), device certificates (kinds 1–4, and certificates re-issued under a new identity key), revocations, `account-state` at signup, after a standard rotation, after a full rotation (all three with `settings_seq = 0`) and with settings, `op` with and without an item-key wrap, `snapshot` with one, device-signed and identity-signed `key-grant`, `device-auth`, `device-request` |
 | `encodings.json` | A | Secret Key and recovery-code formatting with check values, lenient parsing, rejected inputs; Padmé lengths, frames and rejected frames (§7, §8.5) |
+| `items.json` | A | The schema layer of the item record ([ADR 0018](../../../../docs/adr/0018-item-record-encoding.md) §6, §7, §10): every value type encoded, and values a reader shows as unsupported; accepted field keys with their parts, and keys the grammar or the 160-byte limit rejects, among them the four §12 names; tag keys from names (NFC, no Cc, 1–64 bytes), and rejected names |
 | `transcript.json` | B | Signup → login → unlock at `kdf_id` 1 with `RizzySuiteV1`: every OPAQUE message, `E_srv`, `E_local` |
 
 ## Format
@@ -15,7 +16,7 @@ The committed vector files of [CRYPTO.md §15](../../../../docs/CRYPTO.md#15-tes
 Each file follows [`schema.json`](schema.json): `{schema, file, tier, spec, generator, seed, vectors}`, and each vector is `{id, kind, name, inputs, outputs}`.
 
 - `id` is `<kind>/<name>/<index>`.
-- `name` is the §4.3 label, the §8.4 purpose, the §10.2 statement type or the encoding.
+- `name` is the §4.3 label, the §8.4 purpose, the §10.2 statement type, the encoding, or the ADR 0018 rule (`value`, `field-key`, `tag-key`, each with its `/reject` or `/unsupported` variant).
 
 Values follow these rules:
 - Byte strings are lowercase hex.
@@ -38,11 +39,12 @@ The replay tests (`cargo test -p rizzy-core --lib test_vectors`) recompute every
 - every envelope opens again, and the typed wrap functions give the same bytes;
 - the commitment, AAD, signed messages and container bodies are rebuilt from the CRYPTO.md formulas and compared;
 - every statement verifies, and the bundles form a valid chain;
-- every formatted code parses back and decodes to the same bits.
+- every formatted code parses back and decodes to the same bits;
+- every item value is its type byte and its §2-encoded payload, decodes and encodes back to the same bytes, and every unsupported value is still carried verbatim; every accepted key rebuilds from its parts, and every tag key is `tag/` and the lowercase hex of the name that `unicode-normalization` normalises to NFC directly.
 
 A separate test regenerates every file from its seed and compares it with the committed file. That includes `derivations.json` and `transcript.json`, which run Argon2id.
 
-When the files were generated on 2026-09-25, a separate Python implementation written from CRYPTO.md recomputed every tier A output. It used Python `cryptography` 50.0.1, argon2-cffi 25.1.0, and a hand-written HChaCha20 and RFC 9180 implementation checked against the published test vectors. That script is not in the repository. The one vector added since, `padding/frame/reject/3` (2026-09-26), was not part of that cross-check. Tier B values come only from this implementation.
+When the files were generated on 2026-09-25, a separate Python implementation written from CRYPTO.md recomputed every tier A output then present. It used Python `cryptography` 50.0.1, argon2-cffi 25.1.0, and a hand-written HChaCha20 and RFC 9180 implementation checked against the published test vectors. That script is not in the repository. The vectors added since, `padding/frame/reject/3` (2026-09-26) and `items.json` (2026-09-27), were not part of that cross-check. Tier B values come only from this implementation.
 
 ## Changing a vector
 
@@ -63,5 +65,5 @@ cargo test -p rizzy-core --lib test_vectors::generate -- --ignored --exact
 
 - Constructions of M3 and M5: the local index key and shares. Those reserved, On-device parked ([ADR 0022](../../../../docs/adr/0022-server-mode-only.md)) get vectors with the ADR that revives them.
 - HPKE Base mode (`0x10`), which no M1 purpose uses.
-- The canonical op and snapshot headers (ADR 0012 §3) and the item-record encoding. Neither is implemented. The `op`, `snapshot` and `ITEM_OP`/`ITEM_SNAPSHOT` vectors carry placeholder bytes of a valid length in their place.
+- The canonical op and snapshot headers (ADR 0012 §3) and the item-record encoding (ADR 0018). Both are implemented in `rizzy-sync` (modules `header` and `record`), which `rizzy-core` cannot depend on. Their layout-level vectors are Rust test constants there, not files in this directory's schema. The `op` and `snapshot` vectors here still carry placeholder bytes of a valid length as `canonical_header`, which `rizzy-sync`'s header parser rejects, and the `ITEM_OP`/`ITEM_SNAPSHOT` vectors carry placeholder plaintexts and header hashes. Moving the vectors into this schema and regenerating these over real headers waits for an owner decision (CRYPTO.md §15 item 1).
 - Running these files on wasm32 and through UniFFI (§15 item 8).

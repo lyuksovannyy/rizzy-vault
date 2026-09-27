@@ -6,8 +6,10 @@
 //! a state signed by the new identity key), then a silent bundle update and a settings change.
 //! The rotation states keep `settings_seq = 0` (§11.6 step 3, §15 item 1).
 //!
-//! The `op` and `snapshot` vectors sign opaque header bytes of a valid length: the canonical
-//! op and snapshot headers are ADR 0012 §3's, and `rizzy-sync` does not encode them yet.
+//! The `op` and `snapshot` vectors sign opaque header bytes of a valid length, not canonical
+//! headers: the headers are ADR 0012 §3's, encoded by `rizzy-sync`, which this crate cannot
+//! depend on, and whose header parser rejects these bytes. Regenerating them over real headers
+//! waits for an owner decision (see `tests/vectors/README.md`, "Not covered yet").
 
 use chacha20::ChaCha20Rng;
 use serde_json::{Map, Value};

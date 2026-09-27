@@ -8,9 +8,10 @@
 //! through the typed wrap function too, and requires the same bytes from both.
 //!
 //! The plaintexts of `ITEM_OP`, `ITEM_SNAPSHOT`, `ACCOUNT_SETTINGS`, `EXPORT_FILE` and the
-//! server purposes are opaque placeholder bytes: the item-record encoding (ADR 0018, Proposed)
-//! and the other plaintext formats are not implemented yet, and the envelope does not look
-//! inside them.
+//! server purposes are opaque placeholder bytes, and so are the `ITEM_OP` and `ITEM_SNAPSHOT`
+//! header hashes. The item-record encoding (ADR 0018) and the canonical headers (ADR 0012 §3)
+//! are implemented in `rizzy-sync`, which this crate cannot depend on; the other plaintext
+//! formats are not implemented yet. The envelope does not look inside any of them.
 
 use chacha20::ChaCha20Rng;
 use chacha20poly1305::aead::{Aead as _, Payload};

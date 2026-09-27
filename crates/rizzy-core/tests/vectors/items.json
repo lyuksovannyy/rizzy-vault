@@ -1,0 +1,866 @@
+{
+  "file": "items",
+  "generator": "rand_core 0.10 ChaCha20Rng::seed_from_u64 (chacha20 =0.10.2)",
+  "schema": "rizzy-vault/test-vectors/v1",
+  "seed": "24",
+  "spec": "ADR 0018 §6, §7, §10 (the schema layer: values, field keys, tag keys); CRYPTO.md §15 item 1",
+  "tier": "A",
+  "vectors": [
+    {
+      "id": "item/value/0",
+      "inputs": {
+        "type": "cleared"
+      },
+      "kind": "item",
+      "name": "value",
+      "outputs": {
+        "encoded": ""
+      }
+    },
+    {
+      "id": "item/value/1",
+      "inputs": {
+        "text": "",
+        "type": "text"
+      },
+      "kind": "item",
+      "name": "value",
+      "outputs": {
+        "encoded": "01"
+      }
+    },
+    {
+      "id": "item/value/2",
+      "inputs": {
+        "text": "correct horse battery staple",
+        "type": "text"
+      },
+      "kind": "item",
+      "name": "value",
+      "outputs": {
+        "encoded": "01636f727265637420686f727365206261747465727920737461706c65"
+      }
+    },
+    {
+      "id": "item/value/3",
+      "inputs": {
+        "text": " été ",
+        "type": "text"
+      },
+      "kind": "item",
+      "name": "value",
+      "outputs": {
+        "encoded": "012065cc8174c3a920"
+      }
+    },
+    {
+      "id": "item/value/4",
+      "inputs": {
+        "text": "🔑 otpauth://totp/x",
+        "type": "text"
+      },
+      "kind": "item",
+      "name": "value",
+      "outputs": {
+        "encoded": "01f09f9491206f7470617574683a2f2f746f74702f78"
+      }
+    },
+    {
+      "id": "item/value/5",
+      "inputs": {
+        "payload": "766e25ff06495e817585672baf9ec39746c7ffa3e4741931b7d928643bd3b4ab",
+        "type": "bytes"
+      },
+      "kind": "item",
+      "name": "value",
+      "outputs": {
+        "encoded": "02766e25ff06495e817585672baf9ec39746c7ffa3e4741931b7d928643bd3b4ab"
+      }
+    },
+    {
+      "id": "item/value/6",
+      "inputs": {
+        "payload": "",
+        "type": "bytes"
+      },
+      "kind": "item",
+      "name": "value",
+      "outputs": {
+        "encoded": "02"
+      }
+    },
+    {
+      "id": "item/value/7",
+      "inputs": {
+        "bool": false,
+        "type": "bool"
+      },
+      "kind": "item",
+      "name": "value",
+      "outputs": {
+        "encoded": "0300"
+      }
+    },
+    {
+      "id": "item/value/8",
+      "inputs": {
+        "bool": true,
+        "type": "bool"
+      },
+      "kind": "item",
+      "name": "value",
+      "outputs": {
+        "encoded": "0301"
+      }
+    },
+    {
+      "id": "item/value/9",
+      "inputs": {
+        "type": "u64",
+        "u64": "11541656619056905797"
+      },
+      "kind": "item",
+      "name": "value",
+      "outputs": {
+        "encoded": "04a02c338b726c3e45"
+      }
+    },
+    {
+      "id": "item/value/10",
+      "inputs": {
+        "type": "u64",
+        "u64": "18446744073709551615"
+      },
+      "kind": "item",
+      "name": "value",
+      "outputs": {
+        "encoded": "04ffffffffffffffff"
+      }
+    },
+    {
+      "id": "item/value/11",
+      "inputs": {
+        "enum": 30258,
+        "type": "enum"
+      },
+      "kind": "item",
+      "name": "value",
+      "outputs": {
+        "encoded": "057632"
+      }
+    },
+    {
+      "id": "item/value/12",
+      "inputs": {
+        "enum": 61441,
+        "type": "enum"
+      },
+      "kind": "item",
+      "name": "value",
+      "outputs": {
+        "encoded": "05f001"
+      }
+    },
+    {
+      "id": "item/value/13",
+      "inputs": {
+        "payload": "80",
+        "type": "sort-key"
+      },
+      "kind": "item",
+      "name": "value",
+      "outputs": {
+        "encoded": "0680"
+      }
+    },
+    {
+      "id": "item/value/14",
+      "inputs": {
+        "payload": "06251610caf4af50f44b6ff9314fd3f640a21733",
+        "type": "sort-key"
+      },
+      "kind": "item",
+      "name": "value",
+      "outputs": {
+        "encoded": "0606251610caf4af50f44b6ff9314fd3f640a21733"
+      }
+    },
+    {
+      "id": "item/value/unsupported/0",
+      "inputs": {
+        "encoded": "00"
+      },
+      "kind": "item",
+      "name": "value/unsupported",
+      "outputs": {
+        "supported": false
+      }
+    },
+    {
+      "id": "item/value/unsupported/1",
+      "inputs": {
+        "encoded": "07c2eae8e6"
+      },
+      "kind": "item",
+      "name": "value/unsupported",
+      "outputs": {
+        "supported": false
+      }
+    },
+    {
+      "id": "item/value/unsupported/2",
+      "inputs": {
+        "encoded": "ff"
+      },
+      "kind": "item",
+      "name": "value/unsupported",
+      "outputs": {
+        "supported": false
+      }
+    },
+    {
+      "id": "item/value/unsupported/3",
+      "inputs": {
+        "encoded": "0161c3"
+      },
+      "kind": "item",
+      "name": "value/unsupported",
+      "outputs": {
+        "supported": false
+      }
+    },
+    {
+      "id": "item/value/unsupported/4",
+      "inputs": {
+        "encoded": "03"
+      },
+      "kind": "item",
+      "name": "value/unsupported",
+      "outputs": {
+        "supported": false
+      }
+    },
+    {
+      "id": "item/value/unsupported/5",
+      "inputs": {
+        "encoded": "0302"
+      },
+      "kind": "item",
+      "name": "value/unsupported",
+      "outputs": {
+        "supported": false
+      }
+    },
+    {
+      "id": "item/value/unsupported/6",
+      "inputs": {
+        "encoded": "030100"
+      },
+      "kind": "item",
+      "name": "value/unsupported",
+      "outputs": {
+        "supported": false
+      }
+    },
+    {
+      "id": "item/value/unsupported/7",
+      "inputs": {
+        "encoded": "0400000000000001"
+      },
+      "kind": "item",
+      "name": "value/unsupported",
+      "outputs": {
+        "supported": false
+      }
+    },
+    {
+      "id": "item/value/unsupported/8",
+      "inputs": {
+        "encoded": "04000000000000000100"
+      },
+      "kind": "item",
+      "name": "value/unsupported",
+      "outputs": {
+        "supported": false
+      }
+    },
+    {
+      "id": "item/value/unsupported/9",
+      "inputs": {
+        "encoded": "0501"
+      },
+      "kind": "item",
+      "name": "value/unsupported",
+      "outputs": {
+        "supported": false
+      }
+    },
+    {
+      "id": "item/value/unsupported/10",
+      "inputs": {
+        "encoded": "05000100"
+      },
+      "kind": "item",
+      "name": "value/unsupported",
+      "outputs": {
+        "supported": false
+      }
+    },
+    {
+      "id": "item/value/unsupported/11",
+      "inputs": {
+        "encoded": "06"
+      },
+      "kind": "item",
+      "name": "value/unsupported",
+      "outputs": {
+        "supported": false
+      }
+    },
+    {
+      "id": "item/value/unsupported/12",
+      "inputs": {
+        "encoded": "068000"
+      },
+      "kind": "item",
+      "name": "value/unsupported",
+      "outputs": {
+        "supported": false
+      }
+    },
+    {
+      "id": "item/value/unsupported/13",
+      "inputs": {
+        "encoded": "060101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101"
+      },
+      "kind": "item",
+      "name": "value/unsupported",
+      "outputs": {
+        "supported": false
+      }
+    },
+    {
+      "id": "item/field-key/0",
+      "inputs": {
+        "key": "item.type"
+      },
+      "kind": "item",
+      "name": "field-key",
+      "outputs": {
+        "attribute": null,
+        "element": null,
+        "kind": "fixed",
+        "list": null
+      }
+    },
+    {
+      "id": "item/field-key/1",
+      "inputs": {
+        "key": "login.password"
+      },
+      "kind": "item",
+      "name": "field-key",
+      "outputs": {
+        "attribute": null,
+        "element": null,
+        "kind": "fixed",
+        "list": null
+      }
+    },
+    {
+      "id": "item/field-key/2",
+      "inputs": {
+        "key": "login.totp"
+      },
+      "kind": "item",
+      "name": "field-key",
+      "outputs": {
+        "attribute": null,
+        "element": null,
+        "kind": "fixed",
+        "list": null
+      }
+    },
+    {
+      "id": "item/field-key/3",
+      "inputs": {
+        "key": "login.username"
+      },
+      "kind": "item",
+      "name": "field-key",
+      "outputs": {
+        "attribute": null,
+        "element": null,
+        "kind": "fixed",
+        "list": null
+      }
+    },
+    {
+      "id": "item/field-key/4",
+      "inputs": {
+        "key": "a.b"
+      },
+      "kind": "item",
+      "name": "field-key",
+      "outputs": {
+        "attribute": null,
+        "element": null,
+        "kind": "fixed",
+        "list": null
+      }
+    },
+    {
+      "id": "item/field-key/5",
+      "inputs": {
+        "key": "uri/f2c9d6fa6d5cd552410263e834e16b35/value"
+      },
+      "kind": "item",
+      "name": "field-key",
+      "outputs": {
+        "attribute": "value",
+        "element": "f2c9d6fa6d5cd552410263e834e16b35",
+        "kind": "element",
+        "list": "uri"
+      }
+    },
+    {
+      "id": "item/field-key/6",
+      "inputs": {
+        "key": "uri/f2c9d6fa6d5cd552410263e834e16b35/match"
+      },
+      "kind": "item",
+      "name": "field-key",
+      "outputs": {
+        "attribute": "match",
+        "element": "f2c9d6fa6d5cd552410263e834e16b35",
+        "kind": "element",
+        "list": "uri"
+      }
+    },
+    {
+      "id": "item/field-key/7",
+      "inputs": {
+        "key": "field/f2c9d6fa6d5cd552410263e834e16b35/order"
+      },
+      "kind": "item",
+      "name": "field-key",
+      "outputs": {
+        "attribute": "order",
+        "element": "f2c9d6fa6d5cd552410263e834e16b35",
+        "kind": "element",
+        "list": "field"
+      }
+    },
+    {
+      "id": "item/field-key/8",
+      "inputs": {
+        "key": "share/f2c9d6fa6d5cd552410263e834e16b35/secret"
+      },
+      "kind": "item",
+      "name": "field-key",
+      "outputs": {
+        "attribute": "secret",
+        "element": "f2c9d6fa6d5cd552410263e834e16b35",
+        "kind": "element",
+        "list": "share"
+      }
+    },
+    {
+      "id": "item/field-key/9",
+      "inputs": {
+        "key": "tag/61"
+      },
+      "kind": "item",
+      "name": "field-key",
+      "outputs": {
+        "attribute": null,
+        "element": "61",
+        "kind": "element",
+        "list": "tag"
+      }
+    },
+    {
+      "id": "item/field-key/10",
+      "inputs": {
+        "key": "tag/6162"
+      },
+      "kind": "item",
+      "name": "field-key",
+      "outputs": {
+        "attribute": null,
+        "element": "6162",
+        "kind": "element",
+        "list": "tag"
+      }
+    },
+    {
+      "id": "item/field-key/11",
+      "inputs": {
+        "key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b"
+      },
+      "kind": "item",
+      "name": "field-key",
+      "outputs": {
+        "attribute": null,
+        "element": null,
+        "kind": "fixed",
+        "list": null
+      }
+    },
+    {
+      "id": "item/field-key/12",
+      "inputs": {
+        "key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccccccccccccc.dddddddddddddddddddddddddddddddd.eeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "kind": "item",
+      "name": "field-key",
+      "outputs": {
+        "attribute": null,
+        "element": null,
+        "kind": "fixed",
+        "list": null
+      }
+    },
+    {
+      "id": "item/field-key/13",
+      "inputs": {
+        "key": "x/7dab23448af556fa3408a988772e7c4091fc04abb7a061dfc27b6fe1a44019a223a20a79a5cce1a0a452d8308ac47d8ca705d7b480fa04d4d48ea3b2ce76ed9e"
+      },
+      "kind": "item",
+      "name": "field-key",
+      "outputs": {
+        "attribute": null,
+        "element": "7dab23448af556fa3408a988772e7c4091fc04abb7a061dfc27b6fe1a44019a223a20a79a5cce1a0a452d8308ac47d8ca705d7b480fa04d4d48ea3b2ce76ed9e",
+        "kind": "element",
+        "list": "x"
+      }
+    },
+    {
+      "id": "item/field-key/reject/0",
+      "inputs": {
+        "key": "7572692f6162632f76616c7565"
+      },
+      "kind": "item",
+      "name": "field-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "item/field-key/reject/1",
+      "inputs": {
+        "key": "6161616161616161616161616161616161616161616161616161616161616161612e62"
+      },
+      "kind": "item",
+      "name": "field-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "item/field-key/reject/2",
+      "inputs": {
+        "key": "7572692f46324339443646413644354344353532343130323633453833344531364233352f76616c7565"
+      },
+      "kind": "item",
+      "name": "field-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "item/field-key/reject/3",
+      "inputs": {
+        "key": "61616161616161616161616161616161616161616161616161616161616161612e62626262626262626262626262626262626262626262626262626262626262622e63636363636363636363636363636363636363636363636363636363636363632e64646464646464646464646464646464646464646464646464646464646464642e6565656565656565656565656565656565656565656565656565656565"
+      },
+      "kind": "item",
+      "name": "field-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "item/field-key/reject/4",
+      "inputs": {
+        "key": ""
+      },
+      "kind": "item",
+      "name": "field-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "item/field-key/reject/5",
+      "inputs": {
+        "key": "406c6966656379636c65"
+      },
+      "kind": "item",
+      "name": "field-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "item/field-key/reject/6",
+      "inputs": {
+        "key": "6e6f746573"
+      },
+      "kind": "item",
+      "name": "field-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "item/field-key/reject/7",
+      "inputs": {
+        "key": "4c6f67696e2e70617373776f7264"
+      },
+      "kind": "item",
+      "name": "field-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "item/field-key/reject/8",
+      "inputs": {
+        "key": "612e2e62"
+      },
+      "kind": "item",
+      "name": "field-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "item/field-key/reject/9",
+      "inputs": {
+        "key": "31612e62"
+      },
+      "kind": "item",
+      "name": "field-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "item/field-key/reject/10",
+      "inputs": {
+        "key": "7461672f"
+      },
+      "kind": "item",
+      "name": "field-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "item/field-key/reject/11",
+      "inputs": {
+        "key": "612f30302f622f63"
+      },
+      "kind": "item",
+      "name": "field-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "item/field-key/reject/12",
+      "inputs": {
+        "key": "612e622f3030"
+      },
+      "kind": "item",
+      "name": "field-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "item/field-key/reject/13",
+      "inputs": {
+        "key": "c3a92e62"
+      },
+      "kind": "item",
+      "name": "field-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "item/field-key/reject/14",
+      "inputs": {
+        "key": "612e6200"
+      },
+      "kind": "item",
+      "name": "field-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "item/field-key/reject/15",
+      "inputs": {
+        "key": "782f61626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162"
+      },
+      "kind": "item",
+      "name": "field-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "item/tag-key/0",
+      "inputs": {
+        "name": "a"
+      },
+      "kind": "item",
+      "name": "tag-key",
+      "outputs": {
+        "key": "tag/61",
+        "normalized": "61"
+      }
+    },
+    {
+      "id": "item/tag-key/1",
+      "inputs": {
+        "name": "ab"
+      },
+      "kind": "item",
+      "name": "tag-key",
+      "outputs": {
+        "key": "tag/6162",
+        "normalized": "6162"
+      }
+    },
+    {
+      "id": "item/tag-key/2",
+      "inputs": {
+        "name": "Work/Email"
+      },
+      "kind": "item",
+      "name": "tag-key",
+      "outputs": {
+        "key": "tag/576f726b2f456d61696c",
+        "normalized": "576f726b2f456d61696c"
+      }
+    },
+    {
+      "id": "item/tag-key/3",
+      "inputs": {
+        "name": "é"
+      },
+      "kind": "item",
+      "name": "tag-key",
+      "outputs": {
+        "key": "tag/c3a9",
+        "normalized": "c3a9"
+      }
+    },
+    {
+      "id": "item/tag-key/4",
+      "inputs": {
+        "name": "é"
+      },
+      "kind": "item",
+      "name": "tag-key",
+      "outputs": {
+        "key": "tag/c3a9",
+        "normalized": "c3a9"
+      }
+    },
+    {
+      "id": "item/tag-key/5",
+      "inputs": {
+        "name": "ﬁ"
+      },
+      "kind": "item",
+      "name": "tag-key",
+      "outputs": {
+        "key": "tag/efac81",
+        "normalized": "efac81"
+      }
+    },
+    {
+      "id": "item/tag-key/6",
+      "inputs": {
+        "name": "🔑 keys"
+      },
+      "kind": "item",
+      "name": "tag-key",
+      "outputs": {
+        "key": "tag/f09f9491206b657973",
+        "normalized": "f09f9491206b657973"
+      }
+    },
+    {
+      "id": "item/tag-key/7",
+      "inputs": {
+        "name": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      "kind": "item",
+      "name": "tag-key",
+      "outputs": {
+        "key": "tag/7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a",
+        "normalized": "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+      }
+    },
+    {
+      "id": "item/tag-key/reject/0",
+      "inputs": {
+        "name": ""
+      },
+      "kind": "item",
+      "name": "tag-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "item/tag-key/reject/1",
+      "inputs": {
+        "name": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      "kind": "item",
+      "name": "tag-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "item/tag-key/reject/2",
+      "inputs": {
+        "name": "a\u0007"
+      },
+      "kind": "item",
+      "name": "tag-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "item/tag-key/reject/3",
+      "inputs": {
+        "name": ""
+      },
+      "kind": "item",
+      "name": "tag-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    },
+    {
+      "id": "item/tag-key/reject/4",
+      "inputs": {
+        "name": "̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́̈́"
+      },
+      "kind": "item",
+      "name": "tag-key/reject",
+      "outputs": {
+        "accepted": false
+      }
+    }
+  ]
+}

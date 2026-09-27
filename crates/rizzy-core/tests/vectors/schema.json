@@ -8,7 +8,7 @@
   "additionalProperties": false,
   "properties": {
     "schema": { "const": "rizzy-vault/test-vectors/v1" },
-    "file": { "enum": ["derivations", "envelopes", "statements", "encodings", "transcript"] },
+    "file": { "enum": ["derivations", "envelopes", "statements", "encodings", "items", "transcript"] },
     "tier": {
       "description": "A: normative format vectors. B: transcript regression vectors.",
       "enum": ["A", "B"]
@@ -43,11 +43,11 @@
           "pattern": "^[A-Za-z0-9._/-]+$"
         },
         "kind": {
-          "enum": ["derivation", "envelope", "statement", "encoding", "padding", "transcript"]
+          "enum": ["derivation", "envelope", "statement", "encoding", "padding", "item", "transcript"]
         },
         "name": {
           "type": "string",
-          "description": "The §4.3 label, the §8.4 purpose name, the §10.2 statement type, or the encoding."
+          "description": "The §4.3 label, the §8.4 purpose name, the §10.2 statement type, the encoding, or the ADR 0018 item-schema rule."
         },
         "inputs": { "type": "object", "additionalProperties": { "$ref": "#/$defs/value" } },
         "outputs": { "type": "object", "additionalProperties": { "$ref": "#/$defs/value" } }
