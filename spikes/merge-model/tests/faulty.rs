@@ -360,3 +360,101 @@ fn two_author_rule_deletes_only_behind_two_authors() {
     assert_eq!(authors.len(), 2);
     assert!(s.violations.is_empty(), "{:?}", s.violations);
 }
+
+/// A two-author server holding ops 0.1-0.3 of device 0, then the given snapshots in store order,
+/// each `(author, n, k)` covering ops 0.1 to 0.k.
+fn two_author_server(ops: &[Op; 3], snaps: &[(u8, u32, usize)]) -> Server {
+    let mut s = Server {
+        rule: ServerRule::TwoAuthors,
+        ..Server::default()
+    };
+    for o in ops {
+        assert_eq!(s.upload_op(o, 0), merge_model::server::UpRes::Stored);
+    }
+    for &(author, n, k) in snaps {
+        let st = truth(&ops[..k].iter().collect::<Vec<_>>());
+        assert_eq!(
+            s.upload_snap(&snap(author, n, st, true), author),
+            merge_model::server::UpRes::Stored
+        );
+    }
+    s
+}
+
+fn bodiless(s: &Server) -> Vec<Dot> {
+    s.ops
+        .iter()
+        .filter(|(_, o)| o.b.is_none())
+        .map(|(d, _)| *d)
+        .collect()
+}
+
+/// ADR 0021 §3 R1 and §8 properties 4 and 5 in their two-author form
+/// (`Server::check_two_author_props`). A linear history: S_d and S_a (author 1) cover 0.1, S_b
+/// (author 0) covers 0.1-0.2, S_c (author 0) covers 0.1-0.3. R1 deletes 0.1 only: the older of
+/// the two newest (S_b) covers 0.1 and 0.2, but only 0.1 has covers by two authors. R3 drops S_d
+/// and keeps S_a, the second author of 0.1. The check must report every state that differs.
+/// Then a history that is not linear, where the newest covers an op by two authors and the older
+/// of the two newest does not: R1 keeps its body.
+#[test]
+fn two_author_r1_and_properties_4_and_5() {
+    let ops = [
+        op(0, 1, 10, &[], Marker::Active, &[("a", 1)]),
+        op(0, 2, 20, &[(0, 1)], Marker::Active, &[("a", 2)]),
+        op(0, 3, 30, &[(0, 2)], Marker::Active, &[("a", 3)]),
+    ];
+    let mut s = two_author_server(&ops, &[(1, 2, 1), (1, 1, 1), (0, 1, 2), (0, 2, 3)]);
+    assert!(s.linear);
+    let s_d = s.snaps[0].clone();
+    s.compact();
+    assert_eq!(bodiless(&s), vec![Dot::new(0, 1)], "R1 deletes 0.1 only");
+    let kept: Vec<(u8, u32)> = s.snaps.iter().map(|x| x.snap.id).collect();
+    assert_eq!(
+        kept,
+        vec![(1, 1), (0, 1), (0, 2)],
+        "R3 drops S_d, keeps S_a"
+    );
+    assert!(s.violations.is_empty(), "{:?}", s.violations);
+
+    let fires = |t: &Server, label: &str| t.violations.iter().any(|v| v.starts_with(label));
+    let (p4, p5) = ("SRV-4 (TwoAuthors)", "SRV-5 (TwoAuthors)");
+    // A body R1 deletes, kept: only property 5 sees it. Outside a linear history it is not checked.
+    for linear in [true, false] {
+        let mut t = s.clone();
+        t.linear = linear;
+        if let Some(so) = t.ops.get_mut(&Dot::new(0, 1)) {
+            so.b = Some(ops[0].b.clone());
+        }
+        t.check_props(true);
+        assert_eq!(fires(&t, p5), linear, "{:?}", t.violations);
+    }
+    // Bodies R1 keeps, deleted: covered by one author (0.2), or by the newest only (0.3). A header
+    // a healing request stored without its body is expected (property 5), not R1's.
+    for seq in [2, 3] {
+        for healed in [false, true] {
+            let mut t = s.clone();
+            if let Some(so) = t.ops.get_mut(&Dot::new(0, seq)) {
+                so.b = None;
+            }
+            if healed {
+                t.stored_bodiless.insert(Dot::new(0, seq));
+            }
+            t.check_props(true);
+            assert_eq!(fires(&t, p5), !healed, "0.{seq}: {:?}", t.violations);
+        }
+    }
+    // Property 4: S_d, which R3 drops, left retained.
+    let mut t = s.clone();
+    t.snaps.insert(0, s_d);
+    t.check_props(true);
+    assert!(fires(&t, p4), "{:?}", t.violations);
+
+    // Not linear: S_x (author 1) covers 0.1-0.3, then S_y (author 0) covers 0.1-0.2 and S_z
+    // (author 0) 0.1-0.3. 0.3 has covers by two authors, but the older of the two newest (S_y)
+    // does not cover it.
+    let mut n = two_author_server(&ops, &[(1, 1, 3), (0, 1, 2), (0, 2, 3)]);
+    assert!(!n.linear);
+    n.compact();
+    assert_eq!(bodiless(&n), vec![Dot::new(0, 1), Dot::new(0, 2)]);
+    assert!(n.violations.is_empty(), "{:?}", n.violations);
+}

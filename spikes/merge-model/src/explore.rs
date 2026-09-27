@@ -142,6 +142,11 @@ pub struct Coverage {
     pub past_cutoff_recomputed: u64,
     pub past_cutoff_flagged: u64,
     pub recompute_base_mismatch: u64,
+    /// ADR 0021 §8 properties 4 and 5 in their two-author form (`server::Stats`).
+    pub p4_two_author_checked: u64,
+    pub p5_two_author_checked: u64,
+    pub p5_two_author_r1: u64,
+    pub p5_two_author_one_author_kept: u64,
 }
 
 impl Coverage {
@@ -192,7 +197,11 @@ impl Coverage {
             revoked_stale_exempted,
             past_cutoff_recomputed,
             past_cutoff_flagged,
-            recompute_base_mismatch
+            recompute_base_mismatch,
+            p4_two_author_checked,
+            p5_two_author_checked,
+            p5_two_author_r1,
+            p5_two_author_one_author_kept
         );
         for i in 0..4 {
             self.conc_cases[i] += q.conc_cases[i];
@@ -219,6 +228,10 @@ fn add_coverage(c: &mut Coverage, w: &World) {
     c.revoked_bodiless_served += st.revoked_bodiless_served;
     c.revoked_author_covers_served += st.revoked_author_covers_served;
     c.revoked_stale_exempted += st.revoked_stale_exempted;
+    c.p4_two_author_checked += st.p4_two_author_checked;
+    c.p5_two_author_checked += st.p5_two_author_checked;
+    c.p5_two_author_r1 += st.p5_two_author_r1;
+    c.p5_two_author_one_author_kept += st.p5_two_author_one_author_kept;
     c.restores += w.restores;
     for d in &w.devs {
         c.absorbed_dominating += d.absorbed_dominating;
@@ -952,6 +965,14 @@ pub fn print_report(
         s,
         "  faulty: faulty snapshots stored {} | evidence absorptions refused {} / with a dispute {}",
         c.faulty_stored, c.em_refused, c.em_disputes
+    );
+    let _ = writeln!(
+        s,
+        "  two-author server properties: older snapshots checked against property 4 {} | worker runs in a linear history checked against property 5 {} (with an R1 deletion {}, with a body the older covers kept for one author {})",
+        c.p4_two_author_checked,
+        c.p5_two_author_checked,
+        c.p5_two_author_r1,
+        c.p5_two_author_one_author_kept
     );
     let _ = writeln!(
         s,

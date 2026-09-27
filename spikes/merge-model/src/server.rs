@@ -79,8 +79,11 @@ pub struct Server {
     /// Answer 3's condition (not in any ADR): a counter the server raises on every restore from a
     /// backup, above any value the restored database held (like ADR 0021 §2's store sequence).
     pub restore_gen: u64,
-    /// ADR 0021 §3 "Linear histories": every stored snapshot's covered VV is >= that of the one
-    /// stored before it (tracked over every snapshot ever stored, for property 5).
+    /// ADR 0021 §3 "Linear histories" (the condition of §8 property 5): every stored snapshot's
+    /// covered VV is >= that of the one stored before it. Tracked over every snapshot this
+    /// database stored, dropped ones included; a restore takes the checkpoint's value, so the
+    /// snapshots lost with the restored-away state do not count (which checks property 5 in more
+    /// histories than counting them would).
     pub linear: bool,
     pub last_covered: Option<VV>,
     /// ADR 0021 §8 server-property violations and integrity errors (deduplicated).
@@ -100,7 +103,8 @@ pub struct Server {
     /// Answer 5 (`Config::stale_exempt_revoked`).
     pub stale_exempt_revoked: bool,
     /// Headers a healing request stored without a body (never deleted by R1): ADR 0021 §8
-    /// property 5 is checked with them set aside, and the two-author property counts them apart.
+    /// property 5 names them apart from R1's deletions, and the two-author property counts them
+    /// apart.
     pub stored_bodiless: BTreeSet<Dot>,
 }
 
@@ -128,6 +132,14 @@ pub struct Stats {
     pub revoked_bodiless_served: u64,
     pub revoked_author_covers_served: u64,
     pub revoked_stale_exempted: u64,
+    /// ADR 0021 §8 properties 4 and 5 in their two-author form (`check_two_author_props`):
+    /// retained snapshots outside the two newest checked against property 4; `worker` runs in a
+    /// linear history checked against property 5, those where R1 deletes some body, and those
+    /// where the older of the two newest covers a body that keeps it for want of a second author.
+    pub p4_two_author_checked: u64,
+    pub p5_two_author_checked: u64,
+    pub p5_two_author_r1: u64,
+    pub p5_two_author_one_author_kept: u64,
 }
 
 impl Default for Server {
@@ -571,9 +583,9 @@ impl Server {
         }
     }
 
-    /// ADR 0021 §8 server properties 1, 2 and (after `worker`) 4 and 5, plus the two-author
-    /// forms of 4 and a two-author property 6 under `ServerRule::TwoAuthors`. Property 3 is
-    /// checked in `fetch`.
+    /// ADR 0021 §8 server properties 1, 2 and (after `worker`) 4 and 5, with 4 and 5 in their
+    /// two-author form (`check_two_author_props`) and a two-author property 6 under
+    /// `ServerRule::TwoAuthors`. Property 3 is checked in `fetch`.
     pub fn check_props(&mut self, after_worker: bool) {
         let mut found = Vec::new();
         for (dot, so) in &self.ops {
@@ -654,21 +666,85 @@ impl Server {
                     }
                 }
             } else {
-                // SRV-4 (TwoAuthors form): after worker, every retained snapshot outside the two
-                // newest is needed. `snaps` is sorted by store sequence after `compact`.
-                let n = self.snaps.len();
-                for i in 0..n.saturating_sub(2) {
-                    if !self.needed(i) {
-                        found.push(
-                            "SRV-4 (TwoAuthors) an older retained snapshot is not needed"
-                                .to_string(),
-                        );
-                    }
-                }
+                self.check_two_author_props(&mut found);
             }
         }
         for f in found {
             self.violation(f);
         }
+    }
+
+    /// ADR 0021 §8 properties 4 and 5 in their two-author form, after `worker` runs under
+    /// `ServerRule::TwoAuthors`, with §3 R1 and R3 as revised by owner decision 1. Computed from
+    /// the rule texts alone, never through `compact`, `needed` or `cover_authors`, so that a slip
+    /// in the worker cannot hide itself. "Covers" is §2's: the snapshot's clamped VV covers the
+    /// dot; an author is the device that signed the snapshot.
+    ///
+    /// - Property 4, "after `worker` runs, R3 keeps every retained snapshot outside the two
+    ///   newest". R3: "An older snapshot stays while dropping it would lower the number of authors
+    ///   that cover some bodiless header to fewer than two."
+    /// - Property 5, "in a linear history, after `worker` runs, the bodiless headers are those R1
+    ///   deletes behind the older of the two newest, and the headers a healing request stored
+    ///   without a body". R1: "the older of the item's two newest retained snapshots covers the op
+    ///   and retained snapshots by two different authors cover it. With fewer than two retained
+    ///   snapshots it deletes nothing." "Linear" is `Server::linear` (§3 "Linear histories").
+    fn check_two_author_props(&mut self, found: &mut Vec<String>) {
+        let mut ordered: Vec<&StoredSnap> = self.snaps.iter().collect();
+        ordered.sort_by_key(|s| s.store_seq);
+        let n = ordered.len();
+        // The number of distinct authors among the retained snapshots, the one at `skip` left
+        // out, that cover `dot`.
+        let authors = |dot: Dot, skip: Option<usize>| -> usize {
+            ordered
+                .iter()
+                .enumerate()
+                .filter(|(j, s)| Some(*j) != skip && s.clamped.covers(dot))
+                .map(|(_, s)| s.snap.author)
+                .collect::<BTreeSet<Dev>>()
+                .len()
+        };
+        for (i, s) in ordered.iter().enumerate().take(n.saturating_sub(2)) {
+            self.stats.p4_two_author_checked += 1;
+            let stays = self.ops.iter().any(|(dot, so)| {
+                if so.b.is_some() || !s.clamped.covers(*dot) {
+                    return false;
+                }
+                let without = authors(*dot, Some(i));
+                without < 2 && without < authors(*dot, None)
+            });
+            if !stays {
+                found.push(
+                    "SRV-4 (TwoAuthors) an older retained snapshot is one R3 drops".to_string(),
+                );
+            }
+        }
+        if !self.linear {
+            return;
+        }
+        self.stats.p5_two_author_checked += 1;
+        let older = n.checked_sub(2).map(|i| &ordered[i].clamped);
+        let (mut r1_any, mut one_author_kept) = (false, false);
+        for (dot, so) in &self.ops {
+            let older_covers = older.is_some_and(|v| v.covers(*dot));
+            let two = authors(*dot, None) >= 2;
+            let r1 = older_covers && two;
+            r1_any |= r1;
+            one_author_kept |= older_covers && !two && so.b.is_some();
+            let healed = self.stored_bodiless.contains(dot);
+            if (r1 || healed) && so.b.is_some() {
+                found.push(
+                    "SRV-5 (TwoAuthors) linear history: an op R1 deletes, or a healing request stored bodiless, has a body"
+                        .to_string(),
+                );
+            }
+            if !r1 && !healed && so.b.is_none() {
+                found.push(
+                    "SRV-5 (TwoAuthors) linear history: a bodiless header R1 does not delete and no healing request stored"
+                        .to_string(),
+                );
+            }
+        }
+        self.stats.p5_two_author_r1 += r1_any as u64;
+        self.stats.p5_two_author_one_author_kept += one_author_kept as u64;
     }
 }

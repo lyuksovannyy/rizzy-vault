@@ -99,7 +99,7 @@ What this spike is not:
 | Clamped VV, store sequence | ADR 0021 §2 | `server.rs` `store_snap` |
 | R1 delete, R3 retain | ADR 0021 §3 | `server.rs` `compact`, `needed` |
 | Fetch: bodiless headers and covers | ADR 0012 §7 "Fetch"; ADR 0021 §4 | `server.rs` `fetch` |
-| Server properties 1-5 | ADR 0021 §8 | `server.rs` `check_props` (3 in `fetch`) |
+| Server properties 1-5 | ADR 0021 §8 | `server.rs` `check_props` (3 in `fetch`; 4 and 5 under two-author covers in `check_two_author_props`) |
 | Chain check after compaction: a bodiless header counts only against a snapshot the replica accepted | ADR 0012 §7; INV-27 | `replica.rs` `process_response` (two passes) |
 | Freshness: an absorption that would lower the item VV is rejected, never applied | ADR 0012 §7 "Freshness"; INV-25 | `replica.rs` `absorb`; `check_mono` (P4, which must never fire) |
 | Rollback detection, read-only, healing steps 2-4, leaving read-only | ADR 0012 §7 "Healing a server rollback"; THREAT_MODEL §5.8 | `world.rs` `server_behind`, `fetch`, `heal` |
@@ -116,7 +116,7 @@ What this spike is not:
 | Answer 3: the author patches its state; covering unsent snapshots dropped; own-answer scope; wrap moved | ADR 0012 §7 "Upload"; ADR 0018 §3 "Recorded purge"; ADR 0012 §3 "Key wrap" | `replica.rs` `reissue_outbox`, `patch_local` |
 | Answer 4: evidence merge (header clamp, supersession only by a verified header's context, absence is not evidence, a covered op body still merges) | ADR 0012 §2, §4 steps 3-4, §5; ADR 0018 §3 | `item.rs` `em_join`, `maximal`, `restrict`, `singleton`; `replica.rs` `absorb_evidence`, `apply_now`, `deliver` |
 | Answer 4: refuse a snapshot an op body contradicts; report disputes; no snapshot while disputed | ADR 0018 §3 | `replica.rs` `absorb_evidence`, `learn_body`, `write_snapshot` |
-| Answer 4: two-author covers (R1, R3, Fetch) | ADR 0021 §3-§4, open question 1 | `server.rs` `compact`, `needed`, `fetch`, `check_props` (SRV-6) |
+| Answer 4: two-author covers (R1, R3, Fetch) | ADR 0021 §3-§4, open question 1 | `server.rs` `compact`, `needed`, `fetch`, `check_props` (SRV-6), `check_two_author_props` (SRV-4, SRV-5) |
 | Answer 5: a revoked author's snapshot accepted if its own entry is within the cut-off | ADR 0012 §4 step 1; ADR 0021 open question 5 | `replica.rs` `absorb` |
 | Answer 5: server refuses a snapshot claiming its author's unstored dots; no stale-epoch refusal for a revoked author's op within its cut-off | ADR 0021 §2, §5; ADR 0012 §7 "Upload" | `server.rs` `store_snap`, `store_op` |
 | Answer 5: a revoked device's chain must reach its `last_accepted_device_seq` | ADR 0012 §7 chain check; INV-27 | `replica.rs` `process_response` |
@@ -206,6 +206,12 @@ fetches, and `worker` runs, until nothing changes. `check.rs` holds the precise 
   a heal re-publish that stays blocked, a drain that hit its round cap), SRV (ADR 0021 §8 server
   properties 1-5, and SRV-6 under the two-author rule), PIN (more than two snapshots retained at
   quiescence under ADR 0021's rule; informational), NOTE (for example a snapshot rejected).
+  Under the two-author rule, SRV-4 and SRV-5 check §8 properties 4 and 5 as the revised ADR
+  states them, recomputed from the R1 and R3 text after each `worker` run and never through
+  `worker`'s own code. Property 5 applies when every snapshot the server stored has a covered VV at
+  least that of the one stored before it (`Server::linear`; a restore takes the checkpoint's flag).
+  Its expected bodiless headers are the ops the older of the two newest retained snapshots covers
+  and retained snapshots by two authors cover, plus those a healing request stored without a body.
 - **Run labels.** Three classes of run get a suffix on their P1-P3 kinds, so that each kind's
   minimal trace is one of its class:
   - "[... ADR 0012 §6 path]": a replica holds or flagged an op past a revocation cut-off, or some
@@ -220,7 +226,8 @@ fetches, and `worker` runs, until nothing changes. `check.rs` holds the precise 
   contained: a restore, a revocation, a faulty snapshot, a re-issue.
 - **Coverage counters** (printed per run) show which rules a family reaches: compaction,
   absorptions by kind, merged snapshots, healing requests, re-issues, faulty snapshots stored,
-  evidence refusals and disputes, revocation paths.
+  evidence refusals and disputes, revocation paths, and how often the two-author forms of
+  properties 4 and 5 were checked.
 
 ## Exploration
 
@@ -430,6 +437,19 @@ two authors" (the conflict of answers 2 and 4, below). In every exhaustive famil
 P3-faulty, RT, FORK, KEY, RECOMP, HLC, P4 and GAP hold, no device stays read-only, and ADR 0021 §8
 server properties 1-5 hold.
 
+Properties 4 and 5 hold in their two-author form (SRV-4, SRV-5; before 2026-09-27 property 5 was
+checked with ADR 0021's single-cover server only): property 4 on 556,763 older retained
+snapshots, property 5 after 2,929,523 `worker` runs in a linear history, 945,376 of them with an
+R1 deletion and 78,935 with a body the older of the two newest covers kept for want of a second
+author. Mutants of `worker` (every exhaustive family, `--no-traces`): R1 with one author fails
+SRV-5 in 9 families (39,852 schedules; SRV-6 fails too); R1 needing three authors fails only
+SRV-5, in 14 families (387,076); an R3 that keeps every cover of a bodiless header fails only
+SRV-4, in 14 families (722,628). R1 behind the newest instead of the older of the two newest is
+the same rule in a linear history, so property 5 cannot see it; in the other histories it deletes
+more bodies (`compaction` 872,799 instead of 695,802) and no §8 property fails, while
+`faulty-kinds` has 1,198 reported undetectable-fabrication P1 schedules instead of 1,136. No §8
+property pins R1's "only when" outside a linear history.
+
 **Random flavours** (`cargo run --release -- random-all --config integrated --seeds 200000`).
 The class columns split the violating seeds by the run label of their P1-ref kind (Properties
 checked, "Run labels"); "reported undetectable" is a reported divergence with an undetectable
@@ -456,7 +476,10 @@ No violating seed falls outside these four classes, and P3 holds in every seed. 
 FORK and RECOMP traces printed are each a server restore followed by a revocation (the §6 class). The two HLC
 findings are answer 1's documented limit (a tombstone does not carry the HLC of a late Restore;
 minimal trace in `random-reissue-norestore`, seed 128142) and a faulty-plus-restore run. SRV-6h
-appears in every flavour with a restore (for example 30,338 random-heal seeds).
+appears in every flavour with a restore (for example 30,338 random-heal seeds). SRV-4 and SRV-5
+hold in their two-author form in every flavour: property 4 on 1,639,499 older retained snapshots,
+property 5 after 7,746,869 `worker` runs in a linear history (1,119,144 with an R1 deletion,
+619,669 with a body kept for want of a second author).
 
 The classes:
 
