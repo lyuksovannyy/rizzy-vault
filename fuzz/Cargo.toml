@@ -22,10 +22,23 @@
 #   export_fields      export-file header and `data` field decoders, and the server-secrets
 #                      backup header (§11.14, §5.11); the Argon2id key is derived once per process
 #   normalize          login-name and server-origin normalisers (§2); not in the §15 list
+#   sync_types         rizzy-sync's version-vector, dot and HLC decoders and the HLC update rules
+#                      (ADR 0012 §2-§3, ADR 0018 §3); not in the §15 list by name
+#   sync_header        rizzy-sync's op and snapshot header parsers (ADR 0012 §3); not in the §15
+#                      list by name
+#   record_op          item-record parsers (ADR 0018 §12): op data
+#   record_snapshot    item-record parsers (ADR 0018 §12): live snapshot data
+#   record_tombstone   item-record parsers (ADR 0018 §12): tombstone data
+#   record_key         item-record parsers (ADR 0018 §12): the field-key grammar (§7)
+#   item_value         item value decoder (ADR 0018 §6, §10), with verbatim carrying and reading
+#                      against every expected type
+#   item_key           item field-key grammar (ADR 0018 §7, §10) and tag keys built on it
+#   sync_compaction    rizzy-sync's compaction rules on a client's covered VV and on damaged rows
+#                      (ADR 0021 §2-§4, §9)
 #
 # Not covered yet: the share-URL fragment parser (M5, not written) and the export file's JSON
-# document reader (§11.14, not written). `export_fields` covers the field decoders it will call;
-# the reader gets its own target when it is written.
+# document reader (§11.14, not written). `export_fields` covers the field decoders the reader
+# will call; it gets its own target when it is written.
 [package]
 name = "rizzy-fuzz"
 version = "0.0.0"
@@ -44,6 +57,10 @@ libfuzzer-sys = "0.4.13"
 # rizzy-core already pins ([workspace.dependencies], ADR 0009), so no new crate in this graph.
 rand_core = { version = "=0.10.1", default-features = false }
 rizzy-core = { path = "../crates/rizzy-core" }
+# The sync engine's decoders and rules (`sync_types`, `sync_header`, the `record_*` targets and
+# `sync_compaction`). A path crate whose only dependency is rizzy-core, so no new crate in this
+# graph.
+rizzy-sync = { path = "../crates/rizzy-sync" }
 
 # One [[bin]] per target. `test`, `doc` and `bench` are off because a libFuzzer entry point
 # (`#![no_main]` with `fuzz_target!`) is not a test, has no API to document and is not a benchmark.
@@ -99,6 +116,69 @@ bench = false
 [[bin]]
 name = "export_fields"
 path = "fuzz_targets/export_fields.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sync_types"
+path = "fuzz_targets/sync_types.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sync_header"
+path = "fuzz_targets/sync_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "record_op"
+path = "fuzz_targets/record_op.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "record_snapshot"
+path = "fuzz_targets/record_snapshot.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "record_tombstone"
+path = "fuzz_targets/record_tombstone.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "record_key"
+path = "fuzz_targets/record_key.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "item_value"
+path = "fuzz_targets/item_value.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "item_key"
+path = "fuzz_targets/item_key.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sync_compaction"
+path = "fuzz_targets/sync_compaction.rs"
 test = false
 doc = false
 bench = false

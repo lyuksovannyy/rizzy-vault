@@ -11,5 +11,11 @@ publish.workspace = true
 [dependencies]
 rizzy-core.workspace = true
 
+[dev-dependencies]
+# Property tests of the version-vector lattice, the HLC rules and the encode/parse identity
+# (ADR 0012 §12). A dev-dependency only: R1's allow-list covers normal and build dependencies
+# (ADR 0016 §4, "Dev-dependencies").
+proptest.workspace = true
+
 [lints]
 workspace = true

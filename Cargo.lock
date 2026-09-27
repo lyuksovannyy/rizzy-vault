@@ -666,6 +666,7 @@ version = "0.0.0"
 name = "rizzy-sync"
 version = "0.0.0"
 dependencies = [
+ "proptest",
  "rizzy-core",
 ]
 
