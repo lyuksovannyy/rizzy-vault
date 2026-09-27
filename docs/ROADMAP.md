@@ -31,11 +31,11 @@ Target users by phase: **Personal → Enthusiasts/Families → Small & medium bu
 | **M0** | Foundations | Threat model, crypto design ADRs, architecture decisions, repo layout, CI, contribution rules. No product code beyond spikes. | Dev |
 | **M1** | Core vault (MVP) | Register/login, E2EE vault CRUD, sync, web vault, CLI, import/export, generator, TOTP. Author uses it daily. | Personal (dogfood) |
 | **M2** | Browser extension & URL matching | Autofill in Chromium + Firefox, save-on-submit, domain equivalence (youtube.com ≡ youtu.be), match modes. | Personal |
-| **M3** | 1Password-grade UX & desktop | Design system, desktop app, quick-access search, Watchtower-style health report, tags/favorites. | Personal |
+| **M3** | 1Password-grade UX & desktop | Design system (shared tokens; React components for web), native desktop app for macOS (Windows and Linux: §4.5), quick-access search, Watchtower-style health report, tags/favorites. | Personal |
 | **M4** | *Removed* | Removed on 2026-09-27: On-device sync is parked as a post-1.0 idea (§4.6; ADR 0022, Proposed). The number is kept, so M5–M10 keep theirs. Its conflict UI and transparency page moved to M3, scheduled encrypted backups to M8. | — |
 | **M5** | Public sharing | Share an item by link with fragment-held key, expiry, view limits, optional recipient verification. | Personal |
 | **M6** | Aliases & email receiving | Generate alias identities, receive-only mailbox in UI, ingress encryption, autofill integration. | Personal / enthusiasts |
-| **M7** | Mobile & passkeys | iOS/Android apps with OS autofill, passkey (WebAuthn) storage and use. | Personal |
+| **M7** | Mobile & passkeys | Native iOS (SwiftUI) and Android (Kotlin) apps in their own repositories, over the Rust core through UniFFI, with OS autofill, passkey (WebAuthn) storage and use. | Personal |
 | **M8** | Hardening → **v1.0** | External security audit, bug bounty, backup/restore drills, docs. Public 1.0 for personal use. | Public |
 | **M9** | Families & enthusiasts | Shared vaults, family org, emergency access, multiple mail domains, admin panel. | Enthusiasts |
 | **M10** | Business | Org policies, roles, SSO (OIDC/SAML), SCIM, audit logs, admin console, billing hooks. | SMB |
@@ -55,7 +55,8 @@ MoSCoW is scored **against v1.0 (end of M8)**. Items for M9/M10 are listed so th
 |---|---|---|
 | M | Written threat model (attackers: compromised server, malicious admin, network MITM, malware on client, phishing site, stolen device) | M0 |
 | M | Crypto design document + ADRs (see 4.3) reviewed before any vault code | M0 |
-| M | Cargo workspace layout per [ADR 0016](adr/0016-workspace-layout.md): today `rizzy-core`, `rizzy-sync`, `rizzy-server` (binary `rizzy-vault`) and `rizzy-cli` (binary `rv`); planned `rizzy-proto`, `rizzy-client`, `rizzy-import`, `rizzy-match`, `rizzy-storage`, `rizzy-bus`, `rizzy-domain-*`, `rizzy-smtp-ingress`, `rizzy-icon-proxy`, `rizzy-wasm`, `rizzy-ffi`, `rizzy-desktop`, `xtask` | M0 |
+| M | Cargo workspace layout per [ADR 0016](adr/0016-workspace-layout.md) and [ADR 0019](adr/0019-native-clients.md), which partially supersedes it: today `rizzy-core`, `rizzy-sync`, `rizzy-server` (binary `rizzy-vault`) and `rizzy-cli` (binary `rv`); planned `rizzy-proto`, `rizzy-client`, `rizzy-import`, `rizzy-match`, `rizzy-storage`, `rizzy-bus`, `rizzy-domain-*`, `rizzy-smtp-ingress`, `rizzy-icon-proxy`, `rizzy-wasm`, `rizzy-ffi` (M3), `rizzy-ffi-cpp` (with the Linux client), `xtask` | M0 |
+| M | Client repositories per [ADR 0019](adr/0019-native-clients.md) (`rizzy-vault-apple`, `-android`, `-windows`, `-linux`): attested core artifacts, no Rust outside `rizzy-vault` | M3 |
 | M | CI: fmt, clippy (deny warnings), tests, `cargo deny` (licenses, bans, sources and RustSec advisories; cargo-deny reads the same advisory database as `cargo audit`, so there is no separate `cargo audit` job) | M0 |
 | M | License policy: AGPL-3.0 server/core; decide client license; dependency license allow-list | M0 |
 | S | `SECURITY.md` with disclosure process | M0 |
@@ -107,7 +108,7 @@ MoSCoW is scored **against v1.0 (end of M8)**. Items for M9/M10 are listed so th
 | M | Recovery story written down and implemented: "Emergency Kit" (printable Secret Key + recovery code). No recovery = data gone, and the UI says so plainly | M1 |
 | M | **Secret Key / 2SKD** (1Password-style 128-bit device-held key mixed into KDF), mandatory for every account ([ADR 0004](adr/0004-key-derivation-argon2id-secret-key.md)) — protects against server breach + weak master password | M1 (derivation, Emergency Kit) / M3 (QR transfer, polish) |
 | M | Request signing for native clients: every request over a device-authenticated session is signed with the device key (`device-request` statement, [CRYPTO.md §5.10](CRYPTO.md#510-sessions-after-authentication), [ADR 0002](adr/0002-own-protocol.md)); the web vault keeps short-lived bearer tokens | M1 |
-| S | Unlock with biometrics / OS keychain on desktop & mobile | M3 / M7 |
+| S | Unlock with biometrics / OS keychain on desktop & mobile. Windows: deferred until a CRYPTO.md design exists ([ADR 0019](adr/0019-native-clients.md) §2.1); Linux: master password only ([INV-62](THREAT_MODEL.md#8-security-invariants)) | M3 / M7 |
 | S | Session/device management: list devices, revoke, force logout | M3 |
 | C | Hybrid post-quantum key wrapping (X25519 + ML-KEM-768) for sharing & org keys | post-1.0 (format must allow it from M1) |
 | C | Login with passkey (PRF extension to derive unlock key) | post-1.0 |
@@ -130,7 +131,7 @@ The problem: `youtube.com`, `youtu.be`, `m.youtube.com`, `accounts.google.com` a
 | M | Browser extension: Chromium (MV3) + Firefox — inline menu, fill, save/update on submit, generator in field | M2 |
 | S | Android app-ID ↔ domain mapping (Digital Asset Links) and iOS associated domains | M7 |
 | S | Community-contributed equivalence list via PRs with review rules (both domains provably same owner) | M2 |
-| S | Safari extension | M3 |
+| S | Safari extension, after its own key-custody ADR; not in M3, but with the Apple repository's M7 work or later ([ADR 0019](adr/0019-native-clients.md) §2.2) | M7 or later |
 | C | Heuristic multi-step login form support (username page → password page) | M3 |
 | C | Auto-suggest adding a domain to an equivalence group when user manually fills | post-1.0 |
 | W | Fetching website favicons through our server without privacy controls (leaks which sites you use) — must be optional / proxied / cached anonymously | M3 design |
@@ -139,11 +140,11 @@ The problem: `youtube.com`, `youtu.be`, `m.youtube.com`, `accounts.google.com` a
 
 | Pri | Item | When |
 |---|---|---|
-| M | Design system: tokens (color, spacing, type), light/dark, component library shared by web vault + extension + desktop | M3 |
+| M | Design system: tokens (color, spacing, type), light/dark, shared by every client as generated token files; React component library shared by web vault + extension; native components per toolkit, from the same tokens | M3 |
 | M | Quick-access / command palette (global hotkey on desktop, `Ctrl/Cmd+K` in web) | M3 |
 | M | Item detail view with one-click copy, reveal, large-type password display | M3 |
-| M | Accessibility: keyboard-only usable, screen reader labels, WCAG AA contrast | M3 |
-| M | Desktop app (recommendation: **Tauri** — Rust backend reuses `core`, web UI reuses design system) | M3 |
+| M | Accessibility: keyboard-only usable, screen reader labels, WCAG AA contrast (per toolkit on native clients, platform contrast modes included) | M3 |
+| M | Desktop apps, native per OS: SwiftUI (macOS), WinUI 3 (Windows), Qt 6 Quick (Linux), over the Rust core through generated bindings ([ADR 0019](adr/0019-native-clients.md)). This row is macOS. Windows and Linux each get their own row, with the priority the owner sets, once spike S2 (Windows) or S3 (Linux) passes | M3 (macOS) |
 | M | Transparency page in settings: exactly what the server stores for this account (item counts, byte sizes, retention) | M3 |
 | S | **Watchtower-style health**: weak, reused, old passwords; missing 2FA where site supports it; breached passwords via HIBP k-anonymity (only 5-char SHA-1 prefix leaves the device) | M3 |
 | S | Onboarding flow (import wizard, Emergency Kit download, extension install) | M3 |
@@ -240,6 +241,7 @@ This is the most operationally expensive feature in the whole plan. Read the ris
 | M | Biometric unlock, auto-lock timeout, screenshot blocking | M7 |
 | M | Passkey storage (store WebAuthn credentials in vault) and use in extension | M7 |
 | S | Passkey provider on Android 14+/iOS 17+ | M7 |
+| S | macOS AutoFill credential provider, with iOS; passkeys in it only once the [INV-64](THREAT_MODEL.md#8-security-invariants) amendment covers OS credential providers ([ADR 0019](adr/0019-native-clients.md)) | M7 |
 | S | Passkey import/export via FIDO Credential Exchange Protocol (CXP/CXF) when stable | M8 |
 | C | Wear OS / watchOS TOTP viewer | post-1.0 |
 
@@ -275,9 +277,9 @@ This is the most operationally expensive feature in the whole plan. Read the ris
 |---|---|---|---|
 | Protocol | Bitwarden-API-compatible vs. own | **Own** | Compatibility locks us into Bitwarden's crypto, clients and design; Vaultwarden already does that job. We offer *import*, not wire compatibility. |
 | Auth | Bitwarden-style hashed key / SRP / OPAQUE | **OPAQUE** | Server never sees a password-equivalent; audited Rust crate exists. |
-| Client core | Per-platform code vs. shared Rust | **Shared Rust `core`** → wasm (web/extension) + UniFFI (mobile) + native (CLI/Tauri) | One crypto implementation to audit. |
-| UI stack | Rust UI (Leptos/Dioxus) vs. TypeScript (Svelte/React) | **TypeScript + one framework** for web/extension/desktop | Extension ecosystem, hiring, and component libraries are JS-first. Rust stays where security lives. |
-| Desktop | Electron / Tauri | **Tauri** | Smaller, Rust-native, reuses `core` directly. |
+| Client core | Per-platform code vs. shared Rust | **Shared Rust `core`** → wasm (web/extension) + generated bindings for every native client (UniFFI Swift/Kotlin; C# and C++ per [ADR 0019](adr/0019-native-clients.md)) + native (CLI) | One crypto implementation to audit. |
+| UI stack | Rust UI (Leptos/Dioxus) vs. TypeScript (Svelte/React) | **TypeScript + React** for web vault and extensions ([ADR 0014](adr/0014-ui-stack.md)); native toolkits for desktop and mobile ([ADR 0019](adr/0019-native-clients.md)) | Extension ecosystem, hiring, and component libraries are JS-first. Rust stays where security lives. |
+| Desktop | Electron / Tauri / native per OS | **Native per OS:** SwiftUI, WinUI 3, Qt 6 Quick | Native look and OS integration, no webview IPC surface; costs in [ADR 0019](adr/0019-native-clients.md). |
 | Server shape | Microservices / modular monolith with roles | **Modular monolith, one binary, multiple roles** | Personal users need one container; security boundaries (`smtp`, `icons`) get isolated as roles without distributed-system overhead. See [ADR 0010](adr/0010-server-shape.md). |
 | DB | SQLite / Postgres | **Both via sqlx**, SQLite default | Personal self-hosters want zero-config. |
 | Sync engine | Whole-vault LWW / per-item LWW / op log + version vectors / full CRDT library (Automerge, Yrs) | **Op log + HLC + per-item version vectors, field-level merge** | Merges offline edits from several devices with no silent data loss; a full CRDT library is overkill for records of ~20 fields and bloats the payload. |
@@ -286,7 +288,7 @@ This is the most operationally expensive feature in the whole plan. Read the ris
 ## 6. Risks & hard truths
 
 1. **Scope is three products.** Bitwarden, 1Password and AliasVault each have years of work and funded teams. Solo/small-team realistic path: M1–M3 is already a serious year. Protect the core; cut everything else first.
-2. **Clients are the real cost, not the server.** The browser extension (autofill across broken real-world forms) and mobile autofill will eat more time than the whole Rust server. Plan for it.
+2. **Clients are the real cost, not the server.** The browser extension (autofill across broken real-world forms) and mobile autofill will eat more time than the whole Rust server. Plan for it. There are five native UIs plus the web UI, and none of the comparable password managers ships three native desktop UIs ([ADR 0019](adr/0019-native-clients.md)).
 3. **Email is an ops liability.** Self-hosters on residential connections usually cannot receive on port 25; mail domains get abused; spam filtering must happen *before* encryption, so the server briefly sees plaintext mail — the threat model must say so honestly.
 4. **URL equivalence is a security surface.** Every entry in the global equivalence list is a potential phishing vector. Entries need proof of common ownership and review by two maintainers.
 5. **"1Password design" is not a feature list.** It is consistent, boring polish across every screen. Without a design system in M3 it will look like a template.
@@ -294,6 +296,7 @@ This is the most operationally expensive feature in the whole plan. Read the ris
 7. **The org key model must exist from M1.** Retrofitting sharing into a single-user key hierarchy means re-encrypting every vault — the classic rewrite trap.
 8. **The sync engine is the hardest correctness problem in the project.** It needs property-based tests (random edit/offline/reconnect sequences on N simulated devices converging to the same state) from M1, and 30 consecutive days of green nightly runs before v1.0 ships (ADR 0022).
 9. **Naming.** "rizzy-vault" is fine for a personal project; it will be a hard sell to an SMB security buyer. Decide on the public product name before M8.
+10. **Binding generators.** The Windows and Linux clients depend on third-party binding generators that lag UniFFI; the Linux route is unverified ([ADR 0019](adr/0019-native-clients.md) §4).
 
 ## 7. Definition of done for v1.0 (end of M8)
 

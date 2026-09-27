@@ -10,7 +10,7 @@ rizzy-vault is a self-hostable, end-to-end encrypted, zero-knowledge password ma
    - If there is no row, the task is out of scope. Ask.
 2. Read [docs/adr/README.md](docs/adr/README.md), then every ADR your task touches. For security work, also read the relevant parts of [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and [docs/CRYPTO.md](docs/CRYPTO.md).
 3. Check the ADR's **Status** line. Only `Accepted` is binding, and so are the parts of a `Partially superseded` ADR that no later Accepted ADR names ([ADR 0020](docs/adr/0020-partial-supersession.md) point 9).
-   - As of 2026-09-27, ADRs 0001–0016, 0018 and 0020 are Accepted (0020 carries 0001 forward); 0017, 0019, 0021 and 0022 are Proposed.
+   - As of 2026-09-27, ADRs 0001–0014 and 0016–0022 are Accepted (0020 carries 0001 forward), several of them Partially superseded, as their status lines say; 0015 is Superseded by 0019. No ADR is Proposed.
 4. Do not recreate `docs/ARCHITECTURE.md`. It was deliberately removed; do not link to it either.
 
 ## The ADR gate (hard stop)
@@ -23,7 +23,7 @@ rizzy-vault is a self-hostable, end-to-end encrypted, zero-knowledge password ma
 
 ## Crate boundaries
 
-The rules are set by [ADR 0016](docs/adr/0016-workspace-layout.md), Accepted on 2026-09-25. Read it before touching crate boundaries. In short, for the current crates:
+The rules are set by [ADR 0016](docs/adr/0016-workspace-layout.md), Accepted on 2026-09-25 and partially superseded by [ADR 0022](docs/adr/0022-server-mode-only.md) and [ADR 0019](docs/adr/0019-native-clients.md) (§1.3–§1.4). Read them before touching crate boundaries. In short, for the current crates:
 
 - **`rizzy-core`:** crypto, envelopes, item models.
   - No I/O: no filesystem, network, clock or OS randomness.
@@ -31,13 +31,14 @@ The rules are set by [ADR 0016](docs/adr/0016-workspace-layout.md), Accepted on 
   - Must build for `wasm32-unknown-unknown`.
 - **`rizzy-sync`:** the sync engine. It depends on `rizzy-core` only and follows the same no-I/O and wasm rules. Everything the server uses from it is ciphertext only. The field merge, however, receives decrypted field writes from `rizzy-client` as opaque bytes in zeroizing types, so `rizzy-sync` is in the plaintext audit scope ([ADR 0012](docs/adr/0012-sync-engine.md) §13 and owner decision 6, accepted 2026-09-25).
 - **`rizzy-server`** (binary `rizzy-vault`) and **`rizzy-cli`** (binary `rv`) are leaf crates. Nothing depends on them.
+- **Binding crates** (planned: `rizzy-wasm` in M1, `rizzy-ffi` in M3, `rizzy-ffi-cpp` with the Linux client) are leaf crates over `rizzy-client` too ([ADR 0019](docs/adr/0019-native-clients.md) §1.4). Desktop and mobile apps live in their own repositories (`rizzy-vault-apple`, `-android`, `-windows`, `-linux`) and hold no Rust: no `Cargo.toml`, `.rs` or `build.rs`. All Rust stays in this repository (ADR 0019 §6).
 - Dependencies point one way: core ← sync ← leaves. Never the reverse.
 - Only leaf crates depend on `getrandom` directly. It never appears in the dependency closure of `rizzy-core` or `rizzy-sync`, and only the wasm bindings crate enables `wasm_js` ([ADR 0009](docs/adr/0009-crypto-dependency-policy.md#rng-rules), [ADR 0016](docs/adr/0016-workspace-layout.md) R1–R2).
 - Adding, splitting or merging crates needs an ADR 0016 change first.
 
 ## Code rules
 
-- `unsafe` is forbidden in every crate. No exceptions, no workarounds through FFI crates.
+- `unsafe` is forbidden in every crate. No exceptions, no hand-written C ABI, no workarounds through FFI crates. The one accepted case is `unsafe` that an admitted binding generator (wasm-bindgen, UniFFI, uniffi-bindgen-cs, Diplomat) emits into generated glue: it is audited third-party code under [ADR 0019](docs/adr/0019-native-clients.md) §4.1 and owner decision 7 (exact pins, a committed expansion baseline, a reviewed diff with `unsafe` counts on every generator or toolchain bump). Never write `unsafe` into our own source, macro inputs included, and never edit generated glue by hand.
 - No `unwrap`, `expect`, `panic!`, `todo!`, `dbg!` or `println!` in non-test code. Return errors.
 - **Never log secrets.** That covers plaintext, keys, master passwords, Secret Keys, recovery codes, tokens and decrypted fields. It applies to logs, error messages, panic messages and `Debug` output. Secret types zeroize on drop and redact `Debug`.
 - Untrusted input (imports, envelopes, URLs, MIME, API bodies) is size-limited and parsed without panics. Add a fuzz target.

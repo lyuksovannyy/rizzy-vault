@@ -18,6 +18,7 @@ The only official source today is this repository:
 
 <https://github.com/lyuksovannyy/rizzy-vault>
 
+- The native desktop and mobile apps will live in four more repositories ([ADR 0019](docs/adr/0019-native-clients.md) §6): `rizzy-vault-apple` (macOS and iOS), `rizzy-vault-android`, `rizzy-vault-windows` and `rizzy-vault-linux`. Each becomes an official source only once it is listed here with its URL.
 - We publish no binaries, container images, browser extensions or mobile apps.
 - Anything claiming to be one is not ours. Please report it as described below.
 - This list will be updated as each channel is created (container registry in M1, extension stores in M2, desktop in M3, app stores in M7).
@@ -39,7 +40,7 @@ We have no security email address, and none should be trusted unless this file l
 
 - **What is affected:**
   - component: server role, `rizzy-core`, `rizzy-sync`, `rv`, web vault, extension, desktop, mobile, CI or release tooling, or a design document;
-  - commit hash or tag;
+  - repository, and commit hash or tag;
   - relevant configuration: database, deployment profile.
 - **The attacker you assume.** Use the adversary IDs in [THREAT_MODEL.md §4](docs/THREAT_MODEL.md#4-adversaries) where you can, e.g. "A2, active malicious server".
 - **Which security goal or invariant breaks,** e.g. G-5 or INV-xx from [THREAT_MODEL.md](docs/THREAT_MODEL.md).
@@ -85,9 +86,10 @@ We keep you updated in the advisory thread at least every 14 days until it is cl
 
 **In scope:**
 
-- All code in this repository: server roles, `rizzy-core`, `rizzy-sync`, `rv`, and later the web vault, browser extension, desktop and mobile apps.
+- All code in this repository: server roles, `rizzy-core`, `rizzy-sync`, `rv`, and later the web vault, browser extension and the binding crates of the native apps.
+- All code in the four client repositories listed above, once they exist: the native desktop and mobile apps. Report their vulnerabilities here, as described above.
 - The design documents: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), [docs/CRYPTO.md](docs/CRYPTO.md) and the ADRs in [docs/adr/](docs/adr/). A flaw in a construction or an invariant counts even if no code implements it yet.
-- Build and supply chain configuration: [`.github/workflows/`](.github/workflows/), [`deny.toml`](deny.toml), [`Cargo.lock`](Cargo.lock), and release tooling once it exists.
+- Build and supply chain configuration: [`.github/workflows/`](.github/workflows/), [`deny.toml`](deny.toml), [`Cargo.lock`](Cargo.lock), and release tooling once it exists, here and in each client repository.
 - Once they exist, official release artifacts from the channels listed above.
 
 **Out of scope:**
@@ -122,4 +124,4 @@ If in doubt, ask first through a private advisory. This statement binds the proj
 
 - [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md): attackers, trust boundaries, security goals, invariants, accepted risks. [§0 "The short version"](docs/THREAT_MODEL.md#0-the-short-version) states the limits plainly.
 - [docs/CRYPTO.md](docs/CRYPTO.md): primitives, key hierarchy, OPAQUE integration, KDF parameters, envelope format, flows.
-- [docs/adr/](docs/adr/): the decisions behind both, with their status. ADRs 0001–0013, 0015 and 0016 were accepted on 2026-09-25, and 0014, 0018 and 0020 (which carries ADR 0001 forward) on 2026-09-27; 0017, 0019, 0021 and 0022 are still *Proposed* ([index](docs/adr/README.md#index)).
+- [docs/adr/](docs/adr/): the decisions behind both, with their status. ADRs 0001–0013, 0015 and 0016 were accepted on 2026-09-25, and 0014 and 0017–0022 on 2026-09-27. ADR 0020 supersedes ADR 0001, and ADR 0019 supersedes ADR 0015. Several of ADRs 0002–0016 are partially superseded: only the parts the superseding ADR names are replaced, and the rest stays binding ([ADR 0020](docs/adr/0020-partial-supersession.md) point 9; [index](docs/adr/README.md#index)).

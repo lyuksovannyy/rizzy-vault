@@ -62,16 +62,16 @@ Symmetric encryption and the envelope are decided in [ADR 0005](adr/0005-symmetr
 | Storage (SQLite, PostgreSQL, migrations, backups) | [ADR 0011](adr/0011-storage.md) (Accepted) | Not implemented (M1 step 3) |
 | Sync engine: op log, HLC, version vectors, merge | [ADR 0012](adr/0012-sync-engine.md) (Accepted) | Not implemented (M1 step 2). [`crates/rizzy-sync`](../crates/rizzy-sync/src/lib.rs) is a skeleton. Server mode is the only sync mode; On-device sync is parked post-1.0 ([ROADMAP §4.6](ROADMAP.md#46-sync-m1-onward)). Sync invariants: [THREAT_MODEL §8.4](THREAT_MODEL.md#84-sync-and-state). |
 | Item-record encoding and the M1 item schema | [ADR 0018](adr/0018-item-record-encoding.md) (Accepted) | Not implemented (M1 step 2) |
-| Shared Rust client core (wasm, UniFFI) | [ADR 0013](adr/0013-shared-client-core.md) (Accepted) | `rizzy-client` and `rizzy-wasm` not implemented (M1 steps 4–5) |
+| Shared Rust client core (wasm, UniFFI) | [ADR 0013](adr/0013-shared-client-core.md) (Accepted) | `rizzy-client` and `rizzy-wasm` not implemented (M1 steps 4–5). `rizzy-wasm`'s macro expansion gets a committed, reviewed baseline ([ADR 0019](adr/0019-native-clients.md) §4.1) |
 | UI stack for the web platforms | [ADR 0014](adr/0014-ui-stack.md) (Accepted; React) | Not implemented (M1 step 5). With 0010–0014 Accepted, the gate for server and client scaffolding is open ([gates](adr/README.md#gates)) |
-| Desktop shell | [ADR 0015](adr/0015-desktop-tauri.md) (Accepted) | M3 |
+| Native desktop and mobile clients, binding crates, client repositories | [ADR 0019](adr/0019-native-clients.md) (Accepted; supersedes [ADR 0015](adr/0015-desktop-tauri.md), Tauri) | Not implemented. macOS in M3; Windows once spike S2 passes, Linux once S3 passes; iOS and Android in M7 ([ROADMAP §4.5](ROADMAP.md#45-design-ui--ux--1password-feel-m3), [§4.10](ROADMAP.md#410-mobile--passkeys-m7)). The apps live in `rizzy-vault-apple`, `-android`, `-windows` and `-linux`; all Rust, the binding crates `rizzy-ffi` and `rizzy-ffi-cpp` included, stays here |
 | Command-line client `rv` | [ADR 0013](adr/0013-shared-client-core.md) (Accepted) | [`crates/rizzy-cli`](../crates/rizzy-cli/src/main.rs) is a skeleton (`--help`, `--version`); M1 step 4. Threats: [THREAT_MODEL §7.5](THREAT_MODEL.md#75-cli-rv-m1). |
 
 ### Code, tooling and process
 
 | Topic | Where |
 |---|---|
-| Workspace layout, crate boundaries, dependency direction | [ADR 0016](adr/0016-workspace-layout.md) (Accepted); enforced by `cargo xtask check-deps` and `cargo xtask check-clippy` ([`crates/xtask`](../crates/xtask/src/main.rs)) |
+| Workspace layout, crate boundaries, dependency direction | [ADR 0016](adr/0016-workspace-layout.md) (Accepted), with the binding crates in [ADR 0019](adr/0019-native-clients.md) §1.4; enforced by `cargo xtask check-deps` and `cargo xtask check-clippy` ([`crates/xtask`](../crates/xtask/src/main.rs)) |
 | Licensing and contribution terms | [ADR 0017](adr/0017-licensing.md) (**Proposed**); [LICENSE](../LICENSE); license allow-list in [`deny.toml`](../deny.toml) |
 | Third-party material in the repository | [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) |
 | How decisions are recorded | [ADR 0020](adr/0020-partial-supersession.md) (Accepted; carries [ADR 0001](adr/0001-record-architecture-decisions.md) forward and adds partial supersession); [adr/README.md](adr/README.md) (index, lifecycle, gates); [template](adr/0000-template.md) |

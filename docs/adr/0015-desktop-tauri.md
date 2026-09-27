@@ -11,7 +11,7 @@ The relevant ROADMAP rows:
 - [ROADMAP §4.5](../ROADMAP.md#45-design-ui--ux--1password-feel-m3), Must, M3: "Desktop app (recommendation: **Tauri** — Rust backend reuses `core`, web UI reuses design system)". Also, Must, M3: a quick-access command palette on a global hotkey.
 - [ROADMAP §4.3](../ROADMAP.md#43-cryptography--authentication-m0m1-audited-in-m8), Should, M3: unlock with biometrics or the OS keychain.
 
-The threats ([THREAT_MODEL §7.3](../THREAT_MODEL.md#73-desktop-app-tauri-m3)):
+The threats ([THREAT_MODEL §7.3](../THREAT_MODEL.md#73-native-desktop-apps-m3-onward)):
 - XSS in the webview calls IPC to pull every item.
 - A compromised webview escalates through IPC, custom URI schemes or deep links.
 - A fake update feed ([INV-55](../THREAT_MODEL.md#8-security-invariants)).
@@ -57,10 +57,10 @@ Tauri renders with the operating system's webview: WebView2 (Chromium-based) on 
      - writing and clearing the clipboard;
      - checking for, downloading and installing updates;
      - opening file dialogs for import and export. The webview never supplies a path.
-   - **Why:** the main desktop threat is XSS in the webview ([THREAT_MODEL §7.3](../THREAT_MODEL.md#73-desktop-app-tauri-m3)). With a clipboard-write permission, injected script could replace a value the user just copied. With a global-shortcut permission, it could register system-wide hotkeys and capture those key combinations from every other app.
+   - **Why:** the main desktop threat is XSS in the webview ([THREAT_MODEL §7.3](../THREAT_MODEL.md#73-native-desktop-apps-m3-onward)). With a clipboard-write permission, injected script could replace a value the user just copied. With a global-shortcut permission, it could register system-wide hotkeys and capture those key combinations from every other app.
    - The webview gets nothing for `fs`, `shell`, `http`, `process`, `opener`, `clipboard-manager`, `global-shortcut` or `updater`. No capability applies to a remote origin.
    - CI compares the capability files with a committed allow-list and rejects any clipboard-manager, global-shortcut, updater, fs, shell, http, process or opener permission. Any change to the allow-list needs review.
-6. **IPC surface.** Commands are coarse and typed, and the Rust side validates every input as untrusted ([THREAT_MODEL §7.3](../THREAT_MODEL.md#73-desktop-app-tauri-m3), row E).
+6. **IPC surface.** Commands are coarse and typed, and the Rust side validates every input as untrusted ([THREAT_MODEL §7.3](../THREAT_MODEL.md#73-native-desktop-apps-m3-onward), row E).
 
    | Command | Returns |
    |---|---|

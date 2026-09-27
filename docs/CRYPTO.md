@@ -18,7 +18,7 @@ This document holds the full constructions. The ADRs record each decision and li
 3. **The server cannot rearrange data undetected.** It must not be able to swap items, move ciphertext between contexts, downgrade algorithms or KDF parameters, or substitute a user's own keys. Each of these is a named attack class against deployed password managers (Scarlata et al., 2026; see [§14](#14-what-a-malicious-server-can-still-do)).
 4. **The org model exists from M1.** Per-user keypairs, per-vault keys and per-item keys ship in M1, so shared vaults in M9 need no re-encryption of existing vaults. ROADMAP principle 3.
 5. **Everything is versioned.** Ciphertext, KDF parameters, signed statements and labels all carry a version, so a post-quantum migration does not break existing vaults. ROADMAP principle 4.
-6. **One implementation.** All of this lives in `rizzy-core` and runs unchanged on native, wasm32 and UniFFI ([ADR 0013](adr/0013-shared-client-core.md)). No crypto is re-implemented in TypeScript, Kotlin or Swift.
+6. **One implementation.** All of this lives in `rizzy-core` and runs unchanged on native, wasm32 and through the generated bindings of [ADR 0019](adr/0019-native-clients.md) §4. No crypto is re-implemented in TypeScript, Kotlin, Swift, C# or C++.
 
 ### Non-goals
 
@@ -169,7 +169,7 @@ Versions are the latest stable releases as of 2026-09-25 (fact sheet). Audit sta
 | `device_salt` | 16 B | CSPRNG per device | Device state file | Each local re-wrap after a password change |
 | `local_unlock_key` | 32 B | Argon2id + HKDF | Never stored | Password change |
 | **Account key** | 32 B | CSPRNG at signup | Server: `E_srv` (under server_unlock_key). Device: `E_local` (under local_unlock_key), optionally `E_ks` (under the keystore unlock secret), and after a keystore unlock that crossed a rotation, `ACCOUNT_KEY_FORWARD` (under the previous account key, until the next password unlock; [§11.3](#113-unlock-on-an-enrolled-device) step 4). Server: `E_rec` (under the recovery wrap key) | Device revocation, recovery, SK change, suspected compromise, user request ([§11.6](#116-key-rotation)) |
-| Keystore unlock secret (M3/M7) | 32 B | CSPRNG per device | The OS keystore of that device, released only after an OS-enforced user-presence check (threat model INV-62). It opens `E_ks` and nothing else. This is the "local unlock secret" of [ADR 0013](adr/0013-shared-client-core.md) and [ADR 0015](adr/0015-desktop-tauri.md) | On biometric-enrolment change, re-enrolment, or when the user turns keystore unlock off (then `E_ks` is deleted) |
+| Keystore unlock secret (M3/M7) | 32 B | CSPRNG per device | The OS keystore of that device, released only after an OS-enforced user-presence check (threat model INV-62). It opens `E_ks` and nothing else. This is the "local unlock secret" of [ADR 0013](adr/0013-shared-client-core.md) and [ADR 0019](adr/0019-native-clients.md) §5.2 | On biometric-enrolment change, re-enrolment, or when the user turns keystore unlock off (then `E_ks` is deleted) |
 | Identity signing key | Ed25519, 32 B seed | CSPRNG | `E_id` under the account key | Full rotation only |
 | Identity KEM key | X25519, 32 B | CSPRNG (`hpke` `gen_keypair_with_rng`) | `E_id` under the account key | Full rotation only |
 | **Vault key** | 32 B | CSPRNG per vault | Self-grant under the account key; M9: HPKE grant per member | Account-key rotation, member removal (M9) |
@@ -836,6 +836,8 @@ None of this changes the symmetric envelopes. They are already fine against quan
 | `device-auth` | see [§5.10](#510-sessions-after-authentication) | Device key |
 | `device-request` (M1, decided 2026-09-25, [§16](#16-open-questions-for-the-owner) question 15) | str(server_origin) ‖ account_id ‖ device_id ‖ session_id (16) ‖ u64 request_counter ‖ str(method) ‖ str(path_and_query) ‖ SHA-256(request body) ([§5.10](#510-sessions-after-authentication)). An empty method is rejected: the signer refuses it and the verifier fails | Device key |
 
+**Release manifest (Windows, not yet specified).** Before its builds are signed, the Windows client checks for updates against a version manifest, signed with ed25519 and verified against a compiled-in key ([ADR 0019](adr/0019-native-clients.md) §12). Its statement is added to the table above, in this message format ([ADR 0007](adr/0007-ciphertext-envelope.md) point 8), before the Windows client ships.
+
 **Field values.** `sync_mode`: 0 invalid, 1 Server, 2 On-device, reserved (parked, ADR 0022). `recovery_enabled`: 0 or 1. Any other value is rejected. `account_key_id` is the symmetric key id ([§4.4](#44-identifiers-epochs-and-key-ids)) of the current account key. In a `public-key-bundle`, entries are sorted by `key_type`, strictly ascending (one key per type); parsers reject anything else.
 
 **Key types in a bundle (M1).** A bundle carries the identity Ed25519 key (`0x01`) and the identity X25519 key (`0x02`), both required, and the mail X25519 key (`0x03`, from M6), optional. Each is exactly 32 bytes. Parsers reject every other `key_type` ([§4.4](#44-identifiers-epochs-and-key-ids)): the device types `0x04` and `0x05`, which device certificates carry and a bundle never lists, the reserved PQ range `0x10`–`0x1F`, and unknown values. They do not skip an entry they cannot read. So a new key type is a parser change that every verifier ships before any bundle carries it ([§9.7](#97-how-a-migration-lands-pq-example) step 2). Flag bits other than bit 0 must be zero.
@@ -1212,7 +1214,7 @@ One implementation in `rizzy-core` serves two uses: codes for items that hold a 
 ### 12.1 Randomness
 
 - **Injection.** `rizzy-core` and `rizzy-sync` never reach a randomness source themselves. Every function that needs randomness takes `&mut impl rand_core::CryptoRng` (rand_core 0.10). This is the "no I/O" contract in `crates/rizzy-core/src/lib.rs`. In rand_core 0.10, `CryptoRng` is `TryCryptoRng<Error = Infallible>`: it has no error channel, and hpke's `*_with_rng` functions take the same trait.
-- **Platform crates** (CLI, server, Tauri shell, UniFFI bindings, wasm bindings) supply an RNG backed by `getrandom` 0.4, i.e. the OS CSPRNG: getrandom's `SysRng` (feature `sys_rng`) wrapped in rand_core's `UnwrapErr`. On `wasm32-unknown-unknown` the **wasm bindings crate alone** enables getrandom's `wasm_js` feature, which uses `crypto.getRandomValues`. The getrandom README says not to enable it in libraries.
+- **Platform crates** (CLI, server, native binding crates ([ADR 0019](adr/0019-native-clients.md) §4), wasm bindings) supply an RNG backed by `getrandom` 0.4, i.e. the OS CSPRNG: getrandom's `SysRng` (feature `sys_rng`) wrapped in rand_core's `UnwrapErr`. On `wasm32-unknown-unknown` the **wasm bindings crate alone** enables getrandom's `wasm_js` feature, which uses `crypto.getRandomValues`. The getrandom README says not to enable it in libraries.
 - **CI enforcement.** `cargo check-wasm` fails if a dependency pulls getrandom into `rizzy-core` without a backend. This was reproduced in M0 with hpke's default features.
 - **opaque-ke** gets its rand_core 0.6 RNG through the adapter in [§5.1](#51-ciphersuite-and-key-stretching), written against `opaque_ke::rand`. No other rand_core 0.6 use is allowed.
 - **What the RNG produces:** all keys, nonces, ids, salts, recovery codes, share secrets, pairing secrets, challenges, and generated passwords and passphrases. Nothing is derived from time, counters or ids where this document says "random".
@@ -1241,6 +1243,7 @@ One implementation in `rizzy-core` serves two uses: codes for items that hold a 
   - Server logging uses an allow-list of fields. Request and response bodies on auth, key and share endpoints are never logged.
 - **Limits we cannot fix; the UI and docs say so:**
   - **JavaScript strings** (the password field's `value`) are immutable and garbage-collected, so they cannot be wiped. The web client copies the password into a `Uint8Array` via `TextEncoder`, passes it to wasm, and zeroes the array. The string itself lives until GC.
+  - **Native-client boundary** ([ADR 0019](adr/0019-native-clients.md) §3). Host-language strings (.NET, Swift, Kotlin, `QString`) cannot be wiped, like JavaScript strings. The buffers the generated glue and the binding runtime use to pass values across the boundary are freed without wiping, on the Rust side and in each host language (for UniFFI, `RustBuffer` frees and the foreign lowering buffers; L). A `Zeroizing` type cannot cross the boundary; only the copy that stays in Rust is wiped. Secrets cross as bytes, so the host can zero its array.
   - **wasm linear memory** can be wiped from Rust, but the engine may copy it when memory grows (U). A 64 MiB Argon2 run grows the memory, and wasm memory never shrinks.
   - **No `mlock`.** It needs `unsafe` or a libc wrapper, and does not exist in wasm. Swap and hibernation files can hold secrets. We assume OS full-disk encryption.
   - **hkdf 0.13.** It keeps its PRK and its T(i) expand blocks in plain arrays and never wipes them, so copies of HKDF state keyed by an envelope key, SK or `pw_in` are freed unwiped. opaque-ke's own hash stack is covered in the opaque-ke bullet.
@@ -1385,10 +1388,7 @@ All of this lands with the code in M1. None of it is optional.
    The client-side OPAQUE messages (KE2 and the registration response) are not fuzzed. Fuzzing them at a useful rate would need a cheap KSF inside `rizzy-core`, even one behind a `cfg`. The owner decided on 2026-09-26 that no weakened KSF path may exist. Property tests cover the client's handling of random and bit-flipped server messages instead.
 
    cargo-fuzz needs nightly, while the repository pins 1.94.1, so fuzzing runs as a separate scheduled job with its own toolchain (owner decision, [§16](#16-open-questions-for-the-owner)). ROADMAP §4.1 lists fuzzing as a Should for M1–M6.
-8. **Cross-platform equality.** The same vector files are run:
-   - natively on Linux, macOS and Windows (CI already covers all three);
-   - as wasm32 under Node via `wasm-bindgen-test`;
-   - from M7, through UniFFI in Kotlin and Swift smoke tests.
+8. **Cross-platform equality.** The same vector files are run natively on every shipped target (Linux, macOS, Windows, the iOS simulator, an Android emulator) and as wasm32 under Node via `wasm-bindgen-test`; plus binding smoke tests in Swift, Kotlin, C# and C++ against the exact release artifact ([ADR 0019](adr/0019-native-clients.md) §10).
 
    Output must match byte for byte. A difference is a release blocker.
 9. **Memory tests.** A test asserts that the Argon2 block buffer and the `Zeroizing` wrappers are wiped after use, by inspecting the buffer through a test-only hook.
@@ -1481,4 +1481,4 @@ Confidence as in the M0 fact sheet: V = verified, L = likely, U = unverified.
 - Quarkslab, security audit of dalek libraries, 2019 (L).
 - getrandom README and changelog, wasm32 backends (V).
 - argon2 0.6.0 source, `src/block.rs` and `src/lib.rs`: the block memory is not zeroized (V).
-- Related ADRs: [0002](adr/0002-own-protocol.md), [0003](adr/0003-authentication-opaque.md), [0004](adr/0004-key-derivation-argon2id-secret-key.md), [0005](adr/0005-symmetric-encryption-aead.md), [0006](adr/0006-key-hierarchy.md), [0007](adr/0007-ciphertext-envelope.md), [0008](adr/0008-account-recovery.md), [0009](adr/0009-crypto-dependency-policy.md), [0010](adr/0010-server-shape.md), [0011](adr/0011-storage.md), [0012](adr/0012-sync-engine.md), [0013](adr/0013-shared-client-core.md), [0015](adr/0015-desktop-tauri.md), [0016](adr/0016-workspace-layout.md).
+- Related ADRs: [0002](adr/0002-own-protocol.md), [0003](adr/0003-authentication-opaque.md), [0004](adr/0004-key-derivation-argon2id-secret-key.md), [0005](adr/0005-symmetric-encryption-aead.md), [0006](adr/0006-key-hierarchy.md), [0007](adr/0007-ciphertext-envelope.md), [0008](adr/0008-account-recovery.md), [0009](adr/0009-crypto-dependency-policy.md), [0010](adr/0010-server-shape.md), [0011](adr/0011-storage.md), [0012](adr/0012-sync-engine.md), [0013](adr/0013-shared-client-core.md), [0015](adr/0015-desktop-tauri.md), [0016](adr/0016-workspace-layout.md), [0019](adr/0019-native-clients.md).
