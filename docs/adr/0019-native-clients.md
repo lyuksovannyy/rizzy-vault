@@ -1,6 +1,6 @@
 # ADR 0019: Native desktop and mobile clients in separate repositories
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-26
 - Deciders: project owner
 - Milestone: M3 (desktop) / M7 (mobile)
