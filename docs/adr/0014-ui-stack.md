@@ -1,6 +1,6 @@
 # ADR 0014: UI stack for the web platforms
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-25
 - Deciders: project owner
 - Milestone: M1 (web vault, minimal) / M2 (extensions) / M3 (design system) / M5 (share page)

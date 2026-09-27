@@ -1,6 +1,6 @@
 # ADR 0018: Item-record encoding: canonical binary layout and the M1 item schema
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-25
 - Deciders: project owner
 - Milestone: M1 (encoding, M1 item types) / M2, M3, M5, M7 (keys and type ids reserved here)

@@ -1,6 +1,6 @@
 # ADR 0020: Record architecture decisions, with partial supersession
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-26
 - Deciders: project owner
 - Milestone: M0
