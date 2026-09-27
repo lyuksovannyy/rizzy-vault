@@ -1,7 +1,7 @@
 # rizzy-vault threat model
 
-- Status: Proposed (M0 deliverable, [ROADMAP §4.1](ROADMAP.md#41-foundations--project-hygiene-m0), Must)
-- Date: 2026-09-25
+- Status: **Normative.** The M0 deliverable "Written threat model" ([ROADMAP §4.1](ROADMAP.md#41-foundations--project-hygiene-m0), Must). The owner made it normative on 2026-09-27.
+- Date: 2026-09-25, amended 2026-09-27
 - Owner: project owner
 - Covers: M1–M8 (v1.0). M9/M10 threats appear where the M1 design has to prepare for them.
 - Related: [ROADMAP](ROADMAP.md), [CRYPTO.md](CRYPTO.md), ADRs [0002](adr/0002-own-protocol.md), [0003](adr/0003-authentication-opaque.md), [0004](adr/0004-key-derivation-argon2id-secret-key.md), [0005](adr/0005-symmetric-encryption-aead.md), [0006](adr/0006-key-hierarchy.md), [0007](adr/0007-ciphertext-envelope.md), [0008](adr/0008-account-recovery.md), [0009](adr/0009-crypto-dependency-policy.md), [0010](adr/0010-server-shape.md), [0011](adr/0011-storage.md), [0012](adr/0012-sync-engine.md), [0013](adr/0013-shared-client-core.md), [0015](adr/0015-desktop-tauri.md), [0016](adr/0016-workspace-layout.md)

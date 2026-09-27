@@ -2,7 +2,7 @@
 
 ## Status: pre-alpha. Do not store real secrets in it.
 
-rizzy-vault is in M0 (Foundations). There is no release, no vault code, and no security review of anything beyond the design documents. Nothing here is fit for real passwords yet. Keep using an established, externally audited password manager until rizzy-vault reaches v1.0 (end of M8). v1.0 requires an external security audit ([ROADMAP §3](docs/ROADMAP.md#3-milestones)).
+rizzy-vault is at M0 done, M1 in progress. There is no release. The only product code is the `rizzy-core` cryptography (M1 step 1); the sync engine, the server, the clients and the web vault are not written yet (the server and CLI binaries are skeletons). That code and the design documents have had internal review only, and nothing has had an external security audit. Nothing here is fit for real passwords yet. Keep using an established, externally audited password manager until rizzy-vault reaches v1.0 (end of M8). v1.0 requires an external security audit ([ROADMAP §3](docs/ROADMAP.md#3-milestones)).
 
 ## Supported versions
 

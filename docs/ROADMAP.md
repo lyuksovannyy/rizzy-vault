@@ -1,6 +1,6 @@
 # rizzy-vault — Product Roadmap & MoSCoW
 
-> Status: **planning**, no code yet. This document is the source of truth for scope.
+> Status: **M0 done, M1 in progress**. This document is the source of truth for scope.
 > Anything not listed here is out of scope until it is added here first.
 
 ## 1. What we are building (one paragraph)

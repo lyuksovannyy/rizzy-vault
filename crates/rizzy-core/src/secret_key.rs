@@ -175,9 +175,10 @@ pub struct RecoveryCode {
 /// Generates the shared API of [`SecretKey`] and [`RecoveryCode`] for one code kind:
 /// generation, raw bytes, parsing, formatting, the last-group confirmation, `expose_secret`
 /// and the redacted `Debug`. One definition keeps the two types identical except for their
-/// [`Kind`] and their name.
+/// [`Kind`], their name and the first line of the `from_slice` docs (`$from_slice_doc`), which
+/// differs because only the Secret Key is kept in device state (CRYPTO.md §11).
 macro_rules! code_type {
-    ($name:ident, $kind:expr, $what:literal) => {
+    ($name:ident, $kind:expr, $what:literal, $from_slice_doc:literal) => {
         impl $name {
             #[doc = concat!("Draws a new ", $what, " (16 bytes) from the injected CSPRNG.")]
             #[must_use]
@@ -187,7 +188,7 @@ macro_rules! code_type {
                 }
             }
 
-            #[doc = concat!("Rebuilds a ", $what, " from its 16 raw bytes (device state).")]
+            #[doc = $from_slice_doc]
             ///
             /// Only the Secret Key is kept in device state; no client persists a recovery code
             /// (CRYPTO.md §11). The bytes are copied; wiping `bytes` is the caller's job.
@@ -249,8 +250,18 @@ macro_rules! code_type {
     };
 }
 
-code_type!(SecretKey, SECRET_KEY, "Secret Key");
-code_type!(RecoveryCode, RECOVERY_CODE, "recovery code");
+code_type!(
+    SecretKey,
+    SECRET_KEY,
+    "Secret Key",
+    "Rebuilds a Secret Key from its 16 raw bytes (device state)."
+);
+code_type!(
+    RecoveryCode,
+    RECOVERY_CODE,
+    "recovery code",
+    "Rebuilds a recovery code from its 16 raw bytes."
+);
 
 impl RecoveryCode {
     /// The recovery wrap key, the key of `E_rec` (CRYPTO.md §4.3).

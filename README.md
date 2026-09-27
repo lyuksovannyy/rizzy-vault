@@ -23,7 +23,7 @@ Scope and milestones are defined in [docs/ROADMAP.md](docs/ROADMAP.md#3-mileston
 
 | Milestone | State |
 |---|---|
-| **M0** Foundations | **Deliverables in place, not formally closed.** The workspace, toolchain pin, lints, CI, cargo-deny policy, crypto design, ADRs, and security and contribution policy exist. M0 has no tag or "what we learned" note yet ([ROADMAP §3](docs/ROADMAP.md#3-milestones)), and two of its deliverables are still Proposed: [THREAT_MODEL.md](docs/THREAT_MODEL.md) and [ADR 0017](docs/adr/0017-licensing.md) (licensing). |
+| **M0** Foundations | **Deliverables in place, not formally closed.** The workspace, toolchain pin, lints, CI, cargo-deny policy, crypto design, ADRs, and security and contribution policy exist. M0 has no tag or "what we learned" note yet ([ROADMAP §3](docs/ROADMAP.md#3-milestones)), and one of its deliverables is still Proposed: [ADR 0017](docs/adr/0017-licensing.md) (licensing). [THREAT_MODEL.md](docs/THREAT_MODEL.md) became normative on 2026-09-27. |
 | **M1** Core vault (MVP) | **In progress.** Step 1, the `rizzy-core` cryptography, is implemented, with known-answer vectors, property tests and fuzz targets. It has been through an independent review, and every confirmed finding is fixed. The remaining steps, in planned order, are below. |
 | **M2–M10** | Not started. |
 
