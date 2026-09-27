@@ -68,11 +68,14 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0011 | [Storage: SQLite and PostgreSQL via sqlx](0011-storage.md) | Accepted | M1 (SQLite) / M3 (PostgreSQL supported) |
 | 0012 | [Sync engine: op log, HLC and version vectors](0012-sync-engine.md) | Accepted | M1 (engine, Server mode) / M4 (On-device mode) |
 | 0013 | [Shared Rust client core (wasm + UniFFI)](0013-shared-client-core.md) | Accepted | M1 (wasm, CLI) / M3 (Tauri) / M7 (UniFFI) |
-| 0014 | [UI stack](0014-ui-stack.md) | Proposed (framework decided: React) | M1 (web vault) / M2 (extension) / M3 (design system, desktop) |
+| 0014 | [UI stack for the web platforms](0014-ui-stack.md) | Proposed (framework decided: React) | M1 (web vault) / M2 (extensions) / M3 (design system) / M5 (share page) |
 | 0015 | [Desktop shell: Tauri](0015-desktop-tauri.md) | Accepted | M3 |
 | 0016 | [Workspace layout and crate boundaries](0016-workspace-layout.md) | Accepted | M0 (rules, current crates) / M1–M9 (planned crates) |
 | 0017 | [Licensing and contribution terms](0017-licensing.md) | Proposed | M0 |
 | 0018 | [Item-record encoding: canonical binary layout and the M1 item schema](0018-item-record-encoding.md) | Proposed | M1 |
+| 0019 | [Native desktop and mobile clients in separate repositories](0019-native-clients.md) | Proposed | M3 (desktop) / M7 (mobile) |
+| 0020 | [Record architecture decisions, with partial supersession](0020-partial-supersession.md) | Proposed | M0 |
+| 0021 | [Server-side compaction with concurrent snapshots](0021-server-compaction.md) | Proposed | M1 (server; Accepted before step 3) |
 
 ## Gates
 
