@@ -32,7 +32,7 @@ Target users by phase: **Personal → Enthusiasts/Families → Small & medium bu
 | **M1** | Core vault (MVP) | Register/login, E2EE vault CRUD, sync, web vault, CLI, import/export, generator, TOTP. Author uses it daily. | Personal (dogfood) |
 | **M2** | Browser extension & URL matching | Autofill in Chromium + Firefox, save-on-submit, domain equivalence (youtube.com ≡ youtu.be), match modes. | Personal |
 | **M3** | 1Password-grade UX & desktop | Design system, desktop app, quick-access search, Watchtower-style health report, tags/favorites. | Personal |
-| **M4** | Sync modes | User picks **Server** sync (encrypted vault stored on server) or **On-device** sync (server is only an encrypted relay + version tracker, no durable vault copy). Switch between modes without data loss. | Personal |
+| **M4** | *Removed* | Removed on 2026-09-27: On-device sync is parked as a post-1.0 idea (§4.6; ADR 0022, Proposed). The number is kept, so M5–M10 keep theirs. Its conflict UI and transparency page moved to M3, scheduled encrypted backups to M8. | — |
 | **M5** | Public sharing | Share an item by link with fragment-held key, expiry, view limits, optional recipient verification. | Personal |
 | **M6** | Aliases & email receiving | Generate alias identities, receive-only mailbox in UI, ingress encryption, autofill integration. | Personal / enthusiasts |
 | **M7** | Mobile & passkeys | iOS/Android apps with OS autofill, passkey (WebAuthn) storage and use. | Personal |
@@ -75,7 +75,7 @@ MoSCoW is scored **against v1.0 (end of M8)**. Items for M9/M10 are listed so th
 | M | TOTP secret storage + code generation | M1 |
 | M | Password history per item | M1 |
 | M | Trash with restore (soft delete, auto-purge after N days) | M1 |
-| M | Mode-agnostic sync engine (see 4.6): encrypted operation log, per-item version vectors, deterministic merge, no silent data loss. M1 ships Server mode only, but the engine must not assume the server holds the vault | M1 |
+| M | Sync engine (see 4.6): encrypted operation log, per-item version vectors, deterministic merge, no silent data loss | M1 |
 | M | Offline read access on clients (encrypted local cache) | M1 |
 | M | Import: Bitwarden JSON, 1Password (1PUX), KeePass (KDBX/XML), generic CSV, Chrome/Firefox CSV | M1 |
 | M | Export: encrypted JSON (own format) + plaintext JSON/CSV with scary warning | M1 |
@@ -85,6 +85,7 @@ MoSCoW is scored **against v1.0 (end of M8)**. Items for M9/M10 are listed so th
 | S | Item types: SSH key, API credential, Software license, Wi-Fi, Bank account | M3 |
 | S | Favorites, recently used, full-text search on decrypted index (client-side only) | M3 |
 | S | Item revision history (restore old versions) | M3 |
+| S | Scheduled encrypted backups to user-chosen storage (local folder, WebDAV, S3-compatible) | M8 |
 | C | Markdown in secure notes | M3 |
 | C | SSH agent integration (desktop) | post-1.0 |
 | C | `.env` / secrets injection for developers (`rv run -- cmd`) | post-1.0 |
@@ -143,49 +144,28 @@ The problem: `youtube.com`, `youtu.be`, `m.youtube.com`, `accounts.google.com` a
 | M | Item detail view with one-click copy, reveal, large-type password display | M3 |
 | M | Accessibility: keyboard-only usable, screen reader labels, WCAG AA contrast | M3 |
 | M | Desktop app (recommendation: **Tauri** — Rust backend reuses `core`, web UI reuses design system) | M3 |
+| M | Transparency page in settings: exactly what the server stores for this account (item counts, byte sizes, retention) | M3 |
 | S | **Watchtower-style health**: weak, reused, old passwords; missing 2FA where site supports it; breached passwords via HIBP k-anonymity (only 5-char SHA-1 prefix leaves the device) | M3 |
 | S | Onboarding flow (import wizard, Emergency Kit download, extension install) | M3 |
 | S | Localization framework (i18n from day one of M3, English only at first) | M3 |
+| S | Clear conflict UI: "edited on Phone and Laptop at the same time — keep both / pick one" | M3 |
 | C | Themes / accent color customization | post-1.0 |
 | C | Travel mode (hide vaults on device while crossing borders) | M9 |
 | W | Pixel-copying 1Password's UI or icons | never |
 
-### 4.6 Sync modes (M4)
+<a id="46-sync-modes-m4"></a>
+### 4.6 Sync (M1 onward)
 
-Two modes, chosen per account at setup and changeable later:
+One mode, **Server mode**: the server durably stores the full *encrypted* vault and op log. Any new device just logs in and downloads. **Public shares (M5)** are always stored on the server (encrypted, fragment key) — that is their nature; the transparency page lists them.
 
-- **Server mode** (default): the server durably stores the full *encrypted* vault and op log. Any new device just logs in and downloads.
-- **On-device mode**: the vault lives only on the user's devices. The server is a **store-and-forward relay**: it keeps the device registry, each device's sync cursor / version vector (metadata only), and encrypted operations **until every registered device has acknowledged them**, then deletes them. No durable vault snapshot on the server.
-
-What on-device mode actually buys you (be honest in the UI): in server mode the server already sees only ciphertext. On-device mode removes the *offline-crackable vault blob* from the server (a breach yields nothing to brute-force against the master password), shrinks metadata, and satisfies "my data never rests on someone else's disk". The price: **lose all devices = lose the vault**, and a new device cannot be set up without an existing one online.
+On-device sync (M4) was removed on 2026-09-27 and is parked (last row). Its conflict UI and transparency page moved to §4.5 (M3), scheduled encrypted backups to §4.2 (M8).
 
 | Pri | Item | When |
 |---|---|---|
-| M | Single sync engine for both modes (built in M1): client-side encrypted op log, hybrid logical clocks + per-item version vectors, field-level merge, tombstones for deletes, conflicting edits kept as item history instead of dropped | M1 (engine) / M4 (modes) |
-| M | Mode selection at account creation, with a plain-language comparison screen | M4 |
+| M | Single sync engine (built in M1): client-side encrypted op log, hybrid logical clocks + per-item version vectors, field-level merge, tombstones for deletes, conflicting edits kept as item history instead of dropped | M1 |
 | M | **Server mode**: full encrypted vault + op log stored server-side; compaction of op log into snapshots | M1 |
-| M | **On-device mode**: server stores only device registry, public keys, per-device version vectors, and pending encrypted ops; ops purged once acked by all active devices | M4 |
-| M | Pending-op TTL (configurable, e.g. 90 days); a device offline longer than the TTL is marked stale and must re-sync from a peer device, never from the server | M4 |
-| M | New-device enrollment in on-device mode: pair with an existing online device (QR / short code), full snapshot transferred device→device over the relay, E2EE, verified with a short authentication string (SAS) | M4 |
-| M | Device revocation: revoked device is removed from the ack set and vault key is rotated | M4 |
-| M | Mode switching both ways. Server→device: server deletes vault blobs and op log, and proves it by returning a signed deletion receipt. Device→server: client uploads a full encrypted snapshot. Explicit confirmation, no silent switch | M4 |
-| M | Data-loss guardrails for on-device mode: warn when only one device is registered; mandatory encrypted backup prompt (local file) on setup and periodically | M4 |
-| M | Transparency page in settings: exactly what the server stores for this account in the current mode (item counts, byte sizes, retention) | M4 |
-| M | Server admin can restrict which modes are allowed on the instance | M4 |
-| M | Size padding of item, share, relay and mail plaintexts (Padmé, minimum 256 bytes, [ADR 0005](adr/0005-symmetric-encryption-aead.md)) to reduce metadata leakage (how much you edit) | M1 |
-| S | Scheduled encrypted backups to user-chosen storage (local folder, WebDAV, S3-compatible) — strongly recommended for on-device mode | M4 |
-| S | Batching of relayed ops to reduce metadata leakage (how often you edit) | M4 |
-| S | Clear conflict UI: "edited on Phone and Laptop at the same time — keep both / pick one" | M4 |
-| C | Direct LAN sync (mDNS discovery) that skips the relay when devices share a network | post-1.0 |
-| C | Fully serverless peer-to-peer sync (e.g. `iroh` / WebRTC) | post-1.0 |
-| C | Per-vault mode (e.g. personal vault on-device, shared family vault on server) | M9 |
-| W | Web vault as a device in on-device mode — a browser tab is not durable storage. In on-device mode the web vault is disabled (browser extension, desktop, mobile and CLI are real devices) | Won't |
-| W | On-device mode for shared/org vaults in v1.0 — multi-user, multi-device relay with membership changes is a separate design problem | M9 decision |
-
-Interactions with other features:
-- **Public shares (M5)** are always stored on the server (encrypted, fragment key) — that is their nature. Allowed in both modes; the transparency page lists them.
-- **Alias mailbox (M6)**: inbound mail must wait somewhere while devices are offline. In on-device mode mail is kept encrypted on the server until all devices ack, then purged — same relay rule as vault ops.
-- **Business (M10)**: org policy can force Server mode (admins need recovery and audit).
+| M | Size padding of item, share and mail plaintexts (Padmé, minimum 256 bytes, [ADR 0005](adr/0005-symmetric-encryption-aead.md)) to reduce metadata leakage (how much you edit) | M1 |
+| C | On-device sync (the server only relays encrypted ops and keeps no vault copy; device pairing; LAN or peer-to-peer sync) is parked as a post-1.0 idea. It needs a new ADR to return (ADR 0022) | post-1.0 |
 
 ### 4.7 Public sharing (M5)
 
@@ -300,7 +280,7 @@ This is the most operationally expensive feature in the whole plan. Read the ris
 | Desktop | Electron / Tauri | **Tauri** | Smaller, Rust-native, reuses `core` directly. |
 | Server shape | Microservices / modular monolith with roles | **Modular monolith, one binary, multiple roles** | Personal users need one container; security boundaries (`smtp`, `icons`) get isolated as roles without distributed-system overhead. See [ADR 0010](adr/0010-server-shape.md). |
 | DB | SQLite / Postgres | **Both via sqlx**, SQLite default | Personal self-hosters want zero-config. |
-| Sync engine | Whole-vault LWW / per-item LWW / op log + version vectors / full CRDT library (Automerge, Yrs) | **Op log + HLC + per-item version vectors, field-level merge** | Needed for relay-only On-device mode; a full CRDT library is overkill for records of ~20 fields and bloats the payload. |
+| Sync engine | Whole-vault LWW / per-item LWW / op log + version vectors / full CRDT library (Automerge, Yrs) | **Op log + HLC + per-item version vectors, field-level merge** | Merges offline edits from several devices with no silent data loss; a full CRDT library is overkill for records of ~20 fields and bloats the payload. |
 | Mail ingress | Own SMTP in Rust vs. Postfix/Haraka front | **Decide in M6 spike**; lean own minimal receive-only listener | Fewer moving parts for self-hosters, but must be fuzzed hard. |
 
 ## 6. Risks & hard truths
@@ -312,7 +292,7 @@ This is the most operationally expensive feature in the whole plan. Read the ris
 5. **"1Password design" is not a feature list.** It is consistent, boring polish across every screen. Without a design system in M3 it will look like a template.
 6. **Crypto credibility.** Nobody serious (enthusiasts, SMBs) will trust an unaudited password manager. Budget for an external audit before v1.0 or do not call it 1.0.
 7. **The org key model must exist from M1.** Retrofitting sharing into a single-user key hierarchy means re-encrypting every vault — the classic rewrite trap.
-8. **On-device sync turns support tickets into data loss.** Users *will* lose their only phone. Server mode stays the default; on-device mode ships with backup nagging and a scary-but-honest setup screen. The sync engine is the hardest correctness problem in the project — it needs property-based tests (random edit/offline/reconnect sequences on N simulated devices converging to the same state) before M4 ships.
+8. **The sync engine is the hardest correctness problem in the project.** It needs property-based tests (random edit/offline/reconnect sequences on N simulated devices converging to the same state) from M1, and 30 consecutive days of green nightly runs before v1.0 ships (ADR 0022).
 9. **Naming.** "rizzy-vault" is fine for a personal project; it will be a hard sell to an SMB security buyer. Decide on the public product name before M8.
 
 ## 7. Definition of done for v1.0 (end of M8)
@@ -320,6 +300,6 @@ This is the most operationally expensive feature in the whole plan. Read the ris
 - All **Must** items in sections 4.1–4.10 shipped.
 - Third-party security audit completed, findings fixed or publicly documented.
 - Backup → wipe → restore tested on SQLite and Postgres.
-- Sync convergence property tests pass for both modes; mode switch server↔device tested with 3+ devices including one offline past the TTL.
+- Sync convergence property tests pass, green nightly for 30 consecutive days.
 - Import from Bitwarden, 1Password and KeePass verified on real exports.
 - Author and at least 10 external users have used it daily for 60+ days without data loss.

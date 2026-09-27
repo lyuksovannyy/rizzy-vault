@@ -40,7 +40,7 @@ We have no security email address, and none should be trusted unless this file l
 - **What is affected:**
   - component: server role, `rizzy-core`, `rizzy-sync`, `rv`, web vault, extension, desktop, mobile, CI or release tooling, or a design document;
   - commit hash or tag;
-  - relevant configuration: sync mode, database, deployment profile.
+  - relevant configuration: database, deployment profile.
 - **The attacker you assume.** Use the adversary IDs in [THREAT_MODEL.md §4](docs/THREAT_MODEL.md#4-adversaries) where you can, e.g. "A2, active malicious server".
 - **Which security goal or invariant breaks,** e.g. G-5 or INV-xx from [THREAT_MODEL.md](docs/THREAT_MODEL.md).
 - **Steps to reproduce,** and a proof of concept if you have one.
