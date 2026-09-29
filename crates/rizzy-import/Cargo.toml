@@ -1,0 +1,30 @@
+[package]
+name = "rizzy-import"
+description = "Importers for other password managers' export files. No I/O; portable to wasm32."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# ADR 0016 §3 row: importers and their fuzz targets; internal dependency `rizzy-core` only; no
+# I/O, builds for wasm32 (R1). No external crate of its own: the JSON, CSV, XML, zip and
+# DEFLATE readers are written here, so that every buffer holding imported plaintext is a
+# zeroizing one allocated at its final size (CRYPTO.md §12.2), and so that R1's allow-list
+# stays the one `rizzy-core` already has. `zeroize` is the version rizzy-core pins.
+[dependencies]
+rizzy-core.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+# The deterministic test RNG of ADR 0009 (`ChaCha20Rng`), for element ids in tests. A
+# dev-dependency only: R1's allow-list covers normal and build dependencies (ADR 0016 §4,
+# "Dev-dependencies").
+chacha20.workspace = true
+rand_core.workspace = true
+# Round-trip property tests of the DEFLATE reader and the CSV reader.
+proptest.workspace = true
+
+[lints]
+workspace = true
