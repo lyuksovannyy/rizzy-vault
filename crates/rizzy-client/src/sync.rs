@@ -39,6 +39,15 @@
 //! stored" is an acknowledgement. The restore generation of every answer goes to the log, so
 //! an op the server may have stored and served is never re-issued.
 //!
+//! # Key rotation (ADR 0025)
+//!
+//! The driver keeps the wrap-set rows of the last Fetch as served and knows whether it is
+//! synced (a complete Fetch after its last write or upload). [`crate::rotation`] builds each
+//! vault's half of a rotation from them: this device's exact cursor, every row it can open
+//! re-wrapped under the new vault key, the rest dropped. After the commit, and after a rotation
+//! elsewhere, [`VaultSync::adopt_vault_key`] moves the driver to the new epoch; a second key
+//! at an epoch it already saw is a fork alarm and makes the vault read-only.
+//!
 //! # Read-only
 //!
 //! The vault is read-only while the host says so ([`VaultSync::set_read_only`]: a rollback, a
@@ -49,8 +58,15 @@
 //!
 //! - The healing request of ADR 0021 §9 "Healing request" while the server is behind: the
 //!   driver detects the condition and stays read-only, but builds no healing request.
-//! - A stale-epoch answer: the vault key never rotates in this build (no rotation is accepted,
-//!   `rizzy-proto` "Left open"), so a `stale_epoch` answer is reported, not re-issued.
+//! - A stale-epoch answer to an own op the server may have stored and served before a restore
+//!   (ADR 0021 §9 "Stale epoch": re-published in a healing request, never re-issued) stops the
+//!   chain's upload with [`ClientError::HealingRequired`]. A stale-epoch answer to any other own
+//!   op (written at the old epoch before this device learned of a rotation, ADR 0025 §4) is
+//!   handled: once the host adopts the new vault key ([`VaultSync::adopt_vault_key`]; until
+//!   then [`ClientError::VaultKeyRotated`]), the next upload re-issues it and the later
+//!   old-epoch ops of the chain with the same `device_seq` under the writer rule's item key
+//!   (a fresh one when every held key is stale, CRYPTO.md §11.6), and a stale snapshot is
+//!   rewritten.
 //! - The `lacks_wrap` condition of "Server behind": wrap acknowledgements are not tracked, so
 //!   it is passed as false.
 //! - The server's `state_seq` in "Server behind": the account-state checks of
@@ -81,6 +97,7 @@ use rizzy_core::sign::{
 };
 use rizzy_proto::error::ErrorCode;
 use rizzy_proto::limits::MAX_RECORDS;
+use rizzy_proto::objects::ItemKeyWrap;
 use rizzy_proto::vault::{
     FetchRequest, FetchResponse, OpRecord, Record, RecordKeyWrap, SeqEntry, SeqVector,
     SnapshotRecord, UploadRequest, UploadResponse, UploadResult,
@@ -276,6 +293,19 @@ pub struct VaultSync {
     server_behind: bool,
     /// The last restore generation seen.
     generation: Option<RestoreGeneration>,
+    /// The wrap-set rows of the last Fetch page (each page carries the whole set), as served:
+    /// what a rotation re-wraps or drops (ADR 0025 §2 step 3).
+    wrap_rows: Vec<ItemKeyWrap>,
+    /// Whether the last Fetch page was complete, the server was not behind, and nothing was
+    /// written or uploaded since: the cursor is what a rotation sends (ADR 0025 §2 step 1).
+    synced: bool,
+    /// Every `vault_key_epoch` this device held a vault key of, with that key's id: a second key
+    /// at a seen epoch is a fork (ADR 0025 §4).
+    seen_keys: BTreeMap<u32, SymmetricKeyId>,
+    /// The lowest own `device_seq` the server answered `stale_epoch` and this device has not
+    /// re-issued yet (ADR 0021 §9 "Stale epoch"; ADR 0025 §4). The next
+    /// [`VaultSync::upload_request`] re-issues it and the later old-epoch ops of the chain.
+    stale_from: Option<u64>,
 }
 
 impl fmt::Debug for VaultSync {
@@ -316,6 +346,8 @@ impl VaultSync {
             return Err(ClientError::InvalidInput);
         }
         let vault_id = vault_key.vault_id();
+        let mut seen_keys = BTreeMap::new();
+        seen_keys.insert(vault_key.epoch(), vault_key.key_id().map_err(internal)?);
         Ok(Self {
             vault_id,
             device_id: unlocked.device_id,
@@ -334,6 +366,10 @@ impl VaultSync {
             host_read_only: false,
             server_behind: false,
             generation: None,
+            wrap_rows: Vec::new(),
+            synced: false,
+            seen_keys,
+            stale_from: None,
         })
     }
 
@@ -366,6 +402,15 @@ impl VaultSync {
     /// # Errors
     /// [`ClientError::Internal`] if the cursor exceeds the wire bound.
     pub fn fetch_request(&self) -> Result<FetchRequest, ClientError> {
+        Ok(FetchRequest {
+            vault_id: id(self.vault_id.to_bytes()),
+            cursor: self.cursor()?,
+            wraps_after_epoch: None,
+        })
+    }
+
+    /// The cursor: the highest `device_seq` this device has, per device (ADR 0012 §7).
+    fn cursor(&self) -> Result<SeqVector, ClientError> {
         let entries = self
             .log
             .cursor()
@@ -375,11 +420,7 @@ impl VaultSync {
                 seq: d.seq(),
             })
             .collect();
-        Ok(FetchRequest {
-            vault_id: id(self.vault_id.to_bytes()),
-            cursor: SeqVector::new(entries).map_err(|_| ClientError::Internal)?,
-            wraps_after_epoch: None,
-        })
+        SeqVector::new(entries).map_err(|_| ClientError::Internal)
     }
 
     /// The merge of `item`, created with every item key of its wrap set.
@@ -415,8 +456,9 @@ impl VaultSync {
     }
 
     /// Opens an `ITEM_KEY_WRAP` of `item` wrapped at `vault_key_epoch` and adds the key.
-    /// A wrap under another epoch than the held vault key's is ignored (no rotation in this
-    /// build).
+    /// A wrap under another epoch than the held vault key's is ignored: after a rotation every
+    /// row is re-wrapped at the new epoch (ADR 0025 §3), and this device adopts that key first
+    /// ([`VaultSync::adopt_vault_key`]).
     fn learn_wrap(&mut self, item: ItemId, vault_key_epoch: u32, envelope: &[u8]) {
         if vault_key_epoch != self.vault_key.epoch() {
             return;
@@ -608,11 +650,12 @@ impl VaultSync {
                 self.log.learn_revocation(author.status.device, cutoff);
             }
         }
-        // The current wrap set.
+        // The current wrap set, kept as served for a rotation (every page carries all of it).
         for wrap in response.item_key_wraps.as_slice() {
             let item = ItemId::from_bytes(wrap.item_id.to_bytes());
             self.learn_wrap(item, wrap.vault_key_epoch, wrap.envelope.as_slice());
         }
+        self.wrap_rows = response.item_key_wraps.as_slice().to_vec();
         // 1. Verify.
         let mut served = Vec::with_capacity(response.ops.as_slice().len());
         for record in response.ops.as_slice() {
@@ -729,6 +772,7 @@ impl VaultSync {
         );
         self.server_behind = !behind.is_empty();
         outcome.server_behind = self.server_behind;
+        self.synced = response.complete && !self.server_behind;
         self.prune_bodies();
         Ok(outcome)
     }
@@ -826,16 +870,15 @@ impl VaultSync {
     }
 
     /// The newest item key of `item` usable for a write (CRYPTO.md §11.6 writer rule).
-    /// `Err(StaleKey)` when every held key is stale; `Ok(None)` when none is held.
-    fn writer_key(&self, item: ItemId) -> Result<Option<&ItemKey>, ClientError> {
-        let Some(keys) = self.item_keys.get(&item).filter(|k| !k.is_empty()) else {
-            return Ok(None);
-        };
-        keys.iter()
-            .rev()
-            .find(|k| !k.is_stale(self.vault_key.epoch()))
-            .map(Some)
-            .ok_or(ClientError::StaleKey)
+    /// `Ok(None)` when none is held or every held key is stale: the writer then generates a
+    /// fresh item key at the current `vault_key_epoch`, carries its wrap with the op, and the
+    /// merge makes a full snapshot due ([`OwnWrite::fresh_item_key`](rizzy_sync::merge::OwnWrite)).
+    fn writer_key(&self, item: ItemId) -> Option<&ItemKey> {
+        self.item_keys.get(&item).and_then(|keys| {
+            keys.iter()
+                .rev()
+                .find(|k| !k.is_stale(self.vault_key.epoch()))
+        })
     }
 
     /// Writes one own op on `item` (ADR 0012 §2–§4, ADR 0018 §3; CRYPTO.md §8.4, §10.2):
@@ -848,7 +891,7 @@ impl VaultSync {
     /// [`ClientError::ReadOnly`]; [`ClientError::InvalidInput`] if `unlocked` is another
     /// device's; [`ClientError::InvalidEdit`] for a key the record layer refuses, a duplicate
     /// key, data the record layer cannot encode, or a purge the writer rules forbid;
-    /// [`ClientError::StaleKey`]; [`ClientError::Internal`].
+    /// [`ClientError::Internal`].
     #[expect(
         clippy::too_many_lines,
         reason = "one own op built in the order of ADR 0012 §3 and CRYPTO.md §10.2"
@@ -886,7 +929,7 @@ impl VaultSync {
         let plaintext = encode_op(&OpData::new(change.lifecycle, writes))
             .map_err(|_| ClientError::InvalidEdit)?;
         // The item key: the writer rule's, or a fresh one with its wrap.
-        let fresh = match self.writer_key(item)? {
+        let fresh = match self.writer_key(item) {
             Some(_) => None,
             None => Some(ItemKey::generate(rng, self.vault_key.epoch())),
         };
@@ -914,7 +957,7 @@ impl VaultSync {
         let (key_id, envelope, wrap) = {
             let key = match &fresh {
                 Some(k) => k,
-                None => self.writer_key(item)?.ok_or(ClientError::Internal)?,
+                None => self.writer_key(item).ok_or(ClientError::Internal)?,
             };
             let key_id = key.key_id().map_err(internal)?;
             let envelope = seal(rng, key.key(), &ctx, plaintext.expose_secret())
@@ -989,6 +1032,7 @@ impl VaultSync {
         }
         self.clock = hlc;
         self.next_seq = self.next_seq.checked_add(1).ok_or(ClientError::Internal)?;
+        self.synced = false;
         Ok(dot)
     }
 
@@ -1000,7 +1044,7 @@ impl VaultSync {
         unlocked: &UnlockedDevice,
         item: ItemId,
     ) -> Result<(), ClientError> {
-        if self.writer_key(item).ok().flatten().is_none() {
+        if self.writer_key(item).is_none() {
             return Ok(());
         }
         let Some(merge) = self.items.get_mut(&item) else {
@@ -1020,7 +1064,7 @@ impl VaultSync {
         };
         let canonical = header.to_vec().map_err(internal)?;
         let ctx = header.envelope_context().map_err(internal)?;
-        let key = self.writer_key(item)?.ok_or(ClientError::Internal)?;
+        let key = self.writer_key(item).ok_or(ClientError::Internal)?;
         let envelope =
             seal(rng, key.key(), &ctx, written.data.expose_secret()).map_err(internal)?;
         let statement = SnapshotStatement::new(&canonical, &envelope, None).map_err(internal)?;
@@ -1038,6 +1082,163 @@ impl VaultSync {
         Ok(())
     }
 
+    /// Re-issues the own ops a `stale_epoch` answer calls for (ADR 0021 §9 "Stale epoch";
+    /// ADR 0025 §4: "the writer creates a fresh item key and re-issues the op with the same
+    /// `device_seq`"; ADR 0018 §3 "Re-issued ops", owner decision 15). Nothing to do without a
+    /// pending stale answer.
+    ///
+    /// [`VaultLog::stale_plan`] picks the answered op and every later own op below the current
+    /// `vault_key_epoch`. Each one keeps its header but for `vault_key_epoch`, which becomes the
+    /// current one, and its op data (the decrypted body this device keeps for unacknowledged
+    /// ops); the data is sealed again under the CRYPTO.md §11.6 writer rule's item key (a fresh
+    /// one at the current epoch, carried as a signed wrap, when every held key of the item is
+    /// stale), signed again, and replaces the record in the log, the merge and the upload queue.
+    /// Unsent snapshots of the item that cover the op are discarded, and the snapshot the merge
+    /// asks for is due.
+    ///
+    /// Every refusal below is decided before the first op is replaced; only a failure valid
+    /// state cannot cause ([`ClientError::Internal`]) can stop it half-way.
+    ///
+    /// # Errors
+    /// [`ClientError::VaultKeyRotated`] while this device still writes at the answered op's
+    /// epoch: it must adopt the new vault key first. [`ClientError::HealingRequired`] when the
+    /// plan names an op the server may have stored and served (a restore came between): such an
+    /// op is never re-issued, and the healing request that re-publishes it is not in this build;
+    /// nothing is re-issued or sent from the chain then. [`ClientError::Internal`].
+    fn reissue_stale<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        unlocked: &UnlockedDevice,
+    ) -> Result<(), ClientError> {
+        use rizzy_sync::causal::OwnError;
+        use rizzy_sync::merge::Reissue;
+
+        let Some(rejected) = self.stale_from else {
+            return Ok(());
+        };
+        let current = self.vault_key.epoch();
+        let plan = match self.log.stale_plan(rejected, current) {
+            Ok(plan) => plan,
+            Err(OwnError::NotStale) => return Err(ClientError::VaultKeyRotated),
+            Err(_) => return Err(ClientError::Internal),
+        };
+        if !plan.republish.is_empty() {
+            return Err(ClientError::HealingRequired);
+        }
+        let headers: Vec<OpHeader> = self
+            .log
+            .unacknowledged()
+            .filter(|h| plan.reissue.contains(&h.dot))
+            .cloned()
+            .collect();
+        if headers.len() != plan.reissue.len() {
+            return Err(ClientError::Internal);
+        }
+        for old in headers {
+            let dot = old.dot;
+            let item = old.item_id;
+            let header = OpHeader {
+                vault_key_epoch: current,
+                ..old
+            };
+            let fresh = match self.writer_key(item) {
+                Some(_) => None,
+                None => Some(ItemKey::generate(rng, current)),
+            };
+            let (key_id, record) = self.reissued_record(rng, unlocked, &header, fresh.as_ref())?;
+            self.log
+                .reissue_own_op(header.clone())
+                .map_err(|_| ClientError::Internal)?;
+            let fresh_item_key = fresh.is_some();
+            if let Some(key) = fresh {
+                self.add_item_key(item, key);
+            }
+            let before = self.outbox.len();
+            let own = self.device_id;
+            self.outbox
+                .retain(|s| s.header.item_id != item || s.header.covered.get(own) < dot.seq());
+            let trigger = self
+                .items
+                .get_mut(&item)
+                .ok_or(ClientError::Internal)?
+                .reissue_own_op(
+                    &header,
+                    key_id,
+                    Reissue {
+                        fresh_item_key,
+                        discarded_unsent_snapshot: self.outbox.len() != before,
+                    },
+                )
+                .map_err(internal)?;
+            if trigger.is_some() {
+                self.pending_snapshots.insert(item);
+            }
+            self.own_records.insert(dot.seq(), OwnRecord { record });
+            if let Some(body) = self.bodies.get_mut(&dot) {
+                body.0 = key_id;
+            }
+        }
+        self.stale_from = None;
+        self.synced = false;
+        Ok(())
+    }
+
+    /// The record of a re-issued own op ([`VaultSync::reissue_stale`]): the kept op data of
+    /// `header`'s dot sealed under `fresh` or else the writer rule's item key, `fresh`'s wrap
+    /// under the current vault key when there is one, and the statement signed again. Returns
+    /// the item key's id with the record.
+    fn reissued_record<R: CryptoRng + ?Sized>(
+        &self,
+        rng: &mut R,
+        unlocked: &UnlockedDevice,
+        header: &OpHeader,
+        fresh: Option<&ItemKey>,
+    ) -> Result<(SymmetricKeyId, OpRecord), ClientError> {
+        let item = header.item_id;
+        let key = match fresh {
+            Some(k) => k,
+            None => self.writer_key(item).ok_or(ClientError::Internal)?,
+        };
+        let key_id = key.key_id().map_err(internal)?;
+        let (_, plaintext) = self.bodies.get(&header.dot).ok_or(ClientError::Internal)?;
+        let ctx = header.envelope_context().map_err(internal)?;
+        let envelope = seal(rng, key.key(), &ctx, plaintext.expose_secret()).map_err(internal)?;
+        let wrap = match fresh {
+            Some(k) => Some(
+                self.vault_key
+                    .wrap_item_key(
+                        rng,
+                        &ItemKeyWrapCtx {
+                            vault_id: self.vault_id,
+                            item_id: item,
+                            vault_key_epoch: header.vault_key_epoch,
+                        },
+                        k,
+                    )
+                    .map_err(internal)?,
+            ),
+            None => None,
+        };
+        let canonical = header.to_vec().map_err(internal)?;
+        let statement =
+            OpStatement::new(&canonical, &envelope, wrap.as_deref()).map_err(internal)?;
+        let wire = statement
+            .sign(unlocked.device_keys.signing_key())
+            .map_err(internal)?;
+        let record = OpRecord {
+            statement: bytes(wire)?,
+            body: Some(bytes(envelope)?),
+            key_wrap: match wrap {
+                Some(w) => Some(RecordKeyWrap {
+                    item_key_id: id(*key_id.as_bytes()),
+                    envelope: bytes(w)?,
+                }),
+                None => None,
+            },
+        };
+        Ok((key_id, record))
+    }
+
     /// The highest own `device_seq` the server acknowledged in this vault.
     const fn acked(&self) -> u64 {
         self.log.acknowledged()
@@ -1045,12 +1246,15 @@ impl VaultSync {
 
     /// The next upload (ADR 0012 §7 "Upload"): every own op not acknowledged, in chain order,
     /// then the own snapshots whose own entry is acknowledged; `None` when there is nothing to
-    /// send or the vault is read-only. Due snapshots are written first.
+    /// send or the vault is read-only. Own ops the server answered `stale_epoch` are re-issued
+    /// first (module docs, "Not in this build"; ADR 0025 §4), then due snapshots are written.
     ///
     /// # Errors
     /// [`ClientError::InvalidInput`] if `unlocked` is another device's;
     /// [`ClientError::FetchRequired`] before the first Fetch or upload answer;
-    /// [`ClientError::Internal`].
+    /// [`ClientError::VaultKeyRotated`] after a `stale_epoch` answer until the new vault key is
+    /// adopted; [`ClientError::HealingRequired`] when that answer names an op the server may have
+    /// stored and served before a restore; [`ClientError::Internal`].
     pub fn upload_request<R: CryptoRng + ?Sized>(
         &mut self,
         rng: &mut R,
@@ -1065,6 +1269,7 @@ impl VaultSync {
         if self.generation.is_none() {
             return Err(ClientError::FetchRequired);
         }
+        self.reissue_stale(rng, unlocked)?;
         for item in core::mem::take(&mut self.pending_snapshots) {
             self.write_snapshot(rng, unlocked, item)?;
         }
@@ -1096,6 +1301,7 @@ impl VaultSync {
             return Ok(None);
         }
         self.in_flight = in_flight;
+        self.synced = false;
         Ok(Some(UploadRequest {
             vault_id: id(self.vault_id.to_bytes()),
             records: List::new(records).map_err(|_| ClientError::Internal)?,
@@ -1112,6 +1318,7 @@ impl VaultSync {
         response: &UploadResponse,
     ) -> Result<UploadOutcome, ClientError> {
         let in_flight = core::mem::take(&mut self.in_flight);
+        self.synced = false;
         let results = response.results.as_slice();
         if results.len() != in_flight.len() {
             return Err(ClientError::InvalidServerResponse);
@@ -1132,6 +1339,9 @@ impl VaultSync {
                     self.log
                         .record_answered(seq, generation)
                         .map_err(|_| ClientError::Internal)?;
+                    if error == ErrorCode::StaleEpoch {
+                        self.stale_from = Some(self.stale_from.map_or(seq, |s| s.min(seq)));
+                    }
                     outcome.rejected.push(error);
                 }
                 (InFlight::Op(seq), _) => {
@@ -1143,8 +1353,16 @@ impl VaultSync {
                     self.outbox.retain(|s| s.header.snapshot_id != sid);
                     outcome.snapshots_stored += 1;
                 }
-                (InFlight::Snapshot(sid), UploadResult::Rejected { .. }) => {
-                    // "A refusal only discards" the snapshot (ADR 0021 §9).
+                (InFlight::Snapshot(sid), UploadResult::Rejected { error }) => {
+                    // "A refusal only discards" the snapshot; "A stale answer to a snapshot
+                    // only discards and rewrites it" (ADR 0021 §9): the rewrite is due at the
+                    // next upload, under the writer rule's key at the current epoch.
+                    if error == ErrorCode::StaleEpoch
+                        && let Some(stale) =
+                            self.outbox.iter().find(|s| s.header.snapshot_id == sid)
+                    {
+                        self.pending_snapshots.insert(stale.header.item_id);
+                    }
                     self.outbox.retain(|s| s.header.snapshot_id != sid);
                     outcome.snapshots_discarded += 1;
                 }
@@ -1164,6 +1382,120 @@ impl VaultSync {
     /// The merge of `item`, if any op reached it.
     pub(crate) fn merge(&self, item: ItemId) -> Option<&ItemMerge> {
         self.items.get(&item)
+    }
+
+    /// The `vault_key_epoch` of the vault key this driver writes under.
+    #[must_use]
+    pub const fn vault_key_epoch(&self) -> u32 {
+        self.vault_key.epoch()
+    }
+
+    /// The epoch of a rotation's new vault key (ADR 0025 §3 check 2): above every epoch this
+    /// device saw for the vault (its keys and the served wrap-set rows), so an epoch the server
+    /// may have rolled back is never reused.
+    pub(crate) fn next_vault_epoch(&self) -> Result<u32, ClientError> {
+        let seen = self
+            .wrap_rows
+            .iter()
+            .map(|w| w.vault_key_epoch)
+            .chain(self.seen_keys.keys().copied())
+            .fold(self.vault_key.epoch(), u32::max);
+        seen.checked_add(1).ok_or(ClientError::Internal)
+    }
+
+    /// The highest `device_seq` this device holds from `device` in this vault.
+    pub(crate) fn cursor_of(&self, device: DeviceId) -> u64 {
+        self.log.cursor().get(device)
+    }
+
+    /// The vault half of a rotation for this vault (ADR 0025 §2 steps 1–3; CRYPTO.md §11.6
+    /// step 3): the new self-grant, this device's cursor, every served wrap-set row it can open
+    /// re-wrapped under `new_vault_key`, the rest dropped.
+    ///
+    /// # Errors
+    /// [`ClientError::SyncRequired`] unless every own op and snapshot is uploaded and a complete
+    /// Fetch ran after that; [`ClientError::ReadOnly`] while the vault is read-only (a server
+    /// behind this device heals first, ADR 0025 §2 step 2); [`ClientError::InvalidInput`] for
+    /// a key of another vault or not above every epoch seen; [`ClientError::Internal`].
+    pub(crate) fn rotation_half<R: CryptoRng + ?Sized>(
+        &self,
+        rng: &mut R,
+        account_id: rizzy_core::ids::AccountId,
+        new_account_key: &rizzy_core::keys::AccountKey,
+        new_vault_key: &VaultKey,
+    ) -> Result<crate::rotation::VaultHalf, ClientError> {
+        if self.is_read_only() {
+            return Err(ClientError::ReadOnly);
+        }
+        let queued = self.log.unacknowledged().next().is_some()
+            || !self.outbox.is_empty()
+            || !self.pending_snapshots.is_empty();
+        if queued || !self.synced {
+            return Err(ClientError::SyncRequired);
+        }
+        if new_vault_key.vault_id() != self.vault_id
+            || new_vault_key.epoch() < self.next_vault_epoch()?
+        {
+            return Err(ClientError::InvalidInput);
+        }
+        crate::rotation::build_vault_half(
+            rng,
+            account_id,
+            &[&self.vault_key],
+            &self.wrap_rows,
+            self.cursor()?,
+            new_account_key,
+            new_vault_key,
+        )
+    }
+
+    /// Adopts a vault key of this vault that opened under the verified account key: after this
+    /// device's own rotation committed, or after a rotation elsewhere (CRYPTO.md §11.3 step 4.4,
+    /// §11.6 "Current vault epoch"). A key at a higher epoch becomes the one writes use; the
+    /// item keys learned so far stay (old ops still open), and are stale for writing.
+    ///
+    /// ADR 0025 §4: a key at an epoch this device already saw with another key id is a fork;
+    /// the vault goes read-only and nothing is adopted.
+    ///
+    /// # Errors
+    /// [`ClientError::InvalidInput`] for another vault's key; [`ClientError::Fork`] for a second
+    /// key at a seen epoch; [`ClientError::Rollback`] for a key below the current epoch;
+    /// [`ClientError::Internal`].
+    pub fn adopt_vault_key(&mut self, key: VaultKey) -> Result<(), ClientError> {
+        if key.vault_id() != self.vault_id {
+            return Err(ClientError::InvalidInput);
+        }
+        let key_id = key.key_id().map_err(internal)?;
+        if let Some(seen) = self.seen_keys.get(&key.epoch()) {
+            if *seen != key_id {
+                self.host_read_only = true;
+                return Err(ClientError::Fork);
+            }
+            return if key.epoch() == self.vault_key.epoch() {
+                Ok(())
+            } else {
+                Err(ClientError::Rollback)
+            };
+        }
+        if key.epoch() < self.vault_key.epoch() {
+            return Err(ClientError::Rollback);
+        }
+        self.seen_keys.insert(key.epoch(), key_id);
+        self.vault_key = key;
+        self.wrap_rows.clear();
+        self.synced = false;
+        Ok(())
+    }
+
+    /// Test access: the ids and creation epochs of the item keys held for `item`, oldest first.
+    #[cfg(test)]
+    pub(crate) fn item_key_ids(&self, item: ItemId) -> Vec<(SymmetricKeyId, u32)> {
+        self.item_keys
+            .get(&item)
+            .into_iter()
+            .flatten()
+            .filter_map(|k| Some((k.key_id().ok()?, k.created_vault_key_epoch())))
+            .collect()
     }
 
     /// Test access: whether the log counts the own op `seq` as possibly stored and served

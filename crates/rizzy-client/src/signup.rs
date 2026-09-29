@@ -45,8 +45,11 @@ use rizzy_core::opaque::{
 };
 use rizzy_core::rng::CryptoRng;
 use rizzy_core::secret_key::{RecoveryCode, SecretKey};
+/// The device kind of [`SignupInput`], re-exported so a host that links only this crate (a
+/// binding, or `rizzy-server`'s end-to-end tests, ADR 0016 §4 owner decision 4) can name it.
+pub use rizzy_core::sign::DeviceKind;
 use rizzy_core::sign::{
-    AccountState, DeviceCertificate, DeviceKind, PublicKeyBundle, SyncMode,
+    AccountState, DeviceCertificate, PublicKeyBundle, SyncMode,
     statements::WEB_CERT_MAX_LIFETIME_MS,
 };
 use rizzy_proto::auth::{

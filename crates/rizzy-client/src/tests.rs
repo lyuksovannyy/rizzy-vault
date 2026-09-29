@@ -112,6 +112,8 @@ struct Server {
     compact: bool,
     /// The restore generation every answer carries.
     generation: [u8; 16],
+    /// The pending device grants of rotations (`rotation` tests).
+    device_grants: Vec<rizzy_proto::objects::DeviceGrant>,
     /// The next random value.
     rng: ChaCha20Rng,
 }
@@ -136,6 +138,7 @@ impl Server {
             op_items: BTreeMap::new(),
             compact: false,
             generation: [7; 16],
+            device_grants: Vec::new(),
             rng,
         }
     }
@@ -1615,3 +1618,5 @@ fn fake_server_refuses_forged_snapshots_and_serves_covers() {
         ValueRef::Text("p")
     ));
 }
+
+mod rotation;

@@ -23,7 +23,7 @@ use crate::auth::{
 };
 use crate::change::{
     CommitChangeRequest, DeviceSuspensionRequest, ReregisterStartRequest, ReregisterStartResponse,
-    SuspendDeviceResponse,
+    RetiredSecretKey, SuspendDeviceResponse, VaultRotation, VaultRotationUpload, WrapLocator,
 };
 use crate::error::ErrorCode;
 use crate::objects::{
@@ -32,7 +32,7 @@ use crate::objects::{
 };
 use crate::recovery::{
     RecoveryAuthToken, RecoveryCancelResponse, RecoveryCompleteResponse, RecoveryRequest,
-    RecoveryStartResponse,
+    RecoveryStartResponse, RecoveryVault,
 };
 use crate::totp::{
     TotpDisableRequest, TotpEnrolConfirmRequest, TotpEnrolStartResponse, TotpSecretBytes,
@@ -631,6 +631,7 @@ fn commit_change() -> CommitChangeRequest {
         account_settings: None,
         device_certificates: l(vec![b(b"cert")]),
         device_revocations: List::empty(),
+        ..bare_commit(b"state")
     }
 }
 
@@ -658,6 +659,7 @@ fn known_answer_change_recovery_and_totp() {
         }),
         device_certificates: List::empty(),
         device_revocations: List::empty(),
+        ..bare_commit(b"foobar")
     };
     assert_eq!(
         round_trip(&commit),
@@ -721,6 +723,7 @@ fn every_change_recovery_and_totp_message_round_trips() {
             envelope: b(b"e_rec"),
         },
         account: account_view(),
+        vaults: l(vec![recovery_vault()]),
     });
     round_trip(&TotpDisableRequest {
         code: TotpCode::new("000000").unwrap(),
@@ -729,15 +732,15 @@ fn every_change_recovery_and_totp_message_round_trips() {
 
 #[test]
 fn change_recovery_and_totp_requests_are_strict() {
-    // No field can carry a device-only secret, a new Secret Key or a rotation half.
+    // No field can carry a device-only secret, a new Secret Key, a recovery code or a key.
     let commit = serde_json::to_value(commit_change()).unwrap();
     assert!(serde_json::from_value::<CommitChangeRequest>(commit.clone()).is_ok());
     for field in [
         "e_dev",
         "secret_key",
-        "vault_rotation",
-        "device_grants",
-        "bundle",
+        "recovery_code",
+        "account_key",
+        "vault_key",
     ] {
         let mut extra = commit.clone();
         extra[field] = "Zm9v".into();
@@ -813,6 +816,7 @@ fn change_recovery_and_totp_debug_output_never_shows_secrets() {
             envelope: b(b"E-REC-BYTES"),
         },
         account: account_view(),
+        vaults: List::empty(),
     };
     let session_text = complete.session_token.to_b64url();
     let confirm = TotpEnrolConfirmRequest {
@@ -832,4 +836,205 @@ fn change_recovery_and_totp_debug_output_never_shows_secrets() {
     ] {
         assert!(!shown.contains(secret), "{secret} in {shown}");
     }
+}
+
+/// A commit with only its required fields and `state`.
+fn bare_commit(state: &[u8]) -> CommitChangeRequest {
+    CommitChangeRequest {
+        account_state: b(state),
+        registration_upload: None,
+        account_key_server_wrap: None,
+        recovery: None,
+        account_settings: None,
+        device_certificates: List::empty(),
+        device_revocations: List::empty(),
+        bundle: None,
+        identity_secret_keys: None,
+        retired_secret_keys: List::empty(),
+        device_grants: List::empty(),
+        recovery_rewrap: None,
+        vault_rotation: None,
+    }
+}
+
+/// A sample self-grant of vault `vault`.
+fn self_grant(vault: u8) -> VaultSelfGrant {
+    VaultSelfGrant {
+        vault_id: id(vault),
+        account_key_epoch: 1,
+        vault_key_epoch: 1,
+        envelope: b(b"grant"),
+    }
+}
+
+/// A sample wrap-set row at epoch 1.
+fn wrap(item: u8) -> ItemKeyWrap {
+    ItemKeyWrap {
+        item_id: id(item),
+        item_key_id: id(item.wrapping_add(100)),
+        vault_key_epoch: 1,
+        envelope: b(b"wrap"),
+    }
+}
+
+/// A sample vault half of vault `vault`.
+fn vault_rotation(vault: u8) -> VaultRotation {
+    VaultRotation {
+        self_grant: self_grant(vault),
+        cursor: SeqVector::new(vec![SeqEntry {
+            device_id: id(1),
+            seq: 3,
+        }])
+        .unwrap(),
+        item_key_wraps: l(vec![wrap(1)]),
+        dropped: l(vec![WrapLocator {
+            item_id: id(2),
+            item_key_id: id(102),
+        }]),
+    }
+}
+
+/// A sample vault of a recovery answer.
+fn recovery_vault() -> RecoveryVault {
+    RecoveryVault {
+        vault_id: id(4),
+        self_grant: self_grant(4),
+        heads: SeqVector::default(),
+        item_key_wraps: l(vec![wrap(1)]),
+    }
+}
+
+/// A sample full rotation with every rotation field.
+fn rotation_commit() -> CommitChangeRequest {
+    CommitChangeRequest {
+        account_key_server_wrap: Some(AccountKeyServerWrap {
+            account_key_epoch: 1,
+            password_epoch: 0,
+            kdf_id: 1,
+            envelope: b(b"e_srv"),
+        }),
+        bundle: Some(b(b"bundle")),
+        identity_secret_keys: Some(IdentitySecretKeys {
+            identity_epoch: 1,
+            envelope: b(b"e_id"),
+        }),
+        retired_secret_keys: l(vec![RetiredSecretKey {
+            retired_key_id: id(9),
+            envelope: b(b"retired"),
+        }]),
+        device_grants: l(vec![DeviceGrant {
+            account_key_epoch: 1,
+            sender_device_id: id(1),
+            recipient_device_id: id(2),
+            key_grant: b(b"grant"),
+        }]),
+        recovery_rewrap: Some(AccountKeyRecoveryWrap {
+            account_key_epoch: 1,
+            recovery_epoch: 1,
+            envelope: b(b"e_rec"),
+        }),
+        vault_rotation: Some(
+            VaultRotationUpload::new(vec![vault_rotation(3), vault_rotation(4)]).unwrap(),
+        ),
+        ..bare_commit(b"state")
+    }
+}
+
+#[test]
+fn rotation_fields_round_trip_and_are_left_out_when_absent() {
+    let text = round_trip(&rotation_commit());
+    for field in [
+        "\"bundle\"",
+        "\"identity_secret_keys\"",
+        "\"retired_secret_keys\"",
+        "\"device_grants\"",
+        "\"recovery_rewrap\"",
+        "\"vault_rotation\"",
+        "\"cursor\"",
+        "\"dropped\"",
+    ] {
+        assert!(text.contains(field), "{field}");
+    }
+    // A commit without a rotation sends none of them (additive fields, ADR 0025 §1).
+    let plain = round_trip(&bare_commit(b"foo"));
+    assert_eq!(
+        plain,
+        r#"{"account_state":"Zm9v","device_certificates":[],"device_revocations":[]}"#
+    );
+    // Empty lists sent explicitly parse, and serialise without them.
+    let explicit = r#"{"account_state":"Zm9v","device_certificates":[],"device_revocations":[],"device_grants":[],"retired_secret_keys":[]}"#;
+    let parsed: CommitChangeRequest = serde_json::from_str(explicit).unwrap();
+    assert_eq!(serde_json::to_string(&parsed).unwrap(), plain);
+}
+
+#[test]
+fn vault_rotation_is_ordered_bounded_and_strict() {
+    // Strictly ascending by vault id: a duplicate or a wrong order is refused both ways.
+    assert_eq!(
+        VaultRotationUpload::new(vec![vault_rotation(4), vault_rotation(3)]),
+        Err(WireError::NotCanonical)
+    );
+    assert_eq!(
+        VaultRotationUpload::new(vec![vault_rotation(3), vault_rotation(3)]),
+        Err(WireError::NotCanonical)
+    );
+    let good = serde_json::to_value(rotation_commit()).unwrap();
+    let mut swapped = good.clone();
+    swapped["vault_rotation"]["vaults"]
+        .as_array_mut()
+        .unwrap()
+        .reverse();
+    assert!(serde_json::from_value::<CommitChangeRequest>(swapped).is_err());
+    // Unknown fields are refused at every level of the vault half.
+    for path in [
+        &["vault_rotation"][..],
+        &["vault_rotation", "vaults", "0"],
+        &["vault_rotation", "vaults", "0", "self_grant"],
+        &["vault_rotation", "vaults", "0", "item_key_wraps", "0"],
+        &["vault_rotation", "vaults", "0", "dropped", "0"],
+        &["retired_secret_keys", "0"],
+    ] {
+        let mut extra = good.clone();
+        let mut at = &mut extra;
+        for key in path {
+            at = match key.parse::<usize>() {
+                Ok(i) => &mut at[i],
+                Err(_) => &mut at[*key],
+            };
+        }
+        at["vault_key"] = "Zm9v".into();
+        assert!(
+            serde_json::from_value::<CommitChangeRequest>(extra).is_err(),
+            "{path:?}"
+        );
+    }
+    // A cursor must be canonical.
+    let mut zero = good.clone();
+    zero["vault_rotation"]["vaults"][0]["cursor"][0]["seq"] = 0.into();
+    assert!(serde_json::from_value::<CommitChangeRequest>(zero).is_err());
+    // At most 16 retired keys.
+    let mut many = good;
+    let one = many["retired_secret_keys"][0].clone();
+    many["retired_secret_keys"] = serde_json::Value::Array(vec![one; 17]);
+    assert!(serde_json::from_value::<CommitChangeRequest>(many).is_err());
+}
+
+#[test]
+fn recovery_complete_carries_vaults_and_ignores_unknown_fields() {
+    let complete = RecoveryCompleteResponse {
+        session_token: SessionToken::new(Zeroizing::new([3; 32])),
+        account_id: id(1),
+        recovery_wrap: AccountKeyRecoveryWrap {
+            account_key_epoch: 0,
+            recovery_epoch: 1,
+            envelope: b(b"e_rec"),
+        },
+        account: account_view(),
+        vaults: l(vec![recovery_vault()]),
+    };
+    let mut value = serde_json::to_value(&complete).unwrap();
+    value["vaults"][0]["later"] = 1.into();
+    value["later"] = 1.into();
+    let parsed: RecoveryCompleteResponse = serde_json::from_value(value).unwrap();
+    assert_eq!(parsed.vaults.as_slice(), complete.vaults.as_slice());
 }

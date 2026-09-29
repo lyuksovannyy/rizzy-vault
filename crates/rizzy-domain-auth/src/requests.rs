@@ -6,10 +6,10 @@
 //! serialises, and does nothing but convert: every check stays in the typed function it calls
 //! ([`AuthService::commit_change`], [`AuthService::recovery_start`], and so on).
 //!
-//! **No rotation.** [`CommitChangeRequest`] has no rotation fields yet (its docs), so the
-//! [`AccountChange`] built here carries no bundle, `E_id'`, retired key, device grant or vault
-//! half, and [`AuthService::commit_change`] refuses a state that rotates a key as an invalid
-//! request.
+//! **Rotation** (ADR 0025 §1): the rotation fields of [`CommitChangeRequest`] become the
+//! [`AccountChange`]'s bundle, `E_id'`, retired keys, device grants and recovery re-wrap, and its
+//! vault half goes to the vault domain's type through [`VaultPort::rotation_from_wire`]. A
+//! request with both `recovery` and `recovery_rewrap` is refused: they are exclusive.
 
 use rizzy_core::ids::DeviceId;
 use rizzy_core::rng::CryptoRng;
@@ -31,25 +31,33 @@ use crate::ports::VaultPort;
 use crate::session::Session;
 use crate::{AuthService, device_id};
 
-/// The [`AccountChange`] a [`CommitChangeRequest`] describes, with no rotation (module docs).
-fn account_change<R>(req: &CommitChangeRequest) -> AccountChange<R> {
-    AccountChange {
-        account_state: req.account_state.clone(),
-        bundle: None,
-        registration_upload: req.registration_upload.clone(),
-        account_key_server_wrap: req.account_key_server_wrap.clone(),
-        identity_secret_keys: None,
-        recovery: req
-            .recovery
-            .clone()
-            .map_or(RecoveryUpload::None, RecoveryUpload::Register),
-        account_settings: req.account_settings.clone(),
-        retired_secret_keys: Vec::new(),
-        device_certificates: req.device_certificates.clone(),
-        device_revocations: req.device_revocations.clone(),
-        device_grants: List::empty(),
-        vault_rotation: None,
-    }
+/// The [`AccountChange`] a [`CommitChangeRequest`] describes (module docs).
+///
+/// # Errors
+/// [`AuthError::InvalidRequest`] for a request with both `recovery` and `recovery_rewrap`.
+fn account_change<V: VaultPort>(
+    req: CommitChangeRequest,
+) -> Result<AccountChange<V::Rotation>, AuthError> {
+    let recovery = match (req.recovery, req.recovery_rewrap) {
+        (None, None) => RecoveryUpload::None,
+        (Some(registration), None) => RecoveryUpload::Register(registration),
+        (None, Some(rewrap)) => RecoveryUpload::Rewrap(rewrap),
+        (Some(_), Some(_)) => return Err(AuthError::InvalidRequest),
+    };
+    Ok(AccountChange {
+        account_state: req.account_state,
+        bundle: req.bundle,
+        registration_upload: req.registration_upload,
+        account_key_server_wrap: req.account_key_server_wrap,
+        identity_secret_keys: req.identity_secret_keys,
+        recovery,
+        account_settings: req.account_settings,
+        retired_secret_keys: req.retired_secret_keys,
+        device_certificates: req.device_certificates,
+        device_revocations: req.device_revocations,
+        device_grants: req.device_grants,
+        vault_rotation: req.vault_rotation.map(V::rotation_from_wire),
+    })
 }
 
 /// The target device of a suspension request.
@@ -76,19 +84,20 @@ impl<V: VaultPort> AuthService<V> {
         })
     }
 
-    /// [`AuthService::commit_change`] from its request, without a rotation (module docs).
+    /// [`AuthService::commit_change`] from its request, with its rotation fields when present
+    /// (module docs).
     ///
     /// # Errors
-    /// As [`AuthService::commit_change`]; a state that rotates a key is
-    /// [`AuthError::InvalidRequest`].
+    /// As [`AuthService::commit_change`]; [`AuthError::InvalidRequest`] for both `recovery` and
+    /// `recovery_rewrap`.
     pub async fn commit_change_request(
         &self,
         session: &Session,
-        req: &CommitChangeRequest,
+        req: CommitChangeRequest,
         now_ms: u64,
     ) -> Result<(), AuthError> {
-        self.commit_change(session, &account_change(req), now_ms)
-            .await
+        let change = account_change::<V>(req)?;
+        self.commit_change(session, &change, now_ms).await
     }
 
     /// [`AuthService::suspend_device`] from its request: H, for the revocation.
@@ -183,6 +192,7 @@ impl<V: VaultPort> AuthService<V> {
             account_id: release.account_id,
             recovery_wrap: release.recovery_wrap,
             account: release.account,
+            vaults: List::new(release.vaults).map_err(crate::over_limit)?,
         })
     }
 

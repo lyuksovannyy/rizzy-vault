@@ -45,9 +45,9 @@ use rizzy_proto::auth::RecoveryRegistration;
 use rizzy_proto::limits::{MAX_DEVICE_GRANTS, MAX_DEVICE_STATEMENTS};
 use rizzy_proto::objects::{
     AccountKeyRecoveryWrap, AccountKeyServerWrap, AccountSettings, AccountStatement, DeviceGrant,
-    IdentitySecretKeys, KeyEnvelope, OpaqueMessage,
+    IdentitySecretKeys, OpaqueMessage,
 };
-use rizzy_proto::wire::{Bytes, Id, List};
+use rizzy_proto::wire::{Bytes, List};
 use rizzy_storage::{WriteTx, lock_account};
 
 use crate::AuthService;
@@ -59,19 +59,8 @@ use crate::sql::{self, exec};
 use crate::store::{self, Credential, Offered, RecoveryRow};
 use crate::trust::{AccountTrust, Devices};
 
-/// The most `RETIRED_SECRET_KEY` envelopes one change may carry. A full rotation retires the
-/// two identity keys and, from M6, a mail key; the bound only keeps the request small.
-pub const MAX_RETIRED_KEYS: usize = 16;
-
-/// A `RETIRED_SECRET_KEY` envelope (CRYPTO.md §8.4, §11.6 step 3) with its locator, the
-/// retired public key's id.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RetiredSecretKey {
-    /// The retired public key id (§4.4), which files the envelope.
-    pub retired_key_id: Id,
-    /// The envelope under the new account key.
-    pub envelope: KeyEnvelope,
-}
+pub use rizzy_proto::change::RetiredSecretKey;
+pub use rizzy_proto::limits::MAX_RETIRED_KEYS;
 
 /// The recovery objects of a change (CRYPTO.md §11 "Replacing credentials", §11.6 step 5).
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -106,7 +95,7 @@ pub struct AccountChange<R> {
     /// The new `ACCOUNT_SETTINGS`, when `settings_seq` moves.
     pub account_settings: Option<AccountSettings>,
     /// Retired secret keys, with a rotation (at most [`MAX_RETIRED_KEYS`]).
-    pub retired_secret_keys: Vec<RetiredSecretKey>,
+    pub retired_secret_keys: List<RetiredSecretKey, MAX_RETIRED_KEYS>,
     /// New and re-issued certificates.
     pub device_certificates: List<AccountStatement, MAX_DEVICE_STATEMENTS>,
     /// New and re-issued revocations.
@@ -463,7 +452,9 @@ impl<V: VaultPort> AuthService<V> {
     /// and the session and pending-recovery effects (module docs).
     #[expect(
         clippy::too_many_arguments,
-        reason = "the checked parts of one change, passed once from `commit_change`"
+        clippy::too_many_lines,
+        reason = "the checked parts of one change, passed once from `commit_change`, written in \
+                  the order of the module docs"
     )]
     async fn write_change(
         &self,
@@ -549,7 +540,14 @@ impl<V: VaultPort> AuthService<V> {
         }
         if let (true, Some(rotation)) = (step.account_key_rotated, &change.vault_rotation) {
             self.vault
-                .apply_rotation(tx, account, new.account_key_epoch, rotation, now_ms)
+                .apply_rotation(
+                    tx,
+                    account,
+                    new.account_key_epoch,
+                    *new.account_key_id.as_bytes(),
+                    rotation,
+                    now_ms,
+                )
                 .await?;
         }
         store::cas_state(

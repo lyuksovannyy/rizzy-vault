@@ -55,8 +55,9 @@ pub enum ClientError {
     /// A field write breaks a rule of the item schema (ADR 0018 §6–§8, §10), or the edit is
     /// not allowed on the item now (a purge of an item that is not trashed).
     InvalidEdit,
-    /// The item's key or vault key epoch is not usable for a write: the vault key was rotated
-    /// and this build does not re-wrap (CRYPTO.md §11.6 writer rule).
+    /// The item's key is not usable for a write (CRYPTO.md §11.6 writer rule). Not returned by
+    /// this build any more: the writer generates a fresh item key instead. Kept so the stable
+    /// code keeps its meaning.
     StaleKey,
     /// The export file is not a well-formed rizzy-vault export: too large, not the strict JSON
     /// shape of CRYPTO.md §11.14, an unsupported format or version, or a malformed field.
@@ -70,6 +71,27 @@ pub enum ClientError {
     FetchRequired,
     /// The session's request counter is exhausted. A new device authentication is needed.
     SessionExhausted,
+    /// A rotation was asked for before this device uploaded its queued ops and snapshots and
+    /// ran a complete Fetch of every vault afterwards (ADR 0025 §2 step 1). Sync, then retry.
+    SyncRequired,
+    /// The account changed in a way a rotation cannot absorb by rebuilding (an epoch, a key or
+    /// a setting moved): discard the pending rotation and start it again with new keys (ADR 0025
+    /// §2 step 5).
+    RotationRestart,
+    /// A rotation was refused five times in a row because the vault kept changing (ADR 0025 §2
+    /// step 5). The pending rotation is kept; the host reports it and may try later.
+    VaultKeepsChanging,
+    /// The server answered an own op `stale_epoch`: a rotation elsewhere raised the vault's
+    /// `vault_key_epoch` (ADR 0021 §9 "Stale epoch"; ADR 0025 §4). Process the new signed
+    /// `account-state` and adopt the new vault key
+    /// ([`crate::sync::VaultSync::adopt_vault_key`]), then upload again: the op is re-issued
+    /// under the new epoch with the same `device_seq`.
+    VaultKeyRotated,
+    /// The server answered `stale_epoch` to an own op it may have stored and served before a
+    /// restore lost it (ADR 0021 §9 "Stale epoch"): such an op is never re-issued, only
+    /// re-published in a healing request, which this build does not write. The op is not sent
+    /// again; the host reports it.
+    HealingRequired,
     /// An internal step failed that the inputs cannot cause: a sealing, signing, encoding or
     /// derivation call that is unreachable for valid state. No detail is kept on purpose.
     Internal,
@@ -100,6 +122,11 @@ impl ClientError {
             Self::ExportDecryptionFailed => "export_decryption_failed",
             Self::FetchRequired => "fetch_required",
             Self::SessionExhausted => "session_exhausted",
+            Self::SyncRequired => "sync_required",
+            Self::RotationRestart => "rotation_restart",
+            Self::VaultKeepsChanging => "vault_keeps_changing",
+            Self::VaultKeyRotated => "vault_key_rotated",
+            Self::HealingRequired => "healing_required",
             Self::Internal => "internal",
         }
     }
@@ -131,6 +158,11 @@ impl fmt::Display for ClientError {
             Self::ExportDecryptionFailed => "wrong export password, or the file was changed",
             Self::FetchRequired => "fetch the vault before uploading",
             Self::SessionExhausted => "the session must be renewed",
+            Self::SyncRequired => "upload and fetch every vault first",
+            Self::RotationRestart => "the account changed; start the rotation again",
+            Self::VaultKeepsChanging => "the vault keeps changing",
+            Self::VaultKeyRotated => "the vault key was rotated on another device",
+            Self::HealingRequired => "the server lost an own change and needs healing",
             Self::Internal => "internal error",
         })
     }
@@ -170,6 +202,11 @@ mod tests {
             ClientError::ExportDecryptionFailed,
             ClientError::FetchRequired,
             ClientError::SessionExhausted,
+            ClientError::SyncRequired,
+            ClientError::RotationRestart,
+            ClientError::VaultKeepsChanging,
+            ClientError::VaultKeyRotated,
+            ClientError::HealingRequired,
             ClientError::Internal,
         ];
         let mut codes: Vec<&str> = all.iter().map(|e| e.code()).collect();

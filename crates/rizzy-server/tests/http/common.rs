@@ -2,11 +2,10 @@
 //! directory, a real `SQLite` database in a data directory, the startup checks), its router driven
 //! in-process with `tower::ServiceExt::oneshot`.
 //!
-//! The end-to-end client (signup → login → device authentication → signed upload → Fetch with
-//! `rizzy-core`'s client-side functions) is not here: it needs `rizzy-core`, `rizzy-proto` and
-//! `rizzy-sync` in this crate's tests, which ADR 0016 §3 and point 4 do not allow
-//! (`rizzy-server` may dev-depend on `rizzy-client` only, which does not exist yet). It returns
-//! once the owner decides how (an ADR 0016 change, or `rizzy-client`).
+//! The end-to-end client (signup → login → device authentication → signed upload → Fetch → key
+//! rotation) is `rizzy-client`, the one internal crate ADR 0016 §4 (owner decision 4) lets this
+//! crate dev-depend on; `rotation.rs` drives it. `rizzy-core`, `rizzy-proto` and `rizzy-sync`
+//! stay out of these tests: the wire types are only received from the client and passed back.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -159,25 +158,7 @@ impl Server {
 
     /// Sends a request with a peer address, as the listener would.
     pub(crate) async fn send(&self, request: Request<Body>) -> Reply {
-        let mut request = request;
-        request
-            .extensions_mut()
-            .insert(ConnectInfo(SocketAddr::from((
-                Ipv4Addr::new(192, 0, 2, 1),
-                40000,
-            ))));
-        let response = self.router.clone().oneshot(request).await.unwrap();
-        let status = response.status();
-        let headers = response.headers().clone();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap()
-            .to_vec();
-        Reply {
-            status,
-            headers,
-            body,
-        }
+        send_via(self.router.clone(), request).await
     }
 
     /// `GET path`.
@@ -201,5 +182,29 @@ impl Server {
             );
         }
         self.send(request.body(Body::from(body)).unwrap()).await
+    }
+}
+
+/// Sends a request through `router` with a peer address, as the listener would. Owns its
+/// router, so a test can run it on a task of its own ([`Server::send`] borrows the server).
+pub(crate) async fn send_via(router: Router, request: Request<Body>) -> Reply {
+    let mut request = request;
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from((
+            Ipv4Addr::new(192, 0, 2, 1),
+            40000,
+        ))));
+    let response = router.oneshot(request).await.unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+    Reply {
+        status,
+        headers,
+        body,
     }
 }

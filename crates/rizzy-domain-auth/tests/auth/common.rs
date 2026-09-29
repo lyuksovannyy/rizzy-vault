@@ -37,10 +37,13 @@ use rizzy_proto::auth::{
     LoginStartRequest, RecoveryRegistration, RegisterFinishRequest, RegisterStartRequest,
     RequestSignature, TotpCode,
 };
+use rizzy_proto::change::VaultRotationUpload;
 use rizzy_proto::objects::{
     AccountKeyRecoveryWrap, AccountKeyServerWrap, IdentitySecretKeys, VaultSelfGrant,
 };
-use rizzy_proto::wire::{Bytes, Fixed, Id, SessionToken, Text};
+use rizzy_proto::recovery::RecoveryVault;
+use rizzy_proto::vault::SeqVector;
+use rizzy_proto::wire::{Bytes, Fixed, Id, List, SessionToken, Text};
 use rizzy_storage::{Conn, Database, SqliteOptions, WriteTx, WriterLock};
 
 /// The server's canonical origin in every test.
@@ -124,11 +127,20 @@ impl core::ops::Deref for SharedVault {
 impl VaultPort for SharedVault {
     type Rotation = Vec<VaultSelfGrant>;
 
+    fn rotation_from_wire(upload: VaultRotationUpload) -> Self::Rotation {
+        upload
+            .vaults()
+            .iter()
+            .map(|v| v.self_grant.clone())
+            .collect()
+    }
+
     async fn apply_rotation(
         &self,
         _tx: &mut WriteTx,
         account_id: AccountId,
         new_account_key_epoch: u32,
+        _new_account_key_id: [u8; 16],
         rotation: &Self::Rotation,
         _now_ms: u64,
     ) -> Result<(), AuthError> {
@@ -180,6 +192,30 @@ impl VaultPort for SharedVault {
                 g.iter()
                     .filter(|g| g.account_key_epoch == account_key_epoch)
                     .cloned()
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    async fn recovery_vaults(
+        &self,
+        _conn: Conn<'_>,
+        account_id: AccountId,
+    ) -> Result<Vec<RecoveryVault>, AuthError> {
+        Ok(self
+            .grants
+            .lock()
+            .unwrap()
+            .get(&account_id.to_bytes())
+            .map(|grants| {
+                grants
+                    .iter()
+                    .map(|g| RecoveryVault {
+                        vault_id: g.vault_id,
+                        self_grant: g.clone(),
+                        heads: SeqVector::default(),
+                        item_key_wraps: List::empty(),
+                    })
                     .collect()
             })
             .unwrap_or_default())

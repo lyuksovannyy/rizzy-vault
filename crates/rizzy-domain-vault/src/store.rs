@@ -218,6 +218,9 @@ pub(crate) fn snapshot_allowed(session: &Session, snapshot: &VerifiedSnapshot) -
 /// Fills the wrap-set row of a record's carried wrap (CRYPTO.md §4.2: "A wrap that arrives
 /// inside an op or snapshot record fills that row and is also kept with the record"), at the
 /// record's `vault_key_epoch`, the epoch of the vault key its author wrapped under.
+///
+/// A record below the vault's current `vault_key_epoch` reaches here without its wrap
+/// ([`current_wrap`]): such a wrap is under a superseded vault key and never fills a row.
 async fn fill_wrap(
     tx: &mut WriteTx,
     session: &Session,
@@ -237,12 +240,35 @@ async fn fill_wrap(
     Ok(())
 }
 
-/// Stores an op that passed every check, and advances the head of its chain.
+/// Whether a record at `epoch` may keep its carried wrap: only at or above the vault's current
+/// `vault_key_epoch`. A record below it can still be stored (a stale-exempt op of a revoked
+/// device, or a record a healing request re-publishes), but its carried wrap is under a
+/// superseded vault key, which a revoked device may know. ADR 0025 open question 4, decided ("no
+/// healing below the current epoch"), and CRYPTO.md §4.2 and §11.6 step 9 (superseded wraps are
+/// deleted) apply to it as to a wrap-set entry: the wrap fills no row and is not kept with the
+/// record. The record keeps its signed wrap hash, as after a rotation's `clear_record_wraps`, so
+/// "Already stored" still matches a later re-publication that carries the wrap.
+pub(crate) const fn current_wrap(session: &Session, epoch: u32) -> bool {
+    epoch >= session.vault.vault_key_epoch
+}
+
+/// Stores an op that passed every check, and advances the head of its chain. A wrap carried by
+/// an op below the vault's current epoch is dropped ([`current_wrap`]).
 pub(crate) async fn store_op(
     tx: &mut WriteTx,
     session: &mut Session,
     op: &VerifiedOp,
 ) -> Result<(), VaultError> {
+    let stripped;
+    let op = if op.key_wrap.is_some() && !current_wrap(session, op.header.vault_key_epoch) {
+        stripped = VerifiedOp {
+            key_wrap: None,
+            ..op.clone()
+        };
+        &stripped
+    } else {
+        op
+    };
     repo::insert_op(tx.conn(), session.vault_id, op, session.now_sql).await?;
     session.heads.add(op.header.dot);
     fill_wrap(
@@ -258,12 +284,24 @@ pub(crate) async fn store_op(
 /// Stores a snapshot that passed every check (ADR 0021 §2, §3 "Where it runs"): its clamped VV
 /// `min(covered, heads)` from the session's heads at this point, persisted in the canonical VV
 /// encoding and never sent; the next store sequence, and the counter advanced; the item queued
-/// for `worker`. Returns the store sequence.
+/// for `worker`. Returns the store sequence. A wrap carried by a snapshot below the vault's
+/// current epoch is dropped ([`current_wrap`]).
 pub(crate) async fn store_snapshot(
     tx: &mut WriteTx,
     session: &mut Session,
     snapshot: &VerifiedSnapshot,
 ) -> Result<u64, VaultError> {
+    let stripped;
+    let snapshot =
+        if snapshot.key_wrap.is_some() && !current_wrap(session, snapshot.header.vault_key_epoch) {
+            stripped = VerifiedSnapshot {
+                key_wrap: None,
+                ..snapshot.clone()
+            };
+            &stripped
+        } else {
+            snapshot
+        };
     let clamped = clamp(&snapshot.header.covered, &session.heads)
         .to_vec()
         .map_err(|_| VaultError::Corrupt {

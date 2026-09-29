@@ -31,10 +31,10 @@
 //!
 //! **Not in this fast form** (ADR 0011's full drill, reported as open): simulated clients that
 //! change a password, enrol and revoke devices and rotate keys after the backup, then reconnect
-//! and heal the server. They need client-side crypto in this crate's tests, which ADR 0016 does
-//! not allow yet (`tests/http/common.rs`), and the password-change, revocation and rotation
-//! endpoints, which do not exist yet. `rizzy-domain-vault` and `rizzy-domain-auth` test the
-//! healing requests themselves.
+//! and heal the server. The rotation and revocation endpoints exist now (ADR 0025) and
+//! `tests/http/rotation.rs` drives them with `rizzy-client`; the client has no password-change
+//! or healing-request flow yet, so the full drill stays open. `rizzy-domain-vault` and
+//! `rizzy-domain-auth` test the healing requests themselves.
 //!
 //! [docs/self-hosting.md]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/self-hosting.md
 

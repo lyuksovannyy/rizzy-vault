@@ -20,7 +20,8 @@
 //! | [`VaultDomain::fetch`] | ADR 0012 §7 "Fetch" as ADR 0021 §4 supersedes it in part | [`fetch`] |
 //! | [`VaultDomain::compact_item`], [`VaultDomain::run_compaction`] | ADR 0021 §3, §7 (the `worker` job) | [`compact`] |
 //! | [`create_vault`], [`VaultDomain::self_grant`], [`VaultDomain::republish_self_grant`], [`VaultDomain::vaults`] | CRYPTO.md §4.2, §4.4; ADR 0012 §7 healing step 3 | [`keys`] |
-//! | [`port::create_personal_vault`], [`port::self_grants`], [`port::store_self_grants`], [`port::device_head`] | ADR 0016 R4; CRYPTO.md §11.1 step 8, §11.2 step 5, §11.8 step 0; ADR 0012 §7 healing step 3 | [`port`]: the vault side of the `auth` flows, on the caller's transaction |
+//! | [`port::create_personal_vault`], [`port::self_grants`], [`port::store_self_grants`], [`port::device_head`], [`port::recovery_vaults`] | ADR 0016 R4; CRYPTO.md §11.1 step 8, §11.2 step 5, §11.8 step 0, §11.9 step 3; ADR 0012 §7 healing step 3; ADR 0025 §1 | [`port`]: the vault side of the `auth` flows, on the caller's transaction |
+//! | [`rotation::apply_rotation`] | CRYPTO.md §11.6 steps 3 and 9; ADR 0012 §6; ADR 0021 §9 "Rotation cut-off"; ADR 0025 §3 | [`rotation`]: the vault half of a key rotation, in the `auth` domain's commit transaction |
 //! | [`DeviceDirectory`] | ADR 0012 §7 "Certificates come from the `auth` domain through a trait"; ADR 0016 R4 | [`authors`] |
 //!
 //! The rule logic of ADR 0021 §2–§4 and §9 "Server acceptance" / "Revoked and kind-4 authors" is
@@ -131,6 +132,7 @@ mod intake;
 pub mod keys;
 pub mod port;
 mod repo;
+pub mod rotation;
 mod store;
 pub mod upload;
 

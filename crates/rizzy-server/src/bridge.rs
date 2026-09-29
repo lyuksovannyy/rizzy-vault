@@ -11,31 +11,28 @@
 //! concurrency"). Neither holds state.
 //!
 //! **Errors.** A vault-side refusal answers the auth flow with the matching auth error
-//! (`NotFound` and `Invalid` as `InvalidRequest`); a storage or integrity failure is an
-//! [`AuthError::Internal`] naming the port, never a value. A certificate read that fails is a
-//! [`DirectoryError`], and the upload fails.
+//! (`NotFound` and `Invalid` as `InvalidRequest`, `StateConflict` as `StateConflict`); a
+//! storage or integrity failure is an [`AuthError::Internal`] naming the port, never a value
+//! (INV-48). A certificate read that fails is a [`DirectoryError`], and the upload fails.
 //!
-//! **Rotation.** The vault half of a key rotation (CRYPTO.md §11.6 step 9) has no wire form yet
-//! (`rizzy-proto` defines no rotation request, and `rizzy-domain-vault` has no rotation
-//! upload), so [`VaultBridge`]'s rotation type is the uninhabited [`NoRotation`]: no rotation
-//! can be built, and `apply_rotation` can never run.
+//! **Rotation** (ADR 0025 §3–§4). [`VaultBridge`]'s rotation type is the parsed vault half,
+//! `rizzy_proto::change::VaultRotationUpload`, and `apply_rotation` runs
+//! `rizzy_domain_vault::rotation::apply_rotation` on the commit's own transaction, under the
+//! account lock the `auth` domain took, before its compare-and-swap. The recovery answer's
+//! vaults come from `rizzy_domain_vault::port::recovery_vaults` on the same transaction.
 //!
 //! [ADR 0016]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0016-workspace-layout.md
 
 use rizzy_domain_auth::directory::{DeviceStanding, device_authors};
-use rizzy_domain_auth::types::VaultSelfGrant;
 use rizzy_domain_auth::types::{AccountId, DeviceId};
+use rizzy_domain_auth::types::{RecoveryVault, VaultRotationUpload, VaultSelfGrant};
 use rizzy_domain_auth::{AuthError, PersonalVault, VaultPort};
-use rizzy_domain_vault::port;
 use rizzy_domain_vault::{
     AuthorCertificate, AuthorStatus, Authors, DeviceDirectory, DirectoryError,
     PersonalVaultOutcome, VaultError,
 };
+use rizzy_domain_vault::{port, rotation};
 use rizzy_storage::{Conn, WriteTx};
-
-/// The vault half of a key rotation: none can exist in this build (module docs).
-#[derive(Debug)]
-pub enum NoRotation {}
 
 /// The `auth` domain's view of the `vault` domain (module docs).
 #[derive(Clone, Copy, Debug, Default)]
@@ -45,22 +42,47 @@ pub struct VaultBridge;
 fn vault_error(e: &VaultError) -> AuthError {
     match e {
         VaultError::NotFound | VaultError::Invalid => AuthError::InvalidRequest,
+        VaultError::StateConflict => AuthError::StateConflict,
         _ => AuthError::Internal("the vault domain failed inside an auth flow"),
     }
 }
 
 impl VaultPort for VaultBridge {
-    type Rotation = NoRotation;
+    type Rotation = VaultRotationUpload;
+
+    fn rotation_from_wire(upload: VaultRotationUpload) -> Self::Rotation {
+        upload
+    }
 
     async fn apply_rotation(
         &self,
-        _tx: &mut WriteTx,
-        _account_id: AccountId,
-        _new_account_key_epoch: u32,
+        tx: &mut WriteTx,
+        account_id: AccountId,
+        new_account_key_epoch: u32,
+        new_account_key_id: [u8; 16],
         rotation: &Self::Rotation,
-        _now_ms: u64,
+        now_ms: u64,
     ) -> Result<(), AuthError> {
-        match *rotation {}
+        rotation::apply_rotation(
+            tx,
+            account_id,
+            new_account_key_epoch,
+            &new_account_key_id,
+            rotation,
+            now_ms,
+        )
+        .await
+        .map_err(|e| vault_error(&e))
+    }
+
+    async fn recovery_vaults(
+        &self,
+        conn: Conn<'_>,
+        account_id: AccountId,
+    ) -> Result<Vec<RecoveryVault>, AuthError> {
+        port::recovery_vaults(conn, account_id)
+            .await
+            .map_err(|e| vault_error(&e))
     }
 
     async fn create_personal_vault(

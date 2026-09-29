@@ -12,8 +12,12 @@
 //!   does not stop the others, per-page covers and the page byte budget, integrity errors, and a
 //!   Fetch racing compaction (`RIZZY_TEST_RACE_RUNS`, 200 by default).
 //! - [`healing`]: a healing request after a backup and restore, and its atomic refusal.
+//! - [`rotation`]: the vault half of a key rotation (ADR 0025): the rewrite of the wrap set, one
+//!   test per refusal, epochs after a restore, a planted junk wrap, healing below the current
+//!   epoch, the recovery cursor, and uploads racing rotations (`RIZZY_TEST_RACE_RUNS`).
 
 mod common;
 mod compaction;
 mod healing;
+mod rotation;
 mod upload;

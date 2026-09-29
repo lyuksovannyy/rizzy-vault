@@ -355,7 +355,7 @@ fn flow_futures_are_send() {
             identity_secret_keys: None,
             recovery: rizzy_domain_auth::RecoveryUpload::None,
             account_settings: None,
-            retired_secret_keys: Vec::new(),
+            retired_secret_keys: rizzy_proto::wire::List::empty(),
             device_certificates: rizzy_proto::wire::List::empty(),
             device_revocations: rizzy_proto::wire::List::empty(),
             device_grants: rizzy_proto::wire::List::empty(),

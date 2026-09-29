@@ -82,6 +82,18 @@ const SELF_GRANT_GET: &str = include_str!("../queries/self_grant_get.sql");
 const SELF_GRANT_INSERT: &str = include_str!("../queries/self_grant_insert.sql");
 /// See `queries/self_grant_replace.sql`.
 const SELF_GRANT_REPLACE: &str = include_str!("../queries/self_grant_replace.sql");
+/// See `queries/vault_set_epoch.sql`.
+const VAULT_SET_EPOCH: &str = include_str!("../queries/vault_set_epoch.sql");
+/// See `queries/vault_clamped_vvs.sql`.
+const VAULT_CLAMPED_VVS: &str = include_str!("../queries/vault_clamped_vvs.sql");
+/// See `queries/wrap_overwrite.sql`.
+const WRAP_OVERWRITE: &str = include_str!("../queries/wrap_overwrite.sql");
+/// See `queries/wrap_delete.sql`.
+const WRAP_DELETE: &str = include_str!("../queries/wrap_delete.sql");
+/// See `queries/ops_clear_wraps.sql`.
+const OPS_CLEAR_WRAPS: &str = include_str!("../queries/ops_clear_wraps.sql");
+/// See `queries/snapshots_clear_wraps.sql`.
+const SNAPSHOTS_CLEAR_WRAPS: &str = include_str!("../queries/snapshots_clear_wraps.sql");
 
 /// A 16-byte id read back from a column.
 fn id16(bytes: &[u8], what: &'static str) -> Result<[u8; 16], VaultError> {
@@ -878,5 +890,95 @@ pub(crate) async fn write_self_grant(
         .execute(&mut *c)
         .await
         .map(|_| ()))?;
+    Ok(())
+}
+
+/// Sets the vault's current `vault_key_epoch` (a rotation, ADR 0025 §3 step 5).
+pub(crate) async fn set_vault_epoch(
+    conn: Conn<'_>,
+    vault_id: VaultId,
+    vault_key_epoch: u32,
+) -> Result<(), VaultError> {
+    on_engine!(conn, |c| sqlx::query(VAULT_SET_EPOCH)
+        .bind(&vault_id.as_bytes()[..])
+        .bind(u32_to_sql(vault_key_epoch))
+        .execute(&mut *c)
+        .await
+        .map(|_| ()))?;
+    Ok(())
+}
+
+/// The clamped VV of every retained snapshot of the vault.
+pub(crate) async fn clamped_vvs(
+    conn: Conn<'_>,
+    vault_id: VaultId,
+) -> Result<Vec<VersionVector>, VaultError> {
+    let rows: Vec<Vec<u8>> = on_engine!(conn, |c| sqlx::query_scalar(VAULT_CLAMPED_VVS)
+        .bind(&vault_id.as_bytes()[..])
+        .fetch_all(&mut *c)
+        .await)?;
+    rows.iter()
+        .map(|v| {
+            VersionVector::parse(v).map_err(|_| VaultError::Corrupt {
+                what: "vault_snapshots.clamped_vv",
+            })
+        })
+        .collect()
+}
+
+/// Overwrites the wrap-set row `(wrap.item_id, wrap.item_key_id)` with `wrap`'s epoch and
+/// envelope, whatever the stored epoch (a rotation's re-wrap, ADR 0025 §3 step 5). Returns the
+/// number of rows changed.
+pub(crate) async fn overwrite_wrap(
+    conn: Conn<'_>,
+    vault_id: VaultId,
+    wrap: &WrapRow,
+    now_ms: i64,
+) -> Result<u64, VaultError> {
+    Ok(on_engine!(conn, |c| sqlx::query(WRAP_OVERWRITE)
+        .bind(&vault_id.as_bytes()[..])
+        .bind(&wrap.item_id.as_bytes()[..])
+        .bind(&wrap.item_key_id[..])
+        .bind(u32_to_sql(wrap.vault_key_epoch))
+        .bind(wrap.envelope.as_slice())
+        .bind(now_ms)
+        .execute(&mut *c)
+        .await
+        .map(|r| r.rows_affected()))?)
+}
+
+/// Deletes the wrap-set row `(item_id, item_key_id)`. Returns the number of rows deleted.
+pub(crate) async fn delete_wrap(
+    conn: Conn<'_>,
+    vault_id: VaultId,
+    item_id: ItemId,
+    item_key_id: &[u8; 16],
+) -> Result<u64, VaultError> {
+    Ok(on_engine!(conn, |c| sqlx::query(WRAP_DELETE)
+        .bind(&vault_id.as_bytes()[..])
+        .bind(&item_id.as_bytes()[..])
+        .bind(&item_key_id[..])
+        .execute(&mut *c)
+        .await
+        .map(|r| r.rows_affected()))?)
+}
+
+/// Drops the wrap carried with every op and snapshot of the vault (the superseded wraps of a
+/// rotation, ADR 0025 §3 step 5). The signed wrap hashes stay.
+pub(crate) async fn clear_record_wraps(
+    mut conn: Conn<'_>,
+    vault_id: VaultId,
+) -> Result<(), VaultError> {
+    for query in [OPS_CLEAR_WRAPS, SNAPSHOTS_CLEAR_WRAPS] {
+        let c = match &mut conn {
+            Conn::Sqlite(c) => Conn::Sqlite(c),
+            Conn::Postgres(c) => Conn::Postgres(c),
+        };
+        on_engine!(c, |c| sqlx::query(query)
+            .bind(&vault_id.as_bytes()[..])
+            .execute(&mut *c)
+            .await
+            .map(|_| ()))?;
+    }
     Ok(())
 }

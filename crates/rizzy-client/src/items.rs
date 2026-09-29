@@ -29,14 +29,22 @@
 //!   first. ADR 0012 §5 lets a field edit write `Active`, which would also restore it; the
 //!   narrower rule avoids an edit that silently un-trashes.
 //! - Values are the encoded bytes of ADR 0018 §6 ([`Value`]); keys are the final keys of the
-//!   §7 grammar. Hosts build both with `rizzy_core::item`.
+//!   §7 grammar. Hosts build both with `rizzy_core::item`, re-exported here ([`FieldKey`],
+//!   [`Value`], [`ItemType`]) for hosts that link only this crate.
 
-use rizzy_core::ids::ItemId;
+/// The item id [`VaultSync::create_item`] returns, re-exported for hosts (see [`ItemType`]).
+pub use rizzy_core::ids::ItemId;
 use rizzy_core::item::LIFECYCLE_KEY;
 use rizzy_core::item::key::FieldKey as SchemaKey;
+/// The field key of [`FieldEdit`], re-exported for hosts (see [`ItemType`]).
+pub use rizzy_core::item::key::FieldKey;
 use rizzy_core::item::schema::{ITEM_TYPE, WriteMode, WriteSource, check_create, check_write};
-use rizzy_core::item::types::ItemType;
-use rizzy_core::item::value::{Value, ValueRef};
+/// The item type of [`VaultSync::create_item`], re-exported so a host that links only this crate
+/// (a binding, or `rizzy-server`'s end-to-end tests, ADR 0016 §4 owner decision 4) can name it.
+pub use rizzy_core::item::types::ItemType;
+/// The encoded field value of [`FieldEdit`], re-exported for hosts (see [`ItemType`]).
+pub use rizzy_core::item::value::Value;
+use rizzy_core::item::value::ValueRef;
 use rizzy_core::rng::CryptoRng;
 use rizzy_sync::merge::ItemLifecycle;
 use rizzy_sync::record::{Lifecycle, SnapshotData};

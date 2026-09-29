@@ -25,6 +25,10 @@ pub enum VaultError {
     /// The request breaks a rule of the call it was made to (see that call's docs); answered
     /// `invalid_request`.
     Invalid,
+    /// A rotation's vault half does not match what the server holds now (ADR 0025 §3 checks 3
+    /// and 4): a wrap-set row it neither re-wraps nor drops, or a cursor that is not the heads.
+    /// The client fetches and retries (§2 step 5); answered `state_conflict`.
+    StateConflict,
     /// The database failed, or a stored integer is out of range.
     Storage(rizzy_storage::Error),
     /// The `auth` domain could not supply the account's device certificates (ADR 0016 R4).
@@ -51,6 +55,7 @@ impl VaultError {
         match self {
             Self::NotFound => ErrorCode::NotFound,
             Self::Invalid => ErrorCode::InvalidRequest,
+            Self::StateConflict => ErrorCode::StateConflict,
             Self::Storage(_)
             | Self::Directory(_)
             | Self::NoRestoreGeneration
@@ -65,6 +70,9 @@ impl fmt::Display for VaultError {
         match self {
             Self::NotFound => f.write_str("vault not found"),
             Self::Invalid => f.write_str("request refused by a vault rule"),
+            Self::StateConflict => {
+                f.write_str("the rotation does not match the vault the server holds")
+            }
             Self::Storage(e) => write!(f, "storage: {e}"),
             Self::Directory(e) => write!(f, "device directory: {e}"),
             Self::NoRestoreGeneration => f.write_str("the database has no restore generation"),

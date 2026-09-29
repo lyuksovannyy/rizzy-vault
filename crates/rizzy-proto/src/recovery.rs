@@ -1,4 +1,4 @@
-//! Account recovery with the Emergency Kit (CRYPTO.md §11.9; ADR 0008).
+//! Account recovery with the Emergency Kit (CRYPTO.md §11.9; ADR 0008; ADR 0025 §1).
 //!
 //! | Flow step | Request | Response |
 //! |---|---|---|
@@ -16,9 +16,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::account::AccountView;
 use crate::auth::LoginName;
-use crate::limits::RECOVERY_AUTH_TOKEN_LEN;
-use crate::objects::AccountKeyRecoveryWrap;
-use crate::wire::{Id, SecretFixed, SessionToken};
+use crate::limits::{MAX_ITEM_KEY_WRAPS, MAX_VAULT_GRANTS, RECOVERY_AUTH_TOKEN_LEN};
+use crate::objects::{AccountKeyRecoveryWrap, ItemKeyWrap, VaultSelfGrant};
+use crate::vault::SeqVector;
+use crate::wire::{Id, List, SecretFixed, SessionToken};
 
 /// The recovery auth token (CRYPTO.md §4.3): 32 bytes derived from the recovery code, which
 /// the server compares as `SHA-256(token)` with `H_rec` in constant time (§11.9 step 2). A
@@ -56,16 +57,36 @@ pub struct RecoveryCancelResponse {
     pub cancelled: bool,
 }
 
-/// The answer to a recovery complete after the wait (CRYPTO.md §11.9 step 3): `E_rec` with its
-/// epochs, the account objects, and a recovery-only session with a 10-minute TTL that covers
-/// the recovery commit only.
+/// One vault of the recovering account, for the rotation of CRYPTO.md §11.9 step 5 (ADR 0025
+/// §1): its current self-grant, the server's heads h(V, d) and its whole item-key wrap set,
+/// read in one consistent read with the rest of [`RecoveryCompleteResponse`].
 ///
-/// §11.9 step 3 also lists "the item-key wraps". They serve only the rotation of step 5, which
-/// needs the vault half of a rotation upload that no Accepted ADR shapes yet (see
-/// [`crate::change`]), and the server refuses the recovery-only session on the vault
-/// endpoints. How that session reaches the wraps is left open with the rotation's wire form.
+/// The recovering client holds no replica: it sends `heads` as its rotation cursor, re-wraps
+/// the rows it can open and drops the rest. So the recovery-only session never needs a vault
+/// endpoint (ADR 0025 open question 7, decided). Nothing here is trusted: the self-grant opens
+/// under the recovered account key or the recovery stops, and every row is opened with the
+/// context rebuilt from its locator.
+///
+/// A response type: unknown fields are ignored.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryVault {
+    /// The vault.
+    pub vault_id: Id,
+    /// Its current self-grant.
+    pub self_grant: VaultSelfGrant,
+    /// The server's head h(V, d) for every device with ops in the vault.
+    pub heads: SeqVector,
+    /// Every wrap-set row of the vault.
+    pub item_key_wraps: List<ItemKeyWrap, MAX_ITEM_KEY_WRAPS>,
+}
+
+/// The answer to a recovery complete after the wait (CRYPTO.md §11.9 step 3): `E_rec` with its
+/// epochs, the account objects, the vaults with their heads and item-key wraps, and a
+/// recovery-only session with a 10-minute TTL that covers the recovery commit only.
 ///
 /// `H_rec` is not returned: [`AccountKeyRecoveryWrap`] has no field for it.
+///
+/// A response type: unknown fields are ignored.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RecoveryCompleteResponse {
     /// The bearer token of the recovery-only session. A secret.
@@ -77,4 +98,6 @@ pub struct RecoveryCompleteResponse {
     /// The whole bundle chain, the state, the certificates and revocations, `E_id`,
     /// `ACCOUNT_SETTINGS` and the self-grants.
     pub account: AccountView,
+    /// Every vault of the account, ascending by id, with its heads and wrap set (ADR 0025 §1).
+    pub vaults: List<RecoveryVault, MAX_VAULT_GRANTS>,
 }

@@ -33,12 +33,13 @@ use rizzy_proto::auth::{
 };
 use rizzy_proto::change::{
     CommitChangeRequest, DeviceSuspensionRequest, ReregisterStartRequest, ReregisterStartResponse,
-    SuspendDeviceResponse,
+    SuspendDeviceResponse, VaultRotationUpload,
 };
 use rizzy_proto::error::ErrorResponse;
 use rizzy_proto::meta::{ClientHeader, MetaResponse};
 use rizzy_proto::recovery::{
     RecoveryCancelResponse, RecoveryCompleteResponse, RecoveryRequest, RecoveryStartResponse,
+    RecoveryVault,
 };
 use rizzy_proto::totp::{TotpDisableRequest, TotpEnrolConfirmRequest, TotpEnrolStartResponse};
 use rizzy_proto::vault::{
@@ -68,7 +69,7 @@ fuzz_target!(|data: &[u8]| {
     let Some((&selector, json)) = data.split_first() else {
         return;
     };
-    match selector % 40 {
+    match selector % 42 {
         // Requests.
         0 => check::<RegisterStartRequest>(json),
         1 => check::<RegisterFinishRequest>(json),
@@ -112,6 +113,10 @@ fuzz_target!(|data: &[u8]| {
         36 => check::<RecoveryStartResponse>(json),
         37 => check::<RecoveryCancelResponse>(json),
         38 => check::<RecoveryCompleteResponse>(json),
-        _ => check::<TotpEnrolStartResponse>(json),
+        39 => check::<TotpEnrolStartResponse>(json),
+        // The vault half of a rotation and the recovery answer's vaults (ADR 0025 §1), also
+        // reached through `CommitChangeRequest` and `RecoveryCompleteResponse` above.
+        40 => check::<VaultRotationUpload>(json),
+        _ => check::<RecoveryVault>(json),
     }
 });

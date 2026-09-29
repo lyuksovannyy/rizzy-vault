@@ -7,7 +7,8 @@
 //! which needs `rizzy-core`'s client-side OPAQUE and signing, and ADR 0016 §3 keeps
 //! `rizzy-core` out of this crate's tests ([`crate::common`] module docs). The domain half of
 //! each happy path, from the same `rizzy-proto` request types these endpoints parse, runs in
-//! `rizzy-domain-auth`'s `tests/auth/requests.rs`.
+//! `rizzy-domain-auth`'s `tests/auth/requests.rs`. Key rotation and revocation run end to end,
+//! with `rizzy-client`, in [`crate::rotation`].
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};

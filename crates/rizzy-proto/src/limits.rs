@@ -120,6 +120,11 @@ pub const MAX_VAULT_GRANTS: usize = 1024;
 /// per rotation the device has not acknowledged (CRYPTO.md §10.1).
 pub const MAX_DEVICE_GRANTS: usize = 1024;
 
+/// Count limit: `RETIRED_SECRET_KEY` envelopes in one change (ADR 0025 §1: "at most 16"). A
+/// full rotation retires the two identity keys and, from M6, a mail key; the bound only keeps
+/// the request small.
+pub const MAX_RETIRED_KEYS: usize = 16;
+
 /// Count limit (this crate's choice): op and snapshot records in one upload, one healing
 /// request or one Fetch page.
 pub const MAX_RECORDS: usize = 4096;

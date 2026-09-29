@@ -48,7 +48,7 @@
 //! | [`objects`] | CRYPTO.md §4.2, §8.4, §9.6, §10.1, §10.2 | Signed statements, envelopes, wrapped-key objects with their locators |
 //! | [`auth`] | CRYPTO.md §5.3, §5.9, §5.10, §11.1, §11.2; ADR 0002 owner decision 2 | OPAQUE registration and login, device authentication, the request-signing values |
 //! | [`account`] | CRYPTO.md §10.1, §10.2, §11.2 step 7, §11.3, §11.4; ADR 0012 §7 healing steps 1–3 | Account state, enrolment, the web vault's kind-4 certificate, bundles, device grants |
-//! | [`change`] | CRYPTO.md §11 "Replacing credentials", §11.3 step 5, §11.5, §11.8 steps 0–2, §11.9 steps 5–6; ADR 0012 §6 | OPAQUE re-registration, the atomic commit of a credential, settings or device change, suspension |
+//! | [`change`] | CRYPTO.md §11 "Replacing credentials", §11.3 step 5, §11.5, §11.8 steps 0–2, §11.9 steps 5–6; ADR 0012 §6 | OPAQUE re-registration, the atomic commit of a credential, settings, device or key-rotation change (ADR 0025), suspension |
 //! | [`recovery`] | CRYPTO.md §11.9; ADR 0008 | Recovery start, cancel and complete |
 //! | [`totp`] | CRYPTO.md §5.10, §5.11, §11.15 | Server-side 2FA enrolment and removal |
 //! | [`vault`] | ADR 0012 §3, §7; ADR 0021 §2, §4, §9 | Upload, Fetch and the healing request |
@@ -63,9 +63,10 @@
 //!   HTTP headers;
 //! - the invite-token format, the platform names and the version grammar (bounded here only);
 //! - the HTTP status of each error code, except `410 Gone` for a removed API version.
-//! - the rotation fields of [`change::CommitChangeRequest`] and the vault half of a rotation
-//!   upload (CRYPTO.md §11.6 step 9, ADR 0012 §6), and how the recovery-only session reaches
-//!   the item-key wraps of §11.9 step 3: no rotation is accepted in this build.
+//!
+//! The rotation fields of [`change::CommitChangeRequest`], the vault half
+//! ([`change::VaultRotationUpload`]) and the vaults of [`recovery::RecoveryCompleteResponse`]
+//! follow ADR 0025 §1; their JSON field names are this crate's choice.
 //!
 //! JSON field names, the error codes that no spec names, the list-count limits and the upload
 //! batch reading ([`vault::UploadResult`]) are this crate's choices. Before v1.0, `v1` may

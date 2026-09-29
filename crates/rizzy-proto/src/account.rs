@@ -18,8 +18,8 @@
 //! (§10.2); a lost race is answered [`ErrorCode::StateConflict`](crate::error::ErrorCode).
 //!
 //! Password change, revocation and recovery (§11.5, §11.8, §11.9) carry larger atomic requests,
-//! in [`crate::change`] and [`crate::recovery`]; key rotation (§11.6) is not defined yet (see
-//! [`crate::change`]).
+//! in [`crate::change`] and [`crate::recovery`]; key rotation (§11.6) is the commit of
+//! [`crate::change`] with its rotation fields (ADR 0025).
 
 use serde::{Deserialize, Serialize};
 

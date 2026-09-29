@@ -116,7 +116,7 @@ fn recovery_wait_cancel_release_and_commit() {
             identity_secret_keys: None,
             recovery: RecoveryUpload::None,
             account_settings: None,
-            retired_secret_keys: Vec::new(),
+            retired_secret_keys: rizzy_proto::wire::List::empty(),
             device_certificates: List::empty(),
             device_revocations: List::empty(),
             device_grants: List::empty(),

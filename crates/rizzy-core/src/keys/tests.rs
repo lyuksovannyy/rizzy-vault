@@ -912,6 +912,31 @@ fn retired_secret_key_round_trip_and_type_binding() {
 }
 
 #[test]
+fn identity_keys_retire_their_x25519_key() {
+    // A full rotation moves the old identity X25519 key into a `RETIRED_SECRET_KEY` (§11.6 step
+    // 3): the same public key, typed identity X25519, and it round-trips under the new key.
+    let old = identity_keys();
+    let public = old.public_keys().x25519;
+    let retired = old.into_retired_x25519().unwrap();
+    assert_eq!(retired.key_type(), KeyType::IdentityX25519);
+    assert_eq!(*retired.secret_key().public_key(), public);
+    assert_eq!(
+        retired.public_key_id(),
+        public.key_id(KeyType::IdentityX25519)
+    );
+    let ak = account_key(0x12, 2);
+    let ctx = RetiredSecretKeyCtx {
+        account_id: account(),
+        retired_key_id: retired.public_key_id(),
+    };
+    let envelope = ak
+        .wrap_retired_key(&mut seeded_rng(2), &ctx, &retired)
+        .unwrap();
+    let opened = ak.unwrap_retired_key(&ctx, &envelope).unwrap();
+    assert_eq!(*opened.secret_key().public_key(), public);
+}
+
+#[test]
 fn epochs_and_generation() {
     let ak = AccountKey::generate(&mut seeded_rng(16), 0);
     let next = ak.generate_next(&mut seeded_rng(17)).unwrap();

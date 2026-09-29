@@ -63,6 +63,11 @@ zeroize.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
+# The end-to-end client of the HTTP tests (`tests/http/rotation.rs`): signup, login, device
+# authentication, sync and key rotation through the shared client core. A dev-dependency only:
+# ADR 0016 §4 "Dev-dependencies", owner decision 4 (`rizzy-server` → `rizzy-client`), the one
+# dev-only internal edge `cargo xtask check-deps` admits.
+rizzy-client.workspace = true
 # `ServiceExt::oneshot`: drives the router in-process in `tests/http`. Already in the graph
 # through axum.
 tower.workspace = true

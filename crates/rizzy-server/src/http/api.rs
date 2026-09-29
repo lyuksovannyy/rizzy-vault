@@ -50,11 +50,16 @@
 //! domain's, answered `403 fresh_session_required`; a device session signs every request
 //! (step 3 below) on these endpoints like on every other.
 //!
-//! **Key rotation has no endpoint in this build.** The commit carries no rotation fields
-//! (`rizzy_proto::change` "No key rotation in this build": the vault half of CRYPTO.md §11.6 step
-//! 9 has no wire form), so a state that rotates a key, and with it the revocation of §11.8 step 3
-//! and the default recovery of §11.9 step 5, is answered `400 invalid_request`. The
-//! self-revocation of §11.3 step 5 and the recovery that skips the rotation commit.
+//! **Key rotation** (ADR 0025) is the account commit with its rotation fields: the standard and
+//! full rotation of CRYPTO.md §11.6, the revocation of §11.8 step 3 and the rotating recovery of
+//! §11.9 step 5, applied atomically with the vault half under the account lock (the auth domain
+//! and `crate::bridge`). A rotation whose vault half the server does not hold as the rotator saw
+//! it is answered `409 state_conflict`, and the client fetches and retries (ADR 0025 §2 step 5).
+//! The commit takes the upload limit (ADR 0025 §1 "Body limit", open question 5), after the
+//! session check of step 1 below. `/recovery/complete` keeps the 1 MiB limit for its request
+//! body, which is only `{login_name, recovery_auth_token}` and needs no session: the large part is
+//! its response (every vault's heads and wrap set), and an anonymous request never gets the
+//! upload limit (this crate's reading of ADR 0025 §1, reported).
 //!
 //! # Every request
 //!
@@ -119,7 +124,7 @@ use crate::bridge::{AuthDirectory, VaultBridge};
 use crate::log::{self, Field};
 use crate::sys::{now_ms, os_rng};
 
-/// The body limit of every endpoint except upload and healing: 1 MiB. It bounds unauthenticated
+/// The body limit of every endpoint except upload, healing and the account commit: 1 MiB. It bounds unauthenticated
 /// requests (signup, login, device authentication) and the account requests. A request whose
 /// lists stay within `rizzy-proto`'s count limits can still exceed it (4096 statements of up to
 /// 1 KiB, as base64url); no personal account comes near that, and the limit is this crate's
@@ -136,7 +141,8 @@ pub const BODY_READ_BASE: Duration = Duration::from_secs(30);
 /// The slowest upload rate a body's read deadline allows for ([`body_deadline`]): 64 KiB/s.
 pub const BODY_READ_MIN_RATE: usize = 64 * 1024;
 
-/// How many requests with the upload limit (upload, healing) are read and served at once. With
+/// How many requests with the upload limit (upload, healing, the account commit) are read and
+/// served at once. With
 /// the default 32 MiB limit, the bodies held at once stay under 256 MiB. This crate's choice,
 /// reported to the owner.
 pub const MAX_CONCURRENT_LARGE_BODIES: usize = 8;
@@ -386,13 +392,14 @@ impl Endpoint {
         }
     }
 
-    /// The body-size limit: [`BODY_LIMIT`], the configured upload limit for upload and healing,
+    /// The body-size limit: [`BODY_LIMIT`], the configured upload limit for upload, healing and
+    /// the account commit (which carries a rotation's re-wrapped wrap set, ADR 0025 §1),
     /// and 0 for the endpoints that take no body (the `GET` endpoint, recovery cancel and TOTP
     /// enrolment start).
     #[must_use]
     pub const fn body_limit(self, max_upload_bytes: usize) -> usize {
         match self {
-            Self::Upload | Self::Heal => max_upload_bytes,
+            Self::Upload | Self::Heal | Self::CommitChange => max_upload_bytes,
             Self::DeviceGrants | Self::RecoveryCancel | Self::TotpEnrolStart => 0,
             _ => BODY_LIMIT,
         }
@@ -832,7 +839,7 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
                 .map_err(ae)?,
         ),
         Endpoint::CommitChange => {
-            auth.commit_change_request(need()?, &parse(&body)?, now)
+            auth.commit_change_request(need()?, parse(&body)?, now)
                 .await
                 .map_err(ae)?;
             Ok(Reply::Empty)
@@ -1023,7 +1030,7 @@ mod tests {
         let upload = 7 * BODY_LIMIT;
         for e in Endpoint::ALL {
             let expected = match e {
-                Endpoint::Upload | Endpoint::Heal => upload,
+                Endpoint::Upload | Endpoint::Heal | Endpoint::CommitChange => upload,
                 Endpoint::DeviceGrants | Endpoint::RecoveryCancel | Endpoint::TotpEnrolStart => 0,
                 _ => BODY_LIMIT,
             };

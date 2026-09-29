@@ -11,7 +11,8 @@
 //! 2. Any enrolled durable device with a device session cancels it:
 //!    [`AuthService::recovery_cancel`].
 //! 3. [`AuthService::recovery_complete`], after the wait: `E_rec` with its epochs, the account
-//!    objects, and a recovery-only session with a 10-minute TTL. It may be repeated with the same
+//!    objects, every vault with its heads and item-key wraps (ADR 0025 §1), and a recovery-only
+//!    session with a 10-minute TTL. It may be repeated with the same
 //!    token until the recovery commits ([`AuthService::commit_change`] over that session); only
 //!    that commit replaces `H_rec` and closes the pending recovery.
 //!
@@ -28,6 +29,7 @@ use rizzy_core::normalize::LoginName;
 use rizzy_core::rng::CryptoRng;
 use rizzy_proto::account::AccountView;
 use rizzy_proto::objects::AccountKeyRecoveryWrap;
+use rizzy_proto::recovery::RecoveryVault;
 use rizzy_proto::wire::{Bytes, Id, SessionToken};
 use rizzy_storage::{WriteTx, lock_account};
 
@@ -68,19 +70,19 @@ pub struct RecoveryRelease {
     pub recovery_wrap: AccountKeyRecoveryWrap,
     /// The account objects: the whole bundle chain, the state, the certificates and
     /// revocations, `E_id`, `ACCOUNT_SETTINGS` and the self-grants.
-    ///
-    /// The item-key wraps that §11.9 step 3 also lists are **not** released in this build.
-    /// They serve only the rotation of §11.9 step 5, whose vault half no Accepted ADR shapes
-    /// yet; how the recovery-only session reaches them is left open with that rotation's wire
-    /// form. The server refuses the recovery-only session on every vault endpoint (Fetch
-    /// included); opening one to it needs an Accepted ADR first.
     pub account: AccountView,
+    /// Every vault with its self-grant, heads and item-key wraps (§11.9 step 3; ADR 0025 §1),
+    /// read in the same transaction as `account`. The recovering client sends the heads as its
+    /// rotation cursor, so the recovery-only session stays off the vault endpoints (ADR 0025
+    /// open question 7, decided).
+    pub vaults: Vec<RecoveryVault>,
 }
 
 impl core::fmt::Debug for RecoveryRelease {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("RecoveryRelease")
             .field("account_id", &self.account_id)
+            .field("vaults", &self.vaults.len())
             .finish_non_exhaustive()
     }
 }
@@ -273,6 +275,9 @@ impl<V: VaultPort> AuthService<V> {
         let Some((account, row)) = self.check_recovery_code(&mut tx, &name, token).await? else {
             return Err(AuthError::Unauthorized);
         };
+        // The answer is one consistent read under the account lock (ADR 0025 §1): no upload,
+        // rotation or healing commits between its account objects and its vault heads.
+        lock_account(&mut tx, account.as_bytes()).await?;
         match pending(&mut tx, account).await? {
             Some((epoch, _, available)) if epoch == row.recovery_epoch => {
                 if now_ms < available {
@@ -294,6 +299,7 @@ impl<V: VaultPort> AuthService<V> {
         )
         .await?;
         let view = view::build(&self.vault, tx.conn(), &trust, &devices, ViewScope::Chain).await?;
+        let vaults = self.vault.recovery_vaults(tx.conn(), account).await?;
         tx.commit().await?;
         Ok(RecoveryRelease {
             session_token: token,
@@ -304,6 +310,7 @@ impl<V: VaultPort> AuthService<V> {
                 envelope: Bytes::new(row.e_rec).map_err(over_limit)?,
             },
             account: view,
+            vaults,
         })
     }
 }

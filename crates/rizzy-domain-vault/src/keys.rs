@@ -13,7 +13,7 @@
 //!   and no Accepted ADR says what a re-published grant does to the vault's `vault_key_epoch`.
 //!   So this crate's conservative reading, pending the owner:
 //!   - the grant **never changes** `vault_vaults.vault_key_epoch` (the stale-epoch check's
-//!     reference). Only the rotation upload (below, not here) moves it. How the server heals
+//!     reference). Only the rotation upload ([`crate::rotation`]) moves it. How the server heals
 //!     the epoch rollback of a restore is an open question reported to the owner: until an ADR
 //!     answers it, a restore that rolled the vault's epoch back leaves the stale-epoch check at
 //!     the older epoch (a weaker check, never a locked vault);
@@ -34,10 +34,11 @@
 //!   fills its row (`crate::store`, `crate::upload`): inserted when missing, replacing a row at
 //!   a lower `vault_key_epoch`, otherwise kept. Fetch serves the rows (`crate::fetch`).
 //!
-//! **Not here:** the key-rotation upload (CRYPTO.md §11.6 step 9: new self-grants, the re-wrapped
-//! wrap set overwriting every row, the superseded wraps deleted, and the rotation cut-off of ADR
-//! 0012 §6 / ADR 0021 §9 "Rotation cut-off"), which is one atomic request with the `auth`
-//! domain's revocation and `account-state`, and is not part of this unit.
+//! **The key-rotation upload** (CRYPTO.md §11.6 step 9: new self-grants, the re-wrapped wrap set
+//! overwriting every row, the superseded wraps deleted, and the rotation cut-off of ADR 0012 §6 /
+//! ADR 0021 §9 "Rotation cut-off") is [`crate::rotation`] (ADR 0025): one atomic request with the
+//! `auth` domain's `account-state`. It is the only write that moves `vault_key_epoch`, always
+//! upwards, above the stored value (ADR 0025 §3 check 2).
 
 use rizzy_core::ids::{AccountId, VaultId};
 use rizzy_proto::objects::{KeyEnvelope, VaultSelfGrant};

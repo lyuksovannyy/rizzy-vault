@@ -34,6 +34,12 @@ fn bare(state: Vec<u8>) -> CommitChangeRequest {
         account_settings: None,
         device_certificates: List::empty(),
         device_revocations: List::empty(),
+        bundle: None,
+        identity_secret_keys: None,
+        retired_secret_keys: List::empty(),
+        device_grants: List::empty(),
+        recovery_rewrap: None,
+        vault_rotation: None,
     }
 }
 
@@ -159,11 +165,11 @@ fn password_change_from_the_wire_types() {
 
         let login = env.login(&client).await;
         let fresh = env.bearer(&login.response.session_token).await;
-        // A state that rotates the account key has no wire form yet: refused.
+        // A state that rotates the account key, without the rotation objects: refused.
         let rotating = client.next_state(|s| s.account_key_epoch += 1);
         assert!(matches!(
             env.svc
-                .commit_change_request(&fresh, &bare(rotating.1), env.now)
+                .commit_change_request(&fresh, bare(rotating.1), env.now)
                 .await,
             Err(AuthError::InvalidRequest)
         ));
@@ -178,19 +184,19 @@ fn password_change_from_the_wire_types() {
         };
         assert!(matches!(
             env.svc
-                .commit_change_request(&fresh, &partial, env.now)
+                .commit_change_request(&fresh, partial.clone(), env.now)
                 .await,
             Err(AuthError::InvalidRequest)
         ));
         env.svc
-            .commit_change_request(&fresh, &commit, env.now)
+            .commit_change_request(&fresh, commit.clone(), env.now)
             .await
             .unwrap();
         // The change ended every OPAQUE session (§11.5 step 5); device sessions continue, and a
         // byte-identical repeat over one is success (§11 "Secrets before commit").
         assert!(matches!(
             env.svc
-                .commit_change_request(&fresh, &commit, env.now)
+                .commit_change_request(&fresh, commit.clone(), env.now)
                 .await,
             Err(AuthError::Unauthorized)
         ));
@@ -200,7 +206,7 @@ fn password_change_from_the_wire_types() {
             .await
             .unwrap();
         env.svc
-            .commit_change_request(&device_session, &commit, env.now)
+            .commit_change_request(&device_session, commit.clone(), env.now)
             .await
             .unwrap();
         client.adopt(next);
@@ -244,7 +250,7 @@ fn settings_change_over_a_device_session() {
         };
         assert!(matches!(
             env.svc
-                .commit_change_request(&session, &wrong, env.now)
+                .commit_change_request(&session, wrong.clone(), env.now)
                 .await,
             Err(AuthError::InvalidRequest)
         ));
@@ -256,7 +262,7 @@ fn settings_change_over_a_device_session() {
             ..bare(next.1.clone())
         };
         env.svc
-            .commit_change_request(&session, &commit, env.now)
+            .commit_change_request(&session, commit.clone(), env.now)
             .await
             .unwrap();
         client.adopt(next);
@@ -281,7 +287,7 @@ fn settings_change_over_a_device_session() {
         let (commit, _) = password_change(&mut env, &client, &session, "other", &other_sk).await;
         assert!(matches!(
             env.svc
-                .commit_change_request(&session, &commit, env.now)
+                .commit_change_request(&session, commit.clone(), env.now)
                 .await,
             Err(AuthError::FreshSessionRequired)
         ));
@@ -375,7 +381,7 @@ fn suspension_and_self_revocation_from_the_wire_types() {
             ..bare(next.1.clone())
         };
         env.svc
-            .commit_change_request(&fresh, &commit, env.now)
+            .commit_change_request(&fresh, commit.clone(), env.now)
             .await
             .unwrap();
         client.adopt(next);
@@ -483,7 +489,7 @@ fn recovery_from_the_wire_types() {
         // A new password alone, without a new code, is not a recovery commit.
         assert!(matches!(
             env.svc
-                .commit_change_request(&recovery_session, &commit, env.now)
+                .commit_change_request(&recovery_session, commit.clone(), env.now)
                 .await,
             Err(AuthError::FreshSessionRequired)
         ));
@@ -509,7 +515,7 @@ fn recovery_from_the_wire_types() {
             }
         };
         env.svc
-            .commit_change_request(&recovery_session, &commit, env.now)
+            .commit_change_request(&recovery_session, commit.clone(), env.now)
             .await
             .unwrap();
         client.adopt(next);

@@ -1448,6 +1448,7 @@ dependencies = [
  "hyper-util",
  "rand_core 0.10.1",
  "rizzy-bus",
+ "rizzy-client",
  "rizzy-domain-auth",
  "rizzy-domain-vault",
  "rizzy-storage",

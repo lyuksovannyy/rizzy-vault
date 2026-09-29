@@ -42,6 +42,7 @@
 //! | [`signup`] | CRYPTO.md §7, §11 "Secrets before commit", §11.1 | Signup and the Emergency Kit |
 //! | [`login`] | CRYPTO.md §5.3, §11.2, §11.4 | Login on a new device, enrolment, the web vault's ephemeral device |
 //! | [`unlock`] | CRYPTO.md §11.3 | The online part of an unlock, device grants after a rotation |
+//! | [`rotation`] | CRYPTO.md §11.6, §11.8 steps 1–3; ADR 0025 §2 | Standard and full key rotation with an optional revocation: new keys, the auth half, the vault half, the retry rule |
 //! | [`session`] | CRYPTO.md §5.10 | Device authentication and request signing |
 //! | [`sync`] | ADR 0012 §4, §7; ADR 0018 §3, §10; ADR 0021 §2, §4, §9 | The sync driver of one vault |
 //! | [`items`] | ADR 0018 §2, §6–§9; ADR 0012 §5 | Item create, edit, trash, restore, purge and reads; the `rizzy-import` seam |
@@ -74,6 +75,7 @@ pub mod error;
 pub mod export;
 pub mod items;
 pub mod login;
+pub mod rotation;
 pub mod session;
 pub mod signup;
 pub mod sync;

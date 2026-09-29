@@ -435,6 +435,18 @@ impl IdentityKeys {
             x25519: *self.kem.public_key(),
         }
     }
+
+    /// Retires these identity keys at the end of a full rotation (§11.6 step 3): the X25519
+    /// secret key moves into a [`RetiredSecretKey`] of type identity X25519, to be wrapped under
+    /// the new account key ([`AccountKey::wrap_retired_key`]) for old HPKE ciphertext. The
+    /// signing key is dropped (and wiped): signing keys never decrypt anything, so none is
+    /// retired. Nothing is copied: the secret moves.
+    ///
+    /// # Errors
+    /// [`crate::error::ParseError`] (unreachable: identity X25519 is a retirable type).
+    pub fn into_retired_x25519(self) -> Result<RetiredSecretKey, crate::error::ParseError> {
+        RetiredSecretKey::new(KeyType::IdentityX25519, self.kem)
+    }
 }
 
 impl fmt::Debug for IdentityKeys {

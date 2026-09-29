@@ -94,10 +94,10 @@
 //! # Left open, not frozen here
 //!
 //! No Accepted ADR fixes these, so this crate does not define them:
-//! - the rotation half of [`AuthService::commit_change`]: [`AccountChange`] carries it as typed
-//!   arguments, but `rizzy_proto::change::CommitChangeRequest` has no rotation fields yet
-//!   (the vault half of CRYPTO.md §11.6 step 9 has no wire form), so the `requests` entry
-//!   point builds changes without one. Recovery, suspension, TOTP and the other changes have
+//! - nothing about the rotation half of [`AuthService::commit_change`] any more: ADR 0025 §1
+//!   shapes `rizzy_proto::change::CommitChangeRequest`'s rotation fields, and the `requests`
+//!   entry point maps them onto [`AccountChange`] (its vault half through
+//!   [`VaultPort::rotation_from_wire`]). Recovery, suspension, TOTP and the other changes have
 //!   their `rizzy-proto` requests, and typed entry points ([`RecoveryRelease`],
 //!   [`TotpEnrolment`]) beside them;
 //! - the invite-token format and who issues invites (the admin API is M3): [`InviteVerifier`];
@@ -210,6 +210,9 @@ pub mod types {
         limits::SIGNATURE_CONTAINER_LEN,
         wire::{Fixed, List, SessionToken, b64url_len},
     };
+    /// The vault half of a rotation and the vaults of a recovery answer, which
+    /// [`crate::VaultPort`] hands to and takes from the vault domain (ADR 0025 §1).
+    pub use rizzy_proto::{change::VaultRotationUpload, recovery::RecoveryVault};
 }
 
 /// The auth domain: every flow of this crate, over one database.

@@ -16,7 +16,11 @@
 //! One write transaction under the account lock, atomic: any refusal rolls every part back and
 //! the whole request is refused (§9: "else it refuses the whole request"). In order:
 //! 1. the item-key wraps, each filling its wrap-set row when the server lacks it (or holds it at
-//!    a lower epoch);
+//!    a lower epoch); a wrap below the vault's current `vault_key_epoch` is left out (ADR 0025
+//!    open question 4: no healing below the current epoch). The same holds for the wrap an op
+//!    or snapshot record carries: a record below the current epoch is stored without it and
+//!    fills no row (`crate::store::current_wrap`, which also covers a normal upload's
+//!    stale-exempt op of a revoked device);
 //! 2. every op record, in request order: the same verification, "Already stored", author and
 //!    chain checks as an upload; a header may come without its body. Records "Already stored"
 //!    are skipped, not refused;
@@ -252,6 +256,13 @@ async fn heal_in(
     request: &HealingRequest,
 ) -> Result<Result<(), Refusal>, VaultError> {
     for wrap in &request.item_key_wraps {
+        // ADR 0025 open question 4, decided: healing never fills a row below the vault's
+        // current `vault_key_epoch`. Such a row belongs to a key a rotation superseded (and
+        // whose rows it re-wrapped or deleted); it is left out, not refused, so the rest of
+        // the healer's request still heals.
+        if wrap.vault_key_epoch < session.vault.vault_key_epoch {
+            continue;
+        }
         let row = WrapRow {
             item_id: ItemId::from_bytes(wrap.item_id.to_bytes()),
             item_key_id: wrap.item_key_id.to_bytes(),

@@ -234,6 +234,7 @@ impl LoginAwaitingSession {
             origin: self.origin,
             secret_key: self.secret_key,
             pw_in: self.pw_in,
+            export_key: self.export_key,
             account,
             account_key,
             session_token: response.session_token,
@@ -244,17 +245,20 @@ impl LoginAwaitingSession {
 /// A verified OPAQUE login (§11.2 steps 1–6): the bearer session and the verified account.
 pub struct LoggedIn {
     /// The dialled origin.
-    origin: ServerOrigin,
+    pub(crate) origin: ServerOrigin,
     /// The Secret Key.
-    secret_key: SecretKey,
+    pub(crate) secret_key: SecretKey,
     /// `pw_in`.
-    pw_in: PasswordInput,
+    pub(crate) pw_in: PasswordInput,
+    /// OPAQUE's `export_key` of this login: the `server_unlock_key` of `E_srv'` in a rotation
+    /// (CRYPTO.md §11.6 step 4, [`crate::rotation`]).
+    pub(crate) export_key: ExportKey,
     /// The verified account.
-    account: VerifiedAccount,
+    pub(crate) account: VerifiedAccount,
     /// The account key.
-    account_key: AccountKey,
+    pub(crate) account_key: AccountKey,
     /// The OPAQUE session's bearer token.
-    session_token: SessionToken,
+    pub(crate) session_token: SessionToken,
 }
 
 impl fmt::Debug for LoggedIn {
