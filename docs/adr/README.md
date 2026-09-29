@@ -81,7 +81,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0022 | [Server mode only: On-device sync parked](0022-server-mode-only.md) | Accepted | M1 (scope) / post-1.0 (parked) |
 | 0023 | [Logical database backup file format](0023-logical-backup-format.md) | Accepted | M1 |
 | 0024 | [Disabling core dumps through rustix](0024-core-dump-disabling-rustix.md) | Accepted | M1 (server, `rv`) / M3 (bindings) |
-| 0025 | [Key rotation upload: the vault half and the rotation cut-off](0025-rotation-vault-half.md) | Proposed | M1 |
+| 0025 | [Key rotation upload: the vault half and the rotation cut-off](0025-rotation-vault-half.md) | Accepted | M1 |
 
 ## Gates
 

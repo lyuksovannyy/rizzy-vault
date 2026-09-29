@@ -1,6 +1,6 @@
 # ADR 0025: Key rotation upload: the vault half and the rotation cut-off
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-29
 - Deciders: project owner
 - Milestone: M1
