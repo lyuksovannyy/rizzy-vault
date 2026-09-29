@@ -25,22 +25,43 @@
 //! | `POST /api/v1/healing/bundles` | `PublishBundlesRequest` → 204 | any |
 //! | `POST /api/v1/healing/account-state` | `PublishAccountStateRequest` → 204 | any |
 //! | `POST /api/v1/healing/grants` | `PublishGrantsRequest` → 204 | any |
+//! | `POST /api/v1/account/reregister/start` | `ReregisterStartRequest` → `ReregisterStartResponse` | any (fresh OPAQUE, recovery-only or device; checked by the domain) |
+//! | `POST /api/v1/account/commit` | `CommitChangeRequest` → 204 | any (per change; checked by the domain) |
+//! | `POST /api/v1/devices/suspend` | `DeviceSuspensionRequest` → `SuspendDeviceResponse` | OPAQUE or device (fresh OPAQUE bound to another device; checked by the domain) |
+//! | `POST /api/v1/devices/unsuspend` | `DeviceSuspensionRequest` → 204 | OPAQUE or device (as suspend) |
+//! | `POST /api/v1/recovery/start` | `RecoveryRequest` → `RecoveryStartResponse` | none |
+//! | `POST /api/v1/recovery/cancel` | no body → `RecoveryCancelResponse` | OPAQUE or device (a device session; checked by the domain) |
+//! | `POST /api/v1/recovery/complete` | `RecoveryRequest` → `RecoveryCompleteResponse` | none |
+//! | `POST /api/v1/totp/enrol/start` | no body → `TotpEnrolStartResponse` | OPAQUE or device (fresh OPAQUE; checked by the domain) |
+//! | `POST /api/v1/totp/enrol/confirm` | `TotpEnrolConfirmRequest` → 204 | OPAQUE or device (fresh OPAQUE; checked by the domain) |
+//! | `POST /api/v1/totp/disable` | `TotpDisableRequest` → 204 | OPAQUE or device (fresh OPAQUE; checked by the domain) |
 //! | `POST /api/v1/vault/upload` | `UploadRequest` → `UploadResponse` | OPAQUE or device |
 //! | `POST /api/v1/vault/fetch` | `FetchRequest` → `FetchResponse` | OPAQUE or device |
 //! | `POST /api/v1/vault/heal` | `HealingRequest` → `HealingResponse` | OPAQUE or device |
 //!
-//! "Empty success" (`rizzy-proto`'s tables) is `204 No Content`. The recovery-only session
-//! (CRYPTO.md §11.9 step 3) "covers the recovery commit only", so it is refused on the vault
-//! endpoints; the auth domain applies its own session rules to the others. Password change,
-//! rotation, revocation, recovery and TOTP have no `rizzy-proto` request yet ([`rizzy-proto`]
-//! "Left open"), so they have no endpoint in this build.
+//! "Empty success" (`rizzy-proto`'s tables) is `204 No Content`; "no body" endpoints take an
+//! empty body (limit 0) and are `POST` because they change state. The recovery-only session
+//! (CRYPTO.md §11.9 step 3) "covers the recovery commit only", so it is refused here, before the
+//! domain, on the "OPAQUE or device" rows: the vault endpoints, suspension, recovery cancel and
+//! TOTP, which the auth domain then narrows further. The auth domain applies its own session
+//! rules to the "any" rows; re-registration and the commit accept the recovery-only session for
+//! the recovery commit of §11.9 step 5. The freshness rules (a fresh OPAQUE session of at
+//! most 5 minutes, CRYPTO.md §11 "Replacing credentials", §11.5 step 1, §11.8 step 0) are the
+//! domain's, answered `403 fresh_session_required`; a device session signs every request
+//! (step 3 below) on these endpoints like on every other.
+//!
+//! **Key rotation has no endpoint in this build.** The commit carries no rotation fields
+//! (`rizzy_proto::change` "No key rotation in this build": the vault half of CRYPTO.md §11.6 step
+//! 9 has no wire form), so a state that rotates a key, and with it the revocation of §11.8 step 3
+//! and the default recovery of §11.9 step 5, is answered `400 invalid_request`. The
+//! self-revocation of §11.3 step 5 and the recovery that skips the rotation commit.
 //!
 //! # Every request
 //!
 //! 1. **The session, from the headers alone** (threat model §7.6 "D"), for every endpoint that
 //!    takes one: the bearer token must name an unexpired session whose kind fits the presence of
-//!    a signature (`rizzy_domain_auth::AuthService::session_for_token`), and the vault
-//!    endpoints refuse the recovery-only session. This runs before a single body byte is read,
+//!    a signature (`rizzy_domain_auth::AuthService::session_for_token`), and the "OPAQUE or
+//!    device" endpoints refuse the recovery-only session. This runs before a single body byte is read,
 //!    so an anonymous client never gets the large upload limit: it is answered
 //!    `401 unauthorized` at once.
 //! 2. **Body size and time** ([`Endpoint::body_limit`]; threat model §7.6 "D"): a
@@ -194,8 +215,9 @@ enum SessionNeed {
     Optional,
     /// Any session the auth domain accepts; the domain applies the endpoint's own rule.
     Required,
-    /// An OPAQUE or device session: not the recovery-only session.
-    Vault,
+    /// An OPAQUE or device session: not the recovery-only session (the "OPAQUE or device" rows
+    /// of the module docs).
+    NotRecovery,
 }
 
 /// Every `/api/v1` endpoint (module docs for the table).
@@ -229,6 +251,26 @@ pub enum Endpoint {
     PublishAccountState,
     /// Healing step 3.
     PublishGrants,
+    /// OPAQUE re-registration start.
+    ReregisterStart,
+    /// The atomic commit of a credential, settings or device change.
+    CommitChange,
+    /// Revocation phase 1: suspension.
+    SuspendDevice,
+    /// Lifting a suspension.
+    UnsuspendDevice,
+    /// Recovery start.
+    RecoveryStart,
+    /// Recovery cancel, by a device.
+    RecoveryCancel,
+    /// Recovery complete.
+    RecoveryComplete,
+    /// TOTP enrolment start.
+    TotpEnrolStart,
+    /// TOTP enrolment confirmation.
+    TotpEnrolConfirm,
+    /// TOTP removal.
+    TotpDisable,
     /// Vault upload.
     Upload,
     /// Vault Fetch.
@@ -254,6 +296,16 @@ impl Endpoint {
         Self::PublishBundles,
         Self::PublishAccountState,
         Self::PublishGrants,
+        Self::ReregisterStart,
+        Self::CommitChange,
+        Self::SuspendDevice,
+        Self::UnsuspendDevice,
+        Self::RecoveryStart,
+        Self::RecoveryCancel,
+        Self::RecoveryComplete,
+        Self::TotpEnrolStart,
+        Self::TotpEnrolConfirm,
+        Self::TotpDisable,
         Self::Upload,
         Self::Fetch,
         Self::Heal,
@@ -277,6 +329,16 @@ impl Endpoint {
             Self::PublishBundles => "/api/v1/healing/bundles",
             Self::PublishAccountState => "/api/v1/healing/account-state",
             Self::PublishGrants => "/api/v1/healing/grants",
+            Self::ReregisterStart => "/api/v1/account/reregister/start",
+            Self::CommitChange => "/api/v1/account/commit",
+            Self::SuspendDevice => "/api/v1/devices/suspend",
+            Self::UnsuspendDevice => "/api/v1/devices/unsuspend",
+            Self::RecoveryStart => "/api/v1/recovery/start",
+            Self::RecoveryCancel => "/api/v1/recovery/cancel",
+            Self::RecoveryComplete => "/api/v1/recovery/complete",
+            Self::TotpEnrolStart => "/api/v1/totp/enrol/start",
+            Self::TotpEnrolConfirm => "/api/v1/totp/enrol/confirm",
+            Self::TotpDisable => "/api/v1/totp/disable",
             Self::Upload => "/api/v1/vault/upload",
             Self::Fetch => "/api/v1/vault/fetch",
             Self::Heal => "/api/v1/vault/heal",
@@ -298,7 +360,9 @@ impl Endpoint {
             Self::RegisterStart
             | Self::RegisterFinish
             | Self::DeviceAuthStart
-            | Self::DeviceAuthFinish => SessionNeed::None,
+            | Self::DeviceAuthFinish
+            | Self::RecoveryStart
+            | Self::RecoveryComplete => SessionNeed::None,
             Self::LoginStart | Self::LoginFinish => SessionNeed::Optional,
             Self::AccountState
             | Self::EnrolDevice
@@ -307,18 +371,29 @@ impl Endpoint {
             | Self::AckDeviceGrants
             | Self::PublishBundles
             | Self::PublishAccountState
-            | Self::PublishGrants => SessionNeed::Required,
-            Self::Upload | Self::Fetch | Self::Heal => SessionNeed::Vault,
+            | Self::PublishGrants
+            | Self::ReregisterStart
+            | Self::CommitChange => SessionNeed::Required,
+            Self::SuspendDevice
+            | Self::UnsuspendDevice
+            | Self::RecoveryCancel
+            | Self::TotpEnrolStart
+            | Self::TotpEnrolConfirm
+            | Self::TotpDisable
+            | Self::Upload
+            | Self::Fetch
+            | Self::Heal => SessionNeed::NotRecovery,
         }
     }
 
     /// The body-size limit: [`BODY_LIMIT`], the configured upload limit for upload and healing,
-    /// and 0 for the `GET` endpoint, which takes no body.
+    /// and 0 for the endpoints that take no body (the `GET` endpoint, recovery cancel and TOTP
+    /// enrolment start).
     #[must_use]
     pub const fn body_limit(self, max_upload_bytes: usize) -> usize {
         match self {
             Self::Upload | Self::Heal => max_upload_bytes,
-            Self::DeviceGrants => 0,
+            Self::DeviceGrants | Self::RecoveryCancel | Self::TotpEnrolStart => 0,
             _ => BODY_LIMIT,
         }
     }
@@ -560,7 +635,7 @@ async fn precheck(
         )
         .await
         .map_err(|e| refused(endpoint, &e))?;
-    if endpoint.session() == SessionNeed::Vault && session.kind == SessionKind::Recovery {
+    if endpoint.session() == SessionNeed::NotRecovery && session.kind == SessionKind::Recovery {
         return Err(ErrorCode::Unauthorized);
     }
     Ok(())
@@ -595,7 +670,7 @@ async fn authenticate(
         )
         .await
         .map_err(|e| refused(endpoint, &e))?;
-    if endpoint.session() == SessionNeed::Vault && session.kind == SessionKind::Recovery {
+    if endpoint.session() == SessionNeed::NotRecovery && session.kind == SessionKind::Recovery {
         return Err(ErrorCode::Unauthorized);
     }
     Ok(session)
@@ -635,7 +710,7 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
     let credentials = match endpoint.session() {
         SessionNeed::None => None,
         SessionNeed::Optional if !parts.headers.contains_key(AUTHORIZATION) => None,
-        SessionNeed::Optional | SessionNeed::Required | SessionNeed::Vault => {
+        SessionNeed::Optional | SessionNeed::Required | SessionNeed::NotRecovery => {
             let credentials = credentials(&parts)?;
             precheck(api, endpoint, &credentials, now_ms()).await?;
             Some(credentials)
@@ -750,6 +825,72 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
                 .map_err(ae)?;
             Ok(Reply::Empty)
         }
+        Endpoint::ReregisterStart => json(
+            &auth
+                .reregister_start_request(need()?, &parse(&body)?, now)
+                .await
+                .map_err(ae)?,
+        ),
+        Endpoint::CommitChange => {
+            auth.commit_change_request(need()?, &parse(&body)?, now)
+                .await
+                .map_err(ae)?;
+            Ok(Reply::Empty)
+        }
+        Endpoint::SuspendDevice => json(
+            &auth
+                .suspend_device_request(need()?, &parse(&body)?, now)
+                .await
+                .map_err(ae)?,
+        ),
+        Endpoint::UnsuspendDevice => {
+            auth.unsuspend_device_request(need()?, &parse(&body)?, now)
+                .await
+                .map_err(ae)?;
+            Ok(Reply::Empty)
+        }
+        Endpoint::RecoveryStart => {
+            let source = source(api, &parts);
+            json(
+                &auth
+                    .recovery_start_request(&parse(&body)?, &source, now)
+                    .await
+                    .map_err(ae)?,
+            )
+        }
+        Endpoint::RecoveryCancel => json(
+            &auth
+                .recovery_cancel_request(need()?, now)
+                .await
+                .map_err(ae)?,
+        ),
+        Endpoint::RecoveryComplete => {
+            let source = source(api, &parts);
+            json(
+                &auth
+                    .recovery_complete_request(&mut rng, &parse(&body)?, &source, now)
+                    .await
+                    .map_err(ae)?,
+            )
+        }
+        Endpoint::TotpEnrolStart => json(
+            &auth
+                .totp_enrol_start_request(&mut rng, need()?, now)
+                .await
+                .map_err(ae)?,
+        ),
+        Endpoint::TotpEnrolConfirm => {
+            auth.totp_enrol_confirm_request(need()?, &parse(&body)?, now)
+                .await
+                .map_err(ae)?;
+            Ok(Reply::Empty)
+        }
+        Endpoint::TotpDisable => {
+            auth.totp_disable_request(need()?, &parse(&body)?, now)
+                .await
+                .map_err(ae)?;
+            Ok(Reply::Empty)
+        }
         Endpoint::Upload => json(
             &api.vault
                 .upload(need()?.account_id, &parse(&body)?, now)
@@ -782,5 +923,111 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
             Err(HealingError::Failed(e)) => Err(ve(e)),
             Err(e) => Err(e.code()),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The endpoint table: paths, methods, session needs and body limits. These pin the
+    //! wiring the in-process HTTP tests cannot reach yet (they cannot mint a session without
+    //! `rizzy-core`, which ADR 0016 §3 keeps out of this crate's tests).
+
+    use std::collections::HashSet;
+
+    use super::*;
+
+    /// A match without a wildcard: adding a variant without listing it in
+    /// [`Endpoint::ALL`] fails to compile here, and the length check below catches a
+    /// variant missing from `ALL`.
+    const fn listed(endpoint: Endpoint) -> bool {
+        match endpoint {
+            Endpoint::RegisterStart
+            | Endpoint::RegisterFinish
+            | Endpoint::LoginStart
+            | Endpoint::LoginFinish
+            | Endpoint::DeviceAuthStart
+            | Endpoint::DeviceAuthFinish
+            | Endpoint::AccountState
+            | Endpoint::EnrolDevice
+            | Endpoint::WebCertificate
+            | Endpoint::DeviceGrants
+            | Endpoint::AckDeviceGrants
+            | Endpoint::PublishBundles
+            | Endpoint::PublishAccountState
+            | Endpoint::PublishGrants
+            | Endpoint::ReregisterStart
+            | Endpoint::CommitChange
+            | Endpoint::SuspendDevice
+            | Endpoint::UnsuspendDevice
+            | Endpoint::RecoveryStart
+            | Endpoint::RecoveryCancel
+            | Endpoint::RecoveryComplete
+            | Endpoint::TotpEnrolStart
+            | Endpoint::TotpEnrolConfirm
+            | Endpoint::TotpDisable
+            | Endpoint::Upload
+            | Endpoint::Fetch
+            | Endpoint::Heal => true,
+        }
+    }
+
+    #[test]
+    fn all_is_complete_and_paths_unique() {
+        assert_eq!(Endpoint::ALL.len(), 27);
+        assert!(Endpoint::ALL.iter().all(|e| listed(*e)));
+        let unique: HashSet<_> = Endpoint::ALL.iter().copied().map(Endpoint::path).collect();
+        assert_eq!(unique.len(), Endpoint::ALL.len());
+        for e in Endpoint::ALL {
+            assert!(e.path().starts_with("/api/v1/"), "{e:?}");
+        }
+    }
+
+    #[test]
+    fn only_device_grants_is_get() {
+        for e in Endpoint::ALL {
+            let expected = if *e == Endpoint::DeviceGrants {
+                HttpMethod::Get
+            } else {
+                HttpMethod::Post
+            };
+            assert_eq!(e.method(), expected, "{e:?}");
+        }
+    }
+
+    #[test]
+    fn recovery_only_session_refused_on_device_and_vault_rows() {
+        for e in [
+            Endpoint::SuspendDevice,
+            Endpoint::UnsuspendDevice,
+            Endpoint::RecoveryCancel,
+            Endpoint::TotpEnrolStart,
+            Endpoint::TotpEnrolConfirm,
+            Endpoint::TotpDisable,
+            Endpoint::Upload,
+            Endpoint::Fetch,
+            Endpoint::Heal,
+        ] {
+            assert_eq!(e.session(), SessionNeed::NotRecovery, "{e:?}");
+        }
+        // The recovery commit and re-registration take the recovery-only session; the domain
+        // applies their rules (CRYPTO.md §11.9 step 5).
+        assert_eq!(Endpoint::CommitChange.session(), SessionNeed::Required);
+        assert_eq!(Endpoint::ReregisterStart.session(), SessionNeed::Required);
+        for e in [Endpoint::RecoveryStart, Endpoint::RecoveryComplete] {
+            assert_eq!(e.session(), SessionNeed::None, "{e:?}");
+        }
+    }
+
+    #[test]
+    fn body_limits() {
+        let upload = 7 * BODY_LIMIT;
+        for e in Endpoint::ALL {
+            let expected = match e {
+                Endpoint::Upload | Endpoint::Heal => upload,
+                Endpoint::DeviceGrants | Endpoint::RecoveryCancel | Endpoint::TotpEnrolStart => 0,
+                _ => BODY_LIMIT,
+            };
+            assert_eq!(e.body_limit(upload), expected, "{e:?}");
+        }
     }
 }

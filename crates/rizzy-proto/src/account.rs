@@ -17,8 +17,9 @@
 //! Every new `account-state` the server accepts is applied by compare-and-swap on `state_seq`
 //! (§10.2); a lost race is answered [`ErrorCode::StateConflict`](crate::error::ErrorCode).
 //!
-//! Password change, rotation, revocation and recovery (§11.5, §11.6, §11.8, §11.9) carry larger
-//! atomic requests; they are not defined in this crate yet.
+//! Password change, revocation and recovery (§11.5, §11.8, §11.9) carry larger atomic requests,
+//! in [`crate::change`] and [`crate::recovery`]; key rotation (§11.6) is not defined yet (see
+//! [`crate::change`]).
 
 use serde::{Deserialize, Serialize};
 

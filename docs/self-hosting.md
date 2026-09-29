@@ -49,7 +49,7 @@ Never put both into one backup, one archive or one volume.
 **Not in this build** (M1 is in progress):
 - The web vault (M1 step 5): the `web` role serves a fixed "no web vault in this build" page. The API is complete for the M1 clients.
 - `rizzy-vault backup` and `rizzy-vault restore` (see [§8](#8-backup) and [§9](#9-restore)).
-- PostgreSQL (supported from M3; the `worker` role refuses it in this build).
+- PostgreSQL as a supported setup (M3). This build runs every M1 role on it, the `worker` included (one active worker per database, the others wait as standbys), but its PostgreSQL tests are not run in CI yet.
 - The admin panel and API (M3), `notify`, `icons` (M3), `smtp` (M6), Quadlet units (M3), signed images (M8).
 
 ## 2. Install
@@ -64,7 +64,7 @@ $EDITOR .env                      # RIZZY_DOMAIN and RIZZY_ORIGIN, see §4 and �
 docker compose build              # or: podman compose build
 ```
 
-There is no published image yet; `docker compose build` builds `localhost/rizzy-vault:dev` from the repository ([`deploy/Containerfile`](../deploy/Containerfile)). Building needs network access to the base images' registry (`docker.io`), to crates.io (`index.crates.io`, `static.crates.io`), and to `static.rust-lang.org`: the repository's `rust-toolchain.toml` pins a toolchain with `rustfmt`, `clippy` and the `wasm32-unknown-unknown` target, and rustup downloads whatever of it the base image lacks. Behind an egress allow-list or a crates.io mirror, allow all three. For both architectures at once: `docker buildx build --platform linux/amd64,linux/arm64 -f deploy/Containerfile -t <name> ..` (from `deploy/`), or `podman build --platform linux/amd64,linux/arm64 --manifest <name> -f deploy/Containerfile ..`.
+There is no published image yet: CI builds the image for `linux/amd64` and `linux/arm64` on every pull request but pushes nothing, and its publish jobs stay off unless the project owner enables them (they would push unsigned development builds to `ghcr.io`; signed images are M8). `docker compose build` builds `localhost/rizzy-vault:dev` from the repository ([`deploy/Containerfile`](../deploy/Containerfile)). Building needs network access to the base images' registry (`docker.io`), to crates.io (`index.crates.io`, `static.crates.io`), and to `static.rust-lang.org`: the repository's `rust-toolchain.toml` pins a toolchain with `rustfmt`, `clippy` and the `wasm32-unknown-unknown` target, and rustup downloads whatever of it the base image lacks. Behind an egress allow-list or a crates.io mirror, allow all three. For both architectures at once: `docker buildx build --platform linux/amd64,linux/arm64 -f deploy/Containerfile -t <name> ..` (from `deploy/`), or `podman build --platform linux/amd64,linux/arm64 --manifest <name> -f deploy/Containerfile ..`.
 
 Every command in this guide runs from `deploy/`. With Podman, replace `docker` by `podman`.
 

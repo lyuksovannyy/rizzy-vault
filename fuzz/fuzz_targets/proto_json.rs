@@ -31,8 +31,16 @@ use rizzy_proto::auth::{
     DeviceAuthStartResponse, LoginFinishRequest, LoginFinishResponse, LoginStartRequest,
     LoginStartResponse, RegisterFinishRequest, RegisterStartRequest, RegisterStartResponse,
 };
+use rizzy_proto::change::{
+    CommitChangeRequest, DeviceSuspensionRequest, ReregisterStartRequest, ReregisterStartResponse,
+    SuspendDeviceResponse,
+};
 use rizzy_proto::error::ErrorResponse;
 use rizzy_proto::meta::{ClientHeader, MetaResponse};
+use rizzy_proto::recovery::{
+    RecoveryCancelResponse, RecoveryCompleteResponse, RecoveryRequest, RecoveryStartResponse,
+};
+use rizzy_proto::totp::{TotpDisableRequest, TotpEnrolConfirmRequest, TotpEnrolStartResponse};
 use rizzy_proto::vault::{
     FetchRequest, FetchResponse, HealingRequest, HealingResponse, UploadRequest, UploadResponse,
 };
@@ -60,7 +68,7 @@ fuzz_target!(|data: &[u8]| {
     let Some((&selector, json)) = data.split_first() else {
         return;
     };
-    match selector % 28 {
+    match selector % 40 {
         // Requests.
         0 => check::<RegisterStartRequest>(json),
         1 => check::<RegisterFinishRequest>(json),
@@ -90,6 +98,20 @@ fuzz_target!(|data: &[u8]| {
         23 => check::<DeviceGrantsResponse>(json),
         24 => check::<UploadResponse>(json),
         25 => check::<FetchResponse>(json),
-        _ => check::<HealingResponse>(json),
+        26 => check::<HealingResponse>(json),
+        // Requests of the account changes, recovery and TOTP.
+        28 => check::<ReregisterStartRequest>(json),
+        29 => check::<CommitChangeRequest>(json),
+        30 => check::<DeviceSuspensionRequest>(json),
+        31 => check::<RecoveryRequest>(json),
+        32 => check::<TotpEnrolConfirmRequest>(json),
+        33 => check::<TotpDisableRequest>(json),
+        // Their responses.
+        34 => check::<ReregisterStartResponse>(json),
+        35 => check::<SuspendDeviceResponse>(json),
+        36 => check::<RecoveryStartResponse>(json),
+        37 => check::<RecoveryCancelResponse>(json),
+        38 => check::<RecoveryCompleteResponse>(json),
+        _ => check::<TotpEnrolStartResponse>(json),
     }
 });

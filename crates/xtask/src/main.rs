@@ -3,6 +3,8 @@
 //! ```text
 //! cargo xtask check-deps
 //! cargo xtask check-clippy
+//! cargo xtask check-signoff <base>..<head>
+//! cargo xtask check-signoff --squash <before>..<after>
 //! ```
 //!
 //! `check-deps` enforces the crate-boundary rules of ADR 0016 (R1–R8) and the dependency rules
@@ -46,6 +48,13 @@
 //! ignores the entry, and `-D warnings` does not turn that warning into an error. Run it after
 //! `cargo lint`, which it reuses the results of.
 //!
+//! `check-signoff` checks the DCO sign-off of ADR 0017 Decision 4 ([`mod@signoff`]). Without a
+//! flag, every commit in `<base>..<head>` must carry a `Signed-off-by:` trailer naming its
+//! author; CI runs that on each pull request's commits. With `--squash`, every commit in the
+//! range must keep at least one well-formed `Signed-off-by:` line anywhere in its message; CI
+//! runs that on each push to `main`, where the commit is GitHub's squash commit. It reads
+//! `git rev-list` and `git log`, so it needs a checkout that holds both revisions.
+//!
 //! # How `check-deps` works
 //!
 //! 1. [`load`] gathers every input: `cargo metadata --all-features --locked` three times (all
@@ -66,9 +75,10 @@
 //! # Exit codes
 //!
 //! `0` when every check passes (and for `-h`/`--help`), `1` on a violation or when an input
-//! cannot be read or a command fails, `2` on a usage error (no command, an unknown command, an
-//! extra argument, or an argument that is not UTF-8). Both commands are CI steps; xtask is
-//! never shipped and never reads secrets.
+//! cannot be read or a command fails, `2` on a usage error (no command, an unknown command, a
+//! missing or extra argument, an argument that is not UTF-8, or a `check-signoff` range that
+//! [`signoff::check_range`] rejects). Every command is a CI step; xtask is never shipped and
+//! never reads secrets.
 
 // Also set by the workspace lint table (ADR 0016 R7); repeated here so that no manifest edit
 // alone admits `unsafe` in this crate.
@@ -79,6 +89,7 @@ mod check;
 mod manifest;
 mod metadata;
 mod rules;
+mod signoff;
 mod unsafe_scan;
 
 use std::collections::BTreeSet;
@@ -103,13 +114,20 @@ COMMANDS:
                     and scan first-party .rs files for the `unsafe` keyword (ADR 0019 §4.1)
     check-clippy    Run clippy as `cargo lint` does; fail on any warning about a clippy.toml
                     entry, such as \"found a module\" (ADR 0016 §5, R1 API side)
+    check-signoff <base>..<head>
+                    Check that every commit in the range has a Signed-off-by trailer
+                    naming its author (DCO 1.1, ADR 0017 Decision 4)
+    check-signoff --squash <before>..<after>
+                    Check that every commit in the range (squash commits on main) keeps
+                    a well-formed Signed-off-by line anywhere in its message
 ";
 
 /// The second target the getrandom rule is checked on, besides the host (ADR 0016 R1).
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
-/// Dispatches on the one command-line argument. Exactly one argument is accepted; anything
-/// else is a usage error with exit code 2.
+/// Dispatches on the command-line arguments: one command, plus the range (and `--squash`) for
+/// `check-signoff`.
+/// Anything else is a usage error with exit code 2.
 fn main() -> ExitCode {
     // `args_os`, not `args`: `args` panics on an argument that is not UTF-8. Such an argument
     // is no command, so it gets the usage error.
@@ -122,6 +140,10 @@ fn main() -> ExitCode {
     {
         [Some("check-deps")] => check_deps(),
         [Some("check-clippy")] => check_clippy(),
+        [Some("check-signoff"), Some(range)] => check_signoff(range, SignoffMode::PullRequest),
+        [Some("check-signoff"), Some("--squash"), Some(range)] => {
+            check_signoff(range, SignoffMode::Squash)
+        }
         [Some("-h" | "--help")] => {
             let _ = write!(io::stdout().lock(), "{USAGE}");
             ExitCode::SUCCESS
@@ -421,4 +443,166 @@ fn run(cmd: &mut Command) -> Result<String, String> {
         ));
     }
     String::from_utf8(out.stdout).map_err(|e| format!("{cmd:?} printed invalid UTF-8: {e}"))
+}
+
+/// Which rule `check-signoff` applies ([`mod@signoff`], "Pull-request mode" and "Squash mode").
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SignoffMode {
+    /// Every commit carries a `Signed-off-by:` trailer naming its author.
+    PullRequest,
+    /// Every commit's message holds at least one well-formed `Signed-off-by:` line.
+    Squash,
+}
+
+/// A `git` command in the workspace root with the options every `check-signoff` call shares:
+/// `--no-show-signature` and `--no-color` keep a user's git configuration out of the output.
+/// The caller appends `--end-of-options` and the revision.
+fn git_log_cmd(sub: &str) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(workspace_root()).arg(sub);
+    if sub == "log" {
+        cmd.args(["--no-show-signature", "--no-color"]);
+    }
+    cmd
+}
+
+/// The commits in `range`, from `git rev-list --end-of-options <range>` ([`signoff::parse_rev_list`]).
+///
+/// # Errors
+///
+/// Returns a message when git fails or prints output the parser rejects.
+fn rev_list(range: &str) -> Result<Vec<String>, String> {
+    let out = run(git_log_cmd("rev-list").args(["--end-of-options", range]))?;
+    signoff::parse_rev_list(&out)
+}
+
+/// `cargo xtask check-signoff [--squash] <base>..<head>`: checks the DCO sign-off of every
+/// commit in the range ([`mod@signoff`], ADR 0017 Decision 4).
+///
+/// Exits 2 when [`signoff::check_range`] rejects the range. Lists the range with `git rev-list`
+/// in the workspace root, always after `--end-of-options`, so the range is never read as an
+/// option; an empty range, a git failure or output the parsers cannot read exits 1. Then
+/// [`check_pull_request`] or [`check_squash`] applies the mode's rule.
+fn check_signoff(range: &str, mode: SignoffMode) -> ExitCode {
+    let mut err = io::stderr().lock();
+    if let Err(e) = signoff::check_range(range) {
+        let _ = writeln!(err, "check-signoff: {e}\n\n{USAGE}");
+        return ExitCode::from(2);
+    }
+    let listed = match rev_list(range) {
+        Ok(listed) => listed,
+        Err(e) => {
+            let _ = writeln!(err, "check-signoff: error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if listed.is_empty() {
+        let _ = writeln!(
+            err,
+            "check-signoff: error: {range} holds no commits, so nothing would be checked; \
+             check the range (a pull request or a push always has a commit)"
+        );
+        return ExitCode::FAILURE;
+    }
+    let result = match mode {
+        SignoffMode::PullRequest => check_pull_request(range, &listed),
+        SignoffMode::Squash => check_squash(&listed),
+    };
+    match result {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(e) => {
+            let _ = writeln!(err, "check-signoff: error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The pull-request mode: runs `git log` with [`signoff::LOG_FORMAT`] over `range`, requires
+/// the records to be exactly the `listed` commits ([`signoff::same_commits`]), and checks that
+/// each is signed off by its author. Prints `check-signoff: ok (...)` and returns `true` when
+/// every commit is; otherwise prints each unsigned commit and how to fix it to stderr and
+/// returns `false`.
+///
+/// # Errors
+///
+/// Returns a message when git fails or its output cannot be read or does not match `listed`.
+fn check_pull_request(range: &str, listed: &[String]) -> Result<bool, String> {
+    let format = format!("--format={}", signoff::LOG_FORMAT);
+    let out = run(git_log_cmd("log").args([format.as_str(), "--end-of-options", range]))?;
+    let commits = signoff::parse_log(&out)?;
+    signoff::same_commits(&commits, listed)?;
+    let missing = signoff::missing(&commits);
+    if missing.is_empty() {
+        let _ = writeln!(
+            io::stdout().lock(),
+            "check-signoff: ok ({} commit(s) signed off by their authors; DCO 1.1, ADR 0017 \
+             Decision 4)",
+            commits.len()
+        );
+        return Ok(true);
+    }
+    let mut err = io::stderr().lock();
+    for m in &missing {
+        let _ = writeln!(err, "error: [DCO] {m}");
+    }
+    let _ = writeln!(
+        err,
+        "check-signoff: {} of {} commit(s) lack a Signed-off-by trailer with the author's name \
+         and email (DCO 1.1, ADR 0017 Decision 4; CONTRIBUTING.md, \"Sign-off\"). The author \
+         certifies the DCO by signing off: `git commit --amend -s` for the last commit, or \
+         `git rebase --signoff <base>` for all of them, then force-push. AI coding agents \
+         never sign off; the human who opens the pull request does, after review.",
+        missing.len(),
+        commits.len()
+    );
+    Ok(false)
+}
+
+/// The squash mode: reads each `listed` commit's message with its own
+/// `git log -1 --format=%B` call and requires at least one well-formed `Signed-off-by:` line
+/// in it ([`signoff::squash_signoffs`]). Prints `check-signoff: ok (...)` and returns `true`
+/// when every commit has one; otherwise names each commit without one on stderr and returns
+/// `false`.
+///
+/// # Errors
+///
+/// Returns a message when git fails or a message is too large.
+fn check_squash(listed: &[String]) -> Result<bool, String> {
+    let mut bad = Vec::new();
+    for sha in listed {
+        let message =
+            run(git_log_cmd("log").args(["-1", "--format=%B", "--end-of-options", sha.as_str()]))?;
+        if signoff::squash_signoffs(&message)?.is_empty() {
+            bad.push(sha.as_str());
+        }
+    }
+    if bad.is_empty() {
+        let _ = writeln!(
+            io::stdout().lock(),
+            "check-signoff: ok ({} commit(s) keep Signed-off-by lines; squash mode, ADR 0017 \
+             Decision 4)",
+            listed.len()
+        );
+        return Ok(true);
+    }
+    let mut err = io::stderr().lock();
+    for sha in &bad {
+        let _ = writeln!(
+            err,
+            "error: [DCO] {}: the commit message holds no well-formed `Signed-off-by: Name \
+             <email>` line",
+            signoff::short(sha)
+        );
+    }
+    let _ = writeln!(
+        err,
+        "check-signoff: {} of {} commit(s) on main lost the DCO record (ADR 0017 Decision 4). \
+         Squash-merge with \"Pull request title and commit details\", which keeps the commits' \
+         Signed-off-by lines; never \"Pull request title\" or \"Pull request title and \
+         description\", and never a merge commit (CONTRIBUTING.md, \"Review\").",
+        bad.len(),
+        listed.len()
+    );
+    Ok(false)
 }

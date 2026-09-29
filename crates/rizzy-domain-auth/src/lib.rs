@@ -53,6 +53,7 @@
 //! | `change` | CRYPTO.md §11 "Replacing credentials", §11.3 step 5, §11.5, §11.6, §11.8, §11.9 step 6 | [`AuthService::commit_change`]: every atomic change of the signed state with credentials, keys or devices |
 //! | `recovery` | CRYPTO.md §11.9; ADR 0008 | [`AuthService::recovery_start`], [`AuthService::recovery_cancel`], [`AuthService::recovery_complete`] |
 //! | `totp` | CRYPTO.md §5.11, §11.15 | Server-side 2FA enrolment and removal |
+//! | `requests` | CRYPTO.md §11 "Replacing credentials", §11.5, §11.8 step 0, §11.9, §11.15 | The `rizzy-proto` entry points of the flows above that take typed arguments ([`AuthService::commit_change_request`] and the others) |
 //! | `healing` | ADR 0012 §7 "Healing a server rollback" steps 1–3; INV-59 | The reconciliation epoch after a restore |
 //! | `maintenance` | ADR 0010 §5; ADR 0012 §7 | What `worker` runs: expired auth state, stale reconciliation epochs |
 //!
@@ -93,10 +94,12 @@
 //! # Left open, not frozen here
 //!
 //! No Accepted ADR fixes these, so this crate does not define them:
-//! - the wire requests of the recovery flow, the atomic change of [`AuthService::commit_change`],
-//!   suspension and TOTP enrolment: they are typed Rust arguments here ([`AccountChange`],
-//!   [`RecoveryRelease`], [`TotpEnrolment`]); their JSON shapes belong in `rizzy-proto` with
-//!   the API specification;
+//! - the rotation half of [`AuthService::commit_change`]: [`AccountChange`] carries it as typed
+//!   arguments, but `rizzy_proto::change::CommitChangeRequest` has no rotation fields yet
+//!   (the vault half of CRYPTO.md §11.6 step 9 has no wire form), so the `requests` entry
+//!   point builds changes without one. Recovery, suspension, TOTP and the other changes have
+//!   their `rizzy-proto` requests, and typed entry points ([`RecoveryRelease`],
+//!   [`TotpEnrolment`]) beside them;
 //! - the invite-token format and who issues invites (the admin API is M3): [`InviteVerifier`];
 //! - the secrets file's byte layout: [`ServerSecrets`] takes and gives its parts;
 //! - how devices and the account email are notified of a new device, a pending or completed
@@ -139,6 +142,7 @@ mod login;
 mod maintenance;
 mod ratelimit;
 mod recovery;
+mod requests;
 mod signup;
 mod sql;
 mod store;

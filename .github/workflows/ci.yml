@@ -126,3 +126,132 @@ jobs:
           manifest-path: fuzz/Cargo.toml
           command: check
           arguments: --all-features
+
+  dco:
+    name: DCO sign-off
+    # ADR 0017 §4: the commits a pull request adds must be signed off, and the squash commit a
+    # merge pushes to `main` must keep the trailers. The two need different rules (see
+    # crates/xtask/src/signoff.rs, "Squash mode"), so each event runs its own step. A manual
+    # run has no range.
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      # Full history, so that both ends of the range are present.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install || rustup show
+      - uses: Swatinem/rust-cache@v2
+      # Every PR commit needs a `Signed-off-by:` trailer with its author's name and email
+      # (DCO 1.1, ADR 0017 Decision 4). The check is Rust (crates/xtask/src/signoff.rs); the
+      # revisions reach it through the environment, never spliced into the script.
+      - name: Check that every PR commit is signed off by its author
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: cargo xtask check-signoff "$BASE_SHA..$HEAD_SHA"
+      # GitHub writes the squash commit (its author is the merger, its sign-offs sit in the
+      # body), so on `main` the check only requires that each pushed commit kept at least one
+      # well-formed `Signed-off-by:` line anywhere in its message. The per-author rule ran on
+      # the PR before the merge.
+      - name: Check that the commits pushed to main kept their sign-offs
+        if: github.event_name == 'push'
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: cargo xtask check-signoff --squash "$BEFORE_SHA..$AFTER_SHA"
+
+  image:
+    name: container image (${{ matrix.platform }})
+    # deploy/Containerfile for both architectures the operator guide supports (ADR 0010 §4,
+    # docs/self-hosting.md §2). Build only: nothing is pushed and no credential is used. Each
+    # architecture builds natively on its own runner, as the Containerfile expects, instead of
+    # under QEMU emulation, which would take hours for a Rust release build.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build deploy/Containerfile
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: docker build --platform "$PLATFORM" -f deploy/Containerfile -t localhost/rizzy-vault:ci .
+
+  # ---- Image publishing: DISABLED unless the owner turns it on --------------------------------
+  #
+  # The two jobs below push `ghcr.io/<owner>/<repo>:sha-<commit>` (a multi-arch index over
+  # `...-amd64` and `...-arm64`) after every check above passes on a push to `main`. They run
+  # only when the repository variable `RIZZY_PUBLISH_IMAGE` is `true` (Settings → Secrets and
+  # variables → Actions → Variables); by default it is unset and both jobs are skipped. They use
+  # the workflow's own `GITHUB_TOKEN`, with `packages: write` granted to these two jobs alone,
+  # and no other secret; pull requests never reach them. These images are unsigned development
+  # builds, not a release channel: reproducible, signed images are M8 (ADR 0010 §4,
+  # ROADMAP §4.9).
+  image-publish:
+    name: publish image (${{ matrix.arch }}, off by default)
+    needs: [fmt, clippy, test, fuzz-check, wasm, docs, deny, dco, image]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.RIZZY_PUBLISH_IMAGE == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build deploy/Containerfile
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: docker build --platform "linux/$ARCH" -f deploy/Containerfile -t "$IMAGE" .
+      - name: Log in to ghcr.io
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - run: docker push "$IMAGE"
+      - name: Log out of ghcr.io
+        if: always()
+        run: docker logout ghcr.io
+
+  image-manifest:
+    name: publish multi-arch image index (off by default)
+    needs: image-publish
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.RIZZY_PUBLISH_IMAGE == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+    steps:
+      - name: Log in to ghcr.io
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Create the multi-arch index
+        run: docker buildx imagetools create -t "$IMAGE" "$IMAGE-amd64" "$IMAGE-arm64"
+      - name: Log out of ghcr.io
+        if: always()
+        run: docker logout ghcr.io

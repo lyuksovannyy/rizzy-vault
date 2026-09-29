@@ -625,6 +625,97 @@ impl<'de> Deserialize<'de> for SessionToken {
     }
 }
 
+/// A secret binary value of exactly `N` bytes, carried as base64url without padding: the
+/// recovery auth token (CRYPTO.md §4.3, §11.9) and the server's TOTP secret handed to the user
+/// once (§11.15). Like [`SessionToken`]: zeroized on drop, `Debug` redacted, no `PartialEq`, and
+/// errors never quote the input.
+pub struct SecretFixed<const N: usize>(Zeroizing<[u8; N]>);
+
+impl<const N: usize> SecretFixed<N> {
+    /// Length in bytes.
+    pub const LEN: usize = N;
+
+    /// Wraps bytes the caller holds in a zeroizing buffer.
+    #[must_use]
+    pub const fn new(bytes: Zeroizing<[u8; N]>) -> Self {
+        Self(bytes)
+    }
+
+    /// Copies `bytes` into a zeroizing buffer.
+    ///
+    /// # Errors
+    /// [`WireError::WrongLength`]. Nothing is copied on error.
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, WireError> {
+        if bytes.len() != N {
+            return Err(WireError::WrongLength { expected: N });
+        }
+        let mut out = Zeroizing::new([0u8; N]);
+        out.copy_from_slice(bytes);
+        Ok(Self(out))
+    }
+
+    /// The secret. Keep the borrow short, and never log it.
+    #[must_use]
+    pub fn expose_secret(&self) -> &[u8; N] {
+        &self.0
+    }
+
+    /// Decodes base64url without padding, strictly, as exactly `N` bytes, into a zeroizing
+    /// buffer.
+    ///
+    /// # Errors
+    /// [`WireError::WrongLength`] or [`WireError::InvalidEncoding`].
+    pub fn from_b64url(text: &str) -> Result<Self, WireError> {
+        let mut out = Zeroizing::new([0u8; N]);
+        decode_exact(text, &mut *out)?;
+        Ok(Self(out))
+    }
+
+    /// The secret as base64url without padding, in a zeroizing buffer.
+    #[must_use]
+    pub fn to_b64url(&self) -> Zeroizing<String> {
+        let mut buf = Zeroizing::new(vec![0u8; b64url_len(N)]);
+        let mut out = Zeroizing::new(String::with_capacity(b64url_len(N)));
+        if let Ok(text) = Base64UrlUnpadded::encode(&*self.0, &mut buf) {
+            out.push_str(text);
+        }
+        out
+    }
+}
+
+impl<const N: usize> fmt::Debug for SecretFixed<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SecretFixed(<redacted>)")
+    }
+}
+
+impl<const N: usize> Serialize for SecretFixed<N> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_b64url())
+    }
+}
+
+impl<'de, const N: usize> Deserialize<'de> for SecretFixed<N> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// Visitor for [`SecretFixed`].
+        struct V<const N: usize>;
+        impl<const N: usize> Visitor<'_> for V<N> {
+            type Value = SecretFixed<N>;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "a {N}-byte secret as base64url without padding")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                SecretFixed::from_b64url(v).map_err(E::custom)
+            }
+            fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+                let owned = Zeroizing::new(v);
+                SecretFixed::from_b64url(&owned).map_err(E::custom)
+            }
+        }
+        deserializer.deserialize_str(V::<N>)
+    }
+}
+
 /// A list of at most `MAX` elements.
 ///
 /// Deserialising reserves at most [`LIST_PREALLOC_MAX`] elements up front and fails as soon as
@@ -838,6 +929,20 @@ mod tests {
             SessionToken::from_b64url(&text).unwrap().expose_secret(),
             &[9; 32]
         );
+        let secret = SecretFixed::<20>::from_slice(&[7; 20]).unwrap();
+        assert_eq!(format!("{secret:?}"), "SecretFixed(<redacted>)");
+        let text = secret.to_b64url();
+        assert_eq!(text.len(), 27);
+        assert_eq!(
+            SecretFixed::<20>::from_b64url(&text)
+                .unwrap()
+                .expose_secret(),
+            &[7; 20]
+        );
+        assert_eq!(
+            SecretFixed::<20>::from_slice(&[7; 19]).err(),
+            Some(WireError::WrongLength { expected: 20 })
+        );
     }
 
     #[test]
@@ -866,6 +971,8 @@ mod tests {
         let err = serde_json::from_str::<Bytes<4>>(&json).unwrap_err();
         assert!(!err.to_string().contains(secret), "{err}");
         let err = serde_json::from_str::<SessionToken>(&json).unwrap_err();
+        assert!(!err.to_string().contains(secret), "{err}");
+        let err = serde_json::from_str::<SecretFixed<32>>(&json).unwrap_err();
         assert!(!err.to_string().contains(secret), "{err}");
     }
 }

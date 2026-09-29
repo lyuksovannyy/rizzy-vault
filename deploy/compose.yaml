@@ -126,10 +126,10 @@ services:
       - ${RIZZY_SECRETS_BACKUP_DIR:-./backup-secrets}:/backup
 
   # ---- PostgreSQL (profile C) — NOT for production in this build ----------------------------
-  # ADR 0010 §4 / ADR 0011: PostgreSQL is supported from M3. In this build the `worker` role
-  # refuses PostgreSQL (its leader lock is not implemented), so the server could only run
-  # `--roles api,web`, without expired-state purges or compaction. Kept here, commented, as the
-  # shape M3 will ship, NOT as something that starts as written.
+  # ADR 0010 §4 / ADR 0011: PostgreSQL is supported from M3. This build runs every M1 role on it
+  # (the `worker` takes a PostgreSQL leader lock, so extra workers are standbys, ADR 0010 §2), but
+  # its PostgreSQL suite runs only by hand, not in CI. Kept here, commented, as the shape M3 will
+  # ship, NOT as something that starts as written.
   #
   # TLS: rizzy-storage accepts a PostgreSQL URL without `sslmode=verify-full` only for a Unix
   # socket or localhost/127.0.0.1/::1. The `postgres` service below is another container, so the
@@ -140,8 +140,7 @@ services:
   # to start. To try it anyway: give postgres a TLS certificate (`ssl=on`, `ssl_cert_file`,
   # `ssl_key_file`), mount the CA into rizzy-vault, set RIZZY_DATABASE_URL in .env as
   #   postgres://rizzy:<password>@postgres/rizzy?sslmode=verify-full&sslrootcert=/path/ca.pem
-  # add `command: ["serve", "--roles", "api,web"]` and `networks: [edge, db]` to rizzy-vault,
-  # and run `migrate` before every start.
+  # add `networks: [edge, db]` to rizzy-vault, and run `migrate` before every start.
   #
   # postgres:
   #   image: docker.io/library/postgres:17-alpine

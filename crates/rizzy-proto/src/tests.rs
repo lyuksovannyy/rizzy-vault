@@ -21,10 +21,21 @@ use crate::auth::{
     LoginStartRequest, LoginStartResponse, Reconciliation, RecoveryRegistration,
     RegisterFinishRequest, RegisterStartRequest, RegisterStartResponse, ServerOrigin, TotpCode,
 };
+use crate::change::{
+    CommitChangeRequest, DeviceSuspensionRequest, ReregisterStartRequest, ReregisterStartResponse,
+    SuspendDeviceResponse,
+};
 use crate::error::ErrorCode;
 use crate::objects::{
     AccountKeyRecoveryWrap, AccountKeyServerWrap, AccountSettings, DeviceGrant, IdentitySecretKeys,
     ItemKeyWrap, VaultSelfGrant,
+};
+use crate::recovery::{
+    RecoveryAuthToken, RecoveryCancelResponse, RecoveryCompleteResponse, RecoveryRequest,
+    RecoveryStartResponse,
+};
+use crate::totp::{
+    TotpDisableRequest, TotpEnrolConfirmRequest, TotpEnrolStartResponse, TotpSecretBytes,
 };
 use crate::vault::{
     FetchRequest, FetchResponse, HealingRequest, HealingResponse, OpRecord, Record, RecordKeyWrap,
@@ -596,4 +607,229 @@ fn seq_vectors_are_canonical() {
         r#"{{"vault_id":"{ZERO_ID}","cursor":[{{"device_id":"{ZERO_ID}","seq":1}},{{"device_id":"{ZERO_ID}","seq":2}}]}}"#
     );
     assert!(serde_json::from_str::<FetchRequest>(&twice).is_err());
+}
+
+/// A sample commit: a password change with a new recovery code.
+fn commit_change() -> CommitChangeRequest {
+    CommitChangeRequest {
+        account_state: b(b"state"),
+        registration_upload: Some(b(b"upload")),
+        account_key_server_wrap: Some(AccountKeyServerWrap {
+            account_key_epoch: 0,
+            password_epoch: 1,
+            kdf_id: 1,
+            envelope: b(b"e_srv"),
+        }),
+        recovery: Some(RecoveryRegistration {
+            recovery_wrap: AccountKeyRecoveryWrap {
+                account_key_epoch: 0,
+                recovery_epoch: 2,
+                envelope: b(b"e_rec"),
+            },
+            recovery_token_hash: Fixed::from_bytes([8; 32]),
+        }),
+        account_settings: None,
+        device_certificates: l(vec![b(b"cert")]),
+        device_revocations: List::empty(),
+    }
+}
+
+#[test]
+fn known_answer_change_recovery_and_totp() {
+    let suspend = DeviceSuspensionRequest { device_id: id(0) };
+    assert_eq!(
+        round_trip(&suspend),
+        format!(r#"{{"device_id":"{ZERO_ID}"}}"#)
+    );
+    assert_eq!(
+        round_trip(&SuspendDeviceResponse {
+            last_accepted_device_seq: 7
+        }),
+        r#"{"last_accepted_device_seq":7}"#
+    );
+    let commit = CommitChangeRequest {
+        account_state: b(b"foobar"),
+        registration_upload: None,
+        account_key_server_wrap: None,
+        recovery: None,
+        account_settings: Some(AccountSettings {
+            settings_seq: 1,
+            envelope: b(b"foo"),
+        }),
+        device_certificates: List::empty(),
+        device_revocations: List::empty(),
+    };
+    assert_eq!(
+        round_trip(&commit),
+        concat!(
+            r#"{"account_state":"Zm9vYmFy","account_settings":{"settings_seq":1,"envelope":"Zm9v"},"#,
+            r#""device_certificates":[],"device_revocations":[]}"#
+        )
+    );
+    let recovery = RecoveryRequest {
+        login_name: LoginName::from_str("alice").unwrap(),
+        recovery_auth_token: RecoveryAuthToken::new(Zeroizing::new([0; 32])),
+    };
+    assert_eq!(
+        round_trip(&recovery),
+        format!(
+            r#"{{"login_name":"alice","recovery_auth_token":"{}"}}"#,
+            "A".repeat(43)
+        )
+    );
+    let confirm = TotpEnrolConfirmRequest {
+        totp_credential_seq: 1,
+        code: TotpCode::new("123456").unwrap(),
+    };
+    assert_eq!(
+        round_trip(&confirm),
+        r#"{"totp_credential_seq":1,"code":"123456"}"#
+    );
+    let enrol = TotpEnrolStartResponse {
+        totp_credential_seq: 1,
+        secret: TotpSecretBytes::new(Zeroizing::new([0xff; 20])),
+    };
+    assert_eq!(
+        round_trip(&enrol),
+        // 20 bytes of 0xff: 26 full characters, then `8` (the last 4 bits are zero).
+        format!(
+            r#"{{"totp_credential_seq":1,"secret":"{}8"}}"#,
+            "_".repeat(26)
+        )
+    );
+}
+
+#[test]
+fn every_change_recovery_and_totp_message_round_trips() {
+    round_trip(&ReregisterStartRequest {
+        registration_request: b(b"m1"),
+    });
+    round_trip(&ReregisterStartResponse {
+        registration_response: b(b"m2"),
+    });
+    round_trip(&commit_change());
+    round_trip(&RecoveryStartResponse {
+        available_at_ms: 1_790_000_000_000,
+    });
+    round_trip(&RecoveryCancelResponse { cancelled: true });
+    round_trip(&RecoveryCompleteResponse {
+        session_token: SessionToken::new(Zeroizing::new([3; 32])),
+        account_id: id(1),
+        recovery_wrap: AccountKeyRecoveryWrap {
+            account_key_epoch: 0,
+            recovery_epoch: 1,
+            envelope: b(b"e_rec"),
+        },
+        account: account_view(),
+    });
+    round_trip(&TotpDisableRequest {
+        code: TotpCode::new("000000").unwrap(),
+    });
+}
+
+#[test]
+fn change_recovery_and_totp_requests_are_strict() {
+    // No field can carry a device-only secret, a new Secret Key or a rotation half.
+    let commit = serde_json::to_value(commit_change()).unwrap();
+    assert!(serde_json::from_value::<CommitChangeRequest>(commit.clone()).is_ok());
+    for field in [
+        "e_dev",
+        "secret_key",
+        "vault_rotation",
+        "device_grants",
+        "bundle",
+    ] {
+        let mut extra = commit.clone();
+        extra[field] = "Zm9v".into();
+        assert!(
+            serde_json::from_value::<CommitChangeRequest>(extra).is_err(),
+            "{field}"
+        );
+    }
+    let mut nested = commit.clone();
+    nested["recovery"]["recovery_wrap"]["e_dev"] = "Zm9v".into();
+    assert!(serde_json::from_value::<CommitChangeRequest>(nested).is_err());
+    // The device lists are required, and bounded.
+    let mut missing = commit;
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("device_revocations");
+    assert!(serde_json::from_value::<CommitChangeRequest>(missing).is_err());
+    let certs = vec!["\"Zg\""; 4097].join(",");
+    let over = format!(
+        r#"{{"account_state":"Zg","device_certificates":[{certs}],"device_revocations":[]}}"#
+    );
+    assert!(serde_json::from_str::<CommitChangeRequest>(&over).is_err());
+
+    // The recovery auth token is exactly 32 bytes; the name follows §2.
+    let recovery = |name: &str, token: &str| {
+        format!(r#"{{"login_name":"{name}","recovery_auth_token":"{token}"}}"#)
+    };
+    let token = "A".repeat(43);
+    assert!(serde_json::from_str::<RecoveryRequest>(&recovery("ivy", &token)).is_ok());
+    assert!(serde_json::from_str::<RecoveryRequest>(&recovery("ivy", &"A".repeat(42))).is_err());
+    assert!(serde_json::from_str::<RecoveryRequest>(&recovery("ivy", &"A".repeat(44))).is_err());
+    assert!(serde_json::from_str::<RecoveryRequest>(&recovery("i y", &token)).is_err());
+    assert!(
+        serde_json::from_str::<RecoveryRequest>(&format!(
+            r#"{{"login_name":"ivy","recovery_auth_token":"{token}","code":"x"}}"#
+        ))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_str::<DeviceSuspensionRequest>(&format!(
+            r#"{{"device_id":"{ZERO_ID}","account_id":"{ZERO_ID}"}}"#
+        ))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_str::<TotpEnrolConfirmRequest>(
+            r#"{"totp_credential_seq":1,"code":"12345a"}"#
+        )
+        .is_err()
+    );
+    assert!(serde_json::from_str::<TotpDisableRequest>(r#"{"code":"123456789"}"#).is_err());
+}
+
+#[test]
+fn change_recovery_and_totp_debug_output_never_shows_secrets() {
+    let recovery = RecoveryRequest {
+        login_name: LoginName::from_str("alice@example.org").unwrap(),
+        recovery_auth_token: RecoveryAuthToken::new(Zeroizing::new([0xcd; 32])),
+    };
+    let token_text = recovery.recovery_auth_token.to_b64url();
+    let enrol = TotpEnrolStartResponse {
+        totp_credential_seq: 1,
+        secret: TotpSecretBytes::new(Zeroizing::new([0xef; 20])),
+    };
+    let secret_text = enrol.secret.to_b64url();
+    let complete = RecoveryCompleteResponse {
+        session_token: SessionToken::new(Zeroizing::new([0xab; 32])),
+        account_id: id(1),
+        recovery_wrap: AccountKeyRecoveryWrap {
+            account_key_epoch: 0,
+            recovery_epoch: 1,
+            envelope: b(b"E-REC-BYTES"),
+        },
+        account: account_view(),
+    };
+    let session_text = complete.session_token.to_b64url();
+    let confirm = TotpEnrolConfirmRequest {
+        totp_credential_seq: 1,
+        code: TotpCode::new("987654").unwrap(),
+    };
+    let shown = format!("{recovery:?} {enrol:?} {complete:?} {confirm:?}");
+    for secret in [
+        "alice",
+        token_text.as_str(),
+        secret_text.as_str(),
+        session_text.as_str(),
+        "987654",
+        "cdcdcd",
+        "efefef",
+        "ababab",
+    ] {
+        assert!(!shown.contains(secret), "{secret} in {shown}");
+    }
 }

@@ -68,17 +68,19 @@
 //! - `rizzy-vault backup` and `restore`: the logical backup file format has no ADR ([`admin`]).
 //! - Core dumps are not disabled (INV-60): the safe wrappers it names are not an admitted
 //!   dependency ([`server`]).
-//! - `worker` on `PostgreSQL`: its leader lock needs a connection outside the pool that
-//!   `rizzy-storage` does not offer yet ([`server`]).
 //! - The `embed-web` feature and the web vault (M1 step 5), the admin listener and API (M3),
-//!   `notify`, `icons` (M3) and `smtp` (M6), the endpoints of password change, rotation,
-//!   revocation, recovery and TOTP (no `rizzy-proto` request yet).
+//!   `notify`, `icons` (M3) and `smtp` (M6), and key rotation: the commit endpoint refuses a
+//!   state that rotates a key, so the revocation of CRYPTO.md §11.8 step 3 and the default
+//!   recovery of §11.9 step 5 are refused too (the vault half of §11.6 step 9 has no wire form;
+//!   [`http::api`]). Password change, settings, self-revocation, suspension, recovery without
+//!   rotation and TOTP have endpoints.
 //!
 //! # Tests
 //!
 //! `tests/http/` drives the router in-process against a real `SQLite` database: the security
 //! headers and CSP; oversized bodies; anonymous requests to the large-body endpoints refused
-//! before their body is read; and, over a bound localhost port, the header-read timeout and a
+//! before their body is read; the account endpoints' session gating, strict bodies and
+//! recovery refusals and rate limit; and, over a bound localhost port, the header-read timeout and a
 //! shutdown that a stalled request cannot hold open. `tests/cli.rs` runs the binary:
 //! `--version`, usage errors, configuration errors, and the `secrets` commands.
 //! `tests/drill.rs` is the operator's backup → wipe → restore drill in its fast form (the operator

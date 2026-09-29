@@ -247,6 +247,32 @@ fn writer_lock_admits_one_writer() {
     });
 }
 
+/// On SQLite the writer lock already makes the process the only worker (ADR 0010 §2): a
+/// writable database always leads, and stays leading; a read-only one (the `backup` reader)
+/// never runs jobs.
+#[test]
+fn worker_leader_rides_on_the_writer_lock() {
+    block_on(async {
+        let dir = TempDir::new();
+        let db = open(&dir, "db.sqlite").await;
+        let mut leader = db.try_lead_worker().await.unwrap().unwrap();
+        assert_eq!(leader.engine(), Engine::Sqlite);
+        assert!(leader.is_held().await.unwrap());
+        assert!(leader.is_held().await.unwrap());
+        assert!(format!("{leader:?}").contains("Sqlite"));
+        // A second leader in the same process changes nothing: the writer lock is the guard.
+        assert!(db.try_lead_worker().await.unwrap().is_some());
+        leader.release().await.unwrap();
+
+        let ro = Database::open_sqlite_read_only(&SqliteOptions::new(dir.join("db.sqlite")))
+            .await
+            .unwrap();
+        assert!(matches!(ro.try_lead_worker().await, Err(Error::ReadOnly)));
+        ro.close().await;
+        db.close().await;
+    });
+}
+
 #[test]
 fn readers_are_read_only_and_see_committed_snapshots() {
     block_on(async {

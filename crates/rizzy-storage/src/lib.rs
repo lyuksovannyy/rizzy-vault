@@ -1,13 +1,14 @@
 //! `rizzy-storage` — the server's storage layer (roadmap M1 step 3, [ADR 0011]; [ADR 0016] §3
-//! row `rizzy-storage`): sqlx pools, embedded migrations, the per-account lock, and backup and
-//! restore primitives. Server mode only ([ADR 0022]): there are no relay tables.
+//! row `rizzy-storage`): sqlx pools, embedded migrations, the per-account lock, the `worker`
+//! leader lock, and backup and restore primitives. Server mode only ([ADR 0022]): there are no
+//! relay tables.
 //!
 //! # What this crate is, and is not
 //!
 //! It owns the database: the connection pools and their settings, the schema (every domain's
-//! migrations, per engine, [ADR 0011] point 8), the transaction types, the account lock, and
-//! the restore hooks. It holds **no domain logic**: `rizzy-domain-auth` and
-//! `rizzy-domain-vault` own their tables' queries (`auth_`, `vault_`, [ADR 0011] point 5) and
+//! migrations, per engine, [ADR 0011] point 8), the transaction types, the account lock, the
+//! worker leader lock, and the restore hooks. It holds **no domain logic**: `rizzy-domain-auth`
+//! and `rizzy-domain-vault` own their tables' queries (`auth_`, `vault_`, [ADR 0011] point 5) and
 //! run them through this crate's [`WriteTx`] / [`ReadTx`] with [`on_engine!`]. It has no
 //! internal dependencies ([ADR 0016] §3), knows nothing of keys or envelopes, and stores
 //! every envelope, signed statement and hash as the opaque bytes it is given.
@@ -42,6 +43,7 @@
 //! | [`db`] | ADR 0011 points 1, 3, "Transactions and concurrency", "SQLite settings"; ADR 0021 §4 | [`Database`] (enum over the SQLite pools and the PostgreSQL pool), [`WriteTx`] (`BEGIN IMMEDIATE` on the one SQLite writer), [`ReadTx`] (read-only SQLite reader; `REPEATABLE READ READ ONLY` on PostgreSQL), [`Conn`] and [`on_engine!`], the PRAGMAs, PostgreSQL TLS policy |
 //! | [`writer_lock`] | ADR 0010 §2 | [`WriterLock`]: one process writes an SQLite file |
 //! | [`lock`] | ADR 0011 "Transactions and concurrency"; ADR 0010 §2 | [`lock_account`]: `pg_advisory_xact_lock` in its own key space, nothing on SQLite |
+//! | [`leader_lock`] | ADR 0010 §2 | [`WorkerLeader`] from [`Database::try_lead_worker`]: one active `worker` per database, a session-level advisory lock on a dedicated PostgreSQL connection outside the pool; on SQLite the writer lock already covers it |
 //! | [`migrate`] | ADR 0011 points 8–10 | Embedded forward-only migrations per engine; the startup rule with the `VACUUM INTO` pre-migration copy (SQLite) or the refusal (PostgreSQL) |
 //! | [`backup`] | ADR 0011 "Backups" | `VACUUM INTO`; the logical [`Dump`] and [`Database::restore`] into an empty database, which draws a new restore generation, opens every account's reconciliation epoch and raises the store-sequence counters |
 //! | [`tables`] | ADR 0011 "Backups" | The backed-up tables and columns, in restore order |
@@ -60,8 +62,10 @@
 //!
 //! `tests/sqlite.rs` runs against real SQLite files in a temporary directory: migrations and
 //! PRAGMAs, schema-to-backup-list drift, the writer lock, writer/reader separation,
-//! serialised writes, the startup copy, and the backup → restore round trip. `tests/postgres.rs`
-//! runs the same against PostgreSQL when `RIZZY_TEST_POSTGRES_URL` names an empty database;
+//! serialised writes, the startup copy, the backup → restore round trip, and the worker leader
+//! (always granted on a writable file, refused read-only). `tests/postgres.rs` runs the same
+//! against PostgreSQL, plus the leader lock (one of two workers leads; a dropped or terminated
+//! connection releases it), when `RIZZY_TEST_POSTGRES_URL` names an empty database;
 //! its tests are `#[ignore]`d otherwise.
 //!
 //! [ADR 0010]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0010-server-shape.md
@@ -77,6 +81,7 @@ pub mod backup;
 pub mod convert;
 pub mod db;
 pub mod error;
+pub mod leader_lock;
 pub mod lock;
 pub mod meta;
 pub mod migrate;
@@ -86,6 +91,7 @@ pub mod writer_lock;
 pub use backup::{Dump, RestoreReport, TableDump, Value};
 pub use db::{Conn, Database, PostgresOptions, ReadTx, SqliteOptions, WriteTx};
 pub use error::{Engine, Error, RestoreError};
+pub use leader_lock::WorkerLeader;
 pub use lock::lock_account;
 pub use meta::{ReconciliationEpoch, RestoreGeneration};
 pub use migrate::{StartupMigration, remove_pre_migration_copy, schema_version};

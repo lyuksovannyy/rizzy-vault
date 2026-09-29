@@ -67,8 +67,13 @@ pub struct RecoveryRelease {
     /// `E_rec` with the epochs of its context.
     pub recovery_wrap: AccountKeyRecoveryWrap,
     /// The account objects: the whole bundle chain, the state, the certificates and
-    /// revocations, `E_id`, `ACCOUNT_SETTINGS` and the self-grants. The item-key wraps come
-    /// from the vault domain's Fetch over the same session.
+    /// revocations, `E_id`, `ACCOUNT_SETTINGS` and the self-grants.
+    ///
+    /// The item-key wraps that §11.9 step 3 also lists are **not** released in this build.
+    /// They serve only the rotation of §11.9 step 5, whose vault half no Accepted ADR shapes
+    /// yet; how the recovery-only session reaches them is left open with that rotation's wire
+    /// form. The server refuses the recovery-only session on every vault endpoint (Fetch
+    /// included); opening one to it needs an Accepted ADR first.
     pub account: AccountView,
 }
 

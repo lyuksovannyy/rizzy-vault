@@ -23,7 +23,7 @@ Scope and milestones are defined in [docs/ROADMAP.md](docs/ROADMAP.md#3-mileston
 
 | Milestone | State |
 |---|---|
-| **M0** Foundations | **Deliverables in place, not formally closed.** The workspace, toolchain pin, lints, CI, cargo-deny policy, crypto design, ADRs, and security and contribution policy exist. M0 has no tag or "what we learned" note yet ([ROADMAP §3](docs/ROADMAP.md#3-milestones)). [ADR 0017](docs/adr/0017-licensing.md) (licensing) was Accepted on 2026-09-27; its App Store permission text and CI sign-off check are not done yet. [THREAT_MODEL.md](docs/THREAT_MODEL.md) became normative on 2026-09-27. |
+| **M0** Foundations | **Deliverables in place, not formally closed.** The workspace, toolchain pin, lints, CI, cargo-deny policy, crypto design, ADRs, and security and contribution policy exist. M0 has no tag or "what we learned" note yet ([ROADMAP §3](docs/ROADMAP.md#3-milestones)). [ADR 0017](docs/adr/0017-licensing.md) (licensing) was Accepted on 2026-09-27; its App Store permission text is not done yet; CI checks the sign-off of every PR commit (`cargo xtask check-signoff`). [THREAT_MODEL.md](docs/THREAT_MODEL.md) became normative on 2026-09-27. |
 | **M1** Core vault (MVP) | **In progress.** Step 1, the `rizzy-core` cryptography, is implemented, with known-answer vectors, property tests and fuzz targets. It has been through an independent review, and every confirmed finding is fixed. Steps 2 (item schema and sync engine) and 3 (the server) are in progress. The remaining steps, in planned order, are below. |
 | **M2–M10** | Not started. M4 is removed: Server mode is the only sync mode, and On-device sync is parked post-1.0 ([ROADMAP §3](docs/ROADMAP.md#3-milestones)). |
 
@@ -48,7 +48,7 @@ crates/rizzy-domain-auth  server auth domain: OPAQUE, sessions, devices, signed 
 crates/rizzy-domain-vault  server vault domain: op and snapshot upload, Fetch, compaction, restore healing
 crates/rizzy-server   server binary `rizzy-vault`: roles api, web, worker; secrets and migrate commands
 crates/rizzy-cli      command-line client `rv` (skeleton: --help and --version only)
-crates/xtask          repository checks: `cargo xtask check-deps`, `cargo xtask check-clippy`
+crates/xtask          repository checks: `cargo xtask check-deps`, `cargo xtask check-clippy`, `cargo xtask check-signoff`
 docs/                 roadmap, threat model, crypto design, ADRs; index in docs/README.md
 fuzz/                 cargo-fuzz targets; its own workspace, run on nightly
 ```

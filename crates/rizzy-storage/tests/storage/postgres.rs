@@ -9,10 +9,11 @@
 
 use std::time::Duration;
 
+use rizzy_storage::lock::WORKER_LEADER_LOCK;
 use rizzy_storage::meta::{reconciliation_epoch, restore_generation};
 use rizzy_storage::{
-    Database, Error, PostgresOptions, RestoreGeneration, StartupMigration, lock_account, on_engine,
-    schema_version,
+    Conn, Database, Engine, Error, PostgresOptions, RestoreGeneration, StartupMigration,
+    WorkerLeader, lock_account, on_engine, schema_version,
 };
 
 use crate::common::{ACCOUNT_1, block_on, fixture, fixture_after_restore, id};
@@ -181,4 +182,111 @@ async fn debug_hides_row_values(db: &Database) {
         let debug = format!("{err:?}");
         assert!(!debug.contains("abab") && !debug.contains(login), "{debug}");
     }
+}
+
+/// Opens a second, independent handle on the test database, as another server process would.
+#[expect(
+    clippy::unwrap_used,
+    reason = "a test helper: a failure fails the test, which CLAUDE.md allows in test code"
+)]
+async fn open_handle() -> Database {
+    Database::open_postgres(&PostgresOptions::from_url(&url()).unwrap())
+        .await
+        .unwrap()
+}
+
+/// Tries to lead from `db` until it does, for up to 10 s: the server releases a session-level
+/// lock when it notices the session has ended, which can lag the client's close.
+#[expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test helper: a failure fails the test, which CLAUDE.md allows in test code"
+)]
+async fn lead_eventually(db: &Database) -> WorkerLeader {
+    for _ in 0..100 {
+        if let Some(leader) = db.try_lead_worker().await.unwrap() {
+            return leader;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the leader lock was not released within 10 s");
+}
+
+/// One active worker per database (ADR 0010 §2): of two workers (two independent pools, as two
+/// processes have), exactly one takes the leader lock on its dedicated connection; dropping that
+/// connection, or the server terminating its session, hands the lock to the standby; the lost
+/// leader's check fails. Needs no migrated schema.
+#[test]
+#[ignore = "needs RIZZY_TEST_POSTGRES_URL: an empty PostgreSQL database"]
+fn postgres_worker_leader_lock() {
+    block_on(async {
+        let one = open_handle().await;
+        let two = open_handle().await;
+
+        // Only one of two workers leads.
+        let mut first = one.try_lead_worker().await.unwrap().unwrap();
+        assert_eq!(first.engine(), Engine::Postgres);
+        assert!(first.is_held().await.unwrap());
+        assert!(two.try_lead_worker().await.unwrap().is_none());
+        assert!(
+            one.try_lead_worker().await.unwrap().is_none(),
+            "a second leader connection of the same process is refused too"
+        );
+        // The lock is on the dedicated connection, not on a pooled one: closing the leader's
+        // own pool, which drops every pooled connection of `one`, leaves it held. A lock taken
+        // on a pooled connection would be released here (ADR 0010 §2).
+        one.close().await;
+        assert!(first.is_held().await.unwrap());
+        assert!(two.try_lead_worker().await.unwrap().is_none());
+        let one = open_handle().await;
+
+        // Dropping the leader drops its connection, which releases the lock to the standby.
+        drop(first);
+        let mut second = lead_eventually(&two).await;
+        assert!(second.is_held().await.unwrap());
+        assert!(one.try_lead_worker().await.unwrap().is_none());
+
+        // The server ends the leader's session: its next check fails, and the lock is free.
+        let mut w = one.begin_write().await.unwrap();
+        let Conn::Postgres(c) = w.conn() else {
+            panic!("a PostgreSQL handle");
+        };
+        let terminated: Vec<bool> = sqlx::query_scalar(
+            "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' \
+                 AND granted \
+                 AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+                 AND classid::int8 = $1 AND objid::int8 = $2 AND objsubid = 2",
+        )
+        .bind(i64::from(WORKER_LEADER_LOCK.0))
+        .bind(i64::from(WORKER_LEADER_LOCK.1))
+        .fetch_all(&mut *c)
+        .await
+        .unwrap();
+        w.rollback().await.unwrap();
+        assert_eq!(terminated, vec![true]);
+        // pg_terminate_backend only signals the backend; wait, for up to 10 s, for it to exit.
+        let mut lost = false;
+        for _ in 0..100 {
+            if !matches!(second.is_held().await, Ok(true)) {
+                lost = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            lost,
+            "the terminated leader still reports the lock after 10 s"
+        );
+        drop(second);
+
+        // A graceful release hands it over too.
+        let third = lead_eventually(&one).await;
+        assert!(two.try_lead_worker().await.unwrap().is_none());
+        third.release().await.unwrap();
+        let fourth = lead_eventually(&two).await;
+        fourth.release().await.unwrap();
+
+        one.close().await;
+        two.close().await;
+    });
 }

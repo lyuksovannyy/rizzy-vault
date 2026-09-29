@@ -75,7 +75,7 @@ pub(crate) struct Server {
     /// Keeps the directories alive.
     pub(crate) _dir: TempDir,
     /// The services (the database stays open, and locked, while this lives).
-    pub(crate) _services: Services,
+    pub(crate) services: Services,
     /// The router of `api` and `web`.
     pub(crate) router: Router,
 }
@@ -152,7 +152,7 @@ impl Server {
         let router = http::router(Some(services.api.clone()), config.roles.web);
         Self {
             _dir: dir,
-            _services: services,
+            services,
             router,
         }
     }

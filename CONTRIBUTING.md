@@ -43,10 +43,14 @@ cargo xtask check-clippy            # clippy.toml entries clippy ignores ("found
 cargo check --manifest-path fuzz/Cargo.toml --locked --bins               # fuzz targets still build
 cargo deny --manifest-path fuzz/Cargo.toml check                          # fuzz/Cargo.lock
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+cargo xtask check-signoff origin/main..HEAD                                # every commit signed off by its author (ADR 0017 §4)
 ```
+
+CI also builds the server image, [`deploy/Containerfile`](deploy/Containerfile), for `linux/amd64` and `linux/arm64` on every PR, each natively on its own runner. It pushes nothing. Locally: `docker build -f deploy/Containerfile .` (or `podman build`).
 
 Notes:
 
+- `cargo xtask check-signoff <base>..<head>` fails when any commit in the range lacks a `Signed-off-by:` trailer with its author's exact name and email (the email ignores case). Merge commits are checked too, so update a branch by rebasing. CI runs it on the PR's commits (`base.sha..head.sha`). On each push to `main` CI runs `cargo xtask check-signoff --squash <before>..<after>` instead: GitHub writes the squash commit, with the merger as author and the PR's `Signed-off-by:` lines in its body, so that mode only requires each pushed commit to keep at least one well-formed `Signed-off-by:` line anywhere in its message. See [Sign-off](#sign-off).
 - `cargo lint`, `cargo check-wasm` and `cargo xtask` are aliases defined in [`.cargo/config.toml`](.cargo/config.toml). `cargo xtask` runs the workspace's `xtask` crate.
 - `fuzz/` is its own workspace with its own `Cargo.lock` (ADR 0016 §7), so the workspace commands do not see it. A change to `rizzy-core`'s dependencies refreshes `fuzz/Cargo.lock` in the same change. `libfuzzer-sys` is `(MIT OR Apache-2.0) AND NCSA`. `deny.toml` allows NCSA for that crate alone, because it is reachable only from `fuzz/`, which never ships. Running the fuzz targets needs nightly and `cargo-fuzz`; CI does that in a weekly job ([`.github/workflows/fuzz.yml`](.github/workflows/fuzz.yml)) that never blocks a PR.
 - On Windows PowerShell, set the rustdoc flag with `$env:RUSTDOCFLAGS="-D warnings"` before the last command.
@@ -110,6 +114,7 @@ Signed-off-by: Your Name <you@example.com>
 Contribution terms are set by [ADR 0017](docs/adr/0017-licensing.md) Decision 4:
 
 - Sign off every commit with `git commit -s`. The `Signed-off-by:` line certifies the Developer Certificate of Origin 1.1 for that commit. There is no CLA.
+- The sign-off must name the commit's author: the same name and email as the author line (`git commit -s` uses `user.name` and `user.email`, which is what the author line has unless you set it otherwise). A sign-off by someone else, such as a maintainer who amended the commit, does not replace the author's own. CI's `DCO sign-off` job (`cargo xtask check-signoff`) fails the PR otherwise. To fix it: `git commit --amend -s` for the last commit, or `git rebase --signoff origin/main` for all of them, then force-push.
 - Contributions are licensed under the project license, `AGPL-3.0-only`, inbound = outbound.
 
 ## ADR first

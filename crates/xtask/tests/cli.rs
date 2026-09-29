@@ -12,11 +12,25 @@ fn help_prints_every_command() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.contains("check-deps"), "{stdout}");
     assert!(stdout.contains("check-clippy"), "{stdout}");
+    assert!(stdout.contains("check-signoff"), "{stdout}");
 }
 
 #[test]
 fn unknown_or_missing_command_exits_with_usage_error() {
-    for args in [&[][..], &["check"][..], &["check-deps", "extra"][..]] {
+    for args in [
+        &[][..],
+        &["check"][..],
+        &["check-deps", "extra"][..],
+        &["check-signoff"][..],
+        &["check-signoff", "main..HEAD", "extra"][..],
+        &["check-signoff", "--output=x..HEAD"][..],
+        &["check-signoff", "main...HEAD"][..],
+        &["check-signoff", "HEAD"][..],
+        &["check-signoff", "--squash"][..],
+        &["check-signoff", "--squash", "main...HEAD"][..],
+        &["check-signoff", "--squash", "main..HEAD", "extra"][..],
+        &["check-signoff", "--other", "main..HEAD"][..],
+    ] {
         let out = Command::new(BIN).args(args).output().unwrap();
         assert_eq!(out.status.code(), Some(2), "args: {args:?}");
         assert!(String::from_utf8(out.stderr).unwrap().contains("USAGE"));

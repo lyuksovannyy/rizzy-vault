@@ -93,6 +93,13 @@ pub const CHALLENGE_LEN: usize = 32;
 /// Length of a SHA-256 value: `H_rec` (CRYPTO.md §11.1 step 5).
 pub const HASH_LEN: usize = 32;
 
+/// Length of the recovery auth token (CRYPTO.md §4.3: an HKDF output of 32 bytes; §11.9 steps
+/// 2–3).
+pub const RECOVERY_AUTH_TOKEN_LEN: usize = 32;
+
+/// Length of a server 2FA secret: "generated at 20 bytes (160 bits)" (CRYPTO.md §11.15).
+pub const TOTP_SECRET_LEN: usize = 20;
+
 /// Length of the restore generation (ADR 0021 §2): 128 bits.
 pub const RESTORE_GENERATION_LEN: usize = 16;
 

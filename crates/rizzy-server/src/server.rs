@@ -24,12 +24,11 @@
 //! Then the `worker` task starts ([`crate::worker`]) and, for `api` or `web`, the listener.
 //! A `web`-only process opens no database and reads no secrets.
 //!
-//! **`worker` on `PostgreSQL` is refused.** [ADR 0010] §2 requires one active worker per
-//! database, holding a session-level advisory lock on a dedicated connection outside the pool.
-//! `rizzy-server` may not hold sqlx ([ADR 0016] R5) and `rizzy-storage` offers no such
-//! connection yet, so this build cannot take that lock; it refuses rather than run two workers
-//! (`PostgreSQL` is supported from M3). With `SQLite`, the writer lock already makes this process
-//! the only one.
+//! **One active `worker` per database** ([ADR 0010] §2). With `PostgreSQL` the worker takes a
+//! session-level advisory lock on a dedicated connection outside the pool, through
+//! `rizzy-storage` (`rizzy-server` holds no sqlx, [ADR 0016] R5), and runs jobs only while it
+//! holds it; other `worker` processes on the same database are hot standbys
+//! ([`crate::worker`]). With `SQLite`, the writer lock already makes this process the only one.
 //!
 //! **Core dumps** (threat model INV-60) are not disabled by this build: the safe wrappers
 //! INV-60 names (rustix) are not an admitted dependency, and `unsafe` is forbidden. Reported to
@@ -38,10 +37,10 @@
 //! # Shutdown
 //!
 //! On `SIGINT` or `SIGTERM` the listener stops accepting, in-flight requests finish, the
-//! worker finishes its current step and stops, and the database pools close (which also
-//! releases the `SQLite` writer lock). The wait for in-flight requests is bounded
-//! ([`ServeLimits::shutdown_grace`], 30 s): connections still open then are dropped, so a
-//! stalled client cannot keep the process from stopping.
+//! worker finishes its current step, releases its leader lock and stops, and the database pools
+//! close (which also releases the `SQLite` writer lock). The wait for in-flight requests is
+//! bounded ([`ServeLimits::shutdown_grace`], 30 s): connections still open then are dropped, so
+//! a stalled client cannot keep the process from stopping.
 //!
 //! # Connections
 //!
@@ -107,8 +106,6 @@ pub enum ServeError {
     AuthConfig(ConfigError),
     /// The auth domain failed during the startup checks.
     Auth(AuthError),
-    /// `worker` on `PostgreSQL` (module docs).
-    WorkerNeedsSqlite,
     /// The listener could not be bound, or serving failed.
     Listener(std::io::ErrorKind),
 }
@@ -129,10 +126,6 @@ impl fmt::Display for ServeError {
             Self::SecretsMismatch(e) => write!(f, "the secrets do not fit the database: {e}"),
             Self::AuthConfig(e) => write!(f, "auth configuration: {e}"),
             Self::Auth(e) => write!(f, "startup check: {e}"),
-            Self::WorkerNeedsSqlite => f.write_str(
-                "the worker role needs SQLite in this build: its PostgreSQL leader lock is not \
-                 implemented yet (ADR 0010 §2)",
-            ),
             Self::Listener(kind) => write!(f, "listener: {kind}"),
         }
     }
@@ -408,9 +401,6 @@ pub async fn serve(config: Config) -> Result<(), ServeError> {
             Field::Str("version", env!("CARGO_PKG_VERSION")),
         ],
     );
-    if config.roles.worker && matches!(config.database, DatabaseConfig::Postgres(_)) {
-        return Err(ServeError::WorkerNeedsSqlite);
-    }
     let services = if config.roles.need_database() {
         Some(open_services(&config).await?)
     } else {
