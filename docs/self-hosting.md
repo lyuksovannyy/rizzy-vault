@@ -48,9 +48,10 @@ Never put both into one backup, one archive or one volume.
 
 **Not in this build** (M1 is in progress):
 - The web vault (M1 step 5): the `web` role serves a fixed "no web vault in this build" page. The API is complete for the M1 clients.
-- `rizzy-vault backup` and `rizzy-vault restore` (see [§8](#8-backup) and [§9](#9-restore)).
-- PostgreSQL as a supported setup (M3). This build runs every M1 role on it, the `worker` included (one active worker per database, the others wait as standbys), but its PostgreSQL tests are not run in CI yet.
+- PostgreSQL as a supported setup (M3). This build runs every M1 role on it, the `worker` included (one active worker per database, the others wait as standbys), but its PostgreSQL tests are not run in CI yet. `rizzy-vault backup` works on PostgreSQL; `rizzy-vault restore` refuses a PostgreSQL target until the instance lock of [ADR 0023](adr/0023-logical-backup-format.md) §5 exists ([§9](#9-restore)).
 - The admin panel and API (M3), `notify`, `icons` (M3), `smtp` (M6), Quadlet units (M3), signed images (M8).
+
+**Core dumps are off.** A crash must never write the server's memory (keys, the OPAQUE secrets, session state) to disk ([INV-60](THREAT_MODEL.md#8-security-invariants), [ADR 0024](adr/0024-core-dump-disabling-rustix.md)). Before it reads its configuration, `rizzy-vault` sets its core-file limit (`RLIMIT_CORE`) to 0 and, on Linux, marks itself non-dumpable (`PR_SET_DUMPABLE` 0); it reads both back and refuses to start (exit 1, `cannot disable core dumps: ...` on stderr) if either did not take. There is no setting to turn this off. As defence in depth, [`compose.yaml`](../deploy/compose.yaml) also sets `ulimits: core: 0` on every container; under systemd, set `LimitCORE=0` in the unit. On the host, the kernel's `core_pattern` is global to all containers: if it pipes to a crash collector (`systemd-coredump`, `apport`, `abrt`) and `fs.suid_dumpable` is 2, check that the collector stores nothing for this container ([AR-10](THREAT_MODEL.md#9-accepted-risks-and-out-of-scope); whether such a collector can still capture a non-dumpable process is unverified).
 
 ## 2. Install
 
@@ -126,6 +127,8 @@ Settings are `RIZZY_*` names. Each comes from the environment, or from a configu
 | `rizzy-vault secrets rotate [--data-key]` | `secrets-rotate` | the server stopped (it takes the writer lock); the secrets volume writable |
 | `rizzy-vault backup-secrets --out <file> --passphrase-file <file\|->` | `backup-secrets` | the secrets volume (read-only is enough) |
 | `rizzy-vault migrate` | `migrate` | the server stopped (SQLite) |
+| `rizzy-vault backup --out <file\|->` | none: `docker compose exec` into the running server ([§8](#8-backup)) | nothing: it runs next to the server |
+| `rizzy-vault restore --in <file\|->` | `restore` (reads standard input) | the server stopped (it takes the writer lock), an empty database, the instance's secrets file; SQLite only in this build ([§9](#9-restore)) |
 
 Exit codes: 0 success, 1 a runtime failure, 2 a usage or configuration error. Messages name the setting or file that failed, never a value.
 
@@ -235,11 +238,34 @@ If the upgraded server does not start, keep the old image, restore the pre-upgra
 
 | What | How | Where to keep it |
 |---|---|---|
-| The database (`rizzy-vault-data`) | The native copy below | With your data backups, encrypted at rest |
+| The database (`rizzy-vault-data`) | `rizzy-vault backup` below; also the native copy, for losing the disk | With your data backups, encrypted at rest |
 | The secrets (`rizzy-vault-secrets`) | `backup-secrets`, plus the encrypted copy of [§5](#5-the-secrets-file) | **Apart** from the database backups |
 | `deploy/.env`, `deploy/Caddyfile` | Any | Anywhere (no secret in profile A) |
 
-> **Gap: no `rizzy-vault backup` command yet.** ADR 0011 specifies a logical, engine-neutral backup, `rizzy-vault backup` and `rizzy-vault restore`, in "a versioned and documented file format". No Accepted ADR defines that file format yet, so this build does not have the commands (the storage layer has the dump and restore logic, and the automated drill in [§10](#10-the-restore-drill) exercises it). Until they ship, the backup is ADR 0011's **native method**: a copy of the SQLite files, taken with the server stopped.
+### The logical backup: `rizzy-vault backup`
+
+`rizzy-vault backup` writes the whole database, every table as rows, to one file in the engine-neutral format of [ADR 0023](adr/0023-logical-backup-format.md). It reads one consistent snapshot on a read-only connection and takes no lock, so it runs **next to the running server**, which keeps serving. Pipe it straight into an encryption tool, so the unencrypted file never touches the disk (Docker; the same with `podman`):
+
+```sh
+set -o pipefail                                  # bash/zsh: a failed backup fails the pipeline
+mkdir -p backup-db
+docker compose exec -T rizzy-vault /usr/local/bin/rizzy-vault backup --out - \
+  | age -r age1yourpublickey... > "backup-db/rizzy-db-$(date +%Y%m%dT%H%M%S).rvbackup.age"
+```
+
+`--out -` writes the file to standard output (refused when that is a terminal); `--out <file>` writes a new file with mode 0600 instead and never overwrites one. The command prints the file's size and its **SHA-256** on stderr: record it with the archive. The file name is yours to choose.
+
+What the file is, and is not:
+- **Integrity, not authentication.** The file ends with a SHA-256 of everything before it; `restore` checks it before reading anything, so a truncated or corrupted file is refused. It does not stop a deliberate edit: anyone who can write the file can recompute it. Protect the archives like the database itself.
+- **Not encrypted.** It holds what the database holds: every user's ciphertext, login names, device metadata, OPAQUE records and timestamps ([THREAT_MODEL §3.4](THREAT_MODEL.md#34-what-the-server-holds-by-sync-mode)). It never holds the server secrets ([INV-50](THREAT_MODEL.md#8-security-invariants)), but a database backup **plus** the secrets allows offline password guessing, so encrypt it (`age` above, or your backup tool's encryption) and store it apart from the secrets backup.
+- **Tied to its release.** It restores only with a release of the same database schema version. After an upgrade, take a new backup; to restore an older one, use the release that wrote it, then upgrade ([§7](#7-upgrades-and-migrations)).
+- **At most 2 GiB** in this release, which reads the whole file into memory. `backup` refuses to write a larger one, so every backup it writes can be restored. Sessions and in-flight login state are not in it: after a restore every user signs in again.
+
+It works the same on PostgreSQL (one `REPEATABLE READ` snapshot), with the same pair moving an instance from SQLite to PostgreSQL once PostgreSQL restores are available ([§9](#9-restore)).
+
+### The native copy, for losing the disk
+
+A copy of the SQLite files, taken with the server stopped ([ADR 0011](adr/0011-storage.md)'s native method). Restoring it puts the files back as they were and **opens no reconciliation epoch** ([§9](#9-restore)), so use it only to recover from losing the database, never to undo a change; `rizzy-vault restore` of a logical backup is the restore that protects users.
 
 **Why stopped.** The running server holds the database's single writer, so no second process can take a `VACUUM INTO` copy; the image has no `sqlite3` tool; and copying the files of a live WAL database can produce an inconsistent copy. Stopping takes a few seconds: in-flight requests finish (at most 30 s) and the worker stops. The WAL file (`rizzy-vault.sqlite3-wal`) can still hold recent, acknowledged writes after the stop, so a backup is always the whole directory, never the main file alone.
 
@@ -260,7 +286,7 @@ This archives the data volume: the database, its WAL and shared-memory files (th
 
 **Retention.** Old backups keep old data: deleted items, and key wraps that a password change does not invalidate ([AR-11](THREAT_MODEL.md#9-accepted-risks-and-out-of-scope)). Keep only as many as you need. Deleted ciphertext also survives in the WAL, `rizzy-vault.sqlite3-wal`, until a checkpoint: `secure_delete` overwrites deleted data in the database file, not in the WAL ([ADR 0011](adr/0011-storage.md), SQLite settings). So every native archive can hold recently deleted data, and so can the live volume, until the next checkpoint (AR-11).
 
-**Schedule** it with the host's cron or a systemd timer; the server is down for the few seconds the archive takes. Check the archives with the drill ([§10](#10-the-restore-drill)).
+**Schedule** both with the host's cron or a systemd timer: the logical backup as often as you like (the server keeps running), the native copy less often (the server is down for the few seconds the archive takes). Check the backups with the drill ([§10](#10-the-restore-drill)).
 
 ## 9. Restore
 
@@ -271,11 +297,41 @@ This archives the data volume: the database, its WAL and shared-memory files (th
 
 **The reconciliation-epoch notice.** The design's defence is the reconciliation epoch ([INV-59](THREAT_MODEL.md#8-security-invariants)): `rizzy-vault restore` puts every restored account into a reconciliation epoch and draws a new restore generation ([ADR 0021](adr/0021-server-compaction.md) §2). Devices that reconnect then re-upload their newest signed account state, their bundle chain and every device revocation they hold; the server adopts the newest valid state and from then on refuses the old password, the old recovery code and the revoked devices. Until some device of an account reconnects, that account stays exposed, and accounts whose devices never reconnect stay rolled back ([AR-19](THREAT_MODEL.md#9-accepted-risks-and-out-of-scope)). An enrolled device re-registers the password the next time the user types it; recovery stays refused until a device issues a new recovery code.
 
-> **Gap: this build cannot open reconciliation epochs from a restore.** Only `rizzy-vault restore` opens them, and it does not exist yet ([§8](#8-backup)). The native restore below puts the files back as they were: **no reconciliation epoch is opened and the restore generation does not change** (the automated drill pins this, [§10](#10-the-restore-drill)). So after a native restore:
-> - the old passwords, old recovery codes and revoked devices of the backup are accepted **and reconnecting devices do not close them**: the server accepts the newer state they hold only during a reconciliation epoch;
-> - clients cannot see that a restore happened through the restore generation, so ADR 0021's rules for changes that were in flight at backup time do not apply; such changes can be lost or reported as a conflict.
->
-> Use a native restore **only to recover from losing the database**, never to undo an unwanted change, and do the "after a restore" steps below.
+### `rizzy-vault restore`
+
+`rizzy-vault restore` loads a `rizzy-vault backup` file into an **empty** database, with the server stopped. In order ([ADR 0023](adr/0023-logical-backup-format.md) §5), it:
+1. takes the SQLite writer lock (it refuses while the server runs) and checks that the database is empty: no row, and either new or at exactly this release's schema;
+2. reads the file (at most 2 GiB) and checks its magic, format version and SHA-256 before anything else, then parses it strictly;
+3. requires the backup's schema version to be this release's;
+4. checks the secrets file against the backup, as the server's startup check does: the OPAQUE setups the backup records must be the secrets file's, and every data key a 2FA row names must be in it. A fresh secrets file is refused; restore the instance's own secrets first;
+5. loads every row in one transaction, draws a **new restore generation** and puts **every account into a reconciliation epoch**;
+6. prints the number of rows and of accounts in reconciliation, and the notice above.
+
+Any failure leaves the database without a single application row (it may be left migrated to this release's schema), so you can fix the cause and run it again.
+
+Procedure (Docker; the same with `podman`). Keep the current database aside first if it holds anything you may need (a native archive, [§8](#8-backup)):
+
+```sh
+docker compose stop rizzy-vault
+docker run --rm -v rizzy-vault-data:/data docker.io/library/alpine:3 \
+  sh -c 'find /data -mindepth 1 -delete && chown 65532:65532 /data && chmod 0700 /data'
+age -d backup-db/rizzy-db-YYYYMMDDTHHMMSS.rvbackup.age \
+  | docker compose --profile admin run --rm -T restore
+docker compose start rizzy-vault
+docker compose logs rizzy-vault        # expect: listening
+```
+
+If the secrets volume was lost too, restore it **before** running `restore` (below). `restore` exits with 0 on success, 1 when it refused or failed (a non-empty database, a damaged file, another schema version, secrets that do not belong to the backup), and 2 on a usage error.
+
+> **Gap: no restore into PostgreSQL in this build.** ADR 0023 requires an instance lock that every server process on PostgreSQL holds, so that `restore` can prove no server is running; this build does not have it, and `restore` refuses a PostgreSQL database (exit 2). `backup` works on PostgreSQL.
+
+### The native restore, for losing the disk
+
+A native restore puts the files back as they were: **no reconciliation epoch is opened and the restore generation does not change** (the automated drill pins this, [§10](#10-the-restore-drill)). So after a native restore:
+- the old passwords, old recovery codes and revoked devices of the backup are accepted **and reconnecting devices do not close them**: the server accepts the newer state they hold only during a reconciliation epoch;
+- clients cannot see that a restore happened through the restore generation, so ADR 0021's rules for changes that were in flight at backup time do not apply; such changes can be lost or reported as a conflict.
+
+Use a native restore **only to recover from losing the database when no logical backup is recent enough**, never to undo an unwanted change, and do the "after a restore" steps below.
 
 **Native restore** (the server stopped; Docker, the same with `podman`):
 
@@ -289,7 +345,7 @@ docker compose start rizzy-vault
 docker compose logs rizzy-vault        # expect: listening
 ```
 
-If the secrets volume was lost too, restore it **before** starting the server, from your encrypted copy of `secrets.json` ([§5](#5-the-secrets-file)):
+**If the secrets volume was lost too**, restore it **before** `rizzy-vault restore` or before starting the server, from your encrypted copy of `secrets.json` ([§5](#5-the-secrets-file)):
 
 ```sh
 age -d /somewhere/safe/rizzy-secrets-YYYY-MM-DD.json.age | docker run --rm -i -v rizzy-vault-secrets:/s docker.io/library/alpine:3 \
@@ -300,14 +356,14 @@ The server refuses to start against a database whose OPAQUE setup does not match
 
 **After a restore:**
 1. Tell every user that the server was restored to a backup of `<date>`, and ask them to open each of their devices soon, so the devices detect the rollback ([INV-25](THREAT_MODEL.md#8-security-invariants)) and re-upload what the server lost.
-2. Security changes made after the backup (a password change, a device revocation, a recovery-code replacement) are undone by the restore, and a native restore does not heal them (see the gap above). The design's answer is to repeat them. **In this build that is not possible**: its HTTP API has no password-change, device-revocation, recovery-code or key-rotation request, so no such change can have been made through this build, and users cannot repeat one until those requests ship. When they do, ask users to repeat every such change made after the backup.
+2. Security changes made after the backup (a password change, a device revocation, a recovery-code replacement) are undone by the restore. The design heals them when a device of the account reconnects during the reconciliation epoch that `rizzy-vault restore` opens (a native restore opens none, see above), and otherwise has users repeat them. **In this build that is not possible**: its HTTP API has no password-change, device-revocation, recovery-code or key-rotation request, so no such change can have been made through this build, and users cannot repeat one until those requests ship. When they do, ask users to repeat every such change made after the backup.
 3. Accounts whose devices never reconnect stay as the backup left them.
 
 ## 10. The restore drill
 
 A backup you have never restored is a hope, not a backup ([ROADMAP §4.9](ROADMAP.md#49-server-self-hosting--ops-m1-onward): "tested, not just written").
 
-**Automated (runs with `cargo test`).** [`crates/rizzy-server/tests/drill.rs`](../crates/rizzy-server/tests/drill.rs) runs the backup → wipe → restore drill in a fast form, against real SQLite files, through the functions the binary runs: `secrets init`, a populated instance, a start with the startup checks, a logical dump next to the running server, `backup-secrets`, the native copy, a wipe, the secrets restored byte for byte from the encrypted backup, the dump restored into an empty database, and a restart. It checks that the data reads back exactly, that the restore draws a new restore generation and opens a reconciliation epoch for every account (INV-59), that the database backup holds none of the secrets file's secrets (INV-50: every OPAQUE server setup, `enum_key`, every data key and the bootstrap token, searched for both as bytes and as their base64url text), and that a restore into a non-empty database, a fresh secrets file next to the restored database and a wrong passphrase are refused. It also checks the gap of [§9](#9-restore): a native copy restored in place starts, but keeps the old restore generation and opens no epoch.
+**Automated (runs with `cargo test`).** [`crates/rizzy-server/tests/drill.rs`](../crates/rizzy-server/tests/drill.rs) runs the backup → wipe → restore drill in a fast form, against real SQLite files, through the functions the binary runs: `secrets init`, a populated instance, a start with the startup checks, `rizzy-vault backup` to a file next to the running server, `backup-secrets`, the native copy, a wipe, the secrets restored byte for byte from the encrypted backup, `rizzy-vault restore` of the backup file into an empty database, and a restart. It checks that the data reads back exactly, that the restore draws a new restore generation and opens a reconciliation epoch for every account (INV-59), that the backup file holds none of the secrets file's secrets (INV-50: every OPAQUE server setup, `enum_key`, every data key and the bootstrap token, searched for both as bytes and as their base64url text), and that a restore next to the running server, into a non-empty database, with a fresh secrets file, or of a damaged file is refused, as is a wrong passphrase. It also checks the warning of [§9](#9-restore): a native copy restored in place starts, but keeps the old restore generation and opens no epoch. `crates/rizzy-server/tests/cli.rs` runs the two commands as processes: through a pipe and a file, the digest on stderr, and the refusals.
 
 > **Gap: the full drill of ADR 0011 is not automated yet.** ADR 0011 requires simulated clients that change a password, enrol and revoke devices and rotate keys after the backup, then reconnect to the restored server and heal it, on SQLite and PostgreSQL. That needs the client core (M1 step 4) and the password-change, revocation and rotation endpoints, which are not in this build.
 
@@ -315,10 +371,15 @@ A backup you have never restored is a hope, not a backup ([ROADMAP §4.9](ROADMA
 
 ```sh
 docker volume create rizzy-drill-data && docker volume create rizzy-drill-secrets
-docker run --rm -v rizzy-drill-data:/data -v "$PWD/backup-db:/backup:ro" docker.io/library/alpine:3 \
-  sh -c 'tar -C /data -xzf /backup/rizzy-data-YYYYMMDDTHHMMSS.tar.gz && chown -R 65532:65532 /data && chmod 0700 /data'
+docker run --rm -v rizzy-drill-data:/data docker.io/library/alpine:3 \
+  sh -c 'chown 65532:65532 /data && chmod 0700 /data'
 age -d /somewhere/safe/rizzy-secrets-YYYY-MM-DD.json.age | docker run --rm -i -v rizzy-drill-secrets:/s docker.io/library/alpine:3 \
   sh -c 'umask 077 && cat > /s/secrets.json && chown -R 65532:65532 /s && chmod 0700 /s'
+age -d backup-db/rizzy-db-YYYYMMDDTHHMMSS.rvbackup.age \
+  | docker run --rm -i --network none --read-only --tmpfs /tmp --user 65532:65532 \
+      -v rizzy-drill-data:/data -v rizzy-drill-secrets:/run/rizzy-secrets:ro \
+      localhost/rizzy-vault:dev restore --in -
+# expect "restored N rows; M accounts are in a reconciliation epoch ..."
 docker run --rm --network none --read-only --tmpfs /tmp \
   -e RIZZY_ORIGIN=https://vault.example.com \
   -v rizzy-drill-data:/data -v rizzy-drill-secrets:/run/rizzy-secrets:ro \
@@ -327,7 +388,7 @@ docker run --rm --network none --read-only --tmpfs /tmp \
 docker volume rm rizzy-drill-data rizzy-drill-secrets
 ```
 
-`listening` means the archive unpacked into a database this release can open and migrate, and that the secrets fit it. Also try your passphrase on the newest `backup-secrets` file once the command that reads it exists ([§5](#5-the-secrets-file)).
+`restore` succeeding means the file is intact (its SHA-256 matches), was written by this release's schema, and belongs to these secrets; `listening` means the server's startup checks accept the result. Drill the native archives the same way, unpacking one into the scratch data volume (as in [§9](#9-restore)) instead of running `restore`. Also try your passphrase on the newest `backup-secrets` file once the command that reads it exists ([§5](#5-the-secrets-file)).
 
 ## 11. Logs
 
@@ -338,10 +399,11 @@ The server writes one JSON object per line to stderr: `ts_ms`, `level`, `event`,
 - [ ] `RIZZY_ORIGIN` is the exact origin users type, and will not change.
 - [ ] The secrets volume is mounted read-only into the server and is not inside the data volume.
 - [ ] A `backup-secrets` file **and** an encrypted copy of `secrets.json` exist, stored apart from the database backups; the passphrase is stored safely.
-- [ ] Database backups run on a schedule, are encrypted, and are pruned.
+- [ ] Database backups (`rizzy-vault backup`) run on a schedule, are encrypted, and are pruned; their SHA-256 is recorded.
 - [ ] No backup holds both volumes (whole-host snapshots included).
 - [ ] The database is on a local disk, not NFS or SMB.
 - [ ] `RIZZY_SIGNUP` is `closed` outside the first-accounts window.
 - [ ] `RIZZY_TRUSTED_PROXIES` lists exactly the proxy.
 - [ ] The manual drill of [§10](#10-the-restore-drill) passed this month.
 - [ ] Base images are pinned by digest if you build your own image.
+- [ ] The host's crash collector (if `core_pattern` pipes to one) stores no dumps of the rizzy-vault container ([§1](#1-what-you-run)).

@@ -13,11 +13,12 @@
 //!
 //! - [`CRATES`]: one [`CrateRule`] per crate: its side (R6), whether it is a no-I/O crate and
 //!   its external allow-list (R1), getrandom and `wasm_js` rights (R2), its allowed internal
-//!   dependencies (§3), its sqlx rights (R5) and openssl rights (ADR 0009).
+//!   dependencies (§3), its sqlx rights (R5), openssl rights (ADR 0009) and
+//!   rustix rights (ADR 0024).
 //! - [`CORE_EXTERNAL_ALLOW`] and [`PROTO_EXTERNAL_ALLOW`]: the R1 allow-lists of `rizzy-core` and
 //!   `rizzy-proto`, as `name@compat` ([`compat`]).
 //! - The deny-lists: [`NO_IO_FORBIDDEN`] (R1), [`ISOLATED_INGRESS`] (R3), [`SERVER_WIRED`] and
-//!   [`SQLX`] (R5), [`OPENSSL`].
+//!   [`SQLX`] (R5), [`OPENSSL`], [`RUSTIX`].
 //! - The `rand` and getrandom rules: [`RAND`], [`RANDOMNESS_CRATES`],
 //!   [`GETRANDOM_WASM_FEATURES`].
 //! - ADR 0009's required and forbidden feature sets: [`FEATURE_RULES`]. The same list names the
@@ -27,7 +28,7 @@
 //!
 //! The unit tests restate the rights ADR 0016 and ADR 0009 assign, with ADR 0019 §1.4's
 //! replacing rows (`rows_match_adr_0016`: the no-I/O crates, the getrandom leaves, `wasm_js`,
-//! sqlx, the one dev-only edge, openssl and the rows ADR 0022 and ADR 0019 remove;
+//! sqlx, the one dev-only edge, openssl, rustix and the rows ADR 0022 and ADR 0019 remove;
 //! `sides_match_adr_0016_r6`: the R6 sides; `crypto_crates_match_adr_0009`: the crates of ADR
 //! 0009's required feature sets), so changing one of those in a row also means changing a test.
 //! Otherwise, internal edges are checked for well-formedness plus R4 and the R5 server-wired
@@ -90,6 +91,10 @@ pub(crate) struct CrateRule {
     /// May reach openssl (ADR 0009 owner decision 1: `rizzy-server` and the domain crate that
     /// does `WebAuthn`).
     pub(crate) openssl: bool,
+    /// May depend on rustix (ADR 0024 point 2: the leaf crates `rizzy-server` and `rizzy-cli` in
+    /// M1, and the binding leaves `rizzy-ffi` and `rizzy-ffi-cpp`), for core-dump disabling
+    /// (threat model INV-60).
+    pub(crate) rustix: bool,
     /// R1 allow-list of external crates for this crate's own dependencies, as `name@compat`
     /// ([`compat`]). The allow-lists of its internal dependencies are added to it.
     pub(crate) external_allow: &'static [&'static str],
@@ -97,7 +102,7 @@ pub(crate) struct CrateRule {
 
 impl CrateRule {
     /// A row with every right off: no internal dependencies, no getrandom, no sqlx, no openssl,
-    /// and not a no-I/O crate. The builder methods below turn rights on one by one.
+    /// no rustix, and not a no-I/O crate. The builder methods below turn rights on one by one.
     const fn new(name: &'static str, dir: &'static str, side: Side) -> Self {
         Self {
             name,
@@ -110,6 +115,7 @@ impl CrateRule {
             dev_internal: &[],
             sqlx: Sqlx::Forbidden,
             openssl: false,
+            rustix: false,
             external_allow: &[],
         }
     }
@@ -130,6 +136,12 @@ impl CrateRule {
     /// Marks the crate as a leaf that may depend on getrandom directly (R2 (c)).
     const fn leaf(mut self) -> Self {
         self.getrandom_direct = true;
+        self
+    }
+
+    /// Lets the crate depend on rustix (ADR 0024 point 2).
+    const fn rustix(mut self) -> Self {
+        self.rustix = true;
         self
     }
 
@@ -261,6 +273,7 @@ pub(crate) const CRATES: &[CrateRule] = &[
         openssl: true,
         ..CrateRule::new("rizzy-server", "crates/rizzy-server", Side::Server)
             .leaf()
+            .rustix()
             .internal(&[
                 "rizzy-domain-auth",
                 "rizzy-domain-vault",
@@ -276,6 +289,7 @@ pub(crate) const CRATES: &[CrateRule] = &[
     // `rizzy-cli` depends on `rizzy-core` in M0 and moves to `rizzy-client` in M1 (§3 notes).
     CrateRule::new("rizzy-cli", "crates/rizzy-cli", Side::Client)
         .leaf()
+        .rustix()
         .internal(&["rizzy-core", "rizzy-client"])
         .sqlx(Sqlx::SqliteOnly),
     // §3 lists no internal dependency for `xtask`, but its notes say `xtask` is the one crate
@@ -359,10 +373,12 @@ pub(crate) const CRATES: &[CrateRule] = &[
     // sqlite-only sqlx holders (R5) and client-side (R6).
     CrateRule::new("rizzy-ffi", "crates/rizzy-ffi", Side::Client)
         .leaf()
+        .rustix()
         .internal(&["rizzy-client"])
         .sqlx(Sqlx::SqliteOnly),
     CrateRule::new("rizzy-ffi-cpp", "crates/rizzy-ffi-cpp", Side::Client)
         .leaf()
+        .rustix()
         .internal(&["rizzy-client"])
         .sqlx(Sqlx::SqliteOnly),
     CrateRule::new("rizzy-domain-org", "crates/rizzy-domain-org", Side::Server)
@@ -578,6 +594,10 @@ pub(crate) const SQLX_NON_SQLITE_CRATES: &[&str] = &["sqlx-postgres", "sqlx-mysq
 /// ADR 0009 owner decision 1: `openssl` and `openssl-sys` are reachable only from the crates
 /// whose row sets `openssl`.
 pub(crate) const OPENSSL: &[&str] = &["openssl", "openssl-sys"];
+
+/// ADR 0024 point 2: the core-dump crate. Only the crates whose row sets `rustix` declare it, in
+/// any dependency kind, and it is in no other member's normal or build closure.
+pub(crate) const RUSTIX: &str = "rustix";
 
 /// R7: crates with an accepted exception that copy the workspace lint table with only
 /// `unsafe_code` changed. Adding one takes a new ADR; there are none.
@@ -819,6 +839,23 @@ mod tests {
             ["rizzy-server", "rizzy-domain-auth"].into(),
             "ADR 0009 owner decision 1"
         );
+
+        let rustix: HashSet<&str> = CRATES.iter().filter(|r| r.rustix).map(|r| r.name).collect();
+        assert_eq!(
+            rustix,
+            ["rizzy-server", "rizzy-cli", "rizzy-ffi", "rizzy-ffi-cpp"].into(),
+            "ADR 0024 point 2"
+        );
+        // Leaf crates only: nothing may depend on a crate that holds rustix.
+        for r in CRATES {
+            for dep in r.internal.iter().chain(r.dev_internal) {
+                assert!(
+                    !CRATES.iter().any(|d| d.name == *dep && d.rustix),
+                    "ADR 0024 point 2: {} depends on {dep}",
+                    r.name
+                );
+            }
+        }
     }
 
     /// ADR 0016 R6's client-side, server-side and shared crates, as ADR 0019 §1.4 restates the

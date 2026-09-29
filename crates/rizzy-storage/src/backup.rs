@@ -8,11 +8,17 @@
 //!   [`Database::restore`] loads such a [`Dump`] into an empty SQLite or PostgreSQL
 //!   database. The same pair moves an instance from SQLite to PostgreSQL.
 //!
-//! **Not defined here: the backup file format.** ADR 0011 calls for "a versioned and
-//! documented file format"; no Accepted ADR defines its bytes yet, so this crate stops at the
-//! in-memory [`Dump`] and leaves the file writer and reader to the change that defines the
-//! format, with its size limits and fuzz target (a [`Dump`] from a file is untrusted input:
-//! [`Database::restore`] checks every row against the schema, and never panics on a bad one).
+//! - **The backup file** ([ADR 0023]): [`file`](mod@file) writes a [`Dump`] as the versioned,
+//!   self-describing, canonical binary file of ADR 0023 §1 and parses it back strictly, with
+//!   the size limits of §3 and the trailing SHA-256 checked before anything is parsed. A
+//!   [`Dump`] from a file is untrusted input: [`Database::restore`] checks every row against
+//!   the schema again, and never panics on a bad one. The commands around it (`rizzy-vault
+//!   backup` and `restore`, file creation, the secrets check) are `rizzy-server`'s (ADR 0023
+//!   §4).
+//!
+//! **Before a restore**, [`Database::check_restore_target`] checks the target without changing
+//! it (ADR 0023 §5 step 1): no migration applied, or exactly this release's, and no row.
+//! [`Database::restore`] checks the same again inside its write transaction.
 //!
 //! **Restore** runs in one write transaction, so it either happens completely or not at all:
 //! 1. it migrates the target to this release's schema and requires the dump to be of that
@@ -26,6 +32,10 @@
 //!
 //! On SQLite, `restore` and `vacuum_into` need the writer, so they run in the server process or
 //! with the server stopped (ADR 0010 §2); `dump` runs on the read-only reader next to it.
+//!
+//! [ADR 0023]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0023-logical-backup-format.md
+
+pub mod file;
 
 use std::fmt;
 use std::fs::OpenOptions;
@@ -206,6 +216,37 @@ impl Database {
             schema_version,
             tables,
         })
+    }
+
+    /// Checks, without changing anything, that this database can be a restore target (ADR 0023
+    /// §5 step 1): either no migration is applied (a new database), or exactly this release's
+    /// migrations are applied and no application table holds a row. `restore` runs it before
+    /// reading the backup file, so an operator pointed at the wrong database learns it first;
+    /// [`Database::restore`] checks the same again in its own transaction.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Restore`] ([`RestoreError::TargetNotEmpty`]) when migrations are applied but
+    ///   not all of this release's, or a row exists.
+    /// - Those of [`Database::pending_migrations`] (an applied migration this release does not
+    ///   know, or whose checksum differs, or one recorded as failed).
+    /// - [`Error::Database`] when a query fails.
+    pub async fn check_restore_target(&self) -> Result<(), Error> {
+        if self.applied_migrations().await?.is_empty() {
+            return Ok(());
+        }
+        if !self.pending_migrations().await?.is_empty() {
+            return Err(RestoreError::TargetNotEmpty.into());
+        }
+        let mut tx = self.begin_read().await?;
+        let count: i64 = crate::on_engine!(tx.conn(), |c| sqlx::query_scalar(RESTORE_ROW_COUNT)
+            .fetch_one(&mut *c)
+            .await)?;
+        tx.finish().await?;
+        if count != 0 {
+            return Err(RestoreError::TargetNotEmpty.into());
+        }
+        Ok(())
     }
 
     /// Loads `dump` into this database, which must be empty (see the module docs for the

@@ -30,9 +30,9 @@
 //! holds it; other `worker` processes on the same database are hot standbys
 //! ([`crate::worker`]). With `SQLite`, the writer lock already makes this process the only one.
 //!
-//! **Core dumps** (threat model INV-60) are not disabled by this build: the safe wrappers
-//! INV-60 names (rustix) are not an admitted dependency, and `unsafe` is forbidden. Reported to
-//! the owner; the release profile's `panic = "abort"` is unchanged.
+//! **Core dumps** (threat model INV-60) are already off when this runs: [`crate::cli::main`]
+//! disables them first and refuses to start otherwise ([`crate::coredump`], ADR 0024). The
+//! release profile keeps `panic = "abort"`.
 //!
 //! # Shutdown
 //!

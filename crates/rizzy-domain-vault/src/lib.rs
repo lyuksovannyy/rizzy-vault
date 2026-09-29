@@ -243,3 +243,30 @@ pub(crate) async fn restore_generation(conn: Conn<'_>) -> Result<RestoreGenerati
 pub(crate) fn to_sql_time(now_ms: u64) -> Result<i64, VaultError> {
     Ok(rizzy_storage::convert::u64_to_sql(now_ms, "now_ms")?)
 }
+
+#[cfg(test)]
+mod tests {
+    //! Limits this crate sees from both sides: `rizzy-proto`'s and the backup file's.
+
+    use rizzy_proto::limits;
+    use rizzy_storage::backup::file::{MAX_BLOB_LEN, MAX_TEXT_LEN};
+
+    /// ADR 0023 §3: the backup file's blob limit "must be ≥ every `rizzy-proto` limit on a
+    /// stored value", so every row the server accepted over the API fits a backup. The text
+    /// limit covers the one text column, `auth_accounts.login_name`.
+    #[test]
+    fn backup_value_limits_cover_every_stored_value() {
+        const {
+            assert!(limits::MAX_ENVELOPE_LEN <= MAX_BLOB_LEN);
+            assert!(limits::MAX_OP_STATEMENT_LEN <= MAX_BLOB_LEN);
+            assert!(limits::MAX_SNAPSHOT_STATEMENT_LEN <= MAX_BLOB_LEN);
+            assert!(limits::MAX_KEY_GRANT_STATEMENT_LEN <= MAX_BLOB_LEN);
+            assert!(limits::MAX_ACCOUNT_STATEMENT_LEN <= MAX_BLOB_LEN);
+            assert!(limits::MAX_KEY_ENVELOPE_LEN <= MAX_BLOB_LEN);
+            assert!(limits::MAX_OPAQUE_MESSAGE_LEN <= MAX_BLOB_LEN);
+            // A clamped version vector or a device cursor: `u16 n` and `n` entries of 24 bytes.
+            assert!(2 + limits::MAX_VV_ENTRIES * (16 + 8) <= MAX_BLOB_LEN);
+            assert!(<limits::LoginNameRule as rizzy_proto::wire::TextRule>::MAX <= MAX_TEXT_LEN);
+        }
+    }
+}

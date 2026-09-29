@@ -1028,6 +1028,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "linux-raw-sys"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+
+[[package]]
 name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1276,6 +1282,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rizzy-client"
+version = "0.0.0"
+dependencies = [
+ "rand_core 0.10.1",
+ "rizzy-core",
+ "rizzy-proto",
+ "rizzy-sync",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "rizzy-core"
 version = "0.0.0"
 dependencies = [
@@ -1328,13 +1346,24 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "rand_core 0.10.1",
+ "rizzy-client",
  "rizzy-core",
  "rizzy-domain-auth",
+ "rizzy-import",
  "rizzy-proto",
  "rizzy-server",
+ "rizzy-storage",
  "rizzy-sync",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "rizzy-import"
+version = "0.0.0"
+dependencies = [
+ "rizzy-core",
+ "zeroize",
 ]
 
 [[package]]
@@ -1360,6 +1389,7 @@ dependencies = [
  "rizzy-domain-auth",
  "rizzy-domain-vault",
  "rizzy-storage",
+ "rustix",
  "serde",
  "serde_json",
  "tokio",
@@ -1370,6 +1400,7 @@ dependencies = [
 name = "rizzy-storage"
 version = "0.0.0"
 dependencies = [
+ "sha2 0.11.0",
  "sqlx",
 ]
 
@@ -1387,6 +1418,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver",
+]
+
+[[package]]
+name = "rustix"
+version = "1.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+dependencies = [
+ "bitflags",
+ "errno",
+ "libc",
+ "linux-raw-sys",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

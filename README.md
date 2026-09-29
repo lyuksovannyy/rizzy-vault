@@ -42,6 +42,8 @@ ADRs 0010–0014 are Accepted, so the gate for server and client scaffolding (st
 crates/rizzy-core     crypto, envelopes, key hierarchy, item models (no I/O, builds for wasm32)
 crates/rizzy-sync     sync engine (skeleton; code arrives in M1 step 2)
 crates/rizzy-proto    /api/v1 request and response types, serde (no I/O, builds for wasm32)
+crates/rizzy-client   sans-I/O client flows: signup, login, unlock, sessions, sync driver, items, export (no I/O, builds for wasm32)
+crates/rizzy-import   importers: Bitwarden JSON, 1PUX, KeePass XML, CSV (no I/O, builds for wasm32)
 crates/rizzy-storage  server storage: sqlx pools, migrations, account lock, backup and restore
 crates/rizzy-bus      in-process domain events for the server (ids only; M1 step 3)
 crates/rizzy-domain-auth  server auth domain: OPAQUE, sessions, devices, signed state, 2FA, recovery

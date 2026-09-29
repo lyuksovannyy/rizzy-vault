@@ -1,4 +1,5 @@
-//! Rule evaluation for `cargo xtask check-deps` (ADR 0016 §4, §5; ADR 0009; ADR 0019 §4.1).
+//! Rule evaluation for `cargo xtask check-deps` (ADR 0016 §4, §5; ADR 0009; ADR 0019 §4.1;
+//! ADR 0024).
 //!
 //! Every check is a pure function of the resolved graphs, the manifests and the first-party Rust
 //! sources, so the unit tests run them on synthetic inputs.
@@ -15,11 +16,11 @@
 //!
 //! **Which dependency kinds.** A crate's closure is walked with [`Graph::closure`], which takes
 //! one set of kinds for the crate's own edges and another for every edge after that. The R1,
-//! getrandom and feature checks use normal and build edges throughout, because tests may use
-//! dev-only helpers (ADR 0016 §4). R3, R6 and the openssl rule also follow the crate's own
+//! getrandom, rustix and feature checks use normal and build edges throughout, because tests may
+//! use dev-only helpers (ADR 0016 §4). R3, R6 and the openssl rule also follow the crate's own
 //! dev edges, then normal and build edges below them: a dependency's dev-dependencies are
 //! never built for its dependents, so they are not followed. The checks on declarations (R1's
-//! direct `rand` and getrandom, R2, R5, the `openapi` feature, and ADR 0009's
+//! direct `rand` and getrandom, R2, R5, the `openapi` feature, rustix (ADR 0024), and ADR 0009's
 //! `default-features = false` on the crypto crates) read every member's entries of every kind.
 //!
 //! **What this does not check.** Whether a no-I/O crate calls an I/O API is the job of its
@@ -106,6 +107,7 @@ pub(crate) fn run(inputs: &Inputs) -> Vec<Violation> {
     isolated_ingress(g, &mut out);
     client_server_split(g, &mut out);
     openssl(g, &mut out);
+    rustix(g, &mut out);
     manifests(inputs, &mut out);
     workspace_files(inputs, &mut out);
     clippy_configs(inputs, &mut out);
@@ -808,6 +810,45 @@ fn openssl(g: &Graph, out: &mut Vec<Violation>) {
                     format!(
                         "reaches {}; only rizzy-server and rizzy-domain-auth may. Path: {}",
                         name(g, i),
+                        g.path(&reach, i)
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+/// ADR 0024 point 2: rustix only in the leaf crates whose row allows it. A member without the
+/// right must not declare it in any dependency kind, and must not reach it over normal and build
+/// dependencies either, so it never ships in a library (`rizzy-core`, `rizzy-sync`,
+/// `rizzy-client`, a server library) through a third-party crate. Dev-only paths below a
+/// member are not followed: they never ship.
+fn rustix(g: &Graph, out: &mut Vec<Violation>) {
+    for (root, rule) in members(g) {
+        if rule.rustix {
+            continue;
+        }
+        let Some(p) = g.package(root) else { continue };
+        for dep in p.declared.iter().filter(|d| d.name == rules::RUSTIX) {
+            out.push(violation(
+                "ADR 0024 point 2",
+                rule.name,
+                format!(
+                    "declares a {} `{}`; only the leaf crates rizzy-server, rizzy-cli, rizzy-ffi \
+                     and rizzy-ffi-cpp depend on rustix",
+                    dep.kind.section(),
+                    dep.name
+                ),
+            ));
+        }
+        let reach = g.closure(root, NORMAL_BUILD, NORMAL_BUILD, &|_, _, _| false);
+        for &i in reach.keys() {
+            if name(g, i) == rules::RUSTIX {
+                out.push(violation(
+                    "ADR 0024 point 2",
+                    rule.name,
+                    format!(
+                        "reaches rustix; only the leaf crates that hold it may. Path: {}",
                         g.path(&reach, i)
                     ),
                 ));

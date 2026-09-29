@@ -8,15 +8,51 @@
 //! | `secrets rotate --data-key` | CRYPTO.md §5.11 "Rotation" | `SQLite` writer lock |
 //! | `backup-secrets` | ADR 0011 "Backups" and owner decision 3; CRYPTO.md §5.11 | none (reads the secrets file only) |
 //! | `migrate` | ADR 0011 point 9 | `SQLite` writer lock |
+//! | `backup --out <file\|->` | ADR 0011 "Backups"; [ADR 0023] §4, §6 | none: the read-only reader on `SQLite`, a `REPEATABLE READ` transaction on `PostgreSQL` |
+//! | `restore --in <file\|->` | ADR 0011 "Backups"; [ADR 0023] §5, §6 | `SQLite` writer lock; refused on `PostgreSQL` |
 //!
 //! ADR 0010 §2: "`restore`, `migrate` and `secrets rotate` take the writer lock. They run only
 //! while the server is stopped." With `PostgreSQL` there is no writer lock, so `secrets rotate`
 //! cannot prove the server is stopped and refuses (`PostgreSQL` is supported from M3).
 //!
+//! # `backup` and `restore` ([ADR 0023])
+//!
+//! `backup` dumps the database in one read snapshot next to the running server, writes it as
+//! the backup file of `rizzy_storage::backup::file` (canonical, with its trailing SHA-256, and
+//! never longer than the reader's 2 GiB limit), and prints the file's length and SHA-256 on
+//! stderr for the operator to record. `--out -` writes the file to stdout, for piping into
+//! `age` or a backup tool, and is refused when stdout is a terminal (usage error). Otherwise
+//! the file is created new with mode 0600, never over an existing one, and removed again if
+//! writing it fails ([`fsutil::write_new_private`]). The server secrets are never in it
+//! (INV-50).
+//!
+//! `restore` runs the steps of ADR 0023 §5, in order:
+//! 1. **Exclude every server process and check the target.** `SQLite`: take the writer lock
+//!    (the server must be stopped) and require an empty target: no migration applied, or
+//!    exactly this release's, and no row ([`rizzy_storage::Database::check_restore_target`]).
+//!    `PostgreSQL`: ADR 0023 adds an instance lock every server process holds; it is not
+//!    implemented in this build, so `restore` refuses a `PostgreSQL` target with a usage error
+//!    (exit 2), as ADR 0023 §5 requires until it exists.
+//! 2. **Read the file** (at most 2 GiB, from a path or `-` for stdin) and parse it: magic,
+//!    format version and SHA-256 first, then every table strictly.
+//! 3. **Require this release's schema version**; an older backup is restored with the release
+//!    that wrote it, then upgraded with `migrate` (ADR 0023 open question 4, as recommended).
+//! 4. **Check the secrets file against the backup** (CRYPTO.md §5.8, §5.11):
+//!    [`ServerSecrets::check_dump`] refuses a setup mismatch, a fresh secrets file, and a TOTP
+//!    row sealed under a data key the file lacks, and tells the operator to restore the
+//!    secrets first.
+//! 5. **Draw a new restore generation** from the OS CSPRNG (ADR 0021 §2) and load the rows in
+//!    one transaction, which opens a reconciliation epoch for every restored account (INV-59)
+//!    and raises the store-sequence counters (`rizzy_storage::Database::restore`).
+//! 6. **Report**: the caller prints the row count, the number of accounts in reconciliation
+//!    and the INV-59 notice with the AR-19 warning ([`RESTORE_NOTICE`]).
+//!
+//! Any failure leaves the target with no application row; it may be left migrated to this
+//! release's schema, and a retry into it is allowed.
+//!
 //! **Not here, and why** (reported to the owner):
-//! - `backup` and `restore`: [ADR 0011] calls for "a versioned and documented file format" for
-//!   the logical dump, and no Accepted ADR defines its bytes; `rizzy-storage` stops at the
-//!   in-memory dump for the same reason. Freezing a persistent format needs an ADR first.
+//! - The `PostgreSQL` instance lock of ADR 0023 §5 step 1 and its key `K`: not implemented, so
+//!   `restore` refuses `PostgreSQL` targets (`backup` works on `PostgreSQL`).
 //! - Re-sealing TOTP rows under a new data key (CRYPTO.md §5.11: "`worker` re-seals TOTP rows")
 //!   has no domain function yet; after `--data-key` the old key stays in the file and keeps
 //!   opening the rows sealed under it.
@@ -26,13 +62,23 @@
 //!
 //! [ADR 0010]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0010-server-shape.md
 //! [ADR 0011]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0011-storage.md
+//! [ADR 0023]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0023-logical-backup-format.md
 
 use core::fmt;
+use std::io::{IsTerminal as _, Read as _, Write as _};
 use std::path::Path;
 
-use rizzy_domain_auth::ServerSecrets;
+use rand_core::Rng as _;
 use rizzy_domain_auth::secrets::SecretsError;
-use rizzy_storage::{StartupMigration, WriterLock};
+use rizzy_domain_auth::{ServerSecrets, StartupCheckError};
+use rizzy_storage::backup::file::{
+    self as backup_file, DIGEST_LEN, FileError, MAX_BACKUP_FILE_LEN,
+};
+use rizzy_storage::{
+    Database, PostgresOptions, RestoreError, RestoreGeneration, SqliteOptions, StartupMigration,
+    WriterLock, schema_version,
+};
+use zeroize::Zeroizing;
 
 use crate::config::{Config, DatabaseConfig};
 use crate::fsutil::{self, ReadError};
@@ -68,6 +114,31 @@ pub enum AdminError {
     Serve(ServeError),
     /// The writer lock could not be taken: the server is probably running.
     Lock(rizzy_storage::Error),
+    /// `backup --out -` with a terminal on stdout (ADR 0023 §6). A usage error.
+    StdoutIsTerminal,
+    /// `restore` into `PostgreSQL`: the instance lock of ADR 0023 §5 step 1 is not in this
+    /// build. A usage error.
+    RestoreNeedsInstanceLock,
+    /// The database could not be dumped or restored into (the target is not empty, say).
+    Storage(rizzy_storage::Error),
+    /// The backup file could not be written or parsed.
+    BackupFile(FileError),
+    /// The backup file could not be read.
+    Input(std::io::ErrorKind),
+    /// The secrets file does not belong to the backup (ADR 0023 §5 step 4).
+    SecretsMismatch(StartupCheckError),
+}
+
+impl AdminError {
+    /// Whether this is a usage or configuration error (exit code 2) rather than a runtime
+    /// failure (exit code 1).
+    #[must_use]
+    pub const fn is_usage(&self) -> bool {
+        matches!(
+            self,
+            Self::StdoutIsTerminal | Self::RestoreNeedsInstanceLock
+        )
+    }
 }
 
 impl fmt::Display for AdminError {
@@ -93,6 +164,22 @@ impl fmt::Display for AdminError {
             Self::Lock(e) => write!(
                 f,
                 "cannot take the writer lock (is the server running?): {e}"
+            ),
+            Self::StdoutIsTerminal => f.write_str(
+                "refusing to write the backup to a terminal; redirect stdout or name a file with \
+                 --out",
+            ),
+            Self::RestoreNeedsInstanceLock => f.write_str(
+                "restore into PostgreSQL is not available in this build: it needs the instance \
+                 lock of ADR 0023 §5, which is not implemented yet",
+            ),
+            Self::Storage(e) => write!(f, "database: {e}"),
+            Self::BackupFile(e) => write!(f, "{e}"),
+            Self::Input(kind) => write!(f, "cannot read the backup file: {kind}"),
+            Self::SecretsMismatch(e) => write!(
+                f,
+                "the secrets file does not belong to this backup ({e}); restore the instance's \
+                 secrets file first, never a new one"
             ),
         }
     }
@@ -231,4 +318,186 @@ pub async fn migrate(config: &Config) -> Result<&'static str, AdminError> {
     };
     db.close().await;
     outcome.map_err(|e| AdminError::Serve(ServeError::Storage(e)))
+}
+
+/// The notice `restore` prints after a successful restore (ADR 0023 §5 step 6; the threat model
+/// §5.8, INV-59, AR-19).
+pub const RESTORE_NOTICE: &str = "\
+Every account is rolled back to the backup and is now in a reconciliation epoch (INV-59): \
+until a device of an account reconnects, the backup's old passwords, recovery codes and revoked \
+devices work again for that account. Accounts whose devices never reconnect stay rolled back \
+(AR-19). Tell every user the server was restored and ask them to open each of their devices \
+soon.";
+
+/// What `backup` wrote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackupSummary {
+    /// The file's length in bytes.
+    pub len: usize,
+    /// The file's trailing SHA-256 (ADR 0023 §2): not secret, printed for the operator.
+    pub digest: [u8; DIGEST_LEN],
+}
+
+impl BackupSummary {
+    /// The digest in lowercase hex.
+    #[must_use]
+    pub fn digest_hex(&self) -> String {
+        self.digest
+            .iter()
+            .fold(String::with_capacity(64), |mut s, b| {
+                use core::fmt::Write as _;
+                // Writing to a `String` cannot fail.
+                let _infallible = write!(s, "{b:02x}");
+                s
+            })
+    }
+}
+
+/// Whether `path` is `-`: standard input or output.
+fn is_stdio(path: &Path) -> bool {
+    path.as_os_str() == "-"
+}
+
+/// Opens the database for `backup`, taking no writer lock (ADR 0010 §2, ADR 0023 §6): the
+/// read-only reader on `SQLite`, the pool on `PostgreSQL` (whose read transaction is
+/// `REPEATABLE READ READ ONLY`).
+async fn open_backup_reader(config: &Config) -> Result<Database, AdminError> {
+    let db = match &config.database {
+        DatabaseConfig::Sqlite(path) => {
+            Database::open_sqlite_read_only(&SqliteOptions::new(path)).await
+        }
+        DatabaseConfig::Postgres(url) => match PostgresOptions::from_url(url) {
+            Ok(options) => Database::open_postgres(&options).await,
+            Err(e) => Err(e),
+        },
+    };
+    db.map_err(AdminError::Storage)
+}
+
+/// `rizzy-vault backup --out <file|->`: the logical backup file of ADR 0023 (module docs).
+///
+/// # Errors
+/// [`AdminError`]; with a file target, no file is left behind on a failure.
+pub async fn backup(config: &Config, out: &Path) -> Result<BackupSummary, AdminError> {
+    let to_stdout = is_stdio(out);
+    if to_stdout && std::io::stdout().is_terminal() {
+        return Err(AdminError::StdoutIsTerminal);
+    }
+    let db = open_backup_reader(config).await?;
+    let dump = db.dump().await;
+    db.close().await;
+    let dump = dump.map_err(AdminError::Storage)?;
+    let file = backup_file::write(&dump, now_ms()).map_err(AdminError::BackupFile)?;
+    drop(dump);
+    let digest = file
+        .len()
+        .checked_sub(DIGEST_LEN)
+        .and_then(|start| file.get(start..))
+        .and_then(|d| <[u8; DIGEST_LEN]>::try_from(d).ok())
+        .ok_or(AdminError::BackupFile(FileError::Truncated))?;
+    if to_stdout {
+        let mut stdout = std::io::stdout().lock();
+        stdout
+            .write_all(&file)
+            .and_then(|()| stdout.flush())
+            .map_err(|e| AdminError::Write(e.kind()))?;
+    } else {
+        fsutil::write_new_private(out, &file).map_err(|e| AdminError::Write(e.kind()))?;
+    }
+    Ok(BackupSummary {
+        len: file.len(),
+        digest,
+    })
+}
+
+/// Reads the backup file from `path`, or from standard input when `path` is `-`, refusing
+/// anything longer than [`MAX_BACKUP_FILE_LEN`] without reading past it.
+fn read_backup(path: &Path) -> Result<Zeroizing<Vec<u8>>, AdminError> {
+    if is_stdio(path) {
+        let mut buf = Zeroizing::new(Vec::new());
+        let limit = u64::try_from(MAX_BACKUP_FILE_LEN)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        std::io::stdin()
+            .lock()
+            .take(limit)
+            .read_to_end(&mut buf)
+            .map_err(|e| AdminError::Input(e.kind()))?;
+        if buf.len() > MAX_BACKUP_FILE_LEN {
+            return Err(AdminError::BackupFile(FileError::TooLarge));
+        }
+        Ok(buf)
+    } else {
+        fsutil::read_limited(path, MAX_BACKUP_FILE_LEN).map_err(|e| match e {
+            ReadError::TooLarge => AdminError::BackupFile(FileError::TooLarge),
+            ReadError::Io(e) => AdminError::Input(e.kind()),
+        })
+    }
+}
+
+/// `rizzy-vault restore --in <file|->`: the steps of ADR 0023 §5 (module docs). The caller
+/// prints the report and [`RESTORE_NOTICE`].
+///
+/// # Errors
+/// [`AdminError`]; the target then holds no application row.
+pub async fn restore(
+    config: &Config,
+    input: &Path,
+) -> Result<rizzy_storage::RestoreReport, AdminError> {
+    check_location(config)?;
+    // 1. Exclude every server process: the SQLite writer lock. PostgreSQL has no instance lock
+    //    in this build, so it is refused (ADR 0023 §5 step 1).
+    let DatabaseConfig::Sqlite(_) = &config.database else {
+        return Err(AdminError::RestoreNeedsInstanceLock);
+    };
+    let db = server::open_database(config, false)
+        .await
+        .map_err(|e| match e {
+            ServeError::Storage(e @ rizzy_storage::Error::WriterLockHeld { .. }) => {
+                AdminError::Lock(e)
+            }
+            e => AdminError::Serve(e),
+        })?;
+    let outcome = restore_into(&db, config, input).await;
+    db.close().await;
+    outcome
+}
+
+/// Steps 1 (the empty target) to 5 of [`restore`], on the locked database.
+async fn restore_into(
+    db: &Database,
+    config: &Config,
+    input: &Path,
+) -> Result<rizzy_storage::RestoreReport, AdminError> {
+    db.check_restore_target()
+        .await
+        .map_err(AdminError::Storage)?;
+    // 2. Read and parse: magic, format version and digest before anything else.
+    let bytes = read_backup(input)?;
+    let parsed = backup_file::parse(&bytes).map_err(AdminError::BackupFile)?;
+    drop(bytes);
+    // 3. This release's schema version only.
+    let current = schema_version();
+    if parsed.dump.schema_version != current {
+        return Err(AdminError::Storage(
+            RestoreError::SchemaVersion {
+                dump: parsed.dump.schema_version,
+                current,
+            }
+            .into(),
+        ));
+    }
+    // 4. The secrets file must belong to the backup.
+    let secrets = secrets_file::load(&config.secrets_file).map_err(AdminError::Secrets)?;
+    secrets
+        .check_dump(&parsed.dump)
+        .map_err(AdminError::SecretsMismatch)?;
+    drop(secrets);
+    // 5. A new restore generation; the rows, the epochs and the counters in one transaction.
+    let mut generation = [0u8; 16];
+    os_rng().fill_bytes(&mut generation);
+    let now = i64::try_from(now_ms()).unwrap_or(i64::MAX);
+    db.restore(&parsed.dump, RestoreGeneration(generation), now)
+        .await
+        .map_err(AdminError::Storage)
 }

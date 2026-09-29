@@ -465,7 +465,13 @@ fn backup_restore_round_trip() {
         assert_eq!(dump, fixture_after_restore());
         assert_eq!(dump.schema_version, schema_version());
 
-        // Restore into a new database.
+        // Through the backup file (ADR 0023): written and parsed back to the same dump.
+        let file = rizzy_storage::backup::file::write(&dump, 1_234).unwrap();
+        let parsed = rizzy_storage::backup::file::parse(&file).unwrap();
+        assert_eq!(parsed.created_at_ms, 1_234);
+        let dump = parsed.dump;
+
+        // Restore into a new database: a valid target before and after its migrations.
         let target = {
             let path = dir.join("target.sqlite");
             let lock = WriterLock::acquire(&path).unwrap();
@@ -473,8 +479,15 @@ fn backup_restore_round_trip() {
                 .await
                 .unwrap()
         };
+        target.check_restore_target().await.unwrap();
+        target.migrate().await.unwrap();
+        target.check_restore_target().await.unwrap();
         let g1 = RestoreGeneration([0x11; 16]);
         target.restore(&dump, g1, 9_000).await.unwrap();
+        assert!(matches!(
+            target.check_restore_target().await,
+            Err(Error::Restore(RestoreError::TargetNotEmpty))
+        ));
         assert_eq!(target.dump().await.unwrap(), dump);
 
         let mut r = target.begin_read().await.unwrap();
@@ -712,6 +725,11 @@ fn schema_must_match_this_release() {
             other => panic!("{other:?}"),
         }
         ro.close().await;
+        // Nor is it a restore target: some release migrated it, but not to this schema.
+        assert!(matches!(
+            db.check_restore_target().await,
+            Err(Error::Restore(RestoreError::TargetNotEmpty))
+        ));
 
         // A changed migration is refused at startup although nothing is pending, and by dump
         // and restore.
@@ -732,6 +750,10 @@ fn schema_must_match_this_release() {
         ));
         assert!(matches!(
             db.restore(&fixture(), RestoreGeneration([6; 16]), 0).await,
+            Err(Error::Migrate(MigrateError::VersionMismatch(1)))
+        ));
+        assert!(matches!(
+            db.check_restore_target().await,
             Err(Error::Migrate(MigrateError::VersionMismatch(1)))
         ));
 

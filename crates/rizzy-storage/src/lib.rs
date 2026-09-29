@@ -45,7 +45,7 @@
 //! | [`lock`] | ADR 0011 "Transactions and concurrency"; ADR 0010 §2 | [`lock_account`]: `pg_advisory_xact_lock` in its own key space, nothing on SQLite |
 //! | [`leader_lock`] | ADR 0010 §2 | [`WorkerLeader`] from [`Database::try_lead_worker`]: one active `worker` per database, a session-level advisory lock on a dedicated PostgreSQL connection outside the pool; on SQLite the writer lock already covers it |
 //! | [`migrate`] | ADR 0011 points 8–10 | Embedded forward-only migrations per engine; the startup rule with the `VACUUM INTO` pre-migration copy (SQLite) or the refusal (PostgreSQL) |
-//! | [`backup`] | ADR 0011 "Backups" | `VACUUM INTO`; the logical [`Dump`] and [`Database::restore`] into an empty database, which draws a new restore generation, opens every account's reconciliation epoch and raises the store-sequence counters |
+//! | [`backup`] | ADR 0011 "Backups"; ADR 0023 | `VACUUM INTO`; the logical [`Dump`], [`Database::check_restore_target`] and [`Database::restore`] into an empty database, which draws a new restore generation, opens every account's reconciliation epoch and raises the store-sequence counters; [`backup::file`], the backup file's canonical writer and strict parser (format version 1, trailing SHA-256, size limits) |
 //! | [`tables`] | ADR 0011 "Backups" | The backed-up tables and columns, in restore order |
 //! | [`meta`] | ADR 0021 §2; THREAT_MODEL INV-59; ADR 0012 §7 | The restore generation and the reconciliation epochs, for the domain crates |
 //! | [`convert`] | ADR 0011 point 4 | `u64`/`u32` ↔ SQL `i64`, refusing values SQL cannot order |
@@ -62,7 +62,7 @@
 //!
 //! `tests/sqlite.rs` runs against real SQLite files in a temporary directory: migrations and
 //! PRAGMAs, schema-to-backup-list drift, the writer lock, writer/reader separation,
-//! serialised writes, the startup copy, the backup → restore round trip, and the worker leader
+//! serialised writes, the startup copy, the backup → file → restore round trip, and the worker leader
 //! (always granted on a writable file, refused read-only). `tests/postgres.rs` runs the same
 //! against PostgreSQL, plus the leader lock (one of two workers leads; a dropped or terminated
 //! connection releases it), when `RIZZY_TEST_POSTGRES_URL` names an empty database;

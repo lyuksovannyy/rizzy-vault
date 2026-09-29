@@ -14,6 +14,12 @@ path = "src/main.rs"
 
 [dependencies]
 rizzy-core.workspace = true
+# Disables core dumps at process start (threat model INV-60, ADR 0024; `src/coredump.rs`): a
+# leaf crate may depend on rustix directly (ADR 0024 point 2). Called on Unix only: rustix has
+# neither call on Windows (ADR 0024 point 3). Declared for every target because
+# `cargo xtask check-deps` reads no quoted `[target.'cfg(..)']` table headers; on Windows it is
+# compiled but unused.
+rustix.workspace = true
 
 [lints]
 workspace = true

@@ -6,6 +6,8 @@
 //! rizzy-vault secrets init [--config <file>]
 //! rizzy-vault secrets rotate [--data-key] [--config <file>]
 //! rizzy-vault backup-secrets --out <file> --passphrase-file <file|-> [--config <file>]
+//! rizzy-vault backup --out <file|-> [--config <file>]
+//! rizzy-vault restore --in <file|-> [--config <file>]
 //! rizzy-vault -h | --help
 //! rizzy-vault -V | --version
 //! ```
@@ -19,6 +21,9 @@
 //! a panic. Exit codes: 0 success, 1 a runtime failure, 2 a usage or configuration error.
 //! Messages go to stderr through `write!` on a locked handle (never `println!`, which would
 //! panic on a closed pipe) and name what failed, never a value.
+//!
+//! Before anything else, [`main`] disables core dumps ([`crate::coredump`], threat model INV-60,
+//! ADR 0024) and exits 1 if that fails, for every command, `--help` and `--version` included.
 
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write as _};
@@ -27,6 +32,7 @@ use std::process::ExitCode;
 
 use crate::admin::{self, Rotate};
 use crate::config::{self, Config, Sources};
+use crate::coredump;
 use crate::server;
 
 /// The help text, printed on `--help` (stdout) and on a usage error (stderr).
@@ -39,6 +45,8 @@ USAGE:
     rizzy-vault secrets init [--config <file>]
     rizzy-vault secrets rotate [--data-key] [--config <file>]
     rizzy-vault backup-secrets --out <file> --passphrase-file <file|-> [--config <file>]
+    rizzy-vault backup --out <file|-> [--config <file>]
+    rizzy-vault restore --in <file|-> [--config <file>]
 
 OPTIONS:
     --roles <list>    Roles to run: api, web, worker (default: all three; or RIZZY_ROLES)
@@ -91,6 +99,20 @@ pub enum Command {
         /// `--config`.
         config: Option<PathBuf>,
     },
+    /// `backup` (ADR 0023 §6).
+    Backup {
+        /// `--out`: a file, or `-` for stdout.
+        out: PathBuf,
+        /// `--config`.
+        config: Option<PathBuf>,
+    },
+    /// `restore` (ADR 0023 §5, §6).
+    Restore {
+        /// `--in`: a file, or `-` for stdin.
+        input: PathBuf,
+        /// `--config`.
+        config: Option<PathBuf>,
+    },
 }
 
 /// A command line that does not parse.
@@ -110,17 +132,27 @@ struct Flags {
     out: Option<PathBuf>,
     /// `--passphrase-file`.
     passphrase_file: Option<PathBuf>,
+    /// `--in`.
+    input: Option<PathBuf>,
 }
 
 /// Which flags a subcommand accepts.
 #[derive(Clone, Copy)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one independent flag per command-line option"
+)]
 struct Allowed {
     /// `--roles`.
     roles: bool,
     /// `--data-key`.
     data_key: bool,
-    /// `--out` and `--passphrase-file`.
-    backup: bool,
+    /// `--out`.
+    out: bool,
+    /// `--passphrase-file`.
+    passphrase_file: bool,
+    /// `--in`.
+    input: bool,
 }
 
 /// Parses the flags in `args` that `allowed` admits; each at most once.
@@ -137,11 +169,14 @@ fn flags(args: &[OsString], allowed: Allowed) -> Result<Flags, UsageError> {
                 out.roles = Some(value.to_owned());
             }
             "--data-key" if allowed.data_key && !out.data_key => out.data_key = true,
-            "--out" if allowed.backup && out.out.is_none() => {
+            "--out" if allowed.out && out.out.is_none() => {
                 out.out = Some(PathBuf::from(it.next().ok_or(UsageError)?));
             }
-            "--passphrase-file" if allowed.backup && out.passphrase_file.is_none() => {
+            "--passphrase-file" if allowed.passphrase_file && out.passphrase_file.is_none() => {
                 out.passphrase_file = Some(PathBuf::from(it.next().ok_or(UsageError)?));
+            }
+            "--in" if allowed.input && out.input.is_none() => {
+                out.input = Some(PathBuf::from(it.next().ok_or(UsageError)?));
             }
             _ => return Err(UsageError),
         }
@@ -154,15 +189,25 @@ fn flags(args: &[OsString], allowed: Allowed) -> Result<Flags, UsageError> {
 /// # Errors
 /// [`UsageError`] for anything but the forms of the module docs.
 pub fn parse(args: &[OsString]) -> Result<Command, UsageError> {
+    /// No flag but `--config`.
+    const NONE: Allowed = Allowed {
+        roles: false,
+        data_key: false,
+        out: false,
+        passphrase_file: false,
+        input: false,
+    };
+    /// `serve`'s flags.
+    const SERVE: Allowed = Allowed {
+        roles: true,
+        ..NONE
+    };
     let first = args
         .first()
         .map(|a| a.to_str().ok_or(UsageError))
         .transpose()?;
-    let none = Allowed {
-        roles: false,
-        data_key: false,
-        backup: false,
-    };
+    // The arguments from position `from` on.
+    let rest = |from: usize| args.get(from..).unwrap_or_default();
     match (
         first,
         args.get(1).map(OsString::as_os_str).and_then(OsStr::to_str),
@@ -170,45 +215,31 @@ pub fn parse(args: &[OsString]) -> Result<Command, UsageError> {
         (Some("-h" | "--help"), _) if args.len() == 1 => Ok(Command::Help),
         (Some("-V" | "--version"), _) if args.len() == 1 => Ok(Command::Version),
         (None | Some("--roles" | "--config"), _) => {
-            let f = flags(
-                args,
-                Allowed {
-                    roles: true,
-                    ..none
-                },
-            )?;
+            let f = flags(args, SERVE)?;
             Ok(Command::Serve {
                 roles: f.roles,
                 config: f.config,
             })
         }
         (Some("serve"), _) => {
-            let f = flags(
-                args.get(1..).unwrap_or_default(),
-                Allowed {
-                    roles: true,
-                    ..none
-                },
-            )?;
+            let f = flags(rest(1), SERVE)?;
             Ok(Command::Serve {
                 roles: f.roles,
                 config: f.config,
             })
         }
-        (Some("migrate"), _) => {
-            let f = flags(args.get(1..).unwrap_or_default(), none)?;
-            Ok(Command::Migrate { config: f.config })
-        }
-        (Some("secrets"), Some("init")) => {
-            let f = flags(args.get(2..).unwrap_or_default(), none)?;
-            Ok(Command::SecretsInit { config: f.config })
-        }
+        (Some("migrate"), _) => Ok(Command::Migrate {
+            config: flags(rest(1), NONE)?.config,
+        }),
+        (Some("secrets"), Some("init")) => Ok(Command::SecretsInit {
+            config: flags(rest(2), NONE)?.config,
+        }),
         (Some("secrets"), Some("rotate")) => {
             let f = flags(
-                args.get(2..).unwrap_or_default(),
+                rest(2),
                 Allowed {
                     data_key: true,
-                    ..none
+                    ..NONE
                 },
             )?;
             Ok(Command::SecretsRotate {
@@ -218,15 +249,36 @@ pub fn parse(args: &[OsString]) -> Result<Command, UsageError> {
         }
         (Some("backup-secrets"), _) => {
             let f = flags(
-                args.get(1..).unwrap_or_default(),
+                rest(1),
                 Allowed {
-                    backup: true,
-                    ..none
+                    out: true,
+                    passphrase_file: true,
+                    ..NONE
                 },
             )?;
             Ok(Command::BackupSecrets {
                 out: f.out.ok_or(UsageError)?,
                 passphrase_file: f.passphrase_file.ok_or(UsageError)?,
+                config: f.config,
+            })
+        }
+        (Some("backup"), _) => {
+            let f = flags(rest(1), Allowed { out: true, ..NONE })?;
+            Ok(Command::Backup {
+                out: f.out.ok_or(UsageError)?,
+                config: f.config,
+            })
+        }
+        (Some("restore"), _) => {
+            let f = flags(
+                rest(1),
+                Allowed {
+                    input: true,
+                    ..NONE
+                },
+            )?;
+            Ok(Command::Restore {
+                input: f.input.ok_or(UsageError)?,
                 config: f.config,
             })
         }
@@ -273,6 +325,11 @@ fn runtime() -> io::Result<tokio::runtime::Runtime> {
 /// The process entry point (module docs).
 #[must_use]
 pub fn main() -> ExitCode {
+    // First, before the command line, the configuration or any secret (INV-60, ADR 0024).
+    if let Err(e) = coredump::disable() {
+        eprint_line(&e.to_string());
+        return ExitCode::FAILURE;
+    }
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let Ok(command) = parse(&args) else {
         let _ignored = write!(io::stderr().lock(), "{USAGE}");
@@ -297,7 +354,9 @@ pub fn main() -> ExitCode {
         Command::Migrate { config }
         | Command::SecretsInit { config }
         | Command::SecretsRotate { config, .. }
-        | Command::BackupSecrets { config, .. } => (config.clone(), None),
+        | Command::BackupSecrets { config, .. }
+        | Command::Backup { config, .. }
+        | Command::Restore { config, .. } => (config.clone(), None),
     };
     let config = match load_config(config_path, roles) {
         Ok(config) if !matches!(command, Command::Serve { .. }) => config,
@@ -332,21 +391,7 @@ pub fn main() -> ExitCode {
         Command::SecretsInit { .. } => admin::secrets_init(&config)
             .map(|()| "secrets file written".to_owned())
             .map_err(|e| e.to_string()),
-        Command::SecretsRotate { data_key, .. } => {
-            let what = if data_key {
-                Rotate::DataKey
-            } else {
-                Rotate::Setup
-            };
-            admin::secrets_rotate(&config, what)
-                .map(|id| match what {
-                    Rotate::Setup => {
-                        format!("new OPAQUE setup {id} added; new registrations use it")
-                    }
-                    Rotate::DataKey => format!("new data key {id} added and marked current"),
-                })
-                .map_err(|e| e.to_string())
-        }
+        Command::SecretsRotate { data_key, .. } => run_secrets_rotate(&config, data_key),
         Command::BackupSecrets {
             out,
             passphrase_file,
@@ -354,6 +399,8 @@ pub fn main() -> ExitCode {
         } => admin::backup_secrets(&config, &out, &passphrase_file)
             .map(|()| "secrets backup written; store it apart from the database backups".to_owned())
             .map_err(|e| e.to_string()),
+        Command::Backup { out, .. } => return run_backup(&config, &out),
+        Command::Restore { input, .. } => return run_restore(&config, &input),
     };
     match outcome {
         Ok(message) if message.is_empty() => ExitCode::SUCCESS,
@@ -368,6 +415,84 @@ pub fn main() -> ExitCode {
             eprint_line(&message);
             ExitCode::FAILURE
         }
+    }
+}
+
+/// `secrets rotate [--data-key]`: adds a new OPAQUE setup, or a new current data key, and
+/// returns the line to print.
+fn run_secrets_rotate(config: &Config, data_key: bool) -> Result<String, String> {
+    let what = if data_key {
+        Rotate::DataKey
+    } else {
+        Rotate::Setup
+    };
+    admin::secrets_rotate(config, what)
+        .map(|id| match what {
+            Rotate::Setup => format!("new OPAQUE setup {id} added; new registrations use it"),
+            Rotate::DataKey => format!("new data key {id} added and marked current"),
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// The exit code of a failed admin command: 2 for a usage error, 1 otherwise.
+fn admin_failure(e: &admin::AdminError) -> ExitCode {
+    eprint_line(&e.to_string());
+    if e.is_usage() {
+        ExitCode::from(2)
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// `backup`. Every message goes to stderr, since stdout may carry the file (`--out -`); the
+/// SHA-256 is printed for the operator to record (ADR 0023 §2).
+fn run_backup(config: &Config, out: &std::path::Path) -> ExitCode {
+    let rt = match runtime() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprint_line(&format!("cannot start the runtime: {}", e.kind()));
+            return ExitCode::FAILURE;
+        }
+    };
+    match rt.block_on(admin::backup(config, out)) {
+        Ok(summary) => {
+            eprint_line(&format!(
+                "database backup written: {} bytes, SHA-256 {}. Record the digest; encrypt the \
+                 file at rest and store it apart from the secrets backup",
+                summary.len,
+                summary.digest_hex()
+            ));
+            ExitCode::SUCCESS
+        }
+        Err(e) => admin_failure(&e),
+    }
+}
+
+/// `restore`: the report and the INV-59 notice on stdout (ADR 0023 §5 step 6).
+fn run_restore(config: &Config, input: &std::path::Path) -> ExitCode {
+    let rt = match runtime() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprint_line(&format!("cannot start the runtime: {}", e.kind()));
+            return ExitCode::FAILURE;
+        }
+    };
+    match rt.block_on(admin::restore(config, input)) {
+        Ok(report) => {
+            let message = format!(
+                "restored {} rows; {} accounts are in a reconciliation epoch under a new restore \
+                 generation.\n{}",
+                report.rows,
+                report.accounts_in_reconciliation,
+                admin::RESTORE_NOTICE
+            );
+            if print_line(&message) {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(e) => admin_failure(&e),
     }
 }
 
@@ -426,6 +551,26 @@ mod tests {
             })
         );
         assert_eq!(parse(&args(&["--version"])), Ok(Command::Version));
+        assert_eq!(
+            parse(&args(&["backup", "--out", "-"])),
+            Ok(Command::Backup {
+                out: PathBuf::from("-"),
+                config: None
+            })
+        );
+        assert_eq!(
+            parse(&args(&[
+                "restore",
+                "--config",
+                "/etc/rv",
+                "--in",
+                "db.rvbackup"
+            ])),
+            Ok(Command::Restore {
+                input: PathBuf::from("db.rvbackup"),
+                config: Some(PathBuf::from("/etc/rv"))
+            })
+        );
     }
 
     #[test]
@@ -439,6 +584,14 @@ mod tests {
             &["secrets", "init", "--data-key"],
             &["backup-secrets", "--out", "b.json"],
             &["backup", "x"],
+            &["backup"],
+            &["backup", "--in", "f"],
+            &["backup", "--out", "a", "--out", "b"],
+            &["backup", "--out", "f", "--passphrase-file", "p"],
+            &["restore"],
+            &["restore", "--out", "f"],
+            &["restore", "--in"],
+            &["backup-secrets", "--in", "f", "--passphrase-file", "p"],
             &["restore", "x"],
             &["--database-url", "postgres://u:p@h/d"],
         ] {

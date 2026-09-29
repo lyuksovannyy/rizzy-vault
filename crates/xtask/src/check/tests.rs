@@ -1076,6 +1076,57 @@ fn openssl_only_where_webauthn_lives() {
     );
 }
 
+// ---- ADR 0024: rustix ---------------------------------------------------------------------
+
+#[test]
+fn rustix_is_declared_only_by_the_allowed_leaf_crates() {
+    let mut t = Tree::current();
+    let cli = t.id("rizzy-cli");
+    let server = t.id("rizzy-server");
+    let rustix = t.external("rustix", "1.1.5");
+    t.edge(cli, rustix, &[Kind::Normal]);
+    t.edge(server, rustix, &[Kind::Normal]);
+    t.declare(cli, "rustix", Kind::Normal, &["process"]);
+    t.declare(server, "rustix", Kind::Normal, &["process"]);
+    assert_eq!(t.run(), []);
+
+    let sync = t.id("rizzy-sync");
+    t.declare(sync, "rustix", Kind::Dev, &["process"]);
+    assert_fires(
+        &t.run(),
+        "ADR 0024 point 2",
+        "rizzy-sync",
+        "declares a dev-dependency `rustix`",
+    );
+    let xtask = t.id("xtask");
+    t.declare(xtask, "rustix", Kind::Normal, &["process"]);
+    assert_fires(
+        &t.run(),
+        "ADR 0024 point 2",
+        "xtask",
+        "only the leaf crates",
+    );
+}
+
+#[test]
+fn rustix_never_ships_in_another_member_through_a_third_party_crate() {
+    let mut t = Tree::current();
+    let xtask = t.id("xtask");
+    let tempfile = t.external("tempfile", "3.20.0");
+    let rustix = t.external("rustix", "1.1.5");
+    t.edge(tempfile, rustix, &[Kind::Normal]);
+    // A dev-only path does not ship.
+    t.edge(xtask, tempfile, &[Kind::Dev]);
+    assert_eq!(t.run(), []);
+    t.edge(xtask, tempfile, &[Kind::Normal]);
+    assert_only(
+        &t.run(),
+        "ADR 0024 point 2",
+        "xtask",
+        "xtask -> tempfile -> rustix",
+    );
+}
+
 // ---- R7, R8, §1, §3, §5 -----------------------------------------------------------------------
 
 #[test]

@@ -10,7 +10,8 @@
 //! [`ServerSecrets`] holds exactly that list in memory, with the generation primitive
 //! ([`ServerSecrets::generate`], `rizzy-vault secrets init`), the rotation primitives
 //! (§5.8 "Rotating `server_setup`", §5.11 "Rotation") and the startup checks against the
-//! database ([`ServerSecrets::check_database`]).
+//! database ([`ServerSecrets::check_database`]) and, before `rizzy-vault restore` loads it,
+//! against a logical backup ([`ServerSecrets::check_dump`], ADR 0023 §5 step 4).
 //!
 //! **What is not here, and why.** No Accepted ADR fixes the file's byte or text layout, only
 //! its version (`format = 1`) and its contents. This crate therefore defines no encoding: it
@@ -29,7 +30,8 @@ use std::collections::BTreeMap;
 use rizzy_core::opaque::{EnumKey, ServerSetup};
 use rizzy_core::rng::CryptoRng;
 use rizzy_core::server_seal::ServerDataKey;
-use rizzy_storage::Database;
+use rizzy_storage::tables::TABLES;
+use rizzy_storage::{Database, Dump, Value};
 use zeroize::Zeroizing;
 
 use crate::error::AuthError;
@@ -95,6 +97,9 @@ pub enum StartupCheckError {
         /// The `data_key_id`.
         data_key_id: u32,
     },
+    /// A logical backup checked by [`ServerSecrets::check_dump`] lacks one of the tables the
+    /// check reads, or holds a value of the wrong kind or range there (an id outside `u32`).
+    DumpShape,
 }
 
 impl fmt::Display for StartupCheckError {
@@ -112,6 +117,9 @@ impl fmt::Display for StartupCheckError {
                     "a sealed row names data key {data_key_id}, which the secrets lack"
                 )
             }
+            Self::DumpShape => f.write_str(
+                "the backup's OPAQUE setup, credential or TOTP rows do not have the expected shape",
+            ),
         }
     }
 }
@@ -378,5 +386,90 @@ impl ServerSecrets {
         }
         tx.commit().await?;
         Ok(Ok(()))
+    }
+
+    /// The checks 1–3 of [`ServerSecrets::check_database`], on a logical backup before
+    /// `rizzy-vault restore` loads it (ADR 0023 §5 step 4: "require the dump's
+    /// `auth_opaque_setups` to match it, as the startup check does"). Pure: it reads the dump's
+    /// `auth_opaque_setups`, `auth_credentials` and `auth_totp_credentials` rows and writes
+    /// nothing. Login states, the other sealed rows of check 3, are not in a backup
+    /// (`rizzy_storage::tables::NOT_BACKED_UP`).
+    ///
+    /// # Errors
+    ///
+    /// [`StartupCheckError`] when the restore must be refused: a setup mismatch, OPAQUE records
+    /// with none of the loaded setups recorded (a fresh secrets file next to an old backup), a
+    /// TOTP row naming a data key the file lacks, or [`StartupCheckError::DumpShape`] when one
+    /// of those tables is missing or a value there is not the integer or blob it must be.
+    pub fn check_dump(&self, dump: &Dump) -> Result<(), StartupCheckError> {
+        /// The rows of table `name`, and the index of each named column.
+        fn table<'d, const N: usize>(
+            dump: &'d Dump,
+            name: &str,
+            columns: [&str; N],
+        ) -> Result<(&'d [Vec<Value>], [usize; N]), StartupCheckError> {
+            let spec = TABLES
+                .iter()
+                .find(|s| s.name == name)
+                .ok_or(StartupCheckError::DumpShape)?;
+            let mut indexes = [0usize; N];
+            for (slot, column) in indexes.iter_mut().zip(columns) {
+                *slot = spec
+                    .columns
+                    .iter()
+                    .position(|c| c.name == column)
+                    .ok_or(StartupCheckError::DumpShape)?;
+            }
+            let rows = dump
+                .tables
+                .iter()
+                .find(|t| t.table == name)
+                .ok_or(StartupCheckError::DumpShape)?;
+            Ok((rows.rows.as_slice(), indexes))
+        }
+        /// The integer at `index` of `row`.
+        fn int(row: &[Value], index: usize) -> Result<i64, StartupCheckError> {
+            match row.get(index) {
+                Some(Value::Integer(v)) => Ok(*v),
+                _ => Err(StartupCheckError::DumpShape),
+            }
+        }
+
+        // 1. Every loaded setup the dump records must match; 2. OPAQUE records need one.
+        let (setups, [id_col, hash_col]) = table(
+            dump,
+            "auth_opaque_setups",
+            ["setup_id", "ake_public_key_hash"],
+        )?;
+        let mut recorded_any = false;
+        for row in setups {
+            let id = int(row, id_col)?;
+            let Some(Value::Blob(hash)) = row.get(hash_col) else {
+                return Err(StartupCheckError::DumpShape);
+            };
+            let loaded = u32::try_from(id)
+                .ok()
+                .and_then(|id| Some((id, self.setup(id)?)));
+            if let Some((setup_id, setup)) = loaded {
+                if hash.as_slice() != setup.public_key_hash().as_slice() {
+                    return Err(StartupCheckError::SetupMismatch { setup_id });
+                }
+                recorded_any = true;
+            }
+        }
+        let (credentials, _) = table(dump, "auth_credentials", ["setup_id"])?;
+        if !credentials.is_empty() && !recorded_any {
+            return Err(StartupCheckError::NoRecordedSetup);
+        }
+        // 3. Every data key a sealed TOTP row names must be loaded.
+        let (totp, [key_col]) = table(dump, "auth_totp_credentials", ["data_key_id"])?;
+        for row in totp {
+            let id = int(row, key_col)?;
+            let data_key_id = u32::try_from(id).map_err(|_| StartupCheckError::DumpShape)?;
+            if !self.data_keys.contains_key(&data_key_id) {
+                return Err(StartupCheckError::MissingDataKey { data_key_id });
+            }
+        }
+        Ok(())
     }
 }

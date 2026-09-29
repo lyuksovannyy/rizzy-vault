@@ -61,14 +61,20 @@ fn private_new() -> OpenOptions {
 }
 
 /// Writes `bytes` to a new file at `path` with mode 0600, and flushes it to disk. Fails if
-/// `path` exists.
+/// `path` exists, which is then left untouched. If the file was created but writing or
+/// flushing it fails (a full disk, say), the partial file is removed, so a failed write never
+/// leaves a truncated secrets file or backup behind (ADR 0023 §4).
 ///
 /// # Errors
 /// The I/O error.
 pub fn write_new_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = private_new().open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    if written.is_err() {
+        drop(file);
+        let _cleanup = fs::remove_file(path);
+    }
+    written
 }
 
 /// Replaces the file at `path` with `bytes` atomically: writes `<path>.new` with mode 0600,

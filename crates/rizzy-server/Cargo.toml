@@ -56,6 +56,11 @@ base64ct.workspace = true
 # Wipes the secrets file's bytes, the passphrase and the bearer token text after use (CLAUDE.md:
 # secret types zeroize). The version rizzy-core pins; no new crate.
 zeroize.workspace = true
+# Disables core dumps at process start (threat model INV-60, ADR 0024; `coredump`): a leaf crate
+# may depend on rustix directly (ADR 0024 point 2). Called on Unix only: rustix has neither call
+# on Windows (ADR 0024 point 3). Declared for every target because `cargo xtask check-deps` reads
+# no quoted `[target.'cfg(..)']` table headers; on Windows it is compiled but unused.
+rustix.workspace = true
 
 [dev-dependencies]
 # `ServiceExt::oneshot`: drives the router in-process in `tests/http`. Already in the graph

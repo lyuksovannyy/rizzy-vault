@@ -16,11 +16,13 @@ publish = false
 [workspace.dependencies]
 rizzy-core = { path = "crates/rizzy-core" }
 rizzy-proto = { path = "crates/rizzy-proto" }
+rizzy-client = { path = "crates/rizzy-client" }
 rizzy-bus = { path = "crates/rizzy-bus" }
 rizzy-sync = { path = "crates/rizzy-sync" }
 rizzy-storage = { path = "crates/rizzy-storage" }
 rizzy-domain-auth = { path = "crates/rizzy-domain-auth" }
 rizzy-domain-vault = { path = "crates/rizzy-domain-vault" }
+rizzy-import = { path = "crates/rizzy-import" }
 
 # Cryptography. Exact pins and feature sets from ADR 0009 ("Allowed crate families" and
 # "Required feature sets"); docs/CRYPTO.md §3. Bumps are reviewed like crypto changes and are
@@ -77,6 +79,12 @@ tower = { version = "0.5.3", default-features = false, features = ["util"] }
 # OS randomness for the leaf crates only (ADR 0009 "Allowed crate families": `getrandom` 0.4,
 # feature `sys_rng` for `SysRng`; ADR 0016 R2 (c)). The version already in Cargo.lock.
 getrandom = { version = "0.4.3", default-features = false, features = ["sys_rng"] }
+# Core-dump disabling at process start (threat model INV-60; ADR 0024): `setrlimit`/`getrlimit`
+# of `RLIMIT_CORE` and, on Linux and Android, `PR_SET_DUMPABLE` through rustix's safe wrappers.
+# Not cryptography. Exact pin, `default-features = false` (no `std`), feature `process` only
+# (ADR 0024 point 1). Leaf crates only: `rizzy-server` and `rizzy-cli` in M1, later `rizzy-ffi`
+# and `rizzy-ffi-cpp` (ADR 0024 point 2, checked by `cargo xtask check-deps`).
+rustix = { version = "=1.1.5", default-features = false, features = ["process"] }
 
 # Tooling and tests. Not cryptography.
 # serde_json: `xtask` reads `cargo metadata` JSON with it (ADR 0016 §5), and `rizzy-core`'s tests

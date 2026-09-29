@@ -3,28 +3,31 @@
 //!
 //! It runs by default (`cargo test`), on real `SQLite` files in a temporary directory, through the
 //! same functions the `rizzy-vault` binary runs: `secrets init`, `backup-secrets`, the startup
-//! of the `api`/`worker` roles ([`open_services`]), and `rizzy-storage`'s logical dump and
-//! restore.
+//! of the `api`/`worker` roles ([`open_services`]), and `backup` and `restore` with the backup
+//! file of ADR 0023 ([`admin::backup`], [`admin::restore`]).
 //!
 //! 1. **Populate.** `secrets init` writes the secrets file; a populated instance is loaded (two
 //!    accounts with credentials, TOTP, devices, a revocation, a vault with ops and a
 //!    snapshot), and its reconciliation epochs are closed, as on a settled instance. The
 //!    server starts on it: the startup checks pass.
-//! 2. **Back up**, next to the running server: the logical dump on a read-only reader (ADR 0010
-//!    §2: the backup reader takes no writer lock), and `backup-secrets` to an encrypted file.
-//!    The dump holds none of the secrets file's secrets, decoded or as text (INV-50).
+//! 2. **Back up**, next to the running server: `rizzy-vault backup --out <file>` on a read-only
+//!    reader (ADR 0010 §2: the backup reader takes no writer lock), and `backup-secrets` to an
+//!    encrypted file. The backup file holds none of the secrets file's secrets, decoded or as
+//!    text (INV-50). `restore` refuses to run next to the running server (writer lock).
 //! 3. **Stop** the server and take the native backup: a copy of the data directory.
 //! 4. **Wipe** the data directory and the secrets file.
-//! 5. **Restore** the secrets from the encrypted backup (byte for byte) and the database from
-//!    the dump into an empty database.
+//! 5. **Restore** the secrets from the encrypted backup (byte for byte), then the database with
+//!    `rizzy-vault restore --in <file>` into an empty database.
 //! 6. **Start again.** The startup checks pass; the database reads back exactly as backed up;
 //!    the restore generation is new (ADR 0021 §2) and every account is in a reconciliation
 //!    epoch of that generation (INV-59).
-//! 7. **Refusals.** A second restore into the restored (non-empty) database, a fresh secrets
-//!    file next to the restored database (CRYPTO.md §5.8), and a wrong backup passphrase.
+//! 7. **Refusals.** A second `restore` into the restored (non-empty) database; a fresh secrets
+//!    file next to the restored database (CRYPTO.md §5.8), both at startup and by `restore`
+//!    into an empty database, which it leaves empty (ADR 0023 §5 step 4); a damaged backup
+//!    file; and a wrong backup passphrase.
 //! 8. **The native copy**, restored in place, starts, but keeps the old restore generation and
-//!    opens no reconciliation epoch. This pins the warning of the operator docs: until
-//!    `rizzy-vault restore` exists, a native restore does not give INV-59's protections.
+//!    opens no reconciliation epoch. This pins the warning of the operator docs: a native
+//!    restore does not give INV-59's protections, `rizzy-vault restore` does.
 //!
 //! **Not in this fast form** (ADR 0011's full drill, reported as open): simulated clients that
 //! change a password, enrol and revoke devices and rotate keys after the backup, then reconnect
@@ -46,9 +49,11 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use rizzy_domain_auth::StartupCheckError;
 use rizzy_server::config::{self, Config, Sources};
 use rizzy_server::server::{ServeError, Services, open_services};
 use rizzy_server::{admin, fsutil, secrets_backup, secrets_file};
+use rizzy_storage::backup::file;
 use rizzy_storage::meta::{end_reconciliation_epoch, reconciliation_epochs, restore_generation};
 use rizzy_storage::tables::TABLES;
 use rizzy_storage::{
@@ -488,14 +493,31 @@ fn backup_wipe_restore_drill() {
         let services = open_services(&config).await.unwrap();
         assert_eq!(restore_state(&services.db).await, (before, Vec::new()));
 
-        // 2. Back up next to the running server: the logical dump on a read-only reader, and
-        //    the encrypted secrets backup.
-        let reader = Database::open_sqlite_read_only(&SqliteOptions::new(sqlite_path(&config)))
-            .await
-            .unwrap();
-        let backup = reader.dump().await.unwrap();
-        reader.close().await;
+        // 2. Back up next to the running server: `backup` on a read-only reader, and the
+        //    encrypted secrets backup. `restore` cannot run next to it.
+        let backup_path = root.join("db.rvbackup");
+        let summary = admin::backup(&config, &backup_path).await.unwrap();
+        let backup_file = std::fs::read(&backup_path).unwrap();
+        assert_eq!(summary.len, backup_file.len());
+        assert_eq!(
+            summary.digest.as_slice(),
+            &backup_file[backup_file.len() - file::DIGEST_LEN..]
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&backup_path)
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "the database backup is private");
+        }
+        let backup = file::parse(&backup_file).unwrap().dump;
         assert_eq!(backup.schema_version, schema_version());
+        assert!(matches!(
+            admin::restore(&config, &backup_path).await,
+            Err(admin::AdminError::Lock(_))
+        ));
         let backed_up_rows: usize = backup.tables.iter().map(|t| t.rows.len()).sum();
         assert!(backed_up_rows > 20, "the populated instance is backed up");
         let passphrase_file = root.join("passphrase");
@@ -535,6 +557,10 @@ fn backup_wipe_restore_drill() {
                 }
             }
         }
+        // And in the file's bytes as a whole, across value boundaries.
+        for needle in &needles {
+            assert!(!contains(&backup_file, needle), "the backup file");
+        }
 
         // 3. Stop, and take the native backup: the whole data directory, server stopped.
         stop(services).await;
@@ -555,21 +581,15 @@ fn backup_wipe_restore_drill() {
         let opened = secrets_backup::open(&file, PASSPHRASE.trim_end()).unwrap();
         assert_eq!(opened.expose_secret(), original_secrets.as_slice());
         fsutil::write_new_private(&secrets_path, opened.expose_secret()).unwrap();
-        let after = RestoreGeneration([0x22; 16]);
-        {
-            let db = open_writer(&config).await;
-            let report = db.restore(&backup, after, 9_000).await.unwrap();
-            assert_eq!(report.rows, u64::try_from(backed_up_rows).unwrap());
-            assert_eq!(report.accounts_in_reconciliation, ACCOUNTS.len() as u64);
-            db.close().await;
-        }
+        let report = admin::restore(&config, &backup_path).await.unwrap();
+        assert_eq!(report.rows, u64::try_from(backed_up_rows).unwrap());
+        assert_eq!(report.accounts_in_reconciliation, ACCOUNTS.len() as u64);
 
         // 6. Start again: the checks pass, the data is back, a new generation, every account
         //    in a reconciliation epoch of that generation.
         let services = open_services(&config).await.unwrap();
-        let (generation, epochs) = restore_state(&services.db).await;
-        assert_eq!(generation, after);
-        assert_ne!(generation, before);
+        let (after, epochs) = restore_state(&services.db).await;
+        assert_ne!(after, before);
         let mut accounts: Vec<[u8; 16]> = epochs.iter().map(|(a, _)| *a).collect();
         accounts.sort_unstable();
         assert_eq!(accounts, ACCOUNTS.map(|a| [a; 16]).to_vec());
@@ -578,15 +598,12 @@ fn backup_wipe_restore_drill() {
         stop(services).await;
 
         // 7. Refusals.
-        {
-            let db = open_writer(&config).await;
-            assert!(matches!(
-                db.restore(&backup, RestoreGeneration([0x33; 16]), 10_000)
-                    .await,
-                Err(rizzy_storage::Error::Restore(RestoreError::TargetNotEmpty))
-            ));
-            db.close().await;
-        }
+        assert!(matches!(
+            admin::restore(&config, &backup_path).await,
+            Err(admin::AdminError::Storage(rizzy_storage::Error::Restore(
+                RestoreError::TargetNotEmpty
+            )))
+        ));
         let fresh_dir = root.join("fresh-secrets");
         std::fs::create_dir_all(&fresh_dir).unwrap();
         let fresh = server_config(&data, &fresh_dir.join("secrets.json"));
@@ -594,6 +611,34 @@ fn backup_wipe_restore_drill() {
         assert!(matches!(
             open_services(&fresh).await,
             Err(ServeError::SecretsMismatch(_))
+        ));
+        // `restore` checks the secrets before it loads anything, and leaves the target empty.
+        let empty_dir = root.join("empty-data");
+        std::fs::create_dir_all(&empty_dir).unwrap();
+        let fresh_empty = server_config(&empty_dir, &fresh_dir.join("secrets.json"));
+        assert!(matches!(
+            admin::restore(&fresh_empty, &backup_path).await,
+            Err(admin::AdminError::SecretsMismatch(
+                StartupCheckError::SetupMismatch { .. }
+            ))
+        ));
+        {
+            let db = open_writer(&fresh_empty).await;
+            db.check_restore_target().await.unwrap();
+            db.close().await;
+        }
+        // A damaged file is refused by its digest, before the secrets or the database.
+        let damaged_path = root.join("damaged.rvbackup");
+        let mut damaged = backup_file.clone();
+        let middle = damaged.len() / 2;
+        damaged[middle] ^= 0x40;
+        std::fs::write(&damaged_path, &damaged).unwrap();
+        let empty = server_config(&empty_dir, &secrets_path);
+        assert!(matches!(
+            admin::restore(&empty, &damaged_path).await,
+            Err(admin::AdminError::BackupFile(
+                file::FileError::DigestMismatch
+            ))
         ));
         assert!(matches!(
             secrets_backup::open(&file, "not the passphrase"),

@@ -1,6 +1,7 @@
 //! The `rizzy-vault` command line, run as a process: `--version`, usage and configuration
-//! errors (exit 2, never a panic, even on an argument that is not UTF-8), and the `secrets`
-//! and `backup-secrets` admin commands against a temporary directory.
+//! errors (exit 2, never a panic, even on an argument that is not UTF-8), and the `secrets`,
+//! `backup-secrets`, `migrate`, `backup` and `restore` admin commands against a temporary
+//! directory.
 
 #![expect(
     clippy::unwrap_used,
@@ -198,6 +199,137 @@ fn migrate_creates_the_database() {
             .unwrap()
             .contains("nothing to migrate")
     );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Runs the binary with `stdin` on its standard input.
+fn rizzy_with_stdin(args: &[&str], env: &[(&str, &Path)], stdin: &[u8]) -> Output {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    let mut child = Command::new(BIN)
+        .env_clear()
+        .args(args)
+        .envs(env.iter().copied())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(stdin).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// `backup` and `restore` (ADR 0023 §5, §6) as the operator runs them: to and from a file and a
+/// pipe, the digest on stderr, never over an existing file, into an empty database only, and
+/// `PostgreSQL` restores refused as a usage error.
+#[test]
+fn backup_and_restore_commands() {
+    use rizzy_storage::backup::file;
+
+    let dir = temp_dir("backup");
+    let data = dir.join("data");
+    let restored = dir.join("restored");
+    let secrets_dir = dir.join("secrets");
+    for d in [&data, &restored, &secrets_dir] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let secrets = secrets_dir.join("secrets.json");
+    let env = [
+        ("RIZZY_DATA_DIR", data.as_path()),
+        ("RIZZY_SECRETS_FILE", secrets.as_path()),
+    ];
+    let restored_env = [
+        ("RIZZY_DATA_DIR", restored.as_path()),
+        ("RIZZY_SECRETS_FILE", secrets.as_path()),
+    ];
+    assert!(rizzy(&["secrets", "init"], &env).status.success());
+    assert!(rizzy(&["migrate"], &env).status.success());
+
+    // To stdout (a pipe here): the file on stdout, the digest on stderr.
+    let out = rizzy(&["backup", "--out", "-"], &env);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(out.status.success(), "{stderr}");
+    let piped = out.stdout;
+    let parsed = file::parse(&piped).unwrap();
+    let summary = rizzy_server::admin::BackupSummary {
+        len: piped.len(),
+        digest: piped[piped.len() - file::DIGEST_LEN..].try_into().unwrap(),
+    };
+    let digest = summary.digest_hex();
+    assert_eq!(digest.len(), 64);
+    assert!(stderr.contains(&format!("SHA-256 {digest}")), "{stderr}");
+
+    // To a file: mode 0600, the same dump; never over an existing file.
+    let backup = dir.join("db.rvbackup");
+    let out = rizzy(&["backup", "--out", backup.to_str().unwrap()], &env);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.stdout.is_empty());
+    let written = std::fs::read(&backup).unwrap();
+    assert_eq!(file::parse(&written).unwrap().dump, parsed.dump);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&backup).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let out = rizzy(&["backup", "--out", backup.to_str().unwrap()], &env);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(std::fs::read(&backup).unwrap(), written);
+
+    // A damaged file is refused before anything is loaded.
+    let mut damaged = written.clone();
+    let middle = damaged.len() / 2;
+    damaged[middle] ^= 1;
+    let out = rizzy_with_stdin(&["restore", "--in", "-"], &restored_env, &damaged);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("SHA-256 does not match")
+    );
+
+    // From stdin into an empty database: the report and the INV-59 notice.
+    let out = rizzy_with_stdin(&["restore", "--in", "-"], &restored_env, &piped);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("restored 0 rows"), "{stdout}");
+    assert!(
+        stdout.contains("AR-19") && stdout.contains("INV-59"),
+        "{stdout}"
+    );
+
+    // A second restore into the now non-empty database is refused.
+    let out = rizzy(
+        &["restore", "--in", backup.to_str().unwrap()],
+        &restored_env,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8(out.stderr).unwrap().contains("not empty"));
+
+    // PostgreSQL: no instance lock in this build, so a usage error (ADR 0023 §5 step 1). The
+    // URL is never printed.
+    let url = Path::new("postgres://rizzy:hunter2@localhost/rizzy");
+    let out = rizzy(
+        &["restore", "--in", backup.to_str().unwrap()],
+        &[
+            ("RIZZY_DATA_DIR", restored.as_path()),
+            ("RIZZY_SECRETS_FILE", secrets.as_path()),
+            ("RIZZY_DATABASE_URL", url),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("instance lock"), "{stderr}");
+    assert!(!stderr.contains("hunter2"));
+
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

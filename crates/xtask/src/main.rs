@@ -37,6 +37,9 @@
 //!   by `rizzy-core`'s own dependency entries, and none of the forbidden ones anywhere; every
 //!   member declares those crypto crates, `blake2` and `poly1305` included, with
 //!   `default-features = false` in every dependency kind, and never turns `default` back on.
+//! - **ADR 0024** `rustix` (core dumps off, INV-60) only as a direct dependency of the leaf
+//!   crates `rizzy-server`, `rizzy-cli`, `rizzy-ffi` and `rizzy-ffi-cpp`, and in no other
+//!   member's normal or build closure.
 //! - **ADR 0019 §4.1** no `unsafe` keyword token in any first-party `.rs` file, comments and
 //!   literals excluded, including `unsafe` that `forbid(unsafe_code)` can miss in a macro's
 //!   input ([`mod@unsafe_scan`]).
@@ -176,7 +179,7 @@ fn check_deps() -> ExitCode {
         let _ = writeln!(
             io::stdout().lock(),
             "check-deps: ok ({members} workspace crates, {sources} first-party .rs files; \
-             ADR 0016 R1–R8, ADR 0009, ADR 0019 §4.1)"
+             ADR 0016 R1–R8, ADR 0009, ADR 0019 §4.1, ADR 0024)"
         );
         return ExitCode::SUCCESS;
     }

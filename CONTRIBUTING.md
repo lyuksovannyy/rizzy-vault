@@ -36,7 +36,7 @@ CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs exactly these, 
 cargo fmt --all -- --check
 cargo lint                          # alias: clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked     # CI runs this on Linux, macOS and Windows
-cargo check-wasm                    # alias: check -p rizzy-core -p rizzy-sync --target wasm32-unknown-unknown --locked
+cargo check-wasm                    # alias: check -p rizzy-core -p rizzy-sync -p rizzy-proto -p rizzy-client -p rizzy-import --target wasm32-unknown-unknown --locked
 cargo deny check                    # advisories, licenses, bans, sources (deny.toml)
 cargo xtask check-deps              # crate-boundary and dependency rules (ADR 0016 §5, R1–R8; ADR 0009 feature sets, crypto crates with default-features = false); no unsafe keyword in first-party .rs files (ADR 0019 §4.1)
 cargo xtask check-clippy            # clippy.toml entries clippy ignores ("found a module", ADR 0016 §5)

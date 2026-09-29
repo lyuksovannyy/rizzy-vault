@@ -19,6 +19,10 @@ x-hardening: &hardening
   read_only: true
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
+  # Defence in depth for INV-60: the binary already sets its own core limit to 0 and refuses to
+  # start otherwise (ADR 0024).
+  ulimits:
+    core: 0
   user: "65532:65532"
 
 services:
@@ -124,6 +128,24 @@ services:
     volumes:
       - secrets:/run/rizzy-secrets:ro
       - ${RIZZY_SECRETS_BACKUP_DIR:-./backup-secrets}:/backup
+
+  # Loads a `rizzy-vault backup` file from standard input into an EMPTY database (ADR 0023 §5;
+  # guide §9), with the server stopped: it takes the SQLite writer lock, and reads the secrets
+  # only to check that they belong to the backup. `rizzy-vault backup` itself needs no service:
+  # it runs next to the server with `docker compose exec` (guide §8).
+  #   age -d rizzy-db-....rvbackup.age | docker compose --profile admin run --rm -T restore
+  restore:
+    <<: *hardening
+    image: ${RIZZY_IMAGE:-localhost/rizzy-vault:dev}
+    profiles: [admin]
+    command: ["restore", "--in", "-"]
+    network_mode: none
+    stdin_open: true
+    volumes:
+      - data:/data
+      - secrets:/run/rizzy-secrets:ro
+    tmpfs:
+      - /tmp:size=64m,mode=1777
 
   # ---- PostgreSQL (profile C) — NOT for production in this build ----------------------------
   # ADR 0010 §4 / ADR 0011: PostgreSQL is supported from M3. This build runs every M1 role on it

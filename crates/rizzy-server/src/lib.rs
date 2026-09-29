@@ -14,7 +14,8 @@
 //!   the pre-migration copy ([`worker`]).
 //!
 //! It also carries the M1 admin subcommands the ADRs specify ([`admin`]): `secrets init`,
-//! `secrets rotate [--data-key]`, `backup-secrets`, `migrate`.
+//! `secrets rotate [--data-key]`, `backup-secrets`, `migrate`, and `backup` and `restore` with
+//! the logical backup file of ADR 0023 (`rizzy_storage::backup::file`).
 //!
 //! # Module map
 //!
@@ -32,6 +33,7 @@
 //! | [`log`] | INV-48 | Allow-listed structured log lines |
 //! | [`fsutil`] | ADR 0010 §4 | Bounded reads, 0600 files, atomic replace, the inside-the-data-directory check |
 //! | [`sys`] | ADR 0009 "RNG rules"; ADR 0016 R2 | The OS CSPRNG and the clock |
+//! | [`coredump`] | INV-60; ADR 0024 | Core dumps off at process start, read back |
 //!
 //! # Contract
 //!
@@ -42,14 +44,18 @@
 //!   the tokens redact their `Debug`; bodies and headers are never logged.
 //! - **Untrusted input is bounded and parsed without panics**: request bodies (size limits,
 //!   `rizzy-proto`'s bounded types), request headers ([`http::headers`]), the configuration
-//!   file and the secrets file. Fuzz targets: `server_headers`, `server_config`,
-//!   `server_secrets_file`; the request bodies are `rizzy-proto`'s `proto_json`.
+//!   file, the secrets file and the database backup file. Fuzz targets: `server_headers`,
+//!   `server_config`, `server_secrets_file`; the request bodies are `rizzy-proto`'s
+//!   `proto_json`; the backup file is `rizzy-storage`'s `db_backup_parse`.
 //! - **Crate wiring** (ADR 0016 §3 notes, R2, R5): internal dependencies are the domain crates,
 //!   `rizzy-storage` and `rizzy-bus`; the `rizzy-core` and `rizzy-proto` items the auth
 //!   domain's API is written in come through its `types` module, which names them one by one
 //!   (whether this crate should depend on the shared crates directly is an ADR 0016 §3 question
 //!   for the owner). No sqlx. As a leaf it depends on getrandom directly and passes
 //!   `UnwrapErr(SysRng)` to the domains ([`sys`]).
+//! - **Core dumps off** (INV-60, ADR 0024): [`cli::main`] disables them before anything else
+//!   and refuses to start if the read-back fails ([`coredump`]). As a leaf it may depend on
+//!   rustix directly (ADR 0024 point 2).
 //!
 //! # Wire and format details this crate decides
 //!
@@ -65,9 +71,8 @@
 //!
 //! # Not in this build (reported to the owner)
 //!
-//! - `rizzy-vault backup` and `restore`: the logical backup file format has no ADR ([`admin`]).
-//! - Core dumps are not disabled (INV-60): the safe wrappers it names are not an admitted
-//!   dependency ([`server`]).
+//! - `rizzy-vault restore` into `PostgreSQL`: ADR 0023 §5's instance lock is not implemented,
+//!   so it is refused with a usage error ([`admin`]).
 //! - The `embed-web` feature and the web vault (M1 step 5), the admin listener and API (M3),
 //!   `notify`, `icons` (M3) and `smtp` (M6), and key rotation: the commit endpoint refuses a
 //!   state that rotates a key, so the revocation of CRYPTO.md §11.8 step 3 and the default
@@ -82,12 +87,13 @@
 //! before their body is read; the account endpoints' session gating, strict bodies and
 //! recovery refusals and rate limit; and, over a bound localhost port, the header-read timeout and a
 //! shutdown that a stalled request cannot hold open. `tests/cli.rs` runs the binary:
-//! `--version`, usage errors, configuration errors, and the `secrets` commands.
+//! `--version`, usage errors, configuration errors, the `secrets` commands, and `backup` and
+//! `restore` through a pipe and a file with their refusals.
 //! `tests/drill.rs` is the operator's backup → wipe → restore drill in its fast form (the operator
-//! guide, `docs/self-hosting.md` §10): secrets, a logical dump next to the running server, the
-//! encrypted secrets backup, a restore into an empty database with its new restore generation and
-//! reconciliation epochs, and the refusals; it also pins that a native file copy restored in place
-//! opens no epoch.
+//! guide, `docs/self-hosting.md` §10): secrets, `backup` to a file next to the running server,
+//! the encrypted secrets backup, `restore` of that file into an empty database with its new
+//! restore generation and reconciliation epochs, and the refusals; it also pins that a native
+//! file copy restored in place opens no epoch.
 //!
 //! **Not tested here yet:** the end-to-end flow (signup, login, device authentication, a signed
 //! upload and a Fetch with `rizzy-core`'s client-side functions, signature and replay
@@ -109,6 +115,7 @@ pub mod admin;
 pub mod bridge;
 pub mod cli;
 pub mod config;
+pub mod coredump;
 pub mod fsutil;
 pub mod http;
 pub mod log;

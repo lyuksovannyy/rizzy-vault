@@ -50,10 +50,25 @@
 #                      headers, X-Forwarded-For (CRYPTO.md §5.10; threat model §7.6 "S")
 #   server_config      rizzy-server's configuration file parser and validation (ADR 0010)
 #   server_secrets_file rizzy-server's secrets file reader and writer (CRYPTO.md §5.11)
+#   db_backup_parse    rizzy-storage's logical backup file parser and writer (ADR 0023 §3):
+#                      arbitrary bytes, with and without a valid digest, and generated dumps
+#                      round-tripped
+#   client_export      rizzy-client's export-file JSON reader: the whole-file cap, the strict
+#                      parser and the header checks (§11.14)
+#   import_bitwarden   rizzy-import's Bitwarden JSON importer and its JSON reader (ADR 0002
+#                      point 2; threat model A16)
+#   import_1pux        rizzy-import's 1PUX importer: the zip reader, the DEFLATE decoder and
+#                      its size cap, the `export.data` mapping
+#   import_keepass_xml rizzy-import's KeePass XML importer and its XML reader (no DTDs, no
+#                      entities)
+#   import_csv         rizzy-import's generic CSV importer and its CSV reader
+#   import_chrome_csv  rizzy-import's Chrome CSV importer
+#   import_firefox_csv rizzy-import's Firefox CSV importer
 #
-# Not covered yet: the share-URL fragment parser (M5, not written) and the export file's JSON
-# document reader (§11.14, not written). `export_fields` covers the field decoders the reader
-# will call; it gets its own target when it is written.
+# The `import_*` targets share `fuzz_targets/import_common/mod.rs` (the checks on an import
+# result and a counting RNG), included with `#[path]`; it is not a target.
+#
+# Not covered yet: the share-URL fragment parser (M5, not written).
 [package]
 name = "rizzy-fuzz"
 version = "0.0.0"
@@ -90,6 +105,16 @@ rizzy-domain-auth = { path = "../crates/rizzy-domain-auth" }
 # `server_secrets_file`). A path crate; its external crates (axum, hyper, tokio and their trees)
 # are the ones the main workspace already locks and `cargo deny` already checks.
 rizzy-server = { path = "../crates/rizzy-server" }
+# The logical backup file's parser and writer and the table list (`db_backup_parse`). A path
+# crate already in this graph through the two above; its external crates (sqlx, sha2) are the
+# ones the main workspace already locks.
+rizzy-storage = { path = "../crates/rizzy-storage" }
+# The client flows' export reader (`client_export`). A path crate over rizzy-core, rizzy-sync
+# and rizzy-proto, all already here; no new external crate.
+rizzy-client = { path = "../crates/rizzy-client" }
+# The importers (the `import_*` targets). A path crate whose only dependencies are rizzy-core
+# and zeroize, so no new crate in this graph.
+rizzy-import = { path = "../crates/rizzy-import" }
 
 # One [[bin]] per target. `test`, `doc` and `bench` are off because a libFuzzer entry point
 # (`#![no_main]` with `fuzz_target!`) is not a test, has no API to document and is not a benchmark.
@@ -257,6 +282,62 @@ bench = false
 [[bin]]
 name = "server_secrets_file"
 path = "fuzz_targets/server_secrets_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "db_backup_parse"
+path = "fuzz_targets/db_backup_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import_bitwarden"
+path = "fuzz_targets/import_bitwarden.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_export"
+path = "fuzz_targets/client_export.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import_1pux"
+path = "fuzz_targets/import_1pux.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import_keepass_xml"
+path = "fuzz_targets/import_keepass_xml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import_csv"
+path = "fuzz_targets/import_csv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import_chrome_csv"
+path = "fuzz_targets/import_chrome_csv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import_firefox_csv"
+path = "fuzz_targets/import_firefox_csv.rs"
 test = false
 doc = false
 bench = false
