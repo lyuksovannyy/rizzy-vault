@@ -1,0 +1,54 @@
+# Clippy configuration for a no-I/O crate (ADR 0016 R1, API side; §5 "the clippy lists").
+#
+# A crate-level clippy.toml replaces the root one; it does not merge with it. So this file
+# repeats every key of the root clippy.toml, then adds the R1 lists. Entries name items, never
+# modules: clippy 1.94.1 ignores a module path with the warning "found a module".
+# `cargo xtask check-deps` checks that this file repeats the root keys and that its lists equal
+# ADR 0016 §5's set (crates/xtask/src/rules.rs). `cargo xtask check-clippy` fails on any clippy
+# warning about an entry. Change the lists in the ADR first, then here and in rules.rs.
+
+# Repeated from the root clippy.toml.
+msrv = "1.94"
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-print-in-tests = true
+allow-panic-in-tests = true
+
+disallowed-types = [
+  { path = "std::fs::File", reason = "ADR 0016 R1: no filesystem I/O in a no-I/O crate" },
+  { path = "std::fs::OpenOptions", reason = "ADR 0016 R1: no filesystem I/O in a no-I/O crate" },
+  { path = "std::fs::DirBuilder", reason = "ADR 0016 R1: no filesystem I/O in a no-I/O crate" },
+  { path = "std::fs::ReadDir", reason = "ADR 0016 R1: no filesystem I/O in a no-I/O crate" },
+  { path = "std::net::TcpStream", reason = "ADR 0016 R1: no network I/O in a no-I/O crate" },
+  { path = "std::net::TcpListener", reason = "ADR 0016 R1: no network I/O in a no-I/O crate" },
+  { path = "std::net::UdpSocket", reason = "ADR 0016 R1: no network I/O in a no-I/O crate" },
+  { path = "std::process::Command", reason = "ADR 0016 R1: no process APIs in a no-I/O crate" },
+  { path = "std::process::Child", reason = "ADR 0016 R1: no process APIs in a no-I/O crate" },
+  { path = "std::thread::Builder", reason = "ADR 0016 R1: no thread APIs in a no-I/O crate" },
+]
+
+disallowed-methods = [
+  { path = "std::fs::read", reason = "ADR 0016 R1: no filesystem I/O in a no-I/O crate" },
+  { path = "std::fs::read_to_string", reason = "ADR 0016 R1: no filesystem I/O in a no-I/O crate" },
+  { path = "std::fs::write", reason = "ADR 0016 R1: no filesystem I/O in a no-I/O crate" },
+  { path = "std::fs::read_dir", reason = "ADR 0016 R1: no filesystem I/O in a no-I/O crate" },
+  { path = "std::fs::create_dir", reason = "ADR 0016 R1: no filesystem I/O in a no-I/O crate" },
+  { path = "std::fs::create_dir_all", reason = "ADR 0016 R1: no filesystem I/O in a no-I/O crate" },
+  { path = "std::fs::remove_file", reason = "ADR 0016 R1: no filesystem I/O in a no-I/O crate" },
+  { path = "std::fs::remove_dir", reason = "ADR 0016 R1: no filesystem I/O in a no-I/O crate" },
+  { path = "std::fs::remove_dir_all", reason = "ADR 0016 R1: no filesystem I/O in a no-I/O crate" },
+  { path = "std::fs::rename", reason = "ADR 0016 R1: no filesystem I/O in a no-I/O crate" },
+  { path = "std::fs::copy", reason = "ADR 0016 R1: no filesystem I/O in a no-I/O crate" },
+  { path = "std::fs::metadata", reason = "ADR 0016 R1: no filesystem I/O in a no-I/O crate" },
+  { path = "std::net::ToSocketAddrs::to_socket_addrs", reason = "ADR 0016 R1: no network I/O in a no-I/O crate" },
+  { path = "std::env::var", reason = "ADR 0016 R1: no environment access in a no-I/O crate" },
+  { path = "std::env::var_os", reason = "ADR 0016 R1: no environment access in a no-I/O crate" },
+  { path = "std::env::vars", reason = "ADR 0016 R1: no environment access in a no-I/O crate" },
+  { path = "std::env::args", reason = "ADR 0016 R1: no environment access in a no-I/O crate" },
+  { path = "std::env::current_dir", reason = "ADR 0016 R1: no environment access in a no-I/O crate" },
+  { path = "std::env::temp_dir", reason = "ADR 0016 R1: no environment access in a no-I/O crate" },
+  { path = "std::process::exit", reason = "ADR 0016 R1: no process APIs in a no-I/O crate" },
+  { path = "std::thread::spawn", reason = "ADR 0016 R1: no thread APIs in a no-I/O crate" },
+  { path = "std::time::SystemTime::now", reason = "ADR 0016 R1: no clock; time is injected" },
+  { path = "std::time::Instant::now", reason = "ADR 0016 R1: no clock; time is injected" },
+]

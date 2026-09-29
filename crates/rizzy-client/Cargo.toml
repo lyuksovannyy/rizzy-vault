@@ -1,0 +1,30 @@
+[package]
+name = "rizzy-client"
+description = "Sans-I/O client flows of rizzy-vault: signup, login, unlock, device sessions, the sync driver, item edits, encrypted export. No I/O; portable to wasm32."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# ADR 0016 §3 row `rizzy-client`: internal dependencies core, sync, proto, import, match.
+# `rizzy-import` is written in parallel and is not a dependency yet (see the `import` module's
+# seam); `rizzy-match` is M2. No external crate is added: `rand_core`, `subtle` and `zeroize`
+# are the versions rizzy-core pins (ADR 0009), and they are already on the R1 allow-list this
+# crate inherits from rizzy-core (`cargo xtask check-deps`).
+[dependencies]
+rand_core.workspace = true
+rizzy-core.workspace = true
+rizzy-proto.workspace = true
+rizzy-sync.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+# The seeded ChaCha20Rng of the flow tests (ADR 0009: test-only). A dev-dependency only: R1's
+# allow-list covers normal and build dependencies (ADR 0016 §4, "Dev-dependencies").
+chacha20.workspace = true
+
+[lints]
+workspace = true
