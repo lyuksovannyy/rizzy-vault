@@ -1,10 +1,11 @@
 //! Version-1 record vectors (ADR 0018 §12, CRYPTO.md §15 item 1): the layout level.
 //!
-//! **Where they live.** CRYPTO.md §15 item 1(A) places these vectors under
-//! `crates/rizzy-core/tests/vectors/`, in its published JSON schema, which item 8 runs on
-//! every target and through the bindings. They are Rust test constants here, which no binding
-//! or wasm harness can read: `rizzy-core` cannot depend on this crate, and this crate has no
-//! JSON reader. Where they go, and the regeneration of `rizzy-core`'s placeholder
+//! **Where they live.** CRYPTO.md §15 item 1(A) counts these vectors among the normative
+//! vectors under `crates/rizzy-core/tests/vectors/`, in its published JSON schema, which item
+//! 8 runs on every target and through the bindings. For now they are Rust test constants here
+//! and in the header tests, which no binding or wasm harness can read: `rizzy-core` cannot
+//! depend on this crate, and this crate has no JSON reader. §15 item 1(A) records this as the
+//! current state. Their final home, and the regeneration of `rizzy-core`'s placeholder
 //! `canonical_header` statement vectors over real headers, wait for an owner decision.
 //!
 //! **Positive vectors.** Each is a record built through this module's types, the same record

@@ -8,7 +8,7 @@
 
 use rizzy_core::ids::DeviceId;
 
-use super::{FieldKey, LIFECYCLE_KEY};
+use super::{FieldKey, LIFECYCLE_KEY, parse_op, parse_snapshot};
 use crate::dot::Dot;
 use crate::hlc::Hlc;
 use crate::vv::VersionVector;
@@ -52,6 +52,53 @@ pub(super) fn key_of_len(len: usize) -> String {
     k.push('.');
     k.push_str(&"e".repeat(len - k.len()));
     k
+}
+
+/// Whether each way the record layer takes a field key accepts `bytes`: [`FieldKey::new`]
+/// (`false` for input that is not UTF-8, which it cannot be given), and [`parse_op`] and
+/// [`parse_snapshot`] with `bytes` as the key of an op write, of a live snapshot's register
+/// after `@lifecycle` and of a tombstone's late register. Everything around the key is valid,
+/// so each record parses exactly when its key passes; `@lifecycle` itself is refused by every
+/// path, by the grammar or as misplaced.
+pub(super) fn record_layer_accepts(bytes: &[u8]) -> [bool; 4] {
+    let new = core::str::from_utf8(bytes).is_ok_and(|text| FieldKey::new(text).is_ok());
+    let op = Spec::new()
+        .u8(0x01)
+        .u8(0x01)
+        .u16(1)
+        .bytes(bytes)
+        .bytes(&[])
+        .done();
+    let live = Spec::new()
+        .u8(0x02)
+        .u16(2)
+        .register(LIFECYCLE_KEY, &[(1, 1, hlc(0, 0), &[0x01])])
+        .bytes(bytes)
+        .u16(1)
+        .dot(1, 1)
+        .u64(hlc(0, 0).to_u64())
+        .bytes(&[])
+        .u16(0)
+        .done();
+    let tombstone = Spec::new()
+        .u8(0x03)
+        .dot(1, 1)
+        .u64(hlc(0, 0).to_u64())
+        .vv(&[(1, 1)])
+        .raw(&[0x4b; 16])
+        .u16(1)
+        .bytes(bytes)
+        .u16(1)
+        .dot(1, 2)
+        .u64(hlc(0, 1).to_u64())
+        .bytes(&[])
+        .done();
+    [
+        new,
+        parse_op(&op).is_ok(),
+        parse_snapshot(&vv(&[(1, 1)]), &live).is_ok(),
+        parse_snapshot(&vv(&[(1, 2)]), &tombstone).is_ok(),
+    ]
 }
 
 /// Decodes lowercase hex, ignoring whitespace.

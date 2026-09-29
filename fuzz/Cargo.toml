@@ -22,19 +22,25 @@
 #   export_fields      export-file header and `data` field decoders, and the server-secrets
 #                      backup header (§11.14, §5.11); the Argon2id key is derived once per process
 #   normalize          login-name and server-origin normalisers (§2); not in the §15 list
-#   sync_types         rizzy-sync's version-vector, dot and HLC decoders and the HLC update rules
-#                      (ADR 0012 §2-§3, ADR 0018 §3); not in the §15 list by name
-#   sync_header        rizzy-sync's op and snapshot header parsers (ADR 0012 §3); not in the §15
-#                      list by name
+#   sync_types         sync-engine decoders: rizzy-sync's version-vector, dot and HLC decoders,
+#                      and the HLC update rules (ADR 0012 §2-§3, ADR 0018 §3)
+#   sync_header        op and snapshot header parsers (ADR 0012 §3), in rizzy-sync
 #   record_op          item-record parsers (ADR 0018 §12): op data
 #   record_snapshot    item-record parsers (ADR 0018 §12): live snapshot data
 #   record_tombstone   item-record parsers (ADR 0018 §12): tombstone data
-#   record_key         item-record parsers (ADR 0018 §12): the field-key grammar (§7)
+#   record_key         item-record parsers (ADR 0018 §12): the field-key grammar (§7) on the
+#                      record layer's paths, which must agree with the rizzy-core parser they
+#                      call (the one `item_key` fuzzes)
 #   item_value         item value decoder (ADR 0018 §6, §10), with verbatim carrying and reading
 #                      against every expected type
 #   item_key           item field-key grammar (ADR 0018 §7, §10) and tag keys built on it
 #   sync_compaction    rizzy-sync's compaction rules on a client's covered VV and on damaged rows
 #                      (ADR 0021 §2-§4, §9)
+#   sync_merge         rizzy-sync's per-item merge on records a faulty author can sign, in any
+#                      order (ADR 0012 §4-§5, ADR 0018 §3, §10)
+#   sync_causal        rizzy-sync's per-device-chain layer on served headers, covers and body
+#                      verdicts: chain check, causal delivery, revocation, own-chain bookkeeping
+#                      (ADR 0012 §4, §6, §7; ADR 0021 §4, §9)
 #
 # Not covered yet: the share-URL fragment parser (M5, not written) and the export file's JSON
 # document reader (§11.14, not written). `export_fields` covers the field decoders the reader
@@ -57,9 +63,9 @@ libfuzzer-sys = "0.4.13"
 # rizzy-core already pins ([workspace.dependencies], ADR 0009), so no new crate in this graph.
 rand_core = { version = "=0.10.1", default-features = false }
 rizzy-core = { path = "../crates/rizzy-core" }
-# The sync engine's decoders and rules (`sync_types`, `sync_header`, the `record_*` targets and
-# `sync_compaction`). A path crate whose only dependency is rizzy-core, so no new crate in this
-# graph.
+# The sync engine's decoders and rules (`sync_types`, `sync_header`, the `record_*` targets,
+# `sync_compaction`, `sync_merge` and `sync_causal`). A path crate whose only dependency is
+# rizzy-core, so no new crate in this graph.
 rizzy-sync = { path = "../crates/rizzy-sync" }
 
 # One [[bin]] per target. `test`, `doc` and `bench` are off because a libFuzzer entry point
@@ -179,6 +185,20 @@ bench = false
 [[bin]]
 name = "sync_compaction"
 path = "fuzz_targets/sync_compaction.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sync_merge"
+path = "fuzz_targets/sync_merge.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sync_causal"
+path = "fuzz_targets/sync_causal.rs"
 test = false
 doc = false
 bench = false

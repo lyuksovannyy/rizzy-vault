@@ -84,8 +84,9 @@
 //! The caller applies the checks that need its rows or its clock: "Already stored"
 //! (byte-identical records and `snapshot_id`s), the `vault_prev_seq` chain check, the stale-epoch
 //! check and its exemptions, the certificate and signature checks, and the certificate expiry
-//! it reports as [`CertificateExpiry`]. The rotation cut-off (§9 "Rotation cut-off") and the
-//! clients' side of "Revoked and kind-4 authors" are not in this module.
+//! it reports as [`CertificateExpiry`]. The rotation cut-off (§9 "Rotation cut-off") is not in
+//! this module; the clients' side of "Revoked and kind-4 authors" is in
+//! [`causal`](crate::causal).
 //!
 //! # Cost
 //!

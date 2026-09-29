@@ -15,8 +15,7 @@
 //!   the `ITEM_OP` or `ITEM_SNAPSHOT` AAD context built from the header binds the hash of
 //!   exactly the signed bytes (CRYPTO.md §8.4).
 //!
-//! Not in the CRYPTO.md §15 item 7 list by name (ADR 0012 §3 headers); CLAUDE.md requires a
-//! target for every parser of untrusted input.
+//! Part of CRYPTO.md §15 item 7, "op and snapshot header parsers" (ADR 0012 §3).
 //!
 //! ```text
 //! cargo +nightly fuzz run sync_header

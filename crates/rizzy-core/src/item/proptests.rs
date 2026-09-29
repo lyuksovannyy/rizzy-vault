@@ -1,8 +1,9 @@
 //! Property tests of the item schema (ADR 0018 §12, the schema-layer round trips): the value
 //! decoder and the key grammar never panic and are canonical (decode then encode, and parse
-//! then rebuild, are the identity); every key the grammar generates parses; tag keys round-trip
-//! through their names; sort keys land strictly between their neighbours; and the display rules
-//! do not depend on the order the register's values are listed in.
+//! then rebuild, are the identity); every key the grammar generates parses, and the parser
+//! agrees with an independent matcher of the ABNF; tag keys round-trip through their names;
+//! sort keys land strictly between their neighbours; and the display rules do not depend on the
+//! order the register's values are listed in.
 
 use core::fmt::Write as _;
 
@@ -264,4 +265,110 @@ fn rebuilds(key: FieldKeyRef<'_>) -> Result<(), TestCaseError> {
         }
     }
     Ok(())
+}
+
+/// The bytes a near-miss edit writes: the grammar's alphabet (`a`–`f` are both `name` and
+/// `elem` bytes, `g` and `z` `name` bytes only), both separators, and the bytes next to them in
+/// ASCII (`` ` `` and `{` around `a`–`z`, `-` and `:` around `.`, `/` and the digits), `A` and
+/// `@`.
+const NEAR_BYTES: &[u8] = b"abfgz09_./@A`{-:";
+
+/// A key one edit away from one the grammar generates: a byte changed, inserted or removed
+/// (or none, when the removal falls past the end), so that the oracle comparison lands on the
+/// accept/reject boundary and not mostly on random rejections. [`grammar_key`] reaches both
+/// limits: an `elem` of up to 128 digits and keys over 160 bytes.
+fn near_miss_key() -> impl Strategy<Value = Vec<u8>> {
+    (
+        grammar_key(),
+        any::<prop::sample::Index>(),
+        prop::sample::select(NEAR_BYTES),
+        0u8..3,
+    )
+        .prop_map(|(text, at, byte, edit)| {
+            let mut bytes = text.into_bytes();
+            let i = at.index(bytes.len() + 1);
+            match (edit, i < bytes.len()) {
+                (0, true) => bytes[i] = byte,
+                (0 | 1, _) => bytes.insert(i, byte),
+                (_, true) => {
+                    bytes.remove(i);
+                }
+                (_, false) => {}
+            }
+            bytes
+        })
+}
+
+/// A key at the length limits: an element key whose `elem` has 120–132 digits of either
+/// parity (the grammar allows an even 2–128), or a fixed key of four to eight names, 7–263
+/// bytes, so that the 128-digit `elem` limit and the 160-byte key limit are crossed both ways.
+fn long_key() -> impl Strategy<Value = Vec<u8>> {
+    let element = (name(), "[0-9a-f]{120,132}", proptest::option::of(name())).prop_map(
+        |(list, hex, attr)| match attr {
+            Some(attr) => format!("{list}/{hex}/{attr}"),
+            None => format!("{list}/{hex}"),
+        },
+    );
+    let fixed = proptest::collection::vec(name(), 4..=8).prop_map(|names| names.join("."));
+    prop_oneof![element, fixed].prop_map(String::into_bytes)
+}
+
+proptest! {
+    // The only check of the grammar parser against a matcher written separately from the ABNF
+    // (ADR 0018 §7, frozen with the version-1 vectors, §5 "Frozen rules"): this parser is the
+    // record layer's key check too (`rizzy-sync`, §5 rules 2 and 3), so it gets more cases than
+    // the default 256.
+    #![proptest_config(ProptestConfig {
+        cases: 4_000,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    /// The parser agrees with an independent matcher written from the ABNF ([`abnf_oracle`]),
+    /// over a small alphabet that reaches every production and every failure, `@` included.
+    #[test]
+    fn grammar_agrees_with_the_abnf(key in "[a-fA_0-9./@]{0,40}") {
+        prop_assert_eq!(FieldKeyRef::parse_str(&key).is_ok(), abnf_oracle(key.as_bytes()));
+    }
+
+    /// The parser agrees with the ABNF matcher near the boundary ([`near_miss_key`]), at the
+    /// length limits ([`long_key`]) and on arbitrary bytes, UTF-8 or not.
+    #[test]
+    fn grammar_agrees_with_the_abnf_at_the_edges(
+        key in prop_oneof![
+            near_miss_key(),
+            long_key(),
+            proptest::collection::vec(any::<u8>(), 0..200),
+        ],
+    ) {
+        prop_assert_eq!(FieldKeyRef::parse(&key).is_ok(), abnf_oracle(&key));
+    }
+}
+
+/// An independent matcher of the ADR 0018 §7 ABNF and the §10 length limit: it splits the key
+/// on its separators and checks each token, where the parser scans it once. It works on bytes,
+/// so a key that is not UTF-8 is simply one no token accepts.
+fn abnf_oracle(key: &[u8]) -> bool {
+    let name = |b: &[u8]| {
+        (1..=32).contains(&b.len())
+            && b.first().is_some_and(u8::is_ascii_lowercase)
+            && b.iter()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
+    };
+    let elem = |b: &[u8]| {
+        (2..=128).contains(&b.len())
+            && b.len().is_multiple_of(2)
+            && b.iter()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(c))
+    };
+    let grammar = match key.split(|c| *c == b'/').collect::<Vec<_>>().as_slice() {
+        [single] => {
+            let parts: Vec<&[u8]> = single.split(|c| *c == b'.').collect();
+            parts.len() >= 2 && parts.iter().all(|p| name(p))
+        }
+        [n, e] => name(n) && elem(e),
+        [n, e, m] => name(n) && elem(e) && name(m),
+        _ => false,
+    };
+    grammar && (1..=MAX_KEY_LEN).contains(&key.len())
 }

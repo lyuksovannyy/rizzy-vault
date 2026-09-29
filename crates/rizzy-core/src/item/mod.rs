@@ -51,8 +51,9 @@
 //! - **Side channels** (CRYPTO.md §12.3). Values are compared with `subtle::ConstantTimeEq`
 //!   ([`display::resolve_field`]), and tag names are hex-encoded and decoded with arithmetic, not
 //!   a table. Validating UTF-8, NFC-normalising a tag name and checking a key against the grammar
-//!   branch on their input, as showing a value in a UI does. CRYPTO.md §12.3 accepts a residual
-//!   of this kind for the otpauth label and issuer; it does not list these yet.
+//!   branch on their input, as showing a value in a UI does. CRYPTO.md §12.3 lists this as a
+//!   residual ("tag keys") awaiting the owner's acceptance, as the otpauth label and issuer
+//!   were accepted; no owner decision accepts it yet.
 //!
 //! # Where the ambiguous points are resolved
 //!

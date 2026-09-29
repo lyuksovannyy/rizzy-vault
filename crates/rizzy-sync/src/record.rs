@@ -78,6 +78,13 @@
 //! and its history group; every dot, `purge_dot` and every entry of `c` covered by the covered
 //! VV.
 //!
+//! **One grammar for both layers.** The key checks of rules 2 and 3 are `rizzy-core`'s schema
+//! layer's parser, [`FieldKeyRef::parse`], not a copy of it: the record layer and the schema
+//! layer accept exactly the same keys (tested on every path in `tests` and `proptests`), so a
+//! key the record layer carries is always one the schema layer can classify. The record layer
+//! keeps only its own error reporting ([`RecordErrorKind::KeyLength`] or
+//! [`RecordErrorKind::KeyGrammar`] at the key's `str` field) and the `@lifecycle` exception.
+//!
 //! **Nothing else rejects a version-1 record** (ADR 0018 §5), and nothing here normalises one.
 //! These parse and are carried verbatim: several current values from one device in one
 //! register, one dot with different HLCs under different keys, a `purge_dot` that `c` covers,
@@ -116,9 +123,12 @@
 //! [`RecordError`] carries only a kind and a byte offset: local diagnostics outside the frozen
 //! format, which the normative vectors do not assert (ADR 0018 §12). An op's [`Lifecycle`]
 //! marker is item content too (lifecycle is encrypted, ADR 0012 §5, and in a snapshot the same
-//! fact is a `@lifecycle` value), so it also prints `[REDACTED]`. Dots, HLCs, `c` and
-//! `item_key_id` are metadata the server also sees in headers and envelopes, and `Debug`
-//! prints them.
+//! fact is a `@lifecycle` value), so it also prints `[REDACTED]`, and so does whether an item
+//! is live or purged: [`RecordKind`], [`OpData`] (whose write count would give its marker
+//! away), [`SnapshotData`], [`LiveSnapshot`] and [`Tombstone`] print their contents as
+//! `[REDACTED]`, a live snapshot and a tombstone under the one name `SnapshotData`. Dots and
+//! HLCs are metadata the server also sees in op headers, and the `Debug` of an [`Entry`] or a
+//! [`Register`] prints them.
 //!
 //! # Frozen
 //!
@@ -126,12 +136,12 @@
 //! `item_schema_version` (ADR 0018 §5 "Frozen rules", §11).
 
 mod encode;
-mod key;
 mod parse;
 
 use core::fmt;
 
 use rizzy_core::ids::SymmetricKeyId;
+use rizzy_core::item::key::{FieldKeyRef, KeyError};
 
 use crate::dot::Dot;
 use crate::hlc::Hlc;
@@ -143,8 +153,9 @@ pub use parse::{parse_op, parse_snapshot};
 /// Largest value, type byte included: 64 KiB (ADR 0018 §10).
 pub const MAX_VALUE_LEN: usize = 65_536;
 
-/// Largest field key in bytes (ADR 0018 §10); the smallest is 1.
-pub const MAX_KEY_LEN: usize = 160;
+/// Largest field key in bytes (ADR 0018 §10); the smallest is 1. The schema layer's
+/// [`rizzy_core::item::key::MAX_KEY_LEN`], so that both layers apply one limit.
+pub const MAX_KEY_LEN: usize = rizzy_core::item::key::MAX_KEY_LEN;
 
 /// Most field writes in one op (ADR 0018 §10).
 pub const MAX_WRITES: usize = 1_024;
@@ -165,11 +176,16 @@ pub const MAX_SNAPSHOT_DATA_LEN: usize = 12 << 20;
 
 /// The reserved key of the lifecycle register (ADR 0018 §3 "Lifecycle"). It is outside the §7
 /// grammar and used by the record layer only; `@` sorts before every grammar key, so it is the
-/// first register of a live snapshot.
-pub const LIFECYCLE_KEY: &str = "@lifecycle";
+/// first register of a live snapshot. The schema layer's [`rizzy_core::item::LIFECYCLE_KEY`].
+pub const LIFECYCLE_KEY: &str = rizzy_core::item::LIFECYCLE_KEY;
 
 /// `record_kind` (ADR 0018 §3 "Record kinds").
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+///
+/// The kind of a snapshot says whether the item is live or purged. That is item content: it
+/// is inside the encrypted `data`, and the server sees only an `ITEM_SNAPSHOT` envelope either
+/// way. So `Debug` prints `RecordKind([REDACTED])` for every kind, like [`Lifecycle`]; match on
+/// the variant, or use [`RecordKind::to_u8`], where code needs it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum RecordKind {
     /// `0x01`: op data, the only kind an `ITEM_OP` envelope carries.
@@ -192,6 +208,12 @@ impl RecordKind {
     }
 }
 
+impl fmt::Debug for RecordKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RecordKind([REDACTED])")
+    }
+}
+
 /// The `lifecycle` byte of op data (ADR 0018 §3 "Op (a)").
 ///
 /// Create and edit ops carry their writes and `Active`, since every field edit writes `Active`
@@ -201,8 +223,9 @@ impl RecordKind {
 ///
 /// The marker is item content: lifecycle is encrypted so that the server cannot see which
 /// items are trashed (ADR 0012 §5), and the same fact in a snapshot is a `@lifecycle`
-/// [`Value`]. So `Debug` prints `Lifecycle([REDACTED])`, and [`OpData`]'s `Debug` with it;
-/// match on the variant, or use [`Lifecycle::to_u8`], where code needs it.
+/// [`Value`]. So `Debug` prints `Lifecycle([REDACTED])`, and [`OpData`]'s `Debug` prints
+/// nothing of it either; match on the variant, or use [`Lifecycle::to_u8`], where code needs
+/// it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Lifecycle {
@@ -266,6 +289,11 @@ impl fmt::Debug for Lifecycle {
 /// Keys are user content (a tag's name is in its key), so `Debug` prints `[REDACTED]` and the
 /// text is reached only through [`FieldKey::expose_secret`]. `Ord` is the canonical key order
 /// of ADR 0018 §4: the raw bytes compared lexicographically, a proper prefix first.
+///
+/// Every grammar key, whether a writer names it ([`FieldKey::new`]) or the parser reads it
+/// (ADR 0018 §5 rules 2 and 3), is checked by the schema layer's [`FieldKeyRef::parse`]: one
+/// implementation of the grammar and the length limit for both layers, so that a key the
+/// record layer carries is always one the schema layer can classify.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FieldKey<'a>(&'a str);
 
@@ -277,16 +305,11 @@ impl<'a> FieldKey<'a> {
     /// ADR 0018 §7 grammar. `@lifecycle` is not accepted here; use [`FieldKey::LIFECYCLE`].
     ///
     /// # Errors
-    /// [`RecordErrorKind::KeyLength`] at offset 0 for an empty or over-long key, and
-    /// [`RecordErrorKind::KeyGrammar`] at the offset of the first byte the grammar refuses.
+    /// [`RecordErrorKind::KeyLength`] for an empty or over-long key and
+    /// [`RecordErrorKind::KeyGrammar`] for one that breaks the grammar, both at offset 0: the
+    /// key is the whole input.
     pub fn new(key: &'a str) -> Result<Self, RecordError> {
-        if key.is_empty() || key.len() > MAX_KEY_LEN {
-            return Err(RecordError::new(RecordErrorKind::KeyLength, 0));
-        }
-        match key::grammar_error(key.as_bytes()) {
-            None => Ok(Self(key)),
-            Some(at) => Err(RecordError::new(RecordErrorKind::KeyGrammar, at)),
-        }
+        grammar_key(key.as_bytes()).map_err(|kind| RecordError::new(kind, 0))
     }
 
     /// The key's text. Item content: do not log, format or copy it into a plain buffer.
@@ -317,6 +340,26 @@ impl<'a> FieldKey<'a> {
 impl fmt::Debug for FieldKey<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("FieldKey([REDACTED])")
+    }
+}
+
+/// Checks `bytes` as a grammar key (ADR 0018 §7, §10) with the schema layer's parser,
+/// [`FieldKeyRef::parse`], and borrows it as a [`FieldKey`] of the same buffer.
+///
+/// The one key check of this module: [`FieldKey::new`] and the parser's key read call it.
+/// `@lifecycle` is not a grammar key and is refused; the parser places it before calling this.
+/// The parser has already refused an empty or over-long key by its length field, so the
+/// [`RecordErrorKind::KeyLength`] branch serves [`FieldKey::new`].
+///
+/// # Errors
+/// The [`RecordErrorKind`] of the rule broken: [`RecordErrorKind::KeyLength`] for
+/// [`KeyError::Length`] (ADR 0018 §5 rule 2), [`RecordErrorKind::KeyGrammar`] for every other
+/// [`KeyError`] (rule 3). The caller adds the offset.
+fn grammar_key(bytes: &[u8]) -> Result<FieldKey<'_>, RecordErrorKind> {
+    match FieldKeyRef::parse(bytes) {
+        Ok(key) => Ok(FieldKey(key.as_str())),
+        Err(KeyError::Length) => Err(RecordErrorKind::KeyLength),
+        Err(_) => Err(RecordErrorKind::KeyGrammar),
     }
 }
 
@@ -398,7 +441,10 @@ impl<'a> Write<'a> {
 ///
 /// A parsed `OpData` has passed every ADR 0018 §5 rule. One built with [`OpData::new`] is
 /// checked when it is encoded.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+///
+/// `Debug` prints `OpData([REDACTED])`: besides the [`Lifecycle`] marker, the number of writes
+/// gives the lifecycle away, since only an `Active` op has writes (§5 rule 4).
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct OpData<'a> {
     /// The lifecycle marker.
     lifecycle: Lifecycle,
@@ -423,6 +469,12 @@ impl<'a> OpData<'a> {
     #[must_use]
     pub fn writes(&self) -> &[Write<'a>] {
         &self.writes
+    }
+}
+
+impl fmt::Debug for OpData<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("OpData([REDACTED])")
     }
 }
 
@@ -496,7 +548,11 @@ impl<'a> Register<'a> {
 }
 
 /// The `data` of a live item's `ITEM_SNAPSHOT` envelope (ADR 0018 §3 "live snapshot data").
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+///
+/// `Debug` prints `SnapshotData([REDACTED])`, the same text as [`Tombstone`] and
+/// [`SnapshotData`]: this type's own name would say the item is not purged (see
+/// [`SnapshotData`]).
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct LiveSnapshot<'a> {
     /// The current registers, strictly ascending by key, `@lifecycle` first.
     registers: Vec<Register<'a>>,
@@ -527,11 +583,20 @@ impl<'a> LiveSnapshot<'a> {
     }
 }
 
+impl fmt::Debug for LiveSnapshot<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SnapshotData([REDACTED])")
+    }
+}
+
 /// The `data` of a purged item's `ITEM_SNAPSHOT` envelope (ADR 0018 §3 "Tombstone (c)").
 ///
 /// It holds no value or history of the purged item, only late values. The item id is the
 /// snapshot header's. With no late register its encoding is 53 + 24·c bytes.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+///
+/// `Debug` prints `SnapshotData([REDACTED])`, the same text as [`LiveSnapshot`] and
+/// [`SnapshotData`]: this type's own name would say the item is purged (see [`SnapshotData`]).
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Tombstone<'a> {
     /// The recorded purge's dot: of all applied purges, the one with the highest
     /// `(hlc, device_id, seq)`.
@@ -598,13 +663,33 @@ impl<'a> Tombstone<'a> {
     }
 }
 
+impl fmt::Debug for Tombstone<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SnapshotData([REDACTED])")
+    }
+}
+
 /// The `data` of an `ITEM_SNAPSHOT` envelope: a live item or a tombstone.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+///
+/// Whether an item is live or purged is item content: the record kind is inside the encrypted
+/// `data` (ADR 0018 §3), as the lifecycle is (ADR 0012 §5). So `Debug` prints
+/// `SnapshotData([REDACTED])` for either variant, and [`LiveSnapshot`] and [`Tombstone`] print
+/// the same text, since their type names alone would tell them apart. Their contents are not
+/// printed either: the register counts, and which dots are current, in history or late, are
+/// item structure the server never sees. Match on the variant, or use [`SnapshotData::kind`],
+/// where code needs it.
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum SnapshotData<'a> {
     /// Record kind `0x02`.
     Live(LiveSnapshot<'a>),
     /// Record kind `0x03`.
     Tombstone(Tombstone<'a>),
+}
+
+impl fmt::Debug for SnapshotData<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SnapshotData([REDACTED])")
+    }
 }
 
 impl SnapshotData<'_> {
@@ -746,8 +831,8 @@ impl RecordError {
         self.kind
     }
 
-    /// The byte offset of the failing field within `data` (within the key, for
-    /// [`FieldKey::new`]).
+    /// The byte offset of the failing field within `data`; for a key, the start of its `str`
+    /// field. Always 0 for [`FieldKey::new`], whose input is the key alone.
     #[must_use]
     pub const fn offset(&self) -> usize {
         self.offset

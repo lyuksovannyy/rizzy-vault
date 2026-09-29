@@ -38,8 +38,10 @@
 //!   reading what it counts, never panic, and leave the reader untouched on error. The fuzz
 //!   targets `sync_types` (the core types), `sync_header` (the op and snapshot headers),
 //!   `record_op`, `record_snapshot`, `record_tombstone` and `record_key` (the item record and
-//!   its key grammar) and `sync_compaction` (the compaction rules on a client's covered VV and
-//!   on damaged rows) cover them.
+//!   its key grammar), `sync_compaction` (the compaction rules on a client's covered VV and
+//!   on damaged rows), `sync_merge` (the per-item merge on records a faulty author can sign,
+//!   in any order) and `sync_causal` (the per-device-chain layer on served headers and
+//!   covers) cover them.
 //! - **Canonical bytes.** Every encoding here has exactly one valid byte string per value:
 //!   the fixed big-endian layouts of CRYPTO.md §2, never serde.
 //!
@@ -61,10 +63,11 @@
 //! | [`header`] | ADR 0012 §3; CRYPTO.md §8.4, §10.2; ADR 0018 §11 | [`OpHeader`](header::OpHeader) and [`SnapshotHeader`](header::SnapshotHeader): the canonical headers the `op` and `snapshot` statements sign, their strict parsing, and the `ITEM_OP` and `ITEM_SNAPSHOT` AAD contexts built from the same bytes | `header_version` 1, `device_seq` ≥ 1, `item_schema_version` neither 0 nor `0xFFFF`, canonical version vectors, no trailing bytes; parsed before any field of a verified statement is trusted |
 //! | [`record`] | ADR 0018 §2–§5, §7, §10; CRYPTO.md §8.5, §9.5 rule 5 | [`OpData`](record::OpData) and [`SnapshotData`](record::SnapshotData) (live snapshot or tombstone): the `ITEM_OP` and `ITEM_SNAPSHOT` `data` of `item_schema_version` 1, their strict parsers, writers and the §4 state-hash input | Exactly the eight §5 rejection rules and nothing else; the §10 limits; keys and values borrowed from the decrypted buffer, redacted in `Debug`, never in errors |
 //! | [`compaction`] | ADR 0021 §2–§4, §7, §9 "Server acceptance" and "Revoked and kind-4 authors" | Pure functions over one item's retained snapshots (store sequence, clamped VV, author) and op dots with a body flag: the clamped VV, R1's body deletions and R3's snapshot drops, the covers of a Fetch response, and the snapshot and healing-request acceptance checks | A body is deleted only when the older of the two newest snapshots covers it and snapshots by two authors do; dropping a snapshot never leaves a bodiless header without a cover, nor lowers its covering authors below two; a response serves each bodiless header with covers by up to two authors, or reports it uncovered |
+//! | [`merge`] | ADR 0012 §4–§5 as ADR 0018 §3, §6 and §10 restate them; ADR 0018 §3 "Tombstone (c)", "Absorbing a snapshot", "Snapshots are claims", "Re-issued ops", §9, §10; ADR 0021 §9 client rules | [`ItemMerge`](merge::ItemMerge): one item's multi-value registers with history pruned to 50 per field, trash, "Active wins", purge and the tombstone with its late values, snapshot absorption under the evidence merge, the snapshot triggers and the ops a client keeps | Order- and duplicate-independent (a join of the held values under their verified header contexts); a Purge never rejected and never undone; a snapshot never removes a value the replica holds, is cut to the verified headers, refused when an op body contradicts it, and blocks further snapshots while a disagreement it caused is unresolved; keys, values and lifecycle never in `Debug` |
+//! | [`causal`] | ADR 0012 §4 steps 1–2, §6, §7 "Upload", "Fetch", "Chain check after compaction"; ADR 0021 §2, §4, §9; ADR 0018 §3 "Covered ops", "Re-issued ops"; CRYPTO.md §10.2 rule (c), §11.8 step 4 | [`VaultLog`](causal::VaultLog): one vault's per-device chains on a client: the chain check with bodiless headers and covers, causal delivery and deduplication, the cursor, gap and missing-data reports, the revocation cut-off, the own chain's acknowledgements and stale-epoch plans, and "Server behind"; the header-only author checks | A gap is reported, never skipped, and nothing past it is accepted; an op is delivered fresh only when its chain's earlier links and its causal context are settled, a covered op at once, and each body at most once; nothing past a known cut-off is delivered; never re-issues an op the server may have stored and served |
 //!
-//! The rest of ADR 0012 §13's list builds on these: causal delivery, deduplication and the
-//! chain check (ADR 0012 §4, §7), and the multi-value-register merge with history, tombstones
-//! and snapshot absorption (ADR 0012 §4–§5, ADR 0018 §3).
+//! [`causal`] feeds [`merge`] verified headers, op bodies in causal order and snapshots; the
+//! convergence harness (`convergence`, tests only) drives both together (ADR 0012 §12).
 //!
 //! # Invariants the engine keeps (threat model INV-23 to INV-27)
 //!
@@ -92,11 +95,15 @@
 #![warn(clippy::indexing_slicing, clippy::unreachable)]
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
+pub mod causal;
 pub mod compaction;
+#[cfg(test)]
+mod convergence;
 mod cursor;
 pub mod dot;
 pub mod error;
 pub mod header;
 pub mod hlc;
+pub mod merge;
 pub mod record;
 pub mod vv;

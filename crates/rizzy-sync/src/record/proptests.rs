@@ -14,15 +14,18 @@
 //! - a mutation of a valid encoding (a changed, inserted or removed byte, an overwritten
 //!   `u16`) that still parses re-encodes to exactly the mutated bytes, so each record has one
 //!   encoding;
-//! - arbitrary bytes never panic (a no-panic test only: random bytes practically never parse).
+//! - arbitrary bytes never panic (a no-panic test only: random bytes practically never parse);
+//! - the record layer takes a key, on every path, exactly when `rizzy-core`'s schema layer
+//!   accepts it (one grammar for both layers, ADR 0018 §7).
 
 use std::collections::BTreeMap;
 
 use proptest::prelude::*;
 use rizzy_core::ids::SymmetricKeyId;
+use rizzy_core::item::key::FieldKeyRef;
 
 use super::encode::{op_len, snapshot_len};
-use super::testkit::{Spec, SpecEntry, dot, key, vv};
+use super::testkit::{Spec, SpecEntry, dot, key, record_layer_accepts, vv};
 use super::*;
 
 fn config() -> ProptestConfig {
@@ -38,6 +41,15 @@ fn arb_key() -> impl Strategy<Value = String> {
     prop_oneof![
         "[a-c][a-c0-9_]{0,3}(\\.[a-c][a-c0-9_]{0,3}){1,2}",
         "[a-c]{1,3}/([0-9a-f]{2}){1,2}(/[a-c][a-c0-9_]{0,2})?",
+    ]
+}
+
+/// Grammar keys of every length up to about 200 bytes, so that the 160-byte limit is crossed
+/// both ways: fixed keys of four to six long names, element keys with long ids.
+fn arb_long_key() -> impl Strategy<Value = String> {
+    prop_oneof![
+        "[a-z][a-z0-9_]{0,31}(\\.[a-z][a-z0-9_]{0,31}){3,5}",
+        "[a-z][a-z0-9_]{0,31}/([0-9a-f]{2}){1,64}(/[a-z][a-z0-9_]{0,31})?",
     ]
 }
 
@@ -507,6 +519,25 @@ proptest! {
                 let again = encode_snapshot(covered, &s).unwrap();
                 prop_assert_eq!(again.expose_secret(), mutated.as_slice());
             }
+        }
+    }
+
+    /// The record layer takes a key exactly when `rizzy-core`'s schema layer accepts it
+    /// (ADR 0018 §5 rules 2 and 3, §7, §10), on every path ([`record_layer_accepts`]): over a
+    /// small alphabet that reaches every production and every failure, `@` included, over
+    /// grammar keys around the 160-byte limit, and over arbitrary bytes. Both layers call one
+    /// parser, so this checks the record layer's paths around it (the length field, the
+    /// `@lifecycle` exception, UTF-8), not the grammar itself; `rizzy-core`'s
+    /// `grammar_agrees_with_the_abnf` properties check the grammar against the ABNF.
+    #[test]
+    fn both_layers_accept_the_same_keys(
+        small in "[a-fA_0-9./@]{0,40}",
+        long in arb_long_key(),
+        bytes in prop::collection::vec(any::<u8>(), 0..200),
+    ) {
+        for candidate in [small.as_bytes(), long.as_bytes(), bytes.as_slice()] {
+            let schema = FieldKeyRef::parse(candidate).is_ok();
+            prop_assert_eq!(record_layer_accepts(candidate), [schema; 4]);
         }
     }
 

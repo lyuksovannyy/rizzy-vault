@@ -19,8 +19,8 @@
 //!   an adopted receipt moves the clock at most one millisecond past the larger of the clock
 //!   and the wall clock plus 24 h, so no receipt can ratchet it further.
 //!
-//! Not in the CRYPTO.md §15 item 7 list by name; CLAUDE.md requires a target for every parser
-//! of untrusted input.
+//! Part of CRYPTO.md §15 item 7, "sync-engine decoders: the canonical version vector, dot and
+//! HLC" (ADR 0012 §2–§3).
 //!
 //! ```text
 //! cargo +nightly fuzz run sync_types

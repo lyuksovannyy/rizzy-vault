@@ -9,12 +9,13 @@
 //! the remaining input, and the tombstone's `c`.
 
 use core::cmp::Ordering;
+use core::fmt;
 
 use rizzy_core::ids::{ID_LEN, SymmetricKeyId};
 
 use super::{
     Entry, FieldKey, LIFECYCLE_KEY, Lifecycle, Limits, LiveSnapshot, OpData, RecordError,
-    RecordErrorKind as K, RecordKind, Register, SnapshotData, Tombstone, Value, Write, key,
+    RecordErrorKind as K, RecordKind, Register, SnapshotData, Tombstone, Value, Write, grammar_key,
 };
 use crate::cursor::Cursor;
 use crate::dot::Dot;
@@ -35,7 +36,10 @@ const MIN_ENTRY_LEN: usize = Dot::ENCODED_LEN + 8 + 4;
 const MIN_REGISTER_LEN: usize = 4 + 2;
 
 /// What a register production is, for the rules that depend on it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// A late register exists only in a tombstone, so the variant says whether the item is purged:
+/// `Debug` prints `Group([REDACTED])`, like the record types (see [`SnapshotData`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Group {
     /// A current register of a live snapshot: `@lifecycle` allowed, and required first.
     Current,
@@ -43,6 +47,12 @@ enum Group {
     History,
     /// A late register of a tombstone: `@lifecycle` refused, values checked against `c`.
     Late,
+}
+
+impl fmt::Debug for Group {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Group([REDACTED])")
+    }
 }
 
 /// A cursor over `data` with the limits in force.
@@ -71,8 +81,10 @@ impl<'a> Parser<'a> {
         Ok(n)
     }
 
-    /// Reads `str(field_key)`: 1–160 bytes (rule 2), then the §7 grammar (rule 3), unless it
-    /// is `@lifecycle`, which the caller places.
+    /// Reads `str(field_key)`: 1–160 bytes (rule 2), checked on the length field before the
+    /// bytes are taken, then the §7 grammar (rule 3) through [`grammar_key`], the schema
+    /// layer's parser, unless it is `@lifecycle`, which the caller places. Either failure is
+    /// reported at the offset of the `str` field.
     fn key(&mut self) -> Result<FieldKey<'a>, RecordError> {
         let at = self.cur.offset();
         let len = usize::try_from(self.cur.u32()?).unwrap_or(usize::MAX);
@@ -86,13 +98,7 @@ impl<'a> Parser<'a> {
         if bytes == LIFECYCLE_KEY.as_bytes() {
             return Ok(FieldKey::LIFECYCLE);
         }
-        if let Some(bad) = key::grammar_error(bytes) {
-            return Err(RecordError::new(K::KeyGrammar, at + 4 + bad));
-        }
-        // The grammar is ASCII, so this cannot fail; an error is still an error, not a panic.
-        core::str::from_utf8(bytes)
-            .map(FieldKey)
-            .map_err(|_| RecordError::new(K::KeyGrammar, at + 4))
+        grammar_key(bytes).map_err(|kind| RecordError::new(kind, at))
     }
 
     /// Reads a key that must be strictly above `previous` (rule 3), refusing `@lifecycle`
@@ -355,4 +361,19 @@ pub fn parse_snapshot<'a>(
     data: &'a [u8],
 ) -> Result<SnapshotData<'a>, RecordError> {
     snapshot_with(covered, data, Limits::V1)
+}
+
+#[cfg(test)]
+mod tests {
+    //! The parser's private register marker prints no variant: a late register would say the
+    //! item is purged.
+
+    use super::Group;
+
+    #[test]
+    fn group_debug_is_redacted() {
+        for group in [Group::Current, Group::History, Group::Late] {
+            assert_eq!(format!("{group:?}"), "Group([REDACTED])");
+        }
+    }
 }

@@ -12,12 +12,15 @@
 //!   count.
 //! - The writers refuse what the parser refuses; [`canonical_state`] lays out
 //!   `u16 1 ‖ covered VV ‖ data` and has an encoding for an oversize state.
-//! - Keys, values and the lifecycle marker never reach `Debug`, `Display` or an error.
+//! - Keys, values, the lifecycle marker and whether a snapshot is live or a tombstone never
+//!   reach `Debug`, `Display` or an error.
+//! - The record layer takes a key exactly when `rizzy-core`'s schema layer accepts it, on
+//!   every path: [`FieldKey::new`], op writes, live registers and late registers.
 //! - The small API: [`FieldKey::new`], [`Lifecycle`], [`RecordKind`], [`RecordErrorKind::rule`].
 
 use rizzy_core::ids::SymmetricKeyId;
 
-use super::testkit::{Spec, dot, hlc, key, key_of_len, to_hex, vv};
+use super::testkit::{Spec, dot, hlc, key, key_of_len, record_layer_accepts, to_hex, vv};
 use super::*;
 
 /// Device bytes.
@@ -72,14 +75,13 @@ fn op_rejections_and_offsets() {
         .write("a.b", &[])
         .done();
     assert_eq!(op_err(&d), (K::WritesWithoutActive, 2));
-    // Keys: length 0 and 161 at the length field; the grammar at the refused byte.
+    // Keys: length 0 and 161, and the grammar, all at the key's `str` field.
     assert_eq!(op_err(&raw_op(&[("", &[])])), (K::KeyLength, 4));
     let long = format!("a.{}", "b".repeat(159));
     assert_eq!(op_err(&raw_op(&[(&long, &[])])), (K::KeyLength, 4));
-    assert_eq!(
-        op_err(&raw_op(&[("item.Name", &[])])),
-        (K::KeyGrammar, 4 + 4 + 5)
-    );
+    assert_eq!(op_err(&raw_op(&[("item.Name", &[])])), (K::KeyGrammar, 4));
+    let d = raw_op(&[("a.a", &[]), ("tag/6A", &[])]);
+    assert_eq!(op_err(&d), (K::KeyGrammar, 4 + 11));
     assert_eq!(
         op_err(&raw_op(&[("@lifecycle", &[])])),
         (K::MisplacedLifecycle, 4)
@@ -929,6 +931,51 @@ fn keys_and_values_never_reach_debug_or_errors() {
             }
         }
         assert_eq!(format!("{marker:?}"), "Lifecycle([REDACTED])");
+        // Only an `Active` op has writes, so the op data prints no count either.
+        assert_eq!(format!("{parsed:?}"), "OpData([REDACTED])");
+    }
+    assert_eq!(format!("{op:?}"), "OpData([REDACTED])");
+    // Whether an item is live or purged is item content too (the record kind is inside the
+    // encrypted `data`): a live snapshot and a tombstone print the same text, and neither
+    // prints its registers, its purge or its `c`.
+    let cov = vv(&[(A, 2)]);
+    let trashed = Lifecycle::Trashed.register_value().unwrap();
+    let live = SnapshotData::Live(LiveSnapshot::new(
+        vec![Register::new(
+            FieldKey::LIFECYCLE,
+            vec![Entry::new(dot(A, 1), hlc(0, 0), trashed)],
+        )],
+        vec![],
+    ));
+    let tombstone = SnapshotData::Tombstone(Tombstone::new(
+        dot(A, 1),
+        hlc(0, 0),
+        vv(&[(A, 1)]),
+        SymmetricKeyId::from_bytes([0x4b; 16]),
+        vec![Register::new(
+            key("item.name"),
+            vec![Entry::new(dot(A, 2), hlc(0, 1), Value::CLEARED)],
+        )],
+    ));
+    for snapshot in [live, tombstone] {
+        let bytes = encode_snapshot(&cov, &snapshot).unwrap();
+        let parsed = parse_snapshot(&cov, bytes.expose_secret()).unwrap();
+        assert_eq!(parsed, snapshot);
+        let inner = match &parsed {
+            SnapshotData::Live(live) => format!("{live:?}"),
+            SnapshotData::Tombstone(tombstone) => format!("{tombstone:?}"),
+        };
+        for text in [format!("{snapshot:?}"), format!("{parsed:#?}"), inner] {
+            assert_eq!(text, "SnapshotData([REDACTED])");
+        }
+        assert_eq!(format!("{:?}", parsed.kind()), "RecordKind([REDACTED])");
+    }
+    for kind in [
+        RecordKind::Op,
+        RecordKind::LiveSnapshot,
+        RecordKind::Tombstone,
+    ] {
+        assert_eq!(format!("{kind:?}"), "RecordKind([REDACTED])");
     }
     // A rejected record's error names a kind and an offset only.
     let mut broken = bytes.expose_secret().to_vec();
@@ -946,10 +993,112 @@ fn keys_and_values_never_reach_debug_or_errors() {
     assert!(!format!("{e:?}").contains("assword"));
 }
 
+/// The record layer and the schema layer accept exactly the same keys (ADR 0018 §5 rules 2
+/// and 3, §7, §10): every way the record layer takes a key agrees with `rizzy-core`'s
+/// [`FieldKeyRef::parse`] on the keys of the §7 table, the §12 negative cases, the boundaries
+/// of `name`, `elem` and the 160-byte limit, and bytes outside the grammar's alphabet. The
+/// expected answer is spelled out too, so the agreement is never two layers refusing
+/// everything. The property version is in `proptests`.
+#[test]
+fn both_layers_accept_the_same_keys() {
+    use rizzy_core::item::key::FieldKeyRef;
+
+    let id = "00112233445566778899aabbccddeeff";
+    let n32 = "a".repeat(32);
+    let hex128 = "ab".repeat(64);
+    let mut cases: Vec<(Vec<u8>, bool)> = [
+        "item.type",
+        "item.name",
+        "item.notes",
+        "item.favorite",
+        "import.created_ms",
+        "login.username",
+        "login.password",
+        "login.totp",
+        "card.exp_month",
+        "identity.drivers_license",
+        "vault.name",
+        "tag/61",
+        "tag/6162",
+        "tag/00",
+        "a.b.c.d",
+        "x9_.y",
+    ]
+    .iter()
+    .map(|k| (k.as_bytes().to_vec(), true))
+    .collect();
+    for attr in ["label", "kind", "value", "order"] {
+        cases.push((format!("field/{id}/{attr}").into_bytes(), true));
+    }
+    for k in [
+        format!("uri/{id}/match"),
+        format!("pwhist/{id}/ms"),
+        format!("share/{id}/secret"),
+        format!("{n32}.{n32}"),
+        format!("tag/{hex128}"),
+        // The longest `elem` with an attribute name that brings the key to exactly 160 bytes.
+        format!("x/{hex128}/{}", "a".repeat(29)),
+        key_of_len(MAX_KEY_LEN),
+    ] {
+        cases.push((k.into_bytes(), true));
+    }
+    for k in [
+        // ADR 0018 §12: an odd hex count, a 33-byte name, uppercase hex; a 161-byte key.
+        "uri/abc/value".to_owned(),
+        format!("{}.a", "a".repeat(33)),
+        "tag/6A".to_owned(),
+        "tag/AA".to_owned(),
+        key_of_len(MAX_KEY_LEN + 1),
+        // A grammar key of 163 bytes: a 32-byte attribute after the longest `elem`.
+        format!("x/{hex128}/{n32}"),
+        // A lone name, empty parts, stray separators, a bad first byte, too long an `elem`.
+        "notes".to_owned(),
+        String::new(),
+        "tag/a".to_owned(),
+        "item.".to_owned(),
+        ".item".to_owned(),
+        "item..name".to_owned(),
+        "item.name.".to_owned(),
+        "tag/".to_owned(),
+        "tag/61/".to_owned(),
+        "tag/61/value/x".to_owned(),
+        "tag/61.x".to_owned(),
+        "item.name/61".to_owned(),
+        "a.b/00".to_owned(),
+        "Item.name".to_owned(),
+        "1tem.name".to_owned(),
+        "_tem.name".to_owned(),
+        "item.Name".to_owned(),
+        "item.na-me".to_owned(),
+        LIFECYCLE_KEY.to_owned(),
+        "item.name\u{e9}".to_owned(),
+        "item.name\0".to_owned(),
+        format!("{n32}b.x"),
+        format!("tag/{hex128}00"),
+        format!("tag/{}", "a".repeat(127)),
+    ] {
+        cases.push((k.into_bytes(), false));
+    }
+    cases.push((b"item.\xffname".to_vec(), false));
+    cases.push((b"tag/\xc3\xa9".to_vec(), false));
+
+    for (bytes, expected) in &cases {
+        let schema = FieldKeyRef::parse(bytes).is_ok();
+        let text = String::from_utf8_lossy(bytes);
+        assert_eq!(schema, *expected, "{text:?}");
+        assert_eq!(record_layer_accepts(bytes), [schema; 4], "{text:?}");
+    }
+}
+
 #[test]
 fn small_api() {
     assert_eq!(FieldKey::new(""), Err(RecordError::new(K::KeyLength, 0)));
-    assert_eq!(FieldKey::new("tag/6A").unwrap_err().offset(), 5);
+    assert_eq!(
+        FieldKey::new("tag/6A"),
+        Err(RecordError::new(K::KeyGrammar, 0))
+    );
+    let k161 = key_of_len(161);
+    assert_eq!(FieldKey::new(&k161), Err(RecordError::new(K::KeyLength, 0)));
     assert_eq!(
         FieldKey::new(LIFECYCLE_KEY).unwrap_err().kind(),
         K::KeyGrammar
