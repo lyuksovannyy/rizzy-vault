@@ -1,0 +1,32 @@
+[package]
+name = "rizzy-proto"
+description = "The /api/v1 request and response types shared by the rizzy-vault server and clients."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# The OpenAPI schema derive (ADR 0002 point 3, ADR 0016 §3 notes): non-default, and only
+# `xtask` may enable it (`cargo xtask check-deps`). The generator crate is "chosen in M1" and
+# is not chosen yet, so the feature enables nothing for now.
+openapi = []
+
+[dependencies]
+# base64url without padding for every binary field (CRYPTO.md §9.6). The version rizzy-core
+# already pins (ADR 0009), with its strict decoder.
+base64ct.workspace = true
+# The request and response types themselves (ADR 0016 §3 row: "serde").
+serde.workspace = true
+# Wipes bearer tokens, invite tokens and TOTP codes on drop (CLAUDE.md: secret types zeroize).
+zeroize.workspace = true
+
+[dev-dependencies]
+# JSON for the round-trip, rejection and known-answer tests. A dev-dependency only: R1's
+# allow-list covers normal and build dependencies (ADR 0016 §4, "Dev-dependencies").
+serde_json.workspace = true
+
+[lints]
+workspace = true

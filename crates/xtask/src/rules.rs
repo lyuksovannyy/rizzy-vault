@@ -14,7 +14,8 @@
 //! - [`CRATES`]: one [`CrateRule`] per crate: its side (R6), whether it is a no-I/O crate and
 //!   its external allow-list (R1), getrandom and `wasm_js` rights (R2), its allowed internal
 //!   dependencies (§3), its sqlx rights (R5) and openssl rights (ADR 0009).
-//! - [`CORE_EXTERNAL_ALLOW`]: `rizzy-core`'s R1 allow-list, as `name@compat` ([`compat`]).
+//! - [`CORE_EXTERNAL_ALLOW`] and [`PROTO_EXTERNAL_ALLOW`]: the R1 allow-lists of `rizzy-core` and
+//!   `rizzy-proto`, as `name@compat` ([`compat`]).
 //! - The deny-lists: [`NO_IO_FORBIDDEN`] (R1), [`ISOLATED_INGRESS`] (R3), [`SERVER_WIRED`] and
 //!   [`SQLX`] (R5), [`OPENSSL`].
 //! - The `rand` and getrandom rules: [`RAND`], [`RANDOMNESS_CRATES`],
@@ -222,6 +223,29 @@ pub(crate) const CORE_EXTERNAL_ALLOW: &[&str] = &[
     "zeroize_derive@1",
 ];
 
+/// The R1 allow-list of `rizzy-proto` (ADR 0016 §3 row: "serde"; §5), generated from `Cargo.lock`
+/// when the crate was created in M1 step 3, as `name@compat`: `serde` with its derive
+/// (`serde_core`, `serde_derive` and the proc-macro crates `proc-macro2`, `quote`, `syn` 3 and
+/// `unicode-ident`), `base64ct` for CRYPTO.md §9.6's base64url (the version `rizzy-core` pins),
+/// and `zeroize` for the secret wire types, with `zeroize_derive` and `syn` 2, which the
+/// workspace-unified `zeroize` features bring in. Every entry is also on
+/// [`CORE_EXTERNAL_ALLOW`] except the three `serde` crates. The `openapi` feature adds nothing
+/// yet: its schema-derive crate is not chosen (ADR 0002 point 3), and adding it here is a
+/// reviewed change, marked as feature-gated (§3 notes).
+pub(crate) const PROTO_EXTERNAL_ALLOW: &[&str] = &[
+    "base64ct@1",
+    "proc-macro2@1",
+    "quote@1",
+    "serde@1",
+    "serde_core@1",
+    "serde_derive@1",
+    "syn@2",
+    "syn@3",
+    "unicode-ident@1",
+    "zeroize@1",
+    "zeroize_derive@1",
+];
+
 /// The domain crates (ADR 0016 §3). R4: none depends on another.
 pub(crate) const DOMAIN_PREFIX: &str = "rizzy-domain-";
 
@@ -260,8 +284,8 @@ pub(crate) const CRATES: &[CrateRule] = &[
         .leaf()
         .internal(&["rizzy-proto"]),
     // §3, planned crates. Their R1 allow-lists start empty: the PR that creates a no-I/O crate
-    // adds its list, generated from `Cargo.lock` (§5).
-    CrateRule::new("rizzy-proto", "crates/rizzy-proto", Side::Shared).no_io(&[]),
+    // adds its list, generated from `Cargo.lock` (§5). `rizzy-proto` exists since M1 step 3.
+    CrateRule::new("rizzy-proto", "crates/rizzy-proto", Side::Shared).no_io(PROTO_EXTERNAL_ALLOW),
     CrateRule::new("rizzy-import", "crates/rizzy-import", Side::Client)
         .no_io(&[])
         .internal(&["rizzy-core"]),

@@ -41,6 +41,8 @@
 #   sync_causal        rizzy-sync's per-device-chain layer on served headers, covers and body
 #                      verdicts: chain check, causal delivery, revocation, own-chain bookkeeping
 #                      (ADR 0012 §4, §6, §7; ADR 0021 §4, §9)
+#   proto_json         rizzy-proto's /api/v1 request and response types from arbitrary JSON, and
+#                      the Rizzy-Client header parser (ADR 0002 point 3)
 #
 # Not covered yet: the share-URL fragment parser (M5, not written) and the export file's JSON
 # document reader (§11.14, not written). `export_fields` covers the field decoders the reader
@@ -67,6 +69,13 @@ rizzy-core = { path = "../crates/rizzy-core" }
 # `sync_compaction`, `sync_merge` and `sync_causal`). A path crate whose only dependency is
 # rizzy-core, so no new crate in this graph.
 rizzy-sync = { path = "../crates/rizzy-sync" }
+# The /api/v1 types (`proto_json`). A path crate with no internal dependency; its external
+# crates (serde, base64ct, zeroize) are the ones the main workspace already locks.
+rizzy-proto = { path = "../crates/rizzy-proto" }
+# The traits `proto_json` is generic over, and the JSON parser the server and clients use on
+# API bodies. The versions the main workspace locks.
+serde = { version = "1.0.229", default-features = false, features = ["std"] }
+serde_json = { version = "1.0.151", default-features = false, features = ["std"] }
 
 # One [[bin]] per target. `test`, `doc` and `bench` are off because a libFuzzer entry point
 # (`#![no_main]` with `fuzz_target!`) is not a test, has no API to document and is not a benchmark.
@@ -199,6 +208,13 @@ bench = false
 [[bin]]
 name = "sync_causal"
 path = "fuzz_targets/sync_causal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proto_json"
+path = "fuzz_targets/proto_json.rs"
 test = false
 doc = false
 bench = false

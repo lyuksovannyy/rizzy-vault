@@ -1,0 +1,22 @@
+[package]
+name = "rizzy-bus"
+description = "Typed, ids-only domain events for the rizzy-vault server; in-process from M1."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# tokio's `broadcast` channel: a bounded ring buffer per bus that never blocks the publisher and
+# reports a slow subscriber's loss as `Lagged` (ADR 0010 §1 names tokio for the server). Only
+# the `sync` feature: no runtime, no I/O driver.
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+# A current-thread runtime to drive the async `Subscriber::recv` in tests. Test-only.
+tokio = { workspace = true, features = ["sync", "rt"] }
+
+[lints]
+workspace = true

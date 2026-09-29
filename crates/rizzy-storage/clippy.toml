@@ -1,0 +1,29 @@
+# Clippy configuration for rizzy-storage (ADR 0011 point 2).
+#
+# A crate-level clippy.toml replaces the root one; it does not merge with it (ADR 0016 §5). So
+# this file repeats every key of the root clippy.toml, then adds the sqlx escape-hatch bans that
+# ADR 0011 point 2 requires in every crate that depends on sqlx. Each entry names an item, never
+# a module; `cargo xtask check-clippy` fails if clippy reports an entry it cannot resolve. A
+# reviewed use carries `#[expect(clippy::disallowed_types, reason = "...")]` (or
+# `disallowed_methods`) at the narrowest scope. The `rizzy-domain-*` crates copy this file.
+
+# Repeated from the root clippy.toml.
+msrv = "1.94"
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-print-in-tests = true
+allow-panic-in-tests = true
+
+# Engine and document names in doc comments; ".." keeps clippy's default list.
+doc-valid-idents = ["SQLite", "PostgreSQL", "THREAT_MODEL", ".."]
+
+disallowed-types = [
+  { path = "sqlx::AssertSqlSafe", reason = "ADR 0011 point 2, INV-53: query text is a &'static str from a .sql file" },
+  { path = "sqlx::QueryBuilder", reason = "ADR 0011 point 2, INV-53: QueryBuilder::push appends any Display value to the SQL text" },
+]
+
+disallowed-methods = [
+  { path = "sqlx::AssertSqlSafe", reason = "ADR 0011 point 2: disallowed-types does not flag the tuple-constructor call" },
+  { path = "std::string::String::leak", reason = "ADR 0011 point 2: turns a runtime string into a &'static str query" },
+  { path = "std::boxed::Box::leak", reason = "ADR 0011 point 2: turns a runtime string into a &'static str query" },
+]

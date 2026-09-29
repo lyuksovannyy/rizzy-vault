@@ -41,6 +41,9 @@ ADRs 0010–0014 are Accepted, so the gate for server and client scaffolding (st
 ```text
 crates/rizzy-core     crypto, envelopes, key hierarchy, item models (no I/O, builds for wasm32)
 crates/rizzy-sync     sync engine (skeleton; code arrives in M1 step 2)
+crates/rizzy-proto    /api/v1 request and response types, serde (no I/O, builds for wasm32)
+crates/rizzy-storage  server storage: sqlx pools, migrations, account lock, backup and restore
+crates/rizzy-bus      in-process domain events for the server (ids only; M1 step 3)
 crates/rizzy-server   server binary `rizzy-vault` (skeleton: --help and --version only)
 crates/rizzy-cli      command-line client `rv` (skeleton: --help and --version only)
 crates/xtask          repository checks: `cargo xtask check-deps`, `cargo xtask check-clippy`

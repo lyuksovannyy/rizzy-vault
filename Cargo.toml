@@ -15,6 +15,8 @@ publish = false
 
 [workspace.dependencies]
 rizzy-core = { path = "crates/rizzy-core" }
+rizzy-proto = { path = "crates/rizzy-proto" }
+rizzy-bus = { path = "crates/rizzy-bus" }
 rizzy-sync = { path = "crates/rizzy-sync" }
 
 # Cryptography. Exact pins and feature sets from ADR 0009 ("Allowed crate families" and
@@ -43,16 +45,35 @@ subtle = { version = "=2.6.1", default-features = false }
 unicode-normalization = { version = "=0.1.25", default-features = false }
 zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
 
+# Wire types. Not cryptography.
+# serde: the `/api/v1` request and response types of `rizzy-proto` (ADR 0002 point 3; ADR 0016
+# §3 row "serde"). `std` and `derive` only; 1.0.229 is the version already in Cargo.lock through
+# serde_json. Nothing signed or used as AAD goes through serde (CRYPTO.md §2).
+serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
+# Server runtime (ADR 0010 §1: one binary on axum, tokio and sqlx; fact sheet: tokio 1.53.1).
+# Server-side crates only; never a dependency of a no-I/O crate (ADR 0016 R1, checked by
+# `cargo xtask check-deps`). Members switch on the features they need.
+tokio = { version = "1.53.1", default-features = false }
+
 # Tooling and tests. Not cryptography.
 # serde_json: `xtask` reads `cargo metadata` JSON with it (ADR 0016 §5), and `rizzy-core`'s tests
 # read the committed known-answer vector files (CRYPTO.md §15 item 1). Never a normal or build
-# dependency of a no-I/O crate. `std` only; no serde derive.
+# dependency of a no-I/O crate; `rizzy-proto` uses it in tests only. `std` only.
 serde_json = { version = "1.0.145", default-features = false, features = ["std"] }
 
 # Test-only. Never a normal or build dependency of a no-I/O crate (ADR 0016 R1).
 # `chacha20` with `rng` provides the seeded ChaCha20Rng for test vectors (ADR 0009).
 chacha20 = { version = "=0.10.2", default-features = false, features = ["rng"] }
 proptest = { version = "1.11", default-features = false, features = ["std"] }
+
+# Server-side storage (ADR 0011 point 1, ADR 0010). Only `rizzy-storage` and the `rizzy-domain-*`
+# crates depend on sqlx (ADR 0016 R5). Exact pin: INV-53 rests on sqlx 0.9's `SqlSafeStr` guard,
+# so every sqlx upgrade is a reviewed change with both engines' suites (ADR 0011 point 2, Risks).
+# Drivers: `sqlite-bundled` (the SQLite driver without extension loading, which the `sqlite`
+# umbrella feature would add) and `postgres`; `runtime-tokio`; rustls with the ring provider and
+# the webpki root set for PostgreSQL TLS (`sslmode=verify-full`). No `macros`, `any`, `json`:
+# queries are runtime-checked and dispatched by enum (ADR 0011 point 3).
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "postgres", "tls-rustls-ring-webpki", "migrate"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
