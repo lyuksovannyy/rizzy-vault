@@ -43,6 +43,9 @@
 #                      (ADR 0012 §4, §6, §7; ADR 0021 §4, §9)
 #   proto_json         rizzy-proto's /api/v1 request and response types from arbitrary JSON, and
 #                      the Rizzy-Client header parser (ADR 0002 point 3)
+#   auth_rules         rizzy-domain-auth's rules on untrusted statements and transitions: the
+#                      request-counter window, `account-state` steps, bundle-chain extension
+#                      (CRYPTO.md §5.10, §10.2, §11; ADR 0012 §7)
 #
 # Not covered yet: the share-URL fragment parser (M5, not written) and the export file's JSON
 # document reader (§11.14, not written). `export_fields` covers the field decoders the reader
@@ -76,6 +79,9 @@ rizzy-proto = { path = "../crates/rizzy-proto" }
 # API bodies. The versions the main workspace locks.
 serde = { version = "1.0.229", default-features = false, features = ["std"] }
 serde_json = { version = "1.0.151", default-features = false, features = ["std"] }
+# The auth domain's pure rules (`auth_rules`). A path crate; its external crates (sqlx, tokio and
+# their trees) are the ones the main workspace already locks and `cargo deny` already checks.
+rizzy-domain-auth = { path = "../crates/rizzy-domain-auth" }
 
 # One [[bin]] per target. `test`, `doc` and `bench` are off because a libFuzzer entry point
 # (`#![no_main]` with `fuzz_target!`) is not a test, has no API to document and is not a benchmark.
@@ -215,6 +221,13 @@ bench = false
 [[bin]]
 name = "proto_json"
 path = "fuzz_targets/proto_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "auth_rules"
+path = "fuzz_targets/auth_rules.rs"
 test = false
 doc = false
 bench = false

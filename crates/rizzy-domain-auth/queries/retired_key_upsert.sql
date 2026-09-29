@@ -1,0 +1,2 @@
+-- Stores or replaces a RETIRED_SECRET_KEY envelope of account $1 (CRYPTO.md §8.4, §11.6 step 3). Shared by both engines; every value is a bound parameter (INV-53).
+INSERT INTO auth_retired_secret_keys (account_id, retired_key_id, envelope, stored_at_ms) VALUES ($1, $2, $3, $4) ON CONFLICT (account_id, retired_key_id) DO UPDATE SET envelope = excluded.envelope, stored_at_ms = excluded.stored_at_ms

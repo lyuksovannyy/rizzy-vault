@@ -1,0 +1,2 @@
+-- Stores or replaces the OPAQUE record and E_srv of account $1 (CRYPTO.md §11 "Replacing credentials"). Shared by both engines; every value is a bound parameter (INV-53).
+INSERT INTO auth_credentials (account_id, setup_id, opaque_record, kdf_id, password_epoch, e_srv, updated_at_ms) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (account_id) DO UPDATE SET setup_id = excluded.setup_id, opaque_record = excluded.opaque_record, kdf_id = excluded.kdf_id, password_epoch = excluded.password_epoch, e_srv = excluded.e_srv, updated_at_ms = excluded.updated_at_ms

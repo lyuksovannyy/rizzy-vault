@@ -1,0 +1,2 @@
+-- Stores or replaces E_rec and H_rec of account $1 (CRYPTO.md §11.1 step 8, §11.9 step 6). Shared by both engines; every value is a bound parameter (INV-53).
+INSERT INTO auth_recovery (account_id, recovery_epoch, e_rec, h_rec, updated_at_ms) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (account_id) DO UPDATE SET recovery_epoch = excluded.recovery_epoch, e_rec = excluded.e_rec, h_rec = excluded.h_rec, updated_at_ms = excluded.updated_at_ms

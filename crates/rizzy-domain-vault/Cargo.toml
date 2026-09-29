@@ -1,0 +1,38 @@
+[package]
+name = "rizzy-domain-vault"
+description = "rizzy-vault server vault domain: op and snapshot upload, Fetch, compaction, restore healing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Internal dependencies: exactly the ADR 0016 §3 row of `rizzy-domain-vault` (core, sync, proto,
+# storage, bus), checked by `cargo xtask check-deps`. No new external crate: sqlx is the
+# workspace's pinned sqlx (ADR 0011 point 2; R5 lets the domain crates hold it), with the
+# features `rizzy-storage` already enables.
+[dependencies]
+# Signature verification of every uploaded op and snapshot statement (ADR 0012 §7 "Upload").
+rizzy-core.workspace = true
+# Header parsing, version vectors and the compaction rules (ADR 0021 §7).
+rizzy-sync.workspace = true
+# The /api/v1 upload, Fetch and healing types (ADR 0002 point 3).
+rizzy-proto.workspace = true
+# Transactions, the account lock, the restore generation (ADR 0011).
+rizzy-storage.workspace = true
+# `CompactionQueued`, published after commit (ADR 0021 §3 "Where it runs").
+rizzy-bus.workspace = true
+# The queries of this domain's own tables, run through rizzy-storage's transactions.
+sqlx.workspace = true
+
+[dev-dependencies]
+# A current-thread runtime and `spawn` for the integration tests, including the Fetch that races
+# compaction. `rt` only: no macros, no multi-thread runtime.
+tokio = { workspace = true, features = ["rt", "time"] }
+# The seeded ChaCha20Rng that draws the test device keys and ids (ADR 0009: test-only).
+chacha20.workspace = true
+rand_core.workspace = true
+
+[lints]
+workspace = true

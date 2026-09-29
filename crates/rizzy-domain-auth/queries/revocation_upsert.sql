@@ -1,0 +1,2 @@
+-- Stores or replaces the revocation of device $2 of account $1 (CRYPTO.md §11.8). Shared by both engines; every value is a bound parameter (INV-53).
+INSERT INTO auth_device_revocations (account_id, device_id, last_accepted_device_seq, revocation, stored_at_ms) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (account_id, device_id) DO UPDATE SET last_accepted_device_seq = excluded.last_accepted_device_seq, revocation = excluded.revocation, stored_at_ms = excluded.stored_at_ms

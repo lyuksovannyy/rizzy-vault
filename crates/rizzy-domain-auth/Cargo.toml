@@ -1,0 +1,39 @@
+[package]
+name = "rizzy-domain-auth"
+description = "rizzy-vault server auth domain: OPAQUE server side, sessions, devices, key bundles, account state, 2FA and recovery."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# ADR 0016 §3 row `rizzy-domain-auth`: may depend on core, proto, storage and bus. It uses the
+# first three; `rizzy-bus` has no event kind with an M1 consumer for this domain yet (see the
+# crate docs), so it is not a dependency until one exists.
+[dependencies]
+# OPAQUE server side, server-side sealing, signed statements, TOTP, normalisation (CRYPTO.md).
+rizzy-core.workspace = true
+# The /api/v1 request and response types this domain consumes and produces (ADR 0002).
+rizzy-proto.workspace = true
+# Pools, transactions, the account lock and the reconciliation epoch (ADR 0011).
+rizzy-storage.workspace = true
+# SHA-256 of bearer tokens (CRYPTO.md §5.10: "stores only SHA-256(token)") and of rate-limit
+# bucket keys. The version rizzy-core pins (ADR 0009), `zeroize` on; no new crate.
+sha2.workspace = true
+# The auth tables' queries, run through rizzy-storage's transactions and `on_engine!` (ADR 0011
+# point 3; ADR 0016 R5 lets the domain crates hold sqlx). The workspace's exact pin and
+# features; no new crate.
+sqlx.workspace = true
+# Wipes the bearer token and the TOTP secret handed back to the caller (CLAUDE.md: secret
+# types zeroize). The version rizzy-core pins; no new crate.
+zeroize.workspace = true
+
+[dev-dependencies]
+# The seeded ChaCha20Rng of the tests (ADR 0009 test RNG). Test-only.
+chacha20.workspace = true
+# A current-thread runtime to drive the async domain functions against real SQLite. Test-only.
+tokio = { workspace = true, features = ["rt", "time"] }
+
+[lints]
+workspace = true

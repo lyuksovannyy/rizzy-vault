@@ -1213,6 +1213,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "rizzy-domain-auth"
+version = "0.0.0"
+dependencies = [
+ "chacha20",
+ "rizzy-core",
+ "rizzy-proto",
+ "rizzy-storage",
+ "sha2 0.11.0",
+ "sqlx",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "rizzy-domain-vault"
+version = "0.0.0"
+dependencies = [
+ "chacha20",
+ "rand_core 0.10.1",
+ "rizzy-bus",
+ "rizzy-core",
+ "rizzy-proto",
+ "rizzy-storage",
+ "rizzy-sync",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "rizzy-proto"
 version = "0.0.0"
 dependencies = [

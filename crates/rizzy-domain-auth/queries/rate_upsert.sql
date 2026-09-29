@@ -1,0 +1,2 @@
+-- Stores the counters of rate-limit bucket $1. Shared by both engines; every value is a bound parameter (INV-53).
+INSERT INTO auth_rate_limits (bucket, attempts, window_started_at_ms, blocked_until_ms, expires_at_ms) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (bucket) DO UPDATE SET attempts = excluded.attempts, window_started_at_ms = excluded.window_started_at_ms, blocked_until_ms = excluded.blocked_until_ms, expires_at_ms = excluded.expires_at_ms

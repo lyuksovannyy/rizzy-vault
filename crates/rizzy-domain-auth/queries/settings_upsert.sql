@@ -1,0 +1,2 @@
+-- Stores or replaces the ACCOUNT_SETTINGS envelope of account $1 (CRYPTO.md §10.2 "Settings freshness"). Shared by both engines; every value is a bound parameter (INV-53).
+INSERT INTO auth_account_settings (account_id, settings_seq, envelope, updated_at_ms) VALUES ($1, $2, $3, $4) ON CONFLICT (account_id) DO UPDATE SET settings_seq = excluded.settings_seq, envelope = excluded.envelope, updated_at_ms = excluded.updated_at_ms

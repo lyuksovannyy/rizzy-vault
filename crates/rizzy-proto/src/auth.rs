@@ -25,8 +25,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::account::AccountView;
-use crate::limits::MAX_BUNDLES;
 use crate::limits::{CHALLENGE_LEN, InviteTokenRule, LoginNameRule, OriginRule, TotpCodeRule};
+use crate::limits::{MAX_BUNDLES, MAX_DEVICE_STATEMENTS};
 use crate::objects::{
     AccountKeyRecoveryWrap, AccountKeyServerWrap, AccountStatement, IdentitySecretKeys,
     OpaqueMessage, SignatureContainer, VaultSelfGrant,
@@ -175,6 +175,12 @@ pub struct LoginFinishResponse {
 /// during the reconciliation epoch only (ADR 0012 §7 "A device enrolled after the backup";
 /// threat model INV-59): its certificate, the `account-state` that lists it, and the bundle
 /// chain.
+///
+/// ADR 0012 §7 has the server verify that the state lists the certificate. The state commits
+/// only to a hash of its device set (CRYPTO.md §10.2), so the certificates of that set and the
+/// revocations the device holds travel with it, as in
+/// [`PublishAccountStateRequest`](crate::account::PublishAccountStateRequest); the ADR names
+/// no wire shape for them (a detail left open, reported to the owner).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reconciliation {
@@ -184,6 +190,10 @@ pub struct Reconciliation {
     pub account_state: AccountStatement,
     /// The bundle chain, oldest first.
     pub bundles: List<AccountStatement, MAX_BUNDLES>,
+    /// The certificates of the state's device set, this device's among them.
+    pub device_certificates: List<AccountStatement, MAX_DEVICE_STATEMENTS>,
+    /// Every revocation the device holds.
+    pub device_revocations: List<AccountStatement, MAX_DEVICE_STATEMENTS>,
 }
 
 /// Device authentication, step 1: ask for a challenge (CRYPTO.md §5.10). Kinds 1–3 only; the web
@@ -223,6 +233,12 @@ pub struct DeviceAuthFinishRequest {
     pub challenge: Challenge,
     /// The `device-auth` signature container.
     pub signature: SignatureContainer,
+    /// The same objects as [`DeviceAuthStartRequest::reconciliation`], sent again by a device
+    /// the restored database does not know (ADR 0012 §7), so the server verifies them again
+    /// with the signature instead of storing anything before the device proved it holds the
+    /// key. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconciliation: Option<Reconciliation>,
 }
 
 /// The device-authenticated session (CRYPTO.md §5.10): its bearer token and the 16-byte

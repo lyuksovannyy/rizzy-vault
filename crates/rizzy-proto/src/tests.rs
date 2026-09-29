@@ -168,6 +168,7 @@ fn known_answer_device_auth_finish() {
         device_id: id(0xff),
         challenge: Fixed::from_bytes([0; 32]),
         signature: Fixed::from_bytes([0; 82]),
+        reconciliation: None,
     };
     let json = format!(
         r#"{{"account_id":"{ZERO_ID}","device_id":"{}_w","challenge":"{}","signature":"{}"}}"#,
@@ -290,6 +291,8 @@ fn every_auth_message_round_trips() {
             device_certificate: b(b"cert"),
             account_state: b(b"state"),
             bundles: l(vec![b(b"bundle")]),
+            device_certificates: l(vec![b(b"cert")]),
+            device_revocations: l(vec![]),
         }),
     });
     round_trip(&DeviceAuthStartResponse {

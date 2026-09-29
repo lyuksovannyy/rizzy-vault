@@ -1,0 +1,2 @@
+-- Stores or replaces a signed device grant (CRYPTO.md §10.1). Shared by both engines; every value is a bound parameter (INV-53).
+INSERT INTO auth_key_grants (account_id, recipient_device_id, account_key_epoch, sender_device_id, grant_record, stored_at_ms) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (account_id, recipient_device_id, account_key_epoch) DO UPDATE SET sender_device_id = excluded.sender_device_id, grant_record = excluded.grant_record, stored_at_ms = excluded.stored_at_ms

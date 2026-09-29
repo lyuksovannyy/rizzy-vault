@@ -18,6 +18,7 @@ rizzy-core = { path = "crates/rizzy-core" }
 rizzy-proto = { path = "crates/rizzy-proto" }
 rizzy-bus = { path = "crates/rizzy-bus" }
 rizzy-sync = { path = "crates/rizzy-sync" }
+rizzy-storage = { path = "crates/rizzy-storage" }
 
 # Cryptography. Exact pins and feature sets from ADR 0009 ("Allowed crate families" and
 # "Required feature sets"); docs/CRYPTO.md §3. Bumps are reviewed like crypto changes and are
