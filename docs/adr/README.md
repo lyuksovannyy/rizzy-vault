@@ -79,6 +79,8 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0020 | [Record architecture decisions, with partial supersession](0020-partial-supersession.md) | Accepted | M0 |
 | 0021 | [Server-side compaction with concurrent snapshots](0021-server-compaction.md) | Accepted | M1 (server; Accepted before step 3) |
 | 0022 | [Server mode only: On-device sync parked](0022-server-mode-only.md) | Accepted | M1 (scope) / post-1.0 (parked) |
+| 0023 | [Logical database backup file format](0023-logical-backup-format.md) | Proposed | M1 |
+| 0024 | [Disabling core dumps through rustix](0024-core-dump-disabling-rustix.md) | Proposed | M1 (server, `rv`) / M3 (bindings) |
 
 ## Gates
 
