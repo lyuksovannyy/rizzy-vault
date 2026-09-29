@@ -26,3 +26,11 @@ target
 # Local env files — never commit secrets
 .env
 .env.*
+
+# Operator files under deploy/ (docs/self-hosting.md): the PostgreSQL password file, database
+# archives, the secrets-backup staging directory and encrypted secrets copies. Never commit them.
+deploy/pg_password
+deploy/backup/
+deploy/backup-db/
+deploy/backup-secrets/
+*.age

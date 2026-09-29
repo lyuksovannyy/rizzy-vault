@@ -1,0 +1,20 @@
+# The TLS reverse proxy of profile A (ADR 0010 §4, owner decision 3: a Caddy example; the
+# binary has no ACME client in M1). Caddy obtains and renews the certificate for RIZZY_DOMAIN
+# and forwards everything to the rizzy-vault container. Operator guide: docs/self-hosting.md.
+{
+	# No admin endpoint inside the proxy container.
+	admin off
+}
+
+{$RIZZY_DOMAIN} {
+	# Caddy replaces any X-Forwarded-For a client sends with the client's address (it trusts
+	# no upstream proxy unless configured to), and rizzy-vault believes that header only from
+	# this proxy's address (RIZZY_TRUSTED_PROXIES; THREAT_MODEL §7.6 "S", §7.14).
+	#
+	# No `encode` (compression): responses carry session tokens next to attacker-influenced
+	# data. No access log: rizzy-vault logs no IP addresses, and neither should its proxy
+	# unless the operator decides to (THREAT_MODEL §3.4).
+	#
+	# rizzy-vault sets HSTS, CSP and the other security headers itself (INV-49).
+	reverse_proxy rizzy-vault:8080
+}

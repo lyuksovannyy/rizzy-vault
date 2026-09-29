@@ -20,6 +20,7 @@
 //! | [`VaultDomain::fetch`] | ADR 0012 §7 "Fetch" as ADR 0021 §4 supersedes it in part | [`fetch`] |
 //! | [`VaultDomain::compact_item`], [`VaultDomain::run_compaction`] | ADR 0021 §3, §7 (the `worker` job) | [`compact`] |
 //! | [`create_vault`], [`VaultDomain::self_grant`], [`VaultDomain::republish_self_grant`], [`VaultDomain::vaults`] | CRYPTO.md §4.2, §4.4; ADR 0012 §7 healing step 3 | [`keys`] |
+//! | [`port::create_personal_vault`], [`port::self_grants`], [`port::store_self_grants`], [`port::device_head`] | ADR 0016 R4; CRYPTO.md §11.1 step 8, §11.2 step 5, §11.8 step 0; ADR 0012 §7 healing step 3 | [`port`]: the vault side of the `auth` flows, on the caller's transaction |
 //! | [`DeviceDirectory`] | ADR 0012 §7 "Certificates come from the `auth` domain through a trait"; ADR 0016 R4 | [`authors`] |
 //!
 //! The rule logic of ADR 0021 §2–§4 and §9 "Server acceptance" / "Revoked and kind-4 authors" is
@@ -128,6 +129,7 @@ pub mod error;
 pub mod fetch;
 mod intake;
 pub mod keys;
+pub mod port;
 mod repo;
 mod store;
 pub mod upload;
@@ -139,6 +141,7 @@ pub use compact::{CompactionFailure, CompactionReport, CompactionRun};
 pub use error::{HealingError, VaultError};
 pub use fetch::{FetchOutcome, IntegrityError, PAGE_BYTES, PAGE_MAX_OPS};
 pub use keys::create_vault;
+pub use port::PersonalVaultOutcome;
 
 /// The vault domain: a database handle, the `auth` domain's certificates through
 /// [`DeviceDirectory`], and the event bus. Cheap to share behind an `Arc`; every call opens its

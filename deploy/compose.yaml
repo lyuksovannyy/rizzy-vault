@@ -1,0 +1,185 @@
+# rizzy-vault, profile A (solo): one rizzy-vault container (`api,web,worker`) with SQLite, plus
+# the TLS reverse proxy (ADR 0010 §4). Works with `docker compose` and `podman compose`.
+# Operator guide: docs/self-hosting.md. Run every command from this directory (deploy/).
+#
+# First run:
+#   cp rizzy-vault.env.example .env            # then set RIZZY_DOMAIN and RIZZY_ORIGIN
+#   docker compose build
+#   docker compose --profile admin run --rm secrets-init
+#   docker compose up -d
+#
+# Two volumes with different backup targets (ADR 0010 §4, THREAT_MODEL INV-50):
+#   rizzy-vault-data     the database: back it up with your data backups;
+#   rizzy-vault-secrets  the OPAQUE seed and server keys: back it up with `backup-secrets`,
+#                        stored APART from the database backups. Never put both in one backup.
+
+name: rizzy-vault
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  user: "65532:65532"
+
+services:
+  rizzy-vault:
+    <<: *hardening
+    image: ${RIZZY_IMAGE:-localhost/rizzy-vault:dev}
+    build:
+      context: ..
+      dockerfile: deploy/Containerfile
+    restart: unless-stopped
+    command: ["serve"]
+    environment:
+      RIZZY_ORIGIN: ${RIZZY_ORIGIN:?set RIZZY_ORIGIN in deploy/.env}
+      RIZZY_LISTEN: 0.0.0.0:8080
+      RIZZY_SIGNUP: ${RIZZY_SIGNUP:-closed}
+      RIZZY_LOG_LEVEL: ${RIZZY_LOG_LEVEL:-info}
+      # Only the proxy's X-Forwarded-For is believed (THREAT_MODEL §7.6 "S", §7.14): the proxy
+      # has a fixed address on the `edge` network below.
+      RIZZY_TRUSTED_PROXIES: ${RIZZY_PROXY_IP:-172.30.87.10}
+    volumes:
+      - data:/data
+      # Read-only for the server: it never writes the secrets file (ADR 0010 §4).
+      - secrets:/run/rizzy-secrets:ro
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    networks:
+      edge:
+    # Not published: only the proxy reaches it.
+    expose: ["8080"]
+    stop_grace_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  proxy:
+    image: ${RIZZY_PROXY_IMAGE:-docker.io/library/caddy:2-alpine}
+    restart: unless-stopped
+    depends_on: [rizzy-vault]
+    environment:
+      RIZZY_DOMAIN: ${RIZZY_DOMAIN:?set RIZZY_DOMAIN in deploy/.env}
+    # High host ports, so rootless Podman needs no sysctl (ADR 0010 §4). For 80/443 on the
+    # host, see docs/self-hosting.md "Ports".
+    ports:
+      - "${RIZZY_HTTP_PORT:-8080}:80"
+      - "${RIZZY_HTTPS_PORT:-8443}:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      edge:
+        ipv4_address: ${RIZZY_PROXY_IP:-172.30.87.10}
+
+  # ---- one-off admin commands (`--profile admin run --rm <name>`); the server must be stopped
+  # for secrets-rotate and migrate (they take the SQLite writer lock, ADR 0010 §2) ----
+
+  secrets-init:
+    <<: *hardening
+    image: ${RIZZY_IMAGE:-localhost/rizzy-vault:dev}
+    profiles: [admin]
+    command: ["secrets", "init"]
+    network_mode: none
+    volumes:
+      - secrets:/run/rizzy-secrets
+
+  secrets-rotate:
+    <<: *hardening
+    image: ${RIZZY_IMAGE:-localhost/rizzy-vault:dev}
+    profiles: [admin]
+    # Add "--data-key" to rotate the data key instead of the OPAQUE setup.
+    command: ["secrets", "rotate"]
+    network_mode: none
+    volumes:
+      - data:/data
+      - secrets:/run/rizzy-secrets
+
+  migrate:
+    <<: *hardening
+    image: ${RIZZY_IMAGE:-localhost/rizzy-vault:dev}
+    profiles: [admin]
+    command: ["migrate"]
+    network_mode: none
+    volumes:
+      - data:/data
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+  # Writes the encrypted secrets backup into RIZZY_SECRETS_BACKUP_DIR (default ./backup-secrets;
+  # owned by UID 65532, mode 0700; see the guide). That directory is NOT where the database
+  # archives go (./backup-db in the guide): never one directory, archive or backup job for both
+  # (INV-50). Move the file to its safe place after each run. The passphrase comes on standard
+  # input, never from the command line:
+  #   docker compose --profile admin run --rm -T backup-secrets < /path/to/passphrase-file
+  backup-secrets:
+    <<: *hardening
+    image: ${RIZZY_IMAGE:-localhost/rizzy-vault:dev}
+    profiles: [admin]
+    command: ["backup-secrets", "--out", "/backup/rizzy-secrets-backup.json", "--passphrase-file", "-"]
+    network_mode: none
+    stdin_open: true
+    volumes:
+      - secrets:/run/rizzy-secrets:ro
+      - ${RIZZY_SECRETS_BACKUP_DIR:-./backup-secrets}:/backup
+
+  # ---- PostgreSQL (profile C) — NOT for production in this build ----------------------------
+  # ADR 0010 §4 / ADR 0011: PostgreSQL is supported from M3. In this build the `worker` role
+  # refuses PostgreSQL (its leader lock is not implemented), so the server could only run
+  # `--roles api,web`, without expired-state purges or compaction. Kept here, commented, as the
+  # shape M3 will ship, NOT as something that starts as written.
+  #
+  # TLS: rizzy-storage accepts a PostgreSQL URL without `sslmode=verify-full` only for a Unix
+  # socket or localhost/127.0.0.1/::1. The `postgres` service below is another container, so the
+  # server treats it as remote and refuses to start unless the URL has `sslmode=verify-full` and
+  # `sslrootcert=<CA file mounted into rizzy-vault>`, and the postgres container serves TLS with
+  # a certificate for the host name `postgres` signed by that CA. The block below does not set
+  # that up (the stock postgres:17-alpine image serves no TLS), so as written the server refuses
+  # to start. To try it anyway: give postgres a TLS certificate (`ssl=on`, `ssl_cert_file`,
+  # `ssl_key_file`), mount the CA into rizzy-vault, set RIZZY_DATABASE_URL in .env as
+  #   postgres://rizzy:<password>@postgres/rizzy?sslmode=verify-full&sslrootcert=/path/ca.pem
+  # add `command: ["serve", "--roles", "api,web"]` and `networks: [edge, db]` to rizzy-vault,
+  # and run `migrate` before every start.
+  #
+  # postgres:
+  #   image: docker.io/library/postgres:17-alpine
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_DB: rizzy
+  #     POSTGRES_USER: rizzy
+  #     POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+  #   secrets: [pg_password]
+  #   volumes:
+  #     - pg-data:/var/lib/postgresql/data
+  #   networks: [db]
+  #
+  # (and on rizzy-vault)
+  #   environment:
+  #     # postgres://rizzy:<password>@postgres/rizzy?sslmode=verify-full&sslrootcert=... (above)
+  #     RIZZY_DATABASE_URL: ${RIZZY_DATABASE_URL}
+
+networks:
+  edge:
+    ipam:
+      config:
+        - subnet: ${RIZZY_EDGE_SUBNET:-172.30.87.0/24}
+  # db:
+  #   internal: true
+
+volumes:
+  data:
+    name: rizzy-vault-data
+  secrets:
+    name: rizzy-vault-secrets
+  caddy-data:
+    name: rizzy-vault-caddy-data
+  caddy-config:
+    name: rizzy-vault-caddy-config
+  # pg-data:
+  #   name: rizzy-vault-pg-data
+
+# secrets:
+#   pg_password:
+#     file: ./pg_password

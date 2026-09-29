@@ -1,0 +1,21 @@
+# Build context of deploy/Containerfile (Docker reads .dockerignore; Podman and Buildah read it
+# too when there is no .containerignore). Keep build output, local secrets, backups and VCS data
+# out. Patterns match from the context root (the repository), so every secret-bearing name is
+# written with `**/` to match in deploy/ and anywhere else.
+.git
+.claude
+**/target
+fuzz/artifacts
+fuzz/corpus
+# Operator settings (profile C puts the database URL, with its password, in deploy/.env).
+**/.env
+**/.env.*
+**/pg_password
+# Databases, backups and secrets copies (docs/self-hosting.md §5, §8).
+**/*.sqlite3*
+**/*.age
+**/*.gpg
+**/rizzy-secrets*.json
+deploy/backup
+deploy/backup-db
+deploy/backup-secrets

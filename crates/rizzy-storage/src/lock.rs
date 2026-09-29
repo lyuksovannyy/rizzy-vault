@@ -31,8 +31,9 @@ use crate::error::Error;
 pub const ACCOUNT_LOCK_NAMESPACE: i32 = 0x7276_6101;
 
 /// The PostgreSQL advisory-lock key (both `int4` keys) reserved for `worker`'s session-level
-/// leader lock (ADR 0010 §2): namespace `"rva"` followed by 2, key 0. `rizzy-server` takes it on
-/// its dedicated connection; it is here so that every advisory key of the project is defined in
+/// leader lock (ADR 0010 §2): namespace `"rva"` followed by 2, key 0. The worker is to take it on
+/// a dedicated connection (not implemented yet: `rizzy-server` refuses `worker` on PostgreSQL
+/// until that connection exists); it is here so that every advisory key of the project is defined in
 /// one place and cannot collide with [`ACCOUNT_LOCK_NAMESPACE`].
 pub const WORKER_LEADER_LOCK: (i32, i32) = (0x7276_6102, 0);
 

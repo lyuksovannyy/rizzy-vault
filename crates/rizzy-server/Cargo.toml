@@ -8,9 +8,61 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# The library holds everything the binary runs, so the in-process HTTP tests and the fuzz
+# targets (`fuzz/`) reach the router and the parsers of untrusted input. Nothing depends on it
+# but the binary, the tests and `fuzz/` (a leaf, ADR 0016 §3 notes).
+[lib]
+name = "rizzy_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "rizzy-vault"
 path = "src/main.rs"
+
+# Internal dependencies: exactly the ADR 0016 §3 notes ("rizzy-server depends on the domain
+# crates, rizzy-storage, rizzy-bus, ..."), checked by `cargo xtask check-deps`. The server reaches
+# the `rizzy-core` and `rizzy-proto` items the auth domain's API is written in through that
+# crate's `types` module, which names them one by one (no whole-crate re-export); whether it
+# should depend on the shared crates directly is an ADR 0016 §3 question for the owner.
+[dependencies]
+# OPAQUE server side, sessions, devices, account state, 2FA, recovery (ADR 0016 §3).
+rizzy-domain-auth.workspace = true
+# Op and snapshot upload, Fetch, compaction, restore healing (ADR 0016 §3).
+rizzy-domain-vault.workspace = true
+# Pools, migrations, the writer lock, the restore generation (ADR 0011).
+rizzy-storage.workspace = true
+# `CompactionQueued` wakes the worker (ADR 0021 §3).
+rizzy-bus.workspace = true
+# HTTP for the `api` and `web` roles (ADR 0010 §1). Default features off; see the workspace entry.
+axum.workspace = true
+# The HTTP/1 connection with a header-read timeout, under the server's own accept loop
+# (`server::serve_http`). Already in the graph through axum; see the workspace entries.
+hyper.workspace = true
+hyper-util.workspace = true
+# The runtime (ADR 0010 §1): the multi-threaded scheduler, TCP listener, timers, signals for
+# graceful shutdown, `select!`.
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "signal", "sync", "macros"] }
+# OS randomness, as a leaf crate (ADR 0009 "RNG rules", ADR 0016 R2 (c)):
+# `rand_core::UnwrapErr(getrandom::SysRng)` is the RNG every domain call receives.
+getrandom.workspace = true
+rand_core.workspace = true
+# Request and response bodies, the secrets file, the secrets backup file and log lines. The
+# version the workspace already locks; no new crate.
+serde.workspace = true
+serde_json.workspace = true
+# base64url without padding for the secrets file's binary fields (CRYPTO.md §9.6). The version
+# rizzy-core pins (ADR 0009); no new crate.
+base64ct.workspace = true
+# Wipes the secrets file's bytes, the passphrase and the bearer token text after use (CLAUDE.md:
+# secret types zeroize). The version rizzy-core pins; no new crate.
+zeroize.workspace = true
+
+[dev-dependencies]
+# `ServiceExt::oneshot`: drives the router in-process in `tests/http`. Already in the graph
+# through axum.
+tower.workspace = true
+# The seeded ChaCha20Rng of the test clients (ADR 0009 test RNG). Test-only.
+chacha20.workspace = true
 
 [lints]
 workspace = true

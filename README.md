@@ -24,10 +24,10 @@ Scope and milestones are defined in [docs/ROADMAP.md](docs/ROADMAP.md#3-mileston
 | Milestone | State |
 |---|---|
 | **M0** Foundations | **Deliverables in place, not formally closed.** The workspace, toolchain pin, lints, CI, cargo-deny policy, crypto design, ADRs, and security and contribution policy exist. M0 has no tag or "what we learned" note yet ([ROADMAP §3](docs/ROADMAP.md#3-milestones)). [ADR 0017](docs/adr/0017-licensing.md) (licensing) was Accepted on 2026-09-27; its App Store permission text and CI sign-off check are not done yet. [THREAT_MODEL.md](docs/THREAT_MODEL.md) became normative on 2026-09-27. |
-| **M1** Core vault (MVP) | **In progress.** Step 1, the `rizzy-core` cryptography, is implemented, with known-answer vectors, property tests and fuzz targets. It has been through an independent review, and every confirmed finding is fixed. The remaining steps, in planned order, are below. |
+| **M1** Core vault (MVP) | **In progress.** Step 1, the `rizzy-core` cryptography, is implemented, with known-answer vectors, property tests and fuzz targets. It has been through an independent review, and every confirmed finding is fixed. Steps 2 (item schema and sync engine) and 3 (the server) are in progress. The remaining steps, in planned order, are below. |
 | **M2–M10** | Not started. M4 is removed: Server mode is the only sync mode, and On-device sync is parked post-1.0 ([ROADMAP §3](docs/ROADMAP.md#3-milestones)). |
 
-The remaining M1 steps. Every ADR is Accepted (2026-09-27; see the [index](docs/adr/README.md#index)), with its "On acceptance" edits made. Step 2 is in progress.
+The remaining M1 steps. Every ADR is Accepted (2026-09-27; see the [index](docs/adr/README.md#index)), with its "On acceptance" edits made. Steps 2 and 3 are in progress.
 
 1. **Step 2:** the item schema in `rizzy-core` ([ADR 0018](docs/adr/0018-item-record-encoding.md)) and the sync engine in `rizzy-sync` ([ADR 0012](docs/adr/0012-sync-engine.md) and ADR 0018: HLC, version vectors, op log, merge, tombstones, the evidence merge), with convergence property tests seeded from the merge spike ([`spikes/merge-model`](spikes/merge-model/README.md)), and the caller of the durable-certificate expiry rule ([CRYPTO.md §10.2](docs/CRYPTO.md#102-ed25519-signatures-and-signed-statements)).
 2. **Step 3:** the server (ADRs 0010, 0011 and [0021](docs/adr/0021-server-compaction.md), which is Accepted before any step 3 code): API, SQLite storage, OPAQUE and device authentication with request signing, op upload and fetch with compaction and restore healing, backup and restore (the backup reader refuses a `data` field over `MAX_DATA_FIELD_LEN` before decoding, [CRYPTO.md §11.14](docs/CRYPTO.md#1114-encrypted-export-m1)), and the container image with its compose file and operator docs.
@@ -46,7 +46,7 @@ crates/rizzy-storage  server storage: sqlx pools, migrations, account lock, back
 crates/rizzy-bus      in-process domain events for the server (ids only; M1 step 3)
 crates/rizzy-domain-auth  server auth domain: OPAQUE, sessions, devices, signed state, 2FA, recovery
 crates/rizzy-domain-vault  server vault domain: op and snapshot upload, Fetch, compaction, restore healing
-crates/rizzy-server   server binary `rizzy-vault` (skeleton: --help and --version only)
+crates/rizzy-server   server binary `rizzy-vault`: roles api, web, worker; secrets and migrate commands
 crates/rizzy-cli      command-line client `rv` (skeleton: --help and --version only)
 crates/xtask          repository checks: `cargo xtask check-deps`, `cargo xtask check-clippy`
 docs/                 roadmap, threat model, crypto design, ADRs; index in docs/README.md

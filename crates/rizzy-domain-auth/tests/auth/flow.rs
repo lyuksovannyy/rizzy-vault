@@ -127,6 +127,22 @@ fn signup_login_device_auth_and_signed_requests() {
             )
             .await;
         assert!(matches!(unsigned, Err(AuthError::Unauthorized)));
+        // The header-only check: a device session only when signed; an unknown token never.
+        let token = session.token.expose_secret();
+        assert!(
+            env.svc
+                .session_for_token(token, true, env.now)
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            env.svc.session_for_token(token, false, env.now).await,
+            Err(AuthError::Unauthorized)
+        ));
+        assert!(matches!(
+            env.svc.session_for_token(&[0u8; 32], true, env.now).await,
+            Err(AuthError::Unauthorized)
+        ));
         let other = client.make_device(&mut env.rng, env.now);
         let forged = crate::common::Device {
             id: device.id,
@@ -277,6 +293,7 @@ fn flow_futures_are_send() {
             now,
         ));
         send(svc.authenticate_request(b"", None, crate::common::request(b""), now));
+        send(svc.session_for_token(b"", false, now));
         send(svc.totp_enrol_start(rng, &session, now));
         send(svc.register_finish(&finish, now));
         send(svc.register_start(

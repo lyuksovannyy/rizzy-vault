@@ -134,40 +134,56 @@ impl<D: DeviceDirectory> VaultDomain<D> {
         grant: &VaultSelfGrant,
         now_ms: u64,
     ) -> Result<bool, VaultError> {
-        let vault_id = VaultId::from_bytes(grant.vault_id.to_bytes());
-        let now = to_sql_time(now_ms)?;
         let mut tx = self.database().begin_write().await?;
         lock_account(&mut tx, account_id.as_bytes()).await?;
-        let vault = repo::vault(tx.conn(), vault_id)
-            .await?
-            .filter(|v| v.account_id == account_id)
-            .ok_or(VaultError::NotFound)?;
-        if reconciliation_epoch(tx.conn(), account_id.as_bytes())
-            .await?
-            .is_none()
-        {
-            return Err(VaultError::Invalid);
-        }
-        // The highest vault epoch the server verified: its own, or a signed header's.
-        let verified = repo::max_record_epoch(tx.conn(), vault_id)
-            .await?
-            .map_or(vault.vault_key_epoch, |e| e.max(vault.vault_key_epoch));
-        if grant.vault_key_epoch > verified {
-            return Err(VaultError::Invalid);
-        }
-        let stored = repo::self_grant(tx.conn(), vault_id).await?;
-        if !stored.as_ref().is_none_or(|s| is_newer(grant, s)) {
-            return Ok(false);
-        }
-        let row = SelfGrantRow {
-            account_key_epoch: grant.account_key_epoch,
-            vault_key_epoch: grant.vault_key_epoch,
-            envelope: grant.envelope.as_slice().to_vec(),
-        };
-        repo::write_self_grant(tx.conn(), vault_id, &row, stored.is_some(), now).await?;
+        let stored = republish_in(&mut tx, account_id, grant, now_ms).await?;
         tx.commit().await?;
-        Ok(true)
+        Ok(stored)
     }
+}
+
+/// [`VaultDomain::republish_self_grant`] in the caller's write transaction, which has taken the
+/// account's lock: the same rules, the same answer. Nothing is committed here; on an error the
+/// caller drops the transaction.
+///
+/// # Errors
+/// As [`VaultDomain::republish_self_grant`].
+pub(crate) async fn republish_in(
+    tx: &mut WriteTx,
+    account_id: AccountId,
+    grant: &VaultSelfGrant,
+    now_ms: u64,
+) -> Result<bool, VaultError> {
+    let vault_id = VaultId::from_bytes(grant.vault_id.to_bytes());
+    let now = to_sql_time(now_ms)?;
+    let vault = repo::vault(tx.conn(), vault_id)
+        .await?
+        .filter(|v| v.account_id == account_id)
+        .ok_or(VaultError::NotFound)?;
+    if reconciliation_epoch(tx.conn(), account_id.as_bytes())
+        .await?
+        .is_none()
+    {
+        return Err(VaultError::Invalid);
+    }
+    // The highest vault epoch the server verified: its own, or a signed header's.
+    let verified = repo::max_record_epoch(tx.conn(), vault_id)
+        .await?
+        .map_or(vault.vault_key_epoch, |e| e.max(vault.vault_key_epoch));
+    if grant.vault_key_epoch > verified {
+        return Err(VaultError::Invalid);
+    }
+    let stored = repo::self_grant(tx.conn(), vault_id).await?;
+    if !stored.as_ref().is_none_or(|s| is_newer(grant, s)) {
+        return Ok(false);
+    }
+    let row = SelfGrantRow {
+        account_key_epoch: grant.account_key_epoch,
+        vault_key_epoch: grant.vault_key_epoch,
+        envelope: grant.envelope.as_slice().to_vec(),
+    };
+    repo::write_self_grant(tx.conn(), vault_id, &row, stored.is_some(), now).await?;
+    Ok(true)
 }
 
 /// Whether `grant` is newer than the stored grant: neither epoch lower and one higher

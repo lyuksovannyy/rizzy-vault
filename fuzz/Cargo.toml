@@ -46,6 +46,10 @@
 #   auth_rules         rizzy-domain-auth's rules on untrusted statements and transitions: the
 #                      request-counter window, `account-state` steps, bundle-chain extension
 #                      (CRYPTO.md §5.10, §10.2, §11; ADR 0012 §7)
+#   server_headers     rizzy-server's request-header parsers: bearer token, request-signing
+#                      headers, X-Forwarded-For (CRYPTO.md §5.10; threat model §7.6 "S")
+#   server_config      rizzy-server's configuration file parser and validation (ADR 0010)
+#   server_secrets_file rizzy-server's secrets file reader and writer (CRYPTO.md §5.11)
 #
 # Not covered yet: the share-URL fragment parser (M5, not written) and the export file's JSON
 # document reader (§11.14, not written). `export_fields` covers the field decoders the reader
@@ -82,6 +86,10 @@ serde_json = { version = "1.0.151", default-features = false, features = ["std"]
 # The auth domain's pure rules (`auth_rules`). A path crate; its external crates (sqlx, tokio and
 # their trees) are the ones the main workspace already locks and `cargo deny` already checks.
 rizzy-domain-auth = { path = "../crates/rizzy-domain-auth" }
+# The server's parsers of untrusted input (`server_headers`, `server_config`,
+# `server_secrets_file`). A path crate; its external crates (axum, hyper, tokio and their trees)
+# are the ones the main workspace already locks and `cargo deny` already checks.
+rizzy-server = { path = "../crates/rizzy-server" }
 
 # One [[bin]] per target. `test`, `doc` and `bench` are off because a libFuzzer entry point
 # (`#![no_main]` with `fuzz_target!`) is not a test, has no API to document and is not a benchmark.
@@ -228,6 +236,27 @@ bench = false
 [[bin]]
 name = "auth_rules"
 path = "fuzz_targets/auth_rules.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "server_headers"
+path = "fuzz_targets/server_headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "server_config"
+path = "fuzz_targets/server_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "server_secrets_file"
+path = "fuzz_targets/server_secrets_file.rs"
 test = false
 doc = false
 bench = false

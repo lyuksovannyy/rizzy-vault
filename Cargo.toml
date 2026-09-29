@@ -19,6 +19,8 @@ rizzy-proto = { path = "crates/rizzy-proto" }
 rizzy-bus = { path = "crates/rizzy-bus" }
 rizzy-sync = { path = "crates/rizzy-sync" }
 rizzy-storage = { path = "crates/rizzy-storage" }
+rizzy-domain-auth = { path = "crates/rizzy-domain-auth" }
+rizzy-domain-vault = { path = "crates/rizzy-domain-vault" }
 
 # Cryptography. Exact pins and feature sets from ADR 0009 ("Allowed crate families" and
 # "Required feature sets"); docs/CRYPTO.md §3. Bumps are reviewed like crypto changes and are
@@ -55,6 +57,26 @@ serde = { version = "1.0.229", default-features = false, features = ["std", "der
 # Server-side crates only; never a dependency of a no-I/O crate (ADR 0016 R1, checked by
 # `cargo xtask check-deps`). Members switch on the features they need.
 tokio = { version = "1.53.1", default-features = false }
+# HTTP for the `api` and `web` roles (ADR 0010 §1: "one Rust binary on axum, tokio and sqlx";
+# fact sheet: axum 0.8.9). `rizzy-server` only. Default features off; `http1` and `tokio` only:
+# no `json`, `form` or `query` extractors (the server parses bodies itself with `serde_json`, with
+# its own size limits and uniform errors), no `tracing`, no `http2`, no `ws`, no macros.
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
+# hyper's HTTP/1 server connection, for `rizzy-server`'s own accept loop: `axum::serve` sets no
+# hyper timer, so no header-read timeout, and cannot bound its shutdown drain (threat model
+# §7.6 "D"). axum's `http1` and `tokio` features already pull both crates in with exactly these
+# features; no new crate enters the graph. `rizzy-server` only.
+hyper = { version = "1.11.1", default-features = false, features = ["http1", "server"] }
+# `TokioIo`, `TokioTimer` (hyper's timer, needed for the header-read timeout) and
+# `TowerToHyperService` (the axum router as a hyper service). Same versions and features as
+# axum's own use; `rizzy-server` only.
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio", "service"] }
+# `ServiceExt::oneshot` for the in-process HTTP tests of `rizzy-server`. Already in the graph
+# through axum, with the same `util` feature; dev-dependency only.
+tower = { version = "0.5.3", default-features = false, features = ["util"] }
+# OS randomness for the leaf crates only (ADR 0009 "Allowed crate families": `getrandom` 0.4,
+# feature `sys_rng` for `SysRng`; ADR 0016 R2 (c)). The version already in Cargo.lock.
+getrandom = { version = "0.4.3", default-features = false, features = ["sys_rng"] }
 
 # Tooling and tests. Not cryptography.
 # serde_json: `xtask` reads `cargo metadata` JSON with it (ADR 0016 §5), and `rizzy-core`'s tests

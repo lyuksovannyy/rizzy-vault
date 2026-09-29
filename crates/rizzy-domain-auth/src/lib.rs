@@ -10,7 +10,7 @@
 //! `rizzy-proto` has none yet, the typed arguments listed under "Left open"), checks them,
 //! and runs every read-and-write in one `rizzy-storage` transaction under the account lock
 //! ([ADR 0011] "Transactions and concurrency"). The axum wiring, header extraction and
-//! status codes are `rizzy-server`'s (next stage). The vault domain's side of the cross-domain
+//! status codes are `rizzy-server`'s. The vault domain's side of the cross-domain
 //! flows is a trait, [`VaultPort`] ([ADR 0016] R4), which `rizzy-server` implements.
 //!
 //! # Contract
@@ -44,6 +44,8 @@
 //! | [`rules`] | CRYPTO.md §10.2, §11 | Pure checks on untrusted statements and state transitions; the request-counter window |
 //! | [`ports`] | ADR 0016 R4 | [`VaultPort`], the vault domain's side |
 //! | [`session`] | CRYPTO.md §5.10; INV-8 | Sessions: token hashes, kinds, freshness |
+//! | [`directory`] | ADR 0012 §7 "Upload"; ADR 0016 R4 | [`directory::device_authors`]: the verified certificates `rizzy-server` hands the vault domain |
+//! | [`types`] | ADR 0016 §3 notes, R4 | The `rizzy-core` and `rizzy-proto` items this API is written in, re-exported one by one for `rizzy-server` |
 //! | [`error`] | ADR 0002 point 3 | [`AuthError`] and its API code |
 //! | `signup` | CRYPTO.md §11.1, §5.9 | [`AuthService::register_start`], [`AuthService::register_finish`] |
 //! | `login` | CRYPTO.md §5.9–§5.11, §11.2, §11.15; INV-7, INV-59 | [`AuthService::login_start`], [`AuthService::login_finish`] |
@@ -123,6 +125,7 @@
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
 pub mod config;
+pub mod directory;
 pub mod error;
 pub mod ports;
 pub mod rules;
@@ -159,6 +162,51 @@ pub use recovery::{RecoveryPending, RecoveryRelease};
 pub use secrets::{ServerSecrets, StartupCheckError};
 pub use session::{Session, SessionKind};
 pub use totp::TotpEnrolment;
+
+pub mod types {
+    //! The `rizzy-core` and `rizzy-proto` items that [`crate::AuthService`]'s public API is
+    //! written in, or that its caller needs to wire it (ADR 0016 R4: "`rizzy-server` implements
+    //! the trait by wiring in the other domain's public API"), named one by one.
+    //!
+    //! ADR 0016 §3 lets `rizzy-server` depend on the domain crates, not on `rizzy-core` or
+    //! `rizzy-proto`. A caller of this crate still has to name the types its methods take and
+    //! return, so this module re-exports exactly those, and no whole crate: the ids and origin
+    //! of the [`crate::VaultPort`] trait and [`crate::AuthConfig`]; the key types of
+    //! [`crate::ServerSecrets`] and of its sealed backup (CRYPTO.md §5.8, §5.11); and the
+    //! `/api/v1` wire types of the flows' requests, answers and errors, with the header-level
+    //! pieces of CRYPTO.md §5.10. Whether `rizzy-server` should instead depend on the shared
+    //! crates directly is the owner's decision (an ADR 0016 §3 change); until then, nothing
+    //! beyond this list is reachable through this crate.
+
+    /// Ids of the vault port and sessions.
+    pub use rizzy_core::ids::{AccountId, DeviceId};
+    /// The configured origin ([`crate::AuthConfig::new`]).
+    pub use rizzy_core::normalize::ServerOrigin;
+    /// The `server_setup` and `enum_key` of [`crate::ServerSecrets`] (CRYPTO.md §5.8).
+    pub use rizzy_core::opaque::{EnumKey, SERVER_SETUP_LEN, ServerSetup};
+    /// The data keys of [`crate::ServerSecrets`] and the sealed backup of the secrets file
+    /// (CRYPTO.md §5.11).
+    pub use rizzy_core::server_seal::{BackupHeader, ServerDataKey, ServerSecretsBackupKey};
+    /// The backup key's KDF, its passphrase and plaintext type, the RNG trait every flow
+    /// takes, and the bound on a sealed field (CRYPTO.md §5.11 "Backup").
+    pub use rizzy_core::{
+        export::MAX_DATA_FIELD_LEN, kdf::KdfId, rng::CryptoRng, secret::SecretBytes,
+    };
+
+    /// `/api/v1` errors and `/api/meta` (ADR 0002 point 3).
+    pub use rizzy_proto::error::{ErrorCode, ErrorResponse};
+    /// `/api/meta` (ADR 0002 point 3, as ADR 0022 amends it).
+    pub use rizzy_proto::meta::{API_V1, ApiVersion, META_PATH, MetaResponse, Version};
+    /// The self-grants [`crate::VaultPort`] moves between the domains.
+    pub use rizzy_proto::objects::VaultSelfGrant;
+    /// The bearer token and the request signature, as the headers carry them (CRYPTO.md
+    /// §5.10).
+    pub use rizzy_proto::{
+        auth::RequestSignature,
+        limits::SIGNATURE_CONTAINER_LEN,
+        wire::{Fixed, List, SessionToken, b64url_len},
+    };
+}
 
 /// The auth domain: every flow of this crate, over one database.
 ///

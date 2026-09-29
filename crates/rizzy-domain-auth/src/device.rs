@@ -405,6 +405,32 @@ impl<V: VaultPort> AuthService<V> {
         Ok(session)
     }
 
+    /// The first half of [`Self::authenticate_request`], from the headers alone: the bearer
+    /// token's unexpired session, and whether its kind fits the presence of a signature (a
+    /// device session must carry one, any other session must not). It reads no body and
+    /// verifies no signature, so it never authenticates a request by itself; it lets the
+    /// caller refuse a request before reading a large body (threat model §7.6 "D"), and the
+    /// caller then calls [`Self::authenticate_request`] over the body as received.
+    ///
+    /// # Errors
+    /// [`AuthError::Unauthorized`] for an unknown or expired token, or a kind that does not
+    /// fit `signed`; storage errors.
+    pub async fn session_for_token(
+        &self,
+        token: &[u8],
+        signed: bool,
+        now_ms: u64,
+    ) -> Result<Session, AuthError> {
+        let mut tx = self.db.begin_read().await?;
+        let session = session::load(tx.conn(), token, now_ms).await?;
+        tx.finish().await?;
+        if (session.kind == SessionKind::Device) == signed {
+            Ok(session)
+        } else {
+            Err(AuthError::Unauthorized)
+        }
+    }
+
     /// Enrolment of a new durable device (CRYPTO.md §11.2 step 7) over a fresh OPAQUE session:
     /// its certificate and the new `account-state` (`state_seq + 1`, only `device_set_hash`
     /// changed, over exactly the stored set plus this device), applied by compare-and-swap. A
