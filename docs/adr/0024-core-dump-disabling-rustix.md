@@ -1,6 +1,6 @@
 # ADR 0024: Disabling core dumps through rustix
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-29
 - Deciders: project owner
 - Milestone: M1 (server, `rv`) / M3 (desktop bindings) / M7 (mobile bindings)

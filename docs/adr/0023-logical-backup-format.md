@@ -1,6 +1,6 @@
 # ADR 0023: Logical database backup file format
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-29
 - Deciders: project owner
 - Milestone: M1
