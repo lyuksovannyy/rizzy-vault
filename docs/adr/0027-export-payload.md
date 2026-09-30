@@ -1,6 +1,6 @@
 # ADR 0027: Export payload encoding and plaintext export
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-29
 - Deciders: project owner
 - Milestone: M1

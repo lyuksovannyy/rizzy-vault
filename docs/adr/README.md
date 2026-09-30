@@ -82,9 +82,9 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0023 | [Logical database backup file format](0023-logical-backup-format.md) | Accepted | M1 |
 | 0024 | [Disabling core dumps through rustix](0024-core-dump-disabling-rustix.md) | Accepted | M1 (server, `rv`) / M3 (bindings) |
 | 0025 | [Key rotation upload: the vault half and the rotation cut-off](0025-rotation-vault-half.md) | Accepted | M1 |
-| 0026 | [Client device state and encrypted local cache](0026-client-device-state-and-cache.md) | Proposed | M1 (`rv`) / M2 (extension) / M3 (`rizzy-ffi`) |
-| 0027 | [Export payload encoding and plaintext export](0027-export-payload.md) | Proposed | M1 |
-| 0028 | [`/api/v1` HTTP conventions](0028-api-v1-http-conventions.md) | Proposed | M1 |
+| 0026 | [Client device state and encrypted local cache](0026-client-device-state-and-cache.md) | Accepted | M1 (`rv`) / M2 (extension) / M3 (`rizzy-ffi`) |
+| 0027 | [Export payload encoding and plaintext export](0027-export-payload.md) | Accepted | M1 |
+| 0028 | [`/api/v1` HTTP conventions](0028-api-v1-http-conventions.md) | Accepted | M1 |
 
 ## Gates
 

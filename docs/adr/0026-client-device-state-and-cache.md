@@ -1,6 +1,6 @@
 # ADR 0026: Client device state and encrypted local cache
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-29
 - Deciders: project owner
 - Milestone: M1 (`rv`) / M2 (extension, IndexedDB) / M3 (`rizzy-ffi`, `E_ks`)

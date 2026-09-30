@@ -1,6 +1,6 @@
 # ADR 0028: `/api/v1` HTTP conventions
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-29
 - Deciders: project owner
 - Milestone: M1

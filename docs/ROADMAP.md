@@ -78,7 +78,7 @@ MoSCoW is scored **against v1.0 (end of M8)**. Items for M9/M10 are listed so th
 | M | Trash with restore (soft delete, auto-purge after N days) | M1 |
 | M | Sync engine (see 4.6): encrypted operation log, per-item version vectors, deterministic merge, no silent data loss | M1 |
 | M | Offline read access on clients (encrypted local cache) | M1 |
-| M | Import: Bitwarden JSON, 1Password (1PUX), KeePass (KDBX/XML), generic CSV, Chrome/Firefox CSV | M1 |
+| M | Import: Bitwarden JSON, 1Password (1PUX), KeePass (KDBX/XML), generic CSV, Chrome/Firefox CSV, **our plaintext JSON export** | M1 |
 | M | Export: encrypted JSON (own format) + plaintext JSON/CSV with scary warning | M1 |
 | M | CLI client (`rv`) — list, get, add, generate, copy TOTP | M1 |
 | M | Web vault (minimal UI acceptable in M1) | M1 |
