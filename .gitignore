@@ -34,3 +34,6 @@ deploy/backup/
 deploy/backup-db/
 deploy/backup-secrets/
 *.age
+
+# macOS Finder metadata
+.DS_Store
