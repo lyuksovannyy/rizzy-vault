@@ -9,10 +9,13 @@
 //! [`MAX_EXPANDED_LEN`].
 //!
 //! The per-item caps come from the record layer (ADR 0018 §10), restated here because this
-//! crate may depend on `rizzy-core` only (ADR 0016 §3): an imported item is one create op of at
-//! most [`MAX_WRITES`] writes and [`MAX_OP_DATA_LEN`] bytes of op data.
+//! crate may depend on `rizzy-core` only (ADR 0016 §3): an item imported from another product is
+//! one create op of at most [`MAX_WRITES`] writes and [`MAX_OP_DATA_LEN`] bytes of op data. An item
+//! of our own plaintext JSON export ([`crate::rizzy_json`]) may hold more, up to what one item's
+//! snapshot may hold ([`MAX_REGISTERS`], [`MAX_SNAPSHOT_DATA_LEN`]); `rizzy-client` splits its
+//! writes over a create op and the ops that follow (ADR 0027 §2 step 5).
 
-/// Largest JSON input (Bitwarden JSON), in bytes.
+/// Largest JSON input (Bitwarden JSON, our own plaintext JSON export), in bytes.
 pub const MAX_JSON_LEN: usize = 64 << 20;
 
 /// Largest CSV input, in bytes.
@@ -76,3 +79,23 @@ pub const MAX_TEXT_LEN: usize = rizzy_core::item::value::MAX_VALUE_LEN - 1;
 /// `ProtectInMemory`); the cap keeps the duplicate-attribute check, a scan of the attributes
 /// already read, from growing quadratically on a crafted element.
 pub const MAX_XML_ATTRIBUTES: usize = 64;
+
+/// Most `fields` entries of one item in a rizzy-vault plaintext JSON export (ADR 0027 §6:
+/// "array of ≤ 4,096 entries, ADR 0018 §10's register cap"; `rizzy-sync`'s
+/// `record::MAX_GROUPS`).
+pub const MAX_ITEM_FIELDS: usize = 4_096;
+
+/// Most registers of one item's snapshot (ADR 0018 §10; `rizzy-sync`'s `record::MAX_GROUPS`).
+/// `@lifecycle` is one of them, so an imported item holds at most one fewer field writes.
+pub const MAX_REGISTERS: usize = 4_096;
+
+/// Largest snapshot data of one item, in bytes (ADR 0018 §10; `rizzy-sync`'s
+/// `record::MAX_SNAPSHOT_DATA_LEN`). An imported item whose writes would not fit it would be
+/// oversize from its first sync, so it is skipped instead (ADR 0027 §6 "an oversize value or
+/// list").
+pub const MAX_SNAPSHOT_DATA_LEN: usize = 12 << 20;
+
+/// Room kept free in [`MAX_SNAPSHOT_DATA_LEN`] when an imported item is sized: the
+/// `@lifecycle` register, the history the create, split and trash ops leave under it, and the
+/// snapshot's counts.
+pub const SNAPSHOT_MARGIN: usize = 4_096;

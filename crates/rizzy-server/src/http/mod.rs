@@ -1,13 +1,20 @@
 //! The public listener's router: the `api` role under `/api/`, the `web` role everywhere else
-//! ([ADR 0010] §1, §4; [ADR 0002] point 3).
+//! ([ADR 0010] §1, §4; [ADR 0002] point 3; [ADR 0028] items 1, 3, 10 and 15).
 //!
 //! One listener serves both roles when both run; each is present only when its role is. A
 //! request under `/api/` with no `api` role, or to an unknown `/api/` path, answers
-//! `404 not_found` in the uniform error body; any other path with no `web` role answers a
-//! plain `404`. Every response passes through [`security::add_common`] (HSTS, `nosniff`,
-//! `no-referrer`, a CSP) and one access-log line ([`crate::log`]: method, route template,
-//! status, duration; never the raw path, a header or a body).
+//! `404 not_found` in the uniform error body, and a method a route does not serve answers `405`
+//! with `invalid_request`; any other path with no `web` role answers a plain `404`. Routes are
+//! matched byte for byte against the request-target's path: nothing is decoded or normalised,
+//! so a trailing slash, `//`, a dot segment or a percent-encoded octet is `404`. (A `#` and what
+//! follows it never reach the router or the signature check: hyper's target type drops a
+//! fragment, which is no part of a request-target; [`api`] says what that means for signing.)
+//! Every response passes through [`security::add_common`] (HSTS, `nosniff`, `no-referrer`, a
+//! CSP) and one access-log line ([`crate::log`]: method, route template, status, duration;
+//! never the raw path, a header or a body). No response is compressed ([ADR 0028] item 9), and
+//! none carries a CORS header (item 10).
 //!
+//! [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
 //! [ADR 0002]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0002-own-protocol.md
 //! [ADR 0010]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0010-server-shape.md
 
@@ -40,8 +47,10 @@ pub struct RouteName(pub &'static str);
 pub fn router(api: Option<Arc<Api>>, web: bool) -> Router {
     let mut router = Router::new();
     if let Some(api) = api {
-        let mut api_router: Router<Arc<Api>> =
-            Router::new().route(META_PATH, get(|| async { api::meta() }));
+        let mut api_router: Router<Arc<Api>> = Router::new().route(
+            META_PATH,
+            get(|State(api): State<Arc<Api>>| async move { api::meta(&api.min_client_versions) }),
+        );
         for &endpoint in Endpoint::ALL {
             let handler = move |State(api): State<Arc<Api>>, request: Request| {
                 dispatch(api, endpoint, request)

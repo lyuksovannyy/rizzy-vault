@@ -22,7 +22,8 @@
 //! the client can evaluate "Server behind" (§9; `rizzy-sync` `causal::ServerView`), which needs
 //! heads even where the page serves no header.
 //!
-//! **Not fixed here, open for the API specification:** endpoint paths and methods, and how a
+//! The endpoint paths and methods are ADR 0028 item 1's ([`crate::http::paths`]). **Not fixed
+//! by an ADR:** how a
 //! paged Fetch continues. This crate reads "a paged response" (ADR 0021 §4) conservatively: the
 //! client sends its advanced cursor again until a response says `complete`.
 

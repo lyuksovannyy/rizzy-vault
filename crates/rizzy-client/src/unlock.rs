@@ -202,3 +202,39 @@ pub fn apply_device_grants<R: CryptoRng + ?Sized>(
         account_key_epoch: target,
     })
 }
+
+/// The fingerprint to show the user when `view` changes the identity keys (§11.3 step 3.2):
+/// the bundle chain from the pinned bundle is walked and verified, and if the identity keys
+/// change along it, the fingerprint of the new ones is returned. The host shows it, asks the
+/// user to confirm it on this device (ideally against another of their devices), and passes it
+/// back to [`verify_unlock`] or [`apply_device_grants`] as `confirmed`. `None` when the
+/// identity keys are the pinned ones.
+///
+/// Nothing is adopted here, and the fingerprint is of keys no check has accepted yet: showing
+/// it is the check.
+///
+/// # Errors
+/// [`ClientError::InvalidServerResponse`] if the served chain does not verify from the pin.
+pub fn identity_change_fingerprint(
+    state: &DeviceState,
+    view: &AccountView,
+) -> Result<Option<AccountFingerprint>, ClientError> {
+    let wires: Vec<&[u8]> = view
+        .bundles
+        .as_slice()
+        .iter()
+        .map(rizzy_proto::wire::Bytes::as_slice)
+        .collect();
+    let (head, changed) = state
+        .pin
+        .bundle
+        .verify_chain(&wires)
+        .map_err(|_| ClientError::InvalidServerResponse)?;
+    if head.account_id != state.account_id {
+        return Err(ClientError::InvalidServerResponse);
+    }
+    Ok(
+        changed
+            .then(|| AccountFingerprint::compute(state.account_id, &head.identity_public_keys())),
+    )
+}

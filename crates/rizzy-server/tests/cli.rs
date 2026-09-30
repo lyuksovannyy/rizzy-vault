@@ -75,6 +75,22 @@ fn serving_without_an_origin_is_a_configuration_error() {
     );
 }
 
+/// ADR 0028 item 10 (owner decision on open question 6): a public `http` origin refuses the
+/// start, for every command, and the message says what to set.
+#[test]
+fn a_public_http_origin_is_a_configuration_error() {
+    let origin = Path::new("http://vault.example.com");
+    for args in [&[][..], &["migrate"]] {
+        let out = rizzy(args, &[("RIZZY_ORIGIN", origin)]);
+        assert_eq!(out.status.code(), Some(2), "args: {args:?}");
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert!(
+            stderr.contains("RIZZY_ORIGIN must be an https:// origin"),
+            "{stderr}"
+        );
+    }
+}
+
 /// `std::env::args` panics on an argument that is not valid Unicode (exit code 101); the
 /// binary treats it as an unknown option.
 #[test]

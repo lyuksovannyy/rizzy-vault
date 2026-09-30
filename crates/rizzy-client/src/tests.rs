@@ -1619,4 +1619,6 @@ fn fake_server_refuses_forged_snapshots_and_serves_covers() {
     ));
 }
 
+mod export;
 mod rotation;
+mod store;

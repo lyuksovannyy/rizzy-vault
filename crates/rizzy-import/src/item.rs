@@ -1,20 +1,35 @@
-//! Imported items: the field writes of one create op per entry, in the M1 item schema of
+//! Imported items: the field writes of one new item per entry, in the M1 item schema of
 //! `rizzy-core` (ADR 0018 §6–§8), and the builder the format mappers fill.
 //!
-//! **What an imported item is.** The writes of an importer's create op
+//! **What an imported item is.** The writes of an importer's new item
 //! ([`WriteMode::Import`]): `item.type`, the fixed keys of the item's type, and the list
 //! elements (URIs, custom fields, password history, tags) with element ids drawn from the
 //! injected CSPRNG ([`ElementId::generate`]) and `order` sort keys spread evenly
 //! ([`evenly_spaced`]) in source order. `rizzy-client` encodes them through the record layer
 //! and encrypts them at once (ADR 0002 point 2); nothing here does I/O or crypto.
 //!
-//! **Checked before it leaves.** Every write passes
-//! [`check_create`] as an entered write of an import, which covers the key grammar, the
-//! 64 KiB value limit, the item type of each key, no empty Text, and no blank field (ADR 0018
-//! §6: "a create op writes no field the user left blank", so empty source values are simply
-//! not written). The writes are sorted by key bytes with no duplicate (ADR 0018 §4), at most
-//! [`MAX_WRITES`] of them, with op data of at most [`MAX_OP_DATA_LEN`] (ADR 0018 §10). A list
-//! element that would break the op limits is dropped whole, with a warning, never split.
+//! **Checked before it leaves.** Every write passes [`check_create`] for an import, which
+//! covers the key grammar, the 64 KiB value limit and the item type of each key. The writes
+//! are sorted by key bytes with no duplicate (ADR 0018 §4). What else holds depends on where
+//! the writes come from ([`ImportedItem::source`]):
+//!
+//! - **Another product's file** ([`WriteSource::Entered`]; the item builder below). This
+//!   crate builds each value, so it is checked as an entered write: no empty Text and no blank
+//!   field (ADR 0018 §6: "a create op writes no field the user left blank", so empty source
+//!   values are simply not written). The item fits one create op: at most [`MAX_WRITES`]
+//!   writes, with op data of at most [`MAX_OP_DATA_LEN`] (ADR 0018 §10). A list element that
+//!   would break the op limits is dropped whole, with a warning: these mappers keep each item
+//!   within one op, so that what is dropped is a whole element and is warned about.
+//! - **Our own plaintext JSON export** ([`WriteSource::Carried`]; [`crate::rizzy_json`]). Keys
+//!   and value bytes are copied from the file, unknown keys and unsupported values included
+//!   (ADR 0027 §6). Such an item may exceed one op: it holds at most
+//!   [`MAX_REGISTERS`](crate::limits::MAX_REGISTERS)` - 1` writes whose snapshot fits
+//!   [`MAX_SNAPSHOT_DATA_LEN`](crate::limits::MAX_SNAPSHOT_DATA_LEN), and `rizzy-client`'s
+//!   import path **splits** the writes over the create op and the ops that follow it
+//!   (ADR 0027 §2 step 5: "`import_item` splits them into consecutive ops, as §6 'List order'
+//!   already allows"), with `item.type` and `import.created_ms` in the first. It may also be
+//!   trashed ([`ImportedItem::trashed`]): the client creates it, then trashes it in one more
+//!   op.
 //!
 //! **Unmapped source fields** become custom fields (`field/<id>/…`, ADR 0018 §7): a text
 //! field, or a hidden one where the source marks the value as concealed or secret, so the
@@ -51,6 +66,11 @@ pub struct ImportedWrite {
 }
 
 impl ImportedWrite {
+    /// A write of `value` to `key`.
+    pub(crate) fn new(key: FieldKey, value: Value) -> Self {
+        Self { key, value }
+    }
+
     /// The field key.
     #[must_use]
     pub fn key(&self) -> &FieldKey {
@@ -70,8 +90,8 @@ impl ImportedWrite {
     }
 }
 
-/// One imported item: the writes of its create op. `Debug` prints no key or value.
-#[derive(Debug)]
+/// One imported item: the writes of the new item. `Debug` prints no key or value, and not
+/// whether the item is trashed.
 pub struct ImportedItem {
     /// The entry's position in the file ([`crate::Warning::entry`]).
     entry: usize,
@@ -79,9 +99,55 @@ pub struct ImportedItem {
     item_type: ItemType,
     /// The writes, sorted by key bytes, `item.type` among them.
     writes: Vec<ImportedWrite>,
+    /// Where the writes come from: built here, or copied from our own export.
+    source: WriteSource,
+    /// Whether the item is trashed after it is created.
+    trashed: bool,
+}
+
+impl core::fmt::Debug for ImportedItem {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ImportedItem")
+            .field("entry", &self.entry)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ImportedItem {
+    /// An item whose writes were copied from a rizzy-vault plaintext export
+    /// ([`WriteSource::Carried`]); `writes` are sorted by key bytes, without duplicates, and
+    /// have passed [`check_create`].
+    pub(crate) fn carried(
+        entry: usize,
+        item_type: ItemType,
+        writes: Vec<ImportedWrite>,
+        trashed: bool,
+    ) -> Self {
+        Self {
+            entry,
+            item_type,
+            writes,
+            source: WriteSource::Carried,
+            trashed,
+        }
+    }
+
+    /// Where the writes come from, for the writer check that `rizzy-client` repeats:
+    /// [`WriteSource::Entered`] for another product's file, [`WriteSource::Carried`] for our
+    /// own plaintext JSON export (see the module docs).
+    #[must_use]
+    pub fn source(&self) -> WriteSource {
+        self.source
+    }
+
+    /// Whether the item is trashed once created: the client writes its create op (and the ops
+    /// its writes are split over), then trashes it in one more op (ADR 0027 §2 step 3). Only
+    /// an item of our own export can be; another product's deleted entries are skipped.
+    #[must_use]
+    pub fn trashed(&self) -> bool {
+        self.trashed
+    }
+
     /// The entry's position in the file, as warnings give it.
     #[must_use]
     pub fn entry(&self) -> usize {
@@ -94,7 +160,9 @@ impl ImportedItem {
         self.item_type
     }
 
-    /// The create op's writes, strictly ascending by key bytes (ADR 0018 §4).
+    /// The new item's writes, strictly ascending by key bytes (ADR 0018 §4). One create op for
+    /// an [`WriteSource::Entered`] item; possibly more than one op's worth for a
+    /// [`WriteSource::Carried`] one (see the module docs).
     #[must_use]
     pub fn writes(&self) -> &[ImportedWrite] {
         &self.writes
@@ -483,6 +551,8 @@ impl<'w> ItemBuilder<'w> {
             entry,
             item_type,
             writes,
+            source: WriteSource::Entered,
+            trashed: false,
         })
     }
 }

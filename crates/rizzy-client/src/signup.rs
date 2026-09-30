@@ -11,9 +11,9 @@
 //! 1. Every secret and object is built in [`SignupStarted::finish`].
 //! 2. The kit is shown ([`PendingSignup::emergency_kit`]) and the user re-types the last group
 //!    of the Secret Key ([`PendingSignup::confirm_kit`], §7).
-//! 3. A durable device persists its pending device state ([`PendingSignup::pending_device`]).
-//!    No Accepted ADR defines that record's bytes (see [`crate::device`]), so the host cannot
-//!    persist it yet; the value exists and the order is enforced, nothing more.
+//! 3. A durable device persists its pending device state: [`PendingSignup::store_writes`]
+//!    gives the host the cache of the signup, with the device-state record in stage 2 and the
+//!    commit's exact JSON body (ADR 0026 §2 "Signup pending"), to write before step 4.
 //! 4. Only then [`PendingSignup::commit_request`] releases the upload.
 //! 5. [`PendingSignup::finalize`] after the server acknowledged.
 //!
@@ -61,9 +61,14 @@ use rizzy_proto::objects::{
 use rizzy_proto::wire::{Fixed, SecretText, Text};
 use zeroize::Zeroizing;
 
-use crate::account::{AccountPin, CertifiedDevice};
+use rizzy_proto::limits::MAX_UPLOAD_BODY_LEN;
+
+use crate::account::{AccountPin, CertifiedDevice, ServedObjects};
 use crate::device::{DeviceState, NewDevice, UnlockedDevice};
 use crate::error::{ClientError, internal};
+use crate::store;
+use crate::store::record::Stage;
+use crate::store::rows::{Changeset, Write};
 use crate::wire::{bytes, id};
 
 /// What the user enters to sign up (§11.1 step 1), plus the host's choices.
@@ -603,5 +608,70 @@ impl fmt::Debug for SignedUp {
         f.debug_struct("SignedUp")
             .field("unlocked", &self.unlocked)
             .finish_non_exhaustive()
+    }
+}
+
+impl PendingSignup {
+    /// The cache of a durable device's signup, written **before** the commit is sent
+    /// (CRYPTO.md §11 "Secrets before commit" step 3; ADR 0026 §2 "Signup pending", §4 step 3):
+    /// the `cache_meta` rows, the device-state record in stage 2, `commit_json` as
+    /// `pending_commit`, and the account objects and the self-grant this signup registers.
+    ///
+    /// `commit_json` is the exact JSON body of [`PendingSignup::commit_request`] the host is
+    /// about to send. On restart the host resends those bytes; the server treats a
+    /// byte-identical repeat as success (§11.1 step 8), and the answer finalises the record
+    /// ([`crate::store::finalize_writes`] with [`DeviceRecord::committed`]).
+    ///
+    /// # Errors
+    /// [`ClientError::EmergencyKitNotConfirmed`] before the kit was confirmed (step 2 comes
+    /// first); [`ClientError::InvalidInput`] for a web-vault signup, which keeps no device
+    /// state, or an empty or oversized `commit_json`; [`ClientError::Internal`].
+    ///
+    /// [`DeviceRecord::committed`]: crate::store::record::DeviceRecord::committed
+    pub fn store_writes(&self, commit_json: &[u8]) -> Result<Changeset, ClientError> {
+        if !self.confirmed {
+            return Err(ClientError::EmergencyKitNotConfirmed);
+        }
+        let device = self.device.as_ref().ok_or(ClientError::InvalidInput)?;
+        let record = device.record(Stage::SignupPending)?;
+        let mut changeset = store::create_writes(&record)?;
+        if commit_json.is_empty() || commit_json.len() > MAX_UPLOAD_BODY_LEN {
+            return Err(ClientError::InvalidInput);
+        }
+        changeset.push(Write::PendingCommit(Some(commit_json.to_vec())));
+        let vault_key_id = *self.vault_key.key_id().map_err(internal)?.as_bytes();
+        let served = ServedObjects {
+            bundles: vec![(
+                device.pin.bundle.bundle_seq,
+                self.request.bundle.as_slice().to_vec(),
+            )],
+            identity_secret_keys: Some(self.request.identity_secret_keys.clone()),
+            self_grants: vec![(self.request.vault_self_grant.clone(), vault_key_id)],
+        };
+        changeset.append(store::object_writes(
+            &device.pin,
+            core::slice::from_ref(&self.own_certificate),
+            &[],
+            &served,
+        ));
+        Ok(changeset)
+    }
+}
+
+impl EmergencyKit {
+    /// The kit of a recovery (CRYPTO.md §11.9 step 5): the new Secret Key and the new recovery
+    /// code, for the same server and login name.
+    pub(crate) fn for_recovery(
+        origin: &ServerOrigin,
+        login_name: &LoginName,
+        secret_key: &SecretKey,
+        recovery_code: &RecoveryCode,
+    ) -> Self {
+        Self {
+            server_origin: origin.as_str().to_owned(),
+            login_name: login_name.as_str().to_owned(),
+            secret_key: secret_key.to_formatted(),
+            recovery_code: Some(recovery_code.to_formatted()),
+        }
     }
 }

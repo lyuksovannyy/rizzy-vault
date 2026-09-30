@@ -5,13 +5,16 @@
 //! `device_id`, the Secret Key, `device_salt`, `kdf_id`, `E_local` with the epochs of its
 //! context, `E_dev`, and the pin of the last verified account answer (§5.6 step 1).
 //!
-//! # Not a persistent format
+//! # The persistent form
 //!
 //! ADR 0013 §3 rule 2 lets the device state record leave the core "as opaque bytes for the host
-//! to persist", and ADR 0001 point 5 / ADR 0020 make every persistent format an ADR matter. No
-//! Accepted ADR defines the device-state record's byte layout, so this crate does **not**
-//! freeze one: [`DeviceState`] is an in-memory value only, with no encoder and no parser. A
-//! host cannot persist it yet; that is a reported gap, not a decision taken here.
+//! to persist". [ADR 0026] §2 defines those bytes (record version 1);
+//! [`crate::store::record::DeviceRecord`] is the codec, [`DeviceState::record`] the way out and
+//! [`crate::store::record::DeviceRecord::to_state`] the way back in. The pin is not in the
+//! record: it is rebuilt from the account objects of the cache at each load (ADR 0026 §4
+//! step 5).
+//!
+//! [ADR 0026]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0026-client-device-state-and-cache.md
 //!
 //! # What never leaves the device
 //!
@@ -33,6 +36,7 @@ use rizzy_core::sign::DeviceKind;
 
 use crate::account::{AccountPin, VerifiedAccount};
 use crate::error::ClientError;
+use crate::store::record::{DeviceRecord, Stage};
 
 /// `E_local` with the epochs of its context (CRYPTO.md §11.3 step 4.3: "store its ctx epochs
 /// next to it (the reader rebuilds its ctx from those, not from the current state)").
@@ -199,50 +203,45 @@ impl DeviceState {
     ///
     /// # Errors
     /// [`ClientError::WrongPasswordOrSecretKey`] when `E_local` does not open;
-    /// [`ClientError::InvalidInput`] for an absurdly long password; [`ClientError::Internal`]
-    /// when `E_dev` does not open under the key `E_local` gave (damaged state).
+    /// [`ClientError::InvalidInput`] for an absurdly long password;
+    /// [`ClientError::CacheCorrupt`] when `E_dev` does not open under the key `E_local` gave
+    /// (damaged state, ADR 0026 §5 (d)).
     pub fn unlock(&self, password: &str) -> Result<UnlockedDevice, ClientError> {
-        let pw_in = PasswordInput::derive(password, &self.secret_key)
-            .map_err(|_| ClientError::InvalidInput)?;
-        let local = pw_in
-            .local_unlock_key(
-                &self.device_salt,
-                self.kdf_id,
-                self.account_id,
-                self.device_id,
-            )
-            .map_err(|_| ClientError::Internal)?;
-        let ctx = self.local_ctx();
-        let account_key = local
-            .unwrap_account_key(&ctx, &self.local_wrap.envelope)
-            .map_err(|_| ClientError::WrongPasswordOrSecretKey)?;
-        let device_keys = account_key
-            .unwrap_device_keys(
-                &DeviceSecretKeysCtx {
-                    account_id: self.account_id,
-                    device_id: self.device_id,
-                },
-                &self.device_keys_wrap,
-            )
-            .map_err(|_| ClientError::Internal)?;
-        Ok(UnlockedDevice {
-            account_id: self.account_id,
-            device_id: self.device_id,
-            account_key,
-            device_keys,
-            local_unlock_key: Some(local),
-        })
+        offline_unlock(
+            password,
+            &OfflineUnlock {
+                account_id: self.account_id,
+                device_id: self.device_id,
+                secret_key: &self.secret_key,
+                device_salt: &self.device_salt,
+                kdf_id: self.kdf_id,
+                local_wrap: &self.local_wrap,
+                device_keys_wrap: &self.device_keys_wrap,
+            },
+        )
     }
 
-    /// The `E_local` context from the stored epochs.
-    fn local_ctx(&self) -> AccountKeyLocalWrapCtx {
-        AccountKeyLocalWrapCtx {
+    /// The device-state record of this state (ADR 0026 §2), without a pending record: what
+    /// the host persists. `stage` is [`Stage::SignupPending`] only between a signup's kit
+    /// confirmation and the server's acknowledgement.
+    ///
+    /// # Errors
+    /// [`ClientError::Internal`].
+    pub fn record(&self, stage: Stage) -> Result<DeviceRecord, ClientError> {
+        Ok(DeviceRecord {
+            stage,
+            server_origin: self.server_origin.clone(),
             account_id: self.account_id,
             device_id: self.device_id,
-            account_key_epoch: self.local_wrap.account_key_epoch,
-            password_epoch: self.local_wrap.password_epoch,
+            device_kind: self.device_kind,
+            secret_key: SecretKey::from_slice(self.secret_key.expose_secret())
+                .map_err(|_| ClientError::Internal)?,
+            device_salt: self.device_salt,
             kdf_id: self.kdf_id,
-        }
+            device_keys_wrap: self.device_keys_wrap.clone(),
+            local_wrap: Some(self.local_wrap.clone()),
+            pending: None,
+        })
     }
 
     /// The password epoch of `E_local`.
@@ -295,8 +294,77 @@ impl DeviceState {
     }
 }
 
+/// What the offline unlock reads (CRYPTO.md §5.6): the fields of a device state or of a
+/// device-state record ([`DeviceRecord`]), base or pending.
+pub(crate) struct OfflineUnlock<'a> {
+    /// The account.
+    pub(crate) account_id: AccountId,
+    /// The device.
+    pub(crate) device_id: DeviceId,
+    /// The Secret Key.
+    pub(crate) secret_key: &'a SecretKey,
+    /// The salt of the local Argon2id run.
+    pub(crate) device_salt: &'a [u8; DEVICE_SALT_LEN],
+    /// The local `kdf_id`.
+    pub(crate) kdf_id: KdfId,
+    /// `E_local` and the epochs of its context.
+    pub(crate) local_wrap: &'a LocalWrap,
+    /// `E_dev`.
+    pub(crate) device_keys_wrap: &'a [u8],
+}
+
+/// The offline unlock (CRYPTO.md §5.6, §11.3 step 1): `pw_in`, the local unlock key (one
+/// Argon2id run), `E_local` with its context rebuilt from the stored epochs, then `E_dev`.
+///
+/// # Errors
+/// [`ClientError::WrongPasswordOrSecretKey`] when `E_local` does not open (a wrong password
+/// and a damaged `E_local` look the same, ADR 0026 §5 (c)); [`ClientError::InvalidInput`] for
+/// an absurdly long password; [`ClientError::CacheCorrupt`] when `E_dev` does not open under
+/// the key `E_local` gave (ADR 0026 §5 (d)); [`ClientError::Internal`].
+pub(crate) fn offline_unlock(
+    password: &str,
+    fields: &OfflineUnlock<'_>,
+) -> Result<UnlockedDevice, ClientError> {
+    let pw_in = PasswordInput::derive(password, fields.secret_key)
+        .map_err(|_| ClientError::InvalidInput)?;
+    let local = pw_in
+        .local_unlock_key(
+            fields.device_salt,
+            fields.kdf_id,
+            fields.account_id,
+            fields.device_id,
+        )
+        .map_err(|_| ClientError::Internal)?;
+    let ctx = AccountKeyLocalWrapCtx {
+        account_id: fields.account_id,
+        device_id: fields.device_id,
+        account_key_epoch: fields.local_wrap.account_key_epoch,
+        password_epoch: fields.local_wrap.password_epoch,
+        kdf_id: fields.kdf_id,
+    };
+    let account_key = local
+        .unwrap_account_key(&ctx, &fields.local_wrap.envelope)
+        .map_err(|_| ClientError::WrongPasswordOrSecretKey)?;
+    let device_keys = account_key
+        .unwrap_device_keys(
+            &DeviceSecretKeysCtx {
+                account_id: fields.account_id,
+                device_id: fields.device_id,
+            },
+            fields.device_keys_wrap,
+        )
+        .map_err(|_| ClientError::CacheCorrupt)?;
+    Ok(UnlockedDevice {
+        account_id: fields.account_id,
+        device_id: fields.device_id,
+        account_key,
+        device_keys,
+        local_unlock_key: Some(local),
+    })
+}
+
 /// `E_local` of `account_key` under `local`.
-fn wrap_local<R: CryptoRng + ?Sized>(
+pub(crate) fn wrap_local<R: CryptoRng + ?Sized>(
     rng: &mut R,
     local: &LocalUnlockKey,
     account_id: AccountId,
@@ -357,6 +425,13 @@ impl UnlockedDevice {
     #[must_use]
     pub const fn device_id(&self) -> DeviceId {
         self.device_id
+    }
+
+    /// The epoch of the account key these keys hold. Public protocol data (it is in the signed
+    /// `account-state`); a host compares it with the epochs of pending device grants.
+    #[must_use]
+    pub const fn account_key_epoch(&self) -> u32 {
+        self.account_key.epoch()
     }
 
     /// Drops the local unlock key once the online part of the unlock is done.

@@ -1,6 +1,6 @@
 # Contributing to rizzy-vault
 
-rizzy-vault is at **M0 done, M1 in progress**. M1 step 1, the `rizzy-core` cryptography, is implemented. Steps 2 and 3 (the item schema and sync engine, the server) are in progress; steps 4 and 5 (the client core and `rv` CLI, the wasm bindings and web vault) are not started, and the CLI is still a skeleton. The [README](README.md#status) has the details.
+rizzy-vault is at **M0 done, M1 in progress**. M1 step 1, the `rizzy-core` cryptography, is implemented. Steps 2 and 3 (the item schema and sync engine, the server) are in progress; step 4 (the client core and the `rv` CLI) is in progress; step 5 (the wasm bindings and web vault) is not started. The [README](README.md#status) has the details.
 
 - **Most useful now:** review of [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), [docs/CRYPTO.md](docs/CRYPTO.md) and the [ADRs](docs/adr/README.md).
 - **Code PRs** in the ADR-first areas (see [ADR first](#adr-first)) are accepted only when an **Accepted** ADR covers them. ADRs [0020](docs/adr/0020-partial-supersession.md) (which carries ADR 0001 forward), [0016](docs/adr/0016-workspace-layout.md) and [0017](docs/adr/0017-licensing.md) (licensing and contribution terms) are Accepted. Until ADR 0017's App Store permission (Decision 3) is committed, only documentation PRs from outside contributors are merged.

@@ -1,8 +1,8 @@
-//! `rizzy-import` — importers for other password managers' export files (roadmap §4.2, M1;
-//! [ADR 0002] point 2; [ADR 0016] §3).
+//! `rizzy-import` — importers for other password managers' export files, and for our own
+//! plaintext JSON export (roadmap §4.2, M1; [ADR 0002] point 2; [ADR 0016] §3; [ADR 0027] §6).
 //!
-//! An import file goes in as bytes, and the create ops of the imported items come out, as
-//! field writes of `rizzy-core`'s M1 item schema ([ADR 0018] §6–§8): item types, field keys and
+//! An import file goes in as bytes, and the writes of the imported items come out, as field
+//! writes of `rizzy-core`'s M1 item schema ([ADR 0018] §6–§8): item types, field keys and
 //! values, with per-entry warnings. `rizzy-client` encrypts them under the vault's keys at once
 //! and uploads them like any other create op; the server never sees an import file (ADR 0002
 //! point 2).
@@ -17,12 +17,15 @@
 //! | [`Format::GenericCsv`] | a CSV file with a header row | [`csv_import`] |
 //! | [`Format::ChromeCsv`] | Chrome's (Chromium's) password CSV | [`csv_import`] |
 //! | [`Format::FirefoxCsv`] | Firefox's password CSV | [`csv_import`] |
+//! | [`Format::RizzyPlaintextJson`] | rizzy-vault's own plaintext JSON export (ADR 0027 §3) | [`rizzy_json`] |
 //!
 //! Each module's documentation holds its mapping table. **Not imported in M1:** `KeePass` KDBX
 //! databases and Bitwarden's encrypted exports, which need the other product's cryptography
 //! (ADR 0002 point 2 and owner decision 1: legacy primitives would live here, after ADR 0009's
 //! approval procedure, which has not run); they are refused with
-//! [`ImportError::KdbxNotSupported`] and [`ImportError::EncryptedExport`].
+//! [`ImportError::KdbxNotSupported`] and [`ImportError::EncryptedExport`]. rizzy-vault's own
+//! *encrypted* export is read by `rizzy-client` (`export`), which holds its cryptography, and
+//! its plaintext CSV export has no reader (ADR 0027 §6).
 //!
 //! # Contract
 //!
@@ -43,19 +46,21 @@
 //!   adds `clippy::indexing_slicing` and `clippy::unreachable`, and `cargo lint` makes every
 //!   warning an error. One fuzz target per format lives under `fuzz/` (`import_bitwarden`,
 //!   `import_1pux`, `import_keepass_xml`, `import_csv`, `import_chrome_csv`,
-//!   `import_firefox_csv`).
+//!   `import_firefox_csv`, `import_rizzy_json`).
 //! - **Secrets** (CRYPTO.md §12.2). An import file is plaintext passwords. Every string the
 //!   readers produce (JSON strings, numbers and names, CSV fields, XML names, attributes and
-//!   text, the decompressed archive member) is a zeroizing buffer allocated once, at its final
-//!   size or at the size of its raw source, which unescaping only shortens, so no reallocation
-//!   leaves a copy behind. Values leave as `rizzy-core`'s zeroizing [`Value`](rizzy_core::item::value::Value)
-//!   and [`FieldKey`](rizzy_core::item::key::FieldKey). No `Debug` output, error or warning
+//!   text, the decompressed archive member, decoded base64url) is a zeroizing buffer allocated
+//!   once, at its final size or at the size of its raw source, which unescaping only shortens,
+//!   so no reallocation leaves a copy behind. Values leave as `rizzy-core`'s zeroizing
+//!   [`Value`](rizzy_core::item::value::Value) and
+//!   [`FieldKey`](rizzy_core::item::key::FieldKey). No `Debug` output, error or warning
 //!   carries a byte of the file: errors and warnings are kinds, and a warning names only the
 //!   entry's position. The caller owns the input buffer and wipes it.
 //! - **The schema's writer rules.** Every item passes `rizzy-core`'s
 //!   [`check_create`](rizzy_core::item::schema::check_create) for an import before it is
-//!   returned, fits one create op (ADR 0018 §10), and has its writes in canonical key order
-//!   (ADR 0018 §4). See [`item`].
+//!   returned, and has its writes in canonical key order (ADR 0018 §4). An item of another
+//!   product's file fits one create op (ADR 0018 §10); an item of our own plaintext export may
+//!   need several, and `rizzy-client` splits it (ADR 0027 §2 step 5). See [`item`].
 //! - **No `unsafe`** (workspace lint and `#![forbid(unsafe_code)]` below).
 //!
 //! # Readers
@@ -68,6 +73,7 @@
 //! [ADR 0002]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0002-own-protocol.md
 //! [ADR 0016]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0016-workspace-layout.md
 //! [ADR 0018]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0018-item-record-encoding.md
+//! [ADR 0027]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0027-export-payload.md
 #![forbid(unsafe_code)]
 #![warn(clippy::indexing_slicing, clippy::unreachable)]
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
@@ -81,6 +87,7 @@ pub mod json;
 pub mod keepass;
 pub mod limits;
 pub mod onepux;
+pub mod rizzy_json;
 pub mod xml;
 pub mod zip;
 
@@ -116,16 +123,43 @@ pub enum Format {
     ChromeCsv,
     /// Firefox's password CSV export.
     FirefoxCsv,
+    /// rizzy-vault's own plaintext JSON export (ADR 0027 §3, §6; see [`rizzy_json`]).
+    RizzyPlaintextJson,
+}
+
+/// Totals of what an import of our own plaintext JSON export did not take as it stood
+/// (ADR 0027 §6: "The report counts skipped items, ignored members, collapsed conflicts and
+/// dropped history"). Numbers only; [`Import::warnings`] names the positions (INV-48). All zero
+/// for the other formats, whose losses are warnings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Counts {
+    /// Items skipped: a missing or mistyped member, a bad or duplicate key, an oversize value
+    /// or list, or a type the schema refuses.
+    pub skipped_items: usize,
+    /// Members the format does not define, in any object the reader looked at, skipped items
+    /// included.
+    pub ignored_members: usize,
+    /// Fields of imported items that listed `conflicts`: only the displayed value was taken.
+    pub collapsed_conflicts: usize,
+    /// History entries of imported items that were not carried: past the fiftieth, of a field
+    /// other than `login.password`, or not a text.
+    pub dropped_history: usize,
+    /// Fields of imported items left out because the new item may not write them: a key of
+    /// another item type, or one an M1 client never writes (see [`rizzy_json`] "Readings").
+    pub dropped_fields: usize,
 }
 
 /// The result of an import: the items, in file order, and the warnings.
 #[derive(Debug)]
 pub struct Import {
-    /// The imported items, one create op each, in file order.
+    /// The imported items, in file order: one create op each, except an item of our own
+    /// plaintext export, which `rizzy-client` may split over several ops (see [`item`]).
     pub items: Vec<ImportedItem>,
     /// What was not imported as it stood, per entry; at most
     /// [`limits::MAX_WARNINGS`] and one more.
     pub warnings: Vec<Warning>,
+    /// Totals for [`Format::RizzyPlaintextJson`]; zero for the other formats.
+    pub counts: Counts,
 }
 
 /// Imports `input` as `format`. Element ids are drawn from `rng`, the leaf crate's CSPRNG
@@ -140,6 +174,7 @@ pub fn import<R: CryptoRng + ?Sized>(
     rng: &mut R,
 ) -> Result<Import, ImportError> {
     let mut warnings = error::Warnings::default();
+    let mut counts = Counts::default();
     let items = match format {
         Format::BitwardenJson => bitwarden::import(input, rng, &mut warnings)?,
         Format::OnePux => onepux::import(input, rng, &mut warnings)?,
@@ -147,10 +182,12 @@ pub fn import<R: CryptoRng + ?Sized>(
         Format::GenericCsv => csv_import::generic(input, rng, &mut warnings)?,
         Format::ChromeCsv => csv_import::chrome(input, rng, &mut warnings)?,
         Format::FirefoxCsv => csv_import::firefox(input, rng, &mut warnings)?,
+        Format::RizzyPlaintextJson => rizzy_json::import(input, rng, &mut warnings, &mut counts)?,
     };
     Ok(Import {
         items,
         warnings: warnings.into_vec(),
+        counts,
     })
 }
 
@@ -169,5 +206,6 @@ pub fn import_1pux_data<R: CryptoRng + ?Sized>(
     Ok(Import {
         items,
         warnings: warnings.into_vec(),
+        counts: Counts::default(),
     })
 }

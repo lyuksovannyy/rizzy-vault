@@ -171,7 +171,11 @@ fn entries<'a>(input: &mut Input<'_>, values: &'a [Vec<u8>], lifecycle: bool) ->
     for v in values {
         let dot = input.dot();
         let value = if lifecycle {
-            Value::new(if v.first().is_some_and(|b| b & 1 == 0) { &[0x02] } else { &[0x01] })
+            Value::new(if v.first().is_some_and(|b| b & 1 == 0) {
+                &[0x02]
+            } else {
+                &[0x01]
+            })
         } else {
             Value::new(v)
         };
@@ -220,7 +224,10 @@ fn snapshot(input: &mut Input<'_>, pool: &[Vec<u8>]) -> Option<(SnapshotHeader, 
                 .filter(|e| !c.covers(e.dot()))
                 .collect();
             if !kept.is_empty() {
-                late.push(Register::new(FieldKey::new(key).expect("a grammar key"), kept));
+                late.push(Register::new(
+                    FieldKey::new(key).expect("a grammar key"),
+                    kept,
+                ));
             }
         }
         covered.add(purge);
@@ -234,9 +241,11 @@ fn snapshot(input: &mut Input<'_>, pool: &[Vec<u8>]) -> Option<(SnapshotHeader, 
             .chain(l.history())
             .flat_map(|r| r.entries().iter().map(Entry::dot))
             .collect(),
-        SnapshotData::Tombstone(t) => {
-            t.late().iter().flat_map(|r| r.entries().iter().map(Entry::dot)).collect()
-        }
+        SnapshotData::Tombstone(t) => t
+            .late()
+            .iter()
+            .flat_map(|r| r.entries().iter().map(Entry::dot))
+            .collect(),
     };
     dots.into_iter().for_each(|d| covered.add(d));
     let bytes = encode_snapshot(&covered, &data).ok()?;
@@ -304,8 +313,10 @@ fuzz_target!(|data: &[u8]| {
                     continue;
                 };
                 let parsed = parse_snapshot(&header.covered, &bytes).expect("encoded data parses");
-                let datas: Vec<OpData<'_>> =
-                    ops.iter().map(|o| parse_op(&o.data).expect("an encoded op parses")).collect();
+                let datas: Vec<OpData<'_>> = ops
+                    .iter()
+                    .map(|o| parse_op(&o.data).expect("an encoded op parses"))
+                    .collect();
                 let with: Vec<OpInput<'_>> = ops
                     .iter()
                     .zip(&datas)
@@ -356,7 +367,12 @@ fuzz_target!(|data: &[u8]| {
             Ok(_) | Err(MergeError::Record(_)) => {}
             Err(other) => panic!("canonical state: {other}"),
         }
-        let _ = (m.lifecycle(), m.times(), m.late_values_to_surface(), m.is_oversize());
+        let _ = (
+            m.lifecycle(),
+            m.times(),
+            m.late_values_to_surface(),
+            m.is_oversize(),
+        );
         for key in KEYS {
             let _ = m.field(key);
         }

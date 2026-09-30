@@ -555,6 +555,174 @@
         "signer_key_id": "dd5ab6cfd84f41fe640a2f9480188da2",
         "signer_public_key": "9f7c59a8a424e2f2dfa2bf9c06372d44e9a3862e85e4923e0978a9c02c245228"
       }
+    },
+    {
+      "id": "statement/device-request/1",
+      "inputs": {
+        "account_id": "1d8e007d4f8f55a26d28cb4f660ea425",
+        "device_id": "0262cebe47b2b8b786c44c4f9d742521",
+        "method": "POST",
+        "path_and_query": "/p?",
+        "request_body": "7b7d",
+        "request_counter": "43",
+        "server_origin": "https://vault.example.com",
+        "session_id": "f9f1f8754994fceb09c49657cb4f697b",
+        "signer_seed": "b42c755f625822e21db16caeb9ae4709d01216b843f411c1f4a289ec8d00dec5"
+      },
+      "kind": "statement",
+      "name": "device-request",
+      "outputs": {
+        "body": "0000001968747470733a2f2f7661756c742e6578616d706c652e636f6d1d8e007d4f8f55a26d28cb4f660ea4250262cebe47b2b8b786c44c4f9d742521f9f1f8754994fceb09c49657cb4f697b000000000000002b00000004504f5354000000032f703f44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "container": "0101dd5ab6cfd84f41fe640a2f9480188da29816abb21f626a982cb3a46b899c406afea7a9bfe67c93a0ccb6666651f3152f9703077883c9ae5f8b05749975eab3884f925769d2a679819f69fa5b056fec09",
+        "request_body_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "signed_message": "72697a7a792d7661756c742f76312f7369672f6465766963652d726571756573740000010000001968747470733a2f2f7661756c742e6578616d706c652e636f6d1d8e007d4f8f55a26d28cb4f660ea4250262cebe47b2b8b786c44c4f9d742521f9f1f8754994fceb09c49657cb4f697b000000000000002b00000004504f5354000000032f703f44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "signer_key_id": "dd5ab6cfd84f41fe640a2f9480188da2",
+        "signer_public_key": "9f7c59a8a424e2f2dfa2bf9c06372d44e9a3862e85e4923e0978a9c02c245228"
+      }
+    },
+    {
+      "id": "statement/device-request/2",
+      "inputs": {
+        "account_id": "1d8e007d4f8f55a26d28cb4f660ea425",
+        "device_id": "0262cebe47b2b8b786c44c4f9d742521",
+        "method": "POST",
+        "path_and_query": "/p?a=1&a=2&a=1",
+        "request_body": "7b7d",
+        "request_counter": "43",
+        "server_origin": "https://vault.example.com",
+        "session_id": "f9f1f8754994fceb09c49657cb4f697b",
+        "signer_seed": "b42c755f625822e21db16caeb9ae4709d01216b843f411c1f4a289ec8d00dec5"
+      },
+      "kind": "statement",
+      "name": "device-request",
+      "outputs": {
+        "body": "0000001968747470733a2f2f7661756c742e6578616d706c652e636f6d1d8e007d4f8f55a26d28cb4f660ea4250262cebe47b2b8b786c44c4f9d742521f9f1f8754994fceb09c49657cb4f697b000000000000002b00000004504f53540000000e2f703f613d3126613d3226613d3144136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "container": "0101dd5ab6cfd84f41fe640a2f9480188da2d5260b711bd06a271f7d0e2a8c5cb0a0bce75ddac3b97c2ee5126623ff070b02d72133da5c6710cdabf37cd013884bcde0085e08ee2f0ea346b8175dd47a0b0a",
+        "request_body_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "signed_message": "72697a7a792d7661756c742f76312f7369672f6465766963652d726571756573740000010000001968747470733a2f2f7661756c742e6578616d706c652e636f6d1d8e007d4f8f55a26d28cb4f660ea4250262cebe47b2b8b786c44c4f9d742521f9f1f8754994fceb09c49657cb4f697b000000000000002b00000004504f53540000000e2f703f613d3126613d3226613d3144136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "signer_key_id": "dd5ab6cfd84f41fe640a2f9480188da2",
+        "signer_public_key": "9f7c59a8a424e2f2dfa2bf9c06372d44e9a3862e85e4923e0978a9c02c245228"
+      }
+    },
+    {
+      "id": "statement/device-request/3",
+      "inputs": {
+        "account_id": "1d8e007d4f8f55a26d28cb4f660ea425",
+        "device_id": "0262cebe47b2b8b786c44c4f9d742521",
+        "method": "POST",
+        "path_and_query": "/p?q=%2f",
+        "request_body": "7b7d",
+        "request_counter": "43",
+        "server_origin": "https://vault.example.com",
+        "session_id": "f9f1f8754994fceb09c49657cb4f697b",
+        "signer_seed": "b42c755f625822e21db16caeb9ae4709d01216b843f411c1f4a289ec8d00dec5"
+      },
+      "kind": "statement",
+      "name": "device-request",
+      "outputs": {
+        "body": "0000001968747470733a2f2f7661756c742e6578616d706c652e636f6d1d8e007d4f8f55a26d28cb4f660ea4250262cebe47b2b8b786c44c4f9d742521f9f1f8754994fceb09c49657cb4f697b000000000000002b00000004504f5354000000082f703f713d25326644136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "container": "0101dd5ab6cfd84f41fe640a2f9480188da2256adf5303c5937dafd45b1a3a0ce67c1e4432e6295237b306834c7d99deb091595492ddc26dd07c6f18325eaf743404df1679cf911ef60beb3da0e67d83ac0e",
+        "request_body_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "signed_message": "72697a7a792d7661756c742f76312f7369672f6465766963652d726571756573740000010000001968747470733a2f2f7661756c742e6578616d706c652e636f6d1d8e007d4f8f55a26d28cb4f660ea4250262cebe47b2b8b786c44c4f9d742521f9f1f8754994fceb09c49657cb4f697b000000000000002b00000004504f5354000000082f703f713d25326644136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "signer_key_id": "dd5ab6cfd84f41fe640a2f9480188da2",
+        "signer_public_key": "9f7c59a8a424e2f2dfa2bf9c06372d44e9a3862e85e4923e0978a9c02c245228"
+      }
+    },
+    {
+      "id": "statement/device-request/4",
+      "inputs": {
+        "account_id": "1d8e007d4f8f55a26d28cb4f660ea425",
+        "device_id": "0262cebe47b2b8b786c44c4f9d742521",
+        "method": "POST",
+        "path_and_query": "/p?q=%2F",
+        "request_body": "7b7d",
+        "request_counter": "43",
+        "server_origin": "https://vault.example.com",
+        "session_id": "f9f1f8754994fceb09c49657cb4f697b",
+        "signer_seed": "b42c755f625822e21db16caeb9ae4709d01216b843f411c1f4a289ec8d00dec5"
+      },
+      "kind": "statement",
+      "name": "device-request",
+      "outputs": {
+        "body": "0000001968747470733a2f2f7661756c742e6578616d706c652e636f6d1d8e007d4f8f55a26d28cb4f660ea4250262cebe47b2b8b786c44c4f9d742521f9f1f8754994fceb09c49657cb4f697b000000000000002b00000004504f5354000000082f703f713d25324644136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "container": "0101dd5ab6cfd84f41fe640a2f9480188da2e2480cdcca7f8127215ad3456ba39a777bd39ed8e3aefc438e8b41fa7f19995eff528304f23f316547cf42fad4b923c0f44da0b1fb52d314f30a1510758b9900",
+        "request_body_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "signed_message": "72697a7a792d7661756c742f76312f7369672f6465766963652d726571756573740000010000001968747470733a2f2f7661756c742e6578616d706c652e636f6d1d8e007d4f8f55a26d28cb4f660ea4250262cebe47b2b8b786c44c4f9d742521f9f1f8754994fceb09c49657cb4f697b000000000000002b00000004504f5354000000082f703f713d25324644136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "signer_key_id": "dd5ab6cfd84f41fe640a2f9480188da2",
+        "signer_public_key": "9f7c59a8a424e2f2dfa2bf9c06372d44e9a3862e85e4923e0978a9c02c245228"
+      }
+    },
+    {
+      "id": "statement/device-request/5",
+      "inputs": {
+        "account_id": "1d8e007d4f8f55a26d28cb4f660ea425",
+        "device_id": "0262cebe47b2b8b786c44c4f9d742521",
+        "method": "POST",
+        "path_and_query": "/a/./b",
+        "request_body": "7b7d",
+        "request_counter": "43",
+        "server_origin": "https://vault.example.com",
+        "session_id": "f9f1f8754994fceb09c49657cb4f697b",
+        "signer_seed": "b42c755f625822e21db16caeb9ae4709d01216b843f411c1f4a289ec8d00dec5"
+      },
+      "kind": "statement",
+      "name": "device-request",
+      "outputs": {
+        "body": "0000001968747470733a2f2f7661756c742e6578616d706c652e636f6d1d8e007d4f8f55a26d28cb4f660ea4250262cebe47b2b8b786c44c4f9d742521f9f1f8754994fceb09c49657cb4f697b000000000000002b00000004504f5354000000062f612f2e2f6244136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "container": "0101dd5ab6cfd84f41fe640a2f9480188da2dc4d4b0bec0ac6953fe98b76b02b2ba6936e467620636b3369425c86c73ef9a90463bf1b7a005a84d4d99b54b683aaef72e58271dffb5088042c90fc00b01a0d",
+        "request_body_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "signed_message": "72697a7a792d7661756c742f76312f7369672f6465766963652d726571756573740000010000001968747470733a2f2f7661756c742e6578616d706c652e636f6d1d8e007d4f8f55a26d28cb4f660ea4250262cebe47b2b8b786c44c4f9d742521f9f1f8754994fceb09c49657cb4f697b000000000000002b00000004504f5354000000062f612f2e2f6244136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "signer_key_id": "dd5ab6cfd84f41fe640a2f9480188da2",
+        "signer_public_key": "9f7c59a8a424e2f2dfa2bf9c06372d44e9a3862e85e4923e0978a9c02c245228"
+      }
+    },
+    {
+      "id": "statement/device-request/6",
+      "inputs": {
+        "account_id": "1d8e007d4f8f55a26d28cb4f660ea425",
+        "device_id": "0262cebe47b2b8b786c44c4f9d742521",
+        "method": "POST",
+        "path_and_query": "/a/../b",
+        "request_body": "7b7d",
+        "request_counter": "43",
+        "server_origin": "https://vault.example.com",
+        "session_id": "f9f1f8754994fceb09c49657cb4f697b",
+        "signer_seed": "b42c755f625822e21db16caeb9ae4709d01216b843f411c1f4a289ec8d00dec5"
+      },
+      "kind": "statement",
+      "name": "device-request",
+      "outputs": {
+        "body": "0000001968747470733a2f2f7661756c742e6578616d706c652e636f6d1d8e007d4f8f55a26d28cb4f660ea4250262cebe47b2b8b786c44c4f9d742521f9f1f8754994fceb09c49657cb4f697b000000000000002b00000004504f5354000000072f612f2e2e2f6244136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "container": "0101dd5ab6cfd84f41fe640a2f9480188da245c195164591ef10866da84b88ba4508d6e87f0b905fcb5dddf7df2268240aef4138e8de01cab7a299e85e171a6703bbd5bed63ea50ebe8991aeee71aa755a08",
+        "request_body_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "signed_message": "72697a7a792d7661756c742f76312f7369672f6465766963652d726571756573740000010000001968747470733a2f2f7661756c742e6578616d706c652e636f6d1d8e007d4f8f55a26d28cb4f660ea4250262cebe47b2b8b786c44c4f9d742521f9f1f8754994fceb09c49657cb4f697b000000000000002b00000004504f5354000000072f612f2e2e2f6244136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "signer_key_id": "dd5ab6cfd84f41fe640a2f9480188da2",
+        "signer_public_key": "9f7c59a8a424e2f2dfa2bf9c06372d44e9a3862e85e4923e0978a9c02c245228"
+      }
+    },
+    {
+      "id": "statement/device-request/7",
+      "inputs": {
+        "account_id": "1d8e007d4f8f55a26d28cb4f660ea425",
+        "device_id": "0262cebe47b2b8b786c44c4f9d742521",
+        "method": "POST",
+        "path_and_query": "//a",
+        "request_body": "7b7d",
+        "request_counter": "43",
+        "server_origin": "https://vault.example.com",
+        "session_id": "f9f1f8754994fceb09c49657cb4f697b",
+        "signer_seed": "b42c755f625822e21db16caeb9ae4709d01216b843f411c1f4a289ec8d00dec5"
+      },
+      "kind": "statement",
+      "name": "device-request",
+      "outputs": {
+        "body": "0000001968747470733a2f2f7661756c742e6578616d706c652e636f6d1d8e007d4f8f55a26d28cb4f660ea4250262cebe47b2b8b786c44c4f9d742521f9f1f8754994fceb09c49657cb4f697b000000000000002b00000004504f5354000000032f2f6144136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "container": "0101dd5ab6cfd84f41fe640a2f9480188da2cd2df6ae0c5422fc2f70377de9245c89a8d4b2ffe6bdcd54d470ee6a38c75aaa8113dc0ba37958617f1ef55e454353d31b1130fff1be074ce10071fbecb7ab01",
+        "request_body_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "signed_message": "72697a7a792d7661756c742f76312f7369672f6465766963652d726571756573740000010000001968747470733a2f2f7661756c742e6578616d706c652e636f6d1d8e007d4f8f55a26d28cb4f660ea4250262cebe47b2b8b786c44c4f9d742521f9f1f8754994fceb09c49657cb4f697b000000000000002b00000004504f5354000000032f2f6144136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "signer_key_id": "dd5ab6cfd84f41fe640a2f9480188da2",
+        "signer_public_key": "9f7c59a8a424e2f2dfa2bf9c06372d44e9a3862e85e4923e0978a9c02c245228"
+      }
     }
   ]
 }

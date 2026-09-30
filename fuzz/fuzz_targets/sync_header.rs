@@ -36,7 +36,9 @@ fuzz_target!(|data: &[u8]| {
         let statement =
             OpStatement::new(data, b"envelope", None).expect("a canonical header fits the bounds");
         assert_eq!(OpHeader::parse_statement(&statement).as_ref(), Ok(&header));
-        let ctx = header.envelope_context().expect("an accepted header encodes");
+        let ctx = header
+            .envelope_context()
+            .expect("an accepted header encodes");
         assert_eq!(ctx.op_header_hash, ItemOpCtx::header_hash(data));
         assert_eq!(ctx.op_header_hash, statement.header_hash());
         assert_eq!(ctx.device_seq, header.dot.seq());
@@ -47,8 +49,13 @@ fuzz_target!(|data: &[u8]| {
         assert!(!matches!(header.item_schema_version.get(), 0 | 0xFFFF));
         let statement = SnapshotStatement::new(data, b"envelope", Some(b"wrap"))
             .expect("a canonical header fits the bounds");
-        assert_eq!(SnapshotHeader::parse_statement(&statement).as_ref(), Ok(&header));
-        let ctx = header.envelope_context().expect("an accepted header encodes");
+        assert_eq!(
+            SnapshotHeader::parse_statement(&statement).as_ref(),
+            Ok(&header)
+        );
+        let ctx = header
+            .envelope_context()
+            .expect("an accepted header encodes");
         assert_eq!(ctx.snapshot_header_hash, ItemSnapshotCtx::header_hash(data));
         assert_eq!(ctx.snapshot_header_hash, statement.header_hash());
     }

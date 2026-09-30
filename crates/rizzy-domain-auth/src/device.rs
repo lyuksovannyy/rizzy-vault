@@ -42,7 +42,7 @@ use rizzy_proto::objects::DeviceGrant;
 use rizzy_proto::wire::{Bytes, Fixed, Id, List};
 use rizzy_storage::{WriteTx, lock_account};
 
-use crate::config::CHALLENGE_TTL_MS;
+use crate::config::{CHALLENGE_TTL_MS, MAX_REQUEST_COUNTER};
 use crate::error::AuthError;
 use crate::healing::{open_epoch, verify_all};
 use crate::ports::VaultPort;
@@ -345,6 +345,12 @@ impl<V: VaultPort> AuthService<V> {
     /// device session the `device-request` signature over the request as received, with its
     /// `request_counter` accepted at most once within the window of 64.
     ///
+    /// The window is read and written in one write transaction, under the account lock, and
+    /// only after the signature verified (ADR 0028 item 5 "Replay window"): a forged request
+    /// cannot move it, a restart does not reset it, and replicas share it. The counter is
+    /// spent once this returns `Ok`, even if the request then fails in its flow. A counter
+    /// above [`MAX_REQUEST_COUNTER`] is refused.
+    ///
     /// A device session without a signature, and an OPAQUE or recovery session with one, are
     /// refused: native clients sign every request over a device session and only those (the
     /// web vault keeps bearer tokens).
@@ -370,6 +376,14 @@ impl<V: VaultPort> AuthService<V> {
                 Ok(session)
             };
         };
+        // The session row keeps the highest accepted counter in a signed 64-bit column that
+        // admits no negative value (`request_counter_max`), so a counter above `i64::MAX`
+        // cannot be recorded. It is refused like every other unusable counter (ADR 0028 item 5
+        // "One answer"), before anything is read: a client starts at 1 and adds 1 per request,
+        // so it never gets there.
+        if signature.request_counter > MAX_REQUEST_COUNTER {
+            return Err(AuthError::Unauthorized);
+        }
         let mut tx = self.db.begin_write().await?;
         let session = session::load(tx.conn(), token, now_ms).await?;
         let (SessionKind::Device, Some(device)) = (session.kind, session.device_id) else {
@@ -560,7 +574,9 @@ impl<V: VaultPort> AuthService<V> {
         if kept >= self.config.max_web_certificates {
             // Commit the deletions made so far; the upload itself is refused.
             tx.commit().await?;
-            return Err(AuthError::RateLimited);
+            return Err(AuthError::RateLimited {
+                retry_after_ms: None,
+            });
         }
         store::put_cert(tx.conn(), &cert, req.device_certificate.as_slice(), now_ms).await?;
         tx.commit().await?;

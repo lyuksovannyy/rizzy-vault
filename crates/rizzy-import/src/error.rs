@@ -39,6 +39,9 @@ pub enum ImportError {
     /// An XML document type declaration. It is refused outright, so no entity is ever
     /// defined or expanded (threat model A16).
     Doctype,
+    /// A rizzy-vault plaintext JSON export of a `version` this reader does not know
+    /// (ADR 0027 §6: "update required, never guessed or migrated").
+    UpdateRequired,
 }
 
 impl fmt::Display for ImportError {
@@ -57,6 +60,9 @@ impl fmt::Display for ImportError {
             Self::ArchiveUnsupported => "the archive uses an unsupported zip feature",
             Self::Checksum => "the archive's checksum does not match",
             Self::Doctype => "XML document type declarations are not accepted",
+            Self::UpdateRequired => {
+                "the export was written by a newer rizzy-vault; update to import it"
+            }
         })
     }
 }
@@ -99,7 +105,8 @@ pub enum WarningKind {
     InvalidTimestamp,
     /// A field of a kind with no M1 equivalent (a Bitwarden linked field, a 1Password
     /// reference, a field value of an unknown kind, password history of an item that is not a
-    /// login); not imported.
+    /// login, a field of a rizzy-vault plaintext export whose key this client never writes or
+    /// that belongs to another item type); not imported.
     FieldSkipped,
     /// A one-time-password secret that could not go to `login.totp` as it stands: a `KeePass`
     /// TOTP secret whose settings (digits, period, algorithm) are not the defaults a bare
@@ -112,6 +119,23 @@ pub enum WarningKind {
     ExtraColumns,
     /// More warnings than [`crate::limits::MAX_WARNINGS`]; the rest were not recorded.
     WarningsTruncated,
+    /// An item of a type this client does not import: an unknown or reserved type, or the
+    /// vault-settings type, which is never imported as an item (ADR 0027 §6); skipped.
+    UnsupportedItemType,
+    /// An item of a rizzy-vault plaintext export with more fields than an item may hold, or
+    /// more value bytes than one item's snapshot may hold (ADR 0018 §10; ADR 0027 §6 "an
+    /// oversize value or list"); skipped. Nothing of it was imported.
+    OversizeEntry,
+    /// A field of a rizzy-vault plaintext export listed `conflicts`; only its displayed value
+    /// was imported (ADR 0027 §6). At most once per entry.
+    ConflictsCollapsed,
+    /// Password history of a rizzy-vault plaintext export that was not imported: entries past
+    /// the fiftieth, history of a field other than `login.password`, or an entry whose value
+    /// is not a text (ADR 0027 §6). At most once per entry.
+    HistoryDropped,
+    /// A member the rizzy-vault plaintext format does not define was ignored (ADR 0027 §6
+    /// "Unknown members"). At most once per entry, and once for the file as a whole.
+    UnknownMembersIgnored,
 }
 
 impl fmt::Display for WarningKind {
@@ -135,6 +159,11 @@ impl fmt::Display for WarningKind {
             Self::DeletedEntrySkipped => "a deleted entry was skipped",
             Self::ExtraColumns => "a row had more columns than the header",
             Self::WarningsTruncated => "more warnings were not recorded",
+            Self::UnsupportedItemType => "an item of an unsupported type was skipped",
+            Self::OversizeEntry => "an item too large to import was skipped",
+            Self::ConflictsCollapsed => "conflicting values were reduced to the displayed one",
+            Self::HistoryDropped => "some password history was not imported",
+            Self::UnknownMembersIgnored => "unknown members of the file were ignored",
         })
     }
 }
@@ -144,7 +173,8 @@ impl fmt::Display for WarningKind {
 pub struct Warning {
     /// The entry's position among the file's entries, from 0, in file order: Bitwarden
     /// `items`, 1PUX items across accounts and vaults, `KeePass` entries group by group (see
-    /// [`crate::keepass`]), CSV data rows. `None` for a warning about the file as a whole.
+    /// [`crate::keepass`]), CSV data rows, `items` of a rizzy-vault plaintext export. `None` for
+    /// a warning about the file as a whole.
     pub entry: Option<usize>,
     /// What happened.
     pub kind: WarningKind,

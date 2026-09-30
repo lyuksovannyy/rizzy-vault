@@ -40,16 +40,16 @@ use zeroize::Zeroizing;
 use crate::common::{ORIGIN, Reply, Server, block_on, send_via};
 
 /// Every test account's master password.
-const PASSWORD: &str = "correct horse battery staple";
+pub(crate) const PASSWORD: &str = "correct horse battery staple";
 
 /// The login name.
-const NAME: &str = "alice";
+pub(crate) const NAME: &str = "alice";
 
 /// The item field every test writes.
-const FIELD: &str = "login.password";
+pub(crate) const FIELD: &str = "login.password";
 
 /// The host's wall clock.
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     u64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -60,7 +60,7 @@ fn now_ms() -> u64 {
 }
 
 /// How a request authenticates.
-enum Auth<'a> {
+pub(crate) enum Auth<'a> {
     /// No session.
     None,
     /// A bearer token alone (an OPAQUE or recovery session).
@@ -70,12 +70,18 @@ enum Auth<'a> {
 }
 
 /// Sends `method path` with `body`.
-async fn call(server: &Server, method: &str, path: &str, body: Vec<u8>, auth: Auth<'_>) -> Reply {
+pub(crate) async fn call(
+    server: &Server,
+    method: &str,
+    path: &str,
+    body: Vec<u8>,
+    auth: Auth<'_>,
+) -> Reply {
     server.send(request(method, path, body, auth)).await
 }
 
 /// The request `method path` with `body`, authenticated by `auth`.
-fn request(method: &str, path: &str, body: Vec<u8>, auth: Auth<'_>) -> Request<Body> {
+pub(crate) fn request(method: &str, path: &str, body: Vec<u8>, auth: Auth<'_>) -> Request<Body> {
     let mut request = Request::builder()
         .method(method)
         .uri(path)
@@ -106,7 +112,12 @@ fn request(method: &str, path: &str, body: Vec<u8>, auth: Auth<'_>) -> Request<B
 }
 
 /// `POST path` with `value` as JSON.
-async fn post<T: Serialize>(server: &Server, path: &str, value: &T, auth: Auth<'_>) -> Reply {
+pub(crate) async fn post<T: Serialize>(
+    server: &Server,
+    path: &str,
+    value: &T,
+    auth: Auth<'_>,
+) -> Reply {
     call(
         server,
         "POST",
@@ -118,7 +129,12 @@ async fn post<T: Serialize>(server: &Server, path: &str, value: &T, auth: Auth<'
 }
 
 /// `POST path` that must answer `204 No Content`.
-async fn post_empty<T: Serialize>(server: &Server, path: &str, value: &T, auth: Auth<'_>) {
+pub(crate) async fn post_empty<T: Serialize>(
+    server: &Server,
+    path: &str,
+    value: &T,
+    auth: Auth<'_>,
+) {
     let reply = post(server, path, value, auth).await;
     assert_eq!(
         reply.status,
@@ -130,7 +146,7 @@ async fn post_empty<T: Serialize>(server: &Server, path: &str, value: &T, auth: 
 
 /// Signs up a durable device, with a recovery code when `recovery`; returns the Secret Key and
 /// the code, as the Emergency Kit shows them.
-async fn signup(
+pub(crate) async fn signup(
     server: &Server,
     rng: &mut ChaCha20Rng,
     recovery: bool,
@@ -163,7 +179,7 @@ async fn signup(
 }
 
 /// Device authentication (CRYPTO.md §5.10).
-async fn device_session(
+pub(crate) async fn device_session(
     server: &Server,
     state: &DeviceState,
     unlocked: &UnlockedDevice,
@@ -195,7 +211,7 @@ fn reauth_auth<'a>(device: &'a mut Option<(&mut DeviceSession, &UnlockedDevice)>
 }
 
 /// A copy of a bearer token, for a request sent while its owner is borrowed.
-fn copy_token(token: &SessionToken) -> SessionToken {
+pub(crate) fn copy_token(token: &SessionToken) -> SessionToken {
     SessionToken::new(Zeroizing::new(*token.expose_secret()))
 }
 
@@ -233,13 +249,13 @@ async fn login(
 }
 
 /// A device of the test: its state, keys, session, vault and the authors it verifies with.
-struct Client {
+pub(crate) struct Client {
     /// The device state.
-    state: DeviceState,
+    pub(crate) state: DeviceState,
     /// Its unlocked keys.
-    unlocked: UnlockedDevice,
+    pub(crate) unlocked: UnlockedDevice,
     /// Its device session.
-    session: DeviceSession,
+    pub(crate) session: DeviceSession,
     /// The personal vault.
     vault: VaultSync,
     /// The account's authors.
@@ -248,7 +264,7 @@ struct Client {
 
 impl Client {
     /// The client of a fresh signup.
-    async fn signed_up(server: &Server, up: SignedUp) -> Self {
+    pub(crate) async fn signed_up(server: &Server, up: SignedUp) -> Self {
         let state = up.device.unwrap();
         let unlocked = up.unlocked;
         let session = device_session(server, &state, &unlocked).await.unwrap();
@@ -286,7 +302,7 @@ impl Client {
     }
 
     /// The account answer over the device session, verified against the pin (CRYPTO.md §11.3).
-    async fn account_view(&mut self, server: &Server) -> serde_json::Value {
+    pub(crate) async fn account_view(&mut self, server: &Server) -> serde_json::Value {
         let query = account_state_query(&self.state);
         post(
             server,
@@ -330,7 +346,7 @@ impl Client {
 
     /// Fetches, uploads everything queued, then Fetches until complete (ADR 0025 §2 step 1).
     /// Returns the refusals of the upload.
-    async fn sync(&mut self, server: &Server, rng: &mut ChaCha20Rng) -> Vec<ErrorCode> {
+    pub(crate) async fn sync(&mut self, server: &Server, rng: &mut ChaCha20Rng) -> Vec<ErrorCode> {
         self.fetch(server).await;
         let mut rejected = Vec::new();
         while let Some(up) = self.vault.upload_request(rng, &self.unlocked).unwrap() {
@@ -387,7 +403,7 @@ impl Client {
     }
 
     /// Creates an item with `value` in its password field.
-    fn create(&mut self, rng: &mut ChaCha20Rng, value: &str) -> ItemId {
+    pub(crate) fn create(&mut self, rng: &mut ChaCha20Rng, value: &str) -> ItemId {
         let key = FieldKey::parse(FIELD.as_bytes()).unwrap();
         let value = Value::text(value).unwrap();
         self.vault
@@ -423,7 +439,7 @@ impl Client {
     }
 
     /// The password field of `item`, as encoded bytes.
-    fn read(&self, item: ItemId) -> Vec<u8> {
+    pub(crate) fn read(&self, item: ItemId) -> Vec<u8> {
         self.vault
             .field_value(item, FIELD)
             .unwrap()

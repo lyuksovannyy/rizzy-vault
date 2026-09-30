@@ -2,8 +2,9 @@
 //!
 //! **Every response** gets, unless the handler set its own:
 //! - `Strict-Transport-Security: max-age=31536000`. No `includeSubDomains` and no `preload`: a
-//!   self-hoster's other subdomains are not the server's to pin (this crate's reading of "HSTS",
-//!   INV-49). Browsers ignore it over plain HTTP, so a local test is not affected.
+//!   self-hoster's other subdomains are not the server's to pin (ADR 0028 item 10). It is sent
+//!   because the public origin must be HTTPS (`RIZZY_ORIGIN` is refused otherwise, unless it is
+//!   local); on the plaintext hop from the proxy it is only bytes the proxy forwards.
 //! - `X-Content-Type-Options: nosniff` (INV-49).
 //! - `Referrer-Policy: no-referrer` (§7.7 "I").
 //! - `X-Frame-Options: DENY`, for browsers that predate `frame-ancestors`.

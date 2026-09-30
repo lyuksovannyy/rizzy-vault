@@ -1287,6 +1287,7 @@ version = "0.0.0"
 dependencies = [
  "rand_core 0.10.1",
  "rizzy-core",
+ "rizzy-import",
  "rizzy-proto",
  "rizzy-sync",
  "subtle",

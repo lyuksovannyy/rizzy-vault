@@ -166,7 +166,8 @@ const FILES: [VectorFile; 6] = [
             ("statement", "snapshot", 1),
             ("statement", "key-grant", 2),
             ("statement", "device-auth", 1),
-            ("statement", "device-request", 1),
+            // One ordinary request and the seven request-targets of ADR 0028 item 5.
+            ("statement", "device-request", 8),
         ],
     },
     VectorFile {

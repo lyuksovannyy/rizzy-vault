@@ -1033,3 +1033,500 @@ fn caps() {
         ImportError::TooDeep
     );
 }
+
+// ---- rizzy-vault's own plaintext JSON export (ADR 0027 §3, §6) ----
+
+/// A plaintext export document holding `items` (JSON text of the array's elements).
+fn rizzy_doc(items: &str) -> String {
+    format!(
+        "{{\"format\":\"rizzy-vault-plaintext-export\",\"version\":1,\
+         \"exported_at\":1790000000000,\"items\":[{items}]}}"
+    )
+}
+
+/// The writes of a carried item as key → encoded value, with the invariants every item of our
+/// own export keeps: canonical order, the carried create check, the snapshot budget.
+fn carried(item: &ImportedItem) -> BTreeMap<String, Vec<u8>> {
+    assert_eq!(item.source(), WriteSource::Carried);
+    let writes = item.writes();
+    for pair in writes.windows(2) {
+        assert!(pair[0].key().as_bytes() < pair[1].key().as_bytes());
+    }
+    check_create(
+        item.item_type(),
+        WriteMode::Import,
+        writes.iter().map(|w| {
+            (
+                WriteSource::Carried,
+                w.key().as_bytes(),
+                w.value().expose_secret(),
+            )
+        }),
+    )
+    .unwrap();
+    assert!(writes.len() < crate::limits::MAX_REGISTERS);
+    writes
+        .iter()
+        .map(|w| {
+            (
+                w.key().as_str().to_owned(),
+                w.value().expose_secret().to_vec(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn rizzy_json_reads_every_value_type() {
+    let history: String = (0..52)
+        .map(|i| format!("{{\"value\":{{\"text\":\"old {i}\"}},\"ms\":{}}}", 1000 + i))
+        .chain(["{\"value\":{\"bytes\":\"AAEC\"},\"ms\":5}".to_owned()])
+        .collect::<Vec<_>>()
+        .join(",");
+    let doc = rizzy_doc(&format!(
+        r#"{{"id":"000102030405060708090a0b0c0d0e0f","type":1,"trashed":true,
+            "created_ms":1700000000000,"modified_ms":1700000000001,
+            "fields":[
+              {{"key":"item.name","value":{{"text":"Bank \"é\"\n"}}}},
+              {{"key":"item.type","value":{{"enum":3}}}},
+              {{"key":"import.created_ms","value":{{"u64":"5"}}}},
+              {{"key":"item.favorite","value":{{"bool":true}}}},
+              {{"key":"login.password","value":{{"text":"hunter2"}},
+                "conflicts":[{{"text":"other"}}],"history":[{history}]}},
+              {{"key":"login.username","value":{{"text":""}},"history":[{{"x":1}},{{"y":2}}]}},
+              {{"key":"uri/00112233445566778899aabbccddeeff/value","value":{{"text":"https://e.example"}}}},
+              {{"key":"uri/00112233445566778899aabbccddeeff/order","value":{{"sort_key":"gA"}}}},
+              {{"key":"newer.key","value":{{"raw":"fwEC"}}}},
+              {{"key":"newer.bytes","value":{{"bytes":"AAEC"}}}},
+              {{"key":"newer.u64","value":{{"u64":"18446744073709551615"}}}},
+              {{"key":"newer.enum","value":{{"enum":65535}}}}
+            ]}}"#
+    ));
+    let import = run(Format::RizzyPlaintextJson, doc.as_bytes()).unwrap();
+    assert_eq!(import.items.len(), 1);
+    let item = &import.items[0];
+    assert!(item.trashed());
+    assert_eq!(item.item_type(), ItemType::LOGIN);
+    let w = carried(item);
+    // `type` decides the item type; `created_ms` decides `import.created_ms`.
+    assert_eq!(v(&w["item.type"]), V::E(1));
+    assert_eq!(v(&w["import.created_ms"]), V::U(1_700_000_000_000));
+    assert_eq!(v(&w["item.name"]), t("Bank \"é\"\n"));
+    assert_eq!(v(&w["item.favorite"]), V::B(true));
+    assert_eq!(v(&w["login.password"]), t("hunter2"));
+    // An empty Text is a non-empty value (one byte) and is carried verbatim.
+    assert_eq!(w["login.username"], vec![0x01]);
+    assert_eq!(
+        v(&w["uri/00112233445566778899aabbccddeeff/value"]),
+        t("https://e.example")
+    );
+    assert_eq!(
+        w["uri/00112233445566778899aabbccddeeff/order"],
+        vec![0x06, 0x80]
+    );
+    // Unknown keys and an unsupported value, byte for byte.
+    assert_eq!(w["newer.key"], vec![0x7f, 0x01, 0x02]);
+    assert_eq!(w["newer.bytes"], vec![0x02, 0x00, 0x01, 0x02]);
+    assert_eq!(v(&w["newer.u64"]), V::U(u64::MAX));
+    assert_eq!(v(&w["newer.enum"]), V::E(65535));
+    // Fifty history entries, in file order, under fresh element ids.
+    let mut history: Vec<(String, u64)> = Vec::new();
+    for (key, value) in &w {
+        if let Some(id) = key
+            .strip_prefix("pwhist/")
+            .and_then(|k| k.strip_suffix("/value"))
+        {
+            let V::T(text) = v(value) else { panic!() };
+            let V::U(ms) = v(&w[&format!("pwhist/{id}/ms")]) else {
+                panic!()
+            };
+            history.push((text, ms));
+        }
+    }
+    history.sort_by_key(|(_, ms)| *ms);
+    assert_eq!(history.len(), 50);
+    assert_eq!(history[0], ("old 0".to_owned(), 1000));
+    assert_eq!(history[49], ("old 49".to_owned(), 1049));
+    assert_eq!(w.len(), 12 + 100);
+    // The report: numbers and positions only.
+    assert_eq!(
+        import.counts,
+        crate::Counts {
+            skipped_items: 0,
+            ignored_members: 0,
+            collapsed_conflicts: 1,
+            // Two past the fiftieth, one that is not a text, two of another field.
+            dropped_history: 5,
+            dropped_fields: 0,
+        }
+    );
+    assert_eq!(
+        warns(&import),
+        vec![
+            (Some(0), WarningKind::ConflictsCollapsed),
+            (Some(0), WarningKind::HistoryDropped),
+        ]
+    );
+    let shown = format!("{import:?}");
+    for secret in ["hunter2", "Bank", "old 1", "newer"] {
+        assert!(!shown.contains(secret), "{secret} in Debug output");
+    }
+}
+
+#[test]
+fn rizzy_json_whole_file_refusals() {
+    let ok = rizzy_doc("");
+    assert!(
+        run(Format::RizzyPlaintextJson, ok.as_bytes())
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    // `exported_at` is optional; a BOM-less minimal document reads.
+    let minimal = r#"{"items":[],"version":1,"format":"rizzy-vault-plaintext-export"}"#;
+    assert!(run(Format::RizzyPlaintextJson, minimal.as_bytes()).is_ok());
+    let cases: [(String, ImportError); 12] = [
+        (String::new(), ImportError::Malformed),
+        ("[]".to_owned(), ImportError::UnexpectedShape),
+        (
+            ok.replace("rizzy-vault-plaintext-export", "rizzy-vault-export"),
+            ImportError::UnexpectedShape,
+        ),
+        (
+            ok.replace("\"format\":\"rizzy-vault-plaintext-export\",", ""),
+            ImportError::UnexpectedShape,
+        ),
+        (
+            ok.replace("\"version\":1", "\"version\":2"),
+            ImportError::UpdateRequired,
+        ),
+        (
+            ok.replace("\"version\":1", "\"version\":\"1\""),
+            ImportError::UpdateRequired,
+        ),
+        (
+            ok.replace("\"version\":1", "\"version\":1.0"),
+            ImportError::UpdateRequired,
+        ),
+        (
+            ok.replace("\"version\":1,", ""),
+            ImportError::UnexpectedShape,
+        ),
+        (
+            ok.replace("\"items\":[]", "\"items\":{}"),
+            ImportError::UnexpectedShape,
+        ),
+        (
+            ok.replace(",\"items\":[]", ""),
+            ImportError::UnexpectedShape,
+        ),
+        (
+            rizzy_doc(&vec!["{}"; crate::limits::MAX_ENTRIES + 1].join(",")),
+            ImportError::TooMany,
+        ),
+        (
+            rizzy_doc(&format!("{}{}", "[".repeat(70), "]".repeat(70))),
+            ImportError::TooDeep,
+        ),
+    ];
+    for (doc, error) in cases {
+        assert_eq!(
+            run(Format::RizzyPlaintextJson, doc.as_bytes()).unwrap_err(),
+            error,
+            "{}",
+            &doc[..doc.len().min(90)]
+        );
+    }
+    assert_eq!(
+        run(
+            Format::RizzyPlaintextJson,
+            &vec![b' '; crate::limits::MAX_JSON_LEN + 1]
+        )
+        .unwrap_err(),
+        ImportError::TooLarge
+    );
+    assert_eq!(
+        run(Format::RizzyPlaintextJson, b"{\"format\":\"\xff\"}").unwrap_err(),
+        ImportError::Encoding
+    );
+    // At the entry cap the file reads, and every (empty) entry is skipped, not the file.
+    let full = rizzy_doc(&vec!["{}"; crate::limits::MAX_ENTRIES].join(","));
+    let import = run(Format::RizzyPlaintextJson, full.as_bytes()).unwrap();
+    assert!(import.items.is_empty());
+    assert_eq!(import.counts.skipped_items, crate::limits::MAX_ENTRIES);
+    assert_eq!(import.warnings.len(), crate::limits::MAX_WARNINGS + 1);
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one vector per per-item rule of ADR 0027 §6, each skipping exactly its item"
+)]
+fn rizzy_json_per_item_failures_skip_the_item_only() {
+    let good = r#"{"type":2,"fields":[{"key":"item.name","value":{"text":"kept"}}]}"#;
+    let big_text = "x".repeat(65_536);
+    let big_raw = "A".repeat(87_383); // 65,537 bytes
+    let bad: Vec<(String, WarningKind)> = [
+        ("\"not an object\"", WarningKind::MalformedEntry),
+        (r#"{"fields":[]}"#, WarningKind::MalformedEntry),
+        (r#"{"type":"1","fields":[]}"#, WarningKind::MalformedEntry),
+        (r#"{"type":65536,"fields":[]}"#, WarningKind::MalformedEntry),
+        (r#"{"type":1.5,"fields":[]}"#, WarningKind::MalformedEntry),
+        (r#"{"type":1}"#, WarningKind::MalformedEntry),
+        (r#"{"type":1,"fields":{}}"#, WarningKind::MalformedEntry),
+        (
+            r#"{"type":1,"trashed":"no","fields":[]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"created_ms":-1,"fields":[]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"created_ms":18446744073709551616,"fields":[]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        // Types the schema refuses, and the vault-settings type.
+        (r#"{"type":0,"fields":[]}"#, WarningKind::UnsupportedItemType),
+        (r#"{"type":5,"fields":[]}"#, WarningKind::UnsupportedItemType),
+        (r#"{"type":999,"fields":[]}"#, WarningKind::UnsupportedItemType),
+        (
+            r#"{"type":61441,"fields":[{"key":"vault.name","value":{"text":"v"}}]}"#,
+            WarningKind::UnsupportedItemType,
+        ),
+        // Fields.
+        (r#"{"type":1,"fields":[1]}"#, WarningKind::MalformedEntry),
+        (
+            r#"{"type":1,"fields":[{"value":{"text":"a"}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"item.name"}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"Item.Name","value":{"text":"a"}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"@lifecycle","value":{"raw":"AQ"}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"item.name","value":{"text":"a"}},{"key":"item.name","value":{"text":"b"}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"item.type","value":{"enum":1}},{"key":"item.type","value":{"enum":1}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        // Values.
+        (
+            r#"{"type":1,"fields":[{"key":"item.name","value":"a"}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"item.name","value":{}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"item.name","value":{"text":"a","raw":"AQ"}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"item.name","value":{"text":1}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"a.b","value":{"bytes":"A"}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"a.b","value":{"bytes":"AA=="}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"a.b","value":{"bool":"true"}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"a.b","value":{"u64":5}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"a.b","value":{"u64":"05"}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"a.b","value":{"u64":""}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"a.b","value":{"u64":"18446744073709551616"}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"a.b","value":{"enum":65536}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"a.b","value":{"sort_key":""}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"a.b","value":{"sort_key":"gAA"}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"a.b","value":{"raw":""}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        // History of the wrong shape.
+        (
+            r#"{"type":1,"fields":[{"key":"login.password","value":{"text":"a"},"history":{}}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"login.password","value":{"text":"a"},"history":[{"value":{"text":"b"}}]}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+        (
+            r#"{"type":1,"fields":[{"key":"login.password","value":{"text":"a"},"history":[{"ms":1}]}]}"#,
+            WarningKind::MalformedEntry,
+        ),
+    ]
+    .into_iter()
+    .map(|(doc, kind)| (doc.to_owned(), kind))
+    .chain([
+        (
+            format!(
+                r#"{{"type":1,"fields":[{{"key":"item.name","value":{{"text":"{big_text}"}}}}]}}"#
+            ),
+            WarningKind::OversizeEntry,
+        ),
+        (
+            format!(r#"{{"type":1,"fields":[{{"key":"a.b","value":{{"raw":"{big_raw}"}}}}]}}"#),
+            WarningKind::OversizeEntry,
+        ),
+        (
+            format!(r#"{{"type":1,"fields":[{{"key":"a.b","value":{{"bytes":"{big_raw}"}}}}]}}"#),
+            WarningKind::OversizeEntry,
+        ),
+    ])
+    .collect();
+    for (item, kind) in bad {
+        let doc = rizzy_doc(&format!("{good},{item},{good}"));
+        let import = run(Format::RizzyPlaintextJson, doc.as_bytes()).unwrap();
+        let shown = &item[..item.len().min(100)];
+        assert_eq!(import.items.len(), 2, "{shown}");
+        assert_eq!(import.items[0].entry(), 0);
+        assert_eq!(import.items[1].entry(), 2);
+        assert_eq!(warns(&import), vec![(Some(1), kind)], "{shown}");
+        assert_eq!(import.counts.skipped_items, 1);
+        assert_eq!(v(&carried(&import.items[1])["item.name"]), t("kept"));
+    }
+    // The largest values still read: 65,535 bytes of text, 65,536 bytes of raw.
+    let text = "x".repeat(65_535);
+    let raw = "A".repeat(87_382); // 65,536 bytes; the last sextet's spare bits are zero
+    let doc = rizzy_doc(&format!(
+        r#"{{"type":2,"fields":[{{"key":"item.notes","value":{{"text":"{text}"}}}},{{"key":"a.b","value":{{"raw":"{raw}"}}}}]}}"#
+    ));
+    let import = run(Format::RizzyPlaintextJson, doc.as_bytes()).unwrap();
+    assert_eq!(warns(&import), vec![]);
+    let w = carried(&import.items[0]);
+    assert_eq!(w["item.notes"].len(), 65_536);
+    assert_eq!(w["a.b"].len(), 65_536);
+}
+
+#[test]
+fn rizzy_json_unknown_members_and_unwritable_fields() {
+    let doc = r#"{"format":"rizzy-vault-plaintext-export","version":1,"later":[1,2],"version":9,
+      "items":[
+        {"type":1,"extra":null,"type":3,"fields":[
+          {"key":"item.name","value":{"text":"a","note":1},"hint":"x"},
+          {"key":"uri/00112233445566778899aabbccddeeff/match","value":{"enum":2}},
+          {"key":"share/00112233445566778899aabbccddeeff/secret","value":{"bytes":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}},
+          {"key":"card.number","value":{"text":"4111"}},
+          {"key":"login.password","value":{"text":"p"},
+           "history":[{"value":{"text":"o"},"ms":1,"device":"x"}]}
+        ]},
+        {"type":2,"fields":[],"trashed":false},
+        {"type":1,"fields":[{"key":"import.created_ms","value":{"u64":"77"}}]}
+      ]}"#;
+    let import = run(Format::RizzyPlaintextJson, doc.as_bytes()).unwrap();
+    assert_eq!(import.items.len(), 3);
+    let w = carried(&import.items[0]);
+    // The first `type` counts (the JSON reader's rule); the unwritable fields are left out.
+    assert_eq!(import.items[0].item_type(), ItemType::LOGIN);
+    assert_eq!(
+        w.keys()
+            .filter(|k| !k.starts_with("pwhist/"))
+            .collect::<Vec<_>>(),
+        ["item.name", "item.type", "login.password"]
+    );
+    assert_eq!(w.len(), 5);
+    // An item with no field is an item: only its type is written.
+    assert_eq!(
+        carried(&import.items[1]).keys().collect::<Vec<_>>(),
+        ["item.type"]
+    );
+    assert!(!import.items[1].trashed());
+    // Without `created_ms`, an `import.created_ms` field is carried.
+    assert_eq!(v(&carried(&import.items[2])["import.created_ms"]), V::U(77));
+    assert_eq!(
+        import.counts,
+        crate::Counts {
+            skipped_items: 0,
+            // Root: `later`, the second `version`. Item 0: `extra`, the second `type`, `note`,
+            // `hint`, `device`.
+            ignored_members: 7,
+            collapsed_conflicts: 0,
+            dropped_history: 0,
+            dropped_fields: 3,
+        }
+    );
+    assert_eq!(
+        warns(&import),
+        vec![
+            (None, WarningKind::UnknownMembersIgnored),
+            (Some(0), WarningKind::UnknownMembersIgnored),
+            (Some(0), WarningKind::FieldSkipped),
+        ]
+    );
+}
+
+#[test]
+fn rizzy_json_item_size_limits() {
+    let field = |i: usize| format!("{{\"key\":\"k.f{i}\",\"value\":{{\"bool\":true}}}}");
+    let item = |n: usize| {
+        format!(
+            "{{\"type\":2,\"fields\":[{}]}}",
+            (0..n).map(field).collect::<Vec<_>>().join(",")
+        )
+    };
+    // 4,094 fields and `item.type` are 4,095 writes: with `@lifecycle`, the register cap.
+    let doc = rizzy_doc(&format!("{},{},{}", item(4094), item(4095), item(4097)));
+    let import = run(Format::RizzyPlaintextJson, doc.as_bytes()).unwrap();
+    assert_eq!(import.items.len(), 1);
+    assert_eq!(import.items[0].writes().len(), 4095);
+    carried(&import.items[0]);
+    assert_eq!(
+        warns(&import),
+        vec![
+            (Some(1), WarningKind::OversizeEntry),
+            (Some(2), WarningKind::OversizeEntry),
+        ]
+    );
+    // More value bytes than one item's snapshot holds: 200 values of 64 KiB are 12.5 MiB.
+    let text = "y".repeat(65_535);
+    let fat = format!(
+        "{{\"type\":2,\"fields\":[{}]}}",
+        (0..200)
+            .map(|i| format!("{{\"key\":\"k.f{i}\",\"value\":{{\"text\":\"{text}\"}}}}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let import = run(Format::RizzyPlaintextJson, rizzy_doc(&fat).as_bytes()).unwrap();
+    assert!(import.items.is_empty());
+    assert_eq!(warns(&import), vec![(Some(0), WarningKind::OversizeEntry)]);
+}

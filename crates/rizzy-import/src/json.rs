@@ -1,5 +1,5 @@
 //! A bounded JSON reader (RFC 8259) into a tree of zeroizing strings, for the Bitwarden JSON
-//! export and 1PUX's `export.data`.
+//! export, 1PUX's `export.data` and rizzy-vault's own plaintext JSON export.
 //!
 //! **Why not `serde_json`.** Its strings and maps are plain `String`s, so every password of the
 //! export would stay in freed memory. Here every string, number and member name is copied

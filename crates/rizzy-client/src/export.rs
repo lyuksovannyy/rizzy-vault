@@ -1,5 +1,22 @@
-//! The encrypted export file: writer and reader (CRYPTO.md §11.14; ROADMAP §4.2 "Export:
-//! encrypted JSON (own format)"; threat model A16).
+//! Export: the encrypted export file, its payload, and the plaintext exports (CRYPTO.md
+//! §11.14; [ADR 0027]; ROADMAP §4.2 "Export: encrypted JSON (own format) + plaintext JSON/CSV
+//! with scary warning"; threat model A16).
+//!
+//! | Part | Spec | Where |
+//! |---|---|---|
+//! | The encrypted file: the JSON document, its strict bounded reader | CRYPTO.md §11.14 | this module |
+//! | The payload inside `data`: encoding, reader, import as new items | ADR 0027 §1–§2 | [`payload`] |
+//! | Plaintext JSON and CSV, the warning and the typed acknowledgement | ADR 0027 §3–§5 | [`plaintext`] |
+//!
+//! **An export is not a backup** (ADR 0027 Context): it is a user-level portability file, the
+//! items of a vault as one client sees them. It holds no account, device, key, grant or op
+//! log, so it restores no account and no server.
+//!
+//! **Where the file goes is the host's** (ADR 0027 §5 "Output file"): this crate does no I/O
+//! and returns bytes. `rv` writes them to a path the user names with `create_new`, mode 0600,
+//! no `--force`, and refuses stdout when it is a terminal; none of that is decided here.
+//!
+//! # The encrypted file
 //!
 //! `rizzy-core`'s `export` module holds the cryptography: the file key from the export
 //! password (Argon2id, then HKDF with `export_id`), the `EXPORT_FILE` envelope, the header
@@ -30,12 +47,21 @@
 //! length before decoding it (§11.14 "Field sizes"), and only then runs Argon2id. The fuzz
 //! target `client_export` runs the parser and the header checks on arbitrary bytes.
 //!
-//! # The payload is opaque
+//! # The payload
 //!
-//! §11.14 fixes the file, the key and the envelope, but no Accepted ADR defines the plaintext
-//! inside `data` (ADR 0001 point 5 makes an export file's contents a persistent format). This
-//! module therefore takes and returns the payload as bytes and freezes no item encoding: the
-//! payload layout is a reported gap.
+//! [`write_export`] and [`read_export`] take and return the payload as bytes. Its layout is
+//! ADR 0027 §1's, written by [`payload::encode_payload`] and read by
+//! [`payload::parse_payload`]; [`VaultSync::export_encrypted`](crate::sync::VaultSync::export_encrypted)
+//! and [`VaultSync::import_encrypted`](crate::sync::VaultSync::import_encrypted) put the two
+//! halves together. A vault's payload is built and sealed inside `export_encrypted`: no
+//! public call returns it in plaintext (ADR 0027 §5). The file's `version` stays 1; the payload carries its own version inside
+//! the envelope, because the file's `version` is not in the `EXPORT_FILE` context.
+//!
+//! [ADR 0027]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0027-export-payload.md
+
+pub mod payload;
+pub mod plaintext;
+mod state;
 
 use rizzy_core::export::{ExportFileKey, ExportHeader, FORMAT, MAX_DATA_FIELD_LEN, VERSION};
 use rizzy_core::kdf::KdfId;

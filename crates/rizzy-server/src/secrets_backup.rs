@@ -4,7 +4,8 @@
 //! CRYPTO.md §5.11 places the file's `format` string and its JSON writer and reader here, and
 //! gives it "the shape of §11.14: JSON, the header fields in clear, the envelope in `data`".
 //! `rizzy-core` defines the header fields, the context and the key
-//! ([`ServerSecretsBackupKey`]). So the file mirrors the export file's layout field for field:
+//! ([`ServerSecretsBackupKey`]). ADR 0028 item 13 owns the JSON layout, which mirrors the
+//! export file's field for field:
 //!
 //! ```json
 //! {"format":"rizzy-vault-secrets-backup","version":1,"kdf_id":1,

@@ -46,7 +46,7 @@ fn recovery_wait_cancel_release_and_commit() {
             .svc
             .recovery_complete(&mut env.rng, "ivy", &token, &source, env.now)
             .await;
-        assert!(matches!(early, Err(AuthError::RecoveryWaiting)));
+        assert!(matches!(early, Err(AuthError::RecoveryWaiting { .. })));
 
         // An enrolled device cancels it; completing then fails even after the wait.
         let device = &client.devices[0];
@@ -70,7 +70,7 @@ fn recovery_wait_cancel_release_and_commit() {
             env.svc
                 .recovery_complete(&mut env.rng, "ivy", &token, &source, env.now)
                 .await,
-            Err(AuthError::RecoveryWaiting)
+            Err(AuthError::RecoveryWaiting { .. })
         ));
         env.tick(1);
         let release = env

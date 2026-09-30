@@ -19,11 +19,11 @@ fuzz_target!(|data: &[u8]| {
     let Ok(settings) = parse_file(&text) else {
         return;
     };
-    assert!(settings.keys().all(|k| KEYS.contains(k)));
+    assert!(settings.names().all(|k| KEYS.contains(&k)));
     let no_env = |_: &str| None;
     let url = settings
         .get(rizzy_server::config::DATABASE_URL)
-        .cloned()
+        .map(|url| String::clone(url))
         .unwrap_or_default();
     match Config::from_sources(&Sources {
         file: settings,
@@ -33,12 +33,12 @@ fuzz_target!(|data: &[u8]| {
         Ok(config) => {
             let _ = config.check_serve();
             if url.len() > 12 {
-                assert!(!format!("{config:?}").contains(&url));
+                assert!(!format!("{config:?}").contains(url.as_str()));
             }
         }
         Err(e) => {
             if url.len() > 12 {
-                assert!(!e.to_string().contains(&url));
+                assert!(!e.to_string().contains(url.as_str()));
             }
         }
     }

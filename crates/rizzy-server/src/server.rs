@@ -259,8 +259,9 @@ async fn shutdown_signal() {
 }
 
 /// The connection limits of the listener (threat model §7.6 "D": slow clients and floods).
-/// [`ServeLimits::default`] holds the values `rizzy-vault` runs with; this crate's choices,
-/// reported to the owner.
+/// [`ServeLimits::default`] holds the values `rizzy-vault` runs with, which ADR 0028 item 9
+/// fixes: HTTP/1.1 in clear (TLS is the reverse proxy's), a 10 s header-read and keep-alive idle
+/// timeout, at most 1024 connections, a 30 s shutdown grace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ServeLimits {
     /// How long a client has to send a request's whole header block, and how long an idle

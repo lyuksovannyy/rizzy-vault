@@ -104,14 +104,14 @@ Settings are `RIZZY_*` names. Each comes from the environment, or from a configu
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `RIZZY_ORIGIN` | – (required by `api` and `worker`) | The canonical origin clients use, for example `https://vault.example.com` or `https://vault.example.com:8443`. It is bound into OPAQUE and every device signature: **changing it later locks every account out**. |
+| `RIZZY_ORIGIN` | – (required by `api` and `worker`) | The canonical origin clients use, for example `https://vault.example.com` or `https://vault.example.com:8443`. It is bound into OPAQUE and every device signature: **changing it later locks every account out**. It must be an `https://` origin: the server refuses to start with an `http://` one, unless the host is `localhost` or a loopback address (`127.0.0.1`, `[::1]`), which is for local testing only. |
 | `RIZZY_ROLES` | `api,web,worker` | Comma-separated roles. `notify`, `icons` and `smtp` are refused in this build. |
 | `RIZZY_LISTEN` | `127.0.0.1:8080` (the image sets `0.0.0.0:8080`) | The HTTP listener of `api` and `web`. Plain HTTP: always behind the TLS proxy. |
 | `RIZZY_DATA_DIR` | `/data` | The data volume: `rizzy-vault.sqlite3`, its WAL, its lock file, and the pre-migration copy. |
-| `RIZZY_DATABASE_URL` | – (SQLite in the data directory) | A `postgres://` URL. Not supported before M3 (see `compose.yaml`). It may carry the password; it is never logged or printed. |
+| `RIZZY_DATABASE_URL` | – (SQLite in the data directory) | A `postgres://` URL. Not supported before M3 (see `compose.yaml`). It may carry the password; it is never logged or printed. It is the one setting that can hold a secret: a configuration file that holds it must be readable by the server's user only (the server does not check the file's mode). |
 | `RIZZY_SECRETS_FILE` | `/run/rizzy-secrets/secrets.json` | The secrets file. Must resolve outside the data directory, or the server refuses to start. |
 | `RIZZY_SIGNUP` | `closed` | `closed` or `open` ([§3](#3-first-run)). |
-| `RIZZY_TRUSTED_PROXIES` | empty | Comma-separated IP addresses of the reverse proxies whose `X-Forwarded-For` is believed. `compose.yaml` sets the proxy's fixed address. Rate limits count per client address, so without it every client shares the proxy's budget. Never list an address a client can connect from. |
+| `RIZZY_TRUSTED_PROXIES` | empty | Comma-separated IP addresses of the reverse proxies whose `X-Forwarded-For` is believed: single IPv4 or IPv6 addresses, as the listener sees them, with no CIDR prefix, port, brackets or host name (a proxy pool lists every address); a value that does not parse refuses the start. `compose.yaml` sets the proxy's fixed address. Rate limits count per client address (per /64 for IPv6), so without it every client shares the proxy's budget. List only infrastructure you control, never an address a client can connect from: a listed address can name any source. A listed proxy must set `X-Forwarded-For` on every request, or the API answers `400` ([§6](#6-tls-the-reverse-proxy-and-ports)). |
 | `RIZZY_LOG_LEVEL` | `info` | `error`, `warn`, `info` or `debug`. |
 | `RIZZY_WORKER_INTERVAL_SECS` | `60` | Seconds between two worker runs, 1 to 86400. |
 | `RIZZY_MAX_UPLOAD_BYTES` | `33554432` (32 MiB) | Body limit of vault uploads, restore healing and the account commit that carries a key rotation, 32 MiB to 256 MiB. The proxy must allow at least this much (Caddy has no limit by default). |
@@ -187,14 +187,21 @@ TLS ends at the reverse proxy, a second container ([ADR 0010](adr/0010-server-sh
 
 Whichever you choose, `RIZZY_ORIGIN` must be exactly the origin users type, and it must not change afterwards.
 
-**Another proxy** (nginx, Traefik, HAProxy) works if it:
-- terminates TLS and forwards plain HTTP/1.1 to port 8080 on a network the clients cannot reach directly;
-- **replaces** (does not append to) a client-sent `X-Forwarded-For`, or appends the client address as the last entry; the server reads the header from the right, skipping trusted proxies;
+**Another proxy** (nginx, Traefik, HAProxy) works if it ([ADR 0028](adr/0028-api-v1-http-conventions.md) items 5, 9 and 11):
+- terminates TLS and forwards plain HTTP/1.1 to port 8080 on a network the clients cannot reach directly. The listener is plaintext only because that hop is trusted (loopback, or a private network you control); never publish it directly;
+- serves rizzy-vault at the **root of the origin** and forwards the path and query **byte for byte**. Native clients sign the exact request-target they send, so a proxy that strips or adds a path prefix, or that rewrites, normalises or re-encodes the target (merging `//`, resolving `.` and `..`, changing the case of a percent-encoding) makes every signed request fail with `401`. The proxy may rewrite `Host`: it is not signed, the origin is;
+- **sets `X-Forwarded-For` on every request**: it replaces (does not append to) a client-sent value, or appends the client address as the last entry. The server reads the header from the right, skipping trusted proxies, and only its last 16 field lines and 1024 bytes. Each entry is a bare IPv4 or IPv6 address: no port, no brackets, no `unknown`;
 - has its own address in `RIZZY_TRUSTED_PROXIES`, and no other;
 - accepts request bodies up to `RIZZY_MAX_UPLOAD_BYTES`;
 - does not compress responses, and does not log request bodies or the `Authorization` header.
 
-The server sets HSTS, CSP and the other security headers itself ([INV-49](THREAT_MODEL.md#8-security-invariants)). It logs no IP address; if your proxy keeps access logs, they do, and you decide their retention.
+**A listed proxy that sends no usable `X-Forwarded-For` breaks the API.** When the connection comes from an address in `RIZZY_TRUSTED_PROXIES` and the header is missing, malformed, or names only trusted proxies, every `/api/v1` request is answered `400 invalid_request`. The server never falls back to the proxy's own address, because every user behind it would then share one rate-limit budget. If all clients get `400` after you set `RIZZY_TRUSTED_PROXIES`, check that the proxy sets the header (the shipped `Caddyfile` does). `GET /api/meta` and the web page are served regardless, so a health check from the proxy host still works.
+
+**Rate limits.** A client that is rate-limited gets `429` with a `Retry-After` header in whole seconds; clients wait that long before they try again. Do not strip the header at the proxy.
+
+**Memory.** Request bodies are bounded per `api` process: at most 8 requests with the upload limit are read at once, plus 1 MiB for each other connection (1024 connections at most), about 1.25 GiB of bodies at the default `RIZZY_MAX_UPLOAD_BYTES` and 3 GiB at the 256 MiB maximum, and more while they are parsed. Several `api` processes have no shared cap: size each for it, and limit connections at the proxy.
+
+The server sets HSTS, CSP and the other security headers itself ([INV-49](THREAT_MODEL.md#8-security-invariants)), sends no CORS header and does not compress. It logs no IP address; if your proxy keeps access logs, they do, and you decide their retention.
 
 **Health check:** `GET https://<domain>/api/meta` answers 200. The image has no shell or HTTP client, so there is no in-container `HEALTHCHECK`.
 
@@ -396,14 +403,14 @@ The server writes one JSON object per line to stderr: `ts_ms`, `level`, `event`,
 
 ## 12. Checklist
 
-- [ ] `RIZZY_ORIGIN` is the exact origin users type, and will not change.
+- [ ] `RIZZY_ORIGIN` is the exact `https://` origin users type, and will not change.
 - [ ] The secrets volume is mounted read-only into the server and is not inside the data volume.
 - [ ] A `backup-secrets` file **and** an encrypted copy of `secrets.json` exist, stored apart from the database backups; the passphrase is stored safely.
 - [ ] Database backups (`rizzy-vault backup`) run on a schedule, are encrypted, and are pruned; their SHA-256 is recorded.
 - [ ] No backup holds both volumes (whole-host snapshots included).
 - [ ] The database is on a local disk, not NFS or SMB.
 - [ ] `RIZZY_SIGNUP` is `closed` outside the first-accounts window.
-- [ ] `RIZZY_TRUSTED_PROXIES` lists exactly the proxy.
+- [ ] `RIZZY_TRUSTED_PROXIES` lists exactly the proxy, and the proxy sets `X-Forwarded-For` on every request and forwards the path and query unchanged.
 - [ ] The manual drill of [§10](#10-the-restore-drill) passed this month.
 - [ ] Base images are pinned by digest if you build your own image.
 - [ ] The host's crash collector (if `core_pattern` pipes to one) stores no dumps of the rizzy-vault container ([§1](#1-what-you-run)).

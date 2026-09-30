@@ -81,16 +81,16 @@ struct Counters {
     blocked_until_ms: u64,
 }
 
-/// The pure step of one attempt: `None` when the bucket refuses it at `now_ms`, otherwise the
-/// counters after counting it.
-fn step(rule: &RateRule, current: Option<Counters>, now_ms: u64) -> Option<Counters> {
+/// The pure step of one attempt: the counters after counting it, or, when the bucket refuses
+/// it at `now_ms`, how many milliseconds of its backoff remain (at least 1).
+fn step(rule: &RateRule, current: Option<Counters>, now_ms: u64) -> Result<Counters, u64> {
     let mut c = current.unwrap_or(Counters {
         attempts: 0,
         window_started_at_ms: now_ms,
         blocked_until_ms: 0,
     });
     if now_ms < c.blocked_until_ms {
-        return None;
+        return Err(c.blocked_until_ms - now_ms);
     }
     // The counters restart only after a whole quiet window: `window_ms` since the window began
     // and since the last backoff ended. A client that keeps trying while blocked never resets
@@ -112,13 +112,14 @@ fn step(rule: &RateRule, current: Option<Counters>, now_ms: u64) -> Option<Count
             .min(rule.backoff_max_ms);
         c.blocked_until_ms = now_ms.saturating_add(delay);
     }
-    Some(c)
+    Ok(c)
 }
 
 /// Counts one attempt against `key` under `rule`, in the caller's write transaction.
 ///
 /// # Errors
-/// [`AuthError::RateLimited`] when the bucket is blocked; storage errors.
+/// [`AuthError::RateLimited`] when the bucket is blocked, with the rest of its backoff (what
+/// the server sends as `Retry-After`, ADR 0028 item 3); storage errors.
 pub(crate) async fn hit(
     mut conn: Conn<'_>,
     key: &[u8],
@@ -136,7 +137,9 @@ pub(crate) async fn hit(
             })
         })
         .transpose()?;
-    let next = step(rule, current, now_ms).ok_or(AuthError::RateLimited)?;
+    let next = step(rule, current, now_ms).map_err(|remaining_ms| AuthError::RateLimited {
+        retry_after_ms: Some(remaining_ms),
+    })?;
     let expires = next
         .window_started_at_ms
         .max(next.blocked_until_ms)
@@ -182,9 +185,9 @@ pub(crate) async fn hit_all(
         lock_account(&mut tx, &lock_key(key)).await?;
         match hit(tx.conn(), key, rule, now_ms).await {
             Ok(()) => {}
-            Err(AuthError::RateLimited) => {
+            Err(refused @ AuthError::RateLimited { .. }) => {
                 tx.commit().await?;
-                return Err(AuthError::RateLimited);
+                return Err(refused);
             }
             Err(e) => return Err(e),
         }
@@ -218,14 +221,18 @@ mod tests {
         let mut c = None;
         let mut now = 0;
         for _ in 0..3 {
-            c = step(&RULE, c, now);
+            c = step(&RULE, c, now).ok();
             assert_eq!(c.unwrap().blocked_until_ms, 0);
         }
         let mut delays = Vec::new();
         for _ in 0..6 {
             let next = step(&RULE, c, now).unwrap();
             delays.push(next.blocked_until_ms - now);
-            assert!(step(&RULE, Some(next), now).is_none(), "blocked");
+            // Blocked, and the refusal says how much of the backoff is left.
+            assert_eq!(
+                step(&RULE, Some(next), now),
+                Err(next.blocked_until_ms - now)
+            );
             now = next.blocked_until_ms;
             c = Some(next);
         }
@@ -233,10 +240,24 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_reports_the_rest_of_the_backoff() {
+        let mut c = None;
+        for _ in 0..4 {
+            c = step(&RULE, c, 0).ok();
+        }
+        // The fourth attempt set a 1 s backoff.
+        assert_eq!(c.unwrap().blocked_until_ms, 1_000);
+        assert_eq!(step(&RULE, c, 0), Err(1_000));
+        assert_eq!(step(&RULE, c, 250), Err(750));
+        assert_eq!(step(&RULE, c, 999), Err(1));
+        assert!(step(&RULE, c, 1_000).is_ok());
+    }
+
+    #[test]
     fn window_restarts() {
         let mut c = None;
         for _ in 0..3 {
-            c = step(&RULE, c, 0);
+            c = step(&RULE, c, 0).ok();
         }
         let later = step(&RULE, c, 10_000).unwrap();
         assert_eq!(later.attempts, 1);

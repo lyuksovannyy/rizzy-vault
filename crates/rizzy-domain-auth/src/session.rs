@@ -15,9 +15,10 @@
 //!   window of 64 ([`RequestWindow`]). The window is updated in the same transaction as the
 //!   check, under the account lock, so two replicas cannot both accept one counter.
 //!
-//! How the token and the signing values travel in HTTP headers is not fixed by any Accepted ADR
-//! (`rizzy-proto`'s `RequestSignature` docs); the server's HTTP layer extracts them and calls
-//! [`crate::AuthService::authenticate_request`].
+//! How the token and the signing values travel in HTTP headers, and which request bytes are
+//! signed, is ADR 0028 items 4 and 5 (`rizzy-proto`'s `http` module); the server's HTTP layer
+//! extracts them and calls [`crate::AuthService::authenticate_request`]. The edges of the
+//! window are in [`RequestWindow`]'s docs, as ADR 0028 item 5 and CRYPTO.md §5.10 fix them.
 
 use core::fmt;
 

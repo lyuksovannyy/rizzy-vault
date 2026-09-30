@@ -9,9 +9,10 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Router;
@@ -22,7 +23,8 @@ use chacha20::ChaCha20Rng;
 use chacha20::rand_core::SeedableRng as _;
 use rizzy_domain_auth::ServerSecrets;
 use rizzy_domain_auth::types::SessionToken;
-use rizzy_server::config::{self, Config, Sources};
+use rizzy_server::config::{self, Config, Settings, Sources};
+use rizzy_server::http::api::Api;
 use rizzy_server::server::{Services, open_services};
 use rizzy_server::{http, secrets_file};
 use serde::de::DeserializeOwned;
@@ -121,6 +123,15 @@ impl Server {
 
     /// A server with extra settings.
     pub(crate) async fn start_with(extra: &[(&'static str, &str)]) -> Self {
+        Self::start_adjusted(extra, |_| {}).await
+    }
+
+    /// A server with extra settings, whose `api` role `adjust` edits before the router is built
+    /// (the minimum client versions, which no setting carries).
+    pub(crate) async fn start_adjusted(
+        extra: &[(&'static str, &str)],
+        adjust: impl FnOnce(&mut Api),
+    ) -> Self {
         let dir = TempDir::new();
         let data = dir.join("data");
         let secrets_dir = dir.join("secrets");
@@ -142,12 +153,14 @@ impl Server {
         }
         let lookup = move |key: &str| env.get(key).map(OsString::from);
         let config = Config::from_sources(&Sources {
-            file: BTreeMap::new(),
+            file: Settings::new(),
             env: &lookup,
             roles_flag: None,
         })
         .unwrap();
-        let services = open_services(&config).await.unwrap();
+        let mut services = open_services(&config).await.unwrap();
+        // The api role is not shared yet: the router is built below.
+        adjust(Arc::get_mut(&mut services.api).unwrap());
         let router = http::router(Some(services.api.clone()), config.roles.web);
         Self {
             _dir: dir,
@@ -159,6 +172,11 @@ impl Server {
     /// Sends a request with a peer address, as the listener would.
     pub(crate) async fn send(&self, request: Request<Body>) -> Reply {
         send_via(self.router.clone(), request).await
+    }
+
+    /// Sends a request whose connection comes from `peer`.
+    pub(crate) async fn send_from(&self, peer: IpAddr, request: Request<Body>) -> Reply {
+        send_from(self.router.clone(), peer, request).await
     }
 
     /// `GET path`.
@@ -185,16 +203,21 @@ impl Server {
     }
 }
 
+/// The peer address of [`send_via`]: a client, never a configured proxy.
+pub(crate) const PEER: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+
 /// Sends a request through `router` with a peer address, as the listener would. Owns its
 /// router, so a test can run it on a task of its own ([`Server::send`] borrows the server).
 pub(crate) async fn send_via(router: Router, request: Request<Body>) -> Reply {
+    send_from(router, PEER, request).await
+}
+
+/// Sends a request through `router` as a connection from `peer`.
+pub(crate) async fn send_from(router: Router, peer: IpAddr, request: Request<Body>) -> Reply {
     let mut request = request;
     request
         .extensions_mut()
-        .insert(ConnectInfo(SocketAddr::from((
-            Ipv4Addr::new(192, 0, 2, 1),
-            40000,
-        ))));
+        .insert(ConnectInfo(SocketAddr::from((peer, 40000))));
     let response = router.oneshot(request).await.unwrap();
     let status = response.status();
     let headers = response.headers().clone();
@@ -206,5 +229,34 @@ pub(crate) async fn send_via(router: Router, request: Request<Body>) -> Reply {
         status,
         headers,
         body,
+    }
+}
+
+impl Server {
+    /// A server with open signup whose recovery waiting period is `wait_ms` instead of the
+    /// default 72 h (CRYPTO.md §11.9 step 2: "admin-configurable from 0 to 30 days. A
+    /// single-user instance may set 0"). No `RIZZY_*` setting carries the period yet, so the
+    /// harness swaps the auth domain of the opened services for one with the same database,
+    /// secrets and origin and this period; everything else is the server as it starts.
+    pub(crate) async fn start_with_recovery_wait(wait_ms: u64) -> Self {
+        let mut server = Self::start().await;
+        let origin = rizzy_domain_auth::types::ServerOrigin::parse(ORIGIN).unwrap();
+        let mut config = rizzy_domain_auth::AuthConfig::new(origin);
+        config.signup = rizzy_domain_auth::SignupPolicy::Open;
+        config.recovery_wait_ms = wait_ms;
+        // The same secrets the harness wrote to the secrets file (the same seed).
+        let secrets = Arc::new(ServerSecrets::generate(&mut ChaCha20Rng::seed_from_u64(99)));
+        let auth = rizzy_domain_auth::AuthService::new(
+            server.services.db.clone(),
+            secrets,
+            config,
+            rizzy_server::bridge::VaultBridge,
+        )
+        .unwrap();
+        // The router holds the other reference to the api role: drop it, swap, rebuild.
+        server.router = Router::new();
+        Arc::get_mut(&mut server.services.api).unwrap().auth = auth;
+        server.router = http::router(Some(server.services.api.clone()), true);
+        server
     }
 }

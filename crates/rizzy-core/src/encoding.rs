@@ -293,6 +293,40 @@ pub fn b64url_decode_into<'o>(text: &str, out: &'o mut [u8]) -> Result<&'o [u8],
     })
 }
 
+/// Length of the base64url encoding without padding of `n` bytes: `ceil(4n / 3)` (RFC 4648 §5,
+/// padding dropped). Saturates instead of overflowing.
+#[must_use]
+pub const fn b64url_encoded_len(n: usize) -> usize {
+    n.saturating_mul(4).div_ceil(3)
+}
+
+/// Length of the value a base64url text of `text_len` characters without padding decodes to,
+/// or `None` for a length no encoding has (`text_len % 4 == 1`). Computed from the length
+/// alone, so a caller can check a size limit and size a zeroizing buffer before decoding.
+#[must_use]
+pub const fn b64url_decoded_len(text_len: usize) -> Option<usize> {
+    let whole = (text_len / 4) * 3;
+    match text_len % 4 {
+        0 => Some(whole),
+        2 => Some(whole + 1),
+        3 => Some(whole + 2),
+        _ => None,
+    }
+}
+
+/// Encodes `bytes` as base64url without padding into `out`, which must hold at least
+/// [`b64url_encoded_len`]`(bytes.len())` bytes, and returns the text written.
+///
+/// Use this for secrets: encode into a zeroizing buffer of the right size, so no plain
+/// `String` holds the text ([`b64url_encode`] returns one). Constant-time in the data
+/// (`base64ct`).
+///
+/// # Errors
+/// [`ParseError::TooLong`] if `out` is too short.
+pub fn b64url_encode_into<'o>(bytes: &[u8], out: &'o mut [u8]) -> Result<&'o str, ParseError> {
+    Base64UrlUnpadded::encode(bytes, out).map_err(|_| ParseError::TooLong)
+}
+
 #[cfg(test)]
 #[expect(
     clippy::indexing_slicing,
@@ -425,7 +459,18 @@ mod tests {
         for (raw, text) in cases {
             assert_eq!(b64url_encode(raw), text);
             assert_eq!(b64url_decode(text).unwrap(), raw);
+            // The length helpers and the in-place encoder agree with them.
+            assert_eq!(b64url_encoded_len(raw.len()), text.len());
+            assert_eq!(b64url_decoded_len(text.len()), Some(raw.len()));
+            let mut out = [0u8; 8];
+            assert_eq!(b64url_encode_into(raw, &mut out).unwrap(), text);
         }
+        assert_eq!(b64url_decoded_len(1), None);
+        assert_eq!(b64url_decoded_len(5), None);
+        assert_eq!(
+            b64url_encode_into(b"foo", &mut [0u8; 3]),
+            Err(ParseError::TooLong)
+        );
         // The URL-safe alphabet uses '-' and '_'.
         assert_eq!(b64url_encode(&[0xfb, 0xff]), "-_8");
     }

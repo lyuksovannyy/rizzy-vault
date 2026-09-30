@@ -424,8 +424,18 @@ pub fn is_reissue(original: &DeviceCertificate, reissue: &DeviceCertificate) -> 
 /// each `request_counter` at most once per session, within a sliding window of 64").
 ///
 /// `max` is the highest counter accepted so far; bit `i` of `seen` says that `max - i` was
-/// accepted (bit 0 is `max` itself). A counter above `max` slides the window forward; one
-/// within the 64 below it is accepted once; one further back is refused.
+/// accepted (bit 0 is `max` itself), so the map covers `max − 63 ..= max`.
+///
+/// The edges, as ADR 0028 item 5 "Replay window" and CRYPTO.md §5.10 fix them:
+/// - the first signed request of a session may carry any counter;
+/// - `c > max` is accepted whatever the jump, and the window slides (a jump of 64 or more
+///   forgets the map);
+/// - `max − 63 ≤ c ≤ max` is accepted once;
+/// - a duplicate, or `c ≤ max − 64`, is refused.
+///
+/// The caller accepts a counter only after the request's signature verified, and stores the
+/// new window in the same write transaction, under the account lock
+/// (`AuthService::authenticate_request`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct RequestWindow {
     /// The highest accepted counter, `None` before the first request.
@@ -496,6 +506,88 @@ mod tests {
         let w = w.accept(1_000).unwrap();
         assert!(w.accept(100).is_none());
         assert_eq!(w.seen, 1);
+    }
+
+    /// ADR 0028 item 5 "Replay window": the first signed request may carry any counter.
+    #[test]
+    fn window_first_request_may_carry_any_counter() {
+        for first in [0, 1, 63, 64, 1_000_000, u64::MAX - 1, u64::MAX] {
+            let w = RequestWindow::default().accept(first).unwrap();
+            assert_eq!(w.max, Some(first));
+            assert_eq!(w.seen, 1, "only {first} itself is marked");
+            assert!(w.accept(first).is_none(), "{first} twice");
+        }
+    }
+
+    /// `max − 63 ≤ c ≤ max` is accepted once; `c ≤ max − 64` is refused.
+    #[test]
+    fn window_lower_edge_is_max_minus_63() {
+        let max = 1_000;
+        let w = RequestWindow::default().accept(max).unwrap();
+        // The lowest counter inside the window, once.
+        let inside = w.accept(max - 63).unwrap();
+        assert_eq!(inside.max, Some(max));
+        assert_eq!(inside.seen, 1 | (1 << 63));
+        assert!(inside.accept(max - 63).is_none());
+        // One below it, and everything further back, never.
+        for old in [max - 64, max - 65, 1, 0] {
+            assert!(w.accept(old).is_none(), "{old}");
+        }
+        // Every counter of the window is accepted exactly once, in any order.
+        let mut full = w;
+        for back in (1..64).rev() {
+            full = full.accept(max - back).unwrap();
+        }
+        assert_eq!(full.seen, u64::MAX);
+        for back in 0..64 {
+            assert!(full.accept(max - back).is_none(), "{back} behind, twice");
+        }
+    }
+
+    /// `c > max` is accepted whatever the jump; a jump of 64 or more forgets the map, a smaller
+    /// one keeps what still fits.
+    #[test]
+    fn window_slides_on_any_jump_forward() {
+        let seen_10_and_9 = RequestWindow::default()
+            .accept(10)
+            .unwrap()
+            .accept(9)
+            .unwrap();
+        // A jump of 1: both stay marked.
+        let by_one = seen_10_and_9.accept(11).unwrap();
+        assert_eq!(by_one.seen, 0b111);
+        // A jump of 63: counter 10 is now the lowest of the window and still marked; 9 fell out.
+        let by_63 = seen_10_and_9.accept(73).unwrap();
+        assert_eq!(by_63.max, Some(73));
+        assert_eq!(by_63.seen, 1 | (1 << 63));
+        assert!(by_63.accept(10).is_none(), "10 is still remembered");
+        assert!(by_63.accept(9).is_none(), "9 is 64 behind");
+        assert!(by_63.accept(11).is_some(), "11 was never used");
+        // A jump of exactly 64: the map is forgotten, and 10 is now too old to matter.
+        let by_64 = seen_10_and_9.accept(74).unwrap();
+        assert_eq!(by_64.seen, 1);
+        assert!(by_64.accept(10).is_none(), "10 is 64 behind");
+        assert!(by_64.accept(11).is_some());
+        // Any larger jump, up to the end of the range.
+        for far in [75, 10_000, u64::MAX] {
+            let jumped = seen_10_and_9.accept(far).unwrap();
+            assert_eq!(jumped.max, Some(far));
+            assert_eq!(jumped.seen, 1);
+        }
+    }
+
+    /// A refused counter leaves the window as it was: `accept` returns no new window.
+    #[test]
+    fn window_is_unchanged_by_a_refusal() {
+        let w = RequestWindow::default().accept(500).unwrap();
+        assert!(w.accept(500).is_none());
+        assert!(w.accept(436).is_none());
+        assert_eq!(w.max, Some(500));
+        assert_eq!(w.seen, 1);
+        // Below 64 accepted counters the window has no lower edge to fall off.
+        let low = RequestWindow::default().accept(5).unwrap();
+        assert!(low.accept(0).is_some());
+        assert!(low.accept(5).is_none());
     }
 
     #[test]

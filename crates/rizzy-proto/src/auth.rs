@@ -11,8 +11,7 @@
 //! | Device authentication, §5.10 steps 1–3 | [`DeviceAuthStartRequest`], [`DeviceAuthFinishRequest`] | [`DeviceAuthStartResponse`], [`DeviceAuthFinishResponse`] |
 //! | Request signing, §5.10 | [`RequestSignature`] (headers) | – |
 //!
-//! Endpoint paths and HTTP methods are not fixed here: CRYPTO.md §11 calls its paths
-//! "illustrative; the API specification owns them", and no Accepted ADR fixes them yet.
+//! The endpoint paths and HTTP methods are ADR 0028 item 1's ([`crate::http::paths`]).
 //!
 //! **What never travels.** `E_dev`, `E_local`, `E_ks` and `ACCOUNT_KEY_FORWARD` have no field
 //! in any type (CRYPTO.md §4.2), and every request type rejects unknown fields, so a client
@@ -256,9 +255,9 @@ pub struct DeviceAuthFinishResponse {
 /// the per-session `request_counter` and the `device-request` signature container.
 ///
 /// The signature covers `SHA-256(request body)`, so these travel outside the body, in HTTP
-/// headers. **The header names and value encoding are not fixed by any Accepted ADR**, so this
-/// crate defines neither; the server and client steps that add request signing fix them in the
-/// API specification. Everything else the signed message covers (origin, account, device,
+/// headers: [`crate::http::REQUEST_COUNTER_HEADER`] and
+/// [`crate::http::REQUEST_SIGNATURE_HEADER`], in the forms ADR 0028 item 5 fixes (the counter in
+/// decimal, the container as base64url). Everything else the signed message covers (origin, account, device,
 /// session, method, path and query) the server takes from its own state and the request it
 /// received (§9.6, "Exception").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

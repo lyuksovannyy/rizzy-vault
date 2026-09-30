@@ -43,8 +43,9 @@
 //! |---|---|---|
 //! | [`wire`] | CRYPTO.md §9.6; threat model §7.6 "D", INV-48 | Bounded value types: base64url [`wire::Bytes`], [`wire::Fixed`], [`wire::Id`]; [`wire::Text`], [`wire::List`]; the secrets |
 //! | [`limits`] | CRYPTO.md §2, §5.1, §8.5, §9.1–§9.3, §10.2; ADR 0012 §3 | Every size limit, with its source, and the text character sets |
-//! | [`error`] | ADR 0002 point 3 | [`error::ErrorResponse`] and [`error::ErrorCode`] |
-//! | [`meta`] | ADR 0002 point 3, as ADR 0022 amends it | `GET /api/meta` and the `Rizzy-Client` header |
+//! | [`error`] | ADR 0002 point 3; ADR 0028 item 3 | [`error::ErrorResponse`] and [`error::ErrorCode`] |
+//! | [`meta`] | ADR 0002 point 3, as ADR 0022 amends it; ADR 0028 item 14 | `GET /api/meta`, the `Rizzy-Client` header, the platform names and the version rule |
+//! | [`http`] | ADR 0028 items 1, 4, 5 | The endpoint paths, the bearer-token form and the request-signing headers |
 //! | [`objects`] | CRYPTO.md §4.2, §8.4, §9.6, §10.1, §10.2 | Signed statements, envelopes, wrapped-key objects with their locators |
 //! | [`auth`] | CRYPTO.md §5.3, §5.9, §5.10, §11.1, §11.2; ADR 0002 owner decision 2 | OPAQUE registration and login, device authentication, the request-signing values |
 //! | [`account`] | CRYPTO.md §10.1, §10.2, §11.2 step 7, §11.3, §11.4; ADR 0012 §7 healing steps 1–3 | Account state, enrolment, the web vault's kind-4 certificate, bundles, device grants |
@@ -53,16 +54,19 @@
 //! | [`totp`] | CRYPTO.md §5.10, §5.11, §11.15 | Server-side 2FA enrolment and removal |
 //! | [`vault`] | ADR 0012 §3, §7; ADR 0021 §2, §4, §9 | Upload, Fetch and the healing request |
 //!
+//! # The HTTP conventions
+//!
+//! [ADR 0028] freezes the HTTP side of `v1`, and this crate keeps the constants the server and
+//! the clients share: the endpoint paths, the bearer-token form and the request-signing headers
+//! ([`http`], items 1, 4 and 5), the body limits ([`limits::MAX_BODY_LEN`],
+//! [`limits::DEFAULT_UPLOAD_BODY_LEN`], [`limits::MAX_UPLOAD_BODY_LEN`], item 7), and the
+//! `/api/meta` shape, the platform names and the `Rizzy-Client` version rule ([`meta`], item
+//! 14). The HTTP status of each error code is item 3's ([`error`]); the server applies it, and
+//! clients branch on the code.
+//!
 //! # Left open, not frozen here
 //!
-//! No Accepted ADR fixes these wire details, so this crate does not define them:
-//! - endpoint paths and HTTP methods (CRYPTO.md §11: its paths are "illustrative; the API
-//!   specification owns them"), except [`meta::API_V1_PREFIX`] and [`meta::META_PATH`], which
-//!   ADR 0002 fixes;
-//! - how a bearer token and the request-signing values ([`auth::RequestSignature`]) travel in
-//!   HTTP headers;
-//! - the invite-token format, the platform names and the version grammar (bounded here only);
-//! - the HTTP status of each error code, except `410 Gone` for a removed API version.
+//! No Accepted ADR fixes the invite-token format, so this crate only bounds it.
 //!
 //! The rotation fields of [`change::CommitChangeRequest`], the vault half
 //! ([`change::VaultRotationUpload`]) and the vaults of [`recovery::RecoveryCompleteResponse`]
@@ -83,6 +87,7 @@
 //!
 //! [ADR 0002]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0002-own-protocol.md
 //! [ADR 0016]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0016-workspace-layout.md
+//! [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
 
 // Also set by the workspace lint table (ADR 0016 R7); repeated here so that no manifest edit
 // alone admits `unsafe` in this crate.
@@ -94,6 +99,7 @@ pub mod account;
 pub mod auth;
 pub mod change;
 pub mod error;
+pub mod http;
 pub mod limits;
 pub mod meta;
 pub mod objects;

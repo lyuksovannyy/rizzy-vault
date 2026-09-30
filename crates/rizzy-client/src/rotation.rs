@@ -50,10 +50,12 @@
 //!
 //! # Secrets before commit (CRYPTO.md §11)
 //!
-//! The pending rotation holds the new keys until [`PendingRotation::finalize`]; no Accepted ADR
-//! defines the persistent device-state record ([`crate::device`]), so the host cannot persist
-//! it yet (the same reported gap as signup's pending record). No new Secret Key or recovery code
-//! is created here, so no Emergency Kit is due.
+//! The pending rotation holds the new keys until [`PendingRotation::finalize`]. Before the
+//! commit is sent, a host that persists its device state writes the pending record
+//! ([`PendingRotation::pending_record`]: `E_local'` and `E_dev'` under the new account key)
+//! with the commit's exact JSON body (ADR 0026 §2, §4 step 3), and after the commit the cache
+//! writes of the new state ([`PendingRotation::store_writes`]). No new Secret Key or recovery
+//! code is created here, so no Emergency Kit is due.
 //!
 //! # Not in this build (reported)
 //!
@@ -99,11 +101,19 @@ use rizzy_proto::objects::{
 use rizzy_proto::vault::SeqVector;
 use rizzy_proto::wire::{List, SessionToken};
 
-use crate::account::{AccountPin, Anchor, CertifiedDevice, RevokedDevice, verify_public};
-use crate::device::{DeviceState, UnlockedDevice};
+use rizzy_core::envelope::purpose::DeviceSecretKeysCtx;
+use rizzy_core::secret_key::SecretKey;
+
+use crate::account::{
+    AccountPin, Anchor, CertifiedDevice, RevokedDevice, ServedObjects, verify_public,
+};
+use crate::device::{DeviceState, LocalWrap, UnlockedDevice, wrap_local};
 use crate::error::{ClientError, internal};
 use crate::login::LoggedIn;
-use crate::sync::{Authors, VaultSync};
+use crate::store;
+use crate::store::record::PendingRecord;
+use crate::store::rows::{Changeset, Write};
+use crate::sync::{Authors, VaultSync, wrap_rows};
 use crate::wire::{bytes, id};
 
 /// The most rebuilds after `state_conflict` before [`ClientError::VaultKeepsChanging`] (ADR
@@ -349,6 +359,9 @@ pub struct PendingRotation {
     request: CommitChangeRequest,
     /// Rebuilds so far.
     rebuilds: u32,
+    /// `E_local'` and `E_dev'` as [`PendingRotation::pending_record`] built them, which
+    /// [`PendingRotation::finalize`] then adopts unchanged.
+    prepared: Option<(LocalWrap, Vec<u8>)>,
 }
 
 impl fmt::Debug for PendingRotation {
@@ -634,6 +647,7 @@ pub fn start_rotation<R: CryptoRng + ?Sized>(
             vault_rotation: None,
         },
         rebuilds: 0,
+        prepared: None,
     };
     pending.build_account(rng, unlocked, &ordered_vaults)?;
     pending.build_vaults(rng, &ordered_vaults)?;
@@ -1061,22 +1075,29 @@ impl PendingRotation {
         {
             return Err(ClientError::InvalidInput);
         }
-        let derived;
-        let local = if let Some(local) = unlocked.local_unlock_key.as_ref() {
-            local
+        if let Some((local_wrap, device_keys_wrap)) = self.prepared {
+            // The envelopes the pending record holds on disk: the finalised state is those
+            // bytes, not a second wrap of the same key.
+            device.local_wrap = local_wrap;
+            device.device_keys_wrap = device_keys_wrap;
         } else {
-            derived = self
-                .pw_in
-                .local_unlock_key(
-                    &device.device_salt,
-                    device.kdf_id,
-                    device.account_id,
-                    device.device_id,
-                )
-                .map_err(internal)?;
-            &derived
-        };
-        device.rewrap(rng, local, &self.new_account_key, &unlocked.device_keys)?;
+            let derived;
+            let local = if let Some(local) = unlocked.local_unlock_key.as_ref() {
+                local
+            } else {
+                derived = self
+                    .pw_in
+                    .local_unlock_key(
+                        &device.device_salt,
+                        device.kdf_id,
+                        device.account_id,
+                        device.device_id,
+                    )
+                    .map_err(internal)?;
+                &derived
+            };
+            device.rewrap(rng, local, &self.new_account_key, &unlocked.device_keys)?;
+        }
         device.pin = AccountPin {
             bundle: match self.built.bundle {
                 Some((_, bundle)) => bundle,
@@ -1139,7 +1160,7 @@ fn keep_recovery_code<R: CryptoRng + ?Sized>(
 
 /// `ACCOUNT_SETTINGS` re-encrypted under the new account key with `settings_seq + 1`
 /// (CRYPTO.md §11.6 step 3); `None` while `settings_seq = 0`, which stays 0.
-fn reencrypt_settings<R: CryptoRng + ?Sized>(
+pub(crate) fn reencrypt_settings<R: CryptoRng + ?Sized>(
     rng: &mut R,
     base: &AccountPin,
     old_account_key: &AccountKey,
@@ -1238,4 +1259,133 @@ fn change_identity<R: CryptoRng + ?Sized>(
             envelope: bytes(envelope)?,
         },
     ))
+}
+
+impl PendingRotation {
+    /// The pending record of this rotation (CRYPTO.md §11 "Secrets before commit" step 3;
+    /// ADR 0026 §2 "Pending record"): the unchanged Secret Key, salt and `kdf_id`, the new
+    /// account key as `E_local'` under the current password's local unlock key, and `E_dev'`.
+    /// The host stores it with the commit's JSON body ([`crate::store::pending_writes`]) before
+    /// it sends the commit; [`PendingRotation::finalize`] then adopts exactly these envelopes,
+    /// so the state on disk after a crash and the state after the commit are the same bytes.
+    ///
+    /// `E_local'` needs the local unlock key: the one `unlocked` kept from the password unlock,
+    /// or else one derived again from the re-authentication's password (one Argon2id run).
+    ///
+    /// # Errors
+    /// [`ClientError::InvalidInput`] for another device's state; [`ClientError::Internal`].
+    pub fn pending_record<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        device: &DeviceState,
+        unlocked: &UnlockedDevice,
+    ) -> Result<PendingRecord, ClientError> {
+        if device.device_id != self.device_id
+            || unlocked.device_id != self.device_id
+            || device.account_id != self.account_id
+        {
+            return Err(ClientError::InvalidInput);
+        }
+        if self.prepared.is_none() {
+            let derived;
+            let local = if let Some(local) = unlocked.local_unlock_key.as_ref() {
+                local
+            } else {
+                derived = self
+                    .pw_in
+                    .local_unlock_key(
+                        &device.device_salt,
+                        device.kdf_id,
+                        device.account_id,
+                        device.device_id,
+                    )
+                    .map_err(internal)?;
+                &derived
+            };
+            let local_wrap = wrap_local(
+                rng,
+                local,
+                device.account_id,
+                device.device_id,
+                device.kdf_id,
+                &self.new_account_key,
+                device.local_password_epoch(),
+            )?;
+            let device_keys_wrap = self
+                .new_account_key
+                .wrap_device_keys(
+                    rng,
+                    &DeviceSecretKeysCtx {
+                        account_id: device.account_id,
+                        device_id: device.device_id,
+                    },
+                    &unlocked.device_keys,
+                )
+                .map_err(internal)?;
+            self.prepared = Some((local_wrap, device_keys_wrap));
+        }
+        let (local_wrap, device_keys_wrap) = self.prepared.clone().ok_or(ClientError::Internal)?;
+        Ok(PendingRecord {
+            secret_key: SecretKey::from_slice(device.secret_key.expose_secret())
+                .map_err(internal)?,
+            device_salt: device.device_salt,
+            kdf_id: device.kdf_id,
+            local_wrap,
+            device_keys_wrap: Some(device_keys_wrap),
+        })
+    }
+
+    /// The cache writes of the state this rotation commits (ADR 0026 §4 step 3): the new
+    /// `account-state`, the new bundle of a full rotation, the settings, the device set after
+    /// the change, `E_id'`, and per vault the new self-grant with the re-wrapped wrap set, so
+    /// the wraps on disk open under the vault key on disk. The host appends them to
+    /// [`crate::store::finalize_writes`] in the transaction that finalises the commit; call it
+    /// before [`PendingRotation::finalize`], which consumes the rotation.
+    ///
+    /// # Errors
+    /// [`ClientError::Internal`].
+    pub fn store_writes(&self) -> Result<Changeset, ClientError> {
+        let pin = AccountPin {
+            bundle: match &self.built.bundle {
+                Some((_, bundle)) => bundle.clone(),
+                None => self.base.bundle.clone(),
+            },
+            state: self.account.state.clone(),
+            state_wire: self.account.state_wire.clone(),
+            settings: self
+                .built
+                .settings
+                .clone()
+                .or_else(|| self.base.settings.clone()),
+        };
+        let mut self_grants = Vec::with_capacity(self.vaults.len());
+        for (vault, key) in self.vaults.iter().zip(&self.new_vault_keys) {
+            let key_id = *key.key_id().map_err(internal)?.as_bytes();
+            self_grants.push((vault.self_grant.clone(), key_id));
+        }
+        let served = ServedObjects {
+            bundles: self
+                .built
+                .bundle
+                .iter()
+                .map(|(wire, bundle)| (bundle.bundle_seq, wire.clone()))
+                .collect(),
+            identity_secret_keys: Some(self.built.e_id.clone()),
+            self_grants,
+        };
+        let mut changeset = store::object_writes(
+            &pin,
+            &self.account.all_certificates,
+            &self.account.all_revocations,
+            &served,
+        );
+        for (vault, key) in self.vaults.iter().zip(&self.new_vault_keys) {
+            changeset.push(Write::Wraps {
+                vault_id: key.vault_id().to_bytes(),
+                epoch: key.epoch(),
+                wraps: wrap_rows(key.vault_id(), key.epoch(), vault.item_key_wraps.as_slice()),
+            });
+        }
+        Ok(changeset)
+    }
 }

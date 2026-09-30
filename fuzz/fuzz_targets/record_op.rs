@@ -41,7 +41,11 @@ fuzz_target!(|data: &[u8]| {
             assert_eq!(FieldKey::new(key).map(|k| k.expose_secret()), Ok(key));
             assert!(w.value().len() <= MAX_VALUE_LEN);
         }
-        assert!(writes.windows(2).all(|p| matches!(p, [a, b] if a.key() < b.key())));
+        assert!(
+            writes
+                .windows(2)
+                .all(|p| matches!(p, [a, b] if a.key() < b.key()))
+        );
         assert!(parse_snapshot(&VersionVector::new(), data).is_err());
     }
 });

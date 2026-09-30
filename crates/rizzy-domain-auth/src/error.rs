@@ -34,7 +34,14 @@ pub enum AuthError {
     /// session (CRYPTO.md §11 "Replacing credentials", §11.5 step 1).
     FreshSessionRequired,
     /// Rate limit or backoff (ADR 0010 §5, CRYPTO.md §5.9, INV-7). Never a hard lockout.
-    RateLimited,
+    RateLimited {
+        /// How long the bucket that refused still blocks, in milliseconds: what the server
+        /// sends as `Retry-After` (ADR 0028 item 3, owner decision on open question 1). `None`
+        /// when the refusal comes from no bucket with a backoff (the cap on web-vault
+        /// certificates). It depends only on the bucket, which is keyed by what the caller
+        /// sent, so it says nothing the refusal does not.
+        retry_after_ms: Option<u64>,
+    },
     /// The resource does not exist, or this session may not see it (threat model §7.6 "I").
     NotFound,
     /// The compare-and-swap on `state_seq` failed, or the offered state is older than the one
@@ -53,7 +60,12 @@ pub enum AuthError {
     SignupRefused,
     /// A pending recovery exists but its waiting period has not ended (CRYPTO.md §11.9 step 3,
     /// ADR 0008 decision 5).
-    RecoveryWaiting,
+    RecoveryWaiting {
+        /// The rest of the waiting period, in milliseconds. Only a caller that proved the
+        /// recovery code gets this error, and `recovery/start` already told it when the period
+        /// ends.
+        retry_after_ms: u64,
+    },
     /// The storage layer failed. Carries no bound value.
     Storage(rizzy_storage::Error),
     /// The server is misconfigured or its stored state is inconsistent: a data key the secrets
@@ -75,10 +87,24 @@ impl AuthError {
             Self::Unauthorized | Self::SignupRefused => ErrorCode::Unauthorized,
             Self::SecondFactorRequired => ErrorCode::SecondFactorRequired,
             Self::FreshSessionRequired => ErrorCode::FreshSessionRequired,
-            Self::RateLimited | Self::RecoveryWaiting => ErrorCode::RateLimited,
+            Self::RateLimited { .. } | Self::RecoveryWaiting { .. } => ErrorCode::RateLimited,
             Self::NotFound => ErrorCode::NotFound,
             Self::StateConflict | Self::StateFork => ErrorCode::StateConflict,
             Self::Storage(_) | Self::Internal(_) => ErrorCode::Internal,
+        }
+    }
+
+    /// How long the caller should wait before it tries again, in milliseconds, for the two
+    /// errors answered `rate_limited`: the refusing bucket's remaining backoff, or the rest of
+    /// the recovery waiting period. `None` for every other error, and for a rate limit that
+    /// has no backoff. The server sends it as `Retry-After`, rounded up to whole seconds (ADR
+    /// 0028 item 3, owner decision on open question 1).
+    #[must_use]
+    pub const fn retry_after_ms(&self) -> Option<u64> {
+        match self {
+            Self::RateLimited { retry_after_ms } => *retry_after_ms,
+            Self::RecoveryWaiting { retry_after_ms } => Some(*retry_after_ms),
+            _ => None,
         }
     }
 }
@@ -90,13 +116,13 @@ impl fmt::Display for AuthError {
             Self::Unauthorized => f.write_str("unauthorized"),
             Self::SecondFactorRequired => f.write_str("second factor required"),
             Self::FreshSessionRequired => f.write_str("fresh session required"),
-            Self::RateLimited => f.write_str("rate limited"),
+            Self::RateLimited { .. } => f.write_str("rate limited"),
             Self::NotFound => f.write_str("not found"),
             Self::StateConflict => f.write_str("account-state compare-and-swap failed"),
             Self::StateFork => f.write_str("account-state fork refused"),
             Self::Conflict => f.write_str("conflict with stored data"),
             Self::SignupRefused => f.write_str("signup refused"),
-            Self::RecoveryWaiting => f.write_str("recovery waiting period not over"),
+            Self::RecoveryWaiting { .. } => f.write_str("recovery waiting period not over"),
             Self::Storage(e) => write!(f, "storage: {e}"),
             Self::Internal(what) => write!(f, "internal: {what}"),
         }
@@ -135,5 +161,22 @@ mod tests {
         }
         assert_eq!(AuthError::StateFork.code(), ErrorCode::StateConflict);
         assert_eq!(AuthError::Internal("x").code(), ErrorCode::Internal);
+    }
+
+    #[test]
+    fn only_the_rate_limited_answers_carry_a_retry_time() {
+        let limited = AuthError::RateLimited {
+            retry_after_ms: Some(1_500),
+        };
+        assert_eq!(limited.code(), ErrorCode::RateLimited);
+        assert_eq!(limited.retry_after_ms(), Some(1_500));
+        let waiting = AuthError::RecoveryWaiting { retry_after_ms: 7 };
+        assert_eq!(waiting.code(), ErrorCode::RateLimited);
+        assert_eq!(waiting.retry_after_ms(), Some(7));
+        let capped = AuthError::RateLimited {
+            retry_after_ms: None,
+        };
+        assert_eq!(capped.retry_after_ms(), None);
+        assert_eq!(AuthError::Unauthorized.retry_after_ms(), None);
     }
 }

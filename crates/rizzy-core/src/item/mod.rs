@@ -75,7 +75,8 @@
 //! - a restore or duplicate as a new item (§3 "Surfacing", §10 "The way out") copies unknown and
 //!   reserved keys and unsupported values byte for byte, but not `uri/<id>/match`,
 //!   `share/<id>/secret` or `import.created_ms`, which that op may not write
-//!   ([`schema::check_carried`]);
+//!   ([`schema::check_carried`]); the import of our own exports carries displayed values the
+//!   same way, and may also write `import.created_ms` (ADR 0027 §2, §6);
 //! - an `order` attribute whose displayed value is not a valid `SortKey` sorts as "without order"
 //!   ([`order::compare_list_entries`]);
 //! - a list element id may have any length the grammar allows; only writers are bound to the

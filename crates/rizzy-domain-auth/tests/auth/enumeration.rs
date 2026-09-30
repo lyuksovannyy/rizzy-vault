@@ -112,7 +112,7 @@ fn rate_limits_and_the_reauth_bucket() {
         }
         assert!(matches!(
             env.probe("dora", &source, None).await,
-            Err(AuthError::RateLimited)
+            Err(AuthError::RateLimited { .. })
         ));
         // Another source is not blocked by this source's backoff.
         env.probe("dora", b"198.51.100.7", None).await.unwrap();
@@ -130,7 +130,7 @@ fn rate_limits_and_the_reauth_bucket() {
         }
         assert!(matches!(
             env.probe("ghost", &source, None).await,
-            Err(AuthError::RateLimited)
+            Err(AuthError::RateLimited { .. })
         ));
     });
 }
@@ -164,7 +164,7 @@ fn signup_is_rate_limited_per_name() {
         let req = attempt(&mut env, "erin");
         assert!(matches!(
             env.svc.register_start(&req, b"203.0.113.9", env.now).await,
-            Err(AuthError::RateLimited)
+            Err(AuthError::RateLimited { .. })
         ));
         // Another name from a fresh source is not blocked by it.
         let req = attempt(&mut env, "fred");

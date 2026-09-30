@@ -281,7 +281,9 @@ impl<V: VaultPort> AuthService<V> {
         match pending(&mut tx, account).await? {
             Some((epoch, _, available)) if epoch == row.recovery_epoch => {
                 if now_ms < available {
-                    return Err(AuthError::RecoveryWaiting);
+                    return Err(AuthError::RecoveryWaiting {
+                        retry_after_ms: available - now_ms,
+                    });
                 }
             }
             _ => return Err(AuthError::Unauthorized),

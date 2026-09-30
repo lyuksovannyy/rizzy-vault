@@ -49,7 +49,7 @@ crates/rizzy-bus      in-process domain events for the server (ids only; M1 step
 crates/rizzy-domain-auth  server auth domain: OPAQUE, sessions, devices, signed state, 2FA, recovery
 crates/rizzy-domain-vault  server vault domain: op and snapshot upload, Fetch, compaction, restore healing
 crates/rizzy-server   server binary `rizzy-vault`: roles api, web, worker; secrets and migrate commands
-crates/rizzy-cli      command-line client `rv` (skeleton: --help and --version only)
+crates/rizzy-cli      command-line client `rv`: accounts, items, sync, export, import, devices, recovery (docs/rv.md)
 crates/xtask          repository checks: `cargo xtask check-deps`, `cargo xtask check-clippy`, `cargo xtask check-signoff`
 docs/                 roadmap, threat model, crypto design, ADRs; index in docs/README.md
 fuzz/                 cargo-fuzz targets; its own workspace, run on nightly

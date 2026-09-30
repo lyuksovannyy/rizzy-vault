@@ -306,7 +306,7 @@ fn load_config(
     let path = path.or_else(|| env(config::CONFIG).map(PathBuf::from));
     let file = match path {
         Some(path) => config::read_file(&path)?,
-        None => std::collections::BTreeMap::new(),
+        None => config::Settings::new(),
     };
     Config::from_sources(&Sources {
         file,

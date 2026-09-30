@@ -70,8 +70,20 @@
 //!   key still obeys its item types and writers, and a carried `item.type` must name the new
 //!   item's type.
 //!
+//!   **Import of our own exports** ([ADR 0027] §2 step 3, §6 "Writes", open question 5 answered
+//!   "carried"). The same check serves the import of an encrypted export and of the plaintext
+//!   JSON export, with [`WriteMode::Import`]: each displayed value of the exported item is a
+//!   carried write of the new item, "any key of the grammar and any value bytes within §10 are
+//!   kept verbatim and show as unsupported where unknown". With that mode a carried
+//!   `import.created_ms` is writable, as it is for every importer; `uri/<id>/match` and
+//!   `share/<id>/secret` still are not. An import file is hostile input, and this check is what
+//!   keeps a carried write harmless: the key is of the grammar, the value is within the size
+//!   limit and never interpreted here, and a known key stays inside its item type.
+//!
 //! ADR 0018 does not say how restore and duplicate treat keys and values this client cannot
 //! read; the carried reading above is this module's, and so is the one below.
+//!
+//! [ADR 0027]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0027-export-payload.md
 //!
 //! **`uri/<id>/match` is never written**, not even as Cleared when its URI is removed: owner
 //! decision 2 ("M1 clients carry it and never write it") is taken over the general §6 removal
@@ -632,7 +644,9 @@ pub enum WriteMode {
     /// The create op of a new item, from the user: a new item, a restore as a new item
     /// (ADR 0018 §3 "Surfacing") or a duplicate (§10 "The way out").
     Create,
-    /// The create op of an imported item. The only op that writes `import.created_ms`.
+    /// The create op of an imported item. The only op that writes `import.created_ms`. When
+    /// an imported item does not fit one op, its writes are all checked with this mode and
+    /// split over the create op and the ops that follow it (ADR 0027 §2 step 5).
     Import,
     /// An edit of an existing item.
     Edit,
@@ -652,7 +666,8 @@ pub enum WriteSource {
     /// Entered by the user, or built by this client for the user: checked by [`check_write`].
     Entered,
     /// Copied byte for byte from a displayed value of an existing item, for a restore or a
-    /// duplicate as a new item: checked by [`check_carried`].
+    /// duplicate as a new item, or from a displayed value in an export of our own that is being
+    /// imported (ADR 0027 §2, §6): checked by [`check_carried`].
     Carried,
 }
 
@@ -770,9 +785,13 @@ pub fn check_write(
 
 /// Checks one carried field write: a key and value copied byte for byte from a displayed
 /// value of an existing item, for "Restore it as a new item" (ADR 0018 §3 "Surfacing") or
-/// "duplicate as a new item" (§10 "The way out"). See the module docs for why. `mode` is the op
-/// the write goes into: the new item's create op, or one of the edit ops that follow it when
-/// the copy does not fit one op (§10).
+/// "duplicate as a new item" (§10 "The way out"), or from a displayed value of an item in an
+/// export of our own that is being imported (ADR 0027 §2 step 3, §6 "Writes"). See the module
+/// docs for why. `mode` is the op the write goes into: the new item's create op, or one of the
+/// edit ops that follow it when the copy does not fit one op (§10). An import checks every
+/// write of the new item with [`WriteMode::Import`], whichever of its ops the write lands in
+/// (ADR 0027 §6: "Every write passes `check_carried` for `WriteMode::Import`"), and puts
+/// `item.type` and `import.created_ms` in the first.
 ///
 /// Any key the grammar accepts may be carried, unknown and reserved keys included, with any
 /// value bytes up to 65,536; they are not decoded. A known key must still belong to the item's

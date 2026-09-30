@@ -65,6 +65,21 @@ pub enum ClientError {
     /// The export password is wrong, or the export file was changed (one error, CRYPTO.md
     /// §9.5).
     ExportDecryptionFailed,
+    /// The export was written by a newer rizzy-vault: its payload version is not one this
+    /// client reads (ADR 0027 §1: "refused as update required"). Nothing was imported.
+    ExportUpdateRequired,
+    /// The vault is too large for one export file: the encrypted payload would exceed 16 MiB
+    /// (ADR 0027 §1 "Too large", refused before any key derivation), or the plaintext JSON
+    /// would exceed a cap its reader applies (ADR 0027 §6). Nothing was written.
+    ExportTooLarge,
+    /// The vault holds an item that cannot be encoded within the ADR 0018 §10 limits (an
+    /// oversize item), so no export is written (ADR 0027 §1 "Oversize items").
+    /// [`crate::sync::VaultSync::export_blockers`] names the items; the user runs "duplicate
+    /// as a new item" on them first.
+    ExportOversizeItems,
+    /// A plaintext export was asked for without the typed acknowledgement `EXPORT PLAINTEXT`
+    /// (ADR 0027 §5). Nothing was written.
+    PlaintextExportNotAcknowledged,
     /// An upload was asked for before any Fetch response or upload answer was seen: the
     /// restore generation the own-chain bookkeeping needs is unknown (ADR 0021 §2). Fetch
     /// first.
@@ -92,6 +107,28 @@ pub enum ClientError {
     /// re-published in a healing request, which this build does not write. The op is not sent
     /// again; the host reports it.
     HealingRequired,
+    /// The local cache or the device-state record was written by a newer rizzy-vault: its
+    /// `cache_meta.format` or record version is above what this build knows (ADR 0026 §5:
+    /// "update required"). Nothing was read and nothing is written.
+    CacheUpdateRequired,
+    /// The local cache does not load (ADR 0026 §5 (a), (b), (d)): a table, a meta key or the
+    /// device-state record is missing or malformed, a signed statement or an account object
+    /// fails its check, a column disagrees with the statement it indexes, or an own row breaks
+    /// the own chain. The load fails as a whole; nothing is shown, written or uploaded, and the
+    /// cache is never dropped silently. The recourse is "remove this device" and a new
+    /// enrolment.
+    CacheCorrupt,
+    /// The device-state record is signup-pending (ADR 0026 §2, `stage = 2`): the stored
+    /// `register/finish` request must be resent and acknowledged before anything else runs.
+    SignupPending,
+    /// The device state holds no `E_local` (ADR 0026 §2, `has_local = 0`): it cannot unlock;
+    /// the one path left is CRYPTO.md §11.3 step 5, "I changed my password on another device".
+    LocalUnlockUnavailable,
+    /// The device state is older than this device's own history (ADR 0026 §4 step 7, owner
+    /// decision on open question 5): the server holds an own `device_seq` this file lacks, or
+    /// holds another record at an own dot. A restored image or a copied profile. The device is
+    /// read-only; the one resolution is removal and a new enrolment.
+    DeviceStateOutdated,
     /// An internal step failed that the inputs cannot cause: a sealing, signing, encoding or
     /// derivation call that is unreachable for valid state. No detail is kept on purpose.
     Internal,
@@ -120,6 +157,10 @@ impl ClientError {
             Self::StaleKey => "stale_key",
             Self::InvalidExportFile => "invalid_export_file",
             Self::ExportDecryptionFailed => "export_decryption_failed",
+            Self::ExportUpdateRequired => "export_update_required",
+            Self::ExportTooLarge => "export_too_large",
+            Self::ExportOversizeItems => "export_oversize_items",
+            Self::PlaintextExportNotAcknowledged => "plaintext_export_not_acknowledged",
             Self::FetchRequired => "fetch_required",
             Self::SessionExhausted => "session_exhausted",
             Self::SyncRequired => "sync_required",
@@ -127,6 +168,11 @@ impl ClientError {
             Self::VaultKeepsChanging => "vault_keeps_changing",
             Self::VaultKeyRotated => "vault_key_rotated",
             Self::HealingRequired => "healing_required",
+            Self::CacheUpdateRequired => "cache_update_required",
+            Self::CacheCorrupt => "cache_corrupt",
+            Self::SignupPending => "signup_pending",
+            Self::LocalUnlockUnavailable => "local_unlock_unavailable",
+            Self::DeviceStateOutdated => "device_state_outdated",
             Self::Internal => "internal",
         }
     }
@@ -156,6 +202,14 @@ impl fmt::Display for ClientError {
             Self::StaleKey => "the item's key is from an older key epoch",
             Self::InvalidExportFile => "not a valid rizzy-vault export file",
             Self::ExportDecryptionFailed => "wrong export password, or the file was changed",
+            Self::ExportUpdateRequired => {
+                "the export was written by a newer rizzy-vault; update to import it"
+            }
+            Self::ExportTooLarge => "the vault is too large for one export file",
+            Self::ExportOversizeItems => "an item is too large to export; duplicate it first",
+            Self::PlaintextExportNotAcknowledged => {
+                "the plaintext export was not confirmed by typing EXPORT PLAINTEXT"
+            }
             Self::FetchRequired => "fetch the vault before uploading",
             Self::SessionExhausted => "the session must be renewed",
             Self::SyncRequired => "upload and fetch every vault first",
@@ -163,6 +217,15 @@ impl fmt::Display for ClientError {
             Self::VaultKeepsChanging => "the vault keeps changing",
             Self::VaultKeyRotated => "the vault key was rotated on another device",
             Self::HealingRequired => "the server lost an own change and needs healing",
+            Self::CacheUpdateRequired => {
+                "the local data was written by a newer rizzy-vault; update required"
+            }
+            Self::CacheCorrupt => {
+                "the local data does not load; remove this device and enrol it again"
+            }
+            Self::SignupPending => "the signup has not been acknowledged yet",
+            Self::LocalUnlockUnavailable => "this device can no longer unlock with a password",
+            Self::DeviceStateOutdated => "the local data is older than this device's own history",
             Self::Internal => "internal error",
         })
     }
@@ -200,6 +263,10 @@ mod tests {
             ClientError::StaleKey,
             ClientError::InvalidExportFile,
             ClientError::ExportDecryptionFailed,
+            ClientError::ExportUpdateRequired,
+            ClientError::ExportTooLarge,
+            ClientError::ExportOversizeItems,
+            ClientError::PlaintextExportNotAcknowledged,
             ClientError::FetchRequired,
             ClientError::SessionExhausted,
             ClientError::SyncRequired,
@@ -207,6 +274,11 @@ mod tests {
             ClientError::VaultKeepsChanging,
             ClientError::VaultKeyRotated,
             ClientError::HealingRequired,
+            ClientError::CacheUpdateRequired,
+            ClientError::CacheCorrupt,
+            ClientError::SignupPending,
+            ClientError::LocalUnlockUnavailable,
+            ClientError::DeviceStateOutdated,
             ClientError::Internal,
         ];
         let mut codes: Vec<&str> = all.iter().map(|e| e.code()).collect();

@@ -41,6 +41,26 @@ fn vector(name: &str, index: usize, inputs: Obj) -> Vector {
     Vector::build(compute, KIND, name, index, inputs)
 }
 
+/// The request-targets of the `device-request` vectors 1 to 7 (ADR 0028 item 5, "Vectors"):
+/// an empty query (which is not "no query"), duplicate parameters, the same octet
+/// percent-encoded in lower and in upper case, the two dot segments, and an empty first
+/// segment. Each is signed byte for byte as written here.
+///
+/// The seven vectors share every other input (signer, origin, account, device, session id,
+/// counter, method and body), so their signed messages differ only through the target: an
+/// implementation that lower-cased `%2F`, or resolved `/a/./b` and `/a/../b`, would make two
+/// of them equal or fail the replay. A real client never reuses a counter; the vectors do only
+/// to isolate the target.
+const PATHOLOGICAL_TARGETS: [&str; 7] = [
+    "/p?",
+    "/p?a=1&a=2&a=1",
+    "/p?q=%2f",
+    "/p?q=%2F",
+    "/a/./b",
+    "/a/../b",
+    "//a",
+];
+
 /// The story's start time, in milliseconds since the Unix epoch.
 const T0: u64 = 1_780_000_000_000;
 /// One hour in milliseconds.
@@ -438,8 +458,34 @@ pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
             .text("path_and_query", "/api/v1/vaults/sync?cursor=17")
             .bytes("request_body", br#"{"ops":[]}"#),
     );
+    // ADR 0028 item 5 "Signed bytes": `path_and_query` is signed exactly as sent, never parsed,
+    // decoded or normalised. One vector per request-target that a URL library or a proxy would
+    // "tidy" ([`PATHOLOGICAL_TARGETS`]). They come after every older vector and draw from the
+    // generator only after them, so no older vector changes. They share one session id and one
+    // counter: the target is their only input that differs.
+    let target_session = random::<16>(rng);
+    let targets: Vec<Vector> = PATHOLOGICAL_TARGETS
+        .iter()
+        .zip(1usize..)
+        .map(|(target, index)| {
+            vector(
+                "device-request",
+                index,
+                Obj::new()
+                    .bytes("signer_seed", &dev_seed)
+                    .text("server_origin", "https://vault.example.com")
+                    .bytes("account_id", &account)
+                    .bytes("device_id", &desktop.id)
+                    .bytes("session_id", &target_session)
+                    .u64("request_counter", 43)
+                    .text("method", "POST")
+                    .text("path_and_query", target)
+                    .bytes("request_body", b"{}"),
+            )
+        })
+        .collect();
 
-    vec![
+    let mut vectors = vec![
         bundle1,
         bundle2,
         bundle3,
@@ -462,7 +508,9 @@ pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
         grant_web,
         auth,
         request,
-    ]
+    ];
+    vectors.extend(targets);
+    vectors
 }
 
 /// The bundles form a chain (first → identity change → silent update), the identity change is
@@ -504,6 +552,66 @@ pub(super) fn check_file(vectors: &[Vector]) {
             v.id
         );
     }
+    // ADR 0028 item 5: every `device-request` target is signed as written: the signed body
+    // holds `str(path_and_query)` unchanged.
+    let requests: Vec<&Vector> = vectors
+        .iter()
+        .filter(|v| v.name == "device-request")
+        .collect();
+    for v in &requests {
+        let target = text(&v.inputs, "path_and_query");
+        let mut framed = Vec::new();
+        put_str(&mut framed, target).expect("encode");
+        let body = bytes(&v.outputs, "body");
+        assert!(
+            body.windows(framed.len()).any(|w| w == framed.as_slice()),
+            "{}: the target is signed byte for byte",
+            v.id
+        );
+    }
+    // The vectors of [`PATHOLOGICAL_TARGETS`], one per target, differ in the target only:
+    // every other input is equal. So their signed messages are distinct because of the target
+    // alone, and targets a normaliser would make equal (`%2f` and `%2F`; `/a/./b`, which
+    // resolves to `/a/b`, and `/a/../b`, which resolves to `/b`, whatever a resolver makes of
+    // them) are different messages under the same key, session and counter.
+    let pathological: Vec<&Vector> = PATHOLOGICAL_TARGETS
+        .iter()
+        .map(|target| {
+            let mut found = requests
+                .iter()
+                .filter(|v| text(&v.inputs, "path_and_query") == *target);
+            let v = found
+                .next()
+                .unwrap_or_else(|| panic!("no device-request vector for {target}"));
+            assert!(found.next().is_none(), "two vectors for {target}");
+            *v
+        })
+        .collect();
+    let other_inputs = |v: &Vector| {
+        let mut inputs = v.inputs.clone();
+        assert!(inputs.remove("path_and_query").is_some(), "{}", v.id);
+        inputs
+    };
+    let (first, rest) = pathological.split_first().expect("pathological targets");
+    for v in rest {
+        assert_eq!(
+            other_inputs(v),
+            other_inputs(first),
+            "{}: only the target may differ",
+            v.id
+        );
+    }
+    let mut messages: Vec<Vec<u8>> = pathological
+        .iter()
+        .map(|v| bytes(&v.outputs, "signed_message"))
+        .collect();
+    messages.sort_unstable();
+    messages.dedup();
+    assert_eq!(
+        messages.len(),
+        PATHOLOGICAL_TARGETS.len(),
+        "targets that differ give signed messages that differ"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

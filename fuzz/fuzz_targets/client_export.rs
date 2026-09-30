@@ -20,7 +20,10 @@ fuzz_target!(|data: &[u8]| {
     let parsed = parse_export_json(data);
     if let Ok(f) = parsed {
         for s in [f.format, f.export_salt, f.export_id, f.data] {
-            assert!(s.bytes().all(|b| (0x20..0x7F).contains(&b) && b != b'\\' && b != b'"'));
+            assert!(
+                s.bytes()
+                    .all(|b| (0x20..0x7F).contains(&b) && b != b'\\' && b != b'"')
+            );
         }
         let canonical = format!(
             "{{\"format\":\"{}\",\"version\":{},\"kdf_id\":{},\"export_salt\":\"{}\",\

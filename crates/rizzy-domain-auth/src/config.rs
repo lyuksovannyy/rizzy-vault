@@ -29,6 +29,16 @@ pub const RECOVERY_SESSION_TTL_MS: u64 = 10 * 60_000;
 /// each `request_counter` at most once per session, within a sliding window of 64").
 pub const REQUEST_WINDOW: u64 = 64;
 
+/// The highest `request_counter` a session accepts: `i64::MAX`.
+///
+/// ADR 0028 item 5 makes the counter a `u64` and accepts any counter above the highest one
+/// seen. The session row stores that highest counter in a signed 64-bit column that admits no
+/// negative value, so the upper half of the `u64` range cannot be recorded, and a counter there
+/// is refused as `unauthorized` instead of failing in the database. A client that starts at 1
+/// and adds 1 per request never reaches it. Widening the column is a schema change, reported to
+/// the owner.
+pub const MAX_REQUEST_COUNTER: u64 = i64::MAX.unsigned_abs();
+
 /// The default, and the highest allowed value, of [`AuthConfig::max_web_certificates`]: the
 /// most kind-4 (web vault) certificates one account holds at a time (CRYPTO.md §11.4).
 ///

@@ -15,11 +15,15 @@
 //!   `fresh_session_required` (CRYPTO.md §11 "Replacing credentials": a fresh OPAQUE session of
 //!   at most 5 minutes).
 //! - Generic, this crate's: `invalid_request`, `payload_too_large`, `unauthorized`,
-//!   `second_factor_required`, `rate_limited`, `not_found`, `internal`. Their strings and
-//!   meaning are a pre-v1.0 wire choice (ADR 0002 point 5).
+//!   `second_factor_required`, `rate_limited`, `not_found`, `internal`.
 //!
-//! The HTTP status of each code is the server's to choose, except `api_version_gone`, which
-//! ADR 0002 ties to `410 Gone`.
+//! ADR 0028 item 3 freezes the whole set for `v1`, with the HTTP status of each code:
+//! `invalid_request` and `client_too_old` 400; `unauthorized` and `second_factor_required` 401;
+//! `fresh_session_required` 403; `not_found` 404; `state_conflict`, `stale_epoch`,
+//! `record_conflict` and `prev_seq_mismatch` 409; `api_version_gone` 410; `payload_too_large`
+//! 413; `rate_limited` 429, with `Retry-After` in whole seconds; `internal` 500. A method a
+//! route does not serve is `405` with `invalid_request`. **Clients branch on the code, never on
+//! the status.**
 //!
 //! **Forward compatibility.** A client that reads a code it does not know gets
 //! [`ErrorCode::Unknown`] instead of a parse failure: a new code is a new response value, which

@@ -42,9 +42,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use libfuzzer_sys::fuzz_target;
 use rizzy_core::ids::DeviceId;
 use rizzy_sync::compaction::{
-    Body, CertificateExpiry, InputError, OpDot, RetainedSnapshot, SnapshotRefusal,
-    UncoveredHeader, VaultChains, check_healing_request, check_snapshot, clamp, plan_worker,
-    select_covers,
+    Body, CertificateExpiry, InputError, OpDot, RetainedSnapshot, SnapshotRefusal, UncoveredHeader,
+    VaultChains, check_healing_request, check_snapshot, clamp, plan_worker, select_covers,
 };
 use rizzy_sync::dot::Dot;
 use rizzy_sync::vv::VersionVector;
@@ -194,7 +193,9 @@ fuzz_target!(|data: &[u8]| {
         .iter()
         .find(|s| Some(&s.store_seq) == older_of_two_newest)
         .map(|s| &s.clamped);
-    let newest = newest.get(newest.len().saturating_sub(2)..).unwrap_or_default();
+    let newest = newest
+        .get(newest.len().saturating_sub(2)..)
+        .unwrap_or_default();
 
     // §3: R1 and R3.
     match plan_worker(&snapshots, &ops) {

@@ -44,7 +44,7 @@ use rizzy_core::sign::{
     Verified, VerifiedBundle,
 };
 use rizzy_proto::account::AccountView;
-use rizzy_proto::objects::AccountSettings;
+use rizzy_proto::objects::{AccountSettings, IdentitySecretKeys, VaultSelfGrant};
 
 use crate::error::ClientError;
 
@@ -102,6 +102,13 @@ impl AccountPin {
         &self.bundle
     }
 
+    /// The pinned `account-state`'s signed wire form, as served and verified: the evidence a
+    /// host stores with a rollback or fork alarm (ADR 0026 §3, kind 7).
+    #[must_use]
+    pub fn state_wire(&self) -> &[u8] {
+        &self.state_wire
+    }
+
     /// The pinned identity signing key's public half.
     #[must_use]
     pub fn identity_key(&self) -> IdentityVerifyingKey {
@@ -149,6 +156,46 @@ pub struct VerifiedAccount {
     pub(crate) settings: Option<AccountSettings>,
     /// The identity keys changed through the bundle chain, and the user confirmed it.
     pub(crate) identity_changed: bool,
+    /// The served objects this answer verified, as served, for the cache
+    /// ([`crate::store::account_writes`], ADR 0026 §1 "Account objects").
+    pub(crate) served: ServedObjects,
+}
+
+/// The objects of a verified account answer that the cache keeps as served (ADR 0026 §1):
+/// ciphertext and signed statements only.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ServedObjects {
+    /// The served bundles that verified as self-signed, each with its `bundle_seq`.
+    pub(crate) bundles: Vec<(u64, Vec<u8>)>,
+    /// `E_id` with its `identity_epoch`.
+    pub(crate) identity_secret_keys: Option<IdentitySecretKeys>,
+    /// The vault self-grants, each with the id of the vault key it opened to.
+    pub(crate) self_grants: Vec<(VaultSelfGrant, [u8; 16])>,
+}
+
+impl ServedObjects {
+    /// The objects of `view`, whose self-grants opened to `vault_keys` in the same order.
+    fn of_view(view: &AccountView, vault_keys: &[VaultKey]) -> Result<Self, ClientError> {
+        let bundles = view
+            .bundles
+            .as_slice()
+            .iter()
+            .filter_map(|wire| {
+                let bundle = PublicKeyBundle::verify_self_signed(wire.as_slice()).ok()?;
+                Some((bundle.bundle_seq, wire.as_slice().to_vec()))
+            })
+            .collect();
+        let mut self_grants = Vec::with_capacity(vault_keys.len());
+        for (grant, key) in view.vault_self_grants.as_slice().iter().zip(vault_keys) {
+            let key_id = key.key_id().map_err(|_| ClientError::Internal)?;
+            self_grants.push((grant.clone(), *key_id.as_bytes()));
+        }
+        Ok(Self {
+            bundles,
+            identity_secret_keys: Some(view.identity_secret_keys.clone()),
+            self_grants,
+        })
+    }
 }
 
 impl core::fmt::Debug for VerifiedAccount {
@@ -397,7 +444,9 @@ pub(crate) fn verify_account_view(
         return Err(bad);
     }
     let vault_keys = open_self_grants(view, account_id, account_key, state)?;
+    let served = ServedObjects::of_view(view, &vault_keys)?;
     Ok(VerifiedAccount {
+        served,
         account_id,
         pin: AccountPin {
             bundle: public.bundle,

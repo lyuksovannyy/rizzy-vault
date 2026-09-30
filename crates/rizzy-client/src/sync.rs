@@ -117,6 +117,8 @@ use rizzy_sync::vv::VersionVector;
 use crate::account::{CertifiedDevice, RevokedDevice, VerifiedAccount};
 use crate::device::UnlockedDevice;
 use crate::error::{ClientError, internal};
+use crate::store::floors::{id16, u64_be};
+use crate::store::rows::{Changeset, OpRow, SnapshotRow, WrapRow, Write, meta, own};
 use crate::wire::{bytes, id};
 
 /// One author of the account: its certificate's key and status (ADR 0012 §4 step 1).
@@ -241,6 +243,15 @@ pub struct FetchOutcome {
     pub reports: Vec<Report>,
     /// Whether the server is behind this device (the vault is read-only).
     pub server_behind: bool,
+    /// Whether the server holds more of this device's own history than this device does
+    /// ([ADR 0026] §4 step 7): an own head above the highest own `device_seq` held, or a served
+    /// own record this device does not hold or holds with other bytes. The device state is an
+    /// older copy; the host raises the alarm and goes read-only
+    /// ([`ClientError::DeviceStateOutdated`]). The server's head is unsigned, so it only raises
+    /// the alarm: it never moves `next_device_seq`.
+    ///
+    /// [ADR 0026]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0026-client-device-state-and-cache.md
+    pub own_history_ahead: bool,
 }
 
 /// What an upload answer did.
@@ -254,6 +265,48 @@ pub struct UploadOutcome {
     pub snapshots_discarded: usize,
     /// Answers that refused an own op, by error code.
     pub rejected: Vec<ErrorCode>,
+    /// Whether the server refused an own op as a conflict at its dot (`record_conflict`): it
+    /// holds another record there, so this device state is an older copy (ADR 0026 §4 step 7;
+    /// [`FetchOutcome::own_history_ahead`]). No new bytes are signed for that dot.
+    pub own_conflict: bool,
+}
+
+/// The persisted rows of one vault, as [`crate::store::load`] hands them to
+/// [`VaultSync::restore`] after it checked their lengths (ADR 0026 §3, §4 step 5).
+pub(crate) struct VaultImage<'a> {
+    /// The stored `next_device_seq`.
+    pub(crate) next_device_seq: u64,
+    /// The stored HLC.
+    pub(crate) hlc: u64,
+    /// The restore generation of the last response, if any.
+    pub(crate) generation: Option<RestoreGeneration>,
+    /// The wrap-set rows.
+    pub(crate) wraps: Vec<ItemKeyWrap>,
+    /// The op rows of this vault.
+    pub(crate) ops: Vec<&'a OpRow>,
+    /// The snapshot rows of this vault.
+    pub(crate) snapshots: Vec<&'a SnapshotRow>,
+}
+
+/// What [`VaultSync::settle`] accepted, for the cache journal.
+#[derive(Default)]
+struct Settled {
+    /// The dots the commit accepted as new links.
+    accepted: Vec<Dot>,
+    /// The indexes, into the verified covers, of the covers the merge absorbed.
+    absorbed: Vec<usize>,
+}
+
+/// What the journal last wrote of the values that live in `cache_meta` and `vaults`, so that a
+/// value is written again only when it moved.
+#[derive(Clone, Copy, Default)]
+struct Journaled {
+    /// `next_device_seq`.
+    next_seq: u64,
+    /// The HLC.
+    hlc: u64,
+    /// The restore generation.
+    generation: Option<RestoreGeneration>,
 }
 
 /// The sync state of one vault (see the module docs). Holds decrypted item data and keys;
@@ -306,6 +359,16 @@ pub struct VaultSync {
     /// re-issued yet (ADR 0021 §9 "Stale epoch"; ADR 0025 §4). The next
     /// [`VaultSync::upload_request`] re-issues it and the later old-epoch ops of the chain.
     stale_from: Option<u64>,
+    /// The cache writes of the steps since the last [`VaultSync::take_writes`], for a host that
+    /// persists the vault (ADR 0026 §4); `None` for one that does not (the web vault).
+    journal: Option<Vec<Write>>,
+    /// What the journal last wrote of the counters and the restore generation.
+    journaled: Journaled,
+    /// Per own op the server answered without storing it: the restore generation of that
+    /// answer. A re-issue names it, so the cache replaces only a row whose `sent_generation`
+    /// is that generation (ADR 0026 §4 step 6). In memory only: "a `stale_epoch` answer changes
+    /// no row".
+    answered: BTreeMap<u64, RestoreGeneration>,
 }
 
 impl fmt::Debug for VaultSync {
@@ -317,6 +380,23 @@ impl fmt::Debug for VaultSync {
             .field("read_only", &self.is_read_only())
             .finish_non_exhaustive()
     }
+}
+
+/// The cache rows of the served wrap-set rows at `epoch`, the epoch of the held vault key: the
+/// only rows a [`Write::Wraps`] stores (a row at another epoch opens under no key this device
+/// holds).
+pub(crate) fn wrap_rows(vault_id: VaultId, epoch: u32, served: &[ItemKeyWrap]) -> Vec<WrapRow> {
+    served
+        .iter()
+        .filter(|w| w.vault_key_epoch == epoch)
+        .map(|w| WrapRow {
+            vault_id: vault_id.to_bytes().to_vec(),
+            item_id: w.item_id.to_bytes().to_vec(),
+            item_key_id: w.item_key_id.to_bytes().to_vec(),
+            vault_key_epoch: i64::from(w.vault_key_epoch),
+            envelope: w.envelope.as_slice().to_vec(),
+        })
+        .collect()
 }
 
 /// Converts the server's heads to a version vector.
@@ -370,7 +450,120 @@ impl VaultSync {
             synced: false,
             seen_keys,
             stale_from: None,
+            journal: None,
+            journaled: Journaled::default(),
+            answered: BTreeMap::new(),
         })
+    }
+
+    /// Turns the cache journal on (ADR 0026 §4): from now on every step records the rows it
+    /// adds or changes, and the host takes them with [`VaultSync::take_writes`] and commits
+    /// them in one transaction before it releases the next request. A host that persists the
+    /// vault calls this once, on the driver of a new signup or enrolment;
+    /// [`crate::store::load::load`] returns drivers with the journal already on.
+    pub fn persist(&mut self) {
+        if self.journal.is_none() {
+            self.journal = Some(Vec::new());
+        }
+    }
+
+    /// The cache writes of the steps since the last call, with the counters and the restore
+    /// generation if they moved (ADR 0026 §4 steps 1–2 and 6). Empty when the journal is off
+    /// or nothing changed.
+    pub fn take_writes(&mut self) -> Changeset {
+        let Some(journal) = self.journal.as_mut() else {
+            return Changeset::new();
+        };
+        let mut writes = core::mem::take(journal);
+        if self.journaled.next_seq != self.next_seq {
+            writes.push(Write::Meta {
+                key: meta::NEXT_DEVICE_SEQ,
+                value: self.next_seq.to_be_bytes().to_vec(),
+            });
+            self.journaled.next_seq = self.next_seq;
+        }
+        let hlc = self.clock.to_u64();
+        if self.journaled.hlc != hlc {
+            writes.push(Write::Meta {
+                key: meta::HLC,
+                value: hlc.to_be_bytes().to_vec(),
+            });
+            self.journaled.hlc = hlc;
+        }
+        if let Some(generation) = self.generation
+            && self.journaled.generation != Some(generation)
+        {
+            writes.push(Write::VaultGeneration {
+                vault_id: self.vault_id.to_bytes(),
+                generation: generation.to_bytes(),
+            });
+            self.journaled.generation = Some(generation);
+        }
+        // The counters come first: an own op row is admitted only with a counter above it.
+        writes.sort_by_key(|w| !matches!(w, Write::Meta { .. }));
+        writes.into_iter().collect()
+    }
+
+    /// Records one cache write, if the journal is on.
+    fn record(&mut self, write: impl FnOnce() -> Write) {
+        if let Some(journal) = self.journal.as_mut() {
+            journal.push(write());
+        }
+    }
+
+    /// The `ops` row of `record` with `header` (ADR 0026 §3). `body` and `wrap` say whether the
+    /// served body and carried wrap matched the signed hashes; one that did not is not kept.
+    fn op_row(
+        &self,
+        header: &OpHeader,
+        record: &OpRecord,
+        body: bool,
+        wrap: bool,
+        own: i64,
+    ) -> OpRow {
+        OpRow {
+            vault_id: self.vault_id.to_bytes().to_vec(),
+            device_id: header.dot.device_id().to_bytes().to_vec(),
+            device_seq: header.dot.seq().to_be_bytes().to_vec(),
+            item_id: header.item_id.to_bytes().to_vec(),
+            statement: record.statement.as_slice().to_vec(),
+            body: record
+                .body
+                .as_ref()
+                .filter(|_| body)
+                .map(|b| b.as_slice().to_vec()),
+            key_wrap: record
+                .key_wrap
+                .as_ref()
+                .filter(|_| wrap)
+                .map(|w| w.envelope.as_slice().to_vec()),
+            own,
+            sent_generation: None,
+        }
+    }
+
+    /// The `snapshots` row of `record` with `header`.
+    fn snapshot_row(
+        &self,
+        header: &SnapshotHeader,
+        record: &SnapshotRecord,
+        wrap: bool,
+        own: i64,
+    ) -> SnapshotRow {
+        SnapshotRow {
+            vault_id: self.vault_id.to_bytes().to_vec(),
+            snapshot_id: header.snapshot_id.to_bytes().to_vec(),
+            item_id: header.item_id.to_bytes().to_vec(),
+            statement: record.statement.as_slice().to_vec(),
+            envelope: record.envelope.as_slice().to_vec(),
+            key_wrap: record
+                .key_wrap
+                .as_ref()
+                .filter(|_| wrap)
+                .map(|w| w.envelope.as_slice().to_vec()),
+            own,
+            sent_generation: None,
+        }
     }
 
     /// The vault.
@@ -514,8 +707,9 @@ impl VaultSync {
         Some(plaintext)
     }
 
-    /// Verifies one served op record (module docs, steps 1–4). `None` drops it.
-    fn verify_op(&mut self, authors: &Authors, record: &OpRecord) -> Option<ServedOp> {
+    /// Verifies one served op record (module docs, steps 1–4). `None` drops it. The flag says
+    /// whether the record carries a wrap that matches the signed wrap hash.
+    fn verify_op(&mut self, authors: &Authors, record: &OpRecord) -> Option<(ServedOp, bool)> {
         let wire = record.statement.as_slice();
         let author = authors.signer(wire)?;
         let verified = OpStatement::verify(wire, &author.verifying_key).ok()?;
@@ -524,6 +718,22 @@ impl VaultSync {
             return None;
         }
         check_op_author(&header, author.status).ok()?;
+        let body = self.verify_body(&verified, &header, record);
+        let wrap = record
+            .key_wrap
+            .as_ref()
+            .is_some_and(|w| verified.matches_wrap(w.envelope.as_slice()));
+        Some((ServedOp { header, body }, wrap))
+    }
+
+    /// Steps 3 and 4 of the module docs for a record whose statement verified: learns a carried
+    /// wrap that matches the signed hash, then gives the verdict on the body.
+    fn verify_body(
+        &mut self,
+        verified: &OpStatement,
+        header: &OpHeader,
+        record: &OpRecord,
+    ) -> BodyStatus {
         if let Some(wrap) = &record.key_wrap
             && verified.matches_wrap(wrap.envelope.as_slice())
         {
@@ -533,7 +743,7 @@ impl VaultSync {
                 wrap.envelope.as_slice(),
             );
         }
-        let body = match &record.body {
+        match &record.body {
             None => BodyStatus::Bodiless,
             Some(b) if !verified.matches_envelope(b.as_slice()) => BodyStatus::Rejected,
             // A record of an unknown `item_schema_version` is parked (ADR 0018 §11).
@@ -543,7 +753,7 @@ impl VaultSync {
             {
                 BodyStatus::Waiting
             }
-            Some(b) => match self.open_op(&header, b.as_slice()) {
+            Some(b) => match self.open_op(header, b.as_slice()) {
                 Ok(Some(opened)) => {
                     self.bodies.insert(header.dot, opened);
                     BodyStatus::Verified
@@ -560,17 +770,17 @@ impl VaultSync {
                 }
                 Err(()) => BodyStatus::Rejected,
             },
-        };
-        Some(ServedOp { header, body })
+        }
     }
 
-    /// Verifies one served cover. `None` drops it.
+    /// Verifies one served cover. `None` drops it. The flag says whether the record carries a
+    /// wrap that matches the signed wrap hash.
     fn verify_cover(
         &mut self,
         authors: &Authors,
         record: &SnapshotRecord,
         served: &[ServedOp],
-    ) -> Option<(SnapshotHeader, SecretBytes)> {
+    ) -> Option<(SnapshotHeader, SecretBytes, bool)> {
         let wire = record.statement.as_slice();
         let author = authors.signer(wire)?;
         let verified = SnapshotStatement::verify(wire, &author.verifying_key).ok()?;
@@ -593,13 +803,15 @@ impl VaultSync {
             })
         });
         check_snapshot_author(&header, bound).ok()?;
-        if let Some(wrap) = &record.key_wrap
-            && verified.matches_wrap(wrap.envelope.as_slice())
-        {
+        let wrap = record
+            .key_wrap
+            .as_ref()
+            .is_some_and(|w| verified.matches_wrap(w.envelope.as_slice()));
+        if let Some(carried) = record.key_wrap.as_ref().filter(|_| wrap) {
             self.learn_wrap(
                 header.item_id,
                 header.vault_key_epoch,
-                wrap.envelope.as_slice(),
+                carried.envelope.as_slice(),
             );
         }
         if !verified.matches_envelope(record.envelope.as_slice())
@@ -608,7 +820,7 @@ impl VaultSync {
             return None;
         }
         let plaintext = self.open_snapshot(&header, record.envelope.as_slice())?;
-        Some((header, plaintext))
+        Some((header, plaintext, wrap))
     }
 
     /// Processes one Fetch response page (see the module docs). `now_ms` is the host's wall
@@ -628,10 +840,6 @@ impl VaultSync {
     /// commit, covers have also been absorbed and the page committed to the log. The host
     /// treats the error as a server fault and does not assume the response left no trace;
     /// everything applied before the error came from records that verified.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the five steps of the causal cycle, kept together in their order"
-    )]
     pub fn apply_fetch(
         &mut self,
         authors: &Authors,
@@ -642,7 +850,99 @@ impl VaultSync {
         self.log.observe_generation(generation);
         self.generation = Some(generation);
         let mut outcome = FetchOutcome::default();
-        // Revocations the log does not know yet.
+        self.learn_revocations(authors);
+        // The current wrap set, kept as served for a rotation (every page carries all of it).
+        for wrap in response.item_key_wraps.as_slice() {
+            let item = ItemId::from_bytes(wrap.item_id.to_bytes());
+            self.learn_wrap(item, wrap.vault_key_epoch, wrap.envelope.as_slice());
+        }
+        if self.wrap_rows.as_slice() != response.item_key_wraps.as_slice() {
+            let vault_id = self.vault_id.to_bytes();
+            let epoch = self.vault_key.epoch();
+            let rows = wrap_rows(self.vault_id, epoch, response.item_key_wraps.as_slice());
+            self.record(|| Write::Wraps {
+                vault_id,
+                epoch,
+                wraps: rows,
+            });
+        }
+        self.wrap_rows = response.item_key_wraps.as_slice().to_vec();
+        // 1. Verify.
+        let mut served = Vec::with_capacity(response.ops.as_slice().len());
+        // Per verified op: its record, and whether its carried wrap matched the signed hash.
+        let mut op_records = Vec::with_capacity(response.ops.as_slice().len());
+        for record in response.ops.as_slice() {
+            match self.verify_op(authors, record) {
+                Some((op, wrap)) => {
+                    served.push(op);
+                    op_records.push((record, wrap));
+                }
+                None => outcome.dropped += 1,
+            }
+        }
+        let mut covers = Vec::new();
+        let mut cover_records = Vec::new();
+        for record in response.covers.as_slice() {
+            match self.verify_cover(authors, record, &served) {
+                Some((header, plaintext, wrap)) => {
+                    covers.push((header, plaintext));
+                    cover_records.push((record, wrap));
+                }
+                None => outcome.dropped += 1,
+            }
+        }
+        let settled = self.settle(&mut served, &covers, now_ms, &mut outcome)?;
+        // The rows of what was accepted (ADR 0026 §4 step 2): every accepted op statement with
+        // the body and wrap that matched its signed hashes, every absorbed snapshot record.
+        if self.journal.is_some() {
+            for (op, (record, wrap)) in served.iter().zip(&op_records) {
+                if settled.accepted.contains(&op.header.dot) {
+                    let body = matches!(op.body, BodyStatus::Verified | BodyStatus::Waiting);
+                    let row = self.op_row(&op.header, record, body, *wrap, own::SERVED);
+                    self.record(|| Write::PutOp(row));
+                }
+            }
+            for index in &settled.absorbed {
+                if let (Some((header, _)), Some((record, wrap))) =
+                    (covers.get(*index), cover_records.get(*index))
+                {
+                    let row = self.snapshot_row(header, record, *wrap, own::SERVED);
+                    self.record(|| Write::PutSnapshot(row));
+                }
+            }
+        }
+        if response.complete {
+            outcome.reports.extend(self.log.complete_fetch_reports());
+        }
+        // Server behind (ADR 0021 §9).
+        let heads = heads_vv(&response.heads);
+        let behind = self.log.server_behind(
+            0,
+            ServerView {
+                state_seq: 0,
+                heads: &heads,
+                lacks_wrap: false,
+            },
+        );
+        self.server_behind = !behind.is_empty();
+        outcome.server_behind = self.server_behind;
+        // An older copy of the device state (ADR 0026 §4 step 7): the server's own head is
+        // above every own dot held, or it served an own record this device does not hold, or
+        // holds with other bytes.
+        let own_device = self.device_id;
+        outcome.own_history_ahead = heads.get(own_device) > self.log.head(own_device)
+            || outcome.reports.iter().any(|r| match r {
+                Report::UnknownOwnOp { .. } => true,
+                Report::Equivocation { dot, .. } => dot.device_id() == own_device,
+                _ => false,
+            });
+        self.synced = response.complete && !self.server_behind && !outcome.own_history_ahead;
+        self.prune_bodies();
+        Ok(outcome)
+    }
+
+    /// Teaches the log the revocation cut-offs of `authors` it does not know yet.
+    fn learn_revocations(&mut self, authors: &Authors) {
         for author in &authors.entries {
             if let Some(cutoff) = author.status.last_accepted
                 && self.log.cutoff(author.status.device).is_none()
@@ -650,32 +950,28 @@ impl VaultSync {
                 self.log.learn_revocation(author.status.device, cutoff);
             }
         }
-        // The current wrap set, kept as served for a rotation (every page carries all of it).
-        for wrap in response.item_key_wraps.as_slice() {
-            let item = ItemId::from_bytes(wrap.item_id.to_bytes());
-            self.learn_wrap(item, wrap.vault_key_epoch, wrap.envelope.as_slice());
-        }
-        self.wrap_rows = response.item_key_wraps.as_slice().to_vec();
-        // 1. Verify.
-        let mut served = Vec::with_capacity(response.ops.as_slice().len());
-        for record in response.ops.as_slice() {
-            match self.verify_op(authors, record) {
-                Some(op) => served.push(op),
-                None => outcome.dropped += 1,
-            }
-        }
-        let mut covers = Vec::new();
-        for record in response.covers.as_slice() {
-            match self.verify_cover(authors, record, &served) {
-                Some(cover) => covers.push(cover),
-                None => outcome.dropped += 1,
-            }
-        }
+    }
+
+    /// Steps 2–5 of the causal cycle for verified ops and covers: plan, absorb, commit,
+    /// deliver. Shared by [`VaultSync::apply_fetch`] and [`VaultSync::restore`], so a cache
+    /// load runs the same code as a Fetch (ADR 0026 §4 step 5).
+    ///
+    /// # Errors
+    /// As [`VaultSync::apply_fetch`].
+    fn settle(
+        &mut self,
+        served: &mut [ServedOp],
+        covers: &[(SnapshotHeader, SecretBytes)],
+        now_ms: u64,
+        outcome: &mut FetchOutcome,
+    ) -> Result<Settled, ClientError> {
+        let mut settled = Settled::default();
         // Bodies that waited and whose key arrived now.
-        self.retry_waiting(&mut served);
+        self.retry_waiting(served);
+        let served: &[ServedOp] = served;
         // 2. Plan.
         let cover_headers: Vec<SnapshotHeader> = covers.iter().map(|(h, _)| h.clone()).collect();
-        let plan = self.log.plan_covers(&served, &cover_headers);
+        let plan = self.log.plan_covers(served, &cover_headers);
         for dot in &plan.links {
             if let Some(op) = served.iter().find(|s| s.header.dot == *dot) {
                 Self::merge_mut(&mut self.items, &self.item_keys, op.header.item_id)
@@ -733,6 +1029,7 @@ impl VaultSync {
                         }
                         touched.insert(item);
                         outcome.absorbed += 1;
+                        settled.absorbed.push(i);
                     }
                     AbsorbOutcome::Refused(_) => outcome.refused_covers += 1,
                 },
@@ -740,15 +1037,16 @@ impl VaultSync {
             }
         }
         // 4. Commit.
-        let commit = self.log.commit(&served);
+        let commit = self.log.commit(served);
         outcome.reports.extend(commit.reports);
-        for dot in commit.accepted {
-            if let Some(header) = self.log.header(dot).cloned() {
+        for dot in &commit.accepted {
+            if let Some(header) = self.log.header(*dot).cloned() {
                 Self::merge_mut(&mut self.items, &self.item_keys, header.item_id)
                     .record_header(&header)
                     .map_err(|_| ClientError::InvalidServerResponse)?;
             }
         }
+        settled.accepted = commit.accepted;
         // 5. Deliver.
         outcome.applied += self.deliver(now_ms, &mut touched);
         for item in touched {
@@ -757,24 +1055,7 @@ impl VaultSync {
                 self.pending_snapshots.insert(item);
             }
         }
-        if response.complete {
-            outcome.reports.extend(self.log.complete_fetch_reports());
-        }
-        // Server behind (ADR 0021 §9).
-        let heads = heads_vv(&response.heads);
-        let behind = self.log.server_behind(
-            0,
-            ServerView {
-                state_seq: 0,
-                heads: &heads,
-                lacks_wrap: false,
-            },
-        );
-        self.server_behind = !behind.is_empty();
-        outcome.server_behind = self.server_behind;
-        self.synced = response.complete && !self.server_behind;
-        self.prune_bodies();
-        Ok(outcome)
+        Ok(settled)
     }
 
     /// Re-tries the bodies that waited for their item key. A body served in the page being
@@ -1022,6 +1303,10 @@ impl VaultSync {
                 None => None,
             },
         };
+        // ADR 0026 §4 step 1: the own op row (`own = 1`) and the advanced counter land in one
+        // transaction ([`VaultSync::take_writes`] adds the counter).
+        let row = self.own_op_row(dot, item, &record);
+        self.record(|| crate::store::rows::Write::PutOp(row));
         self.own_records.insert(dot.seq(), OwnRecord { record });
         self.bodies.insert(dot, (key_id, plaintext));
         if let Some(key) = fresh {
@@ -1034,6 +1319,24 @@ impl VaultSync {
         self.next_seq = self.next_seq.checked_add(1).ok_or(ClientError::Internal)?;
         self.synced = false;
         Ok(dot)
+    }
+
+    /// The `ops` row of an own, unsent record at `dot` on `item`.
+    fn own_op_row(&self, dot: Dot, item: ItemId, record: &OpRecord) -> OpRow {
+        OpRow {
+            vault_id: self.vault_id.to_bytes().to_vec(),
+            device_id: dot.device_id().to_bytes().to_vec(),
+            device_seq: dot.seq().to_be_bytes().to_vec(),
+            item_id: item.to_bytes().to_vec(),
+            statement: record.statement.as_slice().to_vec(),
+            body: record.body.as_ref().map(|b| b.as_slice().to_vec()),
+            key_wrap: record
+                .key_wrap
+                .as_ref()
+                .map(|w| w.envelope.as_slice().to_vec()),
+            own: own::UNSENT,
+            sent_generation: None,
+        }
     }
 
     /// Writes an own snapshot of `item` into the outbox, if the merge can write one (ADR 0018
@@ -1071,14 +1374,14 @@ impl VaultSync {
         let wire = statement
             .sign(unlocked.device_keys.signing_key())
             .map_err(internal)?;
-        self.outbox.push(OwnSnapshot {
-            header,
-            record: SnapshotRecord {
-                statement: bytes(wire)?,
-                envelope: bytes(envelope)?,
-                key_wrap: None,
-            },
-        });
+        let record = SnapshotRecord {
+            statement: bytes(wire)?,
+            envelope: bytes(envelope)?,
+            key_wrap: None,
+        };
+        let row = self.snapshot_row(&header, &record, false, own::UNSENT);
+        self.record(|| Write::PutSnapshot(row));
+        self.outbox.push(OwnSnapshot { header, record });
         Ok(())
     }
 
@@ -1155,6 +1458,30 @@ impl VaultSync {
             }
             let before = self.outbox.len();
             let own = self.device_id;
+            // ADR 0026 §4 step 6: the re-issued row and the unsent own snapshots ADR 0018 §3
+            // discards change in the transaction committed before the new bytes are sent.
+            let vault_id = self.vault_id.to_bytes();
+            let discarded: Vec<SnapshotId> = self
+                .outbox
+                .iter()
+                .filter(|s| s.header.item_id == item && s.header.covered.get(own) >= dot.seq())
+                .map(|s| s.header.snapshot_id)
+                .collect();
+            for snapshot_id in discarded {
+                self.record(|| Write::DeleteSnapshot {
+                    vault_id,
+                    snapshot_id: snapshot_id.to_bytes(),
+                });
+            }
+            let row = self.own_op_row(dot, item, &record);
+            let stale_generation = self
+                .answered
+                .remove(&dot.seq())
+                .map(RestoreGeneration::to_bytes);
+            self.record(|| Write::ReissueOp {
+                row,
+                stale_generation,
+            });
             self.outbox
                 .retain(|s| s.header.item_id != item || s.header.covered.get(own) < dot.seq());
             let trigger = self
@@ -1300,6 +1627,7 @@ impl VaultSync {
         if records.is_empty() {
             return Ok(None);
         }
+        self.journal_sent(&in_flight);
         self.in_flight = in_flight;
         self.synced = false;
         Ok(Some(UploadRequest {
@@ -1327,20 +1655,37 @@ impl VaultSync {
         self.log.observe_generation(generation);
         self.generation = Some(generation);
         let mut outcome = UploadOutcome::default();
+        let vault_id = self.vault_id.to_bytes();
+        let device_id = self.device_id.to_bytes();
         for (sent, result) in in_flight.iter().zip(results) {
             match (*sent, *result) {
                 (InFlight::Op(seq), UploadResult::Stored | UploadResult::AlreadyStored) => {
                     self.log
                         .acknowledge(seq)
                         .map_err(|_| ClientError::Internal)?;
+                    self.answered.remove(&seq);
+                    // "Already stored" moves a row to `own = 2` (ADR 0026 §4 step 6).
+                    self.record(|| Write::OpOwn {
+                        vault_id,
+                        device_id,
+                        device_seq: seq,
+                        own: own::ACKNOWLEDGED,
+                        sent_generation: None,
+                    });
                     outcome.acknowledged += 1;
                 }
                 (InFlight::Op(seq), UploadResult::Rejected { error }) => {
                     self.log
                         .record_answered(seq, generation)
                         .map_err(|_| ClientError::Internal)?;
+                    self.answered.insert(seq, generation);
                     if error == ErrorCode::StaleEpoch {
                         self.stale_from = Some(self.stale_from.map_or(seq, |s| s.min(seq)));
+                    }
+                    // A conflict answer at an own dot changes no row, and no new bytes are
+                    // signed for that dot (ADR 0026 §4 step 6): the host raises the alarm.
+                    if error == ErrorCode::RecordConflict {
+                        outcome.own_conflict = true;
                     }
                     outcome.rejected.push(error);
                 }
@@ -1348,9 +1693,16 @@ impl VaultSync {
                     self.log
                         .record_answered(seq, generation)
                         .map_err(|_| ClientError::Internal)?;
+                    self.answered.insert(seq, generation);
                 }
                 (InFlight::Snapshot(sid), UploadResult::Stored | UploadResult::AlreadyStored) => {
                     self.outbox.retain(|s| s.header.snapshot_id != sid);
+                    self.record(|| Write::SnapshotOwn {
+                        vault_id,
+                        snapshot_id: sid.to_bytes(),
+                        own: own::ACKNOWLEDGED,
+                        sent_generation: None,
+                    });
                     outcome.snapshots_stored += 1;
                 }
                 (InFlight::Snapshot(sid), UploadResult::Rejected { error }) => {
@@ -1364,6 +1716,10 @@ impl VaultSync {
                         self.pending_snapshots.insert(stale.header.item_id);
                     }
                     self.outbox.retain(|s| s.header.snapshot_id != sid);
+                    self.record(|| Write::DeleteSnapshot {
+                        vault_id,
+                        snapshot_id: sid.to_bytes(),
+                    });
                     outcome.snapshots_discarded += 1;
                 }
                 (InFlight::Snapshot(_), _) => {}
@@ -1382,6 +1738,27 @@ impl VaultSync {
     /// The merge of `item`, if any op reached it.
     pub(crate) fn merge(&self, item: ItemId) -> Option<&ItemMerge> {
         self.items.get(&item)
+    }
+
+    /// Every item's merge, ascending by item id (the order of an export payload, ADR 0027 §1).
+    pub(crate) fn merges(&self) -> impl Iterator<Item = (ItemId, &ItemMerge)> + '_ {
+        self.items.iter().map(|(id, merge)| (*id, merge))
+    }
+
+    /// Whether `unlocked` may write an own op now: the checks [`VaultSync::write_op`] makes
+    /// first, for a caller that writes several ops and must refuse before the first.
+    ///
+    /// # Errors
+    /// [`ClientError::ReadOnly`]; [`ClientError::InvalidInput`] if `unlocked` is another
+    /// device's.
+    pub(crate) fn check_writable(&self, unlocked: &UnlockedDevice) -> Result<(), ClientError> {
+        if self.is_read_only() {
+            return Err(ClientError::ReadOnly);
+        }
+        if unlocked.device_id != self.device_id {
+            return Err(ClientError::InvalidInput);
+        }
+        Ok(())
     }
 
     /// The `vault_key_epoch` of the vault key this driver writes under.
@@ -1503,5 +1880,457 @@ impl VaultSync {
     #[cfg(test)]
     pub(crate) fn may_have_been_served(&self, seq: u64) -> bool {
         self.log.may_have_been_served(seq)
+    }
+}
+
+/// A 16-byte restore-generation column.
+fn generation_column(column: Option<&Vec<u8>>) -> Result<Option<RestoreGeneration>, ClientError> {
+    column
+        .map(|g| id16(g).map(RestoreGeneration::from_bytes))
+        .transpose()
+}
+
+/// The wire record of an `ops` row. Each blob is checked against its `rizzy-proto` limit before
+/// it is parsed (ADR 0026 §3). The wrap's locator is a placeholder: it is never trusted
+/// (CRYPTO.md §4.2), and [`VaultSync::restore`] sets the derived id on the records it sends.
+fn op_record(row: &OpRow) -> Result<OpRecord, ClientError> {
+    let corrupt = |_| ClientError::CacheCorrupt;
+    Ok(OpRecord {
+        statement: rizzy_proto::wire::Bytes::from_slice(&row.statement).map_err(corrupt)?,
+        body: row
+            .body
+            .as_deref()
+            .map(rizzy_proto::wire::Bytes::from_slice)
+            .transpose()
+            .map_err(corrupt)?,
+        key_wrap: row
+            .key_wrap
+            .as_deref()
+            .map(|w| {
+                Ok(RecordKeyWrap {
+                    item_key_id: id([0; 16]),
+                    envelope: rizzy_proto::wire::Bytes::from_slice(w)?,
+                })
+            })
+            .transpose()
+            .map_err(|_: rizzy_proto::wire::WireError| ClientError::CacheCorrupt)?,
+    })
+}
+
+/// The wire record of a `snapshots` row, as [`op_record`].
+fn snapshot_record(row: &SnapshotRow) -> Result<SnapshotRecord, ClientError> {
+    let corrupt = |_| ClientError::CacheCorrupt;
+    Ok(SnapshotRecord {
+        statement: rizzy_proto::wire::Bytes::from_slice(&row.statement).map_err(corrupt)?,
+        envelope: rizzy_proto::wire::Bytes::from_slice(&row.envelope).map_err(corrupt)?,
+        key_wrap: row
+            .key_wrap
+            .as_deref()
+            .map(|w| {
+                Ok(RecordKeyWrap {
+                    item_key_id: id([0; 16]),
+                    envelope: rizzy_proto::wire::Bytes::from_slice(w)?,
+                })
+            })
+            .transpose()
+            .map_err(|_: rizzy_proto::wire::WireError| ClientError::CacheCorrupt)?,
+    })
+}
+
+/// An own op row whose statement verified under this device's key and whose columns agree
+/// with it.
+struct OwnRow<'a> {
+    /// The parsed header.
+    header: OpHeader,
+    /// The verified statement.
+    statement: rizzy_core::sign::Verified<OpStatement>,
+    /// The record, as it goes back to the server.
+    record: OpRecord,
+    /// The row.
+    row: &'a OpRow,
+}
+
+impl VaultSync {
+    /// Rebuilds the driver of a vault from its persisted rows ([ADR 0026] §4 step 5: "verify
+    /// … every record through the same code as a Fetch … and rebuild the logs and merges").
+    ///
+    /// - **Served rows** (`own = 0`) go through the checks of a Fetch ([`VaultSync::apply_fetch`]
+    ///   steps 1–4) and then the same plan, absorb, commit and deliver. A statement that fails
+    ///   under its signer's key, or a column that disagrees with the parsed statement, fails the
+    ///   load (§5 (d)). A row whose signer is no longer among the verified certificates, or
+    ///   whose author checks now refuse it (a revocation learned since), is left out exactly as
+    ///   a Fetch would drop it; the chain check then stops that chain there.
+    /// - **Own rows** (`own` 1, 2, 3) are never taken from a response (`rizzy_sync::causal`
+    ///   reading 5), so they are put back one by one in `device_seq` order: statement under this
+    ///   device's key, columns, the own chain's link and causal context
+    ///   ([`VaultLog::record_own_op`]), the body through the reader's path of the merge. A row
+    ///   that breaks one of these fails the load (§4 step 7, §5 (d)). Acknowledged rows are
+    ///   acknowledged in the log, sent rows keep the restore generation of their first send,
+    ///   and the records of `own` 1 and 3 go back to the upload queue byte for byte.
+    /// - **A body, snapshot envelope or wrap that fails** under a statement that verified is
+    ///   handled as the same bytes from a server are: missing data, the load stands (§5 (e)).
+    /// - The stored `next_device_seq` must be above every own `device_seq` held (§4 step 7); the
+    ///   server's unsigned head never moves it.
+    ///
+    /// # Known limit
+    ///
+    /// An own op whose causal context names an op this device can no longer open (its item
+    /// key's wrap is gone from the wrap set at the held epoch, which only a rotation that
+    /// dropped the row causes, ADR 0025 §2 step 3) cannot be put back into the own chain: the
+    /// load fails, and the recourse is removal and a new enrolment (§5).
+    ///
+    /// # Errors
+    /// [`ClientError::CacheCorrupt`].
+    ///
+    /// [ADR 0026]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0026-client-device-state-and-cache.md
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the load of one vault in its order: own headers, served rows, own chain, outbox"
+    )]
+    pub(crate) fn restore(
+        vault_key: VaultKey,
+        unlocked: &UnlockedDevice,
+        authors: &Authors,
+        image: &VaultImage<'_>,
+        now_ms: u64,
+    ) -> Result<Self, ClientError> {
+        let corrupt = ClientError::CacheCorrupt;
+        let mut vault =
+            Self::new(vault_key, unlocked, image.next_device_seq).map_err(|_| corrupt)?;
+        vault.clock = Hlc::from_u64(image.hlc);
+        vault.learn_revocations(authors);
+        for wrap in &image.wraps {
+            let item = ItemId::from_bytes(wrap.item_id.to_bytes());
+            vault.learn_wrap(item, wrap.vault_key_epoch, wrap.envelope.as_slice());
+        }
+        vault.wrap_rows.clone_from(&image.wraps);
+        let own_device = unlocked.device_id;
+        let own_key = *unlocked.device_keys.signing_key().verifying_key();
+
+        // Split the rows. `own` and the author must agree: an own row is this device's, a
+        // served row is never this device's (the own chain is never taken from a response).
+        let mut foreign: Vec<(DeviceId, u64, &OpRow)> = Vec::new();
+        let mut own_rows: Vec<(u64, &OpRow)> = Vec::new();
+        for row in &image.ops {
+            let device = DeviceId::from_bytes(id16(&row.device_id)?);
+            let seq = u64_be(&row.device_seq)?;
+            let sent = generation_column(row.sent_generation.as_ref())?;
+            let own_row = match row.own {
+                own::SERVED => false,
+                own::UNSENT | own::ACKNOWLEDGED | own::SENT => true,
+                _ => return Err(corrupt),
+            };
+            // `sent_generation` is set exactly on rows that were sent (`own` 3, and 2 after it).
+            let generation_ok = match row.own {
+                own::SERVED | own::UNSENT => sent.is_none(),
+                own::SENT => sent.is_some(),
+                _ => true,
+            };
+            // A row was sent only after a response gave this device a restore generation.
+            let sent_without_response = image.generation.is_none() && sent.is_some();
+            if own_row != (device == own_device)
+                || !generation_ok
+                || sent_without_response
+                || seq == 0
+            {
+                return Err(corrupt);
+            }
+            if own_row {
+                if seq >= image.next_device_seq {
+                    return Err(corrupt);
+                }
+                own_rows.push((seq, row));
+            } else {
+                foreign.push((device, seq, row));
+            }
+        }
+        foreign.sort_by_key(|(device, seq, _)| (*device, *seq));
+        own_rows.sort_by_key(|(seq, _)| *seq);
+
+        // The own headers first, into the merges only: a snapshot is cut to the op headers the
+        // merge has verified (ADR 0018 §3), and this device verified its own.
+        let mut own_ops: Vec<OwnRow<'_>> = Vec::with_capacity(own_rows.len());
+        for (seq, row) in own_rows {
+            let record = op_record(row)?;
+            let statement =
+                OpStatement::verify(record.statement.as_slice(), &own_key).map_err(|_| corrupt)?;
+            let header = OpHeader::parse_statement(&statement).map_err(|_| corrupt)?;
+            if Dot::new(own_device, seq) != Some(header.dot)
+                || header.vault_id != vault.vault_id
+                || header.item_id.to_bytes().as_slice() != row.item_id.as_slice()
+            {
+                return Err(corrupt);
+            }
+            Self::merge_mut(&mut vault.items, &vault.item_keys, header.item_id)
+                .record_header(&header)
+                .map_err(|_| corrupt)?;
+            own_ops.push(OwnRow {
+                header,
+                statement,
+                record,
+                row,
+            });
+        }
+
+        // The served rows, as a Fetch verifies them.
+        let mut served = Vec::with_capacity(foreign.len());
+        for (device, seq, row) in foreign {
+            let record = op_record(row)?;
+            let wire = record.statement.as_slice();
+            let Some(author) = authors.signer(wire) else {
+                continue;
+            };
+            let statement =
+                OpStatement::verify(wire, &author.verifying_key).map_err(|_| corrupt)?;
+            let header = OpHeader::parse_statement(&statement).map_err(|_| corrupt)?;
+            if Dot::new(device, seq) != Some(header.dot)
+                || header.dot.device_id() != author.status.device
+                || header.vault_id != vault.vault_id
+                || header.item_id.to_bytes().as_slice() != row.item_id.as_slice()
+            {
+                return Err(corrupt);
+            }
+            if check_op_author(&header, author.status).is_err() {
+                continue;
+            }
+            let body = vault.verify_body(&statement, &header, &record);
+            served.push(ServedOp { header, body });
+        }
+        let mut covers = Vec::new();
+        let mut outbox = Vec::new();
+        for row in &image.snapshots {
+            let record = snapshot_record(row)?;
+            let wire = record.statement.as_slice();
+            let snapshot_id = SnapshotId::from_bytes(id16(&row.snapshot_id)?);
+            let sent = generation_column(row.sent_generation.as_ref())?;
+            let columns = |header: &SnapshotHeader| {
+                header.snapshot_id == snapshot_id
+                    && header.vault_id == vault.vault_id
+                    && header.item_id.to_bytes().as_slice() == row.item_id.as_slice()
+            };
+            match row.own {
+                own::SERVED | own::ACKNOWLEDGED => {
+                    if row.own == own::SERVED && sent.is_some() {
+                        return Err(corrupt);
+                    }
+                    let Some(author) = authors.signer(wire) else {
+                        continue;
+                    };
+                    let statement = SnapshotStatement::verify(wire, &author.verifying_key)
+                        .map_err(|_| corrupt)?;
+                    let header =
+                        SnapshotHeader::parse_statement(&statement).map_err(|_| corrupt)?;
+                    if !columns(&header)
+                        || (row.own == own::ACKNOWLEDGED) != (header.author == own_device)
+                    {
+                        return Err(corrupt);
+                    }
+                    // The author checks, the envelope and its key as a Fetch applies them; a
+                    // cover that fails them is left out (§5 (e)).
+                    if let Some((header, plaintext, _)) =
+                        vault.verify_cover(authors, &record, &served)
+                    {
+                        covers.push((header, plaintext));
+                    }
+                }
+                own::UNSENT | own::SENT => {
+                    if (row.own == own::SENT) != sent.is_some() {
+                        return Err(corrupt);
+                    }
+                    let statement =
+                        SnapshotStatement::verify(wire, &own_key).map_err(|_| corrupt)?;
+                    let header =
+                        SnapshotHeader::parse_statement(&statement).map_err(|_| corrupt)?;
+                    if !columns(&header) || header.author != own_device {
+                        return Err(corrupt);
+                    }
+                    outbox.push(OwnSnapshot { header, record });
+                }
+                _ => return Err(corrupt),
+            }
+        }
+        let mut outcome = FetchOutcome::default();
+        vault
+            .settle(&mut served, &covers, now_ms, &mut outcome)
+            .map_err(|_| corrupt)?;
+
+        // The own chain, in order; after each link the ops that waited for it are delivered.
+        let mut acknowledged = true;
+        for own_op in own_ops {
+            let seq = own_op.header.dot.seq();
+            match own_op.row.own {
+                own::ACKNOWLEDGED if acknowledged => {}
+                // The server stores a chain only in order: an acknowledged row after an
+                // unacknowledged one is no state this device wrote.
+                own::ACKNOWLEDGED => return Err(corrupt),
+                _ => acknowledged = false,
+            }
+            let sent = generation_column(own_op.row.sent_generation.as_ref())?;
+            vault.restore_own_op(&own_op.header, &own_op.statement, own_op.record, now_ms)?;
+            match own_op.row.own {
+                own::ACKNOWLEDGED => {
+                    vault.log.acknowledge(seq).map_err(|_| corrupt)?;
+                    vault.own_records.remove(&seq);
+                }
+                own::SENT => {
+                    // "Each with the restore generation of its first send" (ADR 0021 §2).
+                    vault.log.observe_generation(sent.ok_or(corrupt)?);
+                    vault.log.record_sent(seq).map_err(|_| corrupt)?;
+                }
+                _ => {}
+            }
+        }
+        vault.outbox = outbox;
+        if let Some(generation) = image.generation {
+            vault.log.observe_generation(generation);
+            vault.generation = Some(generation);
+        }
+        // Neither counter goes backwards (§4 "What never goes backwards").
+        if vault.clock.to_u64() < image.hlc {
+            vault.clock = Hlc::from_u64(image.hlc);
+        }
+        vault.next_seq = image.next_device_seq;
+        vault.prune_bodies();
+        vault.synced = false;
+        vault.journal = Some(Vec::new());
+        vault.journaled = Journaled {
+            next_seq: image.next_device_seq,
+            hlc: image.hlc,
+            generation: image.generation,
+        };
+        Ok(vault)
+    }
+
+    /// Puts one own op back into the own chain (see [`VaultSync::restore`]).
+    fn restore_own_op(
+        &mut self,
+        header: &OpHeader,
+        statement: &OpStatement,
+        mut record: OpRecord,
+        now_ms: u64,
+    ) -> Result<(), ClientError> {
+        let dot = header.dot;
+        let item = header.item_id;
+        let verdict = self.verify_body(statement, header, &record);
+        self.log
+            .record_own_op(header.clone())
+            .map_err(|_| ClientError::CacheCorrupt)?;
+        // The log settled the dot: the body does not wait in the causal layer.
+        self.waiting_bodies.remove(&dot);
+        if verdict == BodyStatus::Verified
+            && let Some((key_id, body)) = self.bodies.get(&dot)
+            && let Ok(data) = parse_op(body.expose_secret())
+        {
+            let merge = Self::merge_mut(&mut self.items, &self.item_keys, item);
+            // An error leaves the item as a reader sees it with this op's data missing.
+            let _ = merge.apply_op(OpInput {
+                header,
+                key_id: *key_id,
+                data: &data,
+            });
+        }
+        // The locator of a carried wrap is derived, never stored: the record goes back to the
+        // server with the id of the item key the wrap opens to.
+        if let Some(wrap) = record.key_wrap.as_mut() {
+            let ctx = ItemKeyWrapCtx {
+                vault_id: self.vault_id,
+                item_id: item,
+                vault_key_epoch: header.vault_key_epoch,
+            };
+            if let Ok(key_id) = self
+                .vault_key
+                .unwrap_item_key(&ctx, wrap.envelope.as_slice())
+                .map_err(|_| ())
+                .and_then(|key| key.key_id().map_err(|_| ()))
+            {
+                wrap.item_key_id = id(*key_id.as_bytes());
+            }
+        }
+        self.own_records.insert(dot.seq(), OwnRecord { record });
+        let mut touched = BTreeSet::new();
+        self.deliver(now_ms, &mut touched);
+        Ok(())
+    }
+
+    /// The upload of what this device wrote and the server never acknowledged, byte for byte as
+    /// it was stored: the own ops in chain order, then the own snapshots (ADR 0026 §5 and the
+    /// owner's decision on open question 6: "upload the `own` 1 and 3 rows byte-identically
+    /// before deleting (no new dot is signed)"). Unlike [`VaultSync::upload_request`] it
+    /// re-issues nothing and writes no new snapshot. `None` when nothing is queued.
+    ///
+    /// # Errors
+    /// [`ClientError::FetchRequired`] before the first Fetch or upload answer;
+    /// [`ClientError::Internal`].
+    pub fn unsent_upload_request(&mut self) -> Result<Option<UploadRequest>, ClientError> {
+        if self.generation.is_none() {
+            return Err(ClientError::FetchRequired);
+        }
+        let mut records = Vec::new();
+        let mut in_flight = Vec::new();
+        let seqs: Vec<u64> = self.log.unacknowledged().map(|h| h.dot.seq()).collect();
+        for seq in seqs {
+            if records.len() >= MAX_RECORDS {
+                break;
+            }
+            let own = self.own_records.get(&seq).ok_or(ClientError::Internal)?;
+            records.push(Record::Op(own.record.clone()));
+            in_flight.push(InFlight::Op(seq));
+            self.log
+                .record_sent(seq)
+                .map_err(|_| ClientError::Internal)?;
+        }
+        let acked = self.acked();
+        for snap in &self.outbox {
+            if records.len() < MAX_RECORDS && snap.header.covered.get(self.device_id) <= acked {
+                records.push(Record::Snapshot(snap.record.clone()));
+                in_flight.push(InFlight::Snapshot(snap.header.snapshot_id));
+            }
+        }
+        if records.is_empty() {
+            return Ok(None);
+        }
+        self.journal_sent(&in_flight);
+        self.in_flight = in_flight;
+        self.synced = false;
+        Ok(Some(UploadRequest {
+            vault_id: id(self.vault_id.to_bytes()),
+            records: List::new(records).map_err(|_| ClientError::Internal)?,
+        }))
+    }
+
+    /// ADR 0026 §4 step 1: each own row an upload carries moves to `own = 3` with the restore
+    /// generation of the last response, in the transaction the host commits before it sends
+    /// the request. A resend keeps the first value (the cache stores it only once).
+    fn journal_sent(&mut self, in_flight: &[InFlight]) {
+        let Some(generation) = self.generation.map(RestoreGeneration::to_bytes) else {
+            return;
+        };
+        let vault_id = self.vault_id.to_bytes();
+        let device_id = self.device_id.to_bytes();
+        for sent in in_flight {
+            let write = match *sent {
+                InFlight::Op(seq) => Write::OpOwn {
+                    vault_id,
+                    device_id,
+                    device_seq: seq,
+                    own: own::SENT,
+                    sent_generation: Some(generation),
+                },
+                InFlight::Snapshot(sid) => Write::SnapshotOwn {
+                    vault_id,
+                    snapshot_id: sid.to_bytes(),
+                    own: own::SENT,
+                    sent_generation: Some(generation),
+                },
+            };
+            self.record(|| write);
+        }
+    }
+
+    /// How many own ops and own snapshots the server has not acknowledged: what removal of
+    /// this device would lose (ADR 0026 §5).
+    #[must_use]
+    pub fn unacknowledged(&self) -> (usize, usize) {
+        (self.log.unacknowledged().count(), self.outbox.len())
     }
 }

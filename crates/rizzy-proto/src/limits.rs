@@ -1,13 +1,15 @@
 //! Every size limit of the `/api/v1` types, with its source, and the character sets of the
 //! [`Text`](crate::wire::Text) fields.
 //!
-//! Two kinds of limit:
+//! Three kinds of limit:
 //! - **Format limits** follow from a layout CRYPTO.md or ADR 0012 fixes: the envelope's 16 MiB
 //!   plaintext limit plus its overhead, the op and snapshot headers with at most `u16::MAX`
 //!   version-vector entries, a statement's fixed body plus its signature container. They are
 //!   upper bounds only. The exact parse (lengths, versions, algorithm ids) stays in
 //!   `rizzy-core` and `rizzy-sync`, which the server and clients run on the decoded bytes; this
 //!   crate does not depend on them (ADR 0016 §3: `rizzy-proto` has no internal dependency).
+//! - **Body limits** are ADR 0028 item 7's ([`MAX_BODY_LEN`], [`DEFAULT_UPLOAD_BODY_LEN`],
+//!   [`MAX_UPLOAD_BODY_LEN`]); the server enforces them, and clients cap what they build.
 //! - **Count limits** on lists have no source in the ADRs. They are this crate's conservative
 //!   choice, each stated below, and a change is a pre-v1.0 wire change (ADR 0002 point 5). A
 //!   whole request is further bounded by the server's body-size limit (threat model §7.6 "D").
@@ -137,6 +139,23 @@ pub const MAX_ITEM_KEY_WRAPS: usize = 65_536;
 /// `GET /api/meta` (ADR 0002 point 3).
 pub const MAX_META_ENTRIES: usize = 32;
 
+/// The body limit of every endpoint except the three below: 1 MiB (ADR 0028 item 7). It bounds
+/// the unauthenticated requests (signup, login, device authentication, recovery) and the account
+/// requests.
+pub const MAX_BODY_LEN: usize = 1024 * 1024;
+
+/// The default, and the smallest, body limit a server applies to `vault/upload`, `vault/heal`
+/// and `account/commit`: 32 MiB (ADR 0028 item 7, `RIZZY_MAX_UPLOAD_BYTES`). One upload must fit
+/// at least one record of the largest size the wire admits: an op statement near
+/// [`MAX_OP_STATEMENT_LEN`] with a [`MAX_ENVELOPE_LEN`] envelope, about 24.5 MiB as base64url
+/// JSON.
+pub const DEFAULT_UPLOAD_BODY_LEN: usize = 32 * 1024 * 1024;
+
+/// The largest body limit an operator may set for `vault/upload`, `vault/heal` and
+/// `account/commit`: 256 MiB (ADR 0028 item 7). Clients use it as their own cap on a request
+/// they build or keep (ADR 0026 §3): no server accepts a larger one.
+pub const MAX_UPLOAD_BODY_LEN: usize = 256 * 1024 * 1024;
+
 /// Login names: CRYPTO.md §2. After ASCII lowercasing, 1–254 bytes from `[a-z0-9._+@-]`,
 /// anything else "rejected at signup and at login, before any lookup". The wire admits exactly
 /// the inputs that lowercase into that set, so uppercase letters pass and the server applies
@@ -167,8 +186,9 @@ impl TextRule for OriginRule {
 }
 
 /// A server or client version (ADR 0002 point 3): at most 64 bytes of `[0-9A-Za-z.+-]`, which
-/// covers semantic versions with pre-release and build suffixes. No format is fixed beyond
-/// that.
+/// covers semantic versions with pre-release and build suffixes. The type admits any such text; the
+/// `Rizzy-Client` check compares versions by `SemVer` 2.0.0 precedence and counts a version that
+/// is not `SemVer` as below any minimum (ADR 0028 item 14; [`crate::meta::semver_precedence`]).
 #[derive(Debug)]
 pub enum VersionRule {}
 
@@ -181,8 +201,9 @@ impl TextRule for VersionRule {
 }
 
 /// A client platform in `Rizzy-Client: <platform>/<version>` and in the minimum-version list
-/// (ADR 0002 point 3): at most 32 bytes of `[a-z0-9-]`. The platform names are not fixed by
-/// any ADR yet.
+/// (ADR 0002 point 3): at most 32 bytes of `[a-z0-9-]`. ADR 0028 item 14 names the eight platforms a
+/// `Rizzy-Client` header may carry ([`crate::meta::PLATFORMS`]); the type stays open so that a
+/// client still reads a later server's minimum list.
 #[derive(Debug)]
 pub enum PlatformRule {}
 
@@ -256,5 +277,16 @@ mod tests {
         assert!(STATEMENT_FRAME + bundle_body + 2 * SIGNATURE_CONTAINER_LEN <= 1024);
         // DEVICE_SECRET_KEYS is the largest key-wrap plaintext (CRYPTO.md §8.5).
         const { assert!(SYMMETRIC_ENVELOPE_OVERHEAD + 65 <= MAX_KEY_ENVELOPE_LEN) };
+    }
+
+    #[test]
+    fn body_limits_match_adr_0028() {
+        assert_eq!(MAX_BODY_LEN, 1 << 20);
+        assert_eq!(DEFAULT_UPLOAD_BODY_LEN, 32 << 20);
+        assert_eq!(MAX_UPLOAD_BODY_LEN, 256 << 20);
+        // One maximal record fits the smallest upload limit as base64url JSON.
+        let record = crate::wire::b64url_len(MAX_OP_STATEMENT_LEN)
+            + crate::wire::b64url_len(MAX_ENVELOPE_LEN);
+        assert!(record < DEFAULT_UPLOAD_BODY_LEN);
     }
 }

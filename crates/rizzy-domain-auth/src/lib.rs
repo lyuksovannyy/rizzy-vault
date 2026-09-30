@@ -101,7 +101,8 @@
 //!   their `rizzy-proto` requests, and typed entry points ([`RecoveryRelease`],
 //!   [`TotpEnrolment`]) beside them;
 //! - the invite-token format and who issues invites (the admin API is M3): [`InviteVerifier`];
-//! - the secrets file's byte layout: [`ServerSecrets`] takes and gives its parts;
+//! - the secrets file's byte layout is not this crate's (ADR 0028 item 13 fixes it, `rizzy-server`
+//!   reads and writes it): [`ServerSecrets`] takes and gives its parts;
 //! - how devices and the account email are notified of a new device, a pending or completed
 //!   recovery (the `notify` role is M3): the flows return what the server needs to notify;
 //! - when an unfinished signup's name reservation is released;
@@ -199,8 +200,12 @@ pub mod types {
 
     /// `/api/v1` errors and `/api/meta` (ADR 0002 point 3).
     pub use rizzy_proto::error::{ErrorCode, ErrorResponse};
-    /// `/api/meta` (ADR 0002 point 3, as ADR 0022 amends it).
-    pub use rizzy_proto::meta::{API_V1, ApiVersion, META_PATH, MetaResponse, Version};
+    /// `/api/meta` and the `Rizzy-Client` header (ADR 0002 point 3, as ADR 0022 amends it; ADR
+    /// 0028 item 14).
+    pub use rizzy_proto::meta::{
+        API_V1, ApiVersion, CLIENT_HEADER, ClientHeader, META_PATH, MetaResponse, MinClientVersion,
+        Platform, Version, client_too_old,
+    };
     /// The self-grants [`crate::VaultPort`] moves between the domains.
     pub use rizzy_proto::objects::VaultSelfGrant;
     /// The bearer token and the request signature, as the headers carry them (CRYPTO.md
@@ -213,6 +218,15 @@ pub mod types {
     /// The vault half of a rotation and the vaults of a recovery answer, which
     /// [`crate::VaultPort`] hands to and takes from the vault domain (ADR 0025 §1).
     pub use rizzy_proto::{change::VaultRotationUpload, recovery::RecoveryVault};
+    /// The HTTP conventions the server applies and clients follow (ADR 0028 items 1, 4, 5 and
+    /// 7): the endpoint paths, the bearer scheme, the request-signing headers, the body limits.
+    pub use rizzy_proto::{
+        http::{
+            BEARER_SCHEME, BEARER_TOKEN_CHARS, MAX_REQUEST_COUNTER_DIGITS, REQUEST_COUNTER_HEADER,
+            REQUEST_SIGNATURE_CHARS, REQUEST_SIGNATURE_HEADER, paths,
+        },
+        limits::{DEFAULT_UPLOAD_BODY_LEN, MAX_BODY_LEN, MAX_UPLOAD_BODY_LEN},
+    };
 }
 
 /// The auth domain: every flow of this crate, over one database.
@@ -312,7 +326,7 @@ pub(crate) const fn is_refusal(e: &AuthError) -> bool {
         AuthError::Unauthorized
             | AuthError::InvalidRequest
             | AuthError::SecondFactorRequired
-            | AuthError::RateLimited
+            | AuthError::RateLimited { .. }
     )
 }
 

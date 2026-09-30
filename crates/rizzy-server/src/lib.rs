@@ -22,9 +22,9 @@
 //! | Module | Spec | Purpose |
 //! |---|---|---|
 //! | [`cli`] | ADR 0010 §1, §4 | The command line and the process entry point |
-//! | [`config`] | ADR 0010 §1, §4 | Settings from a file and the environment |
+//! | [`config`] | ADR 0010 §1, §4; ADR 0028 items 10–12 | Settings from a file and the environment |
 //! | [`server`] | ADR 0010 §2, §4; ADR 0011 point 9; CRYPTO.md §5.8, §5.11; ADR 0021 §2 | Startup checks, serving, graceful shutdown |
-//! | [`http`] | ADR 0002 point 3; ADR 0010 §1; CRYPTO.md §5.10; INV-49, INV-52 | The router, the endpoints, the header parsers, the security headers, the web page |
+//! | [`http`] | ADR 0002 point 3; ADR 0010 §1; ADR 0028; CRYPTO.md §5.10; INV-49, INV-52 | The router, the endpoints, the header parsers, the security headers, the web page |
 //! | [`worker`] | ADR 0010 §1, §5; ADR 0011 point 9; ADR 0021 §3, §7 | The worker loop |
 //! | [`bridge`] | ADR 0016 R4 | The two cross-domain traits, wired |
 //! | [`secrets_file`] | CRYPTO.md §5.11; ADR 0010 §4 | The secrets file's reader and writer |
@@ -57,35 +57,53 @@
 //!   and refuses to start if the read-back fails ([`coredump`]). As a leaf it may depend on
 //!   rustix directly (ADR 0024 point 2).
 //!
-//! # Wire and format details this crate decides
+//! # The HTTP conventions ([ADR 0028])
 //!
-//! No Accepted ADR fixes these; each is documented where it is applied and reported to the
-//! owner as a pre-v1.0 choice (ADR 0002 point 5): the endpoint paths and methods, "empty
-//! success" as `204`, and the HTTP status of each error code ([`http::api`]); the bearer and
-//! request-signing header forms ([`http::headers`]); the body limits, body-read deadlines and
-//! the cap on concurrent large bodies ([`http::api`]); the listener's header-read timeout,
-//! connection cap and shutdown grace ([`server::ServeLimits`]); the rate-limit source
-//! (IPv6 per /64); the configuration file format and setting names ([`config`]); the secrets
-//! file layout ([`secrets_file`]); the secrets backup file layout ([`secrets_backup`], which
-//! CRYPTO.md §5.11 places here).
+//! [ADR 0028] freezes, for `v1`, what this crate used to decide on its own. Where each item is
+//! applied:
+//!
+//! | ADR 0028 item | Where |
+//! |---|---|
+//! | 1 paths and methods, 2 success, 3 errors and `Retry-After` | [`http::api`] (the table, [`http::api::status`]); the router in [`http`] |
+//! | 4 bearer token, 5 request signing | [`http::headers`]; the signed request-target and the one `401` in [`http::api`]; the replay window in `rizzy-domain-auth` |
+//! | 6 order of checks, 7 body limits, 8 slow and concurrent bodies | [`http::api`] |
+//! | 9 listener | [`server::ServeLimits`], [`server::serve_http_with`] |
+//! | 10 response headers; the HTTPS origin | [`http::security`]; [`config`] |
+//! | 11 rate-limit source and trusted proxies | [`http::headers::client_address`], [`config`] |
+//! | 12 configuration | [`config`], [`cli`] |
+//! | 13 secrets file | [`secrets_file`], [`secrets_backup`] |
+//! | 14 `GET /api/meta`, `Rizzy-Client` | [`http::api::meta`], [`http::headers::client_refused`] |
+//! | 15 web role paths | [`http::web`] |
+//!
+//! The constants clients share (paths, header names, body limits, platform names) are
+//! `rizzy-proto`'s. **This crate's readings where the ADR is silent**, each documented where it
+//! is applied and reported to the owner: a `429` that comes from no bucket carries a fixed
+//! `Retry-After` ([`http::api::RETRY_AFTER_FALLBACK_SECS`]); the `Rizzy-Client` and
+//! `X-Forwarded-For` checks run on the 27 `/api/v1` endpoints, before the session check, and
+//! not on `GET /api/meta`; a repeated `Authorization`, signing or `Content-Length` field line
+//! is refused; another method on the web role's two paths is a plain `405`; a
+//! `request_counter` above `i64::MAX` is refused (`rizzy-domain-auth`).
 //!
 //! # Not in this build (reported to the owner)
 //!
 //! - `rizzy-vault restore` into `PostgreSQL`: ADR 0023 §5's instance lock is not implemented,
 //!   so it is refused with a usage error ([`admin`]).
 //! - The `embed-web` feature and the web vault (M1 step 5), the admin listener and API (M3),
-//!   `notify`, `icons` (M3) and `smtp` (M6), and key rotation: the commit endpoint refuses a
-//!   state that rotates a key, so the revocation of CRYPTO.md §11.8 step 3 and the default
-//!   recovery of §11.9 step 5 are refused too (the vault half of §11.6 step 9 has no wire form;
-//!   [`http::api`]). Password change, settings, self-revocation, suspension, recovery without
-//!   rotation and TOTP have endpoints.
+//!   `notify`, `icons` (M3) and `smtp` (M6).
+//! - A setting for the minimum client versions: the list is built in and empty
+//!   ([`http::api::MIN_CLIENT_VERSIONS`]), so no client is refused yet.
 //!
 //! # Tests
 //!
 //! `tests/http/` drives the router in-process against a real `SQLite` database: the security
 //! headers and CSP; oversized bodies; anonymous requests to the large-body endpoints refused
 //! before their body is read; the account endpoints' session gating, strict bodies and
-//! recovery refusals and rate limit; and, over a bound localhost port, the header-read timeout and a
+//! recovery refusals and rate limit; [ADR 0028]'s conventions (`conventions`: the error table
+//! and `Retry-After`, the one `401`, `Content-Length`, no CORS and no compression, the
+//! trusted-proxy rule, `/api/meta` and `Rizzy-Client`, the web paths); request signing
+//! (`signing`: over a real socket, the request-target bytes verified are the bytes sent, an
+//! absolute-form target included, and the replay window's edges); key rotation end to end with
+//! `rizzy-client` (`rotation`); and, over a bound localhost port, the header-read timeout and a
 //! shutdown that a stalled request cannot hold open. `tests/cli.rs` runs the binary:
 //! `--version`, usage errors, configuration errors, the `secrets` commands, and `backup` and
 //! `restore` through a pipe and a file with their refusals.
@@ -95,13 +113,11 @@
 //! restore generation and reconciliation epochs, and the refusals; it also pins that a native
 //! file copy restored in place opens no epoch.
 //!
-//! **Not tested here yet:** the end-to-end flow (signup, login, device authentication, a signed
-//! upload and a Fetch with `rizzy-core`'s client-side functions, signature and replay
-//! refusals). It needs `rizzy-core`, `rizzy-proto` and `rizzy-sync` in this crate's tests, and
-//! ADR 0016 point 4 allows only a `rizzy-client` dev-dependency, which does not exist yet. The
-//! domain crates test the same flows without HTTP; the owner decides how the HTTP flow returns.
+//! The end-to-end flows (signup, login, device authentication, signed requests, sync, rotation)
+//! run through `rizzy-client`, the one dev-only internal edge ADR 0016 §4 admits.
 //!
 //! [ADR 0002]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0002-own-protocol.md
+//! [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
 //! [ADR 0010]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0010-server-shape.md
 //! [ADR 0011]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0011-storage.md
 //! [ADR 0021]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0021-server-compaction.md

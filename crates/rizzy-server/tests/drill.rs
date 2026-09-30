@@ -50,7 +50,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rizzy_domain_auth::StartupCheckError;
-use rizzy_server::config::{self, Config, Sources};
+use rizzy_server::config::{self, Config, Settings, Sources};
 use rizzy_server::server::{ServeError, Services, open_services};
 use rizzy_server::{admin, fsutil, secrets_backup, secrets_file};
 use rizzy_storage::backup::file;
@@ -117,7 +117,7 @@ fn server_config(data: &Path, secrets: &Path) -> Config {
     env.insert(config::SECRETS_FILE, secrets.to_str().unwrap().to_owned());
     let lookup = move |key: &str| env.get(key).map(OsString::from);
     Config::from_sources(&Sources {
-        file: BTreeMap::new(),
+        file: Settings::new(),
         env: &lookup,
         roles_flag: None,
     })

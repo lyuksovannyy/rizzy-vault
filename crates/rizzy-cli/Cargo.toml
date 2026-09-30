@@ -8,12 +8,51 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[lib]
+name = "rizzy_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "rv"
 path = "src/main.rs"
 
+# Internal dependencies: exactly the ADR 0016 §3 row (`rizzy-core`, `rizzy-client`), checked by
+# `cargo xtask check-deps`. The wire types (`rizzy-proto`) and the importers (`rizzy-import`)
+# are reached through `rizzy-client`'s re-exports.
 [dependencies]
+# The sans-I/O client core (ADR 0013 §1–§2): every flow, check and format decision.
+rizzy-client.workspace = true
+# The password generator and TOTP (ROADMAP §4.2 "generate, copy TOTP"), and the id and item
+# types the client core's API is written in.
 rizzy-core.workspace = true
+# The runtime of the HTTP transport and the SQLite executor: a current-thread scheduler, TCP,
+# timers. No signal handling, no process API, no filesystem API (`std` does those).
+tokio = { workspace = true, features = ["rt", "net", "time"] }
+# The HTTP/1.1 client connection (ADR 0013 §2 "HTTP transport … Rust HTTP client, rustls";
+# ADR 0028). hyper and hyper-util are the versions the server already uses; only hyper's
+# `client` feature is new. One connection per request, driven by this crate (`src/http.rs`).
+hyper = { workspace = true, features = ["client"] }
+hyper-util.workspace = true
+# `Full` (the request body) and `Limited` (the bounded response read). Already in the graph
+# through axum; see the workspace entry.
+http-body-util.workspace = true
+# No TLS crate: a client-side TLS crate awaits ADR 0009's approval procedure (see the workspace
+# manifest). `https://` origins are refused until then.
+# The cache executor (ADR 0026 §3–§4; ADR 0019 §5: sqlx sits in `rizzy-cli` for M1), with the
+# `sqlite` driver only (ADR 0016 R5, checked by `cargo xtask check-deps`). The workspace entry
+# `sqlx-client` is the same pinned sqlx without the PostgreSQL driver.
+sqlx-client.workspace = true
+# OS randomness, as a leaf crate (ADR 0009 "RNG rules", ADR 0016 R2 (c)):
+# `rand_core::UnwrapErr(getrandom::SysRng)` is the RNG every client-core call receives.
+getrandom.workspace = true
+rand_core.workspace = true
+# Request and response bodies (the `rizzy-proto` types through serde), and the JSON forms the
+# cache stores as served (ADR 0026 §3: `pending_commit`, the self-grant).
+serde.workspace = true
+serde_json.workspace = true
+# Wipes typed secrets, the device-state record and bearer-token text after use (CLAUDE.md:
+# secret types zeroize). The version rizzy-core pins; no new crate.
+zeroize.workspace = true
 # Disables core dumps at process start (threat model INV-60, ADR 0024; `src/coredump.rs`): a
 # leaf crate may depend on rustix directly (ADR 0024 point 2). Called on Unix only: rustix has
 # neither call on Windows (ADR 0024 point 3). Declared for every target because

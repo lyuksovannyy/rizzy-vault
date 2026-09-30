@@ -262,7 +262,7 @@ fn web_certificates_are_bounded() {
         }
         assert!(matches!(
             env.svc.upload_web_certificate(&session, &r3, env.now).await,
-            Err(AuthError::RateLimited)
+            Err(AuthError::RateLimited { .. })
         ));
         // Logins still work at the limit.
         env.login(&client).await;

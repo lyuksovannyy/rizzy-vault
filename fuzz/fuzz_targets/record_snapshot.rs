@@ -41,7 +41,11 @@ use rizzy_sync::vv::VersionVector;
 fn check_register(register: &Register<'_>, covered: &VersionVector) {
     let entries = register.entries();
     assert!((1..=MAX_VALUES).contains(&entries.len()));
-    assert!(entries.windows(2).all(|p| matches!(p, [a, b] if a.dot() < b.dot())));
+    assert!(
+        entries
+            .windows(2)
+            .all(|p| matches!(p, [a, b] if a.dot() < b.dot()))
+    );
     for e in entries {
         assert!(covered.covers(e.dot()));
         assert!(e.value().len() <= MAX_VALUE_LEN);
@@ -70,7 +74,11 @@ fuzz_target!(|input: &[u8]| {
     let again = encode_snapshot(&covered, &snapshot).expect("an accepted snapshot encodes");
     assert_eq!(again.expose_secret(), data.as_slice());
     let state = canonical_state(&covered, &snapshot).expect("an accepted state encodes");
-    let prefix = [&[0x00, 0x01][..], &covered.to_vec().expect("a decoded vector encodes")].concat();
+    let prefix = [
+        &[0x00, 0x01][..],
+        &covered.to_vec().expect("a decoded vector encodes"),
+    ]
+    .concat();
     assert_eq!(state.expose_secret(), [prefix.as_slice(), &data].concat());
     assert!(data.len() <= MAX_SNAPSHOT_DATA_LEN);
     assert!(parse_op(&data).is_err());

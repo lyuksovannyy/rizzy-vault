@@ -106,6 +106,28 @@ proptest = { version = "1.11", default-features = false, features = ["std"] }
 # queries are runtime-checked and dispatched by enum (ADR 0011 point 3).
 sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "postgres", "tls-rustls-ring-webpki", "migrate"] }
 
+# The `rv` client's transport and cache (ADR 0013 §2: "The Rust HTTP client crate is chosen in
+# M1. It must use rustls"; ADR 0026; ADR 0028). `rizzy-cli` only; never a dependency of a
+# no-I/O crate (ADR 0016 R1, checked by `cargo xtask check-deps`).
+#
+# The HTTP client is hyper's own HTTP/1.1 client connection (`hyper` and `hyper-util` above,
+# with hyper's `client` feature switched on by `rizzy-cli`): no new HTTP crate, and the same
+# hyper the server is tested with. What it needs beside them:
+# - http-body-util: `Full` and `Limited` bodies. Already in Cargo.lock through axum (hyperium,
+#   MIT); no new crate enters the graph.
+#
+# TLS for `https://` origins is NOT here yet. A client-side TLS crate needs ADR 0009's approval
+# procedure ("any other AEAD, KDF, curve, signature, PAKE, RNG or TLS crate on the client
+# side"): an exact pin, the checklist, the protocol-version decision, and an ADR 0009 and
+# CRYPTO.md §3 update the owner accepts. Until then `rv` refuses `https://` origins
+# (`crates/rizzy-cli/src/http.rs`). The candidates, for that ADR: `tokio-rustls` (the tokio
+# adapter of rustls, with the `ring` provider sqlx already uses) and `webpki-roots`.
+http-body-util = { version = "0.1.5", default-features = false }
+# sqlx for a client leaf crate (ADR 0016 R5: "only with the `sqlite` driver and no other driver
+# feature"; ADR 0019 §5; ADR 0026 §3). The same exact pin as `sqlx` above, without `postgres`,
+# TLS and `migrate`: the cache schema is `rizzy-client`'s SQL text, run by the leaf.
+sqlx-client = { package = "sqlx", version = "=0.9.0", default-features = false, features = ["runtime-tokio", "sqlite-bundled"] }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"

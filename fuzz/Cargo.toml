@@ -47,7 +47,8 @@
 #                      request-counter window, `account-state` steps, bundle-chain extension
 #                      (CRYPTO.md §5.10, §10.2, §11; ADR 0012 §7)
 #   server_headers     rizzy-server's request-header parsers: bearer token, request-signing
-#                      headers, X-Forwarded-For (CRYPTO.md §5.10; threat model §7.6 "S")
+#                      headers, Content-Length, Rizzy-Client, X-Forwarded-For (ADR 0028 items 4, 5,
+#                      7, 11, 14; CRYPTO.md §5.10; threat model §7.6 "S")
 #   server_config      rizzy-server's configuration file parser and validation (ADR 0010)
 #   server_secrets_file rizzy-server's secrets file reader and writer (CRYPTO.md §5.11)
 #   db_backup_parse    rizzy-storage's logical backup file parser and writer (ADR 0023 §3):
@@ -55,6 +56,13 @@
 #                      round-tripped
 #   client_export      rizzy-client's export-file JSON reader: the whole-file cap, the strict
 #                      parser and the header checks (§11.14)
+#   client_export_payload rizzy-client's export payload reader and the import mapping behind
+#                      it: arbitrary bytes as the plaintext of an `EXPORT_FILE` envelope
+#                      (ADR 0027 §2)
+#   client_device_state rizzy-client's device-state record codec (ADR 0026 §2): arbitrary bytes,
+#                      and the lifecycle steps on every record that parses
+#   client_cache_load  rizzy-client's cache loader (ADR 0026 §3-§6): the rows of a valid cache
+#                      mutated in every column, then opened and loaded
 #   import_bitwarden   rizzy-import's Bitwarden JSON importer and its JSON reader (ADR 0002
 #                      point 2; threat model A16)
 #   import_1pux        rizzy-import's 1PUX importer: the zip reader, the DEFLATE decoder and
@@ -64,6 +72,8 @@
 #   import_csv         rizzy-import's generic CSV importer and its CSV reader
 #   import_chrome_csv  rizzy-import's Chrome CSV importer
 #   import_firefox_csv rizzy-import's Firefox CSV importer
+#   import_rizzy_json  rizzy-import's reader of rizzy-vault's own plaintext JSON export
+#                      (ADR 0027 §6)
 #
 # The `import_*` targets share `fuzz_targets/import_common/mod.rs` (the checks on an import
 # result and a counting RNG), included with `#[path]`; it is not a target.
@@ -109,8 +119,8 @@ rizzy-server = { path = "../crates/rizzy-server" }
 # crate already in this graph through the two above; its external crates (sqlx, sha2) are the
 # ones the main workspace already locks.
 rizzy-storage = { path = "../crates/rizzy-storage" }
-# The client flows' export reader (`client_export`). A path crate over rizzy-core, rizzy-sync
-# and rizzy-proto, all already here; no new external crate.
+# The client flows' export readers (`client_export`, `client_export_payload`). A path crate over
+# rizzy-core, rizzy-sync, rizzy-proto and rizzy-import, all already here; no new external crate.
 rizzy-client = { path = "../crates/rizzy-client" }
 # The importers (the `import_*` targets). A path crate whose only dependencies are rizzy-core
 # and zeroize, so no new crate in this graph.
@@ -338,6 +348,34 @@ bench = false
 [[bin]]
 name = "import_firefox_csv"
 path = "fuzz_targets/import_firefox_csv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_export_payload"
+path = "fuzz_targets/client_export_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import_rizzy_json"
+path = "fuzz_targets/import_rizzy_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_device_state"
+path = "fuzz_targets/client_device_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_cache_load"
+path = "fuzz_targets/client_cache_load.rs"
 test = false
 doc = false
 bench = false

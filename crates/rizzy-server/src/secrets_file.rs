@@ -2,11 +2,10 @@
 //!
 //! CRYPTO.md §5.11 fixes the file's **contents** ("the single normative list") and its version,
 //! `format = 1`: `server_setup` per `setup_id`, `enum_key`, `server_data_key` per `data_key_id`
-//! with one marked current, and the first-run bootstrap token. No Accepted ADR fixes its
-//! **layout**; `rizzy-domain-auth` leaves the reader and writer to this crate. The layout below
-//! is therefore this crate's choice, the smallest one that carries exactly that list, in the
-//! JSON shape CRYPTO.md §11.14 already uses for files (reported to the owner as a detail to
-//! confirm; it is not frozen by an ADR):
+//! with one marked current, and the first-run bootstrap token. ADR 0028 item 13 owns the JSON
+//! **layout**, and this module mirrors it: the smallest layout that carries exactly that list,
+//! in the JSON shape CRYPTO.md §11.14 already uses for files, at most 256 KiB, unknown members
+//! refused:
 //!
 //! ```json
 //! {
