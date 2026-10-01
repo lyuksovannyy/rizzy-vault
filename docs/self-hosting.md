@@ -48,7 +48,7 @@ Never put both into one backup, one archive or one volume.
 
 **Not in this build** (M1 is in progress):
 - The web vault (M1 step 5): the `web` role serves a fixed "no web vault in this build" page. The API is complete for the M1 clients.
-- PostgreSQL as a supported setup (M3). This build runs every M1 role on it, the `worker` included (one active worker per database, the others wait as standbys), but its PostgreSQL tests are not run in CI yet. `rizzy-vault backup` works on PostgreSQL; `rizzy-vault restore` refuses a PostgreSQL target until the instance lock of [ADR 0023](adr/0023-logical-backup-format.md) §5 exists ([§9](#9-restore)).
+- PostgreSQL as a supported setup (M3). This build runs every M1 role on it, the `worker` included (one active worker per database, the others wait as standbys), but its PostgreSQL tests are not run in CI yet, and the PostgreSQL side of the instance lock, of `restore`, `migrate` and `secrets rotate` ([§9](#9-restore)) has not been run against a real PostgreSQL server at all. Do not rely on it before M3.
 - The admin panel and API (M3), `notify`, `icons` (M3), `smtp` (M6), Quadlet units (M3), signed images (M8).
 
 **Core dumps are off.** A crash must never write the server's memory (keys, the OPAQUE secrets, session state) to disk ([INV-60](THREAT_MODEL.md#8-security-invariants), [ADR 0024](adr/0024-core-dump-disabling-rustix.md)). Before it reads its configuration, `rizzy-vault` sets its core-file limit (`RLIMIT_CORE`) to 0 and, on Linux, marks itself non-dumpable (`PR_SET_DUMPABLE` 0); it reads both back and refuses to start (exit 1, `cannot disable core dumps: ...` on stderr) if either did not take. There is no setting to turn this off. As defence in depth, [`compose.yaml`](../deploy/compose.yaml) also sets `ulimits: core: 0` on every container; under systemd, set `LimitCORE=0` in the unit. On the host, the kernel's `core_pattern` is global to all containers: if it pipes to a crash collector (`systemd-coredump`, `apport`, `abrt`) and `fs.suid_dumpable` is 2, check that the collector stores nothing for this container ([AR-10](THREAT_MODEL.md#9-accepted-risks-and-out-of-scope); whether such a collector can still capture a non-dumpable process is unverified).
@@ -86,7 +86,7 @@ docker compose up -d
 docker compose logs rizzy-vault
 ```
 
-A healthy start logs `database_created` (first start only) and `listening`. A start that fails logs why and exits; see [§4](#4-configuration-reference) for configuration errors (exit code 2). The server refuses to start if the secrets file is inside the data directory, if it does not fit the database (a different setup, a missing data key), or, with SQLite, if another process holds the database's writer lock.
+A healthy start logs `database_created` (first start only) and `listening`. A start that fails logs why and exits; see [§4](#4-configuration-reference) for configuration errors (exit code 2). The server refuses to start if the secrets file is inside the data directory, if it does not fit the database (a different setup, a missing data key), or, with SQLite, if another process holds the database's writer lock (with PostgreSQL: while `restore`, `migrate` or `secrets rotate` holds the instance lock, [§9](#9-restore)).
 
 **Create the first accounts.** Signup is `closed` by default, and the admin panel that issues invites comes in M3. Until then:
 
@@ -115,6 +115,15 @@ Settings are `RIZZY_*` names. Each comes from the environment, or from a configu
 | `RIZZY_LOG_LEVEL` | `info` | `error`, `warn`, `info` or `debug`. |
 | `RIZZY_WORKER_INTERVAL_SECS` | `60` | Seconds between two worker runs, 1 to 86400. |
 | `RIZZY_MAX_UPLOAD_BYTES` | `33554432` (32 MiB) | Body limit of vault uploads, restore healing and the account commit that carries a key rotation, 32 MiB to 256 MiB. The proxy must allow at least this much (Caddy has no limit by default). |
+| `RIZZY_RECOVERY_WAIT_HOURS` | `72` | The recovery waiting period in whole hours, 0 to 720 (30 days); anything else refuses the start. See "The recovery waiting period" below. |
+
+**The recovery waiting period** ([ADR 0008](adr/0008-account-recovery.md) decision 5, [CRYPTO.md §11.9](CRYPTO.md#119-recovery-with-the-emergency-kit)). A user who lost every device recovers the account with the recovery code from the Emergency Kit. A valid code does not release the account at once: it opens a pending recovery, and the server releases the account only `RIZZY_RECOVERY_WAIT_HOURS` later. During the wait, any enrolled device of the account can cancel the recovery. That is what protects a user whose printed kit was stolen: the thief has to wait, and the user's own device can say no.
+- **Default 72 h.** Keep it unless you have a reason. Longer (up to 30 days) gives users more time to notice; shorter gives a thief less to wait out.
+- **0 means no wait:** kit plus server access is an immediate takeover, and the account's devices get no time to cancel. Use 0 only on an instance with a single account, where you are the only user and the kit is yours ([THREAT_MODEL Q-15](THREAT_MODEL.md#10-open-questions-for-the-owner)). The server does not check how many accounts exist; it logs `recovery_wait_zero` at every start as a reminder.
+- **A change applies to recoveries started after the restart.** A recovery that is already pending keeps the release time it was opened with.
+- The wait is enforced by the server. It protects against a kit thief, not against whoever runs the server.
+- In this build a change of the setting is not recorded in the users' security event log (that log is part of the M3 admin work, [INV-69](THREAT_MODEL.md#8-security-invariants)); tell your users when you change it.
+- With `compose.yaml`, set it in `.env`; the server container reads it from there.
 
 `compose.yaml` also reads these, for the containers around the server: `RIZZY_DOMAIN` (the proxy's host name), `RIZZY_HTTP_PORT` and `RIZZY_HTTPS_PORT` (the proxy's host ports, default 8080 and 8443), `RIZZY_IMAGE`, `RIZZY_PROXY_IMAGE`, `RIZZY_EDGE_SUBNET`, `RIZZY_PROXY_IP`, and `RIZZY_SECRETS_BACKUP_DIR` (the host directory `backup-secrets` writes to, default `./backup-secrets`, [§5](#5-the-secrets-file)).
 
@@ -124,11 +133,13 @@ Settings are `RIZZY_*` names. Each comes from the environment, or from a configu
 |---|---|---|
 | `rizzy-vault [serve] [--roles <list>]` | `rizzy-vault` | – |
 | `rizzy-vault secrets init` | `secrets-init` | the secrets volume writable |
-| `rizzy-vault secrets rotate [--data-key]` | `secrets-rotate` | the server stopped (it takes the writer lock); the secrets volume writable |
+| `rizzy-vault secrets rotate [--data-key]` | `secrets-rotate` | the server stopped (it takes the SQLite writer lock, or the PostgreSQL instance lock); the secrets volume writable; with `--data-key`, the data volume too ([§5](#5-the-secrets-file)) |
 | `rizzy-vault backup-secrets --out <file> --passphrase-file <file\|->` | `backup-secrets` | the secrets volume (read-only is enough) |
-| `rizzy-vault migrate` | `migrate` | the server stopped (SQLite) |
+| `rizzy-vault migrate` | `migrate` | the server stopped (it takes the SQLite writer lock, or the PostgreSQL instance lock) |
 | `rizzy-vault backup --out <file\|->` | none: `docker compose exec` into the running server ([§8](#8-backup)) | nothing: it runs next to the server |
-| `rizzy-vault restore --in <file\|->` | `restore` (reads standard input) | the server stopped (it takes the writer lock), an empty database, the instance's secrets file; SQLite only in this build ([§9](#9-restore)) |
+| `rizzy-vault restore --in <file\|->` | `restore` (reads standard input) | the server stopped (it takes the SQLite writer lock, or the PostgreSQL instance lock), an empty database, the instance's secrets file ([§9](#9-restore)) |
+
+The one-off services of `compose.yaml` are written for SQLite: they mount the data volume and have no network. On PostgreSQL, `migrate`, `restore` and `secrets-rotate` also need `RIZZY_DATABASE_URL` and the database's network, like the server.
 
 Exit codes: 0 success, 1 a runtime failure, 2 a usage or configuration error. Messages name the setting or file that failed, never a value.
 
@@ -165,13 +176,21 @@ The file is written with mode 0600 and never overwrites, so move it away before 
 >
 > In this build that encrypted copy is the **only** way to restore the secrets.
 
-**Rotation** ([CRYPTO.md §5.8](CRYPTO.md#58-loss-or-rotation-of-the-server-opaque-secrets), §5.11): `secrets rotate` adds a new OPAQUE setup, which new registrations use; existing accounts keep theirs until their next password change. `secrets rotate --data-key` adds a new data key and marks it current; the old ones stay in the file and keep opening what they sealed. Stop the server first:
+**Rotation** ([CRYPTO.md §5.8](CRYPTO.md#58-loss-or-rotation-of-the-server-opaque-secrets), §5.11): `secrets rotate` adds a new OPAQUE setup, which new registrations use; existing accounts keep theirs until their next password change. `secrets rotate --data-key` adds a new data key and marks it current. Stop the server first (every replica, on PostgreSQL; the command refuses otherwise):
 
 ```sh
 docker compose stop rizzy-vault
 docker compose --profile admin run --rm secrets-rotate
 docker compose start rizzy-vault
 ```
+
+**After `secrets rotate --data-key`:**
+1. The old data keys stay in the file and keep opening what they sealed, so the server starts as before.
+2. The running server's worker re-seals every 2FA secret under the new key, account by account. Its `worker_run` log line counts them in `totp_rows_resealed`; an instance without 2FA has nothing to re-seal. `totp_reseal_failures` above 0 (and a `worker_totp_reseal_skipped` line) means a row could not be opened with the key it names: that account's 2FA is broken already, and its old key is kept.
+3. The old key is **removed from the file by the next `secrets rotate --data-key`**, once no row names it; the command prints which keys it dropped. The server never writes the secrets file, so nothing drops a key while it runs, and this build has no command that drops a key without adding a new one.
+4. Make a new secrets backup after every rotation, and **keep the previous one as long as you keep database backups taken before the 2FA secrets were re-sealed**: such a backup still names the old key, and `restore` refuses it when the secrets file no longer holds that key ([§9](#9-restore) step 4).
+
+> **Gap: old OPAQUE setups are never removed.** [CRYPTO.md §5.8](CRYPTO.md#58-loss-or-rotation-of-the-server-opaque-secrets) step 4 says an old setup is deleted "after a grace period set by the admin", but no ADR defines the command, the grace period or what happens to the accounts still on the old setup, so this build has none: every setup stays in the file.
 
 **If the secrets are lost** and no backup exists, nobody can log in with a password: the OPAQUE records cannot be used without their setup. The design's way out is that users with an enrolled device re-register OPAQUE from that device the next time they type their password, and others use their recovery code ([CRYPTO.md §5.8](CRYPTO.md#58-loss-or-rotation-of-the-server-opaque-secrets)). Starting the old database with a new secrets file is refused (the setup does not match), which is what you want.
 
@@ -235,7 +254,7 @@ docker compose up -d                             # starts the new image; never `
 docker compose logs rizzy-vault                  # database_migrated_after_copy, then listening
 ```
 
-To run the migration as its own step (for example to see it succeed before serving), run `docker compose --profile admin run --rm migrate` while the server is stopped. On PostgreSQL (M3) this step is required: a server that finds a pending migration there refuses to start and names the command.
+To run the migration as its own step (for example to see it succeed before serving), run `docker compose --profile admin run --rm migrate` while the server is stopped. On PostgreSQL (M3) this step is required: a server that finds a pending migration there refuses to start and names the command. There, `migrate` takes the instance lock ([§9](#9-restore)): stop every server process of the database first, all replicas and roles, or it refuses.
 
 If the upgraded server does not start, keep the old image, restore the pre-upgrade backup ([§9](#9-restore)), and report the problem.
 
@@ -268,7 +287,7 @@ What the file is, and is not:
 - **Tied to its release.** It restores only with a release of the same database schema version. After an upgrade, take a new backup; to restore an older one, use the release that wrote it, then upgrade ([§7](#7-upgrades-and-migrations)).
 - **At most 2 GiB** in this release, which reads the whole file into memory. `backup` refuses to write a larger one, so every backup it writes can be restored. Sessions and in-flight login state are not in it: after a restore every user signs in again.
 
-It works the same on PostgreSQL (one `REPEATABLE READ` snapshot), with the same pair moving an instance from SQLite to PostgreSQL once PostgreSQL restores are available ([§9](#9-restore)).
+It works the same on PostgreSQL (one `REPEATABLE READ` snapshot), and the same pair moves an instance from SQLite to PostgreSQL: `backup` on the SQLite instance, `restore` into the empty PostgreSQL database ([§9](#9-restore)).
 
 ### The native copy, for losing the disk
 
@@ -307,7 +326,7 @@ This archives the data volume: the database, its WAL and shared-memory files (th
 ### `rizzy-vault restore`
 
 `rizzy-vault restore` loads a `rizzy-vault backup` file into an **empty** database, with the server stopped. In order ([ADR 0023](adr/0023-logical-backup-format.md) §5), it:
-1. takes the SQLite writer lock (it refuses while the server runs) and checks that the database is empty: no row, and either new or at exactly this release's schema;
+1. shuts every server process out, with the SQLite writer lock or the PostgreSQL instance lock (below; it refuses while a server runs), and checks that the database is empty: no row, and either new or at exactly this release's schema;
 2. reads the file (at most 2 GiB) and checks its magic, format version and SHA-256 before anything else, then parses it strictly;
 3. requires the backup's schema version to be this release's;
 4. checks the secrets file against the backup, as the server's startup check does: the OPAQUE setups the backup records must be the secrets file's, and every data key a 2FA row names must be in it. A fresh secrets file is refused; restore the instance's own secrets first;
@@ -328,9 +347,27 @@ docker compose start rizzy-vault
 docker compose logs rizzy-vault        # expect: listening
 ```
 
-If the secrets volume was lost too, restore it **before** running `restore` (below). `restore` exits with 0 on success, 1 when it refused or failed (a non-empty database, a damaged file, another schema version, secrets that do not belong to the backup), and 2 on a usage error.
+If the secrets volume was lost too, restore it **before** running `restore` (below). `restore` exits with 0 on success, 1 when it refused or failed (a running server, a non-empty database, a damaged file, another schema version, secrets that do not belong to the backup), and 2 on a usage error.
 
-> **Gap: no restore into PostgreSQL in this build.** ADR 0023 requires an instance lock that every server process on PostgreSQL holds, so that `restore` can prove no server is running; this build does not have it, and `restore` refuses a PostgreSQL database (exit 2). `backup` works on PostgreSQL.
+### The PostgreSQL instance lock
+
+SQLite has one writing process, and a lock file next to the database proves it. PostgreSQL has no such file, and several server processes may share one database. So that `restore`, `migrate` and `secrets rotate` can still prove that no server is using the database ([ADR 0023](adr/0023-logical-backup-format.md) §5 step 1):
+
+- **Every server process** that opens the database (`api`, `worker`, any replica) holds a PostgreSQL session-level advisory lock in **shared** mode, on a dedicated connection outside its pool, from startup until it has closed its pools. A `web`-only process opens no database and holds nothing.
+- **`restore`, `migrate` and `secrets rotate`** take the same lock in **exclusive** mode, without waiting. If any server process still holds it, they refuse (exit 1, "the database's instance lock is held") and change nothing: stop every replica and run the command again. While one of them runs, a server refuses to start; it starts normally once the command has finished.
+- **The key** is the single `bigint` advisory key `8247886433088438273` (`0x7276610300000001`). In `pg_locks` it shows as `locktype = 'advisory'`, `classid = 1920360707`, `objid = 1`, `objsubid = 1`, with `mode` `ShareLock` for a server and `ExclusiveLock` for an admin command. To see who holds it:
+
+  ```sql
+  SELECT pid, mode, granted FROM pg_locks
+  WHERE locktype = 'advisory' AND classid = 1920360707 AND objid = 1 AND objsubid = 1;
+  ```
+
+  Do not take advisory locks with this key from anything else that uses the database. (The worker's leader lock and the per-account locks use the two-integer key space, `classid` `1920360706` and `1920360705` with `objsubid = 2`.)
+- **If a server loses the lock** (its dedicated connection dropped: a database restart, a failover, a network cut, `pg_terminate_backend`), it notices at its next check, at most 15 s later plus a 10 s timeout, logs `instance_lock_lost` and **exits with code 1** without the usual shutdown grace. A restart policy (`restart: unless-stopped` in `compose.yaml`) brings it back, and it takes the lock again. In that short window an admin command would be granted the lock although the server still runs, so stop the servers yourself before `restore`, `migrate` or `secrets rotate`; do not rely on the lock alone.
+- A connection pooler in transaction mode (PgBouncer) does not keep a session, and a session-level lock needs one: point `RIZZY_DATABASE_URL` at PostgreSQL itself, or at a pooler in session mode.
+- `backup` takes no lock and runs next to the servers.
+
+> **Not run against PostgreSQL yet.** The PostgreSQL tests of this lock exist but need a PostgreSQL server (`RIZZY_TEST_POSTGRES_URL`) and are not part of CI before M3; in this build they have not been run. Treat PostgreSQL restores as untested until then.
 
 ### The native restore, for losing the disk
 

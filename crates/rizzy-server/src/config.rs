@@ -33,6 +33,15 @@
 //!   blank value means no proxy; an element that does not parse, an empty one from a stray
 //!   comma included, refuses the configuration. It lists only infrastructure the operator
 //!   controls, by the address the listener sees: a listed address can name any source.
+//! - **The recovery waiting period** (ADR 0008 decision 5; CRYPTO.md §11.9 step 2):
+//!   `RIZZY_RECOVERY_WAIT_HOURS`, whole hours from 0 to 720 (30 days), default 72. It is the
+//!   server-enforced wait between a valid recovery code and the release of `E_rec`, which any
+//!   enrolled device can use to cancel the recovery. It applies to recoveries started after the
+//!   setting changed: a pending recovery keeps the release time it was opened with. 0 releases
+//!   at once and is meant for an instance with a single account (threat model Q-15, whose
+//!   sub-question whether the server should enforce that is still open; this build does not,
+//!   and logs a warning at startup). ADR 0028 item 12 does not list this setting: the name and
+//!   the unit are this crate's choice, reported to the owner.
 //!
 //! Every value has a default except the canonical origin, which the `api` and `worker` roles
 //! require (both build the auth domain, which binds the origin into OPAQUE and every
@@ -48,6 +57,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use rizzy_domain_auth::config::{DEFAULT_RECOVERY_WAIT_MS, MAX_RECOVERY_WAIT_MS};
 use rizzy_domain_auth::types::{DEFAULT_UPLOAD_BODY_LEN, MAX_UPLOAD_BODY_LEN, ServerOrigin};
 use zeroize::Zeroizing;
 
@@ -79,6 +89,8 @@ pub const LOG_LEVEL: &str = "RIZZY_LOG_LEVEL";
 pub const WORKER_INTERVAL_SECS: &str = "RIZZY_WORKER_INTERVAL_SECS";
 /// The body-size limit of the vault upload and healing requests, in bytes.
 pub const MAX_UPLOAD_BYTES: &str = "RIZZY_MAX_UPLOAD_BYTES";
+/// The recovery waiting period, in whole hours (ADR 0008 decision 5, CRYPTO.md §11.9 step 2).
+pub const RECOVERY_WAIT_HOURS: &str = "RIZZY_RECOVERY_WAIT_HOURS";
 
 /// Every setting name the file and the environment accept.
 pub const KEYS: &[&str] = &[
@@ -93,6 +105,7 @@ pub const KEYS: &[&str] = &[
     LOG_LEVEL,
     WORKER_INTERVAL_SECS,
     MAX_UPLOAD_BYTES,
+    RECOVERY_WAIT_HOURS,
 ];
 
 /// The settings a configuration file holds, by name.
@@ -170,6 +183,17 @@ pub const DEFAULT_MAX_UPLOAD_BYTES: usize = DEFAULT_UPLOAD_BODY_LEN;
 
 /// The largest upload body limit an operator may set: 256 MiB.
 pub const MAX_MAX_UPLOAD_BYTES: usize = MAX_UPLOAD_BODY_LEN;
+
+/// The default recovery waiting period: 72 h (ADR 0008 decision 5: "After a **72 h** wait,
+/// admin-configurable from 0 to 30 days, the server releases `E_rec`").
+pub const DEFAULT_RECOVERY_WAIT_HOURS: u64 = DEFAULT_RECOVERY_WAIT_MS / MS_PER_HOUR;
+
+/// The longest recovery waiting period an operator may set: 30 days, 720 h (ADR 0008 decision
+/// 5).
+pub const MAX_RECOVERY_WAIT_HOURS: u64 = MAX_RECOVERY_WAIT_MS / MS_PER_HOUR;
+
+/// Milliseconds in one hour.
+const MS_PER_HOUR: u64 = 3_600_000;
 
 /// A role of the binary (ADR 0010 §1). Only the M1 roles exist in this build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -323,6 +347,9 @@ pub struct Config {
     pub worker_interval: Duration,
     /// The upload body limit.
     pub max_upload_bytes: usize,
+    /// The recovery waiting period in milliseconds, 0 to 30 days (ADR 0008 decision 5): how
+    /// long after a valid recovery code the server releases `E_rec`.
+    pub recovery_wait_ms: u64,
 }
 
 /// A configuration the server refuses. `Display` names the setting, never its value (the
@@ -584,6 +611,13 @@ impl Config {
                 _ => return Err(ConfigError::Invalid(MAX_UPLOAD_BYTES)),
             },
         };
+        let recovery_wait_ms = match sources.get(RECOVERY_WAIT_HOURS)? {
+            None => DEFAULT_RECOVERY_WAIT_MS,
+            Some(text) => match text.parse::<u64>() {
+                Ok(hours) if hours <= MAX_RECOVERY_WAIT_HOURS => hours.saturating_mul(MS_PER_HOUR),
+                _ => return Err(ConfigError::Invalid(RECOVERY_WAIT_HOURS)),
+            },
+        };
         Ok(Self {
             roles,
             origin,
@@ -596,6 +630,7 @@ impl Config {
             log_level,
             worker_interval,
             max_upload_bytes,
+            recovery_wait_ms,
         })
     }
 
@@ -763,6 +798,55 @@ mod tests {
         ] {
             assert_eq!(Roles::parse(roles), Err(err), "{roles}");
         }
+    }
+
+    /// The recovery waiting period: 72 h by default, 0 to 30 days in whole hours (ADR 0008
+    /// decision 5); anything else refuses the configuration.
+    #[test]
+    fn recovery_wait_bounds() {
+        assert_eq!(DEFAULT_RECOVERY_WAIT_HOURS, 72);
+        assert_eq!(MAX_RECOVERY_WAIT_HOURS, 30 * 24);
+        assert_eq!(from_env(&[]).unwrap().recovery_wait_ms, 72 * 3_600_000);
+        assert_eq!(
+            from_env(&[(RECOVERY_WAIT_HOURS, "0")])
+                .unwrap()
+                .recovery_wait_ms,
+            0
+        );
+        assert_eq!(
+            from_env(&[(RECOVERY_WAIT_HOURS, "1")])
+                .unwrap()
+                .recovery_wait_ms,
+            3_600_000
+        );
+        assert_eq!(
+            from_env(&[(RECOVERY_WAIT_HOURS, "720")])
+                .unwrap()
+                .recovery_wait_ms,
+            MAX_RECOVERY_WAIT_MS
+        );
+        for bad in [
+            &[(RECOVERY_WAIT_HOURS, "721")],
+            &[(RECOVERY_WAIT_HOURS, "-1")],
+            &[(RECOVERY_WAIT_HOURS, "")],
+            &[(RECOVERY_WAIT_HOURS, "72h")],
+            &[(RECOVERY_WAIT_HOURS, "1.5")],
+            &[(RECOVERY_WAIT_HOURS, "18446744073709551616")],
+        ] {
+            assert_eq!(
+                from_env(bad).unwrap_err(),
+                ConfigError::Invalid(RECOVERY_WAIT_HOURS)
+            );
+        }
+        // The file carries it too.
+        assert_eq!(
+            parse_file("RIZZY_RECOVERY_WAIT_HOURS=24")
+                .unwrap()
+                .get(RECOVERY_WAIT_HOURS)
+                .unwrap()
+                .as_str(),
+            "24"
+        );
     }
 
     /// The configuration built from the environment `pairs` alone.

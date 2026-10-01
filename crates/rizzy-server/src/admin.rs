@@ -4,16 +4,43 @@
 //! | Command | Spec | Lock |
 //! |---|---|---|
 //! | `secrets init` | ADR 0010 §4: "creates the secrets once, run as a one-off with the secrets mount writable" | none (no database) |
-//! | `secrets rotate` | CRYPTO.md §5.8 "Rotating `server_setup`" steps 1–2; ADR 0010 §4 | `SQLite` writer lock |
-//! | `secrets rotate --data-key` | CRYPTO.md §5.11 "Rotation" | `SQLite` writer lock |
+//! | `secrets rotate` | CRYPTO.md §5.8 "Rotating `server_setup`" steps 1–2; ADR 0010 §4 | exclusive |
+//! | `secrets rotate --data-key` | CRYPTO.md §5.11 "Rotation" | exclusive |
 //! | `backup-secrets` | ADR 0011 "Backups" and owner decision 3; CRYPTO.md §5.11 | none (reads the secrets file only) |
-//! | `migrate` | ADR 0011 point 9 | `SQLite` writer lock |
+//! | `migrate` | ADR 0011 point 9 | exclusive |
 //! | `backup --out <file\|->` | ADR 0011 "Backups"; [ADR 0023] §4, §6 | none: the read-only reader on `SQLite`, a `REPEATABLE READ` transaction on `PostgreSQL` |
-//! | `restore --in <file\|->` | ADR 0011 "Backups"; [ADR 0023] §5, §6 | `SQLite` writer lock; refused on `PostgreSQL` |
+//! | `restore --in <file\|->` | ADR 0011 "Backups"; [ADR 0023] §5, §6 | exclusive |
 //!
-//! ADR 0010 §2: "`restore`, `migrate` and `secrets rotate` take the writer lock. They run only
-//! while the server is stopped." With `PostgreSQL` there is no writer lock, so `secrets rotate`
-//! cannot prove the server is stopped and refuses (`PostgreSQL` is supported from M3).
+//! **Exclusive** means every server process is shut out while the command runs (ADR 0010 §2:
+//! "`restore`, `migrate` and `secrets rotate` take the writer lock. They run only while the
+//! server is stopped"; [ADR 0023] §5 step 1 for `PostgreSQL`):
+//! - `SQLite`: the writer lock next to the database file, which a running server holds.
+//! - `PostgreSQL`: the instance lock, taken exclusively on a dedicated connection outside the
+//!   pool (`rizzy_storage::instance_lock`, [`server::take_instance_lock`]). Every server
+//!   process holds it shared, whatever its roles, so the command is refused while any replica
+//!   runs, and a server refuses to start while the command runs.
+//!
+//! A refusal is a runtime failure (exit 1): stop the server and run the command again.
+//!
+//! # `secrets rotate --data-key` and the old key (CRYPTO.md §5.11 "Rotation")
+//!
+//! "`rizzy-vault secrets rotate --data-key` adds a new current key; `worker` re-seals TOTP rows
+//! under the account lock, and the old key is dropped once no row names it."
+//! - The command adds the key and marks it current.
+//! - The running server's `worker` re-seals the TOTP rows under it ([`crate::worker`] step 2).
+//! - **Dropping** is this command's too, on a later run: the server never writes the secrets
+//!   file (ADR 0010 §4), and this command is the one that runs with the secrets mount writable
+//!   and the server shut out. After it has added the new key it drops every other key that no
+//!   sealed row names any more (`ServerSecrets::drop_unused_data_keys`), and reports the ids.
+//!   So a key rotated away is removed from the file by the next `secrets rotate --data-key`
+//!   after the worker has re-sealed, or at once when no row names it (an instance without 2FA
+//!   rows). No Accepted ADR names who drops the key or when; this reading, and the lack of a
+//!   way to drop a key without adding one, are reported to the owner.
+//! - The drop needs the database at this release's schema; on a database that is new, behind,
+//!   or unreadable as such, nothing is dropped and the rotation still happens. With `SQLite`,
+//!   when the database file does not exist yet, the command takes the writer lock alone.
+//! - A database backup taken before the rows were re-sealed still names the old key:
+//!   restoring it needs a secrets backup from before the drop (step 4 below refuses otherwise).
 //!
 //! # `backup` and `restore` ([ADR 0023])
 //!
@@ -28,11 +55,10 @@
 //!
 //! `restore` runs the steps of ADR 0023 §5, in order:
 //! 1. **Exclude every server process and check the target.** `SQLite`: take the writer lock
-//!    (the server must be stopped) and require an empty target: no migration applied, or
-//!    exactly this release's, and no row ([`rizzy_storage::Database::check_restore_target`]).
-//!    `PostgreSQL`: ADR 0023 adds an instance lock every server process holds; it is not
-//!    implemented in this build, so `restore` refuses a `PostgreSQL` target with a usage error
-//!    (exit 2), as ADR 0023 §5 requires until it exists.
+//!    (the server must be stopped). `PostgreSQL`: take the instance lock exclusively; it is
+//!    refused while any server process holds it. Then require an empty target: no migration
+//!    applied, or exactly this release's, and no row
+//!    ([`rizzy_storage::Database::check_restore_target`]).
 //! 2. **Read the file** (at most 2 GiB, from a path or `-` for stdin) and parse it: magic,
 //!    format version and SHA-256 first, then every table strictly.
 //! 3. **Require this release's schema version**; an older backup is restored with the release
@@ -41,8 +67,9 @@
 //!    [`ServerSecrets::check_dump`] refuses a setup mismatch, a fresh secrets file, and a TOTP
 //!    row sealed under a data key the file lacks, and tells the operator to restore the
 //!    secrets first.
-//! 5. **Draw a new restore generation** from the OS CSPRNG (ADR 0021 §2) and load the rows in
-//!    one transaction, which opens a reconciliation epoch for every restored account (INV-59)
+//! 5. **Draw a new restore generation** from the OS CSPRNG (ADR 0021 §2), check once more that
+//!    the instance lock is still held (reading a large file takes time, and a lock whose
+//!    connection dropped meanwhile excludes nobody), and load the rows in one transaction, which opens a reconciliation epoch for every restored account (INV-59)
 //!    and raises the store-sequence counters (`rizzy_storage::Database::restore`).
 //! 6. **Report**: the caller prints the row count, the number of accounts in reconciliation
 //!    and the INV-59 notice with the AR-19 warning ([`RESTORE_NOTICE`]).
@@ -51,12 +78,14 @@
 //! release's schema, and a retry into it is allowed.
 //!
 //! **Not here, and why** (reported to the owner):
-//! - The `PostgreSQL` instance lock of ADR 0023 §5 step 1 and its key `K`: not implemented, so
-//!   `restore` refuses `PostgreSQL` targets (`backup` works on `PostgreSQL`).
-//! - Re-sealing TOTP rows under a new data key (CRYPTO.md §5.11: "`worker` re-seals TOTP rows")
-//!   has no domain function yet; after `--data-key` the old key stays in the file and keeps
-//!   opening the rows sealed under it.
-//! - Deleting an old setup after the grace period (§5.8 step 4) has no command in any ADR.
+//! - Deleting an old OPAQUE setup after the grace period (CRYPTO.md §5.8 "Rotating
+//!   `server_setup`" step 4: "After a grace period set by the admin, delete #1"). The section
+//!   names no command, no setting for the grace period, no rule for which setup may go (the
+//!   startup check already tolerates records that name a setup the file lacks) and nothing
+//!   about the records left behind ("when the admin marks the records invalid" has no
+//!   mechanism either). It is not specified concretely enough to implement without inventing
+//!   an operator interface, so an old setup stays in the file until the owner decides.
+//! - A way to drop an unused data key without adding a new one (section above).
 //! - The bootstrap token (INV-69) is generated into the file by `secrets init` and never
 //!   printed or logged: its only reader is the M3 admin API, which defines how it is shown once.
 //!
@@ -69,14 +98,15 @@ use std::io::{IsTerminal as _, Read as _, Write as _};
 use std::path::Path;
 
 use rand_core::Rng as _;
+use rizzy_domain_auth::AuthError;
 use rizzy_domain_auth::secrets::SecretsError;
 use rizzy_domain_auth::{ServerSecrets, StartupCheckError};
 use rizzy_storage::backup::file::{
     self as backup_file, DIGEST_LEN, FileError, MAX_BACKUP_FILE_LEN,
 };
 use rizzy_storage::{
-    Database, PostgresOptions, RestoreError, RestoreGeneration, SqliteOptions, StartupMigration,
-    WriterLock, schema_version,
+    Database, InstanceLock, InstanceLockMode, PostgresOptions, RestoreError, RestoreGeneration,
+    SqliteOptions, StartupMigration, WriterLock, schema_version,
 };
 use zeroize::Zeroizing;
 
@@ -108,17 +138,15 @@ pub enum AdminError {
     PassphraseFile,
     /// Sealing or the passphrase failed.
     Backup(BackupError),
-    /// `secrets rotate` with `PostgreSQL` (module docs).
-    NeedsSqliteLock,
-    /// The database could not be opened or migrated.
+    /// The database could not be opened or migrated, or its `PostgreSQL` instance lock could
+    /// not be taken or was lost (a server process still runs).
     Serve(ServeError),
     /// The writer lock could not be taken: the server is probably running.
     Lock(rizzy_storage::Error),
+    /// `secrets rotate --data-key` could not read which data keys the database still names.
+    DataKeysInUse(AuthError),
     /// `backup --out -` with a terminal on stdout (ADR 0023 §6). A usage error.
     StdoutIsTerminal,
-    /// `restore` into `PostgreSQL`: the instance lock of ADR 0023 §5 step 1 is not in this
-    /// build. A usage error.
-    RestoreNeedsInstanceLock,
     /// The database could not be dumped or restored into (the target is not empty, say).
     Storage(rizzy_storage::Error),
     /// The backup file could not be written or parsed.
@@ -134,10 +162,7 @@ impl AdminError {
     /// failure (exit code 1).
     #[must_use]
     pub const fn is_usage(&self) -> bool {
-        matches!(
-            self,
-            Self::StdoutIsTerminal | Self::RestoreNeedsInstanceLock
-        )
+        matches!(self, Self::StdoutIsTerminal)
     }
 }
 
@@ -156,11 +181,12 @@ impl fmt::Display for AdminError {
             Self::Write(kind) => write!(f, "cannot write the file: {kind}"),
             Self::PassphraseFile => f.write_str("cannot read the passphrase file"),
             Self::Backup(e) => write!(f, "{e}"),
-            Self::NeedsSqliteLock => f.write_str(
-                "secrets rotate needs the SQLite writer lock to prove the server is stopped; \
-                 not available with PostgreSQL in this build",
-            ),
             Self::Serve(e) => write!(f, "{e}"),
+            Self::DataKeysInUse(e) => write!(
+                f,
+                "cannot read which data keys the database still names ({e}); nothing was \
+                 rotated"
+            ),
             Self::Lock(e) => write!(
                 f,
                 "cannot take the writer lock (is the server running?): {e}"
@@ -168,10 +194,6 @@ impl fmt::Display for AdminError {
             Self::StdoutIsTerminal => f.write_str(
                 "refusing to write the backup to a terminal; redirect stdout or name a file with \
                  --out",
-            ),
-            Self::RestoreNeedsInstanceLock => f.write_str(
-                "restore into PostgreSQL is not available in this build: it needs the instance \
-                 lock of ADR 0023 §5, which is not implemented yet",
             ),
             Self::Storage(e) => write!(f, "database: {e}"),
             Self::BackupFile(e) => write!(f, "{e}"),
@@ -222,18 +244,100 @@ pub enum Rotate {
     DataKey,
 }
 
-/// `rizzy-vault secrets rotate [--data-key]`: takes the `SQLite` writer lock (the server must be
-/// stopped), adds the new secret, and replaces the file atomically with mode 0600. Returns the
-/// new id.
+/// What `secrets rotate` did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rotated {
+    /// The id of the new setup or data key.
+    pub id: u32,
+    /// The data keys dropped from the file because no sealed row names them any more
+    /// (`--data-key` only; module docs), ascending.
+    pub dropped_data_keys: Vec<u32>,
+}
+
+/// What shuts every server process out while an exclusive admin command runs (module docs).
+enum Exclusion {
+    /// The `SQLite` writer lock alone: the database is not opened.
+    WriterLock(WriterLock),
+    /// The opened database (which owns the `SQLite` writer lock) and its instance lock, taken
+    /// exclusively.
+    Database(Database, InstanceLock),
+}
+
+impl Exclusion {
+    /// The opened database, if this exclusion has one.
+    const fn database(&self) -> Option<&Database> {
+        match self {
+            Self::WriterLock(_) => None,
+            Self::Database(db, _) => Some(db),
+        }
+    }
+
+    /// Lets the servers back in: closes the pools, then releases the lock.
+    async fn end(self) {
+        match self {
+            Self::WriterLock(lock) => drop(lock),
+            Self::Database(db, lock) => {
+                db.close().await;
+                server::release_instance_lock(lock).await;
+            }
+        }
+    }
+}
+
+/// Opens the database with every server process shut out (module docs): the `SQLite` writer
+/// lock, or the `PostgreSQL` instance lock taken exclusively. Migrates nothing.
+async fn open_exclusive(config: &Config) -> Result<(Database, InstanceLock), AdminError> {
+    let db = server::open_database(config).await.map_err(|e| match e {
+        ServeError::Storage(e @ rizzy_storage::Error::WriterLockHeld { .. }) => AdminError::Lock(e),
+        e => AdminError::Serve(e),
+    })?;
+    match server::take_instance_lock(&db, InstanceLockMode::Exclusive).await {
+        Ok(lock) => Ok((db, lock)),
+        Err(e) => {
+            db.close().await;
+            Err(AdminError::Serve(e))
+        }
+    }
+}
+
+/// Whether `db` is at exactly this release's schema, so the auth tables can be read. Any doubt
+/// (a new database, pending migrations, an error) reads as "no".
+async fn schema_is_current(db: &Database) -> bool {
+    let applied = db.applied_migrations().await.is_ok_and(|a| !a.is_empty());
+    applied && db.pending_migrations().await.is_ok_and(|p| p.is_empty())
+}
+
+/// `rizzy-vault secrets rotate [--data-key]`: shuts every server process out (the `SQLite`
+/// writer lock, or the `PostgreSQL` instance lock; the server must be stopped), adds the new
+/// secret, with `--data-key` drops the data keys no sealed row names any more (module docs),
+/// and replaces the file atomically with mode 0600.
 ///
 /// # Errors
-/// [`AdminError`].
-pub fn secrets_rotate(config: &Config, what: Rotate) -> Result<u32, AdminError> {
+/// [`AdminError`]; the secrets file is then unchanged.
+pub async fn secrets_rotate(config: &Config, what: Rotate) -> Result<Rotated, AdminError> {
     check_location(config)?;
-    let DatabaseConfig::Sqlite(db_path) = &config.database else {
-        return Err(AdminError::NeedsSqliteLock);
+    let exclusion = match &config.database {
+        // The setup rotation reads no row, and a database that does not exist yet has none:
+        // the writer lock alone, without creating or opening the file.
+        DatabaseConfig::Sqlite(path) if what == Rotate::Setup || !path.exists() => {
+            Exclusion::WriterLock(WriterLock::acquire(path).map_err(AdminError::Lock)?)
+        }
+        DatabaseConfig::Sqlite(_) | DatabaseConfig::Postgres(_) => {
+            let (db, lock) = open_exclusive(config).await?;
+            Exclusion::Database(db, lock)
+        }
     };
-    let _lock = WriterLock::acquire(db_path).map_err(AdminError::Lock)?;
+    let outcome = rotate_excluded(config, what, exclusion.database()).await;
+    exclusion.end().await;
+    outcome
+}
+
+/// [`secrets_rotate`] with the servers shut out; `db` is the opened database, if any.
+async fn rotate_excluded(
+    config: &Config,
+    what: Rotate,
+    db: Option<&Database>,
+) -> Result<Rotated, AdminError> {
     let mut secrets = secrets_file::load(&config.secrets_file).map_err(AdminError::Secrets)?;
     let mut rng = os_rng();
     let id = match what {
@@ -241,10 +345,20 @@ pub fn secrets_rotate(config: &Config, what: Rotate) -> Result<u32, AdminError> 
         Rotate::DataKey => secrets.rotate_data_key(&mut rng),
     }
     .map_err(AdminError::Rotation)?;
+    let dropped_data_keys = match (what, db) {
+        (Rotate::DataKey, Some(db)) if schema_is_current(db).await => secrets
+            .drop_unused_data_keys(db, now_ms())
+            .await
+            .map_err(AdminError::DataKeysInUse)?,
+        _ => Vec::new(),
+    };
     let bytes = secrets_file::serialize(&secrets).map_err(AdminError::Secrets)?;
     fsutil::replace_private(&config.secrets_file, &bytes)
         .map_err(|e| AdminError::Write(e.kind()))?;
-    Ok(id)
+    Ok(Rotated {
+        id,
+        dropped_data_keys,
+    })
 }
 
 /// Reads the passphrase: from `path`, or from standard input when `path` is `-`. Never from the
@@ -294,15 +408,14 @@ pub fn backup_secrets(
     fsutil::write_new_private(out, &file).map_err(|e| AdminError::Write(e.kind()))
 }
 
-/// `rizzy-vault migrate`: opens the database (with the writer lock on `SQLite`) and applies every
-/// pending migration; on `SQLite` with the pre-migration copy first (ADR 0011 point 9).
+/// `rizzy-vault migrate`: opens the database with every server process shut out (the writer
+/// lock on `SQLite`, the exclusive instance lock on `PostgreSQL`) and applies every pending
+/// migration; on `SQLite` with the pre-migration copy first (ADR 0011 point 9).
 ///
 /// # Errors
-/// [`AdminError::Serve`].
+/// [`AdminError::Lock`] or [`AdminError::Serve`].
 pub async fn migrate(config: &Config) -> Result<&'static str, AdminError> {
-    let db = server::open_database(config, false)
-        .await
-        .map_err(AdminError::Serve)?;
+    let (db, lock) = open_exclusive(config).await?;
     let outcome = match &config.database {
         DatabaseConfig::Sqlite(_) => db
             .migrate_at_startup(&config.pre_migration_copy())
@@ -316,7 +429,7 @@ pub async fn migrate(config: &Config) -> Result<&'static str, AdminError> {
             }),
         DatabaseConfig::Postgres(_) => db.migrate().await.map(|()| "migrated"),
     };
-    db.close().await;
+    Exclusion::Database(db, lock).end().await;
     outcome.map_err(|e| AdminError::Serve(ServeError::Storage(e)))
 }
 
@@ -445,27 +558,19 @@ pub async fn restore(
     input: &Path,
 ) -> Result<rizzy_storage::RestoreReport, AdminError> {
     check_location(config)?;
-    // 1. Exclude every server process: the SQLite writer lock. PostgreSQL has no instance lock
-    //    in this build, so it is refused (ADR 0023 §5 step 1).
-    let DatabaseConfig::Sqlite(_) = &config.database else {
-        return Err(AdminError::RestoreNeedsInstanceLock);
-    };
-    let db = server::open_database(config, false)
-        .await
-        .map_err(|e| match e {
-            ServeError::Storage(e @ rizzy_storage::Error::WriterLockHeld { .. }) => {
-                AdminError::Lock(e)
-            }
-            e => AdminError::Serve(e),
-        })?;
-    let outcome = restore_into(&db, config, input).await;
-    db.close().await;
+    // 1. Exclude every server process: the SQLite writer lock, or the PostgreSQL instance lock
+    //    taken exclusively (ADR 0023 §5 step 1).
+    let (db, mut lock) = open_exclusive(config).await?;
+    let outcome = restore_into(&db, &mut lock, config, input).await;
+    Exclusion::Database(db, lock).end().await;
     outcome
 }
 
-/// Steps 1 (the empty target) to 5 of [`restore`], on the locked database.
+/// Steps 1 (the empty target) to 5 of [`restore`], on the database `lock` excludes every
+/// server process from.
 async fn restore_into(
     db: &Database,
+    lock: &mut InstanceLock,
     config: &Config,
     input: &Path,
 ) -> Result<rizzy_storage::RestoreReport, AdminError> {
@@ -497,6 +602,10 @@ async fn restore_into(
     let mut generation = [0u8; 16];
     os_rng().fill_bytes(&mut generation);
     let now = i64::try_from(now_ms()).unwrap_or(i64::MAX);
+    // The servers must still be shut out now that the file is read and the write starts.
+    if !server::instance_lock_held(lock).await {
+        return Err(AdminError::Serve(ServeError::InstanceLockLost));
+    }
     db.restore(&parsed.dump, RestoreGeneration(generation), now)
         .await
         .map_err(AdminError::Storage)

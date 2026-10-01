@@ -11,8 +11,9 @@
 //! 3. **Open the database.** `SQLite`: take the exclusive writer lock next to the file first
 //!    ([ADR 0010] §2; a second server refuses to start), open it, then migrate: automatically,
 //!    with the `VACUUM INTO` pre-migration copy when migrations are pending on an existing
-//!    database ([ADR 0011] point 9). `PostgreSQL`: connect, and refuse to start if a migration is
-//!    pending, naming `rizzy-vault migrate`.
+//!    database ([ADR 0011] point 9). `PostgreSQL`: connect, take the shared instance lock
+//!    (below; a server refuses to start while `restore`, `migrate` or `secrets rotate` runs),
+//!    and refuse to start if a migration is pending, naming `rizzy-vault migrate`.
 //! 4. **Draw the restore generation** if the database has none ([ADR 0021] §2), from the OS
 //!    CSPRNG.
 //! 5. **Check the secrets against the database** (CRYPTO.md §5.8, §5.11: a setup whose public
@@ -29,6 +30,24 @@
 //! `rizzy-storage` (`rizzy-server` holds no sqlx, [ADR 0016] R5), and runs jobs only while it
 //! holds it; other `worker` processes on the same database are hot standbys
 //! ([`crate::worker`]). With `SQLite`, the writer lock already makes this process the only one.
+//!
+//! **The instance lock** ([ADR 0023] §5 step 1). Every process that opens a `PostgreSQL`
+//! database holds the instance lock in shared mode on a dedicated connection outside the pool,
+//! through `rizzy-storage`, from before it reads anything until its pools are closed
+//! ([`take_instance_lock`]). `restore`, `migrate` and `secrets rotate` take it exclusively and
+//! refuse to run while a server holds it ([`crate::admin`]). The lock is "checked alive as ADR
+//! 0010 §2 does for the worker lock", and the process "exits when that connection drops": a
+//! watchdog asks the database every [`INSTANCE_LOCK_CHECK`] whether the session still holds the
+//! lock; a check that fails, errs or takes longer than [`INSTANCE_LOCK_TIMEOUT`] ends the
+//! process at once with [`ServeError::InstanceLockLost`] (exit code 1): the listener and every
+//! open connection are dropped without the shutdown grace, and the worker is stopped at its
+//! next await point, where an open transaction rolls back. The supervisor (compose's restart
+//! policy) starts it again, and it takes the lock anew or is refused. Between the connection
+//! dropping and the next check the process still serves; an admin command started in that
+//! window is granted the lock. The 15 s interval bounds that window; it is this crate's
+//! choice, reported to the owner. With `SQLite` the writer lock is the instance lock and cannot
+//! be lost while the database is open, so no watchdog runs. A `web`-only process opens no
+//! database and holds nothing.
 //!
 //! **Core dumps** (threat model INV-60) are already off when this runs: [`crate::cli::main`]
 //! disables them first and refuses to start otherwise ([`crate::coredump`], ADR 0024). The
@@ -53,6 +72,7 @@
 //! [ADR 0011]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0011-storage.md
 //! [ADR 0016]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0016-workspace-layout.md
 //! [ADR 0021]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0021-server-compaction.md
+//! [ADR 0023]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0023-logical-backup-format.md
 
 use core::fmt;
 use std::future::Future;
@@ -72,7 +92,8 @@ use rizzy_domain_auth::{AuthConfig, AuthError, AuthService, ConfigError, SignupP
 use rizzy_domain_vault::VaultDomain;
 use rizzy_storage::meta::ensure_restore_generation;
 use rizzy_storage::{
-    Database, PostgresOptions, RestoreGeneration, SqliteOptions, StartupMigration, WriterLock,
+    Database, Engine, InstanceLock, InstanceLockMode, PostgresOptions, RestoreGeneration,
+    SqliteOptions, StartupMigration, WriterLock,
 };
 use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, watch};
@@ -86,6 +107,15 @@ use crate::log::{self, Field};
 use crate::secrets_file::{self, SecretsFileError};
 use crate::sys::{now_ms, os_rng};
 use crate::worker;
+
+/// How often a server process on `PostgreSQL` checks that it still holds the instance lock
+/// (module docs). This crate's choice, reported to the owner.
+pub const INSTANCE_LOCK_CHECK: Duration = Duration::from_secs(15);
+
+/// The longest a process waits to take the instance lock (connect and lock), to check it, or to
+/// release it. A check that takes longer counts as a lost lock. This crate's choice, reported
+/// to the owner.
+pub const INSTANCE_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Why the server did not start, or stopped with an error. `Display` names what failed, never
 /// a secret: the storage errors leave out bound values, the secrets errors name fields.
@@ -108,6 +138,17 @@ pub enum ServeError {
     Auth(AuthError),
     /// The listener could not be bound, or serving failed.
     Listener(std::io::ErrorKind),
+    /// The `PostgreSQL` instance lock was refused in this mode ([ADR 0023] §5 step 1): a server
+    /// found an admin command holding it exclusively, or an admin command found a server
+    /// process (or another admin command) holding it.
+    ///
+    /// [ADR 0023]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0023-logical-backup-format.md
+    InstanceLockRefused(InstanceLockMode),
+    /// Taking the instance lock took longer than [`INSTANCE_LOCK_TIMEOUT`].
+    InstanceLockTimeout,
+    /// The instance lock is no longer held (its dedicated connection dropped): a running
+    /// server exits (module docs), and an admin command stops before it writes.
+    InstanceLockLost,
 }
 
 impl fmt::Display for ServeError {
@@ -127,6 +168,20 @@ impl fmt::Display for ServeError {
             Self::AuthConfig(e) => write!(f, "auth configuration: {e}"),
             Self::Auth(e) => write!(f, "startup check: {e}"),
             Self::Listener(kind) => write!(f, "listener: {kind}"),
+            Self::InstanceLockRefused(InstanceLockMode::Shared) => f.write_str(
+                "the database's instance lock is held exclusively: restore, migrate or secrets \
+                 rotate is running against it; start the server when it has finished",
+            ),
+            Self::InstanceLockRefused(InstanceLockMode::Exclusive) => f.write_str(
+                "the database's instance lock is held: a server process (any role, any \
+                 replica) or another admin command still uses this database; stop them first",
+            ),
+            Self::InstanceLockTimeout => {
+                f.write_str("taking the database's instance lock timed out")
+            }
+            Self::InstanceLockLost => f.write_str(
+                "the database's instance lock was lost (its connection dropped); stopping",
+            ),
         }
     }
 }
@@ -144,6 +199,10 @@ impl From<rizzy_storage::Error> for ServeError {
 pub struct Services {
     /// The database.
     pub db: Database,
+    /// The shared instance lock this process holds on the database (module docs); on `SQLite`
+    /// a marker over the writer lock `db` owns. `None` once [`serve`] has moved it into its
+    /// watchdog. Dropping it releases the lock.
+    pub instance_lock: Option<InstanceLock>,
     /// The `api` role's services, which `worker` shares.
     pub api: Arc<Api>,
     /// The in-process event bus the vault domain publishes on; `worker` subscribes to it.
@@ -153,35 +212,131 @@ pub struct Services {
     pub self_check_passed: Instant,
 }
 
-/// Opens the database (`SQLite` with its writer lock and startup migration, or `PostgreSQL`),
-/// without the secrets checks: steps 3 of the module docs. Shared with `rizzy-vault migrate`.
+/// Opens the database without migrating it and without the secrets checks: `SQLite` with its
+/// writer lock, or the `PostgreSQL` pool (the first half of step 3 of the module docs). It
+/// takes no instance lock: the caller does, with [`take_instance_lock`], before it reads or
+/// writes anything. Shared with the admin commands.
 ///
 /// # Errors
 /// [`ServeError::Storage`].
-pub async fn open_database(config: &Config, migrate: bool) -> Result<Database, ServeError> {
+pub async fn open_database(config: &Config) -> Result<Database, ServeError> {
     match &config.database {
         DatabaseConfig::Sqlite(path) => {
             let lock = WriterLock::acquire(path)?;
-            let db = Database::open_sqlite(&SqliteOptions::new(path), lock).await?;
-            if migrate {
-                match db.migrate_at_startup(&config.pre_migration_copy()).await? {
-                    StartupMigration::UpToDate => {}
-                    StartupMigration::Created => log::info("database_created", &[]),
-                    StartupMigration::MigratedAfterCopy => {
-                        log::info("database_migrated_after_copy", &[]);
-                    }
-                }
-            }
-            Ok(db)
+            Ok(Database::open_sqlite(&SqliteOptions::new(path), lock).await?)
         }
         DatabaseConfig::Postgres(url) => {
             let options = PostgresOptions::from_url(url)?;
-            let db = Database::open_postgres(&options).await?;
-            if migrate {
-                db.migrate_at_startup(&config.pre_migration_copy()).await?;
-            }
-            Ok(db)
+            Ok(Database::open_postgres(&options).await?)
         }
+    }
+}
+
+/// Takes the instance lock of `db` in `mode`, within [`INSTANCE_LOCK_TIMEOUT`] (module docs):
+/// shared for a server process, exclusive for `restore`, `migrate` and `secrets rotate`. On
+/// `SQLite` it is always granted: the writer lock `db` owns already excludes everyone else.
+///
+/// # Errors
+/// [`ServeError::InstanceLockRefused`] when someone holds it in a conflicting mode,
+/// [`ServeError::InstanceLockTimeout`], or [`ServeError::Storage`] when the dedicated
+/// connection cannot be opened.
+pub async fn take_instance_lock(
+    db: &Database,
+    mode: InstanceLockMode,
+) -> Result<InstanceLock, ServeError> {
+    match tokio::time::timeout(INSTANCE_LOCK_TIMEOUT, db.try_instance_lock(mode)).await {
+        Ok(Ok(Some(lock))) => Ok(lock),
+        Ok(Ok(None)) => Err(ServeError::InstanceLockRefused(mode)),
+        Ok(Err(e)) => Err(ServeError::Storage(e)),
+        Err(_elapsed) => Err(ServeError::InstanceLockTimeout),
+    }
+}
+
+/// Gives an instance lock up, within [`INSTANCE_LOCK_TIMEOUT`]; past it, or on an error, the
+/// connection is dropped, which releases the lock too.
+pub async fn release_instance_lock(lock: InstanceLock) {
+    match tokio::time::timeout(INSTANCE_LOCK_TIMEOUT, lock.release()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => log::error("instance_lock_release_failed", &[Field::Error("error", &e)]),
+        Err(_elapsed) => log::error(
+            "instance_lock_release_failed",
+            &[Field::Str("error", "releasing the instance lock timed out")],
+        ),
+    }
+}
+
+/// The second half of startup step 3: the startup migration rule of ADR 0011 point 9, on a
+/// database whose instance lock this process holds.
+async fn migrate_at_startup(db: &Database, config: &Config) -> Result<(), ServeError> {
+    match db.migrate_at_startup(&config.pre_migration_copy()).await? {
+        StartupMigration::UpToDate => {}
+        StartupMigration::Created => log::info("database_created", &[]),
+        StartupMigration::MigratedAfterCopy => log::info("database_migrated_after_copy", &[]),
+    }
+    Ok(())
+}
+
+/// Whether `lock` is still held, asked within [`INSTANCE_LOCK_TIMEOUT`]. A lost lock is logged.
+/// The watchdog asks on a timer; an admin command asks once more before it writes.
+pub async fn instance_lock_held(lock: &mut InstanceLock) -> bool {
+    match tokio::time::timeout(INSTANCE_LOCK_TIMEOUT, lock.is_held()).await {
+        Ok(Ok(true)) => true,
+        Ok(Ok(false)) => {
+            log::error(
+                "instance_lock_lost",
+                &[Field::Str("error", "the instance lock is no longer held")],
+            );
+            false
+        }
+        Ok(Err(e)) => {
+            log::error("instance_lock_lost", &[Field::Error("error", &e)]);
+            false
+        }
+        Err(_elapsed) => {
+            log::error(
+                "instance_lock_lost",
+                &[Field::Str("error", "checking the instance lock timed out")],
+            );
+            false
+        }
+    }
+}
+
+/// The instance-lock watchdog (module docs): checks `lock` every `every` until `stop` turns
+/// true, and then hands the lock back for the caller to release last. If a check fails it
+/// sets `lost` and returns `None`; the lock's connection is dropped.
+async fn watch_instance_lock(
+    mut lock: InstanceLock,
+    every: Duration,
+    mut stop: watch::Receiver<bool>,
+    lost: watch::Sender<bool>,
+) -> Option<InstanceLock> {
+    loop {
+        if *stop.borrow() {
+            return Some(lock);
+        }
+        tokio::select! {
+            changed = stop.changed() => {
+                // A dropped sender means the server is going away: stop as well.
+                if changed.is_err() {
+                    return Some(lock);
+                }
+                continue;
+            }
+            () = tokio::time::sleep(every) => {}
+        }
+        if !instance_lock_held(&mut lock).await {
+            let _receiver_gone = lost.send(true);
+            return None;
+        }
+    }
+}
+
+/// Resolves when the watchdog reports the instance lock lost; never, when it ends without
+/// losing it or does not run (`SQLite`, or no database role).
+async fn instance_lock_lost(mut lost: watch::Receiver<bool>) {
+    if lost.wait_for(|lost| *lost).await.is_err() {
+        std::future::pending::<()>().await;
     }
 }
 
@@ -195,7 +350,10 @@ pub async fn open_services(config: &Config) -> Result<Services, ServeError> {
         return Err(ServeError::SecretsInsideDataDir);
     }
     let secrets = Arc::new(secrets_file::load(&config.secrets_file).map_err(ServeError::Secrets)?);
-    let db = open_database(config, true).await?;
+    let db = open_database(config).await?;
+    // Before anything is read: from here on no admin command rewrites this database.
+    let instance_lock = take_instance_lock(&db, InstanceLockMode::Shared).await?;
+    migrate_at_startup(&db, config).await?;
     let mut candidate = [0u8; 16];
     os_rng().fill_bytes(&mut candidate);
     let now = now_ms();
@@ -215,6 +373,12 @@ pub async fn open_services(config: &Config) -> Result<Services, ServeError> {
         SignupMode::Closed => SignupPolicy::Closed,
         SignupMode::Open => SignupPolicy::Open,
     };
+    auth_config.recovery_wait_ms = config.recovery_wait_ms;
+    if config.recovery_wait_ms == 0 {
+        // ADR 0008 decision 5 allows 0; the threat model keeps it for single-account
+        // instances (Q-15). Nothing enforces that here, so the operator is told.
+        log::warn("recovery_wait_zero", &[]);
+    }
     let auth = AuthService::new(db.clone(), secrets, auth_config, VaultBridge)
         .map_err(ServeError::AuthConfig)?;
     let bus = Bus::default();
@@ -227,6 +391,7 @@ pub async fn open_services(config: &Config) -> Result<Services, ServeError> {
             config.max_upload_bytes,
         )),
         db,
+        instance_lock: Some(instance_lock),
         bus,
         self_check_passed: Instant::now(),
     })
@@ -402,13 +567,25 @@ pub async fn serve(config: Config) -> Result<(), ServeError> {
             Field::Str("version", env!("CARGO_PKG_VERSION")),
         ],
     );
-    let services = if config.roles.need_database() {
+    let mut services = if config.roles.need_database() {
         Some(open_services(&config).await?)
     } else {
         None
     };
 
     let (stop_tx, stop_rx) = watch::channel(false);
+    // The instance-lock watchdog (module docs). On SQLite the lock is a marker that cannot be
+    // lost, so none runs, `lost_tx` is dropped and `lost` never resolves.
+    let (lock_stop_tx, lock_stop_rx) = watch::channel(false);
+    let (lost_tx, lost_rx) = watch::channel(false);
+    let watchdog =
+        match services.as_mut().and_then(|s| s.instance_lock.take()) {
+            Some(lock) if lock.engine() == Engine::Postgres => Some(tokio::spawn(
+                watch_instance_lock(lock, INSTANCE_LOCK_CHECK, lock_stop_rx, lost_tx),
+            )),
+            _ => None,
+        };
+    let mut lost = pin!(instance_lock_lost(lost_rx));
     let worker_task = match (&services, config.roles.worker) {
         (Some(services), true) => {
             let copy = match &config.database {
@@ -441,17 +618,31 @@ pub async fn serve(config: Config) -> Result<(), ServeError> {
             Ok(listener) => {
                 let port = listener.local_addr().map_or(0, |a| a.port());
                 log::info("listening", &[Field::U64("port", u64::from(port))]);
-                serve_http(listener, app, shutdown_signal()).await;
-                Ok(())
+                tokio::select! {
+                    () = serve_http(listener, app, shutdown_signal()) => Ok(()),
+                    // Dropping the serving future drops the listener and every connection.
+                    () = &mut lost => Err(ServeError::InstanceLockLost),
+                }
             }
             Err(e) => Err(ServeError::Listener(e.kind())),
         }
     } else {
-        shutdown_signal().await;
-        Ok(())
+        tokio::select! {
+            () = shutdown_signal() => Ok(()),
+            () = &mut lost => Err(ServeError::InstanceLockLost),
+        }
     };
 
     let _receivers_gone = stop_tx.send(true);
+    if matches!(served, Err(ServeError::InstanceLockLost)) {
+        // Exit at once (ADR 0023 §5 step 1): nothing of this process may go on using a
+        // database an admin command can now rewrite. The worker is not waited for; aborting
+        // it rolls back the transaction it may be in.
+        if let Some(task) = worker_task {
+            task.abort();
+        }
+        return served;
+    }
     if let Some(task) = worker_task
         && task.await.is_err()
     {
@@ -460,6 +651,100 @@ pub async fn serve(config: Config) -> Result<(), ServeError> {
     if let Some(services) = services {
         services.db.close().await;
     }
+    // The instance lock goes last, after the pools: held for the process's whole life.
+    let _receiver_gone = lock_stop_tx.send(true);
+    if let Some(task) = watchdog
+        && let Ok(Some(lock)) = task.await
+    {
+        release_instance_lock(lock).await;
+    }
     log::info("stopped", &[]);
     served
+}
+
+#[cfg(test)]
+mod tests {
+    //! The instance lock's plumbing on `SQLite`, where the lock is a marker: it is granted in
+    //! either mode, the watchdog hands it back when told to stop, and "lost" never fires. The
+    //! `PostgreSQL` lock itself is tested in `rizzy-storage` (`tests/storage/postgres.rs`).
+
+    use super::*;
+
+    /// A writable `SQLite` database in a new temporary directory, and that directory.
+    async fn sqlite() -> (Database, std::path::PathBuf) {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "rizzy-server-instance-lock-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.sqlite3");
+        let lock = WriterLock::acquire(&path).unwrap();
+        let db = Database::open_sqlite(&SqliteOptions::new(&path), lock)
+            .await
+            .unwrap();
+        (db, dir)
+    }
+
+    #[tokio::test]
+    async fn sqlite_grants_the_instance_lock_and_the_watchdog_hands_it_back() {
+        let (db, dir) = sqlite().await;
+        for mode in [InstanceLockMode::Shared, InstanceLockMode::Exclusive] {
+            let mut lock = take_instance_lock(&db, mode).await.unwrap();
+            assert_eq!(lock.mode(), mode);
+            assert!(instance_lock_held(&mut lock).await);
+            release_instance_lock(lock).await;
+        }
+
+        let lock = take_instance_lock(&db, InstanceLockMode::Shared)
+            .await
+            .unwrap();
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let (lost_tx, lost_rx) = watch::channel(false);
+        let watchdog = tokio::spawn(watch_instance_lock(
+            lock,
+            Duration::from_millis(5),
+            stop_rx,
+            lost_tx,
+        ));
+        // Several checks pass; nothing is reported lost.
+        let lost = tokio::time::timeout(Duration::from_millis(100), instance_lock_lost(lost_rx));
+        assert!(lost.await.is_err(), "the lock is held: lost never resolves");
+        stop_tx.send(true).unwrap();
+        let handed_back = watchdog.await.unwrap();
+        assert!(handed_back.is_some(), "a stopped watchdog returns the lock");
+
+        // A watchdog whose server is gone (the sender dropped) stops too.
+        let lock = take_instance_lock(&db, InstanceLockMode::Shared)
+            .await
+            .unwrap();
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let (lost_tx, lost_rx) = watch::channel(false);
+        drop(stop_tx);
+        let handed_back =
+            watch_instance_lock(lock, Duration::from_secs(3600), stop_rx, lost_tx).await;
+        assert!(handed_back.is_some());
+        // Its `lost` sender is dropped without a loss: still never resolves.
+        let lost = tokio::time::timeout(Duration::from_millis(50), instance_lock_lost(lost_rx));
+        assert!(lost.await.is_err());
+
+        db.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn instance_lock_errors_say_what_to_do_and_name_no_value() {
+        let shared = ServeError::InstanceLockRefused(InstanceLockMode::Shared).to_string();
+        assert!(shared.contains("restore, migrate or secrets rotate"));
+        let exclusive = ServeError::InstanceLockRefused(InstanceLockMode::Exclusive).to_string();
+        assert!(exclusive.contains("stop them first"));
+        assert!(ServeError::InstanceLockLost.to_string().contains("lost"));
+        assert!(
+            ServeError::InstanceLockTimeout
+                .to_string()
+                .contains("timed out")
+        );
+    }
 }

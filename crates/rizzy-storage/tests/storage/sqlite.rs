@@ -10,9 +10,9 @@ use rizzy_storage::meta::{
 use rizzy_storage::migrate::MIGRATIONS;
 use rizzy_storage::tables::{Kind, NOT_BACKED_UP, TABLES};
 use rizzy_storage::{
-    Conn, Database, Engine, Error, RestoreError, RestoreGeneration, SqliteOptions,
-    StartupMigration, Value, WriterLock, lock_account, on_engine, remove_pre_migration_copy,
-    schema_version,
+    Conn, Database, Engine, Error, InstanceLockMode, RestoreError, RestoreGeneration,
+    SqliteOptions, StartupMigration, Value, WriterLock, lock_account, on_engine,
+    remove_pre_migration_copy, schema_version,
 };
 use sqlx::Row;
 
@@ -268,6 +268,43 @@ fn worker_leader_rides_on_the_writer_lock() {
             .await
             .unwrap();
         assert!(matches!(ro.try_lead_worker().await, Err(Error::ReadOnly)));
+        ro.close().await;
+        db.close().await;
+    });
+}
+
+/// On SQLite the writer lock is the instance lock (ADR 0023 §5 step 1, "SQLite: take the writer
+/// lock"): a writable database is granted it in either mode and keeps it; a read-only one (the
+/// `backup` reader) excludes nobody and is refused.
+#[test]
+fn instance_lock_rides_on_the_writer_lock() {
+    block_on(async {
+        let dir = TempDir::new();
+        let db = open(&dir, "db.sqlite").await;
+        for mode in [InstanceLockMode::Shared, InstanceLockMode::Exclusive] {
+            let mut lock = db.try_instance_lock(mode).await.unwrap().unwrap();
+            assert_eq!(lock.engine(), Engine::Sqlite);
+            assert_eq!(lock.mode(), mode);
+            assert!(lock.is_held().await.unwrap());
+            assert!(lock.is_held().await.unwrap());
+            assert!(format!("{lock:?}").contains("Sqlite"));
+            lock.release().await.unwrap();
+        }
+        // What excludes a second process is the writer lock the database holds.
+        assert!(matches!(
+            WriterLock::acquire(&dir.join("db.sqlite")),
+            Err(Error::WriterLockHeld { .. })
+        ));
+
+        let ro = Database::open_sqlite_read_only(&SqliteOptions::new(dir.join("db.sqlite")))
+            .await
+            .unwrap();
+        for mode in [InstanceLockMode::Shared, InstanceLockMode::Exclusive] {
+            assert!(matches!(
+                ro.try_instance_lock(mode).await,
+                Err(Error::ReadOnly)
+            ));
+        }
         ro.close().await;
         db.close().await;
     });

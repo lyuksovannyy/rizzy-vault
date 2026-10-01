@@ -10,8 +10,8 @@
 //!   bearer token and the per-request device signature (CRYPTO.md §5.10);
 //! - **`web`**: the web vault's static page with its CSP ([`http::web`], [`http::security`];
 //!   INV-49). The web vault itself is M1 step 5; this build serves ADR 0010 §4's fixed page;
-//! - **`worker`**: expired auth state, stale reconciliation epochs, compaction, `SQLite` space and
-//!   the pre-migration copy ([`worker`]).
+//! - **`worker`**: expired auth state, re-sealing 2FA secrets after a data-key rotation, stale
+//!   reconciliation epochs, compaction, `SQLite` space and the pre-migration copy ([`worker`]).
 //!
 //! It also carries the M1 admin subcommands the ADRs specify ([`admin`]): `secrets init`,
 //! `secrets rotate [--data-key]`, `backup-secrets`, `migrate`, and `backup` and `restore` with
@@ -23,9 +23,9 @@
 //! |---|---|---|
 //! | [`cli`] | ADR 0010 §1, §4 | The command line and the process entry point |
 //! | [`config`] | ADR 0010 §1, §4; ADR 0028 items 10–12 | Settings from a file and the environment |
-//! | [`server`] | ADR 0010 §2, §4; ADR 0011 point 9; CRYPTO.md §5.8, §5.11; ADR 0021 §2 | Startup checks, serving, graceful shutdown |
+//! | [`server`] | ADR 0010 §2, §4; ADR 0011 point 9; CRYPTO.md §5.8, §5.11; ADR 0021 §2; ADR 0023 §5 step 1 | Startup checks, the instance lock and its watchdog, serving, graceful shutdown |
 //! | [`http`] | ADR 0002 point 3; ADR 0010 §1; ADR 0028; CRYPTO.md §5.10; INV-49, INV-52 | The router, the endpoints, the header parsers, the security headers, the web page |
-//! | [`worker`] | ADR 0010 §1, §5; ADR 0011 point 9; ADR 0021 §3, §7 | The worker loop |
+//! | [`worker`] | ADR 0010 §1, §5; ADR 0011 point 9; ADR 0021 §3, §7; CRYPTO.md §5.11 "Rotation" | The worker loop |
 //! | [`bridge`] | ADR 0016 R4 | The two cross-domain traits, wired |
 //! | [`secrets_file`] | CRYPTO.md §5.11; ADR 0010 §4 | The secrets file's reader and writer |
 //! | [`secrets_backup`] | ADR 0011 owner decision 3; CRYPTO.md §5.11 | The encrypted secrets backup file |
@@ -82,12 +82,19 @@
 //! `X-Forwarded-For` checks run on the 27 `/api/v1` endpoints, before the session check, and
 //! not on `GET /api/meta`; a repeated `Authorization`, signing or `Content-Length` field line
 //! is refused; another method on the web role's two paths is a plain `405`; a
-//! `request_counter` above `i64::MAX` is refused (`rizzy-domain-auth`).
+//! `request_counter` above `i64::MAX` is refused (`rizzy-domain-auth`); the setting
+//! `RIZZY_RECOVERY_WAIT_HOURS` (ADR 0008 decision 5), which item 12's list does not name
+//! ([`config`]).
 //!
 //! # Not in this build (reported to the owner)
 //!
-//! - `rizzy-vault restore` into `PostgreSQL`: ADR 0023 §5's instance lock is not implemented,
-//!   so it is refused with a usage error ([`admin`]).
+//! - Deleting an old OPAQUE setup after its grace period (CRYPTO.md §5.8 step 4), and dropping
+//!   an unused data key without adding a new one: neither has a command in any ADR ([`admin`]).
+//! - A run of the `PostgreSQL` paths against a real server: the instance lock (ADR 0023 §5 step
+//!   1; [`server`]), and `restore`, `migrate` and `secrets rotate` under it, are tested on
+//!   `SQLite` here and by `rizzy-storage`'s `#[ignore]`d `PostgreSQL` tests.
+//! - Recording a change of the recovery waiting period in the users' security event log
+//!   (threat model §7.19, INV-69): that log is M3's.
 //! - The `embed-web` feature and the web vault (M1 step 5), the admin listener and API (M3),
 //!   `notify`, `icons` (M3) and `smtp` (M6).
 //! - A setting for the minimum client versions: the list is built in and empty

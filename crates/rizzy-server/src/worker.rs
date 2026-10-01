@@ -4,15 +4,25 @@
 //! 1. **Expired auth state** (ADR 0010 §5: "`worker` deletes expired rows"): sessions, sealed
 //!    login states, challenges, rate-limit buckets
 //!    (`rizzy_domain_auth::AuthService::purge_expired`).
-//! 2. **Stale reconciliation epochs** (ADR 0012 §7: "after an admin-set limit (default 30
+//! 2. **TOTP secrets under an old data key** (CRYPTO.md §5.11 "Rotation": "`worker` re-seals
+//!    TOTP rows under the account lock"): after `rizzy-vault secrets rotate --data-key`, every
+//!    TOTP row still sealed under another key than the current one is re-sealed under it, in
+//!    pages of [`TOTP_RESEAL_BATCH`] accounts, each account its own transaction under the
+//!    account lock, until none is left or [`MAX_TOTP_RESEAL_BATCHES`] pages ran
+//!    (`rizzy_domain_auth::AuthService::reseal_totp_secrets`). A run with nothing to do costs
+//!    one read. An account whose row does not open is counted and skipped; it keeps its old
+//!    key in the secrets file. The worker never writes the secrets file (ADR 0010 §4): the old
+//!    key is dropped by a later `secrets rotate --data-key`, once no row names it
+//!    ([`crate::admin`]).
+//! 3. **Stale reconciliation epochs** (ADR 0012 §7: "after an admin-set limit (default 30
 //!    days)").
-//! 3. **Compaction** (ADR 0021 §3, §7): the durable queue, in batches of [`COMPACTION_BATCH`]
+//! 4. **Compaction** (ADR 0021 §3, §7): the durable queue, in batches of [`COMPACTION_BATCH`]
 //!    items, until it is empty or [`MAX_COMPACTION_BATCHES`] batches ran. Each item is its own
 //!    transaction under the account lock; a failing item is logged by vault and item id and
 //!    moved to the back of the queue (`rizzy_domain_vault::VaultDomain::run_compaction`).
-//! 4. **`SQLite` space** (ADR 0011 "`SQLite` settings", `auto_vacuum`): `PRAGMA
-//!    incremental_vacuum` when step 1 or 3 deleted anything.
-//! 5. **The pre-migration copy** (ADR 0011 point 9: "`worker` deletes the copy 24 h after the
+//! 5. **`SQLite` space** (ADR 0011 "`SQLite` settings", `auto_vacuum`): `PRAGMA
+//!    incremental_vacuum` when step 1 or 4 deleted anything.
+//! 6. **The pre-migration copy** (ADR 0011 point 9: "`worker` deletes the copy 24 h after the
 //!    migrated server started and passed its startup self-check"): deleted once 24 h have
 //!    passed since this process passed its startup self-check ([`PreMigrationCopy`]). The
 //!    copy's modification time is not used: it records the migration, which may precede that
@@ -40,9 +50,10 @@
 //!   the worker had before the leader lock existed.
 //!
 //! A step already running when the lock is lost finishes (the window `rizzy_storage::leader_lock`
-//! describes): the purges are idempotent deletes of expired rows, and each compaction item is
-//! its own transaction under the per-account lock, so a standby that takes over meanwhile
-//! serialises with it per account rather than racing it.
+//! describes): the purges are idempotent deletes of expired rows, and each re-sealed account
+//! and each compaction item is its own transaction under the per-account lock, so a standby
+//! that takes over meanwhile serialises with it per account rather than racing it (a row the
+//! other worker already re-sealed is left alone: the update names the key it replaces).
 //!
 //! Log lines carry counts and value-free error texts only.
 
@@ -56,7 +67,13 @@ use tokio::sync::watch;
 
 use crate::http::api::Api;
 use crate::log::{self, Field};
-use crate::sys::now_ms;
+use crate::sys::{now_ms, os_rng};
+
+/// Accounts whose TOTP rows are re-sealed per page (module docs, step 2).
+pub const TOTP_RESEAL_BATCH: u32 = 256;
+
+/// Re-seal pages per run; the rest waits for the next run, so one run stays bounded.
+pub const MAX_TOTP_RESEAL_BATCHES: usize = 64;
 
 /// Items compacted per batch.
 pub const COMPACTION_BATCH: usize = 256;
@@ -83,6 +100,10 @@ const EVENT_DEBOUNCE: Duration = Duration::from_secs(1);
 pub struct RunReport {
     /// Expired auth rows deleted.
     pub auth_rows_purged: u64,
+    /// TOTP rows re-sealed under the current data key.
+    pub totp_rows_resealed: u64,
+    /// Accounts whose TOTP rows could not be re-sealed (they keep their old data key).
+    pub totp_reseal_failures: u64,
     /// Reconciliation epochs ended.
     pub epochs_ended: usize,
     /// Items compacted.
@@ -123,6 +144,8 @@ pub async fn run(
                 "worker_run",
                 &[
                     Field::U64("auth_rows_purged", report.auth_rows_purged),
+                    Field::U64("totp_rows_resealed", report.totp_rows_resealed),
+                    Field::U64("totp_reseal_failures", report.totp_reseal_failures),
                     Field::U64("epochs_ended", count(report.epochs_ended)),
                     Field::U64("items_compacted", count(report.items_compacted)),
                     Field::U64("bodies_deleted", count(report.bodies_deleted)),
@@ -252,6 +275,48 @@ fn count(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
 }
 
+/// Step 2 of a run (module docs): re-seals, under the current server data key, the TOTP secrets
+/// still sealed under another one, page by page, and adds what it did to `report`. It checks
+/// the leader lock before every page; `false` means the lock was lost and the run must stop.
+/// An error ends the step, is logged and leaves the rest to the next run.
+async fn reseal_totp_secrets(api: &Api, leader: &mut WorkerLeader, report: &mut RunReport) -> bool {
+    let mut after = None;
+    for _ in 0..MAX_TOTP_RESEAL_BATCHES {
+        if !still_leader(leader).await {
+            return false;
+        }
+        // The OS CSPRNG draws the new envelopes' nonces (ADR 0009 "RNG rules").
+        let mut rng = os_rng();
+        match api
+            .auth
+            .reseal_totp_secrets(&mut rng, after, TOTP_RESEAL_BATCH)
+            .await
+        {
+            Ok(page) => {
+                report.totp_rows_resealed = report.totp_rows_resealed.saturating_add(page.rows);
+                report.totp_reseal_failures =
+                    report.totp_reseal_failures.saturating_add(page.failures);
+                after = page.next;
+                if after.is_none() {
+                    break;
+                }
+            }
+            Err(e) => {
+                log::error("worker_totp_reseal_failed", &[Field::Error("error", &e)]);
+                break;
+            }
+        }
+    }
+    if report.totp_reseal_failures > 0 {
+        // Counts only: which accounts is the database's to say, not the log's.
+        log::error(
+            "worker_totp_reseal_skipped",
+            &[Field::U64("accounts", report.totp_reseal_failures)],
+        );
+    }
+    true
+}
+
 /// One worker run (module docs), as the holder of `leader`. Never fails: each step's error is
 /// logged and the next step runs. Before every step and every compaction batch it checks that
 /// `leader` still holds the leader lock; when not, it returns at once with
@@ -281,7 +346,7 @@ pub async fn run_once(
         }
         Err(e) => log::error("worker_purge_failed", &[Field::Error("error", &e)]),
     }
-    if !still_leader(leader).await {
+    if !reseal_totp_secrets(api, leader, &mut report).await || !still_leader(leader).await {
         return RunReport {
             leadership_lost: true,
             ..report

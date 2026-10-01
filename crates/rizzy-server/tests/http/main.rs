@@ -1,8 +1,9 @@
 //! In-process HTTP tests of `rizzy-vault`'s router over a real `SQLite` database: the security
 //! headers and CSP (INV-49), body limits, slow and anonymous clients, the listener's timeouts and
 //! bounded shutdown, the uniform error answers, the session gating and strict bodies of the
-//! account endpoints (password change, suspension, recovery, TOTP), and the worker as leader on
-//! `SQLite`, and key rotation end to end with `rizzy-client` (`rotation`: standard and full
+//! account endpoints (password change, suspension, recovery, TOTP), the worker as leader on
+//! `SQLite` with the data-key rotation end to end (`worker`: `secrets rotate --data-key`, the
+//! worker's re-seal, the old key dropped; and the recovery-wait setting), and key rotation end to end with `rizzy-client` (`rotation`: standard and full
 //! rotation, the revocation of CRYPTO.md §11.8, the `state_conflict` retry, ADR 0025).
 //!
 //! ADR 0028's HTTP conventions are pinned by `conventions` (the error table and `Retry-After`,

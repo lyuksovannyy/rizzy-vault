@@ -56,7 +56,8 @@ OPTIONS:
 
 Settings come from RIZZY_* environment variables or the configuration file: RIZZY_ORIGIN,
 RIZZY_LISTEN, RIZZY_DATA_DIR, RIZZY_DATABASE_URL, RIZZY_SECRETS_FILE, RIZZY_SIGNUP,
-RIZZY_TRUSTED_PROXIES, RIZZY_LOG_LEVEL, RIZZY_WORKER_INTERVAL_SECS, RIZZY_MAX_UPLOAD_BYTES.
+RIZZY_TRUSTED_PROXIES, RIZZY_LOG_LEVEL, RIZZY_WORKER_INTERVAL_SECS, RIZZY_MAX_UPLOAD_BYTES,
+RIZZY_RECOVERY_WAIT_HOURS.
 ";
 
 /// A parsed command line.
@@ -426,12 +427,38 @@ fn run_secrets_rotate(config: &Config, data_key: bool) -> Result<String, String>
     } else {
         Rotate::Setup
     };
-    admin::secrets_rotate(config, what)
-        .map(|id| match what {
-            Rotate::Setup => format!("new OPAQUE setup {id} added; new registrations use it"),
-            Rotate::DataKey => format!("new data key {id} added and marked current"),
-        })
+    let rt = runtime().map_err(|e| format!("cannot start the runtime: {}", e.kind()))?;
+    rt.block_on(admin::secrets_rotate(config, what))
+        .map(|rotated| rotation_message(what, &rotated))
         .map_err(|e| e.to_string())
+}
+
+/// The line `secrets rotate` prints: the new id, and for `--data-key` what happens to the old
+/// keys (CRYPTO.md §5.11 "Rotation"). Ids are not secret.
+fn rotation_message(what: Rotate, rotated: &admin::Rotated) -> String {
+    let id = rotated.id;
+    match what {
+        Rotate::Setup => format!("new OPAQUE setup {id} added; new registrations use it"),
+        Rotate::DataKey => {
+            let dropped = if rotated.dropped_data_keys.is_empty() {
+                String::new()
+            } else {
+                let ids: Vec<String> = rotated
+                    .dropped_data_keys
+                    .iter()
+                    .map(u32::to_string)
+                    .collect();
+                format!(
+                    "; dropped data key(s) {}, which no row names any more",
+                    ids.join(", ")
+                )
+            };
+            format!(
+                "new data key {id} added and marked current; the worker re-seals the 2FA \
+                 secrets under it when the server runs{dropped}. Make a new secrets backup"
+            )
+        }
+    }
 }
 
 /// The exit code of a failed admin command: 2 for a usage error, 1 otherwise.

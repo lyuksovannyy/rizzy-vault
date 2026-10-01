@@ -9,7 +9,9 @@
 //!
 //! [`ServerSecrets`] holds exactly that list in memory, with the generation primitive
 //! ([`ServerSecrets::generate`], `rizzy-vault secrets init`), the rotation primitives
-//! (§5.8 "Rotating `server_setup`", §5.11 "Rotation") and the startup checks against the
+//! (§5.8 "Rotating `server_setup`", §5.11 "Rotation", with
+//! [`ServerSecrets::drop_unused_data_keys`] for "the old key is dropped once no row names it")
+//! and the startup checks against the
 //! database ([`ServerSecrets::check_database`]) and, before `rizzy-vault restore` loads it,
 //! against a logical backup ([`ServerSecrets::check_dump`], ADR 0023 §5 step 4).
 //!
@@ -25,7 +27,7 @@
 //! Every secret type here wipes itself on drop and redacts its `Debug`.
 
 use core::fmt;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rizzy_core::opaque::{EnumKey, ServerSetup};
 use rizzy_core::rng::CryptoRng;
@@ -243,7 +245,9 @@ impl ServerSecrets {
 
     /// Adds a new `server_data_key` under the next `data_key_id` and marks it current
     /// (`rizzy-vault secrets rotate --data-key`, CRYPTO.md §5.11 "Rotation"). Returns the new
-    /// id. The old key stays until no row names it.
+    /// id. The old key stays until no row names it: `worker` re-seals the TOTP rows under the
+    /// new key ([`crate::AuthService::reseal_totp_secrets`]), and
+    /// [`ServerSecrets::drop_unused_data_keys`] then drops it.
     ///
     /// # Errors
     /// [`SecretsError::IdOverflow`].
@@ -260,6 +264,57 @@ impl ServerSecrets {
         self.data_keys.insert(id, ServerDataKey::generate(rng, id));
         self.current_data_key_id = id;
         Ok(id)
+    }
+
+    /// Drops every `server_data_key` that is not current and that no sealed row names any more
+    /// (CRYPTO.md §5.11 "Rotation": "the old key is dropped once no row names it"). Returns the
+    /// dropped ids, ascending; the caller writes the file.
+    ///
+    /// In one transaction it first deletes the login states expired at `now_ms`, as `worker`
+    /// does (they can never be opened again, and the server is stopped, so nothing else would
+    /// remove them), then reads every `data_key_id` a TOTP row or a login state names. A key
+    /// a row still names is kept, so the startup check (§5.11: "the server refuses to start if
+    /// a row names an id the file lacks") keeps passing; the current key is always kept.
+    ///
+    /// **Who calls it.** The server never writes the secrets file (ADR 0010 §4), so dropping is
+    /// not `worker`'s: `worker` re-seals ([`crate::AuthService::reseal_totp_secrets`]), and
+    /// `rizzy-vault secrets rotate --data-key`, which runs with the secrets mount writable and
+    /// every server process excluded, calls this. No Accepted ADR names the actor; this reading
+    /// is reported to the owner. The database must be at this release's schema.
+    ///
+    /// A logical backup taken before the rows were re-sealed still names the dropped key:
+    /// restoring it needs a secrets backup from before the drop
+    /// ([`ServerSecrets::check_dump`] refuses it otherwise).
+    ///
+    /// # Errors
+    /// Storage errors; nothing is dropped then.
+    pub async fn drop_unused_data_keys(
+        &mut self,
+        db: &Database,
+        now_ms: u64,
+    ) -> Result<Vec<u32>, AuthError> {
+        let now = sql::u64_sql(now_ms, "now_ms")?;
+        let mut tx = db.begin_write().await?;
+        exec!(tx.conn(), sql::LOGIN_STATES_DELETE_EXPIRED, now)?;
+        let mut named = BTreeSet::new();
+        for query in [sql::TOTP_DATA_KEY_IDS, sql::LOGIN_STATE_DATA_KEY_IDS] {
+            let ids: Vec<(i64,)> = fetch_all!(tx.conn(), (i64,), query)?;
+            for (id,) in ids {
+                named.insert(sql::sql_u32(id, "data_key_id")?);
+            }
+        }
+        tx.commit().await?;
+        let unused: Vec<u32> = self
+            .data_keys
+            .keys()
+            .copied()
+            .filter(|id| *id != self.current_data_key_id && !named.contains(id))
+            .collect();
+        for id in &unused {
+            // Dropping the key wipes it (`ServerDataKey` zeroizes on drop).
+            self.data_keys.remove(id);
+        }
+        Ok(unused)
     }
 
     /// The setups, by `setup_id`, for the server's writer.

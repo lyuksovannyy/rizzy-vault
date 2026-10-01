@@ -71,10 +71,39 @@ impl Drop for TempDir {
     }
 }
 
+/// The configuration of a test server in `dir`, laid out as the container image is: a data
+/// directory and, outside it, a directory for the secrets file (ADR 0010 §4), both created
+/// here. Open signup; `extra` adds or replaces settings.
+pub(crate) fn config_in(dir: &TempDir, extra: &[(&'static str, &str)]) -> Config {
+    let data = dir.join("data");
+    let secrets_dir = dir.join("secrets");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::create_dir_all(&secrets_dir).unwrap();
+    let secrets_path = secrets_dir.join("secrets.json");
+    let mut env: BTreeMap<&'static str, String> = BTreeMap::new();
+    env.insert(config::ORIGIN, ORIGIN.to_owned());
+    env.insert(config::SIGNUP, "open".to_owned());
+    env.insert(config::DATA_DIR, data.to_str().unwrap().to_owned());
+    env.insert(
+        config::SECRETS_FILE,
+        secrets_path.to_str().unwrap().to_owned(),
+    );
+    for (k, v) in extra {
+        env.insert(k, (*v).to_owned());
+    }
+    let lookup = move |key: &str| env.get(key).map(OsString::from);
+    Config::from_sources(&Sources {
+        file: Settings::new(),
+        env: &lookup,
+        roles_flag: None,
+    })
+    .unwrap()
+}
+
 /// A started server.
 pub(crate) struct Server {
     /// Keeps the directories alive.
-    pub(crate) _dir: TempDir,
+    pub(crate) dir: TempDir,
     /// The services (the database stays open, and locked, while this lives).
     pub(crate) services: Services,
     /// The router of `api` and `web`.
@@ -133,40 +162,37 @@ impl Server {
         adjust: impl FnOnce(&mut Api),
     ) -> Self {
         let dir = TempDir::new();
-        let data = dir.join("data");
-        let secrets_dir = dir.join("secrets");
-        std::fs::create_dir_all(&data).unwrap();
-        std::fs::create_dir_all(&secrets_dir).unwrap();
-        let secrets_path = secrets_dir.join("secrets.json");
+        let config = config_in(&dir, extra);
         let secrets = ServerSecrets::generate(&mut ChaCha20Rng::seed_from_u64(99));
-        std::fs::write(&secrets_path, secrets_file::serialize(&secrets).unwrap()).unwrap();
-        let mut env: BTreeMap<&'static str, String> = BTreeMap::new();
-        env.insert(config::ORIGIN, ORIGIN.to_owned());
-        env.insert(config::SIGNUP, "open".to_owned());
-        env.insert(config::DATA_DIR, data.to_str().unwrap().to_owned());
-        env.insert(
-            config::SECRETS_FILE,
-            secrets_path.to_str().unwrap().to_owned(),
-        );
-        for (k, v) in extra {
-            env.insert(k, (*v).to_owned());
-        }
-        let lookup = move |key: &str| env.get(key).map(OsString::from);
-        let config = Config::from_sources(&Sources {
-            file: Settings::new(),
-            env: &lookup,
-            roles_flag: None,
-        })
+        std::fs::write(
+            &config.secrets_file,
+            secrets_file::serialize(&secrets).unwrap(),
+        )
         .unwrap();
-        let mut services = open_services(&config).await.unwrap();
+        Self::open(dir, &config, adjust).await
+    }
+
+    /// Starts the server of `config`, whose directories are in `dir` and whose secrets file
+    /// exists; `adjust` edits its `api` role before the router is built.
+    pub(crate) async fn open(dir: TempDir, config: &Config, adjust: impl FnOnce(&mut Api)) -> Self {
+        let mut services = open_services(config).await.unwrap();
         // The api role is not shared yet: the router is built below.
         adjust(Arc::get_mut(&mut services.api).unwrap());
         let router = http::router(Some(services.api.clone()), config.roles.web);
         Self {
-            _dir: dir,
+            dir,
             services,
             router,
         }
+    }
+
+    /// Stops the server: closes the pools, which releases the writer lock, and hands back its
+    /// directory, so an admin command or a second start can follow.
+    pub(crate) async fn stop(self) -> TempDir {
+        drop(self.router);
+        self.services.db.close().await;
+        drop(self.services);
+        self.dir
     }
 
     /// Sends a request with a peer address, as the listener would.
@@ -233,30 +259,11 @@ pub(crate) async fn send_from(router: Router, peer: IpAddr, request: Request<Bod
 }
 
 impl Server {
-    /// A server with open signup whose recovery waiting period is `wait_ms` instead of the
+    /// A server with open signup whose recovery waiting period is `hours` instead of the
     /// default 72 h (CRYPTO.md §11.9 step 2: "admin-configurable from 0 to 30 days. A
-    /// single-user instance may set 0"). No `RIZZY_*` setting carries the period yet, so the
-    /// harness swaps the auth domain of the opened services for one with the same database,
-    /// secrets and origin and this period; everything else is the server as it starts.
-    pub(crate) async fn start_with_recovery_wait(wait_ms: u64) -> Self {
-        let mut server = Self::start().await;
-        let origin = rizzy_domain_auth::types::ServerOrigin::parse(ORIGIN).unwrap();
-        let mut config = rizzy_domain_auth::AuthConfig::new(origin);
-        config.signup = rizzy_domain_auth::SignupPolicy::Open;
-        config.recovery_wait_ms = wait_ms;
-        // The same secrets the harness wrote to the secrets file (the same seed).
-        let secrets = Arc::new(ServerSecrets::generate(&mut ChaCha20Rng::seed_from_u64(99)));
-        let auth = rizzy_domain_auth::AuthService::new(
-            server.services.db.clone(),
-            secrets,
-            config,
-            rizzy_server::bridge::VaultBridge,
-        )
-        .unwrap();
-        // The router holds the other reference to the api role: drop it, swap, rebuild.
-        server.router = Router::new();
-        Arc::get_mut(&mut server.services.api).unwrap().auth = auth;
-        server.router = http::router(Some(server.services.api.clone()), true);
-        server
+    /// single-user instance may set 0"), set as an operator sets it: through
+    /// `RIZZY_RECOVERY_WAIT_HOURS`.
+    pub(crate) async fn start_with_recovery_wait(hours: u32) -> Self {
+        Self::start_with(&[(config::RECOVERY_WAIT_HOURS, &hours.to_string())]).await
     }
 }

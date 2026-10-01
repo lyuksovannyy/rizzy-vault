@@ -53,19 +53,22 @@ impl core::fmt::Debug for TotpEnrolment {
 }
 
 /// One stored TOTP enrolment.
-struct Stored {
+pub(crate) struct Stored {
     /// Its `totp_credential_seq`.
-    seq: u32,
+    pub(crate) seq: u32,
     /// The data key it is sealed under.
-    data_key_id: u32,
+    pub(crate) data_key_id: u32,
     /// The sealed secret.
-    sealed: Vec<u8>,
+    pub(crate) sealed: Vec<u8>,
     /// The last accepted time step; `None` while unconfirmed.
-    last_step: Option<u64>,
+    pub(crate) last_step: Option<u64>,
 }
 
 /// Every TOTP enrolment of `account_id`, oldest first.
-async fn list(tx: &mut WriteTx, account_id: AccountId) -> Result<Vec<Stored>, AuthError> {
+pub(crate) async fn list(
+    tx: &mut WriteTx,
+    account_id: AccountId,
+) -> Result<Vec<Stored>, AuthError> {
     let rows: Vec<(i64, i64, Vec<u8>, Option<i64>)> = fetch_all!(
         tx.conn(),
         (i64, i64, Vec<u8>, Option<i64>),

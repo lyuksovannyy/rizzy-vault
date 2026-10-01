@@ -236,8 +236,7 @@ fn rizzy_with_stdin(args: &[&str], env: &[(&str, &Path)], stdin: &[u8]) -> Outpu
 }
 
 /// `backup` and `restore` (ADR 0023 §5, §6) as the operator runs them: to and from a file and a
-/// pipe, the digest on stderr, never over an existing file, into an empty database only, and
-/// `PostgreSQL` restores refused as a usage error.
+/// pipe, the digest on stderr, never over an existing file, and into an empty database only.
 #[test]
 fn backup_and_restore_commands() {
     use rizzy_storage::backup::file;
@@ -330,22 +329,61 @@ fn backup_and_restore_commands() {
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8(out.stderr).unwrap().contains("not empty"));
 
-    // PostgreSQL: no instance lock in this build, so a usage error (ADR 0023 §5 step 1). The
-    // URL is never printed.
-    let url = Path::new("postgres://rizzy:hunter2@localhost/rizzy");
-    let out = rizzy(
-        &["restore", "--in", backup.to_str().unwrap()],
-        &[
-            ("RIZZY_DATA_DIR", restored.as_path()),
-            ("RIZZY_SECRETS_FILE", secrets.as_path()),
-            ("RIZZY_DATABASE_URL", url),
-        ],
-    );
-    assert_eq!(out.status.code(), Some(2));
-    let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("instance lock"), "{stderr}");
-    assert!(!stderr.contains("hunter2"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
 
+/// `PostgreSQL` is a target of `restore`, `migrate` and `secrets rotate` (ADR 0023 §5 step 1:
+/// the instance lock), so none of them is a usage error there any more: each goes to the
+/// database first, to shut the servers out. No `PostgreSQL` runs here: a remote URL without
+/// `sslmode=verify-full` is refused before any connection is made, as a runtime failure that
+/// never prints the URL and leaves the secrets file as it was.
+#[test]
+fn exclusive_commands_on_postgres_fail_closed_without_printing_the_url() {
+    let dir = temp_dir("pg-exclusive");
+    let data = dir.join("data");
+    let secrets_dir = dir.join("secrets");
+    for d in [&data, &secrets_dir] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let secrets = secrets_dir.join("secrets.json");
+    let backup = dir.join("db.rvbackup");
+    assert!(
+        rizzy(
+            &["secrets", "init"],
+            &[
+                ("RIZZY_DATA_DIR", data.as_path()),
+                ("RIZZY_SECRETS_FILE", secrets.as_path()),
+            ],
+        )
+        .status
+        .success()
+    );
+    let url = Path::new("postgres://rizzy:hunter2@db.example.com/rizzy");
+    for command in [
+        &["restore", "--in", backup.to_str().unwrap()][..],
+        &["migrate"][..],
+        &["secrets", "rotate"][..],
+        &["secrets", "rotate", "--data-key"][..],
+    ] {
+        let before = std::fs::read(&secrets).unwrap();
+        let out = rizzy(
+            command,
+            &[
+                ("RIZZY_DATA_DIR", data.as_path()),
+                ("RIZZY_SECRETS_FILE", secrets.as_path()),
+                ("RIZZY_DATABASE_URL", url),
+            ],
+        );
+        assert_eq!(out.status.code(), Some(1), "{command:?}");
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert!(stderr.contains("sslmode=verify-full"), "{stderr}");
+        assert!(!stderr.contains("hunter2"));
+        assert_eq!(
+            std::fs::read(&secrets).unwrap(),
+            before,
+            "{command:?}: without the instance lock the secrets file is not rewritten"
+        );
+    }
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

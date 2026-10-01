@@ -154,6 +154,10 @@ queries! {
     CERT_DELETE = "cert_delete";
     /// When the current `account-state` was stored.
     STATE_UPDATED_AT = "state_updated_at";
+    /// A page of accounts holding a TOTP row sealed under another data key than the current.
+    TOTP_STALE_ACCOUNTS = "totp_stale_accounts";
+    /// Replaces a TOTP row's sealed secret and data key id.
+    TOTP_RESEAL = "totp_reseal";
 }
 
 /// Runs a statement on a [`rizzy_storage::Conn`] and returns the number of rows it changed:

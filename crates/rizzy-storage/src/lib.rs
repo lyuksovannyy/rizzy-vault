@@ -1,7 +1,7 @@
 //! `rizzy-storage` — the server's storage layer (roadmap M1 step 3, [ADR 0011]; [ADR 0016] §3
 //! row `rizzy-storage`): sqlx pools, embedded migrations, the per-account lock, the `worker`
-//! leader lock, and backup and restore primitives. Server mode only ([ADR 0022]): there are no
-//! relay tables.
+//! leader lock, the instance lock, and backup and restore primitives. Server mode only
+//! ([ADR 0022]): there are no relay tables.
 //!
 //! # What this crate is, and is not
 //!
@@ -44,6 +44,7 @@
 //! | [`writer_lock`] | ADR 0010 §2 | [`WriterLock`]: one process writes an SQLite file |
 //! | [`lock`] | ADR 0011 "Transactions and concurrency"; ADR 0010 §2 | [`lock_account`]: `pg_advisory_xact_lock` in its own key space, nothing on SQLite |
 //! | [`leader_lock`] | ADR 0010 §2 | [`WorkerLeader`] from [`Database::try_lead_worker`]: one active `worker` per database, a session-level advisory lock on a dedicated PostgreSQL connection outside the pool; on SQLite the writer lock already covers it |
+//! | [`instance_lock`] | ADR 0023 §5 step 1 | [`InstanceLock`] from [`Database::try_instance_lock`]: every server process on PostgreSQL holds it shared, `restore`, `migrate` and `secrets rotate` take it exclusively, on a dedicated connection outside the pool; on SQLite the writer lock already covers it |
 //! | [`migrate`] | ADR 0011 points 8–10 | Embedded forward-only migrations per engine; the startup rule with the `VACUUM INTO` pre-migration copy (SQLite) or the refusal (PostgreSQL) |
 //! | [`backup`] | ADR 0011 "Backups"; ADR 0023 | `VACUUM INTO`; the logical [`Dump`], [`Database::check_restore_target`] and [`Database::restore`] into an empty database, which draws a new restore generation, opens every account's reconciliation epoch and raises the store-sequence counters; [`backup::file`], the backup file's canonical writer and strict parser (format version 1, trailing SHA-256, size limits) |
 //! | [`tables`] | ADR 0011 "Backups" | The backed-up tables and columns, in restore order |
@@ -62,10 +63,12 @@
 //!
 //! `tests/sqlite.rs` runs against real SQLite files in a temporary directory: migrations and
 //! PRAGMAs, schema-to-backup-list drift, the writer lock, writer/reader separation,
-//! serialised writes, the startup copy, the backup → file → restore round trip, and the worker leader
-//! (always granted on a writable file, refused read-only). `tests/postgres.rs` runs the same
+//! serialised writes, the startup copy, the backup → file → restore round trip, and the worker
+//! leader and the instance lock (always granted on a writable file, refused read-only).
+//! `tests/postgres.rs` runs the same
 //! against PostgreSQL, plus the leader lock (one of two workers leads; a dropped or terminated
-//! connection releases it), when `RIZZY_TEST_POSTGRES_URL` names an empty database;
+//! connection releases it) and the instance lock (shared holders refuse the exclusive lock and
+//! the reverse), when `RIZZY_TEST_POSTGRES_URL` names an empty database;
 //! its tests are `#[ignore]`d otherwise.
 //!
 //! [ADR 0010]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0010-server-shape.md
@@ -81,6 +84,7 @@ pub mod backup;
 pub mod convert;
 pub mod db;
 pub mod error;
+pub mod instance_lock;
 pub mod leader_lock;
 pub mod lock;
 pub mod meta;
@@ -91,6 +95,7 @@ pub mod writer_lock;
 pub use backup::{Dump, RestoreReport, TableDump, Value};
 pub use db::{Conn, Database, PostgresOptions, ReadTx, SqliteOptions, WriteTx};
 pub use error::{Engine, Error, RestoreError};
+pub use instance_lock::{InstanceLock, InstanceLockMode};
 pub use leader_lock::WorkerLeader;
 pub use lock::lock_account;
 pub use meta::{ReconciliationEpoch, RestoreGeneration};

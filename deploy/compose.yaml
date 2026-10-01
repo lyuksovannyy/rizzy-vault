@@ -39,6 +39,9 @@ services:
       RIZZY_LISTEN: 0.0.0.0:8080
       RIZZY_SIGNUP: ${RIZZY_SIGNUP:-closed}
       RIZZY_LOG_LEVEL: ${RIZZY_LOG_LEVEL:-info}
+      # The recovery waiting period in hours, 0 to 720 (ADR 0008 decision 5; the guide's
+      # configuration reference says when 0 is acceptable).
+      RIZZY_RECOVERY_WAIT_HOURS: ${RIZZY_RECOVERY_WAIT_HOURS:-72}
       # Only the proxy's X-Forwarded-For is believed (THREAT_MODEL §7.6 "S", §7.14): the proxy
       # has a fixed address on the `edge` network below.
       RIZZY_TRUSTED_PROXIES: ${RIZZY_PROXY_IP:-172.30.87.10}

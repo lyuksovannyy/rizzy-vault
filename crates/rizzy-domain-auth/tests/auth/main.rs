@@ -13,6 +13,7 @@
 //! | `restore` | the reconciliation epoch after a restore: its end, its limit, the device-set check (INV-59) |
 //! | `single_use` | login states and challenges used once on every path; no login across a credential change (§5.10, §5.11, INV-59) |
 //! | `secrets` | the startup checks and what the database never holds (INV-8, INV-50) |
+//! | `data_key` | after a data-key rotation: TOTP rows re-sealed under the account lock, the old key dropped once no row names it (§5.11 "Rotation") |
 //! | `window` | the replay window at its edges, through the database: the first counter, `max − 63`, `max − 64`, jumps, forged requests, a restart, the highest recordable counter (ADR 0028 item 5) |
 
 #![expect(
@@ -23,6 +24,7 @@
 )]
 
 mod common;
+mod data_key;
 mod enumeration;
 mod flow;
 mod recovery;

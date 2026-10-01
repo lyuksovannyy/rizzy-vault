@@ -9,11 +9,12 @@
 
 use std::time::Duration;
 
+use rizzy_storage::instance_lock::INSTANCE_LOCK;
 use rizzy_storage::lock::WORKER_LEADER_LOCK;
 use rizzy_storage::meta::{reconciliation_epoch, restore_generation};
 use rizzy_storage::{
-    Conn, Database, Engine, Error, PostgresOptions, RestoreGeneration, StartupMigration,
-    WorkerLeader, lock_account, on_engine, schema_version,
+    Conn, Database, Engine, Error, InstanceLock, InstanceLockMode, PostgresOptions,
+    RestoreGeneration, StartupMigration, WorkerLeader, lock_account, on_engine, schema_version,
 };
 
 use crate::common::{ACCOUNT_1, block_on, fixture, fixture_after_restore, id};
@@ -288,5 +289,128 @@ fn postgres_worker_leader_lock() {
 
         one.close().await;
         two.close().await;
+    });
+}
+
+/// Tries to take the instance lock from `db` in `mode` until it is granted, for up to 10 s: the
+/// server releases a session-level lock when it notices the session has ended, which can lag
+/// the client's close.
+#[expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test helper: a failure fails the test, which CLAUDE.md allows in test code"
+)]
+async fn instance_lock_eventually(db: &Database, mode: InstanceLockMode) -> InstanceLock {
+    for _ in 0..100 {
+        if let Some(lock) = db.try_instance_lock(mode).await.unwrap() {
+            return lock;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the instance lock was not released within 10 s");
+}
+
+/// The instance lock (ADR 0023 §5 step 1): any number of server processes hold it shared; an
+/// admin command's exclusive lock is refused while one of them remains, and refuses them while
+/// it is held; the lock is on the dedicated connection, not on a pooled one; a terminated
+/// session reads as lost. It does not collide with the worker's leader lock. Needs no migrated
+/// schema.
+#[test]
+#[ignore = "needs RIZZY_TEST_POSTGRES_URL: an empty PostgreSQL database"]
+fn postgres_instance_lock() {
+    block_on(async {
+        let one = open_handle().await;
+        let two = open_handle().await;
+        let admin = open_handle().await;
+
+        // Two servers hold it together; an admin command is refused while either remains.
+        let mut first = instance_lock_eventually(&one, InstanceLockMode::Shared).await;
+        let mut second = two
+            .try_instance_lock(InstanceLockMode::Shared)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.engine(), Engine::Postgres);
+        assert_eq!(first.mode(), InstanceLockMode::Shared);
+        assert!(first.is_held().await.unwrap());
+        assert!(second.is_held().await.unwrap());
+        assert!(
+            admin
+                .try_instance_lock(InstanceLockMode::Exclusive)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Another key space than the worker's leader lock: a worker still leads.
+        let leader = lead_eventually(&one).await;
+        leader.release().await.unwrap();
+        // The lock is on the dedicated connection: closing the pool leaves it held.
+        one.close().await;
+        assert!(first.is_held().await.unwrap());
+        first.release().await.unwrap();
+        assert!(
+            admin
+                .try_instance_lock(InstanceLockMode::Exclusive)
+                .await
+                .unwrap()
+                .is_none(),
+            "one server is left"
+        );
+
+        // The server ends that session: its check fails, and the admin command is granted.
+        let mut w = admin.begin_write().await.unwrap();
+        let Conn::Postgres(c) = w.conn() else {
+            panic!("a PostgreSQL handle");
+        };
+        let terminated: Vec<bool> = sqlx::query_scalar(
+            "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' \
+                 AND granted \
+                 AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+                 AND classid::int8 = $1 AND objid::int8 = $2 AND objsubid = 1",
+        )
+        .bind(INSTANCE_LOCK >> 32)
+        .bind(INSTANCE_LOCK & 0xffff_ffff)
+        .fetch_all(&mut *c)
+        .await
+        .unwrap();
+        w.rollback().await.unwrap();
+        assert_eq!(terminated, vec![true]);
+        let mut lost = false;
+        for _ in 0..100 {
+            if !matches!(second.is_held().await, Ok(true)) {
+                lost = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            lost,
+            "the terminated server still reports the lock after 10 s"
+        );
+        drop(second);
+
+        // The exclusive lock refuses a starting server and a second admin command.
+        let mut exclusive = instance_lock_eventually(&admin, InstanceLockMode::Exclusive).await;
+        assert_eq!(exclusive.mode(), InstanceLockMode::Exclusive);
+        assert!(exclusive.is_held().await.unwrap());
+        assert!(
+            two.try_instance_lock(InstanceLockMode::Shared)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            two.try_instance_lock(InstanceLockMode::Exclusive)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Releasing it lets a server start again.
+        exclusive.release().await.unwrap();
+        let again = instance_lock_eventually(&two, InstanceLockMode::Shared).await;
+        again.release().await.unwrap();
+
+        two.close().await;
+        admin.close().await;
     });
 }

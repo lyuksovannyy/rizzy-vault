@@ -217,7 +217,7 @@ pub(crate) fn copy_token(token: &SessionToken) -> SessionToken {
 
 /// An OPAQUE login; with `device`, a re-authentication over that device's session, which the
 /// server binds to the device (CRYPTO.md §11.6 step 1, §11.8 step 0).
-async fn login(
+pub(crate) async fn login(
     server: &Server,
     rng: &mut ChaCha20Rng,
     sk: &str,

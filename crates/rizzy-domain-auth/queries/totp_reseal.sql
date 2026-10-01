@@ -1,0 +1,2 @@
+-- Replaces the sealed secret of TOTP enrolment $2 of account $1, still sealed under data key $5, with envelope $4 sealed under data key $3 (CRYPTO.md §5.11 "Rotation"). The accepted step and the enrolment number stay. Shared by both engines; every value is a bound parameter (INV-53).
+UPDATE auth_totp_credentials SET data_key_id = $3, sealed_secret = $4 WHERE account_id = $1 AND totp_credential_seq = $2 AND data_key_id = $5

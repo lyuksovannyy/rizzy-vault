@@ -1,0 +1,2 @@
+-- Up to $3 accounts, after account $2 in id order, that hold a TOTP row sealed under another data key than $1, the current one (CRYPTO.md §5.11 "Rotation": worker re-seals them). $2 is the empty blob for the first page. Shared by both engines; every value is a bound parameter (INV-53).
+SELECT DISTINCT account_id FROM auth_totp_credentials WHERE data_key_id <> $1 AND account_id > $2 ORDER BY account_id LIMIT $3

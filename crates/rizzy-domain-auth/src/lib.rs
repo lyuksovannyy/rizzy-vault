@@ -40,7 +40,7 @@
 //! | Module | Spec | Purpose |
 //! |---|---|---|
 //! | [`config`] | ADR 0008 decision 5; ADR 0010 §5; ADR 0012 §7; CRYPTO.md §5.9, §5.10 | [`AuthConfig`]: origin, signup policy, lifetimes, recovery wait, rate limits |
-//! | [`secrets`] | CRYPTO.md §5.8, §5.11; ADR 0010 §4 | [`ServerSecrets`] (`format = 1`): generation, rotation, startup checks against the database |
+//! | [`secrets`] | CRYPTO.md §5.8, §5.11; ADR 0010 §4 | [`ServerSecrets`] (`format = 1`): generation, rotation, dropping unused data keys, startup checks against the database |
 //! | [`rules`] | CRYPTO.md §10.2, §11 | Pure checks on untrusted statements and state transitions; the request-counter window |
 //! | [`ports`] | ADR 0016 R4 | [`VaultPort`], the vault domain's side |
 //! | [`session`] | CRYPTO.md §5.10; INV-8 | Sessions: token hashes, kinds, freshness |
@@ -55,7 +55,7 @@
 //! | `totp` | CRYPTO.md §5.11, §11.15 | Server-side 2FA enrolment and removal |
 //! | `requests` | CRYPTO.md §11 "Replacing credentials", §11.5, §11.8 step 0, §11.9, §11.15 | The `rizzy-proto` entry points of the flows above that take typed arguments ([`AuthService::commit_change_request`] and the others) |
 //! | `healing` | ADR 0012 §7 "Healing a server rollback" steps 1–3; INV-59 | The reconciliation epoch after a restore |
-//! | `maintenance` | ADR 0010 §5; ADR 0012 §7 | What `worker` runs: expired auth state, stale reconciliation epochs |
+//! | `maintenance` | ADR 0010 §5; ADR 0012 §7; CRYPTO.md §5.11 "Rotation" | What `worker` runs: expired auth state, stale reconciliation epochs, re-sealing TOTP secrets after a data-key rotation |
 //!
 //! # Readings of the specs (the conservative choice, where they leave room)
 //!
@@ -116,8 +116,9 @@
 //!
 //! `tests/auth/` runs against real SQLite files: signup, login, device authentication and a
 //! signed request end to end with `rizzy-core`'s client-side functions, replay rejection,
-//! compare-and-swap races and forks, revocation, the recovery wait, 2FA, the reconciliation
-//! epoch, and the indistinguishability of unknown and real login names.
+//! compare-and-swap races and forks, revocation, the recovery wait, 2FA, re-sealing after a
+//! data-key rotation, the reconciliation epoch, and the indistinguishability of unknown and
+//! real login names.
 //!
 //! [ADR 0010]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0010-server-shape.md
 //! [ADR 0011]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0011-storage.md
@@ -161,7 +162,7 @@ pub use change::{AccountChange, MAX_RETIRED_KEYS, RecoveryUpload, RetiredSecretK
 pub use config::{AuthConfig, ConfigError, InviteVerifier, RateLimits, RateRule, SignupPolicy};
 pub use device::RequestParts;
 pub use error::AuthError;
-pub use maintenance::Purged;
+pub use maintenance::{Purged, Resealed};
 pub use ports::{PersonalVault, VaultPort};
 pub use recovery::{RecoveryPending, RecoveryRelease};
 pub use secrets::{ServerSecrets, StartupCheckError};
