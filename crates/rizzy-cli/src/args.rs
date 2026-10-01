@@ -31,7 +31,8 @@ USAGE:
                    [--tag <name>]... [--untag <name>]... [--uri <uri>]...
                    [--set-uri <id>=<uri>]... [--remove-uri <id>]... [<custom field>]...
                    [--set-custom <id>=<value>]... [--set-custom-secret <id>]...
-                   [--remove-custom <id>]...
+                   [--remove-custom <id>]... [--move-uri <id>=<place>]...
+                   [--move-custom <id>=<place>]...
     rv item trash <item> | restore <item> | purge <item>
     rv generate [--length <n>] [--no-symbols] [--no-ambiguous] | [--words <n>]
     rv totp <item>
@@ -45,7 +46,7 @@ USAGE:
     rv recovery complete --server <url> --name <login> [--skip-rotation]
     rv recovery cancel
     rv password --name <login> [--rotate]
-    rv secret-key --name <login> [--skip-rotation]
+    rv secret-key --name <login> [--skip-rotation | --full-rotation]
     rv 2fa enable --name <login> | disable --name <login>
 
 OPTIONS:
@@ -57,6 +58,7 @@ OPTIONS:
 <custom field> is --custom <label>=<text>, --custom-secret <label> (a hidden field; its value
 is asked for) or --custom-bool <label>=true|false. <id> is a URI's or custom field's element
 id as `item show` prints it in the field's key (uri/<id>/value), or a unique prefix of one.
+<place> is first, last, before:<id> or after:<id>.
 <type> is login, note, card, identity, ssh-key, api-credential, software-license, wifi,
 bank-account or passkey. Field keys are the item schema's (item.name, item.notes,
 login.username, login.password, login.totp, card.number, …).
@@ -120,6 +122,8 @@ pub struct FieldArgs {
     pub uri_set: Vec<(String, String)>,
     /// `--remove-uri id` (edit only).
     pub uri_remove: Vec<String>,
+    /// `--move-uri id=place` (edit only): `first`, `last`, `before:<id>` or `after:<id>`.
+    pub uri_move: Vec<(String, String)>,
     /// `--custom label=text`: a new text custom field.
     pub custom: Vec<(String, String)>,
     /// `--custom-secret label`: a new hidden custom field, its value asked for.
@@ -132,6 +136,8 @@ pub struct FieldArgs {
     pub custom_set_secret: Vec<String>,
     /// `--remove-custom id` (edit only).
     pub custom_remove: Vec<String>,
+    /// `--move-custom id=place` (edit only), places as for `--move-uri`.
+    pub custom_move: Vec<(String, String)>,
     /// `--tag name`.
     pub tags: Vec<String>,
     /// `--untag name` (edit only).
@@ -284,6 +290,9 @@ pub enum Command {
         name: String,
         /// Not `--skip-rotation`: rotate the account and vault keys (the default).
         rotate: bool,
+        /// `--full-rotation`: the rotation also replaces the identity keys ("the kit was
+        /// stolen").
+        full: bool,
     },
     /// `2fa enable` or `2fa disable`.
     TwoFactor {
@@ -487,13 +496,7 @@ fn account_command(args: &mut Args, word: &str) -> Result<Command, CliError> {
             let (name, rotate) = name_and_flag(args, "--rotate")?;
             Command::Password { name, rotate }
         }
-        "secret-key" => {
-            let (name, skip) = name_and_flag(args, "--skip-rotation")?;
-            Command::SecretKey {
-                name,
-                rotate: !skip,
-            }
-        }
+        "secret-key" => secret_key_command(args)?,
         _ => {
             let enable = match args.next().as_deref() {
                 Some("enable") => true,
@@ -503,6 +506,30 @@ fn account_command(args: &mut Args, word: &str) -> Result<Command, CliError> {
             let (name, _) = name_and_flag(args, "")?;
             Command::TwoFactor { name, enable }
         }
+    })
+}
+
+/// `secret-key`: `--name`, and at most one of `--skip-rotation` and `--full-rotation`, in any
+/// order.
+fn secret_key_command(args: &mut Args) -> Result<Command, CliError> {
+    let (mut name, mut skip, mut full) = (None, false, false);
+    while let Some(option) = args.next() {
+        match option.as_str() {
+            "--name" => name = Some(args.value("--name")?),
+            "--skip-rotation" => skip = true,
+            "--full-rotation" => full = true,
+            other => return Err(unknown(other)),
+        }
+    }
+    if skip && full {
+        return Err(usage(
+            "--skip-rotation and --full-rotation contradict each other",
+        ));
+    }
+    Ok(Command::SecretKey {
+        name: required(name, "--name")?,
+        rotate: !skip,
+        full,
     })
 }
 
@@ -612,6 +639,16 @@ fn field_args(
             }
             "--set-uri" if !create => fields.uri_set.push(pair(args, "--set-uri", "<id>=<uri>")?),
             "--remove-uri" if !create => fields.uri_remove.push(args.value("--remove-uri")?),
+            "--move-uri" if !create => {
+                fields
+                    .uri_move
+                    .push(pair(args, "--move-uri", "<id>=<place>")?);
+            }
+            "--move-custom" if !create => {
+                fields
+                    .custom_move
+                    .push(pair(args, "--move-custom", "<id>=<place>")?);
+            }
             "--set-custom" if !create => {
                 fields
                     .custom_set
@@ -891,7 +928,16 @@ mod tests {
             command("secret-key --skip-rotation --name alice"),
             Command::SecretKey {
                 name: "alice".to_owned(),
-                rotate: false
+                rotate: false,
+                full: false
+            }
+        );
+        assert_eq!(
+            command("secret-key --full-rotation --name alice"),
+            Command::SecretKey {
+                name: "alice".to_owned(),
+                rotate: true,
+                full: true
             }
         );
         assert_eq!(
@@ -905,6 +951,8 @@ mod tests {
             "password",
             "password --name alice --skip-rotation",
             "secret-key --name alice --rotate",
+            "secret-key --name alice --skip-rotation --full-rotation",
+            "secret-key --full-rotation",
             "2fa --name alice",
             "2fa enable",
             "2fa enable --name alice 123456",

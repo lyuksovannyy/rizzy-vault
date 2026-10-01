@@ -93,6 +93,9 @@ pub enum CredentialChange {
     SecretKey {
         /// Whether to rotate the account key and the vault keys too.
         rotate: bool,
+        /// Whether that rotation is full: also new identity keys (CRYPTO.md §11.6 "Full",
+        /// the "kit was stolen" choice). Only with `rotate`.
+        full: bool,
     },
 }
 
@@ -219,9 +222,9 @@ impl Device {
     ) -> Result<CredentialOutcome, CliError> {
         self.sync(ui).await?;
         self.check_writable()?;
-        let (new_secret_key, rotate) = match change {
-            CredentialChange::Password { rotate } => (false, rotate),
-            CredentialChange::SecretKey { rotate } => (true, rotate),
+        let (new_secret_key, rotate, full_rotation) = match change {
+            CredentialChange::Password { rotate } => (false, rotate, false),
+            CredentialChange::SecretKey { rotate, full } => (true, rotate, full),
         };
         let recovery_on = self.state.pin().state().recovery_enabled;
         let recovery_code = if rotate && !new_secret_key && recovery_on {
@@ -254,6 +257,7 @@ impl Device {
             new_password: &password,
             new_secret_key,
             rotate,
+            full_rotation,
             recovery_code: recovery_code.as_deref().map(String::as_str),
             now_ms: now_ms(),
         };

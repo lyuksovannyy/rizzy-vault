@@ -731,6 +731,12 @@ impl PendingRotation {
         &self.request
     }
 
+    /// Standard or full.
+    #[must_use]
+    pub const fn level(&self) -> RotationLevel {
+        self.level
+    }
+
     /// The fresh OPAQUE session's bearer token. Never log it.
     #[must_use]
     pub const fn bearer_token(&self) -> &SessionToken {

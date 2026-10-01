@@ -21,18 +21,30 @@ use crate::unlock::apply_device_grants;
 
 impl Server {
     /// The account commit of a rotation (module docs). A byte-identical repeat succeeds.
-    fn commit_rotation(&mut self, req: &CommitChangeRequest) -> Result<(), ErrorCode> {
+    pub(super) fn commit_rotation(&mut self, req: &CommitChangeRequest) -> Result<(), ErrorCode> {
         let s = self.stored();
         if req.account_state.as_slice() == s.state.as_slice() {
             return Ok(());
         }
         let bundle = PublicKeyBundle::verify_self_signed(s.bundles.last().unwrap()).unwrap();
-        let verify = |wire: &[u8]| {
+        let verify = |wire: &[u8], bundle: &rizzy_core::sign::VerifiedBundle| {
             AccountState::verify(wire, &bundle.identity_ed25519, bundle.identity_epoch)
                 .map(rizzy_core::sign::Verified::into_statement)
         };
-        let current = verify(&s.state).unwrap();
-        let new = verify(req.account_state.as_slice()).map_err(|_| ErrorCode::InvalidRequest)?;
+        let current = verify(&s.state, &bundle).unwrap();
+        // A full rotation's state is signed by the new identity key of its new bundle, which
+        // the old one chains to (this fake checks the new key's signature only).
+        let signer = match &req.bundle {
+            Some(wire) => {
+                bundle
+                    .verify_successor(wire.as_slice())
+                    .map_err(|_| ErrorCode::InvalidRequest)?
+                    .0
+            }
+            None => bundle,
+        };
+        let new =
+            verify(req.account_state.as_slice(), &signer).map_err(|_| ErrorCode::InvalidRequest)?;
         if new.state_seq != current.state_seq + 1 {
             return Err(ErrorCode::StateConflict);
         }
@@ -61,6 +73,21 @@ impl Server {
             return Err(ErrorCode::StateConflict);
         }
         let s = self.account.as_mut().unwrap();
+        // A credential change committed with the rotation replaces the OPAQUE record.
+        if let Some(upload) = &req.registration_upload {
+            s.password_file = server_registration_finish(upload.as_slice())
+                .unwrap()
+                .to_bytes();
+        }
+        // A full rotation: the new bundle, and every certificate re-issued under it.
+        if let Some(wire) = &req.bundle {
+            s.bundles.push(wire.as_slice().to_vec());
+            s.certs = req
+                .device_certificates
+                .iter()
+                .map(|c| c.as_slice().to_vec())
+                .collect();
+        }
         s.state = req.account_state.as_slice().to_vec();
         s.e_srv = req.account_key_server_wrap.clone().unwrap();
         s.e_id = req.identity_secret_keys.clone().unwrap();
@@ -78,7 +105,7 @@ impl Server {
 }
 
 /// Signs up with a recovery code and returns it with the signup.
-fn signup_with_code(server: &mut Server, rng: &mut ChaCha20Rng) -> (SignedUp, String) {
+pub(super) fn signup_with_code(server: &mut Server, rng: &mut ChaCha20Rng) -> (SignedUp, String) {
     let input = SignupInput {
         server_origin: ORIGIN,
         login_name: "Alice",
@@ -101,7 +128,7 @@ fn signup_with_code(server: &mut Server, rng: &mut ChaCha20Rng) -> (SignedUp, St
 }
 
 /// A fresh OPAQUE login of the account (the re-authentication of CRYPTO.md §11.6 step 1).
-fn reauth(server: &mut Server, rng: &mut ChaCha20Rng, sk: &str) -> LoggedIn {
+pub(super) fn reauth(server: &mut Server, rng: &mut ChaCha20Rng, sk: &str) -> LoggedIn {
     let input = LoginInput {
         server_origin: ORIGIN,
         login_name: "alice",
@@ -126,7 +153,7 @@ fn enrol_another(server: &mut Server, rng: &mut ChaCha20Rng, sk: &str) -> crate:
 }
 
 /// A complete Fetch of `vault`.
-fn fetch(server: &Server, vault: &mut VaultSync) {
+pub(super) fn fetch(server: &Server, vault: &mut VaultSync) {
     let authors = server.authors();
     let response = server.fetch(&vault.fetch_request().unwrap());
     vault.apply_fetch(&authors, &response, T0).unwrap();
@@ -134,7 +161,7 @@ fn fetch(server: &Server, vault: &mut VaultSync) {
 
 /// Uploads everything `vault` has queued (ops, then the snapshots they make due), then runs a
 /// complete Fetch: the state a rotation starts from (ADR 0025 §2 step 1).
-fn settle(
+pub(super) fn settle(
     server: &mut Server,
     rng: &mut ChaCha20Rng,
     vault: &mut VaultSync,

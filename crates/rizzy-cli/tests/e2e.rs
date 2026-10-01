@@ -2257,3 +2257,208 @@ fn item_edit_adds_changes_and_removes_uris_custom_fields_and_tags() {
     let on_a = a.ok(&["item", "show", &item, "--reveal"], &[]);
     assert_eq!(on_b.out, on_a.out);
 }
+
+/// ADR 0018 §6 "List order" through `rv item edit --move-uri` and `--move-custom`: moves to
+/// the first or last place and next to another element, several in one command with an
+/// addition and a removal; two devices that move different URIs to the same place write equal
+/// keys, and a move between those two rewrites the list's `order` keys evenly; the refusals;
+/// another device sees the same order.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one item through every move, then a concurrent move and the rewrite"
+)]
+fn item_edit_moves_uris_and_custom_fields() {
+    let server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("ma");
+    let b = Rv::new("mb");
+    let (secret_key, _) = sign_up(&a, &origin, "alice");
+    let item = a
+        .ok(
+            &[
+                "item",
+                "create",
+                "--type",
+                "login",
+                "--field",
+                "item.name=Mail",
+                "--uri",
+                "https://one.example",
+                "--uri",
+                "https://two.example",
+                "--uri",
+                "https://three.example",
+                "--custom",
+                "A=1",
+                "--custom",
+                "B=2",
+            ],
+            &[],
+        )
+        .out[0]
+        .clone();
+    log_in(&b, &origin, "alice", &secret_key);
+    // A list in order, as `item show` prints it: the element ids, each with its value (URIs) or
+    // label (custom fields).
+    let listed = |rv: &Rv, list: &str| -> Vec<(String, String)> {
+        let shown = rv.ok(&["item", "show", &item, "--reveal"], &[]);
+        let attribute = if list == "uri" { "value" } else { "label" };
+        shown
+            .printed(&format!("order of {list}:"))
+            .split(' ')
+            .map(|id| {
+                let text = shown.printed(&format!("{list}/{id}/{attribute}:"));
+                (id.to_owned(), text)
+            })
+            .collect()
+    };
+    let texts = |rv: &Rv, list: &str| -> Vec<String> {
+        listed(rv, list).into_iter().map(|(_, t)| t).collect()
+    };
+    let id_of = |rv: &Rv, list: &str, text: &str| -> String {
+        listed(rv, list)
+            .into_iter()
+            .find(|(_, t)| t == text)
+            .map(|(id, _)| id)
+            .unwrap()
+    };
+    let one = id_of(&a, "uri", "https://one.example");
+    let two = id_of(&a, "uri", "https://two.example");
+    let three = id_of(&a, "uri", "https://three.example");
+    assert_eq!(
+        texts(&a, "uri"),
+        [
+            "https://one.example",
+            "https://two.example",
+            "https://three.example"
+        ]
+    );
+
+    // First, after a neighbour named by a prefix, before one, last.
+    let edit = |args: &[&str]| {
+        let mut all = vec!["item", "edit", item.as_str()];
+        all.extend_from_slice(args);
+        a.ok(&all, &[]);
+    };
+    edit(&["--move-uri", &format!("{}=first", &three[..8])]);
+    assert_eq!(
+        texts(&a, "uri"),
+        [
+            "https://three.example",
+            "https://one.example",
+            "https://two.example"
+        ]
+    );
+    edit(&["--move-uri", &format!("{one}=after:{}", &two[..8])]);
+    assert_eq!(
+        texts(&a, "uri"),
+        [
+            "https://three.example",
+            "https://two.example",
+            "https://one.example"
+        ]
+    );
+    let first_field = id_of(&a, "field", "A");
+    let second_field = id_of(&a, "field", "B");
+    edit(&[
+        "--move-custom",
+        &format!("{second_field}=before:{first_field}"),
+    ]);
+    assert_eq!(texts(&a, "field"), ["B", "A"]);
+    edit(&["--move-custom", &format!("{second_field}=last")]);
+    assert_eq!(texts(&a, "field"), ["A", "B"]);
+
+    // Several in one command, after its removal and its addition: two goes, four is added
+    // last, then one moves first and three after four.
+    edit(&[
+        "--remove-uri",
+        &two,
+        "--uri",
+        "https://four.example",
+        "--move-uri",
+        &format!("{one}=first"),
+        "--move-uri",
+        &format!("{three}=last"),
+    ]);
+    assert_eq!(
+        texts(&a, "uri"),
+        [
+            "https://one.example",
+            "https://four.example",
+            "https://three.example"
+        ]
+    );
+
+    // Refusals: a place that is none, a removed element, itself as the neighbour, on create.
+    let refused = |args: &[&str]| {
+        let mut all = vec!["item", "edit", item.as_str()];
+        all.extend_from_slice(args);
+        a.try_run(&all, &[PASSWORD], &[], &[]).0
+    };
+    let middle = format!("{one}=middle");
+    assert!(matches!(
+        refused(&["--move-uri", &middle]),
+        Err(CliError::Usage(_))
+    ));
+    let moved_away = format!("{one}=first");
+    assert!(matches!(
+        refused(&["--remove-uri", &one, "--move-uri", &moved_away]),
+        Err(CliError::BadInput(_))
+    ));
+    let itself = format!("{one}=after:{one}");
+    assert!(matches!(
+        refused(&["--move-uri", &itself]),
+        Err(CliError::Client(_))
+    ));
+    let (outcome, _) = a.try_run(
+        &[
+            "item",
+            "create",
+            "--type",
+            "login",
+            "--move-uri",
+            "ab=first",
+        ],
+        &[],
+        &[],
+        &[],
+    );
+    assert!(matches!(outcome, Err(CliError::Usage(_))), "{outcome:?}");
+
+    // Concurrent moves: B (before syncing A's next edit) and A each move a different URI to
+    // the first place, so both write the same key.
+    b.ok(&["sync"], &[]);
+    let four = id_of(&a, "uri", "https://four.example");
+    edit(&["--move-uri", &format!("{four}=first")]);
+    b.ok(
+        &[
+            "item",
+            "edit",
+            &item,
+            "--move-uri",
+            &format!("{three}=first"),
+        ],
+        &[],
+    );
+    a.ok(&["sync"], &[]);
+    let key_of = |rv: &Rv, id: &str| rv.field(&item, &format!("uri/{id}/order"));
+    assert_eq!(key_of(&a, &four), key_of(&a, &three), "equal keys");
+    // A move between the two: no key fits, so the list's keys are rewritten evenly.
+    let (low, high) = if four < three {
+        (&four, &three)
+    } else {
+        (&three, &four)
+    };
+    edit(&["--move-uri", &format!("{one}=after:{low}")]);
+    let order: Vec<String> = listed(&a, "uri").into_iter().map(|(id, _)| id).collect();
+    assert_eq!(order, [low.clone(), one.clone(), high.clone()]);
+    let keys: Vec<String> = order.iter().map(|id| key_of(&a, id)).collect();
+    assert_eq!(keys, ["(order 40)", "(order 80)", "(order c0)"]);
+
+    // Another device sees the same item and order.
+    b.ok(&["sync"], &[]);
+    let on_b = b.ok(&["item", "show", &item, "--reveal"], &[]);
+    let on_a = a.ok(&["item", "show", &item, "--reveal"], &[]);
+    assert_eq!(on_b.out, on_a.out);
+}

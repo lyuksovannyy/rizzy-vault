@@ -6,9 +6,11 @@
 //! - `rv password --name <login> [--rotate]`: a new master password, asked twice. The keys
 //!   are not rotated unless `--rotate` ("also rotate keys", for a password that leaked); with
 //!   it and recovery on, the current recovery code is asked for and kept.
-//! - `rv secret-key --name <login> [--skip-rotation]`: a new Secret Key and a new Emergency
-//!   Kit, with a standard rotation by default (and then a new recovery code when recovery is
-//!   on). `--skip-rotation` is the explicit opt-out.
+//! - `rv secret-key --name <login> [--skip-rotation | --full-rotation]`: a new Secret Key and a
+//!   new Emergency Kit, with a standard rotation by default (and then a new recovery code when
+//!   recovery is on). `--skip-rotation` is the explicit opt-out; `--full-rotation` ("the kit
+//!   was stolen", CRYPTO.md §11.6 "Full") also replaces the identity keys, so every other
+//!   device shows the new safety number to confirm.
 //! - `rv 2fa enable --name <login>` / `rv 2fa disable --name <login>`: server-side TOTP. The
 //!   code is read from the terminal without echo, or from standard input; never from the
 //!   command line.
@@ -45,12 +47,21 @@ pub async fn change(
             "The Secret Key was changed; only the new Emergency Kit works from now on."
         }
     });
-    if matches!(
-        change,
-        CredentialChange::Password { rotate: true } | CredentialChange::SecretKey { rotate: true }
-    ) {
-        env.ui
-            .note("The account key and the vault key were rotated.");
+    match change {
+        CredentialChange::SecretKey {
+            rotate: true,
+            full: true,
+        } => env.ui.note(
+            "The account key, the vault key and the identity keys were rotated. Every other \
+             device shows a new safety number the next time it goes online: compare it before \
+             you accept it.",
+        ),
+        CredentialChange::Password { rotate: true }
+        | CredentialChange::SecretKey { rotate: true, .. } => {
+            env.ui
+                .note("The account key and the vault key were rotated.");
+        }
+        _ => {}
     }
     if dropped > 0 {
         env.ui.note(&format!(

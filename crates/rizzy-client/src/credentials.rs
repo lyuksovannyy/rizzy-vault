@@ -31,6 +31,16 @@
 //!   after a Secret Key change a **new recovery code** is issued when recovery is on, because
 //!   "the user MAY instead type the current recovery code" does not apply to a rotation
 //!   triggered by an SK change; after a password change the current code is typed and kept.
+//! - **Full rotation** ([`CredentialChangeInput::full_rotation`]; §11.6 "Full", the "kit was
+//!   stolen" choice of §11.9). The rotation that rides with the change also replaces the
+//!   identity keys (`identity_epoch + 1`, a new bundle signed by the new and the old identity
+//!   key, every certificate and revocation re-issued, §11.6 step 7), exactly as
+//!   [`crate::rotation`] builds a full rotation; the new state is signed by the new identity
+//!   key. It needs a rotation: a full rotation without `rotate` is refused. The recovery rule
+//!   is the one above, unchanged by the level: an SK change issues a new code, a password
+//!   change keeps the typed one. Reading (reported): §11.6 step 5 names "kit exposed" among
+//!   the triggers that issue a new code; a password change with a full rotation is not one
+//!   of them (the kit holds no password), so it keeps the typed code like a standard one.
 //!
 //! # Secrets before commit (§11)
 //!
@@ -54,8 +64,6 @@
 //!
 //! # Not in this build (reported)
 //!
-//! - A **full** rotation with a credential change (the "kit was stolen" choice): only the
-//!   standard one.
 //! - The "only the new password known" path of §11.3 step 5 (a device whose offline unlock
 //!   fails because its `E_local` is still under the old password): the host must unlock with
 //!   the old password first.
@@ -182,6 +190,9 @@ pub struct CredentialChangeInput<'a> {
     /// Whether to run a standard rotation in the same commit: the default for a Secret Key
     /// change, opt-in ("also rotate keys") for a password change.
     pub rotate: bool,
+    /// Whether that rotation is **full**: also new identity keys (CRYPTO.md §11.6 "Full"; the
+    /// "kit was stolen" choice). Requires `rotate`.
+    pub full_rotation: bool,
     /// The current recovery code, to keep it through the rotation of a **password** change
     /// while recovery is on (§11.6 step 5). `None` otherwise: a Secret Key change with a
     /// rotation issues a new code, and a change without a rotation leaves `E_rec` as it is.
@@ -195,6 +206,7 @@ impl fmt::Debug for CredentialChangeInput<'_> {
         f.debug_struct("CredentialChangeInput")
             .field("new_secret_key", &self.new_secret_key)
             .field("rotate", &self.rotate)
+            .field("full_rotation", &self.full_rotation)
             .field("keeps_recovery_code", &self.recovery_code.is_some())
             .finish_non_exhaustive()
     }
@@ -215,8 +227,8 @@ pub struct CredentialChangeStarted {
     pw_in: PasswordInput,
     /// The OPAQUE client state.
     registration: ClientRegistrationState,
-    /// Whether to rotate.
-    rotate: bool,
+    /// The rotation to run with the change, if any.
+    rotation: Option<RotationLevel>,
     /// The current recovery code to keep, as typed.
     recovery_code: Option<Zeroizing<String>>,
     /// The host clock at the start.
@@ -237,8 +249,8 @@ impl fmt::Debug for CredentialChangeStarted {
 /// # Errors
 /// [`ClientError::InvalidInput`] for a login name that does not normalise, a new password
 /// the new-password rules refuse, a change that changes neither the password nor the Secret
-/// Key, or a recovery code given where none is kept (see
-/// [`CredentialChangeInput::recovery_code`]); the errors of the re-authentication check
+/// Key, a full rotation asked for without a rotation, or a recovery code given where none is
+/// kept (see [`CredentialChangeInput::recovery_code`]); the errors of the re-authentication check
 /// ([`ClientError::Rollback`], [`ClientError::Fork`], [`ClientError::IdentityChangeUnconfirmed`],
 /// [`ClientError::AccountKeyRotated`], [`ClientError::InvalidServerResponse`]);
 /// [`ClientError::Internal`].
@@ -250,6 +262,13 @@ pub fn start_credential_change<R: CryptoRng + ?Sized>(
     input: &CredentialChangeInput<'_>,
 ) -> Result<(CredentialChangeStarted, ReregisterStartRequest), ClientError> {
     check_reauth(&reauth, device, unlocked)?;
+    let rotation = match (input.rotate, input.full_rotation) {
+        (false, false) => None,
+        (true, false) => Some(RotationLevel::Standard),
+        (true, true) => Some(RotationLevel::Full),
+        // A full rotation is a level of a rotation, not something without one.
+        (false, true) => return Err(ClientError::InvalidInput),
+    };
     let login_name = LoginName::parse(input.login_name).map_err(|_| ClientError::InvalidInput)?;
     let recovery_on = reauth.account.pin.state.recovery_enabled;
     // A kept code only rides with the rotation of a password change while recovery is on.
@@ -277,7 +296,7 @@ pub fn start_credential_change<R: CryptoRng + ?Sized>(
             new_secret_key: input.new_secret_key,
             pw_in,
             registration,
-            rotate: input.rotate,
+            rotation,
             recovery_code: input.recovery_code.map(|c| Zeroizing::new(c.to_owned())),
             now_ms: input.now_ms,
         },
@@ -333,8 +352,9 @@ impl CredentialChangeStarted {
         let mut device_salt = [0u8; DEVICE_SALT_LEN];
         rng.fill_bytes(&mut device_salt);
         // §11.6 step 5: a rotation triggered by an SK change issues a new code.
-        let recovery_code = (self.rotate && self.new_secret_key && base.recovery_enabled)
-            .then(|| RecoveryCode::generate(rng));
+        let recovery_code =
+            (self.rotation.is_some() && self.new_secret_key && base.recovery_enabled)
+                .then(|| RecoveryCode::generate(rng));
         let kit = self.new_secret_key.then(|| {
             EmergencyKit::for_change(
                 &self.reauth.origin,
@@ -357,9 +377,9 @@ impl CredentialChangeStarted {
             device_salt,
             local: None,
         };
-        let change = if self.rotate {
+        let change = if let Some(level) = self.rotation {
             let options = RotationOptions {
-                level: RotationLevel::Standard,
+                level,
                 revoke: None,
                 recovery_code: self.recovery_code.as_deref().map(String::as_str),
                 now_ms: self.now_ms,
@@ -632,6 +652,15 @@ impl PendingCredentialChange {
     #[must_use]
     pub const fn rotates(&self) -> bool {
         matches!(self.change, Change::Rotation(_))
+    }
+
+    /// The level of the rotation the change runs, if it rotates.
+    #[must_use]
+    pub const fn rotation_level(&self) -> Option<RotationLevel> {
+        match &self.change {
+            Change::Rotation(r) => Some(r.level()),
+            Change::Plain(_) => None,
+        }
     }
 
     /// Confirms the kit: `typed` must be the last group of four characters of the new Secret

@@ -1,8 +1,8 @@
 //! `rv`'s account flows end to end against a real `rizzy-vault` server: a master password
-//! change and a Secret Key change with the other device following them (CRYPTO.md §11.5,
-//! §11.3 step 5), an interrupted change settled by the next run, server-side 2FA (§5.10,
-//! §11.15), and a recovery with the Emergency Kit completed through the binaries on a server
-//! with a zero waiting period (§11.9).
+//! change and a Secret Key change, also with a full rotation, with the other device following
+//! them (CRYPTO.md §11.5, §11.6, §11.3 step 5), an interrupted change settled by the next
+//! run, server-side 2FA (§5.10, §11.15), and a recovery with the Emergency Kit completed
+//! through the binaries on a server with a zero waiting period (§11.9).
 //!
 //! The harness is `tests/e2e.rs`'s, cut down: the built `rizzy-vault` binary on a loopback
 //! port with a temporary `SQLite` database (ADR 0016 §3 forbids a dependency on
@@ -868,6 +868,109 @@ fn an_applied_change_followed_by_a_rotation_elsewhere_is_settled() {
     let mut names = c.item_names(NEW_PASSWORD);
     names.sort();
     assert_eq!(names, ["After", "Kept"]);
+}
+
+/// CRYPTO.md §11.5 "SK change" with §11.6 "Full" through `rv secret-key --full-rotation` (the
+/// "kit was stolen" choice): a new kit with a new recovery code, the account key, the vault key
+/// and the identity keys rotated; the other device confirms the new identity, opens its grant
+/// and takes the new Secret Key; only the new kit works afterwards.
+#[test]
+fn a_secret_key_change_with_a_full_rotation_end_to_end() {
+    let server = Server::start(&[], None);
+    let origin = server.origin();
+    let a = Rv::new("fa");
+    let b = Rv::new("fb");
+    let (secret_key, recovery_code) = sign_up(&a, &origin, "alice");
+    let (outcome, login) = log_in(&b, &origin, &secret_key, PASSWORD);
+    outcome.unwrap_or_else(|e| panic!("login: {e:?} {:?}", login.notes));
+    create_note(&a, PASSWORD, "Before");
+
+    // The two rotation flags contradict each other.
+    let (outcome, _) = a.try_run(
+        &[
+            "secret-key",
+            "--name",
+            "alice",
+            "--skip-rotation",
+            "--full-rotation",
+        ],
+        &[PASSWORD],
+        &[],
+    );
+    assert!(matches!(outcome, Err(CliError::Usage(_))), "{outcome:?}");
+
+    let changed = a.ok(
+        &["secret-key", "--name", "alice", "--full-rotation"],
+        &[PASSWORD],
+        &[],
+    );
+    let new_secret_key = changed.printed("Secret Key:");
+    let new_recovery_code = changed.printed("Recovery code:");
+    assert!(new_secret_key.starts_with("RV1-") && new_secret_key != secret_key);
+    assert!(new_recovery_code.starts_with("RVR1-") && new_recovery_code != recovery_code);
+    assert!(
+        changed.noted("the identity keys were rotated"),
+        "{:?}",
+        changed.notes
+    );
+    assert!(
+        changed.noted("only the new Emergency Kit works"),
+        "{:?}",
+        changed.notes
+    );
+    assert_eq!(a.item_names(PASSWORD), ["Before"]);
+    a.ok(&["sync"], &[PASSWORD], &[]);
+
+    // B: the identity change is confirmed, the rotation followed through B's grant, and the
+    // new Secret Key typed from the new kit.
+    let (outcome, followed) = b.try_run(
+        &["sync"],
+        &[PASSWORD, PASSWORD, &new_secret_key],
+        &["CONFIRM", "alice"],
+    );
+    outcome.unwrap_or_else(|e| panic!("follow: {e:?} {:?}", followed.notes));
+    assert!(
+        followed.noted("identity keys changed"),
+        "{:?}",
+        followed.notes
+    );
+    assert!(
+        followed.noted("changed on another device"),
+        "{:?}",
+        followed.notes
+    );
+    create_note(&b, PASSWORD, "From B");
+    a.ok(&["sync"], &[PASSWORD], &[]);
+    let mut names = a.item_names(PASSWORD);
+    names.sort();
+    assert_eq!(names, ["Before", "From B"]);
+
+    // New devices: the old Secret Key no longer logs in; the new one does, and reads all.
+    let c = Rv::new("fc");
+    let (outcome, _) = log_in(&c, &origin, &secret_key, PASSWORD);
+    assert!(wrong_credentials(&outcome), "{outcome:?}");
+    let (outcome, login) = log_in(&c, &origin, &new_secret_key, PASSWORD);
+    outcome.unwrap_or_else(|e| panic!("login: {e:?} {:?}", login.notes));
+    assert_eq!(c.item_names(PASSWORD).len(), 2);
+
+    // The old recovery code is void; the new one is the account's (then cancelled).
+    let r = Rv::new("fr");
+    let (outcome, _) = r.try_run(
+        &["recovery", "start", "--server", &origin, "--name", "alice"],
+        &[&recovery_code],
+        &[],
+    );
+    assert!(
+        matches!(outcome, Err(CliError::Server(ErrorCode::Unauthorized))),
+        "{outcome:?}"
+    );
+    r.ok(
+        &["recovery", "start", "--server", &origin, "--name", "alice"],
+        &[&new_recovery_code],
+        &[],
+    );
+    let cancelled = a.ok(&["recovery", "cancel"], &[PASSWORD], &[]);
+    assert!(cancelled.noted("was cancelled"));
 }
 
 /// Server-side 2FA through `rv` (CRYPTO.md §5.10, §11.15): enrolment with the code from the

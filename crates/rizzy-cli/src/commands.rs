@@ -43,6 +43,7 @@ use rizzy_client::export::plaintext::{
     PLAINTEXT_EXPORT_PHRASE, PLAINTEXT_EXPORT_WARNING, PlaintextExportAck, csv_export_warning,
 };
 use rizzy_client::items::{FieldEdit, FieldKey, ItemId, ItemLifecycle, ItemType, Value};
+use rizzy_client::lists::split_order_ops;
 use rizzy_client::rizzy_import::{self, Format};
 use rizzy_client::rotation::RotationLevel;
 use rizzy_client::signup::DeviceKind;
@@ -52,7 +53,9 @@ use rizzy_core::generator::{
     CharacterOptions, ClassRule, PassphraseOptions, generate_passphrase, generate_password,
 };
 use rizzy_core::ids::DeviceId;
-use rizzy_core::item::schema::{Concealment, Expected, ITEM_NAME, KeyClass, LOGIN_TOTP, classify};
+use rizzy_core::item::schema::{
+    Concealment, Expected, ITEM_NAME, KeyClass, LIST_FIELD, LIST_URI, LOGIN_TOTP, classify,
+};
 use rizzy_core::item::tag::{tag_key, tag_name};
 use rizzy_core::item::value::ValueRef;
 use rizzy_core::totp::{OtpAuthUri, TotpParams, TotpSecret};
@@ -196,11 +199,11 @@ pub async fn run(invocation: Invocation, env: &mut Env<'_>) -> Result<(), CliErr
             ))
             .await
         }
-        Command::SecretKey { name, rotate } => {
+        Command::SecretKey { name, rotate, full } => {
             Box::pin(account::change(
                 env,
                 &name,
-                CredentialChange::SecretKey { rotate },
+                CredentialChange::SecretKey { rotate, full },
             ))
             .await
         }
@@ -393,6 +396,17 @@ fn item_show(device: &Device, ui: &mut dyn Ui, item: &str, reveal: bool) -> Resu
         let line = Zeroizing::new(format!("{}: {}{conflict}", label.as_str(), shown.as_str()));
         ui.print(&line)?;
     }
+    // The fields above are in key order; the lists a user reorders, in list order (ADR 0018
+    // §6), by the element ids `--move-uri` and `--move-custom` take.
+    for list in [LIST_URI, LIST_FIELD] {
+        let elements = vault.list_elements(item, list);
+        if elements.is_empty() {
+            continue;
+        }
+        let ids: Vec<&str> = elements.iter().map(|e| e.element.as_str()).collect();
+        let line = Zeroizing::new(format!("order of {list}: {}", ids.join(" ")));
+        ui.print(&line)?;
+    }
     Ok(())
 }
 
@@ -416,14 +430,15 @@ fn encode_value(key: &FieldKey, text: &str) -> Result<Value, CliError> {
 }
 
 /// The writes `--field`, `--secret`, `--clear`, `--tag`, `--untag` and the list options
-/// (`--uri`, custom fields; [`crate::lists`]) ask for, for a new item (`item` is `None`) or an
-/// existing one.
+/// (`--uri`, custom fields, moves; [`crate::lists`]) ask for, for a new item (`item` is `None`)
+/// or an existing one, as the ops to write in turn (`rizzy_client::lists::split_order_ops`:
+/// one, unless a list rewrite does not fit in it).
 fn collect_writes(
     ui: &mut dyn Ui,
     vault: &VaultSync,
     item: Option<ItemId>,
     fields: &FieldArgs,
-) -> Result<Vec<(FieldKey, Value)>, CliError> {
+) -> Result<Vec<Vec<(FieldKey, Value)>>, CliError> {
     let parse_key = |text: &str| {
         FieldKey::parse(text.as_bytes()).map_err(|_| CliError::BadInput("not a field key"))
     };
@@ -455,8 +470,9 @@ fn collect_writes(
     for name in &fields.untag {
         writes.push((tag(name)?, Value::cleared()));
     }
-    writes.extend(crate::lists::list_writes(ui, vault, item, fields)?);
-    Ok(writes)
+    let lists = crate::lists::list_writes(ui, vault, item, fields)?;
+    writes.extend(lists.writes);
+    Ok(split_order_ops(lists.rewrite, writes))
 }
 
 /// Syncs after a local write; an unreachable server leaves the ops queued and is not an error.
@@ -486,7 +502,11 @@ async fn item_create(
         .map(|(_, t)| *t)
         .ok_or_else(|| CliError::Usage("unknown item type".into()))?;
     let mut device = Device::open(env).await?;
-    let writes = collect_writes(env.ui, device.vault(), None, fields)?;
+    // A new item has no element whose `order` a rewrite would write: one op at most.
+    let writes: Vec<(FieldKey, Value)> = collect_writes(env.ui, device.vault(), None, fields)?
+        .into_iter()
+        .flatten()
+        .collect();
     let item = device
         .edit(|vault, rng, unlocked, now| {
             let edits: Vec<FieldEdit<'_>> = writes
@@ -504,17 +524,22 @@ async fn item_create(
 async fn item_edit(env: &mut Env<'_>, item: &str, fields: &FieldArgs) -> Result<(), CliError> {
     let mut device = Device::open(env).await?;
     let item = resolve_item(device.vault(), item)?;
-    let writes = collect_writes(env.ui, device.vault(), Some(item), fields)?;
-    if writes.is_empty() {
+    let ops = collect_writes(env.ui, device.vault(), Some(item), fields)?;
+    if ops.is_empty() {
         return Err(CliError::Usage("nothing to change".into()));
     }
     device
         .edit(|vault, rng, unlocked, now| {
-            let edits: Vec<FieldEdit<'_>> = writes
-                .iter()
-                .map(|(key, value)| FieldEdit { key, value })
-                .collect();
-            vault.edit_item(rng, unlocked, item, &edits, now)
+            // The consecutive ops of a list rewrite too large for one op first (ADR 0018 §6),
+            // then the edit.
+            for writes in &ops {
+                let edits: Vec<FieldEdit<'_>> = writes
+                    .iter()
+                    .map(|(key, value)| FieldEdit { key, value })
+                    .collect();
+                vault.edit_item(rng, unlocked, item, &edits, now)?;
+            }
+            Ok(())
         })
         .await?;
     sync_after_write(&mut device, env.ui).await

@@ -270,7 +270,12 @@ impl Server {
             .certs
             .iter()
             .map(|w| CertifiedDevice {
-                certificate: DeviceCertificate::verify(w, &bundle.identity_ed25519, 0).unwrap(),
+                certificate: DeviceCertificate::verify(
+                    w,
+                    &bundle.identity_ed25519,
+                    bundle.identity_epoch,
+                )
+                .unwrap(),
                 wire: w.clone(),
             })
             .collect();
@@ -1927,8 +1932,10 @@ fn fake_server_refuses_forged_snapshots_and_serves_covers() {
     ));
 }
 
+mod credentials;
 mod export;
 mod healing;
+mod lists;
 mod rotation;
 mod store;
 

@@ -59,6 +59,7 @@ rv item create --type login --field item.name=Example --field login.username=ali
 rv item edit 3fa2 --secret login.password --clear item.notes --untag work
 rv item edit 3fa2 --uri https://login.example.org --custom "Account=1234" --custom-secret PIN
 rv item edit 3fa2 --set-uri 9b1c=https://example.org/new --remove-custom 52e0
+rv item edit 3fa2 --move-uri 9b1c=first --move-custom 52e0=after:7d41
 rv item trash 3fa2             # restore, purge
 rv generate --length 24        # or --words 6
 rv totp 3fa2
@@ -67,6 +68,8 @@ rv totp 3fa2
 Every command asks for the master password: nothing unlocked outlives the process. A command that changes something writes it to the local file first and then uploads it. If the server is not reachable the change stays queued and the next `rv sync` sends it.
 
 URIs and custom fields are list elements: `item show` prints each with its element id in the key (`uri/<id>/value`, `field/<id>/label`), and `--set-uri`, `--remove-uri`, `--set-custom`, `--set-custom-secret` and `--remove-custom` take that id or a unique prefix of it. `--uri`, `--custom <label>=<text>`, `--custom-secret <label>` (a hidden field: the value is asked for) and `--custom-bool <label>=true|false` add one, after the last. Removing one clears every attribute of it, so it disappears on every device. A hidden field's value is never taken from the command line: `--set-custom` refuses it, `--set-custom-secret` asks.
+
+`--move-uri <id>=<place>` and `--move-custom <id>=<place>` reorder them; a place is `first`, `last`, `before:<id>` or `after:<id>`, and `item show` prints each list's ids in order (`order of uri: …`). Moves run in the order given, after the same command's removals and additions. A move writes only the moved element's position; when two devices placed elements at the same spot and nothing fits between them any more, the whole list's positions are rewritten evenly, which is invisible apart from the new `order` values. Tags and password history have no order of their own and cannot be moved.
 
 Item types: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`, `software-license`, `wifi`, `bank-account`, `passkey`. Field keys are those of the item schema ([ADR 0018](adr/0018-item-record-encoding.md)), for example `item.name`, `item.notes`, `login.username`, `login.password`, `login.totp`, `card.number`.
 
@@ -106,11 +109,12 @@ If a rotation or a signup is interrupted after it was sent, the next `rv` run fi
 ```sh
 rv password   --name alice              # a new master password; --rotate also rotates the keys
 rv secret-key --name alice              # a new Secret Key and Emergency Kit; rotates the keys
+rv secret-key --name alice --full-rotation   # the same, and new identity keys: the kit was stolen
 rv 2fa enable  --name alice             # server-side two-factor login with an authenticator app
 rv 2fa disable --name alice
 ```
 
-Each of them first logs in again with the current master password (and a two-factor code when two-factor login is on). `password` asks for the new master password twice; it does not rotate the keys unless `--rotate` is given, which you want if the old password leaked (with a recovery code, it then asks for that code and keeps it). `secret-key` keeps the master password, shows a **new Emergency Kit** and asks you to type part of it back before anything is sent; by default it also rotates the keys and issues a new recovery code, which the kit shows. `--skip-rotation` is the opt-out: then the kit has no recovery code, and the earlier one stays valid, so keep the old kit for its recovery code (only its Secret Key stops working). The old kit stops working only once the server has taken the change: if the server refuses it, `rv` says the change was not made and the new kit is void, and the old kit stays the valid one. If copying the kit takes more than four minutes, `rv` logs in once more before sending the change (the server takes it only within five minutes of a login). Your other devices ask for the new master password, and the new Secret Key if it changed, the next time they go online.
+Each of them first logs in again with the current master password (and a two-factor code when two-factor login is on). `password` asks for the new master password twice; it does not rotate the keys unless `--rotate` is given, which you want if the old password leaked (with a recovery code, it then asks for that code and keeps it). `secret-key` keeps the master password, shows a **new Emergency Kit** and asks you to type part of it back before anything is sent; by default it also rotates the keys and issues a new recovery code, which the kit shows. `--skip-rotation` is the opt-out: then the kit has no recovery code, and the earlier one stays valid, so keep the old kit for its recovery code (only its Secret Key stops working). `--full-rotation` is for a kit you believe was stolen: the rotation also replaces the account's identity keys, so each of your other devices shows a new safety number the next time it goes online and asks you to type `CONFIRM` after comparing it with one you trust. The old kit stops working only once the server has taken the change: if the server refuses it, `rv` says the change was not made and the new kit is void, and the old kit stays the valid one. If copying the kit takes more than four minutes, `rv` logs in once more before sending the change (the server takes it only within five minutes of a login). Your other devices ask for the new master password, and the new Secret Key if it changed, the next time they go online.
 
 If such a change is interrupted after it was sent, it is kept like an interrupted rotation: the next `rv` run opens with the **current** master password, asks for the new one, and finishes the change or sends it again. If the server does not take it then, `rv` says so, and the previous master password and Emergency Kit stay the valid ones.
 
