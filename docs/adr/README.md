@@ -86,6 +86,8 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0027 | [Export payload encoding and plaintext export](0027-export-payload.md) | Accepted | M1 |
 | 0028 | [`/api/v1` HTTP conventions](0028-api-v1-http-conventions.md) | Accepted | M1 |
 | 0029 | [KeePass KDBX import: legacy primitives in `rizzy-import`](0029-kdbx-import.md) | Proposed | M3 |
+| 0030 | [Client-side TLS for `rv`](0030-client-tls-rv.md) | Proposed | M1 |
+| 0031 | [Retiring old OPAQUE setups](0031-retiring-old-opaque-setups.md) | Proposed | M1 |
 
 ## Gates
 
