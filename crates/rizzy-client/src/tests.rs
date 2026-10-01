@@ -430,6 +430,112 @@ impl Server {
         UploadResult::Stored
     }
 
+    /// A healing request as the server takes it (ADR 0021 §9 "Server acceptance"), simplified:
+    /// all or nothing; wraps fill rows; each op is verified and stored unless the same
+    /// statement is held at its dot (another one refuses the request); a bodiless header needs
+    /// a snapshot of the request that covers it; the snapshots then pass the upload checks
+    /// against the heads after the request's headers. No stale-epoch check.
+    fn heal(
+        &mut self,
+        req: &rizzy_proto::vault::HealingRequest,
+    ) -> Result<rizzy_proto::vault::HealingResponse, ()> {
+        let saved = (
+            self.ops.clone(),
+            self.wraps.clone(),
+            self.snapshots.clone(),
+            self.op_items.clone(),
+        );
+        let authors = self.authors();
+        let snapshots: Vec<SnapshotHeader> = req
+            .records
+            .as_slice()
+            .iter()
+            .filter_map(|r| match r {
+                Record::Snapshot(s) => {
+                    let wire = s.statement.as_slice();
+                    let author = authors.signer(wire)?;
+                    let verified = SnapshotStatement::verify(wire, &author.verifying_key).ok()?;
+                    SnapshotHeader::parse_statement(&verified).ok()
+                }
+                Record::Op(_) => None,
+            })
+            .collect();
+        let mut ok = true;
+        self.wraps
+            .extend(req.item_key_wraps.as_slice().iter().cloned());
+        for record in req.records.as_slice() {
+            let Record::Op(op) = record else { continue };
+            let wire = op.statement.as_slice();
+            let Some(author) = authors.signer(wire) else {
+                ok = false;
+                break;
+            };
+            let Ok(verified) = OpStatement::verify(wire, &author.verifying_key) else {
+                ok = false;
+                break;
+            };
+            let header = OpHeader::parse_statement(&verified).unwrap();
+            if op.body.is_none()
+                && !snapshots
+                    .iter()
+                    .any(|s| s.item_id == header.item_id && s.covered.covers(header.dot))
+            {
+                ok = false;
+                break;
+            }
+            let chain = self
+                .ops
+                .entry(header.dot.device_id().to_bytes())
+                .or_default();
+            match chain.get(&header.dot.seq()) {
+                Some(held) if held.statement == op.statement => {}
+                Some(_) => {
+                    ok = false;
+                    break;
+                }
+                None => {
+                    if let Some(w) = &op.key_wrap {
+                        self.wraps.push(WireItemKeyWrap {
+                            item_id: Id::from_bytes(header.item_id.to_bytes()),
+                            item_key_id: w.item_key_id,
+                            vault_key_epoch: header.vault_key_epoch,
+                            envelope: w.envelope.clone(),
+                        });
+                    }
+                    chain.insert(header.dot.seq(), op.clone());
+                    self.op_items.insert(
+                        (header.dot.device_id().to_bytes(), header.dot.seq()),
+                        header.item_id,
+                    );
+                }
+            }
+        }
+        let as_upload = UploadRequest {
+            vault_id: req.vault_id,
+            records: List::new(Vec::new()).unwrap(),
+        };
+        for record in req.records.as_slice() {
+            let Record::Snapshot(snapshot) = record else {
+                continue;
+            };
+            if !ok {
+                break;
+            }
+            if let UploadResult::Rejected { .. } =
+                self.store_snapshot(&authors, &as_upload, snapshot)
+            {
+                ok = false;
+            }
+        }
+        if !ok {
+            (self.ops, self.wraps, self.snapshots, self.op_items) = saved;
+            return Err(());
+        }
+        Ok(rizzy_proto::vault::HealingResponse {
+            restore_generation: Fixed::from_bytes(self.generation),
+        })
+    }
+
     fn fetch(&self, req: &FetchRequest) -> FetchResponse {
         let mut ops = Vec::new();
         let mut covers: Vec<SnapshotRecord> = Vec::new();
@@ -1540,6 +1646,208 @@ fn server_behind_and_restore_generations() {
     );
 }
 
+/// ADR 0021 §9 "Server behind", "Healing request": a server restored from an older backup is
+/// behind both devices. B heals it with what it holds (A's lost ops verbatim, the lost wrap of
+/// an item created after the backup), both devices leave read-only, A writes again on top of
+/// the healed chain, and a new device reads every item.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one restore story: backup, writes, restore, healing, reads"
+)]
+fn a_restored_server_is_healed_and_both_devices_leave_read_only() {
+    let mut rng = ChaCha20Rng::seed_from_u64(30);
+    let mut server = Server::new(31);
+    let a = signup(&mut server, &mut rng, DeviceKind::DesktopCli);
+    let sk = secret_key_text(a.device.as_ref().unwrap());
+    let b = login_and_enrol(&mut server, &mut rng, &sk);
+    let authors = Authors::from_account(&b.account).unwrap();
+    let vault_id = a.vault_key.vault_id();
+    let (mut a_vault, a_unlocked, items) = synced_writer(&mut server, &mut rng, a, &authors, 1);
+    let backup = (
+        server.ops.clone(),
+        server.wraps.clone(),
+        server.snapshots.clone(),
+        server.op_items.clone(),
+    );
+
+    // After the backup: A edits the first item and creates a second one (a fresh item key).
+    let key = SchemaKey::parse(LOGIN_PASSWORD.as_bytes()).unwrap();
+    let edited = Value::text("edited after the backup").unwrap();
+    a_vault
+        .edit_item(
+            &mut rng,
+            &a_unlocked,
+            items[0],
+            &[FieldEdit {
+                key: &key,
+                value: &edited,
+            }],
+            T0 + 10,
+        )
+        .unwrap();
+    let created = Value::text("created after the backup").unwrap();
+    let second = a_vault
+        .create_item(
+            &mut rng,
+            &a_unlocked,
+            ItemType::LOGIN,
+            &[FieldEdit {
+                key: &key,
+                value: &created,
+            }],
+            T0 + 11,
+        )
+        .unwrap();
+    let up = a_vault
+        .upload_request(&mut rng, &a_unlocked)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        a_vault
+            .apply_upload_response(&server.upload(&up))
+            .unwrap()
+            .acknowledged,
+        2
+    );
+    let mut b_account = b.account;
+    let mut b_vault =
+        VaultSync::new(b_account.take_vault_key(vault_id).unwrap(), &b.unlocked, 1).unwrap();
+    b_vault
+        .apply_fetch(
+            &authors,
+            &server.fetch(&b_vault.fetch_request().unwrap()),
+            T0 + 12,
+        )
+        .unwrap();
+    assert!(!b_vault.needs_healing());
+
+    // The restore: the backup's rows and a new restore generation.
+    (server.ops, server.wraps, server.snapshots, server.op_items) = backup;
+    server.generation = [0x55; 16];
+    let out = b_vault
+        .apply_fetch(
+            &authors,
+            &server.fetch(&b_vault.fetch_request().unwrap()),
+            T0 + 13,
+        )
+        .unwrap();
+    assert!(out.server_behind);
+    assert!(b_vault.is_read_only());
+    assert!(b_vault.needs_healing());
+
+    // B's request: A's two lost ops with their bodies, and the second item's lost wrap.
+    let heal = b_vault.healing_request().unwrap().unwrap();
+    let ops: Vec<&OpRecord> = heal
+        .records
+        .as_slice()
+        .iter()
+        .map(|r| match r {
+            Record::Op(op) => op,
+            Record::Snapshot(_) => panic!("no cover needed: every body is held"),
+        })
+        .collect();
+    assert_eq!(ops.len(), 2);
+    assert!(ops.iter().all(|op| op.body.is_some()));
+    assert!(
+        heal.item_key_wraps
+            .as_slice()
+            .iter()
+            .any(|w| w.item_id.to_bytes() == second.to_bytes())
+    );
+    let answer = server.heal(&heal).unwrap();
+    let outcome = b_vault.apply_healing_response(&answer).unwrap();
+    assert_eq!((outcome.ops, outcome.own_acknowledged), (2, 0));
+    let out = b_vault
+        .apply_fetch(
+            &authors,
+            &server.fetch(&b_vault.fetch_request().unwrap()),
+            T0 + 14,
+        )
+        .unwrap();
+    assert!(!out.server_behind);
+    assert!(!b_vault.is_read_only());
+    assert!(!b_vault.needs_healing());
+
+    // A sees the server whole again and writes on top of the healed chain.
+    let out = a_vault
+        .apply_fetch(
+            &authors,
+            &server.fetch(&a_vault.fetch_request().unwrap()),
+            T0 + 15,
+        )
+        .unwrap();
+    assert!(!out.server_behind);
+    a_vault
+        .trash_item(&mut rng, &a_unlocked, items[0], T0 + 16)
+        .unwrap();
+    let up = a_vault
+        .upload_request(&mut rng, &a_unlocked)
+        .unwrap()
+        .unwrap();
+    let answer = server.upload(&up);
+    assert!(
+        answer
+            .results
+            .as_slice()
+            .iter()
+            .all(|r| matches!(r, UploadResult::Stored))
+    );
+
+    // A fresh replica of B, from nothing, reads both items as A left them.
+    let mut b_state = b.device;
+    let mut fresh = verify_unlock(&mut b_state, &b.unlocked, &server.view(), None).unwrap();
+    let mut c_vault =
+        VaultSync::new(fresh.take_vault_key(vault_id).unwrap(), &b.unlocked, 1).unwrap();
+    let out = c_vault
+        .apply_fetch(
+            &authors,
+            &server.fetch(&c_vault.fetch_request().unwrap()),
+            T0 + 17,
+        )
+        .unwrap();
+    assert!(out.reports.is_empty(), "{:?}", out.reports);
+    assert_eq!(c_vault.item_lifecycle(items[0]), ItemLifecycle::Trashed);
+    assert_eq!(
+        c_vault
+            .field_value(second, LOGIN_PASSWORD)
+            .unwrap()
+            .expose_secret(),
+        created.expose_secret()
+    );
+}
+
+/// A healing request is refused when the server would get a header with neither its body nor
+/// a cover, and nothing is built under an alarm (ADR 0021 §9; `heal` module readings).
+#[test]
+fn healing_is_not_built_under_an_alarm() {
+    let mut rng = ChaCha20Rng::seed_from_u64(32);
+    let mut server = Server::new(33);
+    let a = signup(&mut server, &mut rng, DeviceKind::DesktopCli);
+    let authors = server.authors();
+    let (mut vault, unlocked, _) = synced_writer(&mut server, &mut rng, a, &authors, 2);
+    let own = unlocked.device_id().to_bytes();
+    // Before any Fetch answer of the vault was seen there are no heads: Fetch first.
+    let lost = server.ops.get_mut(&own).unwrap().remove(&2).unwrap();
+    vault
+        .apply_fetch(
+            &authors,
+            &server.fetch(&vault.fetch_request().unwrap()),
+            T0 + 10,
+        )
+        .unwrap();
+    assert!(vault.needs_healing());
+    vault.set_read_only(true);
+    assert_eq!(vault.healing_request().unwrap_err(), ClientError::ReadOnly);
+    vault.set_read_only(false);
+    // A refusal changes nothing: the same request is built again.
+    let first = vault.healing_request().unwrap().unwrap();
+    vault.healing_refused();
+    let again = vault.healing_request().unwrap().unwrap();
+    assert_eq!(first, again);
+    assert_eq!(first.records.as_slice(), [Record::Op(lost)]);
+}
+
 #[test]
 fn fake_server_refuses_forged_snapshots_and_serves_covers() {
     let mut rng = ChaCha20Rng::seed_from_u64(20);
@@ -1622,3 +1930,218 @@ fn fake_server_refuses_forged_snapshots_and_serves_covers() {
 mod export;
 mod rotation;
 mod store;
+
+/// ADR 0018 §6 "List elements", "List order": URIs and custom fields of an existing item are
+/// added after the last element, edited by key, and removed by clearing every attribute the
+/// item holds, `uri/<id>/match` (never written by M1) left out; tags by their own key.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one item through every list edit, in order"
+)]
+fn list_elements_are_added_edited_and_removed() {
+    use rizzy_core::item::schema::{
+        ATTR_KIND, ATTR_LABEL, ATTR_MATCH, ATTR_VALUE, CUSTOM_KIND_HIDDEN, LIST_FIELD, LIST_TAG,
+        LIST_URI,
+    };
+    use rizzy_core::item::tag::tag_key;
+
+    let mut rng = ChaCha20Rng::seed_from_u64(40);
+    let mut server = Server::new(41);
+    let a = signup(&mut server, &mut rng, DeviceKind::DesktopCli);
+    let authors = server.authors();
+    let (mut vault, unlocked, items) = synced_writer(&mut server, &mut rng, a, &authors, 1);
+    let item = items[0];
+    let mut now = T0 + 100;
+    let mut write =
+        |vault: &mut VaultSync, rng: &mut ChaCha20Rng, writes: &[(SchemaKey, Value)]| {
+            let edits: Vec<FieldEdit<'_>> = writes
+                .iter()
+                .map(|(key, value)| FieldEdit { key, value })
+                .collect();
+            now += 1;
+            vault.edit_item(rng, &unlocked, item, &edits, now)
+        };
+    let uris = |vault: &VaultSync| -> Vec<String> {
+        vault
+            .list_elements(item, LIST_URI)
+            .iter()
+            .map(|e| {
+                let value = vault
+                    .field_value(
+                        item,
+                        &format!("{LIST_URI}/{}/{ATTR_VALUE}", e.element.as_str()),
+                    )
+                    .unwrap();
+                match value.decode().unwrap() {
+                    ValueRef::Text(t) => t.to_owned(),
+                    _ => panic!("text"),
+                }
+            })
+            .collect()
+    };
+
+    // Two URIs, then a third after them: list order is insertion order.
+    let orders = vault.append_orders(Some(item), LIST_URI, 2).unwrap();
+    let mut writes = Vec::new();
+    for (uri, order) in ["https://a.example", "https://b.example"]
+        .iter()
+        .zip(&orders)
+    {
+        let (_, new) = VaultSync::new_element_writes(
+            &mut rng,
+            LIST_URI,
+            vec![(ATTR_VALUE, Value::text(uri).unwrap())],
+            Some(order),
+        )
+        .unwrap();
+        writes.extend(new);
+    }
+    write(&mut vault, &mut rng, &writes).unwrap();
+    let orders = vault.append_orders(Some(item), LIST_URI, 1).unwrap();
+    assert!(orders[0].as_bytes() > vault_order(&vault, item, 1).as_slice());
+    let (third, new) = VaultSync::new_element_writes(
+        &mut rng,
+        LIST_URI,
+        vec![(ATTR_VALUE, Value::text("https://c.example").unwrap())],
+        Some(&orders[0]),
+    )
+    .unwrap();
+    write(&mut vault, &mut rng, &new).unwrap();
+    assert_eq!(
+        uris(&vault),
+        [
+            "https://a.example",
+            "https://b.example",
+            "https://c.example"
+        ]
+    );
+
+    // Edit the first, remove the second.
+    let elements = vault.list_elements(item, LIST_URI);
+    let first = elements[0].element.as_str().to_owned();
+    let second = elements[1].element.as_str().to_owned();
+    let key = SchemaKey::parse(format!("{LIST_URI}/{first}/{ATTR_VALUE}").as_bytes()).unwrap();
+    write(
+        &mut vault,
+        &mut rng,
+        &[(key, Value::text("https://a2.example").unwrap())],
+    )
+    .unwrap();
+    let removal = vault
+        .element_removal_writes(item, LIST_URI, &second)
+        .unwrap();
+    assert_eq!(removal.len(), 2, "value and order");
+    assert!(removal.iter().all(|(_, v)| v.is_cleared()));
+    write(&mut vault, &mut rng, &removal).unwrap();
+    assert_eq!(uris(&vault), ["https://a2.example", "https://c.example"]);
+    assert_eq!(
+        vault
+            .element_removal_writes(item, LIST_URI, &second)
+            .unwrap_err(),
+        ClientError::UnknownItem
+    );
+
+    // A `match` written by a newer client is carried, never written by this one: the removal
+    // leaves it out and the element still goes.
+    let third_hex = hex_of(third.as_bytes());
+    let match_key = format!("{LIST_URI}/{third_hex}/{ATTR_MATCH}");
+    let match_value = Value::enumeration(1);
+    vault
+        .write_op(
+            &mut rng,
+            &unlocked,
+            item,
+            &crate::sync::OwnChange {
+                lifecycle: rizzy_sync::record::Lifecycle::Active,
+                writes: &[(match_key.as_str(), match_value.expose_secret())],
+            },
+            T0 + 500,
+        )
+        .unwrap();
+    let removal = vault
+        .element_removal_writes(item, LIST_URI, &third_hex)
+        .unwrap();
+    assert!(removal.iter().all(|(k, _)| k.as_str() != match_key));
+    write(&mut vault, &mut rng, &removal).unwrap();
+    assert_eq!(uris(&vault), ["https://a2.example"]);
+
+    // A hidden custom field, then its removal; a tag the same way.
+    let orders = vault.append_orders(Some(item), LIST_FIELD, 1).unwrap();
+    let (field, new) = VaultSync::new_element_writes(
+        &mut rng,
+        LIST_FIELD,
+        vec![
+            (ATTR_LABEL, Value::text("PIN").unwrap()),
+            (ATTR_KIND, Value::enumeration(CUSTOM_KIND_HIDDEN)),
+            (ATTR_VALUE, Value::text("1234").unwrap()),
+        ],
+        Some(&orders[0]),
+    )
+    .unwrap();
+    let tag = tag_key("work").unwrap();
+    let mut writes = new;
+    writes.push((tag_key("work").unwrap(), Value::bool(true)));
+    write(&mut vault, &mut rng, &writes).unwrap();
+    assert_eq!(vault.list_elements(item, LIST_FIELD).len(), 1);
+    assert_eq!(vault.list_elements(item, LIST_TAG).len(), 1);
+    let field_hex = hex_of(field.as_bytes());
+    let mut removal = vault
+        .element_removal_writes(item, LIST_FIELD, &field_hex)
+        .unwrap();
+    assert_eq!(removal.len(), 4, "label, kind, value and order");
+    let tag_element = vault.list_elements(item, LIST_TAG)[0]
+        .element
+        .as_str()
+        .to_owned();
+    removal.extend(
+        vault
+            .element_removal_writes(item, LIST_TAG, &tag_element)
+            .unwrap(),
+    );
+    write(&mut vault, &mut rng, &removal).unwrap();
+    assert!(vault.list_elements(item, LIST_FIELD).is_empty());
+    assert!(vault.list_elements(item, LIST_TAG).is_empty());
+    // The registers stay (ADR 0018 §4), cleared.
+    assert!(
+        vault
+            .field_value(item, tag.as_str())
+            .is_some_and(|v| v.is_cleared())
+    );
+
+    // Every op is a valid upload the server stores.
+    let up = vault.upload_request(&mut rng, &unlocked).unwrap().unwrap();
+    let answer = server.upload(&up);
+    assert!(
+        answer
+            .results
+            .as_slice()
+            .iter()
+            .all(|r| matches!(r, UploadResult::Stored))
+    );
+}
+
+/// The `order` payload of the `index`-th URI element of `item`, in list order.
+fn vault_order(vault: &VaultSync, item: ItemId, index: usize) -> Vec<u8> {
+    use rizzy_core::item::schema::{ATTR_ORDER, LIST_URI};
+    let element = &vault.list_elements(item, LIST_URI)[index];
+    let value = vault
+        .field_value(
+            item,
+            &format!("{LIST_URI}/{}/{ATTR_ORDER}", element.element.as_str()),
+        )
+        .unwrap();
+    match value.decode().unwrap() {
+        ValueRef::SortKey(payload) => payload.to_vec(),
+        _ => panic!("a sort key"),
+    }
+}
+
+/// Lowercase hex of `bytes`.
+fn hex_of(bytes: &[u8]) -> String {
+    use core::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    })
+}

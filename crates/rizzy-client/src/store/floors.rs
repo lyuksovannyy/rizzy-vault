@@ -19,6 +19,8 @@
 //! - delete an `ops` row, or replace its statement, except by a re-issue of a row that is
 //!   `own = 1`, or `own = 3` with `sent_generation` equal to the stale answer's restore
 //!   generation (§4 step 6);
+//! - drop the body of an `ops` row that is not `own = 0` (served rows only: the pruning of
+//!   §4 step 2);
 //! - lower `next_device_seq` or the stored HLC, leave `next_device_seq` at or below an own
 //!   `device_seq` held, or insert an own op below the `next_device_seq` stored before (a
 //!   reused dot);
@@ -526,6 +528,15 @@ impl Pending<'_> {
                 self.ops.insert(key, held);
                 Ok(())
             }
+            // Only the body of a served row: the statement, the own rows and every floor stay.
+            Write::PruneOpBody {
+                vault_id,
+                device_id,
+                device_seq,
+            } => match self.op(&(*vault_id, *device_id, *device_seq)) {
+                Some(held) if held.own == own::SERVED => Ok(()),
+                _ => Err(Refused),
+            },
             Write::PutSnapshot(row) => {
                 let key = snapshot_key(row).map_err(corrupt)?;
                 match self.snapshot(&key) {

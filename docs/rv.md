@@ -57,12 +57,16 @@ rv item show 3fa2              # ids may be shortened to a unique prefix; --reve
 rv item create --type login --field item.name=Example --field login.username=alice \
                --secret login.password --uri https://example.org --tag work
 rv item edit 3fa2 --secret login.password --clear item.notes --untag work
+rv item edit 3fa2 --uri https://login.example.org --custom "Account=1234" --custom-secret PIN
+rv item edit 3fa2 --set-uri 9b1c=https://example.org/new --remove-custom 52e0
 rv item trash 3fa2             # restore, purge
 rv generate --length 24        # or --words 6
 rv totp 3fa2
 ```
 
 Every command asks for the master password: nothing unlocked outlives the process. A command that changes something writes it to the local file first and then uploads it. If the server is not reachable the change stays queued and the next `rv sync` sends it.
+
+URIs and custom fields are list elements: `item show` prints each with its element id in the key (`uri/<id>/value`, `field/<id>/label`), and `--set-uri`, `--remove-uri`, `--set-custom`, `--set-custom-secret` and `--remove-custom` take that id or a unique prefix of it. `--uri`, `--custom <label>=<text>`, `--custom-secret <label>` (a hidden field: the value is asked for) and `--custom-bool <label>=true|false` add one, after the last. Removing one clears every attribute of it, so it disappears on every device. A hidden field's value is never taken from the command line: `--set-custom` refuses it, `--set-custom-secret` asks.
 
 Item types: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`, `software-license`, `wifi`, `bank-account`, `passkey`. Field keys are those of the item schema ([ADR 0018](adr/0018-item-record-encoding.md)), for example `item.name`, `item.notes`, `login.username`, `login.password`, `login.totp`, `card.number`.
 
@@ -122,10 +126,14 @@ rv recovery cancel                      # on a device that is still enrolled
 
 `recovery start` needs the recovery code from the Emergency Kit. The server then makes you wait (72 hours), and a device that is still enrolled can cancel a recovery you did not start with `rv recovery cancel`. `recovery complete` asks for the recovery code again, sets a new master password, shows a **new Emergency Kit** (the old Secret Key and recovery code stop working), rotates the keys unless `--skip-rotation` is given, and enrols this computer. Every other device then asks for the new master password and Secret Key the next time it goes online. An operator who runs the server for one person can set the wait to 0 hours (`RIZZY_RECOVERY_WAIT_HOURS`, see [self-hosting.md](self-hosting.md)).
 
+## After the server was restored from a backup
+
+If the server's operator restored it from an older backup, the edits made after that backup are gone from the server but not from your devices. The next `rv sync` on a device that holds them notices that the server is behind, says so ("The server has lost changes this device holds"), sends them back in one request, and goes on. Until that has happened the device does not write: an edit is refused as read-only, and reading works as before. Run `rv sync` on each device that was in use after the backup. If the server refuses the request, or a device cannot send back everything the server lost, `rv` says so and the device stays read-only.
+
 ## Alarms
 
 `rv` stops writing and says so when it cannot trust what it sees: the server rolled the account back, served another identity key, or knows more about this device than the local file does. The alarm stays until it is dealt with. For an identity change, `rv` shows a safety number to compare on another device before you accept it. For "device state outdated" the only way on is to enrol again. While a rollback, fork or unconfirmed-identity alarm is raised, `rv device forget` refuses to remove the local file, with or without the master password: the file is the evidence.
 
 ## Not in this build
 
-Clipboard output, `https://` (and with it a private CA: the TLS crates await approval), a full key rotation together with a Secret Key change, editing the URIs and custom fields of an existing item, and no-echo input on platforms without `stty` (there, pipe the secrets in).
+Clipboard output, `https://` (and with it a private CA: the TLS crates await approval), a full key rotation together with a Secret Key change, reordering list elements, and no-echo input on platforms without `stty` (there, pipe the secrets in).

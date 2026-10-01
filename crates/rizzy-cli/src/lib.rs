@@ -67,6 +67,7 @@ pub mod device;
 pub mod enrol;
 pub mod error;
 pub mod http;
+mod lists;
 pub mod paths;
 pub mod recover;
 pub mod sys;

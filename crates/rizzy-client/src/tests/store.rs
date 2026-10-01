@@ -1490,6 +1490,24 @@ fn the_floors_refuse_what_must_never_be_written() {
             },
         );
     }
+    // Only a served row's body is pruned: never an own row's, never a row the file lacks.
+    for (seq, device) in [
+        (acked_seq, device_id),
+        (
+            u64::from_be_bytes(unsent.device_seq.as_slice().try_into().unwrap()),
+            device_id,
+        ),
+        (1, [0x42; 16]),
+    ] {
+        refused(
+            floors,
+            Write::PruneOpBody {
+                vault_id,
+                device_id: device,
+                device_seq: seq,
+            },
+        );
+    }
     // An acknowledged row is never re-issued; a sent one only under its own generation.
     refused(
         floors,
@@ -1843,4 +1861,218 @@ fn an_alarm_survives_a_restart() {
             .unwrap_err(),
         ClientError::ReadOnly
     );
+}
+
+/// ADR 0026 §1, §4 step 2 ("pruning of bodies ADR 0018 §10 no longer needs"): once a snapshot
+/// of its own is acknowledged, a device drops the bodies of the served ops it covers, keeps
+/// every statement and its own bodies, and the file loads to the same state after every step.
+/// After a restore lost everything, its healing request (ADR 0021 §9) sends those headers
+/// bodiless behind that snapshot, verbatim, and a fresh replica reads the item again.
+#[test]
+fn bodies_behind_an_acknowledged_own_snapshot_are_pruned_and_healed_bodiless() {
+    let mut rng = ChaCha20Rng::seed_from_u64(90);
+    let mut server = Server::new(91);
+    let (mut a, sk, _) = Dev::signed_up(&mut server, &mut rng);
+    a.fetch(&server);
+    let mut b = Dev::enrolled(&mut server, &mut rng, &sk);
+    b.fetch(&server);
+    let backup = (
+        server.ops.clone(),
+        server.wraps.clone(),
+        server.snapshots.clone(),
+        server.op_items.clone(),
+    );
+    let item = a.create(&mut rng, "v0");
+    for i in 0..34 {
+        a.edit(&mut rng, item, &format!("a{i}"));
+    }
+    a.upload(&mut server, &mut rng);
+    b.fetch(&server);
+    assert!(b.cache.rows.ops.iter().all(|o| o.body.is_some()));
+    // B's write makes its own snapshot due; once the server acknowledged it, the bodies it
+    // covers go.
+    b.edit(&mut rng, item, "from b");
+    b.upload(&mut server, &mut rng);
+    let pruned_flags = |rows: &CacheRows| {
+        rows.ops
+            .iter()
+            .filter(|o| o.own == own::SERVED)
+            .map(|o| o.body.is_none())
+            .collect::<Vec<bool>>()
+    };
+    let pruned = pruned_flags(&b.cache.rows).iter().filter(|p| **p).count();
+    assert!(pruned > 0, "some served body is pruned");
+    assert!(
+        b.cache
+            .rows
+            .ops
+            .iter()
+            .filter(|o| o.own != own::SERVED)
+            .all(|o| o.body.is_some()),
+        "own rows keep their bodies"
+    );
+    assert!(
+        b.cache
+            .rows
+            .snapshots
+            .iter()
+            .any(|s| s.own == own::ACKNOWLEDGED)
+    );
+    b.assert_loads();
+    assert_crash_safe(&b.cache.history, &[&b.unlocked]);
+    // A reload has nothing more to prune.
+    let mut loaded = b.reload();
+    let writes = loaded.vaults[0].take_writes();
+    assert!(
+        !writes
+            .writes()
+            .iter()
+            .any(|w| matches!(w, Write::PruneOpBody { .. }))
+    );
+
+    // The restore loses every op; B heals it.
+    (server.ops, server.wraps, server.snapshots, server.op_items) = backup;
+    server.generation = [0x77; 16];
+    let out = b.fetch(&server);
+    assert!(out.server_behind);
+    let heal = b.vault.healing_request().unwrap().unwrap();
+    let records = heal.records.as_slice();
+    let bodiless = records
+        .iter()
+        .filter(|r| matches!(r, Record::Op(op) if op.body.is_none()))
+        .count();
+    assert_eq!(bodiless, pruned);
+    assert!(matches!(records.last(), Some(Record::Snapshot(_))));
+    let answer = server.heal(&heal).unwrap();
+    b.vault.apply_healing_response(&answer).unwrap();
+    b.flush();
+    assert!(!b.fetch(&server).server_behind);
+    b.assert_loads();
+
+    // A new device, through a compacting server, reads the item again.
+    server.compact = true;
+    let mut c = Dev::enrolled(&mut server, &mut rng, &sk);
+    let out = c.fetch(&server);
+    assert!(out.reports.is_empty(), "{:?}", out.reports);
+    assert_eq!(
+        c.vault
+            .field_value(item, LOGIN_PASSWORD)
+            .unwrap()
+            .expose_secret(),
+        Value::text("from b").unwrap().expose_secret()
+    );
+    c.assert_loads();
+}
+
+/// ADR 0021 §9 "Healing request" and ADR 0026 §4 step 6: two own ops are sent and stored, but
+/// the answer is lost; the restored backup holds the first and not the second, and lost
+/// another device's later ops. The healing request skips the stored own op (its range starts
+/// above the server's head) and re-publishes the second; the answer acknowledges both, both
+/// rows move to `own = 2`, and the file loads again.
+#[test]
+fn a_heal_acknowledges_the_own_ops_the_restored_server_holds() {
+    let mut rng = ChaCha20Rng::seed_from_u64(92);
+    let mut server = Server::new(93);
+    let (mut a, sk, _) = Dev::signed_up(&mut server, &mut rng);
+    a.fetch(&server);
+    let item = a.create(&mut rng, "v0");
+    a.upload(&mut server, &mut rng);
+    let mut b = Dev::enrolled(&mut server, &mut rng, &sk);
+    b.fetch(&server);
+
+    // B sends two edits; the server stores both, and the answer is lost.
+    b.edit(&mut rng, item, "b1");
+    b.edit(&mut rng, item, "b2");
+    let up = b
+        .vault
+        .upload_request(&mut rng, &b.unlocked)
+        .unwrap()
+        .unwrap();
+    b.flush();
+    b.assert_sent_rows(&up);
+    let own_seqs: Vec<u64> = up
+        .records
+        .as_slice()
+        .iter()
+        .filter_map(|r| match r {
+            Record::Op(op) => b
+                .cache
+                .rows
+                .ops
+                .iter()
+                .find(|row| row.statement == op.statement.as_slice())
+                .map(|row| u64::from_be_bytes(row.device_seq.clone().try_into().unwrap())),
+            Record::Snapshot(_) => None,
+        })
+        .collect();
+    assert_eq!(own_seqs.len(), 2);
+    let b_device: [u8; 16] = b
+        .cache
+        .rows
+        .ops
+        .iter()
+        .find(|row| row.own == own::SENT)
+        .unwrap()
+        .device_id
+        .clone()
+        .try_into()
+        .unwrap();
+    server.upload(&up);
+    // The backup holds B's first op, not its second.
+    let mut backup = (
+        server.ops.clone(),
+        server.wraps.clone(),
+        server.snapshots.clone(),
+        server.op_items.clone(),
+    );
+    backup.0.get_mut(&b_device).unwrap().remove(&own_seqs[1]);
+    backup.3.remove(&(b_device, own_seqs[1]));
+    // A writes after the backup, and B reads it.
+    a.fetch(&server);
+    a.edit(&mut rng, item, "a1");
+    a.upload(&mut server, &mut rng);
+    b.fetch(&server);
+
+    // The restore: B finds the server behind on A's chain and heals it.
+    (server.ops, server.wraps, server.snapshots, server.op_items) = backup;
+    server.generation = [0x79; 16];
+    let out = b.fetch(&server);
+    assert!(out.server_behind);
+    let heal = b.vault.healing_request().unwrap().unwrap();
+    let republished: Vec<&OpRecord> = heal
+        .records
+        .as_slice()
+        .iter()
+        .filter_map(|r| match r {
+            Record::Op(op) => Some(op),
+            Record::Snapshot(_) => None,
+        })
+        .filter(|op| up.records.as_slice().contains(&Record::Op((*op).clone())))
+        .collect();
+    assert_eq!(
+        republished,
+        vec![match &up.records.as_slice()[1] {
+            Record::Op(op) => op,
+            Record::Snapshot(_) => panic!("an op"),
+        }],
+        "the stored own op is outside the range; the other is re-published verbatim"
+    );
+    let answer = server.heal(&heal).unwrap();
+    let outcome = b.vault.apply_healing_response(&answer).unwrap();
+    assert_eq!(outcome.own_acknowledged, 1);
+    b.flush();
+    assert!(
+        b.cache
+            .rows
+            .ops
+            .iter()
+            .filter(|row| row.own != own::SERVED)
+            .all(|row| row.own == own::ACKNOWLEDGED),
+        "every own row up to the re-published one is acknowledged"
+    );
+    b.assert_loads();
+    assert!(!b.fetch(&server).server_behind);
+    b.upload(&mut server, &mut rng);
+    b.assert_loads();
+    assert_crash_safe(&b.cache.history, &[&b.unlocked]);
 }

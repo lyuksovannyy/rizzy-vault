@@ -385,6 +385,17 @@ pub enum Write {
         /// As [`Write::OpOwn`].
         sent_generation: Option<[u8; 16]>,
     },
+    /// Drops the body of a served op row (`own = 0`): ADR 0026 §4 step 2, "pruning of bodies ADR
+    /// 0018 §10 no longer needs" (the rule is `VaultSync`'s). The statement, the carried wrap and
+    /// every other column stay; an own row is never pruned.
+    PruneOpBody {
+        /// The vault.
+        vault_id: [u8; 16],
+        /// The op's author.
+        device_id: [u8; 16],
+        /// The op's `device_seq`.
+        device_seq: u64,
+    },
     /// Deletes an own snapshot the server refused or a re-issue discarded (ADR 0018 §3); never
     /// a served or acknowledged one.
     DeleteSnapshot {
@@ -415,6 +426,7 @@ impl fmt::Debug for Write {
             Self::OpOwn { .. } => "Write::OpOwn",
             Self::PutSnapshot(_) => "Write::PutSnapshot",
             Self::SnapshotOwn { .. } => "Write::SnapshotOwn",
+            Self::PruneOpBody { .. } => "Write::PruneOpBody",
             Self::DeleteSnapshot { .. } => "Write::DeleteSnapshot",
         })
     }
@@ -614,6 +626,21 @@ impl CacheRows {
                     if held.sent_generation.is_none() {
                         held.sent_generation = sent_generation.map(|g| g.to_vec());
                     }
+                }
+            }
+            Write::PruneOpBody {
+                vault_id,
+                device_id,
+                device_seq,
+            } => {
+                let seq = device_seq.to_be_bytes();
+                if let Some(held) = self.ops.iter_mut().find(|o| {
+                    o.vault_id == *vault_id
+                        && o.device_id == *device_id
+                        && o.device_seq == seq
+                        && o.own == own::SERVED
+                }) {
+                    held.body = None;
                 }
             }
             Write::PutSnapshot(row) => {

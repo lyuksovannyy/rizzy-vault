@@ -129,6 +129,9 @@ const SNAPSHOT_SENT: &str = "UPDATE snapshots SET own = 3, sent_generation = COA
 /// Marks an own snapshot acknowledged.
 const SNAPSHOT_ACKNOWLEDGED: &str = "UPDATE snapshots SET own = 2 \
      WHERE vault_id = ?1 AND snapshot_id = ?2 AND own IN (3, 2)";
+/// Drops the body of a served op row (ADR 0026 §4 step 2); an own row keeps its body.
+const PRUNE_OP_BODY: &str = "UPDATE ops SET body = NULL \
+     WHERE vault_id = ?1 AND device_id = ?2 AND device_seq = ?3 AND own = 0";
 /// Deletes an own snapshot the server never acknowledged.
 const DELETE_SNAPSHOT: &str =
     "DELETE FROM snapshots WHERE vault_id = ?1 AND snapshot_id = ?2 AND own IN (1, 3)";
@@ -751,6 +754,20 @@ async fn apply(conn: &mut SqliteConnection, write: &Write) -> Result<(), sqlx::E
             };
             one_row(query.execute(&mut *conn).await?.rows_affected())
         }
+        Write::PruneOpBody {
+            vault_id,
+            device_id,
+            device_seq,
+        } => {
+            let seq = device_seq.to_be_bytes();
+            let done = sqlx::query(PRUNE_OP_BODY)
+                .bind(vault_id.as_slice())
+                .bind(device_id.as_slice())
+                .bind(seq.as_slice())
+                .execute(&mut *conn)
+                .await?;
+            one_row(done.rows_affected())
+        }
         Write::DeleteSnapshot {
             vault_id,
             snapshot_id,
@@ -1017,6 +1034,12 @@ mod tests {
                 object(kind::ALARM, vec![Alarm::Fork.to_u8()], b"ev2"),
             ],
             vec![Write::ClearAlarm(Alarm::UnconfirmedIdentityChange)],
+            // The pruning of a served body (ADR 0026 §4 step 2).
+            vec![Write::PruneOpBody {
+                vault_id: VAULT,
+                device_id: OTHER,
+                device_seq: 1,
+            }],
         ];
         sets.into_iter()
             .map(|writes| writes.into_iter().collect())
@@ -1156,6 +1179,12 @@ mod tests {
                 Write::VaultGeneration {
                     vault_id: [0x42; 16],
                     generation: [0; 16],
+                },
+                // An own row keeps its body.
+                Write::PruneOpBody {
+                    vault_id: VAULT,
+                    device_id: DEVICE,
+                    device_seq: 1,
                 },
             ];
             for write in refused {

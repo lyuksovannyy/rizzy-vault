@@ -1819,3 +1819,255 @@ fn settling_a_pending_rotation_does_not_confirm_another_devices_identity_change(
     b.ok(&["sync"], &[]);
     assert_eq!(b.field(&first, "item.name"), "After three");
 }
+
+impl Server {
+    /// `rizzy-vault backup` next to the running server, into a new file in its directory.
+    fn backup(&self, name: &str) -> PathBuf {
+        let file = self.dir.join(name);
+        let backup = Self::command(&self.dir, self.port, self.origin_port)
+            .args(["backup", "--out"])
+            .arg(&file)
+            .output()
+            .unwrap();
+        assert!(
+            backup.status.success(),
+            "{}",
+            String::from_utf8_lossy(&backup.stderr)
+        );
+        file
+    }
+
+    /// The operator's restore (self-hosting.md §9): stop the server, empty the database,
+    /// `rizzy-vault restore` the backup (a new restore generation, a reconciliation epoch),
+    /// start the server again.
+    fn restore_from(&mut self, backup: &Path) {
+        self.stop();
+        let data = self.dir.join("data");
+        std::fs::remove_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        let restore = Self::command(&self.dir, self.port, self.origin_port)
+            .args(["restore", "--in"])
+            .arg(backup)
+            .output()
+            .unwrap();
+        assert!(
+            restore.status.success(),
+            "{}",
+            String::from_utf8_lossy(&restore.stderr)
+        );
+        self.child = Self::spawn(&self.dir, self.port, self.origin_port);
+    }
+}
+
+/// ADR 0021 §9 "Server behind", "Healing request" through `rv`, against a real server restored
+/// from an older backup: the edits made after the backup are lost on the server, the device
+/// that made them finds the server behind at its next sync, heals it with one request, and
+/// writes again; another device then reads every edit.
+#[test]
+fn a_server_restored_from_an_older_backup_is_healed_by_the_next_sync() {
+    let mut server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("ha");
+    let b = Rv::new("hb");
+    let (secret_key, _) = sign_up(&a, &origin, "alice");
+    log_in(&b, &origin, "alice", &secret_key);
+    let first = create_note(&a, "First");
+    b.ok(&["sync"], &[]);
+    let backup = server.backup("before.rvbackup");
+
+    // After the backup: an edit and a new item (a new item key), both uploaded.
+    a.ok(
+        &["item", "edit", &first, "--field", "item.name=First, edited"],
+        &[],
+    );
+    let second = create_note(&a, "Second");
+    server.restore_from(&backup);
+
+    // A's next sync finds the server behind (its acknowledged own ops and an item-key wrap
+    // are gone), heals it and syncs on.
+    let healed = a.ok(&["sync"], &[]);
+    assert!(healed.noted("Sending them back"), "{:?}", healed.notes);
+    assert!(
+        healed.noted("has the lost changes again"),
+        "{:?}",
+        healed.notes
+    );
+    // Writable again: a third item goes up on top of the healed chain.
+    let third = create_note(&a, "Third");
+    let synced = a.ok(&["sync"], &[]);
+    assert!(!synced.noted("Sending them back"));
+
+    // B reads everything, the edit included, from the healed server.
+    b.ok(&["sync"], &[]);
+    let items = b.items();
+    assert_eq!(items.len(), 3, "{items:?}");
+    for id in [&first, &second, &third] {
+        assert!(items.iter().any(|(i, _)| i == id), "{id} in {items:?}");
+    }
+    assert_eq!(b.field(&first, "item.name"), "First, edited");
+}
+
+/// ADR 0018 §6 "List elements" through `rv item edit`: URIs and custom fields of an existing
+/// item are added, changed and removed (removal clears every attribute the item holds), tags
+/// added and removed; a hidden custom field's value is asked for and never taken from the
+/// command line; another device sees the result.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one item through every list option of item edit, then a second device"
+)]
+fn item_edit_adds_changes_and_removes_uris_custom_fields_and_tags() {
+    let server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("la");
+    let b = Rv::new("lb");
+    let (secret_key, _) = sign_up(&a, &origin, "alice");
+    let item = a
+        .ok(
+            &[
+                "item",
+                "create",
+                "--type",
+                "login",
+                "--field",
+                "item.name=Mail",
+                "--uri",
+                "https://one.example",
+                "--custom",
+                "Account=1234",
+                "--tag",
+                "work",
+            ],
+            &[],
+        )
+        .out[0]
+        .clone();
+    // The element ids, as `item show` prints them in the keys.
+    let element = |rv: &Rv, list: &str, attribute: &str, value: &str| -> Option<String> {
+        rv.ok(&["item", "show", &item, "--reveal"], &[])
+            .out
+            .iter()
+            .find_map(|line| {
+                let rest = line.strip_prefix(&format!("{list}/"))?;
+                let (id, tail) = rest.split_once('/')?;
+                (tail == format!("{attribute}: {value}")).then(|| id.to_owned())
+            })
+    };
+    let one = element(&a, "uri", "value", "https://one.example").unwrap();
+    let account = element(&a, "field", "label", "Account").unwrap();
+
+    // Add a URI and a hidden field, change the first URI and the text field, untag.
+    a.ok(
+        &[
+            "item",
+            "edit",
+            &item,
+            "--uri",
+            "https://two.example",
+            "--set-uri",
+            &format!("{}=https://one.example/login", &one[..6]),
+            "--set-custom",
+            &format!("{account}=5678"),
+            "--custom-secret",
+            "PIN",
+            "--untag",
+            "work",
+            "--tag",
+            "home",
+        ],
+        &["0000"],
+    );
+    let shown = a.ok(&["item", "show", &item, "--reveal"], &[]);
+    let pin = element(&a, "field", "label", "PIN").unwrap();
+    assert!(
+        shown
+            .out
+            .iter()
+            .any(|l| l == &format!("field/{pin}/value: 0000"))
+    );
+    assert!(
+        shown
+            .out
+            .iter()
+            .any(|l| l == &format!("field/{account}/value: 5678"))
+    );
+    assert!(shown.out.iter().any(|l| l == "tag home: true"));
+    assert!(!shown.out.iter().any(|l| l.starts_with("tag work")));
+    assert!(element(&a, "uri", "value", "https://one.example/login").is_some());
+    let two = element(&a, "uri", "value", "https://two.example").unwrap();
+    // Concealed without --reveal.
+    let hidden = a.ok(&["item", "show", &item], &[]);
+    assert!(
+        hidden
+            .out
+            .iter()
+            .any(|l| l == &format!("field/{pin}/value: ********"))
+    );
+
+    // A hidden field's value never comes from the command line.
+    let (outcome, _) = a.try_run(
+        &["item", "edit", &item, "--set-custom", &format!("{pin}=1")],
+        &[PASSWORD],
+        &[],
+        &[],
+    );
+    assert!(matches!(outcome, Err(CliError::Usage(_))), "{outcome:?}");
+    a.ok(
+        &["item", "edit", &item, "--set-custom-secret", &pin],
+        &["9999"],
+    );
+    assert!(
+        a.ok(&["item", "show", &item, "--reveal"], &[])
+            .out
+            .iter()
+            .any(|l| l == &format!("field/{pin}/value: 9999"))
+    );
+
+    // Remove the first URI and the text field: every attribute is cleared, so neither shows.
+    a.ok(
+        &[
+            "item",
+            "edit",
+            &item,
+            "--remove-uri",
+            &one,
+            "--remove-custom",
+            &account,
+        ],
+        &[],
+    );
+    let shown = a.ok(&["item", "show", &item, "--reveal"], &[]);
+    assert!(
+        !shown.out.iter().any(|l| l.contains(&one)),
+        "{:?}",
+        shown.out
+    );
+    assert!(
+        !shown.out.iter().any(|l| l.contains(&account)),
+        "{:?}",
+        shown.out
+    );
+    assert!(shown.out.iter().any(|l| l.contains(&two)));
+    // Removing it again names no element.
+    let (outcome, _) = a.try_run(
+        &["item", "edit", &item, "--remove-uri", &one],
+        &[PASSWORD],
+        &[],
+        &[],
+    );
+    assert!(matches!(outcome, Err(CliError::BadInput(_))), "{outcome:?}");
+    // The edit-only options are refused on create.
+    let (outcome, _) = a.try_run(
+        &["item", "create", "--type", "login", "--remove-uri", "ab"],
+        &[],
+        &[],
+        &[],
+    );
+    assert!(matches!(outcome, Err(CliError::Usage(_))), "{outcome:?}");
+
+    // Another device sees the same item.
+    log_in(&b, &origin, "alice", &secret_key);
+    let on_b = b.ok(&["item", "show", &item, "--reveal"], &[]);
+    let on_a = a.ok(&["item", "show", &item, "--reveal"], &[]);
+    assert_eq!(on_b.out, on_a.out);
+}

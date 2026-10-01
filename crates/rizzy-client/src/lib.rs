@@ -47,6 +47,7 @@
 //! | [`session`] | CRYPTO.md §5.10 | Device authentication and request signing |
 //! | [`sync`] | ADR 0012 §4, §7; ADR 0018 §3, §10; ADR 0021 §2, §4, §9 | The sync driver of one vault |
 //! | [`items`] | ADR 0018 §2, §6–§9; ADR 0012 §5; ADR 0027 §2 steps 3–5 | Item create, edit, trash, restore, purge and reads; the import path, which splits an item over a create op and the ops that follow |
+//! | [`lists`] | ADR 0018 §6 "List elements", "List order" | The writes that add, edit and remove URIs, custom fields, password-history entries and tags of an item |
 //! | [`export`] | CRYPTO.md §11.14 | The encrypted export file writer and bounded reader |
 //! | [`export::payload`] | ADR 0027 §1–§2 | The export payload: encoding, bounded reader, import of our own export as new items |
 //! | [`export::plaintext`] | ADR 0027 §3–§5 | Plaintext JSON and CSV behind the typed acknowledgement; the frozen warning texts |
@@ -67,7 +68,8 @@
 //! policy is ADR 0018 §10's: a vault keeps every accepted op header ("Headers kept"), each
 //! item's merge state, and the decrypted data of only the ops since the item's newest snapshot,
 //! the ops still waiting, and its own unacknowledged ops; the rest is dropped after every Fetch
-//! and upload answer. A host that keeps no cache (the web vault) never turns the journal on
+//! and upload answer. The cache drops the ciphertext body of a served op too, once a snapshot
+//! this device wrote and the server acknowledged covers it ([`store`], "Pruning"). A host that keeps no cache (the web vault) never turns the journal on
 //! ([`sync::VaultSync::persist`]).
 //!
 //! # HTTP
@@ -95,6 +97,7 @@ pub mod device;
 pub mod error;
 pub mod export;
 pub mod items;
+pub mod lists;
 pub mod login;
 pub mod recovery;
 pub mod rotation;

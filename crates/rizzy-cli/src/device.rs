@@ -82,7 +82,16 @@
 //! way on is `rv device forget` and a new login. `next_device_seq` never takes the server's
 //! unsigned head.
 //!
+//! # Restore healing (ADR 0021 §9)
+//!
+//! [`Device::sync`] heals between its first Fetch and the upload when that Fetch found the
+//! server behind this device (a restore from an older backup), and [`Device::upload`] does when
+//! a stale answer names an own op the server may have stored and served; the steps are the
+//! `heal` submodule's ([`Device::heal`]).
+//!
 //! [ADR 0026]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0026-client-device-state-and-cache.md
+
+mod heal;
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -826,6 +835,7 @@ impl Device {
     /// [`CliError::Server`] for a refusal that is not resolved; [`CliError::Alarm`].
     pub async fn upload(&mut self, ui: &mut dyn Ui) -> Result<(), CliError> {
         let mut followed = false;
+        let mut healed = false;
         loop {
             let request = match self.vault.upload_request(&mut self.rng, &self.unlocked) {
                 Ok(Some(request)) => request,
@@ -837,6 +847,14 @@ impl Device {
                 Err(ClientError::VaultKeyRotated) if !followed => {
                     followed = true;
                     self.refresh(ui).await?;
+                    continue;
+                }
+                // ADR 0021 §9 "Stale epoch": an op the server may have stored and served before a
+                // restore is re-published in a healing request, never re-issued.
+                Err(ClientError::HealingRequired) if !healed => {
+                    healed = true;
+                    self.fetch().await?;
+                    self.heal(ui).await?;
                     continue;
                 }
                 Err(e) => return Err(e.into()),
@@ -862,14 +880,16 @@ impl Device {
         }
     }
 
-    /// Online, then Fetch, upload, Fetch: the device holds what the server holds and the
-    /// server holds what the device wrote (ADR 0025 §2 step 1).
+    /// Online, then Fetch, restore healing when the server is behind (`heal`), upload, Fetch:
+    /// the device holds what the server holds and the server holds what the device wrote
+    /// (ADR 0025 §2 step 1; ADR 0021 §9).
     ///
     /// # Errors
     /// As [`Device::online`], [`Device::fetch`] and [`Device::upload`].
     pub async fn sync(&mut self, ui: &mut dyn Ui) -> Result<(), CliError> {
         self.online(ui).await?;
         self.fetch().await?;
+        self.heal(ui).await?;
         self.upload(ui).await?;
         self.fetch().await
     }

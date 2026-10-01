@@ -53,12 +53,7 @@ use rizzy_core::generator::{
     CharacterOptions, ClassRule, PassphraseOptions, generate_passphrase, generate_password,
 };
 use rizzy_core::ids::DeviceId;
-use rizzy_core::item::key::ElementId;
-use rizzy_core::item::order::evenly_spaced;
-use rizzy_core::item::schema::{
-    ATTR_ORDER, ATTR_VALUE, Concealment, Expected, ITEM_NAME, KeyClass, LIST_URI, LOGIN_TOTP,
-    classify,
-};
+use rizzy_core::item::schema::{Concealment, Expected, ITEM_NAME, KeyClass, LOGIN_TOTP, classify};
 use rizzy_core::item::tag::{tag_key, tag_name};
 use rizzy_core::item::value::ValueRef;
 use rizzy_core::totp::{OtpAuthUri, TotpParams, TotpSecret};
@@ -421,8 +416,15 @@ fn encode_value(key: &FieldKey, text: &str) -> Result<Value, CliError> {
     }
 }
 
-/// The writes `--field`, `--secret`, `--clear`, `--tag`, `--untag` and `--uri` ask for.
-fn collect_writes(ui: &mut dyn Ui, fields: &FieldArgs) -> Result<Vec<(FieldKey, Value)>, CliError> {
+/// The writes `--field`, `--secret`, `--clear`, `--tag`, `--untag` and the list options
+/// (`--uri`, custom fields; [`crate::lists`]) ask for, for a new item (`item` is `None`) or an
+/// existing one.
+fn collect_writes(
+    ui: &mut dyn Ui,
+    vault: &VaultSync,
+    item: Option<ItemId>,
+    fields: &FieldArgs,
+) -> Result<Vec<(FieldKey, Value)>, CliError> {
     let parse_key = |text: &str| {
         FieldKey::parse(text.as_bytes()).map_err(|_| CliError::BadInput("not a field key"))
     };
@@ -454,23 +456,7 @@ fn collect_writes(ui: &mut dyn Ui, fields: &FieldArgs) -> Result<Vec<(FieldKey, 
     for name in &fields.untag {
         writes.push((tag(name)?, Value::cleared()));
     }
-    if !fields.uris.is_empty() {
-        let mut rng = os_rng();
-        let orders =
-            evenly_spaced(fields.uris.len()).map_err(|_| CliError::BadInput("too many URIs"))?;
-        for (uri, order) in fields.uris.iter().zip(orders) {
-            let id = ElementId::generate(&mut rng);
-            let bad = |_| CliError::BadInput("not a URI this version can write");
-            writes.push((
-                id.key(LIST_URI, ATTR_VALUE).map_err(bad)?,
-                Value::text(uri).map_err(|_| CliError::BadInput("the URI is too long"))?,
-            ));
-            writes.push((
-                id.key(LIST_URI, ATTR_ORDER).map_err(bad)?,
-                Value::sort_key(&order),
-            ));
-        }
-    }
+    writes.extend(crate::lists::list_writes(ui, vault, item, fields)?);
     Ok(writes)
 }
 
@@ -501,7 +487,7 @@ async fn item_create(
         .map(|(_, t)| *t)
         .ok_or_else(|| CliError::Usage("unknown item type".into()))?;
     let mut device = Device::open(env).await?;
-    let writes = collect_writes(env.ui, fields)?;
+    let writes = collect_writes(env.ui, device.vault(), None, fields)?;
     let item = device
         .edit(|vault, rng, unlocked, now| {
             let edits: Vec<FieldEdit<'_>> = writes
@@ -519,7 +505,7 @@ async fn item_create(
 async fn item_edit(env: &mut Env<'_>, item: &str, fields: &FieldArgs) -> Result<(), CliError> {
     let mut device = Device::open(env).await?;
     let item = resolve_item(device.vault(), item)?;
-    let writes = collect_writes(env.ui, fields)?;
+    let writes = collect_writes(env.ui, device.vault(), Some(item), fields)?;
     if writes.is_empty() {
         return Err(CliError::Usage("nothing to change".into()));
     }

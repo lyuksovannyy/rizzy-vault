@@ -54,21 +54,26 @@
 //! fork or an unconfirmed identity change of the account) or while the server is behind this
 //! device ([`VaultLog::server_behind`], checked on every Fetch). No op is written then.
 //!
+//! # Restore healing and stale answers (ADR 0021 §9)
+//!
+//! While the server is behind, the host sends the healing request of the `heal` module
+//! ([`VaultSync::healing_request`]) and Fetches again; the vault leaves read-only once no
+//! condition of "Server behind" holds. The conditions are evaluated on every Fetch: a head
+//! below this device's cursor, item-VV entry or acknowledged own `device_seq`, and a wrap the
+//! server lacks that this device got from it or had acknowledged ([`VaultSync`]
+//! `known_wraps`, compared with the served wrap-set rows by item and derived item-key id).
+//!
+//! A stale-epoch answer to an own op written at the old epoch before this device learned of a
+//! rotation (ADR 0025 §4) is re-issued: once the host adopts the new vault key
+//! ([`VaultSync::adopt_vault_key`]; until then [`ClientError::VaultKeyRotated`]), the next
+//! upload re-issues it and the later old-epoch ops of the chain with the same `device_seq`
+//! under the writer rule's item key (a fresh one when every held key is stale, CRYPTO.md
+//! §11.6), and a stale snapshot is rewritten. An own op of that plan that the server may have
+//! stored and served before a restore is never re-issued: [`VaultSync::upload_request`]
+//! answers [`ClientError::HealingRequired`] until a healing request re-published it.
+//!
 //! # Not in this build (reported)
 //!
-//! - The healing request of ADR 0021 §9 "Healing request" while the server is behind: the
-//!   driver detects the condition and stays read-only, but builds no healing request.
-//! - A stale-epoch answer to an own op the server may have stored and served before a restore
-//!   (ADR 0021 §9 "Stale epoch": re-published in a healing request, never re-issued) stops the
-//!   chain's upload with [`ClientError::HealingRequired`]. A stale-epoch answer to any other own
-//!   op (written at the old epoch before this device learned of a rotation, ADR 0025 §4) is
-//!   handled: once the host adopts the new vault key ([`VaultSync::adopt_vault_key`]; until
-//!   then [`ClientError::VaultKeyRotated`]), the next upload re-issues it and the later
-//!   old-epoch ops of the chain with the same `device_seq` under the writer rule's item key
-//!   (a fresh one when every held key is stale, CRYPTO.md §11.6), and a stale snapshot is
-//!   rewritten.
-//! - The `lacks_wrap` condition of "Server behind": wrap acknowledgements are not tracked, so
-//!   it is passed as false.
 //! - The server's `state_seq` in "Server behind": the account-state checks of
 //!   [`crate::unlock`] cover a lower `state_seq`, so the vault check passes 0 for both.
 //!
@@ -78,6 +83,10 @@
 //! (`rizzy_sync::causal::own`). M1 has one vault per account; the host passes the next
 //! `device_seq` when it builds the driver, and reads it back with
 //! [`VaultSync::next_device_seq`].
+
+mod heal;
+
+pub use heal::HealingOutcome;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -369,6 +378,30 @@ pub struct VaultSync {
     /// is that generation (ADR 0026 §4 step 6). In memory only: "a `stale_epoch` answer changes
     /// no row".
     answered: BTreeMap<u64, RestoreGeneration>,
+    /// Every op record this device holds that the server stored: each accepted served op and
+    /// each acknowledged own op, verbatim (signed statement, the body while it is kept, the
+    /// carried wrap with its derived locator). What a healing request re-publishes (ADR 0021
+    /// §9 "Headers kept", "Healing request"); the body goes when [`VaultSync::prune_bodies`]
+    /// drops it.
+    held_ops: BTreeMap<Dot, OpRecord>,
+    /// Every snapshot record this device holds as a cover: the covers it absorbed and its own
+    /// snapshots the server acknowledged (ADR 0021 §9 "Headers kept": "every snapshot record
+    /// they wrote or absorbed"). A healing request sends them verbatim as the covers of the
+    /// headers it sends without a body.
+    held_covers: Vec<(SnapshotHeader, SnapshotRecord)>,
+    /// The server's heads h(V, d) in the last Fetch page, for the healing request's ranges.
+    server_heads: Option<VersionVector>,
+    /// The item-key wraps of this vault at the held vault key's epoch that this device got
+    /// from the server (wrap-set rows, wraps carried by served records) or had acknowledged
+    /// (wraps carried by own acknowledged ops), by item and derived item-key id (ADR 0021 §9
+    /// "Server behind": "the server lacks an item-key wrap the device got from it or had
+    /// acknowledged").
+    known_wraps: BTreeMap<(ItemId, [u8; 16]), ItemKeyWrap>,
+    /// The (item, item-key id) pairs of the wrap-set rows of the last Fetch page that opened
+    /// at the held epoch.
+    served_wraps: BTreeSet<(ItemId, [u8; 16])>,
+    /// The own `device_seq`s of the healing request in flight, for its answer.
+    healing: Option<heal::HealInFlight>,
 }
 
 impl fmt::Debug for VaultSync {
@@ -453,6 +486,12 @@ impl VaultSync {
             journal: None,
             journaled: Journaled::default(),
             answered: BTreeMap::new(),
+            held_ops: BTreeMap::new(),
+            held_covers: Vec::new(),
+            server_heads: None,
+            known_wraps: BTreeMap::new(),
+            served_wraps: BTreeSet::new(),
+            healing: None,
         })
     }
 
@@ -652,18 +691,112 @@ impl VaultSync {
     /// A wrap under another epoch than the held vault key's is ignored: after a rotation every
     /// row is re-wrapped at the new epoch (ADR 0025 §3), and this device adopts that key first
     /// ([`VaultSync::adopt_vault_key`]).
-    fn learn_wrap(&mut self, item: ItemId, vault_key_epoch: u32, envelope: &[u8]) {
+    /// Returns the derived id of the item key it opened to, if it opened.
+    fn learn_wrap(
+        &mut self,
+        item: ItemId,
+        vault_key_epoch: u32,
+        envelope: &[u8],
+    ) -> Option<SymmetricKeyId> {
         if vault_key_epoch != self.vault_key.epoch() {
-            return;
+            return None;
         }
         let ctx = ItemKeyWrapCtx {
             vault_id: self.vault_id,
             item_id: item,
             vault_key_epoch,
         };
-        if let Ok(key) = self.vault_key.unwrap_item_key(&ctx, envelope) {
-            self.add_item_key(item, key);
+        let key = self.vault_key.unwrap_item_key(&ctx, envelope).ok()?;
+        let key_id = key.key_id().ok()?;
+        self.add_item_key(item, key);
+        Some(key_id)
+    }
+
+    /// [`VaultSync::learn_wrap`], and the wrap joins the wraps this device knows the server
+    /// held ([`VaultSync::known_wraps`]): a wrap-set row the server served, or a wrap carried
+    /// by a record the server stored. Returns the derived item-key id.
+    fn remember_wrap(
+        &mut self,
+        item: ItemId,
+        vault_key_epoch: u32,
+        envelope: &[u8],
+    ) -> Option<SymmetricKeyId> {
+        let key_id = self.learn_wrap(item, vault_key_epoch, envelope)?;
+        if let Ok(envelope) = rizzy_proto::wire::Bytes::from_slice(envelope) {
+            self.known_wraps
+                .entry((item, *key_id.as_bytes()))
+                .or_insert_with(|| ItemKeyWrap {
+                    item_id: id(item.to_bytes()),
+                    item_key_id: id(*key_id.as_bytes()),
+                    vault_key_epoch,
+                    envelope,
+                });
         }
+        Some(key_id)
+    }
+
+    /// The carried wrap of a held record, as a healing request re-publishes it: at the held
+    /// epoch with the locator set to the derived id of the item key it opens to (and the wrap
+    /// remembered), or dropped if it does not open; below the held epoch as it came, since the
+    /// server keeps such a wrap with the record and fills no row with it (ADR 0025 open
+    /// question 4). `None` for a wrap that did not match the signed hash.
+    fn held_wrap(
+        &mut self,
+        item: ItemId,
+        vault_key_epoch: u32,
+        carried: Option<&RecordKeyWrap>,
+        matched: bool,
+    ) -> Option<RecordKeyWrap> {
+        let carried = carried.filter(|_| matched)?;
+        if vault_key_epoch != self.vault_key.epoch() {
+            return Some(carried.clone());
+        }
+        let key_id = self.remember_wrap(item, vault_key_epoch, carried.envelope.as_slice())?;
+        Some(RecordKeyWrap {
+            item_key_id: id(*key_id.as_bytes()),
+            envelope: carried.envelope.clone(),
+        })
+    }
+
+    /// Keeps `record` as a held op record (the server stored it). `body` and `wrap` say whether
+    /// the body and the wrap matched the signed hashes; one that did not is not kept.
+    fn hold_op(&mut self, header: &OpHeader, record: &OpRecord, body: bool, wrap: bool) {
+        let key_wrap = self.held_wrap(
+            header.item_id,
+            header.vault_key_epoch,
+            record.key_wrap.as_ref(),
+            wrap,
+        );
+        let held = OpRecord {
+            statement: record.statement.clone(),
+            body: record.body.clone().filter(|_| body),
+            key_wrap,
+        };
+        self.held_ops.insert(header.dot, held);
+    }
+
+    /// Keeps a snapshot record as a held cover (absorbed, or own and acknowledged), once.
+    /// `wrap` says whether its carried wrap matched the signed hash.
+    fn hold_cover(&mut self, header: &SnapshotHeader, record: &SnapshotRecord, wrap: bool) {
+        if self
+            .held_covers
+            .iter()
+            .any(|(h, _)| h.snapshot_id == header.snapshot_id)
+        {
+            return;
+        }
+        let key_wrap = self.held_wrap(
+            header.item_id,
+            header.vault_key_epoch,
+            record.key_wrap.as_ref(),
+            wrap,
+        );
+        let held = SnapshotRecord {
+            statement: record.statement.clone(),
+            envelope: record.envelope.clone(),
+            key_wrap,
+        };
+        self.held_covers.push((header.clone(), held));
     }
 
     /// Decrypts an `ITEM_OP` envelope under the item key its header names, if held. `Ok(None)`
@@ -852,10 +985,16 @@ impl VaultSync {
         let mut outcome = FetchOutcome::default();
         self.learn_revocations(authors);
         // The current wrap set, kept as served for a rotation (every page carries all of it).
+        let mut served_wraps = BTreeSet::new();
         for wrap in response.item_key_wraps.as_slice() {
             let item = ItemId::from_bytes(wrap.item_id.to_bytes());
-            self.learn_wrap(item, wrap.vault_key_epoch, wrap.envelope.as_slice());
+            if let Some(key_id) =
+                self.remember_wrap(item, wrap.vault_key_epoch, wrap.envelope.as_slice())
+            {
+                served_wraps.insert((item, *key_id.as_bytes()));
+            }
         }
+        self.served_wraps = served_wraps;
         if self.wrap_rows.as_slice() != response.item_key_wraps.as_slice() {
             let vault_id = self.vault_id.to_bytes();
             let epoch = self.vault_key.epoch();
@@ -894,18 +1033,23 @@ impl VaultSync {
         let settled = self.settle(&mut served, &covers, now_ms, &mut outcome)?;
         // The rows of what was accepted (ADR 0026 §4 step 2): every accepted op statement with
         // the body and wrap that matched its signed hashes, every absorbed snapshot record.
-        if self.journal.is_some() {
-            for (op, (record, wrap)) in served.iter().zip(&op_records) {
-                if settled.accepted.contains(&op.header.dot) {
-                    let body = matches!(op.body, BodyStatus::Verified | BodyStatus::Waiting);
+        // The same records are held in memory for a healing request (ADR 0021 §9).
+        for (op, (record, wrap)) in served.iter().zip(&op_records) {
+            if settled.accepted.contains(&op.header.dot) {
+                let body = matches!(op.body, BodyStatus::Verified | BodyStatus::Waiting);
+                self.hold_op(&op.header, record, body, *wrap);
+                if self.journal.is_some() {
                     let row = self.op_row(&op.header, record, body, *wrap, own::SERVED);
                     self.record(|| Write::PutOp(row));
                 }
             }
-            for index in &settled.absorbed {
-                if let (Some((header, _)), Some((record, wrap))) =
-                    (covers.get(*index), cover_records.get(*index))
-                {
+        }
+        for index in &settled.absorbed {
+            if let (Some((header, _)), Some((record, wrap))) =
+                (covers.get(*index), cover_records.get(*index))
+            {
+                self.hold_cover(header, record, *wrap);
+                if self.journal.is_some() {
                     let row = self.snapshot_row(header, record, *wrap, own::SERVED);
                     self.record(|| Write::PutSnapshot(row));
                 }
@@ -921,7 +1065,7 @@ impl VaultSync {
             ServerView {
                 state_seq: 0,
                 heads: &heads,
-                lacks_wrap: false,
+                lacks_wrap: self.lacks_wrap(),
             },
         );
         self.server_behind = !behind.is_empty();
@@ -937,8 +1081,28 @@ impl VaultSync {
                 _ => false,
             });
         self.synced = response.complete && !self.server_behind && !outcome.own_history_ahead;
+        self.server_heads = Some(heads);
         self.prune_bodies();
         Ok(outcome)
+    }
+
+    /// Whether the server lacks an item-key wrap this device got from it or had acknowledged
+    /// (ADR 0021 §9 "Server behind"): a wrap of [`VaultSync::known_wraps`] at the held epoch
+    /// whose row the last Fetch page did not serve. Compared by item and derived item-key id;
+    /// a served row whose locator lies counts as missing, the conservative side.
+    ///
+    /// A served row above the held epoch means a rotation this device has not adopted yet
+    /// (ADR 0025 §3: the rotation re-wraps the whole set at the new epoch): the set at the held
+    /// epoch is gone by design, and the account answer, not this check, moves the device on
+    /// ([`VaultSync::adopt_vault_key`]). Nothing is compared then.
+    fn lacks_wrap(&self) -> bool {
+        let epoch = self.vault_key.epoch();
+        let rotated = self.wrap_rows.iter().any(|w| w.vault_key_epoch > epoch);
+        !rotated
+            && self
+                .known_wraps
+                .keys()
+                .any(|known| !self.served_wraps.contains(known))
     }
 
     /// Teaches the log the revocation cut-offs of `authors` it does not know yet.
@@ -1124,6 +1288,22 @@ impl VaultSync {
 
     /// Drops the op data the device no longer needs: it keeps each item's retained ops, the
     /// waiting ones and its own unacknowledged ops (ADR 0018 §10 "Newest snapshot").
+    ///
+    /// # The cache (ADR 0026 §1, §4 step 2)
+    ///
+    /// The cache keeps "op bodies since each item's newest snapshot", and a Fetch or upload
+    /// step persists the "pruning of bodies ADR 0018 §10 no longer needs". This build prunes
+    /// the most conservative subset of that, the body ([`Write::PruneOpBody`]; the signed
+    /// statement stays for the life of the vault, ADR 0021 §9 "Headers kept") of an op that:
+    /// - is another device's: an own op goes back into the own chain at load through its body
+    ///   (`restore`), so own rows keep theirs;
+    /// - is not among the retained, waiting or unacknowledged ops above;
+    /// - is covered by a snapshot of its item that **this device wrote and the server
+    ///   acknowledged**. Such a snapshot is this device's own merged state, so the load
+    ///   rebuilds the item from it exactly; an absorbed cover is another author's claim
+    ///   (ADR 0018 §3 "Snapshots are claims"), which the in-memory merge folds the op into
+    ///   before dropping it but a load from the snapshot alone could not, so it never lets a
+    ///   body go. The snapshot row is `own = 2`, which the load reads as a cover.
     fn prune_bodies(&mut self) {
         let mut keep: BTreeSet<Dot> = self
             .items
@@ -1133,6 +1313,35 @@ impl VaultSync {
         keep.extend(self.log.waiting().iter().map(|w| w.dot));
         keep.extend(self.log.unacknowledged().map(|h| h.dot));
         self.bodies.retain(|dot, _| keep.contains(dot));
+        let own_device = self.device_id;
+        let prunable: Vec<Dot> = self
+            .held_ops
+            .iter()
+            .filter(|(dot, record)| {
+                record.body.is_some() && dot.device_id() != own_device && !keep.contains(dot)
+            })
+            .filter(|(dot, _)| {
+                self.log.header(**dot).is_some_and(|header| {
+                    self.held_covers.iter().any(|(cover, _)| {
+                        cover.author == own_device
+                            && cover.item_id == header.item_id
+                            && cover.covered.covers(**dot)
+                    })
+                })
+            })
+            .map(|(dot, _)| *dot)
+            .collect();
+        let vault_id = self.vault_id.to_bytes();
+        for dot in prunable {
+            if let Some(record) = self.held_ops.get_mut(&dot) {
+                record.body = None;
+            }
+            self.record(|| Write::PruneOpBody {
+                vault_id,
+                device_id: dot.device_id().to_bytes(),
+                device_seq: dot.seq(),
+            });
+        }
     }
 }
 
@@ -1406,8 +1615,10 @@ impl VaultSync {
     /// [`ClientError::VaultKeyRotated`] while this device still writes at the answered op's
     /// epoch: it must adopt the new vault key first. [`ClientError::HealingRequired`] when the
     /// plan names an op the server may have stored and served (a restore came between): such an
-    /// op is never re-issued, and the healing request that re-publishes it is not in this build;
-    /// nothing is re-issued or sent from the chain then. [`ClientError::Internal`].
+    /// op is never re-issued but re-published by [`VaultSync::healing_request`] first; until
+    /// that request is acknowledged, or a Fetch shows the server's own head at or above the
+    /// op (it is stored, and goes up verbatim to be answered "already stored"), nothing is
+    /// re-issued or sent from the chain. [`ClientError::Internal`].
     fn reissue_stale<R: CryptoRng + ?Sized>(
         &mut self,
         rng: &mut R,
@@ -1425,7 +1636,12 @@ impl VaultSync {
             Err(OwnError::NotStale) => return Err(ClientError::VaultKeyRotated),
             Err(_) => return Err(ClientError::Internal),
         };
-        if !plan.republish.is_empty() {
+        // An op the server may have stored and served is re-published in a healing request
+        // first ([`VaultSync::healing_request`]); once that request is acknowledged it is no
+        // longer in the way. One at or below the server's own head is stored: it goes up
+        // verbatim by the normal upload path, answered "already stored"
+        // ([`VaultSync::awaits_republish`]).
+        if plan.republish.iter().any(|dot| self.awaits_republish(*dot)) {
             return Err(ClientError::HealingRequired);
         }
         let headers: Vec<OpHeader> = self
@@ -1571,17 +1787,37 @@ impl VaultSync {
         self.log.acknowledged()
     }
 
+    /// Moves the own records the server acknowledged (every own link up to the highest
+    /// acknowledged `device_seq`) from the upload queue to the held records: the server stored
+    /// them, so a healing request re-publishes them (ADR 0021 §9).
+    fn hold_acknowledged(&mut self) {
+        let acked = self.acked();
+        let done: Vec<u64> = self.own_records.range(..=acked).map(|(s, _)| *s).collect();
+        for seq in done {
+            let Some(own) = self.own_records.remove(&seq) else {
+                continue;
+            };
+            let header =
+                Dot::new(self.device_id, seq).and_then(|dot| self.log.header(dot).cloned());
+            if let Some(header) = header {
+                // This device built the record: its body and wrap are the ones it signed.
+                self.hold_op(&header, &own.record, true, true);
+            }
+        }
+    }
+
     /// The next upload (ADR 0012 §7 "Upload"): every own op not acknowledged, in chain order,
     /// then the own snapshots whose own entry is acknowledged; `None` when there is nothing to
     /// send or the vault is read-only. Own ops the server answered `stale_epoch` are re-issued
-    /// first (module docs, "Not in this build"; ADR 0025 §4), then due snapshots are written.
+    /// first (module docs, "Restore healing and stale answers"; ADR 0025 §4), then due snapshots are written.
     ///
     /// # Errors
     /// [`ClientError::InvalidInput`] if `unlocked` is another device's;
     /// [`ClientError::FetchRequired`] before the first Fetch or upload answer;
     /// [`ClientError::VaultKeyRotated`] after a `stale_epoch` answer until the new vault key is
     /// adopted; [`ClientError::HealingRequired`] when that answer names an op the server may have
-    /// stored and served before a restore; [`ClientError::Internal`].
+    /// stored and served before a restore, until [`VaultSync::healing_request`] re-published it;
+    /// [`ClientError::Internal`].
     pub fn upload_request<R: CryptoRng + ?Sized>(
         &mut self,
         rng: &mut R,
@@ -1664,6 +1900,7 @@ impl VaultSync {
                         .acknowledge(seq)
                         .map_err(|_| ClientError::Internal)?;
                     self.answered.remove(&seq);
+                    self.hold_acknowledged();
                     // "Already stored" moves a row to `own = 2` (ADR 0026 §4 step 6).
                     self.record(|| Write::OpOwn {
                         vault_id,
@@ -1696,6 +1933,15 @@ impl VaultSync {
                     self.answered.insert(seq, generation);
                 }
                 (InFlight::Snapshot(sid), UploadResult::Stored | UploadResult::AlreadyStored) => {
+                    if let Some(stored) = self
+                        .outbox
+                        .iter()
+                        .find(|s| s.header.snapshot_id == sid)
+                        .cloned()
+                    {
+                        // An own snapshot carries no wrap (`write_snapshot`).
+                        self.hold_cover(&stored.header, &stored.record, false);
+                    }
                     self.outbox.retain(|s| s.header.snapshot_id != sid);
                     self.record(|| Write::SnapshotOwn {
                         vault_id,
@@ -1860,6 +2106,10 @@ impl VaultSync {
         self.seen_keys.insert(key.epoch(), key_id);
         self.vault_key = key;
         self.wrap_rows.clear();
+        // The wraps this device knows the server held were at the old epoch; the rows at the
+        // new one come with the next Fetch.
+        self.known_wraps.clear();
+        self.served_wraps.clear();
         self.synced = false;
         Ok(())
     }
@@ -2001,9 +2251,32 @@ impl VaultSync {
         vault.learn_revocations(authors);
         for wrap in &image.wraps {
             let item = ItemId::from_bytes(wrap.item_id.to_bytes());
-            vault.learn_wrap(item, wrap.vault_key_epoch, wrap.envelope.as_slice());
+            // A row on disk was served at the held epoch: the server held it.
+            vault.remember_wrap(item, wrap.vault_key_epoch, wrap.envelope.as_slice());
         }
         vault.wrap_rows.clone_from(&image.wraps);
+        // The item keys that records carry, before any envelope is opened: a cover may be
+        // sealed under an item key whose wrap only an own op carries (a fresh key of the
+        // writer rule), and the own ops are put back after the covers are absorbed. A wrap
+        // opens only under the held vault key with the context it was sealed for (vault, item,
+        // epoch), so trying it at the held epoch with the row's item is safe: a wrong column
+        // or another epoch does not open, and nothing else is taken from the row here.
+        let epoch = vault.vault_key.epoch();
+        for (item, wrap) in image
+            .ops
+            .iter()
+            .filter_map(|r| Some((&r.item_id, r.key_wrap.as_ref()?)))
+            .chain(
+                image
+                    .snapshots
+                    .iter()
+                    .filter_map(|r| Some((&r.item_id, r.key_wrap.as_ref()?))),
+            )
+        {
+            if let Ok(item) = id16(item) {
+                vault.learn_wrap(ItemId::from_bytes(item), epoch, wrap);
+            }
+        }
         let own_device = unlocked.device_id;
         let own_key = *unlocked.device_keys.signing_key().verifying_key();
 
@@ -2074,6 +2347,7 @@ impl VaultSync {
 
         // The served rows, as a Fetch verifies them.
         let mut served = Vec::with_capacity(foreign.len());
+        let mut served_records = Vec::with_capacity(foreign.len());
         for (device, seq, row) in foreign {
             let record = op_record(row)?;
             let wire = record.statement.as_slice();
@@ -2094,9 +2368,15 @@ impl VaultSync {
                 continue;
             }
             let body = vault.verify_body(&statement, &header, &record);
+            let wrap = record
+                .key_wrap
+                .as_ref()
+                .is_some_and(|w| statement.matches_wrap(w.envelope.as_slice()));
+            served_records.push((record, wrap));
             served.push(ServedOp { header, body });
         }
         let mut covers = Vec::new();
+        let mut cover_records = Vec::new();
         let mut outbox = Vec::new();
         for row in &image.snapshots {
             let record = snapshot_record(row)?;
@@ -2127,9 +2407,10 @@ impl VaultSync {
                     }
                     // The author checks, the envelope and its key as a Fetch applies them; a
                     // cover that fails them is left out (§5 (e)).
-                    if let Some((header, plaintext, _)) =
+                    if let Some((header, plaintext, wrap)) =
                         vault.verify_cover(authors, &record, &served)
                     {
+                        cover_records.push((header.clone(), record, wrap));
                         covers.push((header, plaintext));
                     }
                 }
@@ -2150,9 +2431,19 @@ impl VaultSync {
             }
         }
         let mut outcome = FetchOutcome::default();
-        vault
+        let settled = vault
             .settle(&mut served, &covers, now_ms, &mut outcome)
             .map_err(|_| corrupt)?;
+        // The records held for a healing request, as a Fetch holds them.
+        for (op, (record, wrap)) in served.iter().zip(&served_records) {
+            if settled.accepted.contains(&op.header.dot) {
+                let body = matches!(op.body, BodyStatus::Verified | BodyStatus::Waiting);
+                vault.hold_op(&op.header, record, body, *wrap);
+            }
+        }
+        for (header, record, wrap) in &cover_records {
+            vault.hold_cover(header, record, *wrap);
+        }
 
         // The own chain, in order; after each link the ops that waited for it are delivered.
         let mut acknowledged = true;
@@ -2170,7 +2461,7 @@ impl VaultSync {
             match own_op.row.own {
                 own::ACKNOWLEDGED => {
                     vault.log.acknowledge(seq).map_err(|_| corrupt)?;
-                    vault.own_records.remove(&seq);
+                    vault.hold_acknowledged();
                 }
                 own::SENT => {
                     // "Each with the restore generation of its first send" (ADR 0021 §2).
@@ -2190,7 +2481,6 @@ impl VaultSync {
             vault.clock = Hlc::from_u64(image.hlc);
         }
         vault.next_seq = image.next_device_seq;
-        vault.prune_bodies();
         vault.synced = false;
         vault.journal = Some(Vec::new());
         vault.journaled = Journaled {
@@ -2198,6 +2488,8 @@ impl VaultSync {
             hlc: image.hlc,
             generation: image.generation,
         };
+        // After the journal is on: a body this load no longer needs is pruned on disk too.
+        vault.prune_bodies();
         Ok(vault)
     }
 

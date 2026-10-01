@@ -104,9 +104,14 @@ pub enum ClientError {
     VaultKeyRotated,
     /// The server answered `stale_epoch` to an own op it may have stored and served before a
     /// restore lost it (ADR 0021 §9 "Stale epoch"): such an op is never re-issued, only
-    /// re-published in a healing request, which this build does not write. The op is not sent
-    /// again; the host reports it.
+    /// re-published in a healing request. The host fetches, sends
+    /// [`crate::sync::VaultSync::healing_request`] and uploads again.
     HealingRequired,
+    /// The server is behind this device and no complete healing request can be built (ADR 0021
+    /// §9 "Healing request"): a header in a chain's range is held with neither its body nor a
+    /// held snapshot that covers it, the server lacks a dot this device holds no header of, or
+    /// the request would exceed the wire limits. The vault stays read-only; the host reports it.
+    CannotHeal,
     /// The local cache or the device-state record was written by a newer rizzy-vault: its
     /// `cache_meta.format` or record version is above what this build knows (ADR 0026 §5:
     /// "update required"). Nothing was read and nothing is written.
@@ -168,6 +173,7 @@ impl ClientError {
             Self::VaultKeepsChanging => "vault_keeps_changing",
             Self::VaultKeyRotated => "vault_key_rotated",
             Self::HealingRequired => "healing_required",
+            Self::CannotHeal => "cannot_heal",
             Self::CacheUpdateRequired => "cache_update_required",
             Self::CacheCorrupt => "cache_corrupt",
             Self::SignupPending => "signup_pending",
@@ -217,6 +223,9 @@ impl fmt::Display for ClientError {
             Self::VaultKeepsChanging => "the vault keeps changing",
             Self::VaultKeyRotated => "the vault key was rotated on another device",
             Self::HealingRequired => "the server lost an own change and needs healing",
+            Self::CannotHeal => {
+                "the server lost changes that this device cannot send back; the vault stays read-only"
+            }
             Self::CacheUpdateRequired => {
                 "the local data was written by a newer rizzy-vault; update required"
             }
@@ -274,6 +283,7 @@ mod tests {
             ClientError::VaultKeepsChanging,
             ClientError::VaultKeyRotated,
             ClientError::HealingRequired,
+            ClientError::CannotHeal,
             ClientError::CacheUpdateRequired,
             ClientError::CacheCorrupt,
             ClientError::SignupPending,

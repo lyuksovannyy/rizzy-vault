@@ -38,14 +38,21 @@
 //! 4. An alarm is written in the transaction that detects it ([`alarm_write`]); no write
 //!    removes one.
 //!
+//! # Pruning (§1, §4 step 2)
+//!
+//! "Pruning of bodies ADR 0018 §10 no longer needs" runs in the vault driver's steps and
+//! reaches the file as [`rows::Write::PruneOpBody`]: the body of a served op row that no
+//! retained, waiting or unacknowledged op needs and that a snapshot of this device, acknowledged
+//! by the server, covers (the exact rule is `VaultSync`'s `prune_bodies`). A load reads that
+//! snapshot row as the cover of the bodiless header, as a Fetch from a compacted server would.
+//! Own rows keep their bodies, and **snapshot records are never dropped**: ADR 0021 §9
+//! "Headers kept" keeps "every snapshot record they wrote or absorbed", and a healing request
+//! sends held snapshots verbatim as covers, so this build reads ADR 0026 §1's "the newest
+//! snapshot record(s) per item" as a floor, not a ceiling (reported). The cache therefore holds
+//! more ciphertext than ADR 0026 §1 lists, never less, and nothing decrypted.
+//!
 //! # Not in this build (reported)
 //!
-//! - **Pruning.** Bodies and snapshot records are kept once written: "pruning of bodies ADR
-//!   0018 §10 no longer needs" (§4 step 2) and "the newest snapshot record(s) per item" (§1)
-//!   are not implemented. A load replays the rows, and a body may only be dropped when a
-//!   kept, server-held snapshot covers it; deciding that safely is left to a later change. The
-//!   cache therefore holds more ciphertext than ADR 0026 §1 lists, never less, and nothing
-//!   decrypted.
 //! - **`wraps_after_epoch`** is always `NULL`: the driver asks for the whole wrap set.
 //! - **Migrations.** Format 1 is the only format; there is no migration step yet.
 //!

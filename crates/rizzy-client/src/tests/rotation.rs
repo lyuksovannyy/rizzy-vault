@@ -658,8 +658,12 @@ fn refuse_first(up: &UploadRequest, error: ErrorCode, generation: [u8; 16]) -> U
 /// are re-issued with the same `device_seq`, `vault_prev_seq`, HLC and causal context, at the
 /// new epoch, under a fresh item key whose wrap the first carries; they are stored and the
 /// chain goes on. An op the server may have stored and served before a restore is never
-/// re-issued.
+/// re-issued: it is re-published verbatim in a healing request.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one chain through a stale answer, a re-issue, a restore and its healing"
+)]
 fn a_stale_epoch_answer_reissues_the_ops_under_the_new_key() {
     let mut rng = ChaCha20Rng::seed_from_u64(50);
     let mut server = Server::new(51);
@@ -765,6 +769,127 @@ fn a_stale_epoch_answer_reissues_the_ops_under_the_new_key() {
     assert_eq!(
         vault.upload_request(&mut rng, &unlocked).unwrap_err(),
         ClientError::HealingRequired
+    );
+
+    // It is re-published verbatim in a healing request instead (the restored server answers
+    // under the new generation), acknowledged, and never re-issued.
+    server.generation = [9; 16];
+    vault
+        .apply_fetch(
+            &authors,
+            &server.fetch(&vault.fetch_request().unwrap()),
+            T0 + 20_003,
+        )
+        .unwrap();
+    assert!(vault.needs_healing());
+    let heal = vault.healing_request().unwrap().unwrap();
+    assert_eq!(heal.records.as_slice(), &sent.records.as_slice()[..1]);
+    let answer = server.heal(&heal).unwrap();
+    assert_eq!(
+        vault
+            .apply_healing_response(&answer)
+            .unwrap()
+            .own_acknowledged,
+        1
+    );
+    assert!(!vault.needs_healing());
+    if let Some(up) = vault.upload_request(&mut rng, &unlocked).unwrap() {
+        assert!(
+            up.records
+                .as_slice()
+                .iter()
+                .all(|r| matches!(r, Record::Snapshot(_)))
+        );
+    }
+}
+
+/// ADR 0021 §9 "Stale epoch" and "Already stored": the healing request that re-published a
+/// maybe-served own op was stored, but its answer was lost. The next Fetch shows the op at the
+/// server's own head, so no healing request is built for it (its range starts above that
+/// head) and the driver does not stay blocked: the normal upload re-sends it verbatim, the
+/// server answers "already stored", and that acknowledges it. It is never re-issued.
+#[test]
+fn a_republished_op_whose_heal_answer_was_lost_is_acknowledged_as_already_stored() {
+    let mut rng = ChaCha20Rng::seed_from_u64(54);
+    let mut server = Server::new(55);
+    let (a, _) = signup_with_code(&mut server, &mut rng);
+    let vault_id = a.vault_key.vault_id();
+    let authors = server.authors();
+    let (mut vault, unlocked, items) = synced_writer(&mut server, &mut rng, a, &authors, 1);
+    settle(&mut server, &mut rng, &mut vault, &unlocked);
+    let key = password_key();
+    let value = Value::text("third").unwrap();
+    vault
+        .edit_item(
+            &mut rng,
+            &unlocked,
+            items[0],
+            &[FieldEdit {
+                key: &key,
+                value: &value,
+            }],
+            T0 + 20_000,
+        )
+        .unwrap();
+    let sent = vault.upload_request(&mut rng, &unlocked).unwrap().unwrap();
+    // A stale answer under another restore generation: the op may have been stored and served.
+    vault
+        .apply_upload_response(&refuse_first(&sent, ErrorCode::StaleEpoch, [9; 16]))
+        .unwrap();
+    vault
+        .adopt_vault_key(VaultKey::generate(&mut rng, vault_id, 1))
+        .unwrap();
+    assert_eq!(
+        vault.upload_request(&mut rng, &unlocked).unwrap_err(),
+        ClientError::HealingRequired
+    );
+    server.generation = [9; 16];
+    vault
+        .apply_fetch(
+            &authors,
+            &server.fetch(&vault.fetch_request().unwrap()),
+            T0 + 20_001,
+        )
+        .unwrap();
+    let heal = vault.healing_request().unwrap().unwrap();
+    assert_eq!(heal.records.as_slice(), &sent.records.as_slice()[..1]);
+    // The server stores it; the answer never arrives.
+    server.heal(&heal).unwrap();
+    vault.healing_refused();
+    assert!(
+        vault.needs_healing(),
+        "the last Fetch is older than the heal"
+    );
+
+    // The next Fetch shows the op stored: nothing to heal, and the upload is not blocked.
+    vault
+        .apply_fetch(
+            &authors,
+            &server.fetch(&vault.fetch_request().unwrap()),
+            T0 + 20_002,
+        )
+        .unwrap();
+    assert!(!vault.needs_healing());
+    assert_eq!(vault.healing_request().unwrap(), None);
+    let again = vault.upload_request(&mut rng, &unlocked).unwrap().unwrap();
+    assert_eq!(
+        again.records.as_slice()[0],
+        sent.records.as_slice()[0],
+        "re-sent verbatim, never re-issued"
+    );
+    let answer = server.upload(&again);
+    assert_eq!(answer.results.as_slice()[0], UploadResult::AlreadyStored);
+    let outcome = vault.apply_upload_response(&answer).unwrap();
+    assert!(outcome.rejected.is_empty());
+    assert!(outcome.acknowledged >= 1);
+    assert_eq!(vault.unacknowledged().0, 0);
+    settle(&mut server, &mut rng, &mut vault, &unlocked);
+    assert_eq!(
+        vault
+            .field_value(items[0], LOGIN_PASSWORD)
+            .unwrap()
+            .expose_secret(),
+        value.expose_secret()
     );
 }
 

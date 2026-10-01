@@ -26,9 +26,12 @@ USAGE:
     rv item list [--trash]
     rv item show <item> [--reveal]
     rv item create --type <type> [--field <key>=<value>]... [--secret <key>]...
-                   [--uri <uri>]... [--tag <name>]...
+                   [--uri <uri>]... [--tag <name>]... [<custom field>]...
     rv item edit <item> [--field <key>=<value>]... [--secret <key>]... [--clear <key>]...
-                   [--tag <name>]... [--untag <name>]...
+                   [--tag <name>]... [--untag <name>]... [--uri <uri>]...
+                   [--set-uri <id>=<uri>]... [--remove-uri <id>]... [<custom field>]...
+                   [--set-custom <id>=<value>]... [--set-custom-secret <id>]...
+                   [--remove-custom <id>]...
     rv item trash <item> | restore <item> | purge <item>
     rv generate [--length <n>] [--no-symbols] [--no-ambiguous] | [--words <n>]
     rv totp <item>
@@ -51,6 +54,9 @@ OPTIONS:
     -V, --version    Print version
 
 <item> and <device> are hex ids or unique prefixes of one, as the list commands print them.
+<custom field> is --custom <label>=<text>, --custom-secret <label> (a hidden field; its value
+is asked for) or --custom-bool <label>=true|false. <id> is a URI's or custom field's element
+id as `item show` prints it in the field's key (uri/<id>/value), or a unique prefix of one.
 <type> is login, note, card, identity, ssh-key, api-credential, software-license, wifi,
 bank-account or passkey. Field keys are the item schema's (item.name, item.notes,
 login.username, login.password, login.totp, card.number, …).
@@ -108,8 +114,24 @@ pub struct FieldArgs {
     pub secrets: Vec<String>,
     /// `--clear key` (edit only).
     pub clear: Vec<String>,
-    /// `--uri uri` (create only).
+    /// `--uri uri`: a new URI.
     pub uris: Vec<String>,
+    /// `--set-uri id=uri` (edit only).
+    pub uri_set: Vec<(String, String)>,
+    /// `--remove-uri id` (edit only).
+    pub uri_remove: Vec<String>,
+    /// `--custom label=text`: a new text custom field.
+    pub custom: Vec<(String, String)>,
+    /// `--custom-secret label`: a new hidden custom field, its value asked for.
+    pub custom_secret: Vec<String>,
+    /// `--custom-bool label=true|false`: a new boolean custom field.
+    pub custom_bool: Vec<(String, String)>,
+    /// `--set-custom id=value` (edit only): a custom field that is not hidden.
+    pub custom_set: Vec<(String, String)>,
+    /// `--set-custom-secret id` (edit only): a custom field's value, asked for.
+    pub custom_set_secret: Vec<String>,
+    /// `--remove-custom id` (edit only).
+    pub custom_remove: Vec<String>,
     /// `--tag name`.
     pub tags: Vec<String>,
     /// `--untag name` (edit only).
@@ -578,13 +600,44 @@ fn field_args(
             }
             "--secret" => fields.secrets.push(args.value("--secret")?),
             "--tag" => fields.tags.push(args.value("--tag")?),
-            "--uri" if create => fields.uris.push(args.value("--uri")?),
+            "--uri" => fields.uris.push(args.value("--uri")?),
+            "--custom" => fields
+                .custom
+                .push(pair(args, "--custom", "<label>=<text>")?),
+            "--custom-secret" => fields.custom_secret.push(args.value("--custom-secret")?),
+            "--custom-bool" => {
+                fields
+                    .custom_bool
+                    .push(pair(args, "--custom-bool", "<label>=true|false")?);
+            }
+            "--set-uri" if !create => fields.uri_set.push(pair(args, "--set-uri", "<id>=<uri>")?),
+            "--remove-uri" if !create => fields.uri_remove.push(args.value("--remove-uri")?),
+            "--set-custom" if !create => {
+                fields
+                    .custom_set
+                    .push(pair(args, "--set-custom", "<id>=<value>")?);
+            }
+            "--set-custom-secret" if !create => fields
+                .custom_set_secret
+                .push(args.value("--set-custom-secret")?),
+            "--remove-custom" if !create => {
+                fields.custom_remove.push(args.value("--remove-custom")?);
+            }
             "--clear" if !create => fields.clear.push(args.value("--clear")?),
             "--untag" if !create => fields.untag.push(args.value("--untag")?),
             other => return Err(unknown(other)),
         }
     }
     Ok(fields)
+}
+
+/// The value of `option` split at its first `=`: `<a>=<b>` as `form` names it.
+fn pair(args: &mut Args, option: &str, form: &str) -> Result<(String, String), CliError> {
+    let text = args.value(option)?;
+    let (a, b) = text
+        .split_once('=')
+        .ok_or_else(|| usage(format!("{option} takes {form}")))?;
+    Ok((a.to_owned(), b.to_owned()))
 }
 
 /// `generate`.
@@ -783,7 +836,7 @@ mod tests {
             "signup --name a",
             "item",
             "item show",
-            "item edit x --uri u",
+            "item create --type login --remove-uri ab",
             "item create --field novalue --type login",
             "generate --length many",
             "export",
