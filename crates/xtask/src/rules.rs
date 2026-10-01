@@ -606,9 +606,10 @@ pub(crate) const LINT_EXCEPTIONS: &[&str] = &[];
 /// ADR 0019 §4.1: directories of generated Rust, relative to the workspace root, that the
 /// first-party `unsafe` token scan skips ([`crate::unsafe_scan`]). §4.1 commits the
 /// macro-expanded binding crate as a reviewed baseline under the binding crate's directory; that
-/// code is not first party, and §4.1's baseline diff reviews its `unsafe`. Empty: no baseline is
-/// committed yet. An entry is reviewed like the rest of this table.
-pub(crate) const GENERATED_RUST: &[&str] = &[];
+/// code is not first party, and §4.1's baseline diff reviews its `unsafe`. The baseline is
+/// committed for `rizzy-wasm` (owner decision 7), checked by [`crate::bindings`]. An entry is
+/// reviewed like the rest of this table.
+pub(crate) const GENERATED_RUST: &[&str] = &[crate::bindings::BASELINE_DIR];
 
 /// ADR 0016 §3 notes: only `xtask` enables `rizzy-proto`'s `openapi` feature.
 pub(crate) const OPENAPI_FEATURE: (&str, &str, &str) = ("rizzy-proto", "openapi", "xtask");
@@ -904,11 +905,11 @@ mod tests {
         assert_eq!(side(Side::Tool), ["xtask"].into(), "R6");
     }
 
-    /// ADR 0019 §4.1: no generated baseline is committed yet, so the `unsafe` token scan skips
-    /// no directory. The PR that commits one changes this test.
+    /// ADR 0019 §4.1, owner decision 7: the `unsafe` token scan skips only the committed
+    /// expansion baseline of `rizzy-wasm`. A new entry changes this test.
     #[test]
-    fn no_generated_rust_is_skipped_yet() {
-        assert!(GENERATED_RUST.is_empty(), "{GENERATED_RUST:?}");
+    fn only_the_wasm_baseline_is_skipped() {
+        assert_eq!(GENERATED_RUST, ["crates/rizzy-wasm/generated"]);
     }
 
     /// ADR 0009 "Required feature sets" and its 2026-09-26 amendment, restated: these are the

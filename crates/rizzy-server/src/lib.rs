@@ -8,8 +8,9 @@
 //! - **`api`**: every `/api/v1` message of `rizzy-proto` and `GET /api/meta`, over
 //!   `rizzy-domain-auth` and `rizzy-domain-vault` ([`http::api`]), with body-size limits, the
 //!   bearer token and the per-request device signature (CRYPTO.md §5.10);
-//! - **`web`**: the web vault's static page with its CSP ([`http::web`], [`http::security`];
-//!   INV-49). The web vault itself is M1 step 5; this build serves ADR 0010 §4's fixed page;
+//! - **`web`**: the web vault with its CSP ([`http::web`], [`http::security`]; INV-49): with
+//!   the `embed-web` feature, the `apps/web` build embedded in the binary; without it (the
+//!   default), ADR 0010 §4's fixed page;
 //! - **`worker`**: expired auth state, re-sealing 2FA secrets after a data-key rotation, stale
 //!   reconciliation epochs, compaction, `SQLite` space and the pre-migration copy ([`worker`]).
 //!
@@ -81,7 +82,8 @@
 //! `Retry-After` ([`http::api::RETRY_AFTER_FALLBACK_SECS`]); the `Rizzy-Client` and
 //! `X-Forwarded-For` checks run on the 27 `/api/v1` endpoints, before the session check, and
 //! not on `GET /api/meta`; a repeated `Authorization`, signing or `Content-Length` field line
-//! is refused; another method on the web role's two paths is a plain `405`; a
+//! is refused; another method on a path the web role serves is a plain `405`; with
+//! `embed-web`, the web vault's fixed asset paths besides item 15's two (reported); a
 //! `request_counter` above `i64::MAX` is refused (`rizzy-domain-auth`); the setting
 //! `RIZZY_RECOVERY_WAIT_HOURS` (ADR 0008 decision 5), which item 12's list does not name
 //! ([`config`]).
@@ -95,7 +97,7 @@
 //!   `SQLite` here and by `rizzy-storage`'s `#[ignore]`d `PostgreSQL` tests.
 //! - Recording a change of the recovery waiting period in the users' security event log
 //!   (threat model §7.19, INV-69): that log is M3's.
-//! - The `embed-web` feature and the web vault (M1 step 5), the admin listener and API (M3),
+//! - The admin listener and API (M3),
 //!   `notify`, `icons` (M3) and `smtp` (M6).
 //! - A setting for the minimum client versions: the list is built in and empty
 //!   ([`http::api::MIN_CLIENT_VERSIONS`]), so no client is refused yet.

@@ -1,0 +1,40 @@
+[package]
+name = "rizzy-wasm"
+description = "wasm-bindgen bindings of rizzy-vault's sans-I/O client core for the web vault (`packages/core`). JavaScript does fetch; Rust holds every key."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# `cdylib` is the wasm module `wasm-bindgen-cli` reads (`cargo xtask build-wasm`); `rlib` lets the
+# host build and test the same code (ADR 0016 §3 notes: "`rizzy-wasm` must compile, though not
+# run, on host targets").
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Internal dependencies: exactly the ADR 0016 §3 row (`rizzy-client`), checked by
+# `cargo xtask check-deps`. `rizzy-core` and `rizzy-proto` are reached through `rizzy-client`'s
+# re-exports.
+[dependencies]
+# The sans-I/O client core (ADR 0013 §1–§2): every flow, check and format decision.
+rizzy-client.workspace = true
+# The generated JavaScript glue (ADR 0013 §3 rule 7, §4). Exact pin in the workspace manifest.
+wasm-bindgen.workspace = true
+# OS randomness, as a leaf crate (ADR 0009 "RNG rules", ADR 0016 R2 (c)): on wasm32 the
+# `wasm_js` backend (`crypto.getRandomValues`), which only this crate enables; on the host,
+# where CI builds and tests this crate, the OS source. `UnwrapErr(SysRng)` is the RNG every
+# client-core call receives.
+getrandom = { workspace = true, features = ["wasm_js"] }
+rand_core.workspace = true
+# Request and response bodies: the `rizzy-proto` types through serde, as `rv` does. Both are
+# already in the graph; no new crate.
+serde.workspace = true
+serde_json.workspace = true
+# Wipes request bodies, bearer-token text and typed secrets after use (CLAUDE.md: secret types
+# zeroize). The version rizzy-core pins; no new crate.
+zeroize.workspace = true
+
+[lints]
+workspace = true

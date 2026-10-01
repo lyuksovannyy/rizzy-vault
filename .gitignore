@@ -37,3 +37,5 @@ deploy/backup-secrets/
 
 # macOS Finder metadata
 .DS_Store
+# The JavaScript workspace (ADR 0014 §3): installed dependencies are never committed.
+node_modules/

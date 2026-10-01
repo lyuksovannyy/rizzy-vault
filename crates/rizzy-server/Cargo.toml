@@ -74,5 +74,13 @@ tower.workspace = true
 # The seeded ChaCha20Rng of the test clients (ADR 0009 test RNG). Test-only.
 chacha20.workspace = true
 
+# ADR 0010 §4: the web vault is embedded in the binary behind `embed-web`, off by default. With
+# it, `http::web` embeds the files of `apps/web/dist/` (`include_bytes!`), so the web vault must
+# be built first (`pnpm install --frozen-lockfile`, `pnpm run build:wasm`, `pnpm run build`).
+# Without it, `web` serves a fixed page, and no Rust job needs a JavaScript toolchain. No
+# dependency is added by the feature.
+[features]
+embed-web = []
+
 [lints]
 workspace = true

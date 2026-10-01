@@ -74,6 +74,9 @@
 #   import_firefox_csv rizzy-import's Firefox CSV importer
 #   import_rizzy_json  rizzy-import's reader of rizzy-vault's own plaintext JSON export
 #                      (ADR 0027 §6)
+#   wasm_host_input    rizzy-wasm's readers of what JavaScript hands in: response status and
+#                      body (`checkMeta`, `expectNoContent`), hex ids, item-draft entries, and
+#                      the start of a login and a signup (ADR 0013 §3 rule 8)
 #
 # The `import_*` targets share `fuzz_targets/import_common/mod.rs` (the checks on an import
 # result and a counting RNG), included with `#[path]`; it is not a target.
@@ -125,6 +128,10 @@ rizzy-client = { path = "../crates/rizzy-client" }
 # The importers (the `import_*` targets). A path crate whose only dependencies are rizzy-core
 # and zeroize, so no new crate in this graph.
 rizzy-import = { path = "../crates/rizzy-import" }
+# The web vault's bindings (`wasm_host_input`). A path crate over rizzy-client; its external
+# crates (wasm-bindgen and its macro crates, getrandom with `wasm_js`) are the ones the main
+# workspace already locks and `cargo deny` already checks. Built for the host here.
+rizzy-wasm = { path = "../crates/rizzy-wasm" }
 
 # One [[bin]] per target. `test`, `doc` and `bench` are off because a libFuzzer entry point
 # (`#![no_main]` with `fuzz_target!`) is not a test, has no API to document and is not a benchmark.
@@ -376,6 +383,13 @@ bench = false
 [[bin]]
 name = "client_cache_load"
 path = "fuzz_targets/client_cache_load.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wasm_host_input"
+path = "fuzz_targets/wasm_host_input.rs"
 test = false
 doc = false
 bench = false

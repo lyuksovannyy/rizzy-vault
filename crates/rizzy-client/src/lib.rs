@@ -39,7 +39,7 @@
 //! | [`account`] | CRYPTO.md §10.2, §10.3, §11.2 step 6, §11.3 steps 2–3 | Verifying an account answer; the pin; rollback, fork, identity change |
 //! | [`device`] | CRYPTO.md §4.2, §5.6 | The in-memory device state; the offline unlock |
 //! | [`signup`] | CRYPTO.md §7, §11 "Secrets before commit", §11.1 | Signup and the Emergency Kit |
-//! | [`login`] | CRYPTO.md §5.3, §11.2, §11.4 | Login on a new device, enrolment, the web vault's ephemeral device |
+//! | [`login`] | CRYPTO.md §5.3, §11.2, §11.4 | Login on a new device, enrolment, the web vault's ephemeral device and its account refresh |
 //! | [`unlock`] | CRYPTO.md §11.3 | The online part of an unlock, device grants after a rotation |
 //! | [`rotation`] | CRYPTO.md §11.6, §11.8 steps 1–3; ADR 0025 §2 | Standard and full key rotation with an optional revocation: new keys, the auth half, the vault half, the retry rule |
 //! | [`credentials`] | CRYPTO.md §11.5, §11.3 step 5 | Master password and Secret Key change, with or without a rotation; following a change made elsewhere |
@@ -112,6 +112,11 @@ pub mod unlock;
 mod wire;
 
 pub use error::ClientError;
+/// The core crate (ADR 0016 §3 row `rizzy-core`), re-exported so that a binding that may depend
+/// on this crate only (`rizzy-wasm`, whose §3 row lists `client` and nothing else) can name the
+/// ids, the item schema (field keys, values, concealment), the password generator and TOTP that
+/// its coarse calls use. Bindings export none of its primitive API (ADR 0013 §3 rule 6).
+pub use rizzy_core;
 /// The importers (ADR 0016 §3 row `rizzy-import`), re-exported so that a host that may depend
 /// on this crate only (`rizzy-cli`, a binding) can read an import file and pass its items to
 /// [`sync::VaultSync::import_items`].

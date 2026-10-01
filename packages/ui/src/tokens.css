@@ -1,0 +1,60 @@
+/* The M1 token set (ADR 0014 §5): hand-written CSS custom properties, light and dark. M3
+   replaces this file with CSS generated from the platform-neutral token source, keeping the
+   property names where possible. Components use only these properties, in the declared
+   text/background pairs below (the contrast check over them is M3). */
+
+:root {
+  color-scheme: light dark;
+
+  /* Colour: declared pairs are (--color-text, --color-bg), (--color-text, --color-surface),
+     (--color-text-muted, --color-bg), (--color-on-accent, --color-accent),
+     (--color-on-danger, --color-danger), (--color-warning-text, --color-warning-bg). */
+  --color-bg: #f7f7f8;
+  --color-surface: #ffffff;
+  --color-border: #c9cad1;
+  --color-text: #17181c;
+  --color-text-muted: #4d505b;
+  --color-accent: #2f4fd6;
+  --color-on-accent: #ffffff;
+  --color-danger: #b3261e;
+  --color-on-danger: #ffffff;
+  --color-warning-bg: #fff4d6;
+  --color-warning-text: #4a3500;
+  --color-focus: #2f4fd6;
+
+  /* Spacing. */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+
+  /* Type: system fonts only (no third-party origin, no font files). */
+  --font-body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-size-small: 0.875rem;
+  --font-size-body: 1rem;
+  --font-size-title: 1.375rem;
+
+  /* Radius. */
+  --radius-1: 4px;
+  --radius-2: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #121317;
+    --color-surface: #1c1d23;
+    --color-border: #3b3d47;
+    --color-text: #ececf1;
+    --color-text-muted: #b4b6c2;
+    --color-accent: #8fa6ff;
+    --color-on-accent: #0b1030;
+    --color-danger: #ffb4ab;
+    --color-on-danger: #410002;
+    --color-warning-bg: #3a2c00;
+    --color-warning-text: #ffe08a;
+    --color-focus: #8fa6ff;
+  }
+}

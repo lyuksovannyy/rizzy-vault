@@ -1,0 +1,22 @@
+{
+  "name": "rizzy-vault-js",
+  "private": true,
+  "description": "The JavaScript workspace of rizzy-vault (ADR 0014 §3–§4): packages/core, packages/ui and apps/web.",
+  "license": "AGPL-3.0-only",
+  "packageManager": "pnpm@10.30.2",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build:wasm": "cargo xtask build-wasm",
+    "build": "pnpm --recursive run build",
+    "lint": "eslint --max-warnings 0 .",
+    "test": "pnpm --recursive run test",
+    "e2e": "pnpm --filter @rizzy-vault/web run e2e"
+  },
+  "devDependencies": {
+    "eslint": "10.11.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.0"
+  }
+}

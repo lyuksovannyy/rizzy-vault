@@ -518,7 +518,8 @@ fn this_build_refuses_no_client_version() {
 }
 
 /// Item 15: `/` and `/index.html` for `GET` and `HEAD`; every other path outside `/api/` is a
-/// plain-text `404`, whatever the method.
+/// plain-text `404`, whatever the method. With `embed-web`, the web vault's fixed asset paths
+/// are served too (`http::web` module docs), so `/assets/app.js` is not probed there.
 #[test]
 fn the_web_role_serves_two_paths() {
     block_on(async {
@@ -541,7 +542,12 @@ fn the_web_role_serves_two_paths() {
             ("POST", "/nothing"),
             ("PUT", "/index.html/"),
             ("DELETE", "/x"),
+            ("GET", "/assets/../index.html"),
+            ("GET", "/assets/"),
         ] {
+            if path == "/assets/app.js" && cfg!(feature = "embed-web") {
+                continue;
+            }
             let request = Request::builder()
                 .method(method)
                 .uri(path)

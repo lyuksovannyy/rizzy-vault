@@ -1,0 +1,11 @@
+# ADR 0019 §4.1 (b): the baseline of crates/rizzy-wasm/generated/expanded.rs.
+# Written by `cargo xtask expand-bindings --write`; checked by `cargo xtask check-deps`.
+# Counts are keyword tokens and attribute names outside comments and literals.
+wasm-bindgen = 0.2.129
+rustc = rustc 1.94.1 (e408947bf 2026-03-25)
+sources = fnv1a64:fdfcf6548cb09bcf
+target = wasm32-unknown-unknown
+unsafe = 435
+extern = 272
+no_mangle = 113
+export_name = 128

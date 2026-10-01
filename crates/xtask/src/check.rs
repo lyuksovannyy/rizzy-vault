@@ -78,6 +78,9 @@ pub(crate) struct Inputs {
     /// Every first-party `.rs` file, as (path relative to the workspace root, text), for the
     /// `unsafe` token scan ([`unsafe_scan`]).
     pub(crate) rust_sources: Vec<(String, String)>,
+    /// The expansion baseline of `rizzy-wasm` and the locked wasm-bindgen version, for ADR 0019
+    /// §4.1 (b) ([`crate::bindings::check`]).
+    pub(crate) bindings: crate::bindings::BaselineInput,
 }
 
 /// Normal and build dependencies: what ships in, or runs to build, a crate.
@@ -113,6 +116,13 @@ pub(crate) fn run(inputs: &Inputs) -> Vec<Violation> {
     clippy_configs(inputs, &mut out);
     wasm_alias(g, &inputs.cargo_config, &mut out);
     unsafe_tokens(&inputs.rust_sources, &mut out);
+    for message in crate::bindings::check(&inputs.bindings) {
+        out.push(violation(
+            "ADR 0019 §4.1",
+            crate::bindings::WASM_CRATE,
+            message,
+        ));
+    }
     out.sort();
     out.dedup();
     out

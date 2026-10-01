@@ -1,0 +1,16 @@
+# The pnpm workspace (ADR 0014 §3–§4). One package manager; no Nx, Turborepo or Lerna.
+packages:
+  - "packages/*"
+  - "apps/*"
+
+# ADR 0014 §3 "Install scripts": no dependency lifecycle script runs on install. The allow-list
+# starts empty; an entry is owner-approved and justified like a deny.toml exception.
+onlyBuiltDependencies: []
+
+# Licence pin (ADR 0014 §3 "a licence allow-list"; deny.toml `[licenses] allow`). ESLint 10 and
+# typescript-eslint 8.71 ask for minimatch ^10.2, and every minimatch from 10.1.0 on is
+# BlueOak-1.0.0, which deny.toml does not list. 9.0.9 is the newest ISC release, has the same
+# API (`minimatch`, `Minimatch`, `escape`, `unescape`), and carries the ReDoS fixes of 9.0.6+.
+# Remove this pin once the owner adds BlueOak-1.0.0 to deny.toml, or a later minimatch is ISC.
+overrides:
+  minimatch: 9.0.9

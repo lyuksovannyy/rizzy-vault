@@ -5,6 +5,9 @@
 //! cargo xtask check-clippy
 //! cargo xtask check-signoff <base>..<head>
 //! cargo xtask check-signoff --squash <before>..<after>
+//! cargo xtask expand-bindings [--write]
+//! cargo xtask build-wasm
+//! cargo xtask check-js
 //! ```
 //!
 //! `check-deps` enforces the crate-boundary rules of ADR 0016 (R1–R8) and the dependency rules
@@ -43,6 +46,9 @@
 //! - **ADR 0019 §4.1** no `unsafe` keyword token in any first-party `.rs` file, comments and
 //!   literals excluded, including `unsafe` that `forbid(unsafe_code)` can miss in a macro's
 //!   input ([`mod@unsafe_scan`]).
+//! - **ADR 0019 §4.1 (b)** the committed expansion baseline of `rizzy-wasm` exists, records the
+//!   `wasm-bindgen` version of `Cargo.lock`, and its `unsafe`/`extern`/`no_mangle`/`export_name`
+//!   counts are those of the committed expansion ([`mod@bindings`]).
 //!
 //! R3, R5 and R6 cover dev-dependencies too. The rules table is in `rules.rs`.
 //!
@@ -57,6 +63,13 @@
 //! range must keep at least one well-formed `Signed-off-by:` line anywhere in its message; CI
 //! runs that on each push to `main`, where the commit is GitHub's squash commit. It reads
 //! `git rev-list` and `git log`, so it needs a checkout that holds both revisions.
+//!
+//! `expand-bindings` and `build-wasm` are the binding generator's two other controls
+//! ([`mod@bindings`]): the regeneration of the expansion baseline (a job on a toolchain that
+//! accepts `-Z` options) and the build of the wasm module into `packages/core` with exactly the
+//! locked `wasm-bindgen-cli` (ADR 0013 §4).
+//!
+//! `check-js` checks the JavaScript dependency policy of ADR 0014 §3 ([`mod@js`]).
 //!
 //! # How `check-deps` works
 //!
@@ -88,7 +101,9 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
+mod bindings;
 mod check;
+mod js;
 mod manifest;
 mod metadata;
 mod rules;
@@ -123,6 +138,15 @@ COMMANDS:
     check-signoff --squash <before>..<after>
                     Check that every commit in the range (squash commits on main) keeps
                     a well-formed Signed-off-by line anywhere in its message
+    expand-bindings [--write]
+                    Regenerate the macro expansion of rizzy-wasm and compare it with the
+                    committed baseline, or replace it (ADR 0019 §4.1 (b)); needs a rustc
+                    that accepts -Z options
+    build-wasm      Build rizzy-wasm for wasm32 and run wasm-bindgen-cli (exactly the locked
+                    version) into packages/core/generated (ADR 0013 §4)
+    check-js        Check the JavaScript dependency policy: exact versions, pinned pnpm,
+                    empty install-script allow-list, deny.toml licences, pnpm audit
+                    (ADR 0014 §3)
 ";
 
 /// The second target the getrandom rule is checked on, besides the host (ADR 0016 R1).
@@ -147,6 +171,12 @@ fn main() -> ExitCode {
         [Some("check-signoff"), Some("--squash"), Some(range)] => {
             check_signoff(range, SignoffMode::Squash)
         }
+        [Some("expand-bindings")] => report(bindings::expand_bindings(&workspace_root(), false)),
+        [Some("expand-bindings"), Some("--write")] => {
+            report(bindings::expand_bindings(&workspace_root(), true))
+        }
+        [Some("build-wasm")] => report(bindings::build_wasm(&workspace_root())),
+        [Some("check-js")] => report(js::check_js(&workspace_root())),
         [Some("-h" | "--help")] => {
             let _ = write!(io::stdout().lock(), "{USAGE}");
             ExitCode::SUCCESS
@@ -154,6 +184,21 @@ fn main() -> ExitCode {
         _ => {
             let _ = write!(io::stderr().lock(), "{USAGE}");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// Prints the report of a command that returns one ([`mod@bindings`]): `Ok` to stdout with exit
+/// code 0, `Err` to stderr with exit code 1.
+fn report(result: Result<String, String>) -> ExitCode {
+    match result {
+        Ok(text) => {
+            let _ = writeln!(io::stdout().lock(), "{text}");
+            ExitCode::SUCCESS
+        }
+        Err(text) => {
+            let _ = writeln!(io::stderr().lock(), "{text}");
+            ExitCode::FAILURE
         }
     }
 }
@@ -290,6 +335,7 @@ fn load() -> Result<Inputs, String> {
     let mut manifests = Vec::new();
     let mut clippy_configs = Vec::new();
     let mut hidden_clippy_configs = Vec::new();
+    let bindings = baseline_input(&root, &all_targets)?;
     let mut clippy_dirs = vec![root.clone()];
     for i in all_targets.members() {
         let Some(p) = all_targets.package(i) else {
@@ -322,6 +368,38 @@ fn load() -> Result<Inputs, String> {
         per_target,
         manifests,
         rust_sources: rust_sources(&root)?,
+        bindings,
+    })
+}
+
+/// The inputs of the baseline check ([`bindings::check`]): whether `rizzy-wasm` is a member,
+/// the two baseline files if present, the locked wasm-bindgen version, the pinned toolchain
+/// channel, and the fingerprint of the current `rizzy-wasm` sources.
+///
+/// # Errors
+///
+/// Returns a message when `Cargo.lock` or a present baseline file cannot be read.
+fn baseline_input(root: &Path, graph: &Graph) -> Result<bindings::BaselineInput, String> {
+    let member = graph
+        .members()
+        .filter_map(|i| graph.package(i))
+        .any(|p| p.name == bindings::WASM_CRATE);
+    let dir = root.join(bindings::BASELINE_DIR);
+    Ok(bindings::BaselineInput {
+        member,
+        expanded: read_optional(&dir.join(bindings::EXPANDED))?,
+        counts: read_optional(&dir.join(bindings::COUNTS))?,
+        locked_wasm_bindgen: bindings::lock_version(
+            &read(&root.join("Cargo.lock"))?,
+            "wasm-bindgen",
+        ),
+        toolchain_channel: bindings::toolchain_channel(&read(&root.join("rust-toolchain.toml"))?),
+        // Only a member has sources to fingerprint; the check skips a non-member.
+        sources: if member {
+            bindings::fingerprint(&bindings::source_files(root)?)
+        } else {
+            String::new()
+        },
     })
 }
 

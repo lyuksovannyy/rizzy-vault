@@ -1,0 +1,29 @@
+{
+  "name": "@rizzy-vault/core",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The only way UI code reaches the Rust core (ADR 0013 §4, ADR 0014 §4): a typed wrapper over rizzy-wasm. The generated wasm-bindgen files are not exported.",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "generated"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.0",
+    "typescript": "6.0.3",
+    "vite": "8.3.1",
+    "vitest": "4.1.11"
+  }
+}

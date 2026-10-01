@@ -1,0 +1,5 @@
+# Built by `vite build` (embedded by rizzy-server with `embed-web`, ADR 0010 §4) and the
+# Playwright run outputs. Never committed.
+/dist/
+/test-results/
+/playwright-report/

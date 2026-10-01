@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "Repository checks for rizzy-vault (ADR 0016 §5, ADR 0017 §4): `cargo xtask check-deps`, `check-clippy`, `check-signoff`. Never shipped."
+description = "Repository checks for rizzy-vault (ADR 0016 §5, ADR 0017 §4, ADR 0019 §4.1, ADR 0013 §4): `cargo xtask check-deps`, `check-clippy`, `check-signoff`, `expand-bindings`, `build-wasm`, `check-js`. Never shipped."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

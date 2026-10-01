@@ -1,0 +1,23 @@
+{
+  "name": "@rizzy-vault/ui",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The web design system (ADR 0014 §5): the hand-written M1 token CSS and the React components every web surface shares, among them the one secret-field component (INV-68).",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./tokens.css": "./src/tokens.css"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "peerDependencies": {
+    "react": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "react": "19.3.0",
+    "typescript": "6.0.3"
+  }
+}

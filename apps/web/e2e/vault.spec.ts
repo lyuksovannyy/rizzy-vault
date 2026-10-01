@@ -1,0 +1,238 @@
+// The web vault end to end, in Chromium, against the real `rizzy-vault` with `embed-web`:
+// signup with the Emergency Kit → the vault → create an item → reload (nothing persists) →
+// log in again and see the item → lock → unlock → trash and restore.
+//
+// Along the way it checks:
+// - INV-49: the page's CSP and headers as served, and that nothing on the page violates the
+//   CSP (inline script or style, eval, Trusted Types for the Worker URL);
+// - INV-68: every secret field has `spellcheck="false"` and `autocomplete="off"` before and
+//   after a reveal;
+// - the Emergency Kit download.
+import { readFile } from "node:fs/promises";
+
+import { type Locator, type Page, expect, test } from "@playwright/test";
+
+import { type RunningServer, startServer } from "./server.ts";
+
+const PASSWORD = "correct horse battery staple";
+const ITEM_PASSWORD = "hunter2-but-much-longer";
+
+let server: RunningServer;
+
+test.beforeAll(async () => {
+  server = await startServer();
+});
+
+test.afterAll(() => {
+  server.stop();
+});
+
+/** Collects CSP violations and console errors of a page. */
+function watch(page: Page): { problems: string[] } {
+  const problems: string[] = [];
+  page.on("console", (m) => {
+    if (m.type() === "error") {
+      problems.push(`console: ${m.text()}`);
+    }
+  });
+  page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
+  return { problems };
+}
+
+/** Records `securitypolicyviolation` events in the page, read back by {@link violations}. */
+async function recordViolations(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const w = window as unknown as { __cspViolations: string[] };
+    w.__cspViolations = [];
+    document.addEventListener("securitypolicyviolation", (e) => {
+      w.__cspViolations.push(`${e.violatedDirective} ${e.blockedURI}`);
+    });
+  });
+}
+
+/** The CSP violations recorded so far. */
+async function violations(page: Page): Promise<string[]> {
+  return page.evaluate(() => (window as unknown as { __cspViolations: string[] }).__cspViolations);
+}
+
+/** INV-68 on one secret input, before and after its "Show" toggle. */
+async function checkSecretField(field: Locator): Promise<void> {
+  const input = field.locator("input[data-secret-field]");
+  await expect(input).toHaveAttribute("type", "password");
+  await expect(input).toHaveAttribute("spellcheck", "false");
+  await expect(input).toHaveAttribute("autocomplete", "off");
+  await field.getByRole("button", { name: "Show" }).click();
+  await expect(input).toHaveAttribute("type", "text");
+  await expect(input).toHaveAttribute("spellcheck", "false");
+  await expect(input).toHaveAttribute("autocomplete", "off");
+  await field.getByRole("button", { name: "Hide" }).click();
+  await expect(input).toHaveAttribute("type", "password");
+}
+
+/** The secret field whose label is `label`. */
+function secretField(page: Page, label: string): Locator {
+  return page.locator(".secret-field").filter({ has: page.getByLabel(label, { exact: true }) });
+}
+
+/** Logs in on the login (or unlock) screen. */
+async function logIn(page: Page, loginName: string | undefined, secretKey: string): Promise<void> {
+  if (loginName !== undefined) {
+    await page.getByLabel("Login name").fill(loginName);
+  }
+  await page.getByLabel("Secret Key", { exact: true }).fill(secretKey);
+  await page.getByLabel("Master password", { exact: true }).fill(PASSWORD);
+  await page.getByRole("button", { name: /^(Log in|Unlock)$/ }).click();
+  await expect(page.getByRole("button", { name: "Lock" })).toBeVisible();
+}
+
+test("signup, item, reload, login, lock, unlock", async ({ page }) => {
+  const { problems } = watch(page);
+  await recordViolations(page);
+
+  // The page as served: the INV-49 headers.
+  const response = await page.goto(server.origin);
+  expect(response?.status()).toBe(200);
+  const headers = response?.headers() ?? {};
+  const csp = headers["content-security-policy"] ?? "";
+  expect(csp).toContain("script-src 'self' 'wasm-unsafe-eval'");
+  expect(csp).toContain("frame-ancestors 'none'");
+  expect(csp).toContain("require-trusted-types-for 'script'");
+  expect(csp).not.toContain("unsafe-inline");
+  expect(headers["x-content-type-options"]).toBe("nosniff");
+  expect(headers["strict-transport-security"]).toBe("max-age=31536000");
+
+  // The login screen, with its secret fields (INV-68).
+  await expect(page.getByRole("heading", { name: "Log in to rizzy-vault" })).toBeVisible();
+  await expect(page.getByText("Do not let the browser save your master password")).toBeVisible();
+  await checkSecretField(secretField(page, "Secret Key"));
+  await checkSecretField(secretField(page, "Master password"));
+
+  // Signup.
+  await page.getByRole("button", { name: "Create an account" }).click();
+  await page.getByLabel("Login name").fill("Alice");
+  await checkSecretField(secretField(page, "Master password"));
+  await page.getByLabel("Master password", { exact: true }).fill(PASSWORD);
+  await page.getByLabel("Repeat the master password", { exact: true }).fill(PASSWORD);
+  await page.getByRole("button", { name: "Continue" }).click();
+
+  // The Emergency Kit, shown once, with a download.
+  const kit = page.getByTestId("emergency-kit");
+  await expect(kit).toBeVisible();
+  const secretKey = (await page.getByTestId("kit-secret-key").textContent()) ?? "";
+  expect(secretKey).toMatch(/^RV1-/);
+  await expect(page.getByTestId("kit-recovery-code")).toHaveText(/^RVR1-/);
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByRole("button", { name: "Download the kit" }).click(),
+  ]);
+  await expect(page.getByTestId("kit-warnings")).toContainText("take over your account");
+  expect(download.suggestedFilename()).toMatch(/^rizzy-vault-emergency-kit-\d{4}-\d{2}-\d{2}\.html$/);
+  const kitFile = await readFile(await download.path());
+  expect(kitFile.toString("utf8")).toContain(secretKey);
+
+  // A wrong confirmation is refused; the right one commits and opens the vault.
+  await page.getByLabel(/last group of your Secret Key/).fill("ZZZZ");
+  await page.getByRole("button", { name: "Create the account" }).click();
+  await expect(page.locator('[data-code="emergency_kit_not_confirmed"]')).toBeVisible();
+  const lastGroup = secretKey.split("-").at(-1) ?? "";
+  await page.getByLabel(/last group of your Secret Key/).fill(lastGroup);
+  await page.getByRole("button", { name: "Create the account" }).click();
+  await expect(page.getByRole("button", { name: "Lock" })).toBeVisible();
+  await expect(page.getByText("No items yet.")).toBeVisible();
+
+  // Create a login item.
+  await page.getByRole("button", { name: "New login" }).click();
+  await page.getByLabel("Title").fill("Example");
+  await page.getByLabel("Username", { exact: true }).fill("alice@example.com");
+  await checkSecretField(secretField(page, "Password"));
+  await page.getByLabel("Password", { exact: true }).fill(ITEM_PASSWORD);
+  await page.getByLabel("Add a website").fill("https://example.com/login");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("heading", { name: "Example" })).toBeVisible();
+  await expect(page.getByText("Synced", { exact: true })).toBeVisible();
+
+  // The URI is a safe link; the password is masked until revealed.
+  await expect(page.getByRole("link", { name: "https://example.com/login" })).toHaveAttribute(
+    "rel",
+    "noopener noreferrer",
+  );
+  const passwordRow = page.locator('[data-field="login.password"]');
+  await expect(passwordRow.getByText("••••••••")).toBeVisible();
+  await passwordRow.getByRole("button", { name: "Reveal" }).click();
+  const revealed = passwordRow.locator("input[data-secret-field]");
+  await expect(revealed).toHaveValue(ITEM_PASSWORD);
+  await expect(revealed).toHaveAttribute("type", "text");
+  await expect(revealed).toHaveAttribute("spellcheck", "false");
+  await expect(revealed).toHaveAttribute("readonly", "");
+
+  // Reload: the web vault keeps nothing, so it is a new login, and the item comes back from
+  // the server.
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Log in to rizzy-vault" })).toBeVisible();
+  await logIn(page, "alice", secretKey);
+  await page.getByRole("button", { name: /Example/ }).click();
+  await expect(page.getByRole("heading", { name: "Example" })).toBeVisible();
+  await expect(page.getByText("alice@example.com").first()).toBeVisible();
+
+  // Search.
+  await page.getByLabel("Search items").fill("nothing-like-it");
+  await expect(page.getByText("Nothing matches.")).toBeVisible();
+  await page.getByLabel("Search items").fill("exam");
+  await expect(page.getByRole("button", { name: /Example/ })).toBeVisible();
+
+  // Lock, then unlock (a new login with the remembered login name).
+  await page.getByRole("button", { name: "Lock" }).click();
+  await expect(page.getByRole("heading", { name: "Unlock rizzy-vault" })).toBeVisible();
+  await logIn(page, undefined, secretKey);
+  await page.getByRole("button", { name: /Example/ }).click();
+  const again = page.locator('[data-field="login.password"]');
+  await again.getByRole("button", { name: "Reveal" }).click();
+  await expect(again.locator("input[data-secret-field]")).toHaveValue(ITEM_PASSWORD);
+
+  // Trash and restore.
+  await page.getByRole("button", { name: "Move to trash" }).click();
+  await expect(page.getByText("No items yet.")).toBeVisible();
+  await page.getByRole("button", { name: "Trash", exact: true }).click();
+  await page.getByRole("button", { name: /Example/ }).click();
+  await page.getByRole("button", { name: "Restore" }).click();
+  await page.getByRole("button", { name: "Items", exact: true }).click();
+  await expect(page.getByRole("button", { name: /Example/ })).toBeVisible();
+
+  // The generator.
+  await page.getByRole("button", { name: "Generator", exact: true }).click();
+  await page.getByRole("button", { name: "Generate" }).click();
+  const generated = page.locator(".generated input[data-secret-field]");
+  await expect(generated).toHaveValue(/.{20}/);
+  await expect(generated).toHaveAttribute("spellcheck", "false");
+
+  // Devices: none enrolled; the web session is ephemeral.
+  await page.getByRole("button", { name: "Devices", exact: true }).click();
+  await expect(page.getByText("No enrolled devices.")).toBeVisible();
+
+  expect(await violations(page)).toEqual([]);
+  expect(problems).toEqual([]);
+});
+
+test("a wrong master password is refused", async ({ page }) => {
+  await page.goto(server.origin);
+  await page.getByLabel("Login name").fill("nobody");
+  await page.getByLabel("Secret Key", { exact: true }).fill("RV1-AAAAAA-AAAAAA-AAAAA-AAAAA-AAAAA-AAAAA");
+  await page.getByLabel("Master password", { exact: true }).fill("wrong");
+  await page.getByRole("button", { name: "Log in" }).click();
+  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Log in to rizzy-vault" })).toBeVisible();
+});
+
+test("the server serves only the embedded files", async ({ request }) => {
+  for (const path of ["/assets/app.js", "/assets/core-worker.js", "/assets/style.css"]) {
+    const r = await request.get(server.origin + path);
+    expect(r.status(), path).toBe(200);
+    expect(r.headers()["content-security-policy"]).toContain("'wasm-unsafe-eval'");
+  }
+  const wasm = await request.get(`${server.origin}/assets/rizzy_core_bg.wasm`);
+  expect(wasm.headers()["content-type"]).toBe("application/wasm");
+  for (const path of ["/assets/", "/assets/APP.JS", "/favicon.ico", "/src/main.tsx"]) {
+    const r = await request.get(server.origin + path);
+    expect(r.status(), path).toBe(404);
+  }
+});

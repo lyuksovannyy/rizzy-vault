@@ -262,6 +262,13 @@ impl Server {
         s.state = req.account_state.as_slice().to_vec();
     }
 
+    /// `devices/web-certificate`: the ephemeral certificate joins the served certificates, not
+    /// the device set (CRYPTO.md §11.4).
+    fn web_certificate(&mut self, req: &rizzy_proto::account::UploadWebDeviceCertificateRequest) {
+        let s = self.account.as_mut().unwrap();
+        s.certs.push(req.device_certificate.as_slice().to_vec());
+    }
+
     /// The verified authors the fake uses to check uploads.
     fn authors(&self) -> Authors {
         let s = self.stored();
@@ -1085,6 +1092,130 @@ fn web_vault_signup_has_no_device_state() {
     )
     .unwrap();
     assert_eq!(state.device_set_hash, empty);
+}
+
+/// A web-vault login: OPAQUE, then the ephemeral device and its certificate upload.
+fn web_login(server: &mut Server, rng: &mut ChaCha20Rng, sk: &str) -> crate::login::WebSession {
+    let input = LoginInput {
+        server_origin: ORIGIN,
+        login_name: "alice",
+        secret_key: sk,
+        password: PASSWORD,
+    };
+    let (started, request) = start_login(rng, &input).unwrap();
+    let answer = server.login_start(&request);
+    let (awaiting, finish) = started.finish(rng, &answer, None).unwrap();
+    let logged_in = awaiting
+        .complete(server.login_finish(&finish).unwrap())
+        .unwrap();
+    let (web, upload) = logged_in.web_device(rng, T0 + 1).unwrap();
+    server.web_certificate(&upload);
+    web
+}
+
+#[test]
+fn web_sessions_refresh_the_account_and_read_later_certificates() {
+    use crate::login::{verify_web_refresh, web_account_query};
+
+    let mut rng = ChaCha20Rng::seed_from_u64(31);
+    let mut server = Server::new(32);
+    // A web-vault signup, keeping the Secret Key the kit shows.
+    let input = SignupInput {
+        server_origin: ORIGIN,
+        login_name: "Alice",
+        password: PASSWORD,
+        invite: None,
+        issue_recovery_code: false,
+        device_kind: DeviceKind::WebEphemeral,
+        now_ms: T0,
+    };
+    let (started, request) = start_signup(&mut rng, &input).unwrap();
+    let account_id = AccountId::from_bytes(request.account_id.to_bytes());
+    let response = server.register_start(&request);
+    let mut pending = started.finish(&mut rng, &response).unwrap();
+    let sk = pending.emergency_kit().secret_key().to_owned();
+    let last = sk.rsplit('-').next().unwrap().to_owned();
+    pending.confirm_kit(&last).unwrap();
+    server.register_finish(account_id, pending.commit_request().unwrap());
+    pending.finalize().unwrap();
+
+    let first = web_login(&mut server, &mut rng, &sk);
+    let second = web_login(&mut server, &mut rng, &sk);
+    let second_id = second.unlocked.device_id;
+    assert!(
+        !first
+            .account
+            .certificates()
+            .iter()
+            .any(|c| c.certificate.device_id == second_id),
+        "the first login predates the second session"
+    );
+
+    // The refresh reads the second session's certificate, so its ops verify.
+    let query = web_account_query(&first.account);
+    let before_enrolment = server.view_since(&query);
+    let fresh = verify_web_refresh(&first.account, &first.unlocked, &before_enrolment).unwrap();
+    assert!(
+        fresh
+            .certificates()
+            .iter()
+            .any(|c| c.certificate.device_id == second_id)
+    );
+    assert!(
+        Authors::from_account(&fresh)
+            .unwrap()
+            .entries
+            .iter()
+            .any(|a| a.key_id
+                == second
+                    .unlocked
+                    .device_keys
+                    .signing_key()
+                    .verifying_key()
+                    .key_id())
+    );
+
+    // An answer that leaves the session's own certificate out is refused.
+    let own = first.own_certificate.wire.clone();
+    let mut withheld = server.view_since(&query);
+    withheld.device_certificates = List::new(
+        withheld
+            .device_certificates
+            .as_slice()
+            .iter()
+            .filter(|c| c.as_slice() != own.as_slice())
+            .cloned()
+            .collect(),
+    )
+    .unwrap();
+    assert_eq!(
+        verify_web_refresh(&first.account, &first.unlocked, &withheld).unwrap_err(),
+        ClientError::InvalidServerResponse
+    );
+
+    // After a newer state was read, the older one is a rollback; nothing is adopted.
+    let input = LoginInput {
+        server_origin: ORIGIN,
+        login_name: "alice",
+        secret_key: &sk,
+        password: PASSWORD,
+    };
+    let (started, request) = start_login(&mut rng, &input).unwrap();
+    let answer = server.login_start(&request);
+    let (awaiting, finish) = started.finish(&mut rng, &answer, None).unwrap();
+    let logged_in = awaiting
+        .complete(server.login_finish(&finish).unwrap())
+        .unwrap();
+    let (_pending, enrol) = logged_in
+        .enrol(&mut rng, DeviceKind::DesktopCli, T0 + 2)
+        .unwrap();
+    server.enrol(&enrol);
+    let newer = verify_web_refresh(&fresh, &first.unlocked, &server.view()).unwrap();
+    assert!(newer.state().state_seq > fresh.state().state_seq);
+    assert_eq!(
+        verify_web_refresh(&newer, &first.unlocked, &before_enrolment).unwrap_err(),
+        ClientError::Rollback
+    );
 }
 
 #[test]

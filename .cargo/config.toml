@@ -2,7 +2,7 @@
 # `cargo lint` — the exact clippy invocation CI runs.
 lint = "clippy --workspace --all-targets --locked -- -D warnings"
 # `cargo check-wasm` — the no-I/O crates (rizzy-core, rizzy-sync, rizzy-proto) must stay portable to the browser/extension.
-check-wasm = "check -p rizzy-core -p rizzy-sync -p rizzy-proto -p rizzy-client -p rizzy-import --target wasm32-unknown-unknown --locked"
+check-wasm = "check -p rizzy-core -p rizzy-sync -p rizzy-proto -p rizzy-client -p rizzy-import -p rizzy-wasm --target wasm32-unknown-unknown --locked"
 # `cargo xtask check-deps` — the crate-boundary and dependency rules of ADR 0016 §5.
 # `cargo xtask check-clippy` — clippy.toml entries clippy ignores ("found a module", §5).
 # `--locked`, like the other aliases: a stale Cargo.lock fails instead of being rewritten before

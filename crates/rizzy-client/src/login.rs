@@ -8,6 +8,10 @@
 //!             └─ web_device ──UploadWebDeviceCertificateRequest──► host (kind 4, §11.4)
 //! ```
 //!
+//! A web session reads the account again while it lives ([`web_account_query`],
+//! [`verify_web_refresh`]): the certificates of devices and web sessions certified after its
+//! login, without which their ops cannot be verified and are dropped.
+//!
 //! # Checks
 //!
 //! - Before any stretching: the served `kdf_id` is on the allow-list and the served origin is
@@ -41,7 +45,9 @@ use rizzy_core::rng::CryptoRng;
 use rizzy_core::secret_key::SecretKey;
 use rizzy_core::sign::statements::WEB_CERT_MAX_LIFETIME_MS;
 use rizzy_core::sign::{DeviceCertificate, DeviceKind};
-use rizzy_proto::account::{EnrolDeviceRequest, UploadWebDeviceCertificateRequest};
+use rizzy_proto::account::{
+    AccountStateQuery, AccountView, EnrolDeviceRequest, UploadWebDeviceCertificateRequest,
+};
 use rizzy_proto::auth::{
     LoginFinishRequest, LoginFinishResponse, LoginStartRequest, LoginStartResponse, TotpCode,
 };
@@ -521,4 +527,68 @@ impl fmt::Debug for WebSession {
             .field("unlocked", &self.unlocked)
             .finish_non_exhaustive()
     }
+}
+
+/// The account-state query of a web session's refresh: bundles above the pinned one, and the
+/// settings unless the session holds those of the pinned state (the query
+/// [`crate::unlock::account_state_query`] builds for an enrolled device, on the session's pin).
+#[must_use]
+pub fn web_account_query(account: &VerifiedAccount) -> AccountStateQuery {
+    let pin = &account.pin;
+    let held = pin
+        .settings
+        .as_ref()
+        .filter(|s| s.settings_seq == pin.state.settings_seq);
+    AccountStateQuery {
+        known_bundle_seq: pin.bundle.bundle_seq,
+        known_settings_seq: held.map_or(0, |s| s.settings_seq),
+    }
+}
+
+/// Verifies the account answer a web session reads during its life (CRYPTO.md §11.4), against
+/// the pin of its login, with the checks an enrolled device's unlock makes (§11.3 steps 2–3):
+/// a lower or forked `account-state` is [`ClientError::Rollback`] or [`ClientError::Fork`], a
+/// changed identity key is [`ClientError::IdentityChangeUnconfirmed`] (a web session has no
+/// stored pin to confirm a change against: the host logs in again, which anchors the new keys
+/// through `E_id`), and a rotated account key is [`ClientError::AccountKeyRotated`] (a web
+/// session receives no device grant: the host logs in again). Nothing is adopted on an error.
+///
+/// The session's own ephemeral certificate must still be served, under its own keys, and the
+/// device not revoked: an answer that leaves it out describes another account state than the
+/// one the session's ops are verified under.
+///
+/// # Errors
+/// As above; [`ClientError::InvalidServerResponse`] for any other failed check;
+/// [`ClientError::InvalidInput`] if `unlocked` is another account's.
+pub fn verify_web_refresh(
+    account: &VerifiedAccount,
+    unlocked: &UnlockedDevice,
+    view: &AccountView,
+) -> Result<VerifiedAccount, ClientError> {
+    if unlocked.account_id != account.account_id {
+        return Err(ClientError::InvalidInput);
+    }
+    let fresh = verify_account_view(
+        view,
+        account.account_id,
+        &unlocked.account_key,
+        &Anchor::Enrolled {
+            pin: &account.pin,
+            confirmed: None,
+        },
+    )?;
+    let own_keys = unlocked.device_keys.public_keys();
+    let revoked = fresh
+        .revocations
+        .iter()
+        .any(|r| r.revocation.device_id == unlocked.device_id);
+    let certified = fresh.certificates.iter().any(|c| {
+        c.certificate.device_id == unlocked.device_id
+            && c.certificate.device_ed25519 == own_keys.ed25519
+            && c.certificate.device_x25519 == own_keys.x25519
+    });
+    if revoked || !certified {
+        return Err(ClientError::InvalidServerResponse);
+    }
+    Ok(fresh)
 }

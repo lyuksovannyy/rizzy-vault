@@ -19,3 +19,11 @@ fuzz/corpus
 deploy/backup
 deploy/backup-db
 deploy/backup-secrets
+# JavaScript workspace: host-built dependencies and outputs. The image installs and builds its
+# own (deploy/Containerfile stages `wasm` and `web`); a host's node_modules is for another OS.
+**/node_modules
+packages/core/generated
+packages/*/dist
+apps/web/dist
+apps/web/test-results
+apps/web/playwright-report

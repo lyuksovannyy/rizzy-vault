@@ -1,0 +1,30 @@
+{
+  "name": "@rizzy-vault/web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The web vault (ADR 0014; ROADMAP §4.2): React over packages/core, whose wasm core runs in one dedicated Worker (ADR 0013 §4). Built with Vite into dist/, which rizzy-server embeds with the embed-web feature (ADR 0010 §4).",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "e2e": "cargo build --locked -p rizzy-server --bin rizzy-vault --features embed-web && playwright test"
+  },
+  "dependencies": {
+    "@rizzy-vault/core": "workspace:*",
+    "@rizzy-vault/ui": "workspace:*",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.60.0",
+    "@types/node": "24.19.0",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "eslint": "10.11.0",
+    "typescript": "6.0.3",
+    "vite": "8.3.1",
+    "vitest": "4.1.11"
+  }
+}

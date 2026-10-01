@@ -1,0 +1,759 @@
+//! Items across the boundary: what a list or an item view shows, and what an edit asks for
+//! (ADR 0013 §3 rule 3, "Plaintext crosses at the smallest useful size"; ADR 0018 §6–§7; the
+//! writes are `rizzy-client`'s `items` and `lists`).
+//!
+//! - **A list** ([`ItemSummary`]) carries the id, the type, the name, the login's username,
+//!   the favourite flag and whether a TOTP secret is set. Never a concealed value.
+//! - **An item view** ([`FieldView`]) carries every displayed field with its key split into
+//!   list, element and attribute, its kind, and its value **only if the schema shows it**. A
+//!   concealed value (passwords, TOTP secrets, card numbers, hidden custom fields, and to be
+//!   safe every key this build does not know) crosses only through
+//!   [`crate::Session::reveal_field`], on the user's request.
+//! - **An edit** ([`ItemDraft`]) is built in Rust from the user's input, call by call, and
+//!   written as one op by [`crate::Session::create_item`] or [`crate::Session::edit_item`],
+//!   where every write passes the schema checks. The draft holds the typed values in zeroizing
+//!   buffers until then.
+//!
+//! The draft's calls mirror `rv item create`/`item edit`: `set` (a field, by its final key,
+//! including an existing element's attribute such as `uri/<id>/value`), `clear`, `tag` and
+//! `untag`, `addUri`, `addCustomField` (text, hidden or boolean) and `removeElement`.
+
+use core::fmt;
+
+use rizzy_client::ClientError;
+use rizzy_client::items::{FieldKey, ItemId, ItemLifecycle, ItemType, Value};
+use rizzy_client::rizzy_core::item::schema::{
+    ATTR_KIND, ATTR_LABEL, ATTR_VALUE, CUSTOM_KIND_BOOLEAN, CUSTOM_KIND_HIDDEN, CUSTOM_KIND_TEXT,
+    Concealment, CustomFieldKind, Expected, ITEM_FAVORITE, ITEM_NAME, KeyClass, LIST_FIELD,
+    LIST_URI, LOGIN_TOTP, LOGIN_USERNAME, classify,
+};
+use rizzy_client::rizzy_core::item::tag::{tag_key, tag_name};
+use rizzy_client::rizzy_core::item::value::ValueRef;
+use rizzy_client::rizzy_core::rng::CryptoRng;
+use rizzy_client::sync::VaultSync;
+use wasm_bindgen::prelude::wasm_bindgen;
+use zeroize::Zeroizing;
+
+use crate::error::{CoreError, CoreResult};
+
+/// The most entries one draft takes: the writes of one op (ADR 0018 §10: 1,024).
+pub const MAX_DRAFT_ENTRIES: usize = 1024;
+
+/// The item types the web vault names, as `rv --type` names them.
+pub const TYPES: [(&str, ItemType); 10] = [
+    ("login", ItemType::LOGIN),
+    ("note", ItemType::SECURE_NOTE),
+    ("card", ItemType::CARD),
+    ("identity", ItemType::IDENTITY),
+    ("ssh-key", ItemType::SSH_KEY),
+    ("api-credential", ItemType::API_CREDENTIAL),
+    ("software-license", ItemType::SOFTWARE_LICENSE),
+    ("wifi", ItemType::WIFI),
+    ("bank-account", ItemType::BANK_ACCOUNT),
+    ("passkey", ItemType::PASSKEY),
+];
+
+/// The name of an item type; `unknown` for one this build does not name.
+pub(crate) fn type_name(item_type: Option<ItemType>) -> &'static str {
+    TYPES
+        .iter()
+        .find(|(_, t)| Some(*t) == item_type)
+        .map_or("unknown", |(name, _)| name)
+}
+
+/// The item type a name names.
+pub(crate) fn type_from_name(name: &str) -> CoreResult<ItemType> {
+    TYPES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, t)| *t)
+        .ok_or(ClientError::InvalidInput.into())
+}
+
+/// Lowercase hex.
+#[must_use]
+pub fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(char::from(DIGITS[usize::from(b >> 4)]));
+        out.push(char::from(DIGITS[usize::from(b & 0x0f)]));
+    }
+    out
+}
+
+/// The 16 bytes of a 32-digit hex id (an item, element or device id from the host), upper or
+/// lower case. Host input: bounded and parsed without panics (ADR 0013 §3 rule 8).
+///
+/// # Errors
+/// `invalid_input` for anything but 32 hex digits.
+pub fn parse_id(text: &str) -> CoreResult<[u8; 16]> {
+    let bad = || CoreError::from(ClientError::InvalidInput);
+    let digits = text.as_bytes();
+    if digits.len() != 32 {
+        return Err(bad());
+    }
+    let mut out = [0u8; 16];
+    for (byte, pair) in out.iter_mut().zip(digits.chunks_exact(2)) {
+        let mut value = 0u8;
+        for d in pair {
+            let nibble = match d {
+                b'0'..=b'9' => d - b'0',
+                b'a'..=b'f' => d - b'a' + 10,
+                b'A'..=b'F' => d - b'A' + 10,
+                _ => return Err(bad()),
+            };
+            value = (value << 4) | nibble;
+        }
+        *byte = value;
+    }
+    Ok(out)
+}
+
+/// The item a hex id names.
+pub(crate) fn item_id(text: &str) -> CoreResult<ItemId> {
+    Ok(ItemId::from_bytes(parse_id(text)?))
+}
+
+/// The text of a field, if it holds one.
+fn text_field(vault: &VaultSync, item: ItemId, key: &str) -> Option<Zeroizing<String>> {
+    let value = vault.field_value(item, key)?;
+    match value.decode() {
+        Ok(ValueRef::Text(text)) => Some(Zeroizing::new(text.to_owned())),
+        _ => None,
+    }
+}
+
+/// Whether a field is concealed unless revealed: what the schema conceals, and, to be safe,
+/// every key this build does not know (as `rv item show` decides).
+pub(crate) fn concealed(key: &FieldKey) -> bool {
+    match classify(key.as_key()) {
+        KeyClass::Known(spec) => spec.concealment != Concealment::Shown,
+        _ => true,
+    }
+}
+
+/// One row of an item list (module docs). Wiped when freed.
+#[wasm_bindgen]
+pub struct ItemSummary {
+    /// The item id, 32 hex digits.
+    id: String,
+    /// The type's name ([`TYPES`]).
+    item_type: &'static str,
+    /// `item.name`, or empty.
+    title: Zeroizing<String>,
+    /// `login.username`, if set.
+    username: Option<Zeroizing<String>>,
+    /// `item.favorite`.
+    favorite: bool,
+    /// Whether `login.totp` is set.
+    has_totp: bool,
+    /// Whether the item is in the trash.
+    trashed: bool,
+}
+
+impl fmt::Debug for ItemSummary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ItemSummary")
+            .field("id", &self.id)
+            .field("item_type", &self.item_type)
+            .finish_non_exhaustive()
+    }
+}
+
+#[wasm_bindgen]
+impl ItemSummary {
+    /// The item id, 32 lowercase hex digits.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    /// The type's name: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`,
+    /// `software-license`, `wifi`, `bank-account`, `passkey`, or `unknown`.
+    #[wasm_bindgen(getter, js_name = itemType)]
+    #[must_use]
+    pub fn item_type(&self) -> String {
+        self.item_type.to_owned()
+    }
+
+    /// The item's name, or an empty string.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn title(&self) -> String {
+        self.title.as_str().to_owned()
+    }
+
+    /// The login's username, or `undefined`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn username(&self) -> Option<String> {
+        self.username.as_ref().map(|u| u.as_str().to_owned())
+    }
+
+    /// Whether the item is a favourite.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn favorite(&self) -> bool {
+        self.favorite
+    }
+
+    /// Whether the item has a TOTP secret ([`crate::Session::totp`]).
+    #[wasm_bindgen(getter, js_name = hasTotp)]
+    #[must_use]
+    pub fn has_totp(&self) -> bool {
+        self.has_totp
+    }
+
+    /// Whether the item is in the trash.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn trashed(&self) -> bool {
+        self.trashed
+    }
+}
+
+/// The summary of `item`, if it is active or trashed and not the vault-settings item.
+pub(crate) fn summary(vault: &VaultSync, item: ItemId) -> Option<ItemSummary> {
+    let trashed = match vault.item_lifecycle(item) {
+        ItemLifecycle::Active => false,
+        ItemLifecycle::Trashed => true,
+        _ => return None,
+    };
+    let item_type = vault.item_type(item);
+    if item_type == Some(ItemType::VAULT_SETTINGS) {
+        return None;
+    }
+    let favorite = vault
+        .field_value(item, ITEM_FAVORITE)
+        .is_some_and(|v| matches!(v.decode(), Ok(ValueRef::Bool(true))));
+    let has_totp = vault
+        .field_value(item, LOGIN_TOTP)
+        .is_some_and(|v| matches!(v.decode(), Ok(ValueRef::Text(t)) if !t.is_empty()));
+    Some(ItemSummary {
+        id: hex(item.as_bytes()),
+        item_type: type_name(item_type),
+        title: text_field(vault, item, ITEM_NAME).unwrap_or_default(),
+        username: text_field(vault, item, LOGIN_USERNAME).filter(|u| !u.is_empty()),
+        favorite,
+        has_totp,
+        trashed,
+    })
+}
+
+/// The summaries of the active items, or of the trashed ones.
+pub(crate) fn summaries(vault: &VaultSync, trash: bool) -> Vec<ItemSummary> {
+    vault
+        .item_ids()
+        .into_iter()
+        .filter_map(|item| summary(vault, item))
+        .filter(|s| s.trashed == trash)
+        .collect()
+}
+
+/// One displayed field of an item (module docs). Wiped when freed.
+#[wasm_bindgen]
+pub struct FieldView {
+    /// The final key (user content: a tag key holds the tag's name).
+    key: Zeroizing<String>,
+    /// The list, for an element key.
+    list: Option<String>,
+    /// The element id, for an element key (a tag's is its name's hex).
+    element: Option<Zeroizing<String>>,
+    /// The attribute, for an element key with one.
+    attribute: Option<String>,
+    /// The tag's name, for a tag key.
+    tag: Option<Zeroizing<String>>,
+    /// `text`, `bool`, `number`, `enum`, `bytes`, `sort_key` or `unknown`.
+    kind: &'static str,
+    /// Whether the value is withheld until revealed.
+    concealed: bool,
+    /// The value as text, unless concealed or not text-like.
+    value: Option<Zeroizing<String>>,
+    /// Whether the field holds conflicting values (ADR 0018 §6).
+    conflict: bool,
+}
+
+impl fmt::Debug for FieldView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FieldView")
+            .field("kind", &self.kind)
+            .field("concealed", &self.concealed)
+            .finish_non_exhaustive()
+    }
+}
+
+#[wasm_bindgen]
+impl FieldView {
+    /// The field's final key (`login.password`, `uri/<id>/value`, `tag/<hex>`, …).
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn key(&self) -> String {
+        self.key.as_str().to_owned()
+    }
+
+    /// The list (`uri`, `field`, `pwhist`, `tag`, …) of an element key, or `undefined`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn list(&self) -> Option<String> {
+        self.list.clone()
+    }
+
+    /// The element id of an element key, or `undefined`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn element(&self) -> Option<String> {
+        self.element.as_ref().map(|e| e.as_str().to_owned())
+    }
+
+    /// The attribute (`value`, `label`, `kind`, `order`, …) of an element key, or `undefined`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn attribute(&self) -> Option<String> {
+        self.attribute.clone()
+    }
+
+    /// The tag's name for a tag key, or `undefined`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn tag(&self) -> Option<String> {
+        self.tag.as_ref().map(|t| t.as_str().to_owned())
+    }
+
+    /// The value's kind: `text`, `bool`, `number`, `enum`, `bytes`, `sort_key` or `unknown`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn kind(&self) -> String {
+        self.kind.to_owned()
+    }
+
+    /// Whether the value is withheld until [`crate::Session::reveal_field`].
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn concealed(&self) -> bool {
+        self.concealed
+    }
+
+    /// The value as text (`true`/`false` for a bool, decimal for a number or enum), or
+    /// `undefined` when concealed, bytes, an order key or unreadable.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn value(&self) -> Option<String> {
+        self.value.as_ref().map(|v| v.as_str().to_owned())
+    }
+
+    /// Whether the field holds conflicting values; the one shown is the one shown everywhere.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn conflict(&self) -> bool {
+        self.conflict
+    }
+}
+
+/// The kind and text of a value. Bytes and order keys have no text.
+fn kind_and_text(value: &Value) -> (&'static str, Option<Zeroizing<String>>) {
+    match value.decode() {
+        Ok(ValueRef::Text(text)) => ("text", Some(Zeroizing::new(text.to_owned()))),
+        Ok(ValueRef::Bool(flag)) => ("bool", Some(Zeroizing::new(flag.to_string()))),
+        Ok(ValueRef::U64(number)) => ("number", Some(Zeroizing::new(number.to_string()))),
+        Ok(ValueRef::Enum(number)) => ("enum", Some(Zeroizing::new(number.to_string()))),
+        Ok(ValueRef::Bytes(_)) => ("bytes", None),
+        Ok(ValueRef::SortKey(_)) => ("sort_key", None),
+        Ok(ValueRef::Cleared) | Err(_) => ("unknown", None),
+    }
+}
+
+/// The item that `id` names, if it is active or trashed.
+pub(crate) fn visible_item(vault: &VaultSync, id: &str) -> CoreResult<ItemId> {
+    let item = item_id(id)?;
+    match vault.item_lifecycle(item) {
+        ItemLifecycle::Active | ItemLifecycle::Trashed => Ok(item),
+        _ => Err(ClientError::UnknownItem.into()),
+    }
+}
+
+/// The displayed fields of `item`, concealed values withheld (module docs).
+pub(crate) fn fields(vault: &VaultSync, item: ItemId) -> Vec<FieldView> {
+    let mut out = Vec::new();
+    for key in vault.field_keys(item) {
+        let Ok(parsed) = FieldKey::parse(key.as_bytes()) else {
+            continue;
+        };
+        let Some(value) = vault.field_value(item, &key) else {
+            continue;
+        };
+        if value.is_cleared() {
+            continue;
+        }
+        let parts = parsed.as_key();
+        let hidden = concealed(&parsed);
+        let (kind, text) = kind_and_text(&value);
+        out.push(FieldView {
+            list: parts.list().map(str::to_owned),
+            element: parts.element().map(|e| Zeroizing::new(e.to_owned())),
+            attribute: parts.attribute().map(str::to_owned),
+            tag: tag_name(parts).ok(),
+            kind,
+            concealed: hidden,
+            value: if hidden { None } else { text },
+            conflict: vault.field_conflicts(item, &key),
+            key,
+        });
+    }
+    out
+}
+
+/// The value of one field of `item` as text, concealed or not (ADR 0013 §3 rule 3: "A secret
+/// field value crosses only when the user reveals it").
+pub(crate) fn reveal(vault: &VaultSync, item: ItemId, key: &str) -> CoreResult<Zeroizing<String>> {
+    let value = vault
+        .field_value(item, key)
+        .filter(|v| !v.is_cleared())
+        .ok_or(ClientError::UnknownItem)?;
+    kind_and_text(&value)
+        .1
+        .ok_or(ClientError::InvalidInput.into())
+}
+
+/// A custom field's kind, as the draft names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CustomKind {
+    /// Text, shown.
+    Text,
+    /// Text, concealed.
+    Hidden,
+    /// A boolean.
+    Boolean,
+}
+
+/// One entry of a draft.
+enum Entry {
+    /// A field by its final key, with the typed text.
+    Set(String, Zeroizing<String>),
+    /// A field cleared.
+    Clear(String),
+    /// A tag added.
+    Tag(Zeroizing<String>),
+    /// A tag removed.
+    Untag(Zeroizing<String>),
+    /// A new URI.
+    AddUri(Zeroizing<String>),
+    /// A new custom field: label, kind, value.
+    AddCustom(Zeroizing<String>, CustomKind, Zeroizing<String>),
+    /// An element removed: list, full element id.
+    Remove(String, String),
+}
+
+/// The changes of one create or edit (module docs). Values are wiped when the draft is freed
+/// or written; `Debug` shows the number of entries only.
+#[wasm_bindgen]
+#[derive(Default)]
+pub struct ItemDraft {
+    /// The entries, in the order given.
+    entries: Vec<Entry>,
+}
+
+impl fmt::Debug for ItemDraft {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ItemDraft")
+            .field("entries", &self.entries.len())
+            .finish()
+    }
+}
+
+#[wasm_bindgen]
+impl ItemDraft {
+    /// An empty draft.
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets a field by its final key: a fixed key (`item.name`, `login.password`, …) or an
+    /// attribute of an existing element (`uri/<id>/value`, `field/<id>/value`). The text is
+    /// encoded as the schema expects when the draft is written (`true`/`false` for a bool,
+    /// decimal for a number or enum).
+    ///
+    /// # Errors
+    /// `invalid_input` past [`MAX_DRAFT_ENTRIES`] entries.
+    pub fn set(&mut self, key: &str, text: &str) -> Result<(), CoreError> {
+        self.push(Entry::Set(key.to_owned(), Zeroizing::new(text.to_owned())))
+    }
+
+    /// Clears a field by its final key.
+    ///
+    /// # Errors
+    /// As [`ItemDraft::set`].
+    pub fn clear(&mut self, key: &str) -> Result<(), CoreError> {
+        self.push(Entry::Clear(key.to_owned()))
+    }
+
+    /// Adds a tag.
+    ///
+    /// # Errors
+    /// As [`ItemDraft::set`].
+    pub fn tag(&mut self, name: &str) -> Result<(), CoreError> {
+        self.push(Entry::Tag(Zeroizing::new(name.to_owned())))
+    }
+
+    /// Removes a tag.
+    ///
+    /// # Errors
+    /// As [`ItemDraft::set`].
+    pub fn untag(&mut self, name: &str) -> Result<(), CoreError> {
+        self.push(Entry::Untag(Zeroizing::new(name.to_owned())))
+    }
+
+    /// Adds a URI, after the item's last one.
+    ///
+    /// # Errors
+    /// As [`ItemDraft::set`].
+    #[wasm_bindgen(js_name = addUri)]
+    pub fn add_uri(&mut self, uri: &str) -> Result<(), CoreError> {
+        self.push(Entry::AddUri(Zeroizing::new(uri.to_owned())))
+    }
+
+    /// Adds a custom field after the item's last one. `kind` is `text`, `hidden` or
+    /// `boolean` (whose value is `true` or `false`).
+    ///
+    /// # Errors
+    /// `invalid_input` for another kind; as [`ItemDraft::set`].
+    #[wasm_bindgen(js_name = addCustomField)]
+    pub fn add_custom_field(
+        &mut self,
+        label: &str,
+        kind: &str,
+        value: &str,
+    ) -> Result<(), CoreError> {
+        let kind = match kind {
+            "text" => CustomKind::Text,
+            "hidden" => CustomKind::Hidden,
+            "boolean" => CustomKind::Boolean,
+            _ => return Err(ClientError::InvalidInput.into()),
+        };
+        self.push(Entry::AddCustom(
+            Zeroizing::new(label.to_owned()),
+            kind,
+            Zeroizing::new(value.to_owned()),
+        ))
+    }
+
+    /// Removes an element (a URI, a custom field, …) of `list` by its full element id, as
+    /// [`FieldView::element`] gives it.
+    ///
+    /// # Errors
+    /// As [`ItemDraft::set`].
+    #[wasm_bindgen(js_name = removeElement)]
+    pub fn remove_element(&mut self, list: &str, element: &str) -> Result<(), CoreError> {
+        self.push(Entry::Remove(list.to_owned(), element.to_owned()))
+    }
+
+    /// The number of entries.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn length(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+impl ItemDraft {
+    /// Adds an entry, within the bound.
+    fn push(&mut self, entry: Entry) -> CoreResult<()> {
+        if self.entries.len() >= MAX_DRAFT_ENTRIES {
+            return Err(ClientError::InvalidInput.into());
+        }
+        self.entries.push(entry);
+        Ok(())
+    }
+
+    /// Whether the draft holds nothing.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// A field write.
+pub(crate) type Write = (FieldKey, Value);
+
+/// The Text value of user input.
+fn text(input: &str) -> CoreResult<Value> {
+    Value::text(input).map_err(|_| ClientError::InvalidEdit.into())
+}
+
+/// The Bool value of `true`/`yes` or `false`/`no`.
+fn boolean(input: &str) -> CoreResult<Value> {
+    match input {
+        "true" | "yes" => Ok(Value::bool(true)),
+        "false" | "no" => Ok(Value::bool(false)),
+        _ => Err(ClientError::InvalidEdit.into()),
+    }
+}
+
+/// The kind a custom field displays.
+fn custom_kind(vault: &VaultSync, item: ItemId, element: &str) -> CustomFieldKind {
+    let key = format!("{LIST_FIELD}/{element}/{ATTR_KIND}");
+    let value = vault.field_value(item, &key);
+    CustomFieldKind::from_displayed(value.as_ref().and_then(|v| v.decode().ok()))
+}
+
+/// The encoded value of `text` for `key`, as the schema expects it (as `rv` encodes it). A
+/// custom field's value follows the kind the field displays.
+fn encode(
+    vault: &VaultSync,
+    item: Option<ItemId>,
+    key: &FieldKey,
+    input: &str,
+) -> CoreResult<Value> {
+    let KeyClass::Known(spec) = classify(key.as_key()) else {
+        return Err(ClientError::InvalidEdit.into());
+    };
+    match spec.expected {
+        Expected::CustomFieldValue => {
+            let parts = key.as_key();
+            match (item, parts.element()) {
+                (Some(item), Some(element))
+                    if custom_kind(vault, item, element) == CustomFieldKind::Boolean =>
+                {
+                    boolean(input)
+                }
+                _ => text(input),
+            }
+        }
+        Expected::Text => text(input),
+        Expected::Bool => boolean(input),
+        Expected::U64 => input
+            .parse()
+            .map(Value::u64)
+            .map_err(|_| ClientError::InvalidEdit.into()),
+        Expected::Enum => input
+            .parse()
+            .map(Value::enumeration)
+            .map_err(|_| ClientError::InvalidEdit.into()),
+        _ => Err(ClientError::InvalidEdit.into()),
+    }
+}
+
+/// A field key from the host.
+fn parse_key(text: &str) -> CoreResult<FieldKey> {
+    FieldKey::parse(text.as_bytes()).map_err(|_| ClientError::InvalidEdit.into())
+}
+
+/// The writes of `draft` for a new item (`item` is `None`) or an existing one. The schema
+/// checks run when they are written.
+pub(crate) fn writes<R: CryptoRng + ?Sized>(
+    rng: &mut R,
+    vault: &VaultSync,
+    item: Option<ItemId>,
+    draft: &ItemDraft,
+) -> CoreResult<Vec<Write>> {
+    let mut out = Vec::new();
+    let uris = draft
+        .entries
+        .iter()
+        .filter(|e| matches!(e, Entry::AddUri(_)))
+        .count();
+    let customs = draft
+        .entries
+        .iter()
+        .filter(|e| matches!(e, Entry::AddCustom(..)))
+        .count();
+    let mut uri_orders = vault.append_orders(item, LIST_URI, uris)?.into_iter();
+    let mut custom_orders = vault.append_orders(item, LIST_FIELD, customs)?.into_iter();
+    for entry in &draft.entries {
+        match entry {
+            Entry::Set(key, input) => {
+                let key = parse_key(key)?;
+                let value = encode(vault, item, &key, input)?;
+                out.push((key, value));
+            }
+            Entry::Clear(key) => out.push((parse_key(key)?, Value::cleared())),
+            Entry::Tag(name) => out.push((
+                tag_key(name).map_err(|_| ClientError::InvalidEdit)?,
+                Value::bool(true),
+            )),
+            Entry::Untag(name) => out.push((
+                tag_key(name).map_err(|_| ClientError::InvalidEdit)?,
+                Value::cleared(),
+            )),
+            Entry::AddUri(uri) => {
+                let order = uri_orders.next().ok_or(ClientError::Internal)?;
+                let (_, new) = VaultSync::new_element_writes(
+                    rng,
+                    LIST_URI,
+                    vec![(ATTR_VALUE, text(uri)?)],
+                    Some(&order),
+                )?;
+                out.extend(new);
+            }
+            Entry::AddCustom(label, kind, value) => {
+                let order = custom_orders.next().ok_or(ClientError::Internal)?;
+                let (kind_id, value) = match kind {
+                    CustomKind::Text => (CUSTOM_KIND_TEXT, text(value)?),
+                    CustomKind::Hidden => (CUSTOM_KIND_HIDDEN, text(value)?),
+                    CustomKind::Boolean => (CUSTOM_KIND_BOOLEAN, boolean(value)?),
+                };
+                let (_, new) = VaultSync::new_element_writes(
+                    rng,
+                    LIST_FIELD,
+                    vec![
+                        (ATTR_LABEL, text(label)?),
+                        (ATTR_KIND, Value::enumeration(kind_id)),
+                        (ATTR_VALUE, value),
+                    ],
+                    Some(&order),
+                )?;
+                out.extend(new);
+            }
+            Entry::Remove(list, element) => {
+                let item = item.ok_or(ClientError::InvalidEdit)?;
+                out.extend(vault.element_removal_writes(item, list, element)?);
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_ids_round_trip() {
+        let bytes = [0xab_u8; 16];
+        let text = hex(&bytes);
+        assert_eq!(text.len(), 32);
+        assert_eq!(parse_id(&text).unwrap(), bytes);
+        assert_eq!(parse_id(&text.to_uppercase()).unwrap(), bytes);
+        for bad in ["", "ab", &"g".repeat(32), &"a".repeat(33)] {
+            assert!(parse_id(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn type_names_round_trip() {
+        for (name, item_type) in TYPES {
+            assert_eq!(type_from_name(name).unwrap(), item_type);
+            assert_eq!(type_name(Some(item_type)), name);
+        }
+        assert!(type_from_name("vault-settings").is_err());
+        assert_eq!(type_name(None), "unknown");
+    }
+
+    #[test]
+    fn drafts_are_bounded() {
+        let mut draft = ItemDraft::new();
+        for _ in 0..MAX_DRAFT_ENTRIES {
+            draft.set("item.name", "x").unwrap();
+        }
+        assert_eq!(draft.length(), MAX_DRAFT_ENTRIES);
+        assert!(draft.set("item.name", "x").is_err());
+        assert!(
+            ItemDraft::new()
+                .add_custom_field("l", "secret", "v")
+                .is_err()
+        );
+        assert!(!format!("{draft:?}").contains('x'));
+    }
+}

@@ -54,6 +54,21 @@ pub(crate) fn first_party(path: &str, generated: &[&str]) -> bool {
 /// Returns a message with the position when a block comment, string or character literal is
 /// not terminated, because the rest of the file could not be scanned.
 pub(crate) fn unsafe_tokens(source: &str) -> Result<Vec<Position>, String> {
+    Ok(word_tokens(source, &["unsafe"])?
+        .into_iter()
+        .map(|(_, at)| at)
+        .collect())
+}
+
+/// Every word token of `source` that is one of `words`, with its index into `words` and its
+/// position, in order. Words inside comments and literals are not tokens; raw identifiers
+/// (`r#unsafe`) are skipped. The lexer of [`unsafe_tokens`], shared with the binding-baseline
+/// counts of ADR 0019 §4.1 (b) ([`crate::bindings`]).
+///
+/// # Errors
+///
+/// As [`unsafe_tokens`].
+pub(crate) fn word_tokens(source: &str, words: &[&str]) -> Result<Vec<(usize, Position)>, String> {
     let mut cur = Cursor::new(source);
     let mut found = Vec::new();
     while let Some(c) = cur.peek(0) {
@@ -63,11 +78,14 @@ pub(crate) fn unsafe_tokens(source: &str) -> Result<Vec<Position>, String> {
             ('/', Some('*')) => cur.block_comment(start)?,
             ('"', _) => cur.string(start)?,
             ('\'', _) => cur.quote(start)?,
-            _ if is_word(c) => match cur.word().as_str() {
-                "unsafe" => found.push(start),
-                prefix @ ("r" | "br" | "cr") => cur.raw(prefix == "r", start)?,
-                _ => {}
-            },
+            _ if is_word(c) => {
+                let word = cur.word();
+                if let Some(index) = words.iter().position(|w| *w == word) {
+                    found.push((index, start));
+                } else if matches!(word.as_str(), "r" | "br" | "cr") {
+                    cur.raw(word == "r", start)?;
+                }
+            }
             _ => cur.advance(),
         }
     }
@@ -390,6 +408,8 @@ mod tests {
             include_str!("check.rs"),
             include_str!("check/tests.rs"),
             include_str!("rules.rs"),
+            include_str!("bindings.rs"),
+            include_str!("js.rs"),
             include_str!("manifest.rs"),
             include_str!("metadata.rs"),
             include_str!("../tests/cli.rs"),

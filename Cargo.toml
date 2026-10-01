@@ -85,6 +85,16 @@ getrandom = { version = "0.4.3", default-features = false, features = ["sys_rng"
 # (ADR 0024 point 1). Leaf crates only: `rizzy-server` and `rizzy-cli` in M1, later `rizzy-ffi`
 # and `rizzy-ffi-cpp` (ADR 0024 point 2, checked by `cargo xtask check-deps`).
 rustix = { version = "=1.1.5", default-features = false, features = ["process"] }
+# The JavaScript bindings of the web vault's core (ADR 0013 §4 "Build"; ADR 0016 §3 row
+# `rizzy-wasm`; ADR 0019 §4.1 "Pinned and vetted"). `rizzy-wasm` only: the R1 deny-list keeps it
+# out of every no-I/O crate (`cargo xtask check-deps`). Exact pin: `wasm-bindgen-cli` must be
+# exactly this version (ADR 0013 §4; `cargo xtask build-wasm` refuses any other), and every bump
+# is a reviewed PR with the expansion-baseline diff and its `unsafe`/`extern`/`no_mangle`
+# counts (ADR 0019 §4.1 (b), owner decision 7). 0.2.129 is the version ADR 0013 names (fact
+# sheet 2026-09-25) and the newest on crates.io on 2026-10-01. Not cryptography. `std` only;
+# no `serde-serialize` (bodies are serialised by `serde_json` in the crate, not through
+# `JsValue`), no `enable-interning`, no `spans`.
+wasm-bindgen = { version = "=0.2.129", default-features = false, features = ["std"] }
 
 # Tooling and tests. Not cryptography.
 # serde_json: `xtask` reads `cargo metadata` JSON with it (ADR 0016 §5), and `rizzy-core`'s tests

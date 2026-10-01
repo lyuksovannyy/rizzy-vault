@@ -194,6 +194,7 @@ impl Tree {
             clippy_configs: self.clippy_configs.clone(),
             hidden_clippy_configs: self.hidden_clippy_configs.clone(),
             rust_sources: self.rust_sources.clone(),
+            bindings: crate::bindings::BaselineInput::default(),
         })
     }
 }
