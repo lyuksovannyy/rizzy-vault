@@ -8,7 +8,7 @@ Status: M1, not audited. Read [SECURITY.md](../SECURITY.md) before trusting it w
 
 `rv` takes no secret as an argument or from the environment. It asks on the terminal with echo off. When standard input is not a terminal, it reads the secrets from it, one per line, in the order it asks. A field value that is a secret is given with `--secret <key>`, which asks for it the same way.
 
-`rv` prints a secret only when the command exists to show one: the Emergency Kit at `signup`, `secret-key` and `recovery complete`, the two-factor secret at `2fa enable`, `item show --reveal`, `generate`, `totp`. It does not copy to the clipboard in this build, so those values stay in the terminal's scrollback: clear it.
+`rv` prints a secret only when the command exists to show one: the Emergency Kit at `signup`, `secret-key` and `recovery complete`, the two-factor secret at `2fa enable`, `item show --reveal`, `generate`, `totp`. It has no clipboard output (owner decision, 2026-10-01), so those values stay in the terminal's scrollback: clear it.
 
 ## Where the data lives, and keeping it out of backups
 
@@ -136,4 +136,4 @@ If the server's operator restored it from an older backup, the edits made after 
 
 ## Not in this build
 
-Clipboard output, `https://` (and with it a private CA: the TLS crates await approval), a full key rotation together with a Secret Key change, reordering list elements, and no-echo input on platforms without `stty` (there, pipe the secrets in).
+`https://` (and with it a private CA: the TLS crates await approval), a full key rotation together with a Secret Key change, reordering list elements, and no-echo input on platforms without `stty` (there, pipe the secrets in).

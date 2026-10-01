@@ -22,8 +22,7 @@
 //!   `generate` and `totp` print what they were asked for. `signup`, `secret-key` and
 //!   `recovery complete` print the Emergency Kit once, `2fa enable` the 2FA secret once.
 //!   Nothing else prints a secret, and no error or note ever does.
-//!   Copying to the clipboard instead of printing (INV-56's default for a terminal) is not in
-//!   this build (reported): it needs a platform clipboard crate.
+//!   There is no clipboard output, by the owner's decision of 2026-10-01.
 //!
 //! # Removing this device (`device forget`; ADR 0026 §5)
 //!

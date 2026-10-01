@@ -617,7 +617,7 @@ Parked with On-device mode ([ADR 0022](adr/0022-server-mode-only.md)). The headi
 - Copied secrets are marked sensitive or concealed wherever the OS supports it (Windows, macOS and Android have mechanisms; the exact APIs will be confirmed in M3 and M7).
 - Screenshots are blocked and the app-switcher preview is hidden on mobile ([ROADMAP §4.10](ROADMAP.md#410-mobile--passkeys-m7)).
 - Each native desktop client excludes its window from screen capture where the OS supports it ([ADR 0019](adr/0019-native-clients.md)): `SetWindowDisplayAffinity` on Windows, `NSWindow.sharingType` on macOS (each U until M3). Linux under Wayland is likely unsupported.
-- The CLI copies to the clipboard by default instead of printing ([INV-56](#8-security-invariants)).
+- The CLI prints a secret only when a command exists to show one or `--reveal` is given, and never copies to the clipboard: `rv` is a terminal client of a remote server and has no clipboard output (owner decision, 2026-10-01; [INV-56](#8-security-invariants)).
 - Secret input fields set `spellcheck="false"` and `autocomplete` values that discourage browser saving, and a reveal does not turn spell-check back on. On mobile, secret fields use secure text entry and the keyboard's no-personalised-learning flag, and a revealed secret is shown read-only rather than in an editable field. Native desktops use the toolkit's password control, with spell-check, autocorrect and prediction off, on reveal too ([INV-68](#8-security-invariants)). Browsers may ignore `autocomplete` hints (U), so the web-vault copy also tells users not to let the browser save the master password.
 
 **Residual risk.** Clipboard managers that ignore the sensitive flag, and cross-device clipboard sync ([AR-16](#9-accepted-risks-and-out-of-scope)).
@@ -921,7 +921,7 @@ SwiftUI (macOS), WinUI 3 with C# (Windows) and Qt 6 Quick with C++ (Linux), each
 | S | Wrong or impersonated server. | TLS through rustls. OPAQUE authenticates the server's registered static key at new-device login and re-authentication. Everyday device authentication adds nothing beyond TLS ([A4](#a4-network-attacker-mitm)); per-request signatures limit a relayed session ([Q-7](#10-open-questions-for-the-owner)). | INV-1 |
 | T | – | – | – |
 | R | – | – | – |
-| I | Secrets in argv (`ps`, shell history), environment variables, terminal scrollback, piped logs. A session-token file readable by other users. Core dumps of the unlocked process. The state file (SK, `E_local`) in the user's home-directory backups. | Secrets come in only through a TTY prompt or stdin. Output goes to the clipboard by default. Token in the OS keyring or a 0600 file. Core dumps disabled at startup. No keystore unlock: the OS keyring does not enforce user presence. The docs tell users to keep the state file out of backups. | INV-56, INV-60, INV-61, INV-62 |
+| I | Secrets in argv (`ps`, shell history), environment variables, terminal scrollback, piped logs. A session-token file readable by other users. Core dumps of the unlocked process. The state file (SK, `E_local`) in the user's home-directory backups. | Secrets come in only through a TTY prompt or stdin. A secret is printed only on an explicit request; there is no clipboard output. Token in the OS keyring or a 0600 file. Core dumps disabled at startup. No keystore unlock: the OS keyring does not enforce user presence. The docs tell users to keep the state file out of backups. | INV-56, INV-60, INV-61, INV-62 |
 | D | – | – | – |
 | E | – (runs as the user) | – | – |
 

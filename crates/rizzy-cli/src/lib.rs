@@ -40,7 +40,6 @@
 //!
 //! # Not in this build (reported)
 //!
-//! - Copying secrets to the clipboard instead of printing them (INV-56's default).
 //! - Turning terminal echo off without the system `stty` (see [`ui`]); on platforms without
 //!   it, secrets are read from standard input only.
 //! - `https://` origins: the client-side TLS crates are not approved under ADR 0009 yet, so

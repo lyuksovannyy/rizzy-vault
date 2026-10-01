@@ -78,7 +78,7 @@ MoSCoW is scored **against v1.0 (end of M8)**. Items for M9/M10 are listed so th
 | M | Trash with restore (soft delete, auto-purge after N days) | M1 |
 | M | Sync engine (see 4.6): encrypted operation log, per-item version vectors, deterministic merge, no silent data loss | M1 |
 | M | Offline read access on clients (encrypted local cache) | M1 |
-| M | Import: Bitwarden JSON, 1Password (1PUX), KeePass (KDBX/XML), generic CSV, Chrome/Firefox CSV, **our plaintext JSON export** | M1 |
+| M | Import: Bitwarden JSON, 1Password (1PUX), KeePass XML, generic CSV, Chrome/Firefox CSV, **our plaintext JSON export** | M1 |
 | M | Export: encrypted JSON (own format) + plaintext JSON/CSV with scary warning | M1 |
 | M | CLI client (`rv`) — list, get, add, generate, copy TOTP | M1 |
 | M | Web vault (minimal UI acceptable in M1) | M1 |
@@ -148,6 +148,7 @@ The problem: `youtube.com`, `youtu.be`, `m.youtube.com`, `accounts.google.com` a
 | M | Transparency page in settings: exactly what the server stores for this account (item counts, byte sizes, retention) | M3 |
 | S | **Watchtower-style health**: weak, reused, old passwords; missing 2FA where site supports it; breached passwords via HIBP k-anonymity (only 5-char SHA-1 prefix leaves the device) | M3 |
 | S | Onboarding flow (import wizard, Emergency Kit download, extension install) | M3 |
+| S | Import: KeePass KDBX files ([ADR 0029](adr/0029-kdbx-import.md), Proposed; moved out of M1 by the owner on 2026-10-01: M1 reads KeePass XML only) | M3 |
 | S | Localization framework (i18n from day one of M3, English only at first) | M3 |
 | S | Clear conflict UI: "edited on Phone and Laptop at the same time — keep both / pick one" | M3 |
 | C | Themes / accent color customization | post-1.0 |

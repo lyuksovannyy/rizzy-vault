@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-09-30
 - Deciders: project owner
-- Milestone: M1
+- Milestone: M3 (moved out of M1 by the owner on 2026-10-01)
 
 ## Context
 
