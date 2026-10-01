@@ -1907,6 +1907,192 @@ fn a_server_restored_from_an_older_backup_is_healed_by_the_next_sync() {
     assert_eq!(b.field(&first, "item.name"), "First, edited");
 }
 
+impl Server {
+    /// The operator's native copy (self-hosting.md: the fallback for disk loss): the server
+    /// stopped, its data directory copied aside, the server started again.
+    fn native_copy(&mut self, name: &str) -> PathBuf {
+        self.stop();
+        let copy = self.dir.join(name);
+        copy_tree(&self.dir.join("data"), &copy);
+        self.child = Self::spawn(&self.dir, self.port, self.origin_port);
+        copy
+    }
+
+    /// Puts a native copy back in place: no `rizzy-vault restore`, so no new restore
+    /// generation and no reconciliation epoch (the drill's step 8 in `rizzy-server`).
+    fn native_restore(&mut self, copy: &Path) {
+        self.stop();
+        let data = self.dir.join("data");
+        std::fs::remove_dir_all(&data).unwrap();
+        copy_tree(copy, &data);
+        self.child = Self::spawn(&self.dir, self.port, self.origin_port);
+    }
+}
+
+/// Copies the files of `from` into a new directory `to`, recursively.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+/// ADR 0012 §7 "Healing a server rollback" steps 1–3 and "A device enrolled after the backup"
+/// through `rv`, against a server put back with `rizzy-vault restore` (a reconciliation epoch,
+/// INV-59): after the backup a second device enrols (a newer `account-state`) and both devices
+/// write. The device the restored server does not know authenticates with its certificate, the
+/// account state, the bundle chain and the device set, re-publishes the newer state and its
+/// edits, and leaves the rollback alarm; the first device then finds its state on the server
+/// again and heals its vault. Both keep working and read each other's edits.
+#[test]
+fn a_restored_server_takes_back_the_account_state_and_a_device_enrolled_after_the_backup() {
+    let mut server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("raa");
+    let b = Rv::new("rab");
+    let (secret_key, _) = sign_up(&a, &origin, "alice");
+    let first = create_note(&a, "First");
+    let backup = server.backup("before.rvbackup");
+
+    // After the backup: B enrols (the account state moves on), both write, both sync.
+    log_in(&b, &origin, "alice", &secret_key);
+    let from_b = create_note(&b, "From B");
+    a.ok(&["sync"], &[]);
+    let from_a = create_note(&a, "From A");
+    b.ok(&["sync"], &[]);
+    assert_eq!(b.items().len(), 3);
+    server.restore_from(&backup);
+
+    // B is unknown to the restored server and its state is behind B's: B authenticates with
+    // its certificate, re-publishes the account state, and heals the vault.
+    let healed = b.ok(&["sync"], &[]);
+    for note in [
+        "did not know this device",
+        "Sending the newer one back",
+        "holds this device's account state again",
+        "has the lost changes again",
+    ] {
+        assert!(healed.noted(note), "{note}: {:?}", healed.notes);
+    }
+    // A is in the restored device set and finds the newest state again (B re-published it);
+    // its own lost edit goes back with the vault healing.
+    let synced = a.ok(&["sync"], &[]);
+    assert!(
+        !synced.noted("Sending the newer one back"),
+        "{:?}",
+        synced.notes
+    );
+
+    // Both write on the healed server and read each other.
+    let after_a = create_note(&a, "After, from A");
+    b.ok(
+        &["item", "edit", &first, "--field", "item.name=First, from B"],
+        &[],
+    );
+    a.ok(&["sync"], &[]);
+    b.ok(&["sync"], &[]);
+    for rv in [&a, &b] {
+        let items = rv.items();
+        assert_eq!(items.len(), 4, "{items:?}");
+        for id in [&first, &from_a, &from_b, &after_a] {
+            assert!(items.iter().any(|(i, _)| i == id), "{id} in {items:?}");
+        }
+        assert_eq!(rv.field(&first, "item.name"), "First, from B");
+    }
+    // A sync on each finds nothing left to heal.
+    for rv in [&a, &b] {
+        let quiet = rv.ok(&["sync"], &[]);
+        assert!(!quiet.noted("Sending"), "{:?}", quiet.notes);
+    }
+}
+
+/// The other order: the device of the restored set heals first, which ends the reconciliation
+/// epoch (ADR 0012 §7 "End of the reconciliation epoch"); the certificates it re-published let
+/// the device enrolled after the backup authenticate as any known device.
+#[test]
+fn a_restored_server_healed_first_by_a_device_of_the_restored_set() {
+    let mut server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("rfa");
+    let b = Rv::new("rfb");
+    let (secret_key, _) = sign_up(&a, &origin, "alice");
+    let backup = server.backup("before.rvbackup");
+    log_in(&b, &origin, "alice", &secret_key);
+    let from_b = create_note(&b, "From B");
+    a.ok(&["sync"], &[]);
+    server.restore_from(&backup);
+
+    let healed = a.ok(&["sync"], &[]);
+    assert!(
+        healed.noted("holds this device's account state again"),
+        "{:?}",
+        healed.notes
+    );
+    // B is known again: no certificate shown; its lost edit goes back with the vault.
+    let synced = b.ok(&["sync"], &[]);
+    assert!(
+        !synced.noted("did not know this device"),
+        "{:?}",
+        synced.notes
+    );
+    let after_b = create_note(&b, "After, from B");
+    a.ok(&["sync"], &[]);
+    let items = a.items();
+    for id in [&from_b, &after_b] {
+        assert!(items.iter().any(|(i, _)| i == id), "{id} in {items:?}");
+    }
+}
+
+/// The negative of the test above: the server is put back from a native copy, so it opens no
+/// reconciliation epoch, and the older account state it serves is, for the devices, a genuine
+/// rollback. The device holding the newer state raises the alarm and re-publishes, the server
+/// refuses it, and the alarm stays across runs (read-only, reads still work); the device
+/// enrolled after the copy gets no session from its certificate.
+#[test]
+fn a_rollback_outside_a_reconciliation_epoch_stays_an_alarm() {
+    let mut server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("rna");
+    let b = Rv::new("rnb");
+    let (secret_key, _) = sign_up(&a, &origin, "alice");
+    create_note(&a, "First");
+    let copy = server.native_copy("native-copy");
+    log_in(&b, &origin, "alice", &secret_key);
+    a.ok(&["sync"], &[]);
+    server.native_restore(&copy);
+
+    for _ in 0..2 {
+        let (outcome, run) = a.try_run(&["sync"], &[PASSWORD], &[], &[]);
+        assert!(
+            matches!(outcome, Err(CliError::Alarm(Alarm::Rollback))),
+            "{outcome:?}: {:?}",
+            run.notes
+        );
+        assert!(run.noted("refused"), "{:?}", run.notes);
+    }
+    let (outcome, _) = a.try_run(
+        &["item", "create", "--type", "note", "--field", "item.name=x"],
+        &[PASSWORD],
+        &[],
+        &[],
+    );
+    assert!(matches!(outcome, Err(CliError::Alarm(Alarm::Rollback))));
+    assert_eq!(a.items().len(), 1);
+
+    let (outcome, run) = b.try_run(&["sync"], &[PASSWORD], &[], &[]);
+    assert!(
+        matches!(outcome, Err(CliError::Server(ErrorCode::Unauthorized))),
+        "{outcome:?}: {:?}",
+        run.notes
+    );
+}
+
 /// ADR 0018 §6 "List elements" through `rv item edit`: URIs and custom fields of an existing
 /// item are added, changed and removed (removal clears every attribute the item holds), tags
 /// added and removed; a hidden custom field's value is asked for and never taken from the

@@ -35,7 +35,7 @@ use crate::error::AuthError;
 use crate::ports::VaultPort;
 use crate::rules;
 use crate::session::{self, Session, SessionKind};
-use crate::sql::{self, exec};
+use crate::sql::{self, exec, fetch_all};
 use crate::store;
 use crate::trust::{AccountTrust, Devices};
 
@@ -238,11 +238,13 @@ impl<V: VaultPort> AuthService<V> {
     /// account, at an `account_key_epoch` no higher than the state's, and verify under its
     /// sender's certificate (a revoked sender too, CRYPTO.md §11.3 step 4.2) or, for a sender
     /// the server holds no durable certificate for, under the identity key. Self-grants go to
-    /// [`VaultPort::store_self_grants`], which keeps a newer stored one.
+    /// [`VaultPort::store_self_grants`], which keeps a newer stored one. Outside the epoch, a
+    /// request whose every grant the server already holds byte for byte is a success that stores
+    /// nothing (ADR 0028, "re-sent grants are accepted").
     ///
     /// # Errors
-    /// [`AuthError::InvalidRequest`] for a grant that does not verify or fit, or any call outside
-    /// the epoch; storage errors.
+    /// [`AuthError::InvalidRequest`] for a grant that does not verify or fit, or a call outside
+    /// the epoch that carries a grant the server does not hold; storage errors.
     pub async fn publish_grants(
         &self,
         session: &Session,
@@ -256,10 +258,17 @@ impl<V: VaultPort> AuthService<V> {
             now_ms,
         )
         .await?;
+        let account = trust.account_id;
         if epoch.is_none() {
+            // ADR 0028 "Retry after an unknown outcome", row "Healing": "re-sent grants are
+            // accepted". Outside the epoch a request is a success only when the server already
+            // holds every grant it carries, byte for byte; it then stores nothing.
+            if held_already(&self.vault, &mut tx, account, req).await? {
+                tx.commit().await?;
+                return Ok(());
+            }
             return Err(AuthError::InvalidRequest);
         }
-        let account = trust.account_id;
         let head = trust.head()?;
         for grant in &req.device_grants {
             let recipient = devices
@@ -299,6 +308,43 @@ impl<V: VaultPort> AuthService<V> {
         tx.commit().await?;
         Ok(())
     }
+}
+
+/// Whether the server holds every grant of `req` byte for byte: each device grant as the
+/// stored row of its recipient, epoch and sender, and each self-grant among the account's
+/// current self-grants under its `account_key_epoch`. In the caller's write transaction.
+async fn held_already<V: VaultPort>(
+    vault: &V,
+    tx: &mut WriteTx,
+    account: AccountId,
+    req: &PublishGrantsRequest,
+) -> Result<bool, AuthError> {
+    for grant in &req.device_grants {
+        let rows: Vec<(i64, Vec<u8>, Vec<u8>)> = fetch_all!(
+            tx.conn(),
+            (i64, Vec<u8>, Vec<u8>),
+            sql::GRANTS_FOR_DEVICE,
+            &account.as_bytes()[..],
+            &grant.recipient_device_id.as_bytes()[..]
+        )?;
+        let held = rows.iter().any(|(epoch, sender, record)| {
+            i64::from(grant.account_key_epoch) == *epoch
+                && sender.as_slice() == grant.sender_device_id.as_bytes().as_slice()
+                && record.as_slice() == grant.key_grant.as_slice()
+        });
+        if !held {
+            return Ok(false);
+        }
+    }
+    for grant in &req.vault_self_grants {
+        let stored = vault
+            .self_grants(tx.conn(), account, grant.account_key_epoch)
+            .await?;
+        if !stored.contains(grant) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Verified statements, each with its wire form.

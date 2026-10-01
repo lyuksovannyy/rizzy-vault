@@ -61,9 +61,10 @@
 //!   unconfirmed identity change, an outdated device state) no healing request is built: the
 //!   device state itself may be the older copy (ADR 0026 §4 step 7).
 //! - **Account healing** (ADR 0012 §7 steps 1–3: the bundle chain, the `account-state`, grants
-//!   and self-grants) is not here: a server whose `account-state` is behind is reported by the
-//!   unlock checks of [`crate::unlock`] as a rollback, which ends in the rollback alarm in this
-//!   build.
+//!   and self-grants) is not here but in [`crate::healing`]: a server whose `account-state` is
+//!   behind is reported by the unlock checks of [`crate::unlock`] as a rollback, the host
+//!   re-publishes what that module builds, and the vault is healed after the account answer
+//!   verifies again.
 //!
 //! # Persistence (ADR 0026 §4)
 //!

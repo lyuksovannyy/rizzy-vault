@@ -28,7 +28,7 @@ use rizzy_core::normalize::ServerOrigin;
 use rizzy_core::sign::{DeviceAuth, DeviceRequest};
 use rizzy_proto::auth::{
     DeviceAuthFinishRequest, DeviceAuthFinishResponse, DeviceAuthStartRequest,
-    DeviceAuthStartResponse, RequestSignature,
+    DeviceAuthStartResponse, Reconciliation, RequestSignature,
 };
 use rizzy_proto::wire::{Fixed, SessionToken};
 
@@ -44,6 +44,40 @@ pub fn device_auth_start(state: &DeviceState) -> DeviceAuthStartRequest {
         device_id: id(state.device_id.to_bytes()),
         reconciliation: None,
     }
+}
+
+/// Step 1 for a device the server's database does not know after a restore (ADR 0012 §7 "A
+/// device enrolled after the backup"): the request carries `reconciliation`, built by
+/// [`crate::healing::reconciliation`]. The host sends it only after the plain
+/// [`device_auth_start`] was refused; the server accepts it only during the account's
+/// reconciliation epoch. The same objects go with step 2
+/// ([`device_auth_finish_reconciling`]).
+#[must_use]
+pub fn device_auth_start_reconciling(
+    state: &DeviceState,
+    reconciliation: Reconciliation,
+) -> DeviceAuthStartRequest {
+    DeviceAuthStartRequest {
+        reconciliation: Some(reconciliation),
+        ..device_auth_start(state)
+    }
+}
+
+/// Step 2 of a certificate-carrying device authentication: [`device_auth_finish`] with the
+/// objects of [`device_auth_start_reconciling`] sent again, which the server verifies again
+/// before it stores anything.
+///
+/// # Errors
+/// As [`device_auth_finish`].
+pub fn device_auth_finish_reconciling(
+    state: &DeviceState,
+    unlocked: &UnlockedDevice,
+    challenge: &DeviceAuthStartResponse,
+    reconciliation: Reconciliation,
+) -> Result<DeviceAuthFinishRequest, ClientError> {
+    let mut request = device_auth_finish(state, unlocked, challenge)?;
+    request.reconciliation = Some(reconciliation);
+    Ok(request)
 }
 
 /// Step 2: signs the served challenge with the device key (CRYPTO.md §5.10 step 2). The

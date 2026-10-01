@@ -30,8 +30,11 @@
 //!   excepted);
 //! - delete a snapshot row that is served or acknowledged;
 //! - delete an alarm, except the unconfirmed-identity-change alarm when the user confirmed the
-//!   new fingerprint (the one flow of this build that resolves an alarm); removal of the
-//!   device removes the file;
+//!   new fingerprint, and the rollback alarm in the changeset that adopts a verified
+//!   `account-state` (which the rule above keeps at or above the held one): the server no
+//!   longer serves a lower `state_seq`, so the device "leaves read-only" (ADR 0021 §9 "Server
+//!   behind"; restore healing, [`crate::healing`]). These are the flows of this build that
+//!   resolve an alarm; removal of the device removes the file;
 //! - change `format`, `server_origin`, `account_id` or `device_id` once set, or write a
 //!   device-state record that does not parse or names another account or device.
 //!
@@ -266,6 +269,7 @@ impl Floors {
             ops: BTreeMap::new(),
             snapshots: BTreeMap::new(),
             record: None,
+            cleared_rollback: false,
         };
         for write in changeset.writes() {
             next.check(write).map_err(|_| ClientError::Internal)?;
@@ -330,6 +334,9 @@ struct Pending<'a> {
     snapshots: BTreeMap<(Id16, Id16), Option<SnapshotFloor>>,
     /// The ids of a device-state record written here.
     record: Option<(Id16, Id16)>,
+    /// Whether the rollback alarm is cleared here, which needs an `account-state` write in the
+    /// same changeset.
+    cleared_rollback: bool,
 }
 
 impl Pending<'_> {
@@ -429,11 +436,16 @@ impl Pending<'_> {
                 Ok(())
             }
             Write::ClearAlarm(alarm) => {
-                // Only the alarm a flow of this build resolves; the others stay for good.
-                if *alarm == Alarm::UnconfirmedIdentityChange {
-                    Ok(())
-                } else {
-                    Err(Refused)
+                // Only the alarms a flow of this build resolves; the others stay for good. The
+                // rollback alarm only together with the adoption of a state not below the held one
+                // (checked in `finish`).
+                match alarm {
+                    Alarm::UnconfirmedIdentityChange => Ok(()),
+                    Alarm::Rollback => {
+                        self.cleared_rollback = true;
+                        Ok(())
+                    }
+                    _ => Err(Refused),
                 }
             }
             Write::DeviceSet {
@@ -666,6 +678,9 @@ impl Pending<'_> {
     /// The checks that need the whole changeset: the counter is above every own dot written
     /// here, and a device-state record names the cache's account and device.
     fn finish(&self) -> Result<(), Refused> {
+        if self.cleared_rollback && self.state.is_none() {
+            return Err(Refused);
+        }
         let own_written = self
             .ops
             .iter()

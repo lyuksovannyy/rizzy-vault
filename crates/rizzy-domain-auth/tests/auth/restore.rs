@@ -161,18 +161,25 @@ async fn device_session(env: &mut Env, client: &Client, device: &Device) -> Sess
     env.signed(client, device, &mut ds, b"").await.unwrap()
 }
 
-/// Whether the reconciliation epoch is open, as healing step 3 sees it (it refuses any call
-/// outside the epoch).
+/// Whether the reconciliation epoch is open, as the healing calls see it: an empty healing step 3
+/// (a success in and outside the epoch, ADR 0028 "re-sent grants are accepted") ends an epoch
+/// past its limit, then the epoch row is read.
 async fn epoch_open(env: &Env, session: &Session) -> bool {
     let empty = PublishGrantsRequest {
         vault_self_grants: List::empty(),
         device_grants: List::empty(),
     };
-    match env.svc.publish_grants(session, &empty, env.now).await {
-        Ok(()) => true,
-        Err(AuthError::InvalidRequest) => false,
-        Err(e) => panic!("unexpected {e}"),
-    }
+    env.svc
+        .publish_grants(session, &empty, env.now)
+        .await
+        .unwrap();
+    let mut tx = env.db.begin_read().await.unwrap();
+    let open = rizzy_storage::meta::reconciliation_epoch(tx.conn(), session.account_id.as_bytes())
+        .await
+        .unwrap()
+        .is_some();
+    tx.finish().await.unwrap();
+    open
 }
 
 #[test]
@@ -366,6 +373,37 @@ fn restored_device_repeating_an_adopted_state_ends_the_epoch() {
             .await
             .unwrap();
         assert!(!epoch_open(&env, &a).await);
+
+        // ADR 0028 "re-sent grants are accepted": after the epoch, the same device re-sends
+        // the self-grants the server holds (its step 3, after the step 2 that ended the epoch),
+        // a success that stores nothing; a grant the server does not hold is refused.
+        let view = env
+            .svc
+            .account_view(
+                &a,
+                rizzy_proto::account::AccountStateQuery {
+                    known_bundle_seq: 0,
+                    known_settings_seq: 0,
+                },
+                env.now,
+            )
+            .await
+            .unwrap();
+        assert!(!view.vault_self_grants.is_empty());
+        let resent = PublishGrantsRequest {
+            vault_self_grants: view.vault_self_grants.clone(),
+            device_grants: List::empty(),
+        };
+        env.svc.publish_grants(&a, &resent, env.now).await.unwrap();
+        let other = PublishGrantsRequest {
+            vault_self_grants: List::new(vec![crate::common::self_grant(&mut env.rng, &client)])
+                .unwrap(),
+            device_grants: List::empty(),
+        };
+        assert!(matches!(
+            env.svc.publish_grants(&a, &other, env.now).await,
+            Err(AuthError::InvalidRequest)
+        ));
     });
 }
 

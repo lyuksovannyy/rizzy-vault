@@ -44,7 +44,8 @@
 //! | [`rotation`] | CRYPTO.md §11.6, §11.8 steps 1–3; ADR 0025 §2 | Standard and full key rotation with an optional revocation: new keys, the auth half, the vault half, the retry rule |
 //! | [`credentials`] | CRYPTO.md §11.5, §11.3 step 5 | Master password and Secret Key change, with or without a rotation; following a change made elsewhere |
 //! | [`two_factor`] | CRYPTO.md §5.10, §11.15 | Server-side 2FA enrolment (the otpauth URI) and removal requests |
-//! | [`session`] | CRYPTO.md §5.10 | Device authentication and request signing |
+//! | [`session`] | CRYPTO.md §5.10; ADR 0012 §7 "A device enrolled after the backup" | Device authentication (also certificate-carrying, after a restore) and request signing |
+//! | [`healing`] | ADR 0012 §7 steps 1–3; ADR 0021 §9 "Server behind" | Account-side restore healing: the bundle chain, the newest `account-state`, the self-grants; the reconciliation objects |
 //! | [`sync`] | ADR 0012 §4, §7; ADR 0018 §3, §10; ADR 0021 §2, §4, §9 | The sync driver of one vault |
 //! | [`items`] | ADR 0018 §2, §6–§9; ADR 0012 §5; ADR 0027 §2 steps 3–5 | Item create, edit, trash, restore, purge and reads; the import path, which splits an item over a create op and the ops that follow |
 //! | [`lists`] | ADR 0018 §6 "List elements", "List order" | The writes that add, edit and remove URIs, custom fields, password-history entries and tags of an item |
@@ -96,6 +97,7 @@ pub mod credentials;
 pub mod device;
 pub mod error;
 pub mod export;
+pub mod healing;
 pub mod items;
 pub mod lists;
 pub mod login;

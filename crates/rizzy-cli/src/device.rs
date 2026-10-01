@@ -26,7 +26,13 @@
 //!   device (§11.3 step 3.2);
 //! - a rollback, a fork or an unconfirmed identity change: the alarm is written in the
 //!   transaction that detects it, and the device is read-only from then on, across restarts
-//!   (ADR 0026 §4 step 4).
+//!   (ADR 0026 §4 step 4);
+//! - a rollback is then healed (ADR 0012 §7 steps 1–3, `heal`): still read-only, the device
+//!   re-publishes its bundle chain, state and self-grants and asks again; an answer not below
+//!   the pin lifts the alarm in the transaction that adopts it (ADR 0021 §9 "Server behind").
+//!   Each run with the alarm tries again, except while a pending commit waits (settling it
+//!   would write a new state, not re-publish one). A refused challenge is asked for once more
+//!   with this device's certificate, state and chain ("A device enrolled after the backup").
 //!
 //! # Write order (ADR 0026 §4)
 //!
@@ -100,10 +106,12 @@ use rizzy_client::ClientError;
 use rizzy_client::account::{CertifiedDevice, RevokedDevice, VerifiedAccount};
 use rizzy_client::credentials::PendingCredentialChange;
 use rizzy_client::device::{DeviceState, UnlockedDevice};
+use rizzy_client::healing::{self, HeldAccount};
 use rizzy_client::login::{LoggedIn, LoginInput, start_login};
 use rizzy_client::rizzy_proto::account::{AccountStateQuery, AccountView, DeviceGrantsResponse};
 use rizzy_client::rizzy_proto::auth::{
     DeviceAuthFinishResponse, DeviceAuthStartResponse, LoginFinishResponse, LoginStartResponse,
+    Reconciliation,
 };
 use rizzy_client::rizzy_proto::change::{
     CommitChangeRequest, DeviceSuspensionRequest, SuspendDeviceResponse,
@@ -117,7 +125,10 @@ use rizzy_client::rotation::{
     ConflictOutcome, PendingRotation, RevokeDevice, RotationDone, RotationLevel, RotationOptions,
     start_rotation,
 };
-use rizzy_client::session::{DeviceSession, device_auth_finish, device_auth_start};
+use rizzy_client::session::{
+    DeviceSession, device_auth_finish, device_auth_finish_reconciling, device_auth_start,
+    device_auth_start_reconciling,
+};
 use rizzy_client::store::floors::Floors;
 use rizzy_client::store::load::{self, Loaded};
 use rizzy_client::store::record::{DeviceRecord, Stage};
@@ -253,6 +264,8 @@ pub struct Device {
     certificates: Vec<CertifiedDevice>,
     /// The account's verified revocations.
     revocations: Vec<RevokedDevice>,
+    /// The account objects this device holds, for restore healing (`rizzy_client::healing`).
+    held: HeldAccount,
     /// The authors, for the vault's Fetch.
     authors: Authors,
     /// The personal vault (M1 has one vault per account).
@@ -263,6 +276,9 @@ pub struct Device {
     session: Option<DeviceSession>,
     /// Whether the account answer was verified in this run.
     refreshed: bool,
+    /// Whether this run authenticated with the reconciliation objects (a restored server that
+    /// did not know this device).
+    reconciled: bool,
     /// The master password, kept for this run's re-authentications and the pending record.
     password: Zeroizing<String>,
     /// The OS CSPRNG.
@@ -360,11 +376,13 @@ impl Device {
             unlocked,
             certificates: loaded_account.certificates().to_vec(),
             revocations: loaded_account.revocations().to_vec(),
+            held: HeldAccount::from_account(&loaded_account),
             authors,
             vault,
             alarms,
             session: None,
             refreshed: false,
+            reconciled: false,
             password,
             rng: os_rng(),
         })
@@ -398,6 +416,7 @@ impl Device {
             pending_commit: None,
             state,
             unlocked,
+            held: HeldAccount::from_devices(certificates.clone(), revocations.clone()),
             certificates,
             revocations,
             authors,
@@ -405,6 +424,7 @@ impl Device {
             alarms: BTreeSet::new(),
             session: None,
             refreshed: false,
+            reconciled: false,
             password,
             rng: os_rng(),
         })
@@ -503,16 +523,48 @@ impl Device {
     }
 
     /// Device authentication (CRYPTO.md §5.10): a new session for this run.
+    ///
+    /// A refused challenge is asked for once more with this device's certificate, the pinned
+    /// `account-state` and the bundle chain (ADR 0012 §7 "A device enrolled after the backup"):
+    /// a server restored from a backup taken before this device enrolled does not know it, and
+    /// accepts the carried objects during its reconciliation epoch only. Everything carried is
+    /// public and signed, and the server already held it before the restore. When that second
+    /// attempt is refused too, the first refusal is returned.
     async fn authenticate(&mut self) -> Result<(), CliError> {
+        let refused = match self.authenticate_with(None).await {
+            Err(e @ CliError::Server(ErrorCode::Unauthorized)) => e,
+            other => return other,
+        };
+        let Ok(reconciliation) = healing::reconciliation(&self.state, &self.held) else {
+            return Err(refused);
+        };
+        match self.authenticate_with(Some(reconciliation)).await {
+            Ok(()) => {
+                self.reconciled = true;
+                Ok(())
+            }
+            Err(CliError::Server(ErrorCode::Unauthorized)) => Err(refused),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// One device authentication, plain or carrying `reconciliation`.
+    async fn authenticate_with(
+        &mut self,
+        reconciliation: Option<Reconciliation>,
+    ) -> Result<(), CliError> {
+        let start_request = match &reconciliation {
+            Some(r) => device_auth_start_reconciling(&self.state, r.clone()),
+            None => device_auth_start(&self.state),
+        };
         let start: DeviceAuthStartResponse = self
             .http
-            .post(
-                paths::DEVICE_AUTH_START,
-                &device_auth_start(&self.state),
-                Auth::None,
-            )
+            .post(paths::DEVICE_AUTH_START, &start_request, Auth::None)
             .await?;
-        let finish = device_auth_finish(&self.state, &self.unlocked, &start)?;
+        let finish = match reconciliation {
+            Some(r) => device_auth_finish_reconciling(&self.state, &self.unlocked, &start, r)?,
+            None => device_auth_finish(&self.state, &self.unlocked, &start)?,
+        };
         let answer: DeviceAuthFinishResponse = self
             .http
             .post(paths::DEVICE_AUTH_FINISH, &finish, Auth::None)
@@ -580,17 +632,28 @@ impl Device {
         if self.refreshed {
             return Ok(());
         }
-        // Rollback, fork and an outdated device state end the online life of this file. An
-        // unconfirmed identity change is asked about again below.
-        if let Some(alarm) = self
-            .alarms
-            .iter()
-            .find(|a| **a != Alarm::UnconfirmedIdentityChange)
-        {
+        // A fork and an outdated device state end the online life of this file. An unconfirmed
+        // identity change is asked about again below; under a rollback the device, still
+        // read-only, re-publishes and asks again (ADR 0012 §7, ADR 0021 §9 "Server behind";
+        // `heal`). With a pending commit it does not: settling would resend a new state, which is
+        // a write, not a re-publication, so the pending record waits under the alarm.
+        let pending = self.record.has_pending();
+        if let Some(alarm) = self.alarms.iter().find(|a| match a {
+            Alarm::UnconfirmedIdentityChange => false,
+            Alarm::Rollback => pending,
+            _ => true,
+        }) {
             return Err(CliError::Alarm(*alarm));
         }
         if self.session.is_none() {
             self.authenticate().await?;
+        }
+        if self.reconciled {
+            ui.note(
+                "The server did not know this device (restored from a backup taken before it \
+                 was added?). It was shown this device's certificate and the account's signed \
+                 state.",
+            );
         }
         if self.record.has_pending() {
             self.settle_pending(ui).await?;
@@ -608,9 +671,23 @@ impl Device {
     }
 
     /// Fetches and verifies the account answer (module docs, "Going online").
+    ///
+    /// A rollback (the server's state, or its self-grant, behind this device's) is written as
+    /// the alarm, then healed once: the account objects are re-published
+    /// ([`Device::heal_account`]) and the answer is asked for and verified again, which lifts
+    /// the alarm if the server no longer serves anything older.
     async fn refresh(&mut self, ui: &mut dyn Ui) -> Result<(), CliError> {
         let view = self.account_view().await?;
-        self.apply_view(ui, &view, Changeset::new(), false).await
+        match self.apply_view(ui, &view, Changeset::new(), false).await {
+            Err(CliError::Alarm(Alarm::Rollback)) => {
+                self.heal_account(ui).await?;
+                let view = self.account_view().await?;
+                self.apply_view(ui, &view, Changeset::new(), false).await?;
+                ui.note("The server holds this device's account state again.");
+                Ok(())
+            }
+            other => other,
+        }
     }
 
     /// Verifies `view` against the pin and persists the outcome. `before` holds writes that
@@ -781,10 +858,23 @@ impl Device {
             }
             Err(e) => return Err(e.into()),
         }
+        // ADR 0021 §9 "Server behind": the verified state is not below the pin (the floors keep
+        // it so) and the self-grant not below the held vault key, so a rollback alarm is
+        // resolved: "the device leaves read-only once none holds". It is cleared in the
+        // transaction that adopts the answer (ADR 0026 §4 step 4).
+        let resolves_rollback = self.alarms.contains(&Alarm::Rollback);
+        if resolves_rollback {
+            changeset.push(Write::ClearAlarm(Alarm::Rollback));
+        }
         if self.vault.vault_key_epoch() != epoch && self.fetch_into(&mut changeset).await? {
             self.raise(&mut changeset, Alarm::DeviceStateOutdated, &[])?;
         }
         self.commit(changeset).await?;
+        self.held.absorb(&account);
+        if resolves_rollback {
+            self.alarms.remove(&Alarm::Rollback);
+            self.vault.set_read_only(!self.alarms.is_empty());
+        }
         self.check_writable()
     }
 
