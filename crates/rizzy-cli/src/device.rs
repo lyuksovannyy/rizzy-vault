@@ -63,6 +63,18 @@
 //! the stored commit's bundle byte for byte. Any other identity change (a full rotation by
 //! another device after this one's) is shown and confirmed like any other.
 //!
+//! A pending **password or Secret Key change** (CRYPTO.md §11.5; `credentials`) is settled the
+//! same way, except that its pending record unlocks with the new password only, which the
+//! settling run asks for, and that a change without a rotation is recognised by the served
+//! state or, when that cannot tell, by a login with the pending credentials.
+//!
+//! # A password or Secret Key change elsewhere (CRYPTO.md §11.3 step 5)
+//!
+//! When the account answer shows a higher `password_epoch`, the new password (and, if the
+//! stored one no longer logs in, the new Secret Key) is asked for, `E_local` is re-created
+//! under it with a new salt, and the record is written in the transaction that adopts the
+//! answer.
+//!
 //! # An older copy of the device state (ADR 0026 §4 step 7, owner decision on open question 5)
 //!
 //! When a Fetch shows the server holding an own dot this file lacks, or an upload is refused
@@ -77,9 +89,10 @@ use std::path::PathBuf;
 
 use rizzy_client::ClientError;
 use rizzy_client::account::{CertifiedDevice, RevokedDevice, VerifiedAccount};
+use rizzy_client::credentials::PendingCredentialChange;
 use rizzy_client::device::{DeviceState, UnlockedDevice};
 use rizzy_client::login::{LoggedIn, LoginInput, start_login};
-use rizzy_client::rizzy_proto::account::{AccountView, DeviceGrantsResponse};
+use rizzy_client::rizzy_proto::account::{AccountStateQuery, AccountView, DeviceGrantsResponse};
 use rizzy_client::rizzy_proto::auth::{
     DeviceAuthFinishResponse, DeviceAuthStartResponse, LoginFinishResponse, LoginStartResponse,
 };
@@ -92,7 +105,8 @@ use rizzy_client::rizzy_proto::recovery::RecoveryCancelResponse;
 use rizzy_client::rizzy_proto::vault::{FetchResponse, UploadResponse};
 use rizzy_client::rizzy_proto::wire::{Id, SessionToken};
 use rizzy_client::rotation::{
-    ConflictOutcome, RevokeDevice, RotationLevel, RotationOptions, start_rotation,
+    ConflictOutcome, PendingRotation, RevokeDevice, RotationDone, RotationLevel, RotationOptions,
+    start_rotation,
 };
 use rizzy_client::session::{DeviceSession, device_auth_finish, device_auth_start};
 use rizzy_client::store::floors::Floors;
@@ -116,6 +130,9 @@ use crate::http::{Auth, Http};
 use crate::paths::{AccountLock, cache_path, check_data_dir, enrolled_accounts, hex};
 use crate::sys::{OsRng, now_ms, os_rng};
 use crate::ui::Ui;
+
+mod credentials;
+pub use credentials::{CredentialChange, CredentialOutcome};
 
 /// What a command runs in: where the local data is, which account, and the user.
 pub struct Env<'a> {
@@ -621,6 +638,18 @@ impl Device {
         let verified = verify_unlock(&mut self.state, &self.unlocked, view, confirmed.as_ref());
         let (account, changeset) = match verified {
             Ok(account) => (account, before),
+            // §11.3 step 5: the password or the Secret Key changed elsewhere. `E_local` is
+            // re-created under the new password (in memory), the answer verified again, and the
+            // record written in the transaction that adopts the answer.
+            Err(ClientError::PasswordChangedElsewhere) => {
+                Box::pin(self.follow_credential_change(ui)).await?;
+                let account =
+                    verify_unlock(&mut self.state, &self.unlocked, view, confirmed.as_ref())?;
+                self.record = self.state.record(Stage::Committed)?;
+                let mut changeset = before;
+                changeset.push(store::record_write(&self.record)?);
+                (account, changeset)
+            }
             Err(ClientError::AccountKeyRotated) => {
                 // §11.3 step 4: the grants, the re-wrapped record, then the answer again.
                 let session = self
@@ -639,8 +668,21 @@ impl Device {
                     &grants,
                     confirmed.as_ref(),
                 )?;
-                let account =
-                    verify_unlock(&mut self.state, &self.unlocked, view, confirmed.as_ref())?;
+                let account = match verify_unlock(
+                    &mut self.state,
+                    &self.unlocked,
+                    view,
+                    confirmed.as_ref(),
+                ) {
+                    // A rotation together with a credential change (a Secret Key change
+                    // rotates by default, CRYPTO.md §11.5): §11.3 step 5 after step 4,
+                    // under the delivered key, before anything is written.
+                    Err(ClientError::PasswordChangedElsewhere) => {
+                        Box::pin(self.follow_credential_change(ui)).await?;
+                        verify_unlock(&mut self.state, &self.unlocked, view, confirmed.as_ref())?
+                    }
+                    other => other?,
+                };
                 self.record = self.state.record(Stage::Committed)?;
                 let mut changeset = before;
                 changeset.push(store::record_write(&self.record)?);
@@ -863,6 +905,47 @@ impl Device {
         self.commit(store::finalize_writes(&self.record)?).await
     }
 
+    /// Drops a pending change found at start that the server does not hold (`settle_pending`),
+    /// tells the user which credentials and Emergency Kit are the valid ones, and refreshes.
+    /// `credential`: it was a master password or Secret Key change, whose kit, if it showed
+    /// one, must not be taken for the valid one. `gone`: neither its credentials nor the
+    /// previous ones log in any more (they were changed again on another device, which the
+    /// refresh then follows).
+    async fn drop_unsettled(
+        &mut self,
+        ui: &mut dyn Ui,
+        credential: bool,
+        gone: bool,
+    ) -> Result<(), CliError> {
+        self.abandon_pending().await?;
+        ui.note(match (credential, gone) {
+            (true, true) => {
+                "Neither the credentials of the interrupted change nor the previous ones log in \
+                 any more: the master password or the Secret Key was changed again on another \
+                 device. The interrupted change is dropped. Keep every Emergency Kit until this \
+                 device works again: the next prompts ask for the account's current master \
+                 password, and for the Secret Key of its newest kit if needed."
+            }
+            (false, true) => {
+                "The master password or the Secret Key was changed on another device since the \
+                 rotation was interrupted; the rotation is dropped. Run it again once this \
+                 device follows the change."
+            }
+            (true, false) => {
+                "The server did not take the interrupted change of the master password or \
+                 Secret Key (the account changed since): the change was NOT made. The new \
+                 Emergency Kit it showed, if any, is void, its Secret Key and any recovery code \
+                 on it alike. Your previous master password, Secret Key and Emergency Kit, with \
+                 its recovery code, stay the valid ones. Run the command again."
+            }
+            (false, false) => {
+                "The server did not take the interrupted rotation (the account changed since). \
+                 Nothing was rotated; run the command again."
+            }
+        });
+        self.refresh(ui).await
+    }
+
     /// Settles a pending rotation found at start (module docs).
     async fn settle_pending(&mut self, ui: &mut dyn Ui) -> Result<(), CliError> {
         let commit = self
@@ -872,17 +955,55 @@ impl Device {
         // The stored body is parsed back only through `rizzy-proto` (ADR 0026 §3).
         let request: CommitChangeRequest =
             serde_json::from_slice(&commit).map_err(|_| ClientError::CacheCorrupt)?;
+        // A password or Secret Key change (CRYPTO.md §11.5): its pending record unlocks with
+        // the new password only, and whether the server took it is asked with a login.
+        let mut credential = None;
+        if self.record.pending_changes_password() {
+            ui.note(
+                "A change of the master password or Secret Key was interrupted before the \
+                 server answered; settling it.",
+            );
+            let name = ui.line("Login name")?;
+            let new_password = ui.secret("The new master password of that change")?;
+            credential = Some((name, new_password));
+        }
         // The keys the device holds once the commit is applied (one more Argon2id run).
-        let pending_unlocked = self.record.unlock_pending(&self.password)?;
+        let pending_unlocked = self.record.unlock_pending(
+            credential
+                .as_ref()
+                .map_or(self.password.as_str(), |(_, p)| p.as_str()),
+        )?;
         let promoted = DeviceRecord::parse(&self.record.encode()?)?.promote_pending();
         let mut view = self.account_view().await?;
         let mut applied = self
-            .pending_applied(&request, &promoted, &pending_unlocked, &view)
+            .settled(
+                ui,
+                &request,
+                &promoted,
+                &pending_unlocked,
+                &view,
+                credential.as_ref(),
+            )
             .await?;
         if !applied {
             ui.note("A key rotation was interrupted before the server answered; sending it again.");
-            let name = ui.line("Login name")?;
-            let reauth = self.reauth(ui, &name).await?;
+            let name = match &credential {
+                Some((name, _)) => name.clone(),
+                None => ui.line("Login name")?,
+            };
+            let reauth = match self.reauth(ui, &name).await {
+                Ok(reauth) => reauth,
+                // The current credentials no longer log in, and the change was found not
+                // applied (for a credential change: its own credentials did not log in
+                // either), so they were changed again on another device. The record holds no
+                // key the device needs (`credentials` module docs), and keeping it would fail
+                // every later run the same way: it is dropped, and the refresh follows the
+                // other change (CRYPTO.md §11.3 step 5).
+                Err(CliError::Client(ClientError::WrongPasswordOrSecretKey)) => {
+                    return self.drop_unsettled(ui, credential.is_some(), true).await;
+                }
+                Err(e) => return Err(e),
+            };
             let sent = self
                 .http
                 .post_bytes_empty(
@@ -901,7 +1022,14 @@ impl Device {
                 Err(e) if e.refuses_commit() => {
                     view = self.account_view().await?;
                     applied = self
-                        .pending_applied(&request, &promoted, &pending_unlocked, &view)
+                        .settled(
+                            ui,
+                            &request,
+                            &promoted,
+                            &pending_unlocked,
+                            &view,
+                            credential.as_ref(),
+                        )
                         .await?;
                 }
                 // Unknown outcome (no answer, a proxy's page, `internal`, a rate limit): the
@@ -918,17 +1046,16 @@ impl Device {
         if !applied {
             // The keys of the rotation died with the process that made them; it cannot be
             // rebuilt on the changed account, only started again.
-            self.abandon_pending().await?;
-            ui.note(
-                "The server did not take the interrupted rotation (the account changed since). \
-                 Nothing was rotated; run the command again.",
-            );
-            return self.refresh(ui).await;
+            return self.drop_unsettled(ui, credential.is_some(), false).await;
         }
         // CRYPTO.md §11 step 5: the pending keys become the device's, in the transaction that
         // also writes the new state.
         self.state = promoted.to_state(self.state.pin().clone())?;
         self.unlocked = pending_unlocked;
+        if let Some((_, new_password)) = credential {
+            // From here on this device unlocks, and re-authenticates, with the new password.
+            self.password = new_password;
+        }
         let finalize = store::finalize_writes(&promoted)?;
         self.record = promoted;
         self.pending_commit = None;
@@ -976,7 +1103,9 @@ impl Device {
         let mut probe = promoted.to_state(self.state.pin().clone())?;
         let own_identity = identity_change_fingerprint(&probe, view).ok().flatten();
         match verify_unlock(&mut probe, pending_unlocked, view, own_identity.as_ref()) {
-            Ok(_) => Ok(true),
+            // A later password change elsewhere is reported only after the pending account
+            // key verified the answer: the key is this rotation's.
+            Ok(_) | Err(ClientError::PasswordChangedElsewhere) => Ok(true),
             Err(ClientError::AccountKeyRotated) => {
                 let session = self
                     .session
@@ -1090,7 +1219,10 @@ impl Device {
             .state
             .record(Stage::Committed)?
             .with_pending(pending_record);
-        Ok(RotationInFlight { pending, token })
+        Ok(RotationInFlight {
+            pending: Flight::Rotation(Box::new(pending)),
+            token,
+        })
     }
 
     /// ADR 0026 §4 step 3: writes the pending record and the exact JSON body of the commit,
@@ -1104,7 +1236,7 @@ impl Device {
         &mut self,
         flight: &RotationInFlight,
     ) -> Result<Vec<u8>, CliError> {
-        let body = serde_json::to_vec(flight.pending.commit_request())
+        let body = serde_json::to_vec(flight.pending.commit_request()?)
             .map_err(|_| ClientError::Internal)?;
         self.commit(store::pending_writes(&self.record, &body)?)
             .await?;
@@ -1279,14 +1411,15 @@ impl Device {
     }
 }
 
-/// A rotation built and not yet finalised ([`Device::begin_rotation`]): the pending rotation
+/// A rotation (or a credential change, which commits the same way) built and not yet
+/// finalised ([`Device::begin_rotation`], `Device::change_credentials`): the pending change
 /// of the client core, which holds the new keys, and the fresh OPAQUE session's token. Dropping
 /// it wipes the keys; a pending record already written stays for the next run to settle.
 pub struct RotationInFlight {
     /// The rotation.
-    pending: rizzy_client::rotation::PendingRotation,
+    pub(crate) pending: Flight,
     /// The bearer token of the re-authentication.
-    token: SessionToken,
+    pub(crate) token: SessionToken,
 }
 
 impl std::fmt::Debug for RotationInFlight {
@@ -1294,5 +1427,70 @@ impl std::fmt::Debug for RotationInFlight {
         f.debug_struct("RotationInFlight")
             .field("pending", &self.pending)
             .finish_non_exhaustive()
+    }
+}
+
+/// What a [`RotationInFlight`] commits: a key rotation (CRYPTO.md §11.6, §11.8), or a password
+/// or Secret Key change, with or without a rotation (§11.5). Both are one `account/commit` with
+/// a pending record, the same retry rule and the same finalisation.
+#[derive(Debug)]
+pub(crate) enum Flight {
+    /// A key rotation.
+    Rotation(Box<PendingRotation>),
+    /// A credential change.
+    Credential(Box<PendingCredentialChange>),
+}
+
+impl Flight {
+    /// The commit to send.
+    fn commit_request(&self) -> Result<&CommitChangeRequest, ClientError> {
+        match self {
+            Self::Rotation(r) => Ok(r.commit_request()),
+            Self::Credential(c) => c.commit_request(),
+        }
+    }
+
+    /// What to fetch after a `state_conflict`.
+    fn state_query(&self) -> AccountStateQuery {
+        match self {
+            Self::Rotation(r) => r.state_query(),
+            Self::Credential(c) => c.state_query(),
+        }
+    }
+
+    /// The retry rule after a `state_conflict`.
+    fn on_state_conflict(
+        &mut self,
+        rng: &mut OsRng,
+        view: &AccountView,
+        unlocked: &UnlockedDevice,
+        vaults: &[&VaultSync],
+    ) -> Result<ConflictOutcome, ClientError> {
+        match self {
+            Self::Rotation(r) => r.on_state_conflict(rng, view, unlocked, vaults),
+            Self::Credential(c) => c.on_state_conflict(rng, view, unlocked, vaults),
+        }
+    }
+
+    /// The cache writes of the committed state.
+    fn store_writes(&self) -> Result<Changeset, ClientError> {
+        match self {
+            Self::Rotation(r) => r.store_writes(),
+            Self::Credential(c) => c.store_writes(),
+        }
+    }
+
+    /// Finalises the device state after the acknowledgement.
+    fn finalize(
+        self,
+        rng: &mut OsRng,
+        state: &mut DeviceState,
+        unlocked: &mut UnlockedDevice,
+        vaults: &mut [&mut VaultSync],
+    ) -> Result<RotationDone, ClientError> {
+        match self {
+            Self::Rotation(r) => (*r).finalize(rng, state, unlocked, vaults),
+            Self::Credential(c) => (*c).finalize(rng, state, unlocked, vaults),
+        }
     }
 }

@@ -59,9 +59,10 @@
 //!
 //! # Not in this build (reported)
 //!
-//! - A rotation that issues a **new recovery code** (§11.6 step 5 default, and the SK change and
-//!   recovery that require one): only keeping the current code, or an account with recovery
-//!   off, is supported; a rotation of an account with recovery on needs its current code.
+//! - A standalone rotation that issues a **new recovery code** (§11.6 step 5 default): a
+//!   rotation by itself keeps the current code (an account with recovery on needs it typed).
+//!   A new code is issued only by the rotation of a Secret Key change
+//!   (`start_rotation_with`, [`crate::credentials`]) and by recovery ([`crate::recovery`]).
 //! - **Re-wrapping older retired keys** (§11.6 step 3): the account view carries no
 //!   `RETIRED_SECRET_KEY`, so only the identity key this rotation retires is sent.
 //! - A rotation by a **web vault** (kind 4) and the **rotating recovery** of §11.9 step 5 on the
@@ -91,6 +92,7 @@ use rizzy_core::sign::{
     PublicKeyBundle, VerifiedBundle,
 };
 use rizzy_proto::account::{AccountStateQuery, AccountView};
+use rizzy_proto::auth::RecoveryRegistration;
 use rizzy_proto::change::{
     CommitChangeRequest, RetiredSecretKey, VaultRotation, VaultRotationUpload, WrapLocator,
 };
@@ -99,7 +101,7 @@ use rizzy_proto::objects::{
     ItemKeyWrap, VaultSelfGrant,
 };
 use rizzy_proto::vault::SeqVector;
-use rizzy_proto::wire::{List, SessionToken};
+use rizzy_proto::wire::{Fixed, List, SessionToken};
 
 use rizzy_core::envelope::purpose::DeviceSecretKeysCtx;
 use rizzy_core::secret_key::SecretKey;
@@ -107,6 +109,7 @@ use rizzy_core::secret_key::SecretKey;
 use crate::account::{
     AccountPin, Anchor, CertifiedDevice, RevokedDevice, ServedObjects, verify_public,
 };
+use crate::credentials::{CredentialPart, NewCredential};
 use crate::device::{DeviceState, LocalWrap, UnlockedDevice, wrap_local};
 use crate::error::{ClientError, internal};
 use crate::login::LoggedIn;
@@ -290,6 +293,8 @@ struct Built {
     e_id: IdentitySecretKeys,
     /// `E_rec'` for a kept code.
     recovery_rewrap: Option<AccountKeyRecoveryWrap>,
+    /// `E_rec'` and `H_rec'` of a new code (a Secret Key change's rotation).
+    recovery: Option<RecoveryRegistration>,
     /// The re-encrypted settings.
     settings: Option<AccountSettings>,
     /// The retired identity key of a full rotation.
@@ -362,6 +367,8 @@ pub struct PendingRotation {
     /// `E_local'` and `E_dev'` as [`PendingRotation::pending_record`] built them, which
     /// [`PendingRotation::finalize`] then adopts unchanged.
     prepared: Option<(LocalWrap, Vec<u8>)>,
+    /// The new credential committed with this rotation ([`start_rotation_with`]), if any.
+    credential: Option<CredentialPart>,
 }
 
 impl fmt::Debug for PendingRotation {
@@ -393,8 +400,9 @@ impl fmt::Debug for RotationDone {
     }
 }
 
-/// Checks the re-authentication against this device's pin and keys (module docs).
-fn check_reauth(
+/// Checks the re-authentication against this device's pin and keys (module docs). Also the
+/// check of a credential change ([`crate::credentials`]) and of following one made elsewhere.
+pub(crate) fn check_reauth(
     reauth: &LoggedIn,
     device: &DeviceState,
     unlocked: &UnlockedDevice,
@@ -470,10 +478,6 @@ fn ordered<'a>(
 /// and [`ClientError::AccountKeyRotated`] when the re-authentication's account is not the one
 /// this device pinned; [`ClientError::SyncRequired`] and [`ClientError::ReadOnly`] from the
 /// vaults; [`ClientError::InvalidServerResponse`]; [`ClientError::Internal`].
-#[expect(
-    clippy::too_many_lines,
-    reason = "CRYPTO.md §11.6 steps 2–5 and 7 in order, each a few lines, then the first attempt"
-)]
 pub fn start_rotation<R: CryptoRng + ?Sized>(
     rng: &mut R,
     reauth: LoggedIn,
@@ -481,6 +485,35 @@ pub fn start_rotation<R: CryptoRng + ?Sized>(
     unlocked: &UnlockedDevice,
     vaults: &[&VaultSync],
     options: &RotationOptions<'_>,
+) -> Result<PendingRotation, ClientError> {
+    start_rotation_with(rng, reauth, device, unlocked, vaults, options, None)
+}
+
+/// [`start_rotation`], optionally committing a new credential in the same request: the
+/// rotation of a Secret Key change (by default) or of a password change with "also rotate
+/// keys" (CRYPTO.md §11.5 "Rotation"). With `credential`:
+/// - `E_srv'` is under the new registration's `export_key`, at `password_epoch + 1` and the
+///   new `kdf_id`, and the new state carries both;
+/// - when `credential` issues a new recovery code (an SK change, §11.6 step 5 forbids keeping
+///   the code then), `E_rec'` and `H_rec'` at `recovery_epoch + 1` replace the kept-code rewrap,
+///   and [`RotationOptions::recovery_code`] must be `None`;
+/// - the pending record and the finalised device state carry the new Secret Key, a new
+///   `device_salt`, the new `kdf_id` and `E_local'` under the new password's local unlock key.
+///
+/// # Errors
+/// As [`start_rotation`].
+#[expect(
+    clippy::too_many_lines,
+    reason = "CRYPTO.md §11.6 steps 2–5 and 7 in order, each a few lines, then the first attempt"
+)]
+pub(crate) fn start_rotation_with<R: CryptoRng + ?Sized>(
+    rng: &mut R,
+    reauth: LoggedIn,
+    device: &DeviceState,
+    unlocked: &UnlockedDevice,
+    vaults: &[&VaultSync],
+    options: &RotationOptions<'_>,
+    credential: Option<NewCredential>,
 ) -> Result<PendingRotation, ClientError> {
     check_reauth(&reauth, device, unlocked)?;
     let LoggedIn {
@@ -509,7 +542,14 @@ pub fn start_rotation<R: CryptoRng + ?Sized>(
             return Err(ClientError::InvalidInput);
         }
     }
-    if state.recovery_enabled != options.recovery_code.is_some() {
+    let issues_code = credential
+        .as_ref()
+        .is_some_and(|c| c.recovery_code.is_some());
+    if issues_code {
+        if !state.recovery_enabled || options.recovery_code.is_some() {
+            return Err(ClientError::InvalidInput);
+        }
+    } else if state.recovery_enabled != options.recovery_code.is_some() {
         return Err(ClientError::InvalidInput);
     }
 
@@ -538,7 +578,12 @@ pub fn start_rotation<R: CryptoRng + ?Sized>(
 
     // Steps 3–5 and 7 (the bundle): the objects that depend only on the keys.
     let new_epoch = new_account_key.epoch();
-    let e_srv = export_key
+    // With a new credential, E_srv' is under its registration's export_key and epochs.
+    let (srv_export_key, password_epoch, kdf_id) = match &credential {
+        Some(c) => (&c.export_key, c.part.password_epoch, c.part.kdf_id),
+        None => (&export_key, state.password_epoch, state.kdf_id),
+    };
+    let e_srv = srv_export_key
         .server_unlock_key(account_id)
         .map_err(internal)?
         .wrap_account_key(
@@ -546,8 +591,8 @@ pub fn start_rotation<R: CryptoRng + ?Sized>(
             &AccountKeyServerWrapCtx {
                 account_id,
                 account_key_epoch: new_epoch,
-                password_epoch: state.password_epoch,
-                kdf_id: state.kdf_id,
+                password_epoch,
+                kdf_id,
             },
             &new_account_key,
         )
@@ -561,6 +606,26 @@ pub fn start_rotation<R: CryptoRng + ?Sized>(
             &new_account_key,
             text,
         )?),
+    };
+    let (credential, recovery) = match credential {
+        None => (None, None),
+        Some(NewCredential {
+            part,
+            export_key: _,
+            recovery_code,
+        }) => {
+            let recovery = match recovery_code {
+                None => None,
+                Some(code) => Some(issue_recovery_code(
+                    rng,
+                    account_id,
+                    state,
+                    &new_account_key,
+                    &code,
+                )?),
+            };
+            (Some(part), recovery)
+        }
     };
     let settings = reencrypt_settings(rng, &base, &old_account_key, &new_account_key)?;
     let (signer, bundle, retired) = match new_identity {
@@ -590,10 +655,11 @@ pub fn start_rotation<R: CryptoRng + ?Sized>(
     let built = Built {
         e_srv: AccountKeyServerWrap {
             account_key_epoch: new_epoch,
-            password_epoch: state.password_epoch,
-            kdf_id: state.kdf_id.get(),
+            password_epoch,
+            kdf_id: kdf_id.get(),
             envelope: bytes(e_srv)?,
         },
+        recovery,
         e_id: IdentitySecretKeys {
             identity_epoch: signer.epoch(),
             envelope: bytes(e_id)?,
@@ -648,6 +714,7 @@ pub fn start_rotation<R: CryptoRng + ?Sized>(
         },
         rebuilds: 0,
         prepared: None,
+        credential,
     };
     pending.build_account(rng, unlocked, &ordered_vaults)?;
     pending.build_vaults(rng, &ordered_vaults)?;
@@ -820,6 +887,17 @@ impl PendingRotation {
                 settings_hash(settings.settings_seq, Some(settings.envelope.as_slice()))
                     .ok_or(ClientError::Internal)?;
         }
+        // A credential change committed with the rotation (CRYPTO.md §11 "Replacing
+        // credentials"): `password_epoch + 1`, the new record's `kdf_id`, and `recovery_epoch
+        // + 1` with a new code.
+        if let Some(credential) = &self.credential {
+            state.password_epoch = credential.password_epoch;
+            state.kdf_id = credential.kdf_id;
+        }
+        if let Some(recovery) = &self.built.recovery {
+            state.recovery_epoch = recovery.recovery_wrap.recovery_epoch;
+            state.recovery_enabled = true;
+        }
         let state_wire = state.sign(signing).map_err(internal)?;
         self.account = AccountPart {
             state,
@@ -953,9 +1031,12 @@ impl PendingRotation {
         .map_err(internal)?;
         self.request = CommitChangeRequest {
             account_state: bytes(self.account.state_wire.clone())?,
-            registration_upload: None,
+            registration_upload: self
+                .credential
+                .as_ref()
+                .map(|c| c.registration_upload.clone()),
             account_key_server_wrap: Some(self.built.e_srv.clone()),
-            recovery: None,
+            recovery: self.built.recovery.clone(),
             account_settings: self.built.settings.clone(),
             device_certificates: statements(&self.account.certificates)?,
             device_revocations: revocations,
@@ -1058,7 +1139,7 @@ impl PendingRotation {
     /// [`ClientError::InvalidInput`] for another device's state or a vault set that is not the
     /// rotated one; the errors of [`VaultSync::adopt_vault_key`]; [`ClientError::Internal`].
     pub fn finalize<R: CryptoRng + ?Sized>(
-        self,
+        mut self,
         rng: &mut R,
         device: &mut DeviceState,
         unlocked: &mut UnlockedDevice,
@@ -1075,7 +1156,12 @@ impl PendingRotation {
         {
             return Err(ClientError::InvalidInput);
         }
-        if let Some((local_wrap, device_keys_wrap)) = self.prepared {
+        // A credential change needs `E_local'` under the new password: the one the pending
+        // record holds, built now if the host kept none.
+        if self.credential.is_some() {
+            self.prepare(rng, device, unlocked)?;
+        }
+        if let Some((local_wrap, device_keys_wrap)) = self.prepared.take() {
             // The envelopes the pending record holds on disk: the finalised state is those
             // bytes, not a second wrap of the same key.
             device.local_wrap = local_wrap;
@@ -1097,6 +1183,9 @@ impl PendingRotation {
                 &derived
             };
             device.rewrap(rng, local, &self.new_account_key, &unlocked.device_keys)?;
+        }
+        if let Some(credential) = self.credential.take() {
+            credential.apply(device, unlocked);
         }
         device.pin = AccountPin {
             bundle: match self.built.bundle {
@@ -1155,6 +1244,44 @@ fn keep_recovery_code<R: CryptoRng + ?Sized>(
         account_key_epoch: new_epoch,
         recovery_epoch: state.recovery_epoch,
         envelope: bytes(envelope)?,
+    })
+}
+
+/// `E_rec'` and `H_rec'` of a new recovery code `code` (CRYPTO.md §11.6 step 5, the default
+/// and, after a Secret Key change, the only choice): the new `account_key_epoch` and
+/// `recovery_epoch + 1`, as at recovery (§11.9 step 5).
+fn issue_recovery_code<R: CryptoRng + ?Sized>(
+    rng: &mut R,
+    account_id: AccountId,
+    state: &AccountState,
+    new_account_key: &AccountKey,
+    code: &RecoveryCode,
+) -> Result<RecoveryRegistration, ClientError> {
+    let new_epoch = new_account_key.epoch();
+    let recovery_epoch = state
+        .recovery_epoch
+        .checked_add(1)
+        .ok_or(ClientError::Internal)?;
+    let envelope = code
+        .wrap_key()
+        .map_err(internal)?
+        .wrap_account_key(
+            rng,
+            &AccountKeyRecoveryWrapCtx {
+                account_id,
+                account_key_epoch: new_epoch,
+                recovery_epoch,
+            },
+            new_account_key,
+        )
+        .map_err(internal)?;
+    Ok(RecoveryRegistration {
+        recovery_wrap: AccountKeyRecoveryWrap {
+            account_key_epoch: new_epoch,
+            recovery_epoch,
+            envelope: bytes(envelope)?,
+        },
+        recovery_token_hash: Fixed::from_bytes(code.auth_token().map_err(internal)?.server_hash()),
     })
 }
 
@@ -1263,14 +1390,18 @@ fn change_identity<R: CryptoRng + ?Sized>(
 
 impl PendingRotation {
     /// The pending record of this rotation (CRYPTO.md §11 "Secrets before commit" step 3;
-    /// ADR 0026 §2 "Pending record"): the unchanged Secret Key, salt and `kdf_id`, the new
-    /// account key as `E_local'` under the current password's local unlock key, and `E_dev'`.
-    /// The host stores it with the commit's JSON body ([`crate::store::pending_writes`]) before
-    /// it sends the commit; [`PendingRotation::finalize`] then adopts exactly these envelopes,
-    /// so the state on disk after a crash and the state after the commit are the same bytes.
+    /// ADR 0026 §2 "Pending record"): the Secret Key, salt and `kdf_id` after the commit
+    /// (unchanged, unless a credential change rides with the rotation), the new account key as
+    /// `E_local'` under the local unlock key of the password that is current after the commit,
+    /// and `E_dev'`. The host stores it with the commit's JSON body
+    /// ([`crate::store::pending_writes`]) before it sends the commit;
+    /// [`PendingRotation::finalize`] then adopts exactly these envelopes, so the state on disk
+    /// after a crash and the state after the commit are the same bytes.
     ///
-    /// `E_local'` needs the local unlock key: the one `unlocked` kept from the password unlock,
-    /// or else one derived again from the re-authentication's password (one Argon2id run).
+    /// Without a credential change, `E_local'` needs the local unlock key: the one `unlocked`
+    /// kept from the password unlock, or else one derived again from the re-authentication's
+    /// password (one Argon2id run). With one, the new password's key is derived once (one
+    /// Argon2id run, CRYPTO.md §11.5 "Argon2id runs").
     ///
     /// # Errors
     /// [`ClientError::InvalidInput`] for another device's state; [`ClientError::Internal`].
@@ -1280,13 +1411,49 @@ impl PendingRotation {
         device: &DeviceState,
         unlocked: &UnlockedDevice,
     ) -> Result<PendingRecord, ClientError> {
+        self.prepare(rng, device, unlocked)?;
+        let (local_wrap, device_keys_wrap) = self.prepared.clone().ok_or(ClientError::Internal)?;
+        let (secret_key, device_salt, kdf_id) = match &self.credential {
+            Some(credential) => (
+                &credential.secret_key,
+                credential.device_salt,
+                credential.kdf_id,
+            ),
+            None => (&device.secret_key, device.device_salt, device.kdf_id),
+        };
+        Ok(PendingRecord {
+            secret_key: SecretKey::from_slice(secret_key.expose_secret()).map_err(internal)?,
+            device_salt,
+            kdf_id,
+            local_wrap,
+            device_keys_wrap: Some(device_keys_wrap),
+        })
+    }
+
+    /// Builds `E_local'` and `E_dev'` once ([`PendingRotation::pending_record`]).
+    fn prepare<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        device: &DeviceState,
+        unlocked: &UnlockedDevice,
+    ) -> Result<(), ClientError> {
         if device.device_id != self.device_id
             || unlocked.device_id != self.device_id
             || device.account_id != self.account_id
         {
             return Err(ClientError::InvalidInput);
         }
-        if self.prepared.is_none() {
+        if self.prepared.is_some() {
+            return Ok(());
+        }
+        let local_wrap = if let Some(credential) = self.credential.as_mut() {
+            credential.local_wrap(
+                rng,
+                device.account_id,
+                device.device_id,
+                &self.new_account_key,
+            )?
+        } else {
             let derived;
             let local = if let Some(local) = unlocked.local_unlock_key.as_ref() {
                 local
@@ -1302,7 +1469,7 @@ impl PendingRotation {
                     .map_err(internal)?;
                 &derived
             };
-            let local_wrap = wrap_local(
+            wrap_local(
                 rng,
                 local,
                 device.account_id,
@@ -1310,29 +1477,21 @@ impl PendingRotation {
                 device.kdf_id,
                 &self.new_account_key,
                 device.local_password_epoch(),
-            )?;
-            let device_keys_wrap = self
-                .new_account_key
-                .wrap_device_keys(
-                    rng,
-                    &DeviceSecretKeysCtx {
-                        account_id: device.account_id,
-                        device_id: device.device_id,
-                    },
-                    &unlocked.device_keys,
-                )
-                .map_err(internal)?;
-            self.prepared = Some((local_wrap, device_keys_wrap));
-        }
-        let (local_wrap, device_keys_wrap) = self.prepared.clone().ok_or(ClientError::Internal)?;
-        Ok(PendingRecord {
-            secret_key: SecretKey::from_slice(device.secret_key.expose_secret())
-                .map_err(internal)?,
-            device_salt: device.device_salt,
-            kdf_id: device.kdf_id,
-            local_wrap,
-            device_keys_wrap: Some(device_keys_wrap),
-        })
+            )?
+        };
+        let device_keys_wrap = self
+            .new_account_key
+            .wrap_device_keys(
+                rng,
+                &DeviceSecretKeysCtx {
+                    account_id: device.account_id,
+                    device_id: device.device_id,
+                },
+                &unlocked.device_keys,
+            )
+            .map_err(internal)?;
+        self.prepared = Some((local_wrap, device_keys_wrap));
+        Ok(())
     }
 
     /// The cache writes of the state this rotation commits (ADR 0026 §4 step 3): the new

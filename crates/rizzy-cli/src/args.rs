@@ -41,6 +41,9 @@ USAGE:
     rv recovery start --server <url> --name <login>
     rv recovery complete --server <url> --name <login> [--skip-rotation]
     rv recovery cancel
+    rv password --name <login> [--rotate]
+    rv secret-key --name <login> [--skip-rotation]
+    rv 2fa enable --name <login> | disable --name <login>
 
 OPTIONS:
     --account <id>   The account (hex id) when several are enrolled here
@@ -246,6 +249,27 @@ pub enum Command {
     },
     /// `recovery cancel`.
     RecoveryCancel,
+    /// `password`: a new master password (CRYPTO.md §11.5).
+    Password {
+        /// `--name`: the login name, for the re-authentication.
+        name: String,
+        /// `--rotate`: also rotate the account key and the vault keys.
+        rotate: bool,
+    },
+    /// `secret-key`: a new Secret Key (CRYPTO.md §11.5).
+    SecretKey {
+        /// `--name`.
+        name: String,
+        /// Not `--skip-rotation`: rotate the account and vault keys (the default).
+        rotate: bool,
+    },
+    /// `2fa enable` or `2fa disable`.
+    TwoFactor {
+        /// `--name`.
+        name: String,
+        /// `enable` rather than `disable`.
+        enable: bool,
+    },
 }
 
 /// A command with the options every command shares.
@@ -413,6 +437,7 @@ pub fn parse(arguments: Vec<OsString>) -> Result<Invocation, CliError> {
             Some("cancel") => Command::RecoveryCancel,
             _ => return Err(usage("recovery needs start, complete or cancel")),
         },
+        Some(word @ ("password" | "secret-key" | "2fa")) => account_command(&mut args, word)?,
         Some(other) => return Err(unknown(other)),
         None => return Err(usage("no command")),
     };
@@ -431,6 +456,45 @@ fn server_and_name(args: &mut Args) -> Result<(String, String), CliError> {
         }
     }
     Ok((required(server, "--server")?, required(name, "--name")?))
+}
+
+/// `password`, `secret-key` and `2fa …` (`word`).
+fn account_command(args: &mut Args, word: &str) -> Result<Command, CliError> {
+    Ok(match word {
+        "password" => {
+            let (name, rotate) = name_and_flag(args, "--rotate")?;
+            Command::Password { name, rotate }
+        }
+        "secret-key" => {
+            let (name, skip) = name_and_flag(args, "--skip-rotation")?;
+            Command::SecretKey {
+                name,
+                rotate: !skip,
+            }
+        }
+        _ => {
+            let enable = match args.next().as_deref() {
+                Some("enable") => true,
+                Some("disable") => false,
+                _ => return Err(usage("2fa needs enable or disable")),
+            };
+            let (name, _) = name_and_flag(args, "")?;
+            Command::TwoFactor { name, enable }
+        }
+    })
+}
+
+/// `--name`, required, and the optional flag `flag` (none when empty), in any order.
+fn name_and_flag(args: &mut Args, flag: &str) -> Result<(String, bool), CliError> {
+    let (mut name, mut set) = (None, false);
+    while let Some(option) = args.next() {
+        match option.as_str() {
+            "--name" => name = Some(args.value("--name")?),
+            other if !flag.is_empty() && other == flag => set = true,
+            other => return Err(unknown(other)),
+        }
+    }
+    Ok((required(name, "--name")?, set))
 }
 
 /// `signup`.
@@ -758,6 +822,41 @@ mod tests {
                 panic!("usage");
             };
             assert_eq!(message, "unexpected argument", "{secret}");
+        }
+    }
+
+    #[test]
+    fn account_commands_parse() {
+        assert_eq!(
+            command("password --name alice --rotate"),
+            Command::Password {
+                name: "alice".to_owned(),
+                rotate: true
+            }
+        );
+        assert_eq!(
+            command("secret-key --skip-rotation --name alice"),
+            Command::SecretKey {
+                name: "alice".to_owned(),
+                rotate: false
+            }
+        );
+        assert_eq!(
+            command("2fa disable --name alice"),
+            Command::TwoFactor {
+                name: "alice".to_owned(),
+                enable: false
+            }
+        );
+        for line in [
+            "password",
+            "password --name alice --skip-rotation",
+            "secret-key --name alice --rotate",
+            "2fa --name alice",
+            "2fa enable",
+            "2fa enable --name alice 123456",
+        ] {
+            assert!(matches!(parsed(line), Err(CliError::Usage(_))), "{line}");
         }
     }
 }

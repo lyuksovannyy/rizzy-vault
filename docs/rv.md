@@ -8,7 +8,7 @@ Status: M1, not audited. Read [SECURITY.md](../SECURITY.md) before trusting it w
 
 `rv` takes no secret as an argument or from the environment. It asks on the terminal with echo off. When standard input is not a terminal, it reads the secrets from it, one per line, in the order it asks. A field value that is a secret is given with `--secret <key>`, which asks for it the same way.
 
-`rv` prints a secret only when the command exists to show one: the Emergency Kit at `signup` and `recovery complete`, `item show --reveal`, `generate`, `totp`. It does not copy to the clipboard in this build, so those values stay in the terminal's scrollback: clear it.
+`rv` prints a secret only when the command exists to show one: the Emergency Kit at `signup`, `secret-key` and `recovery complete`, the two-factor secret at `2fa enable`, `item show --reveal`, `generate`, `totp`. It does not copy to the clipboard in this build, so those values stay in the terminal's scrollback: clear it.
 
 ## Where the data lives, and keeping it out of backups
 
@@ -97,6 +97,21 @@ If a rotation or a signup is interrupted after it was sent, the next `rv` run fi
 
 `rv login` and `rv recovery complete` save nothing before the server answers ([ADR 0026](adr/0026-client-device-state-and-cache.md) defines no pending stage for them; an open point). If their answer is lost, `rv` says that the outcome is unknown: run the command again, and if the first attempt did reach the server, revoke the extra device it left with `rv device revoke`. After a recovery with an unknown outcome keep both Emergency Kits until you know which one logs in.
 
+## Master password, Secret Key and two-factor login
+
+```sh
+rv password   --name alice              # a new master password; --rotate also rotates the keys
+rv secret-key --name alice              # a new Secret Key and Emergency Kit; rotates the keys
+rv 2fa enable  --name alice             # server-side two-factor login with an authenticator app
+rv 2fa disable --name alice
+```
+
+Each of them first logs in again with the current master password (and a two-factor code when two-factor login is on). `password` asks for the new master password twice; it does not rotate the keys unless `--rotate` is given, which you want if the old password leaked (with a recovery code, it then asks for that code and keeps it). `secret-key` keeps the master password, shows a **new Emergency Kit** and asks you to type part of it back before anything is sent; by default it also rotates the keys and issues a new recovery code, which the kit shows. `--skip-rotation` is the opt-out: then the kit has no recovery code, and the earlier one stays valid, so keep the old kit for its recovery code (only its Secret Key stops working). The old kit stops working only once the server has taken the change: if the server refuses it, `rv` says the change was not made and the new kit is void, and the old kit stays the valid one. If copying the kit takes more than four minutes, `rv` logs in once more before sending the change (the server takes it only within five minutes of a login). Your other devices ask for the new master password, and the new Secret Key if it changed, the next time they go online.
+
+If such a change is interrupted after it was sent, it is kept like an interrupted rotation: the next `rv` run opens with the **current** master password, asks for the new one, and finishes the change or sends it again. If the server does not take it then, `rv` says so, and the previous master password and Emergency Kit stay the valid ones.
+
+`2fa enable` shows the secret once, as an `otpauth://` URI and in Base32, for your authenticator app, then asks for the app's current code. From then on every login asks for a code. `2fa disable` needs a current code too, a newer one than the code its own login used. Codes are typed at the terminal or piped in, never given on the command line. Losing the authenticator needs the server administrator.
+
 ## Forgotten master password
 
 ```sh
@@ -105,7 +120,7 @@ rv recovery complete --server https://vault.example.org --name alice
 rv recovery cancel                      # on a device that is still enrolled
 ```
 
-`recovery start` needs the recovery code from the Emergency Kit. The server then makes you wait (72 hours), and a device that is still enrolled can cancel a recovery you did not start with `rv recovery cancel`. `recovery complete` asks for the recovery code again, sets a new master password, shows a **new Emergency Kit** (the old Secret Key and recovery code stop working), rotates the keys unless `--skip-rotation` is given, and enrols this computer. Every other device must then log in again with the new master password and Secret Key.
+`recovery start` needs the recovery code from the Emergency Kit. The server then makes you wait (72 hours), and a device that is still enrolled can cancel a recovery you did not start with `rv recovery cancel`. `recovery complete` asks for the recovery code again, sets a new master password, shows a **new Emergency Kit** (the old Secret Key and recovery code stop working), rotates the keys unless `--skip-rotation` is given, and enrols this computer. Every other device then asks for the new master password and Secret Key the next time it goes online. An operator who runs the server for one person can set the wait to 0 hours (`RIZZY_RECOVERY_WAIT_HOURS`, see [self-hosting.md](self-hosting.md)).
 
 ## Alarms
 
@@ -113,4 +128,4 @@ rv recovery cancel                      # on a device that is still enrolled
 
 ## Not in this build
 
-Clipboard output, a private CA, changing the master password or the Secret Key outside recovery, editing the URIs and custom fields of an existing item, and no-echo input on platforms without `stty` (there, pipe the secrets in).
+Clipboard output, `https://` (and with it a private CA: the TLS crates await approval), a full key rotation together with a Secret Key change, editing the URIs and custom fields of an existing item, and no-echo input on platforms without `stty` (there, pipe the secrets in).

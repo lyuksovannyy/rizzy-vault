@@ -19,8 +19,9 @@
 //! - **In:** never from the command line. `--field` refuses a key the schema conceals;
 //!   `--secret <key>` asks for the value.
 //! - **Out:** `item show` prints a concealed field as `********` unless `--reveal` is given.
-//!   `generate` and `totp` print what they were asked for. `signup` prints the Emergency Kit
-//!   once. Nothing else prints a secret, and no error or note ever does.
+//!   `generate` and `totp` print what they were asked for. `signup`, `secret-key` and
+//!   `recovery complete` print the Emergency Kit once, `2fa enable` the 2FA secret once.
+//!   Nothing else prints a secret, and no error or note ever does.
 //!   Copying to the clipboard instead of printing (INV-56's default for a terminal) is not in
 //!   this build (reported): it needs a platform clipboard crate.
 //!
@@ -63,9 +64,10 @@ use rizzy_core::item::value::ValueRef;
 use rizzy_core::totp::{OtpAuthUri, TotpParams, TotpSecret};
 use zeroize::Zeroizing;
 
+use crate::account;
 use crate::args::{Command, ExportFormat, FieldArgs, Generate, ImportFormat, Invocation, USAGE};
 use crate::db::Db;
-use crate::device::{Device, Env, pick_account};
+use crate::device::{CredentialChange, Device, Env, pick_account};
 use crate::enrol;
 use crate::error::{CliError, alarm_text};
 use crate::paths::{AccountLock, cache_path, hex, read_limited, unhex, write_new_file};
@@ -192,6 +194,25 @@ pub async fn run(invocation: Invocation, env: &mut Env<'_>) -> Result<(), CliErr
             rotate,
         } => Box::pin(recover::complete(env, &server, &name, rotate)).await,
         Command::RecoveryCancel => Box::pin(recover::cancel(env)).await,
+        Command::Password { name, rotate } => {
+            Box::pin(account::change(
+                env,
+                &name,
+                CredentialChange::Password { rotate },
+            ))
+            .await
+        }
+        Command::SecretKey { name, rotate } => {
+            Box::pin(account::change(
+                env,
+                &name,
+                CredentialChange::SecretKey { rotate },
+            ))
+            .await
+        }
+        Command::TwoFactor { name, enable } => {
+            Box::pin(account::two_factor(env, &name, enable)).await
+        }
     }
 }
 

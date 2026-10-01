@@ -13,8 +13,8 @@
 //!    [`apply_device_grants`] (§11.3 step 4), persist, send the acknowledgement it returns, and
 //!    run [`verify_unlock`] again.
 //! 4. On [`ClientError::PasswordChangedElsewhere`]: the host prompts for the new password (and
-//!    Secret Key) and runs an OPAQUE login (§11.3 step 5). Re-creating `E_local` on this
-//!    device after that login is not implemented in this build (reported).
+//!    Secret Key) and runs an OPAQUE login (§11.3 step 5), then
+//!    [`crate::credentials::follow_credential_change`] re-creates `E_local` with a new salt.
 //!
 //! # Readings
 //!

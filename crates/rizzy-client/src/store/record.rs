@@ -392,6 +392,20 @@ impl DeviceRecord {
         self.secret_key.to_formatted()
     }
 
+    /// Whether the pending record changes the credential: its `password_epoch` is above the
+    /// one of `E_local` (a password or Secret Key change, CRYPTO.md §11.5), so it unlocks
+    /// with the new password only.
+    #[must_use]
+    pub fn pending_changes_password(&self) -> bool {
+        match (&self.pending, &self.local_wrap) {
+            (Some(pending), Some(local)) => {
+                pending.local_wrap.password_epoch > local.password_epoch
+            }
+            (Some(_), None) => true,
+            (None, _) => false,
+        }
+    }
+
     /// The offline unlock from this record (CRYPTO.md §5.6; ADR 0026 §4 step 5).
     ///
     /// # Errors

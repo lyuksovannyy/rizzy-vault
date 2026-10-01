@@ -675,3 +675,22 @@ impl EmergencyKit {
         }
     }
 }
+
+impl EmergencyKit {
+    /// The kit of a Secret Key change (CRYPTO.md §11.5 step 4, §7 "Changing the SK"): the new
+    /// Secret Key, and the new recovery code when the change's rotation issued one. Without a
+    /// new code the kit carries none, and the recovery code of the earlier kit stays valid.
+    pub(crate) fn for_change(
+        origin: &ServerOrigin,
+        login_name: &LoginName,
+        secret_key: &SecretKey,
+        recovery_code: Option<&RecoveryCode>,
+    ) -> Self {
+        Self {
+            server_origin: origin.as_str().to_owned(),
+            login_name: login_name.as_str().to_owned(),
+            secret_key: secret_key.to_formatted(),
+            recovery_code: recovery_code.map(RecoveryCode::to_formatted),
+        }
+    }
+}

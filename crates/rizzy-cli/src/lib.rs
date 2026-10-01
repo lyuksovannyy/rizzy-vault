@@ -19,6 +19,7 @@
 //! | [`device`] | An opened device: unlock, load, going online, sync, rotation, the write order of ADR 0026 §4 |
 //! | [`enrol`] | Signup and login on a new device |
 //! | [`recover`] | Recovery with the Emergency Kit (CRYPTO.md §11.9) |
+//! | [`account`] | A new master password or Secret Key (CRYPTO.md §11.5), server-side 2FA (§5.10) |
 //! | [`commands`] | The commands |
 //! | [`error`] | [`CliError`], with no secret in it |
 //! | `coredump` | Core dumps off at start (INV-60, ADR 0024) |
@@ -28,7 +29,9 @@
 //! - **No `unsafe`**, no `unwrap`, `expect`, `panic!` or `println!` outside tests (CLAUDE.md).
 //! - **Secrets** (threat model INV-56): never read from argv or the environment, never
 //!   written to a log, an error or a note; printed only by the commands whose purpose is to
-//!   show one (`signup`'s Emergency Kit, `item show --reveal`, `generate`, `totp`).
+//!   show one (the Emergency Kit of `signup`, `secret-key` and `recovery complete`, the 2FA
+//!   secret of `2fa enable`, `item show --reveal`, `generate`, `totp`). A 2FA code is read like
+//!   a secret: from the terminal or standard input.
 //! - **The local data** must stay out of backups and sync tools (INV-61): the usage text and
 //!   the operator docs say where it lives.
 //! - **Untrusted input.** The cache file is verified row by row at every load
@@ -44,8 +47,9 @@
 //!   they are refused (see [`http`]). Only a loopback `http://` server can be used.
 //! - A persisted pending stage for `rv login` and `rv recovery complete` (ADR 0026 defines one
 //!   for signup only; see [`enrol`] and [`recover`]).
-//! - Changing the master password or the Secret Key, server-side TOTP enrolment, editing URIs
-//!   and custom fields of an existing item.
+//! - Editing URIs and custom fields of an existing item.
+//! - A private CA file to trust besides the public roots: there is no `https://` path to
+//!   apply it to until the TLS crates are approved (above).
 //!
 //! [ADR 0013]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0013-shared-client-core.md
 
@@ -54,6 +58,7 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
+pub mod account;
 pub mod args;
 pub mod commands;
 mod coredump;

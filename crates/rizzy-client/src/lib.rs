@@ -42,6 +42,8 @@
 //! | [`login`] | CRYPTO.md §5.3, §11.2, §11.4 | Login on a new device, enrolment, the web vault's ephemeral device |
 //! | [`unlock`] | CRYPTO.md §11.3 | The online part of an unlock, device grants after a rotation |
 //! | [`rotation`] | CRYPTO.md §11.6, §11.8 steps 1–3; ADR 0025 §2 | Standard and full key rotation with an optional revocation: new keys, the auth half, the vault half, the retry rule |
+//! | [`credentials`] | CRYPTO.md §11.5, §11.3 step 5 | Master password and Secret Key change, with or without a rotation; following a change made elsewhere |
+//! | [`two_factor`] | CRYPTO.md §5.10, §11.15 | Server-side 2FA enrolment (the otpauth URI) and removal requests |
 //! | [`session`] | CRYPTO.md §5.10 | Device authentication and request signing |
 //! | [`sync`] | ADR 0012 §4, §7; ADR 0018 §3, §10; ADR 0021 §2, §4, §9 | The sync driver of one vault |
 //! | [`items`] | ADR 0018 §2, §6–§9; ADR 0012 §5; ADR 0027 §2 steps 3–5 | Item create, edit, trash, restore, purge and reads; the import path, which splits an item over a create op and the ops that follow |
@@ -88,6 +90,7 @@
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
 pub mod account;
+pub mod credentials;
 pub mod device;
 pub mod error;
 pub mod export;
@@ -99,6 +102,7 @@ pub mod session;
 pub mod signup;
 pub mod store;
 pub mod sync;
+pub mod two_factor;
 pub mod unlock;
 mod wire;
 
