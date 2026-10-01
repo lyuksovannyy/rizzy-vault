@@ -16,6 +16,17 @@ rizzy-core.workspace = true
 # (ADR 0012 §12). A dev-dependency only: R1's allow-list covers normal and build dependencies
 # (ADR 0016 §4, "Dev-dependencies").
 proptest.workspace = true
+# The seeded ChaCha20Rng of the convergence harness (ADR 0009 "RNG rules": deterministic RNGs
+# are dev-dependencies only): it draws the device signing seeds, the item keys and the envelope
+# nonces, so the harness signs real statements and seals real `ITEM_OP`/`ITEM_SNAPSHOT`
+# envelopes (ADR 0012 §12 "real `rizzy-core` crypto with a test RNG"). `rand_core` names the
+# `SeedableRng` trait that seeds it. Both are already in the workspace at their ADR 0009 pins.
+chacha20.workspace = true
+rand_core.workspace = true
+# Reads `rizzy-core`'s committed known-answer vector files (CRYPTO.md §15 item 1) in the test
+# that parses their canonical headers with this crate's `header` module. Test-only, as in
+# `rizzy-proto`.
+serde_json.workspace = true
 
 [lints]
 workspace = true

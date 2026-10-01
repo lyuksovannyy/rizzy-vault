@@ -17,13 +17,14 @@
 //! every page, 4 and 5 after every `worker` run. What it finds goes into
 //! [`Server::violations`].
 //!
-//! **Signatures.** `rizzy-core` offers no way to build a device signing key or seal an envelope
-//! without an injected `CryptoRng`, and `rizzy-sync` has no RNG crate among its dependencies
-//! (and this change adds no dependency). So a record here is its unsigned
-//! [`OpStatement`]/[`SnapshotStatement`] (the exact bytes the signature covers: the canonical
-//! header and `SHA-256` of the envelope) with the record's `data` standing in for the envelope.
-//! The server checks the envelope hash as it checks a signature (a record that fails is never
-//! stored); a client checks the same hash and parses the header from the statement.
+//! **Signatures and envelopes.** A record is its signed [`OpStatement`] or
+//! [`SnapshotStatement`] in the wire form (the device signature over the canonical header and
+//! `SHA-256` of the envelope) and the sealed `ITEM_OP` or `ITEM_SNAPSHOT` envelope
+//! ([`super::crypto`]). Before it stores a record the server verifies the signature under the
+//! key of the device the record names, requires the header parsed from the verified statement
+//! to be the record's and to name that device, and checks the envelope against the signed hash
+//! ([`OpRecord::verify`], [`SnapRecord::verify`]); a record that fails is never stored. It
+//! holds no item key and never opens an envelope.
 //!
 //! **What is modelled of ADR 0021 §9.** "Already stored" (checked first, byte-identical by
 //! statement and body), a conflict at a stored dot, the `vault_prev_seq` check, revocation
@@ -35,9 +36,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use rizzy_core::ids::{DeviceId, ItemId};
-use rizzy_core::sign::{OpStatement, SnapshotStatement};
+use rizzy_core::sign::{OpStatement, SnapshotStatement, Verified};
 
-use super::checker;
+use super::{checker, crypto};
 use crate::causal::RestoreGeneration;
 use crate::compaction::{
     Body, CertificateExpiry, OpDot, RetainedSnapshot, SnapshotRefusal, VaultChains,
@@ -47,32 +48,62 @@ use crate::dot::Dot;
 use crate::header::{OpHeader, SnapshotHeader};
 use crate::vv::{VersionVector, VvOrdering};
 
-/// An op record as it travels: the statement its author signs, its parsed header (the server
+/// An op record as it travels: the statement its author signed, its parsed header (the server
 /// parses the canonical header before storing, ADR 0012 §7), and its body when one goes with it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct OpRecord {
-    /// The statement over the canonical header and the envelope hash.
-    pub(super) statement: OpStatement,
-    /// The header, parsed from the statement.
+    /// The signed `op` statement in its wire form (CRYPTO.md §9.6, §10.2): the canonical
+    /// header, the envelope hash and the author's signature container.
+    pub(super) signed: Vec<u8>,
+    /// The header the record claims. Nothing trusts it before [`OpRecord::verify`] has found
+    /// it equal to the header of the verified statement.
     pub(super) header: OpHeader,
-    /// The body (the envelope stand-in: the op `data`), or `None` for a bodiless header.
+    /// The body, the sealed `ITEM_OP` envelope, or `None` for a bodiless header.
     pub(super) body: Option<Vec<u8>>,
 }
 
-/// A snapshot record as it travels: statement, parsed header and `data`.
+impl OpRecord {
+    /// Verifies the record's signature (CRYPTO.md §10.2): the statement under the key of the
+    /// device the claimed header names, and the header parsed from the verified statement,
+    /// which must be the claimed one (so it names that device, INV-22). Returns the verified
+    /// statement, against whose signed hash the caller checks the body.
+    pub(super) fn verify(&self) -> Option<Verified<OpStatement>> {
+        let (statement, header) = crypto::verify_op(&self.signed, self.header.dot.device_id())?;
+        (header == self.header).then_some(statement)
+    }
+}
+
+/// A snapshot record as it travels: signed statement, parsed header and `data`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct SnapRecord {
-    /// The statement over the canonical header and the envelope hash.
-    pub(super) statement: SnapshotStatement,
-    /// The header, parsed from the statement.
+    /// The signed `snapshot` statement in its wire form.
+    pub(super) signed: Vec<u8>,
+    /// The header the record claims; as [`OpRecord::header`], trusted only after
+    /// [`SnapRecord::verify`].
     pub(super) header: SnapshotHeader,
-    /// The snapshot `data` (the envelope stand-in).
+    /// The snapshot `data`, sealed: the `ITEM_SNAPSHOT` envelope.
     pub(super) data: Vec<u8>,
     /// The simulation's ground truth, never sent and never read by the server or a device's
     /// sync code: whether the snapshot may lie, because a faulty device wrote it dishonestly
     /// or its author had absorbed such a snapshot before writing it (the merge spike's
     /// `honest` and `tainted`). Only the property checks read it.
     pub(super) tainted: bool,
+}
+
+impl SnapRecord {
+    /// Verifies the record's signature, as [`OpRecord::verify`]: under the key of the claimed
+    /// author, with the verified statement's header equal to the claimed one.
+    pub(super) fn verify(&self) -> Option<Verified<SnapshotStatement>> {
+        let (statement, header) = crypto::verify_snapshot(&self.signed, self.header.author)?;
+        (header == self.header).then_some(statement)
+    }
+
+    /// Whether the record's signature verifies and its `data` is the envelope the statement
+    /// signed.
+    fn verifies_with_data(&self) -> bool {
+        self.verify()
+            .is_some_and(|statement| statement.matches_envelope(&self.data))
+    }
 }
 
 /// A retained snapshot: the record, its store sequence and its clamped VV (ADR 0021 §2).
@@ -259,6 +290,9 @@ pub(super) enum OpAnswer {
     Revoked,
     /// The body does not match the signed envelope hash.
     BadBody,
+    /// The statement's signature does not verify under its author's key, or the statement
+    /// signs another header than the record claims.
+    BadSignature,
 }
 
 /// The server's answer to a snapshot upload.
@@ -272,6 +306,9 @@ pub(super) enum SnapAnswer {
     Refused(SnapshotRefusal),
     /// The data does not match the signed envelope hash.
     BadData,
+    /// The statement's signature does not verify under its author's key, or the statement
+    /// signs another header than the record claims.
+    BadSignature,
 }
 
 /// Why a healing request was refused as a whole.
@@ -281,6 +318,8 @@ pub(super) enum HealRefusal {
     Op(Dot, OpAnswer),
     /// A snapshot was refused.
     Snapshot(SnapshotRefusal),
+    /// A snapshot's signature did not verify, or its data is not the envelope it signed.
+    BadSnapshot,
     /// A bodiless header had no cover among the item's snapshots (§9 "Server acceptance").
     Uncovered(Dot),
 }
@@ -437,14 +476,16 @@ impl Server {
     }
 
     /// Checks one op record for storing into `db` (the upload checks of ADR 0012 §7 and
-    /// ADR 0021 §9, in order: "already stored" first, then conflict, revocation, link, body).
+    /// ADR 0021 §9, in order: "already stored" first, then conflict, the signature,
+    /// revocation, link, body).
     fn check_op(db: &Db, record: &OpRecord, bodiless_ok: bool) -> Result<bool, OpAnswer> {
         let dot = record.header.dot;
         if let Some(stored) = db.record(dot) {
             // "Byte-identical to the record the server stores": the signed statement, and the
             // body when both have one (a bodiless stored header and a re-published body of the
-            // same statement are the same signed record).
-            let same = stored.statement == record.statement
+            // same statement are the same signed record). The stored statement was verified
+            // when it was stored, so identical bytes need no second verification.
+            let same = stored.signed == record.signed
                 && (stored.body.is_none() || record.body.is_none() || stored.body == record.body);
             return if same {
                 Ok(false)
@@ -452,6 +493,10 @@ impl Server {
                 Err(OpAnswer::Conflict)
             };
         }
+        // Nothing of the header is used before the signature over it verified.
+        let Some(statement) = record.verify() else {
+            return Err(OpAnswer::BadSignature);
+        };
         if db
             .cutoffs
             .get(&dot.device_id())
@@ -463,7 +508,7 @@ impl Server {
             return Err(OpAnswer::NotLinked);
         }
         match &record.body {
-            Some(body) if !record.statement.matches_envelope(body) => Err(OpAnswer::BadBody),
+            Some(body) if !statement.matches_envelope(body) => Err(OpAnswer::BadBody),
             None if !bodiless_ok => Err(OpAnswer::NotLinked),
             _ => Ok(true),
         }
@@ -505,7 +550,11 @@ impl Server {
             self.stats.already_stored += 1;
             return SnapAnswer::AlreadyStored;
         }
-        if !record.statement.matches_envelope(&record.data) {
+        let Some(statement) = record.verify() else {
+            self.stats.snapshots_refused += 1;
+            return SnapAnswer::BadSignature;
+        };
+        if !statement.matches_envelope(&record.data) {
             self.stats.snapshots_refused += 1;
             return SnapAnswer::BadData;
         }
@@ -543,12 +592,15 @@ impl Server {
                     }
                 }
                 Ok(false) => {
-                    // Already stored: a held body re-published over a bodiless row restores it.
+                    // Already stored: a held body re-published over a bodiless row restores it,
+                    // if it is the envelope the stored statement signed.
                     if let (Some(body), Some(chain)) =
                         (&record.body, db.chains.get_mut(&dot.device_id()))
                         && let Some(stored) = chain.get_mut(&dot.seq())
                         && stored.body.is_none()
-                        && record.statement.matches_envelope(body)
+                        && record
+                            .verify()
+                            .is_some_and(|statement| statement.matches_envelope(body))
                     {
                         stored.body = Some(body.clone());
                         db.healed.remove(&dot);
@@ -564,6 +616,10 @@ impl Server {
         for snap in &request.snapshots {
             if db.holds_snapshot(snap) {
                 continue;
+            }
+            if !snap.verifies_with_data() {
+                self.stats.heals_refused += 1;
+                return Err(HealRefusal::BadSnapshot);
             }
             if let Err(refusal) = db.store_snapshot(snap, &heads) {
                 self.stats.heals_refused += 1;

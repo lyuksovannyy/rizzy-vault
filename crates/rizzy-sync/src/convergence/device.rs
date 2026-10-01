@@ -13,6 +13,18 @@
 //!   the merge spike's `integrated` preset drops them (`keepown` = "since newest snapshot"), so
 //!   that a healing request has to send headers without their bodies behind snapshots.
 //!
+//! # Crypto
+//!
+//! The device signs and seals what it writes, and verifies and opens what it is served
+//! ([`super::crypto`]). An own op is sealed as its `ITEM_OP` envelope and signed; a snapshot
+//! (an honest one or a lie) is sealed as its `ITEM_SNAPSHOT` envelope, whose AAD binds its
+//! covered VV, and signed. A served record is used only after its signature verified under
+//! the key of the device it names, its header was parsed from the verified statement, its
+//! envelope matched the signed hash and opened under the context that header gives, and the
+//! record parser accepted what it holds. The device keeps each accepted envelope as it
+//! travelled, so a re-upload and a healing request send the same signed bytes, together with
+//! the `data` it opened to.
+//!
 //! # Ground truth for the checks
 //!
 //! A faulty device ([`Device::faulty`]) sends lies ([`super::faults`]) in the snapshots the
@@ -52,11 +64,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use rizzy_core::ids::{DeviceId, ItemId, OpId, SnapshotId};
-use rizzy_core::sign::{OpStatement, SnapshotStatement};
+use rizzy_core::secret::SecretBytes;
 
 use super::faults::{self, Fault};
 use super::server::{HealingRequest, OpAnswer, OpRecord, Page, Server, SnapAnswer, SnapRecord};
-use super::{VAULT, item_key};
+use super::{VAULT, crypto, item_key};
 use crate::causal::{BodyStatus, Report, ServedOp, ServerView, VaultLog};
 use crate::dot::Dot;
 use crate::header::{ItemSchemaVersion, OpHeader, SnapshotHeader};
@@ -121,10 +133,15 @@ pub(super) struct Device {
     pub(super) log: VaultLog,
     /// Its merge of each item.
     pub(super) items: BTreeMap<ItemId, ItemMerge>,
-    /// The op bodies it still holds, verified.
-    bodies: BTreeMap<Dot, Vec<u8>>,
-    /// The statement of every accepted link and own op.
-    statements: BTreeMap<Dot, OpStatement>,
+    /// The op bodies it still holds, verified: the sealed `ITEM_OP` envelope as it travelled
+    /// (a re-upload and a healing request send the same bytes again), with the op `data` it
+    /// opened to under its verified header.
+    bodies: BTreeMap<Dot, HeldBody>,
+    /// The signed statement (wire form) of every accepted link and own op.
+    signed: BTreeMap<Dot, Vec<u8>>,
+    /// The generator of its envelope nonces ([`crypto::Nonces`]). It is not part of the
+    /// state a refused healing request rolls back.
+    rng: crypto::Nonces,
     /// Every snapshot record it wrote or absorbed.
     held_snaps: Vec<SnapRecord>,
     /// Snapshots written and not uploaded yet.
@@ -171,14 +188,16 @@ pub(super) struct Device {
 }
 
 impl Device {
-    /// Device `id`, its wall clock at `now_ms`.
-    pub(super) fn new(id: DeviceId, now_ms: u64) -> Self {
+    /// Device `id` of the run scheduled from `seed`, its wall clock at `now_ms`. The seed only
+    /// keys the device's nonce generator.
+    pub(super) fn new(id: DeviceId, now_ms: u64, seed: u64) -> Self {
         Self {
             id,
             log: VaultLog::new(VAULT, id),
             items: BTreeMap::new(),
             bodies: BTreeMap::new(),
-            statements: BTreeMap::new(),
+            signed: BTreeMap::new(),
+            rng: crypto::Nonces::new(seed, id),
             held_snaps: Vec::new(),
             outbox_snaps: Vec::new(),
             clock: Hlc::ZERO,
@@ -219,9 +238,10 @@ impl Device {
     }
 
     /// Writes `edit` on `item` (ADR 0012 §2–§4, ADR 0018 §3): its header on the own chain,
-    /// applied through [`ItemMerge::apply_own_op`] with the writer rules, kept for upload. A
-    /// read-only device writes nothing, and a Purge the writer rules forbid is not written.
-    /// Returns the op's dot and encoded data, for the harness's ledger.
+    /// applied through [`ItemMerge::apply_own_op`] with the writer rules, then sealed as its
+    /// `ITEM_OP` envelope, signed and kept for upload. A read-only device writes nothing, and
+    /// a Purge the writer rules forbid is not written. Returns the op's header and encoded
+    /// data (the plaintext, which only the harness's ledger sees).
     pub(super) fn write(&mut self, item: ItemId, edit: &Edit) -> Option<(OpHeader, Vec<u8>)> {
         if self.read_only {
             return None;
@@ -306,23 +326,37 @@ impl Device {
             self.errors
                 .push(format!("record_own_op failed at {:?}: {e:?}", header.dot));
         }
-        let Ok(canonical) = header.to_vec() else {
-            self.errors.push("an op header did not encode".to_owned());
+        if !self.seal_own_op(&header, &body) {
             return None;
-        };
-        match OpStatement::new(&canonical, &body, None) {
-            Ok(statement) => {
-                self.statements.insert(dot, statement);
-            }
-            Err(_) => self
-                .errors
-                .push("OpStatement::new refused a header".to_owned()),
         }
-        self.bodies.insert(dot, body.clone());
         if applied.snapshot_due.is_some() {
             self.snapshot(item);
         }
         Some((header, body))
+    }
+
+    /// Makes the record of an own op that travels and keeps it for upload: `data` sealed as
+    /// the `ITEM_OP` envelope under the item key, its AAD bound to `header`, and the `op`
+    /// statement signed over the header and the envelope's hash. Returns whether it sealed.
+    fn seal_own_op(&mut self, header: &OpHeader, data: &[u8]) -> bool {
+        let Some(envelope) = crypto::seal_op(&mut self.rng, header, data) else {
+            self.errors.push("an op did not seal".to_owned());
+            return false;
+        };
+        match crypto::sign_op(header, &envelope) {
+            Some(signed) => {
+                self.signed.insert(header.dot, signed);
+            }
+            None => self.errors.push("an op statement did not sign".to_owned()),
+        }
+        self.bodies.insert(
+            header.dot,
+            HeldBody {
+                envelope,
+                data: data.to_vec(),
+            },
+        );
+        true
     }
 
     /// Writes a snapshot of `item` into the outbox, if the merge can write one (ADR 0018 §10).
@@ -397,8 +431,10 @@ impl Device {
         faults::apply(fault, covered, data, &cx)
     }
 
-    /// The snapshot record of `item` with `covered` and `data`, under a fresh snapshot id;
-    /// `tainted` is the simulation's ground truth ([`SnapRecord::tainted`]).
+    /// The snapshot record of `item` with `covered` and `data`, under a fresh snapshot id:
+    /// `data` sealed as the `ITEM_SNAPSHOT` envelope of that header (so its AAD binds the
+    /// covered VV) and the `snapshot` statement signed by this device. `tainted` is the
+    /// simulation's ground truth ([`SnapRecord::tainted`]).
     fn snapshot_record(
         &mut self,
         item: ItemId,
@@ -418,12 +454,12 @@ impl Device {
             vault_key_epoch: 0,
             covered,
         };
-        let canonical = header.to_vec().ok()?;
-        let statement = SnapshotStatement::new(&canonical, data, None).ok()?;
+        let envelope = crypto::seal_snapshot(&mut self.rng, &header, data)?;
+        let signed = crypto::sign_snapshot(&header, &envelope)?;
         Some(SnapRecord {
-            statement,
+            signed,
             header,
-            data: data.to_vec(),
+            data: envelope,
             tainted,
         })
     }
@@ -440,9 +476,9 @@ impl Device {
     /// The own op record at `dot`, with its body if held.
     fn record(&self, dot: Dot) -> Option<OpRecord> {
         Some(OpRecord {
-            statement: self.statements.get(&dot)?.clone(),
+            signed: self.signed.get(&dot)?.clone(),
             header: self.log.header(dot)?.clone(),
-            body: self.bodies.get(&dot).cloned(),
+            body: self.bodies.get(&dot).map(|held| held.envelope.clone()),
         })
     }
 
@@ -511,6 +547,9 @@ impl Device {
                 SnapAnswer::BadData => self
                     .errors
                     .push("the server refused an honest snapshot's data".to_owned()),
+                SnapAnswer::BadSignature => self
+                    .errors
+                    .push("the server refused an honest snapshot's signature".to_owned()),
             }
         }
     }
@@ -534,8 +573,7 @@ impl Device {
 
     /// The devices with a chain in this device's log.
     fn chains(&self) -> BTreeSet<DeviceId> {
-        let mut chains: BTreeSet<DeviceId> =
-            self.statements.keys().map(|d| d.device_id()).collect();
+        let mut chains: BTreeSet<DeviceId> = self.signed.keys().map(|d| d.device_id()).collect();
         chains.insert(self.id);
         chains
     }
@@ -754,7 +792,11 @@ impl Device {
                         .map(|s| s.header.covered.clone())
                         .collect::<Vec<_>>()
                 ));
+                // The nonce generator is not rolled back: the discarded fresh snapshots drew
+                // nonces, and a device never draws the same nonce twice.
+                let rng = self.rng.clone();
                 *self = saved;
+                self.rng = rng;
                 self.stats = stats;
                 self.events = log;
                 self.stats.heals_refused += 1;
@@ -818,36 +860,67 @@ impl Device {
         reason = "the five steps of the causal module's client cycle, kept together in their order"
     )]
     fn process_page(&mut self, page: &Page, touched: &mut BTreeSet<ItemId>) {
-        // 1. Verify: the header from the statement, the body against the signed hash and the
-        //    record parser (ADR 0012 §4 step 1).
+        // 1. Verify (ADR 0012 §4 step 1): the signature under the key of the device the record
+        //    names, the header from the verified statement, the body against the signed hash,
+        //    then the envelope opened under the context that header gives, and the record
+        //    parser on what it holds. The claimed `record.header` only picks the key.
         let mut served = Vec::new();
-        let mut verified: BTreeMap<Dot, (&OpRecord, &[u8])> = BTreeMap::new();
+        let mut verified: BTreeMap<Dot, Opened<'_>> = BTreeMap::new();
+        let mut signed: BTreeMap<Dot, &[u8]> = BTreeMap::new();
         for record in &page.ops {
-            let Ok(header) = OpHeader::parse_statement(&record.statement) else {
+            let Some((statement, header)) =
+                crypto::verify_op(&record.signed, record.header.dot.device_id())
+            else {
                 continue;
             };
-            let body = match &record.body {
-                Some(b) if record.statement.matches_envelope(b) && parse_op(b).is_ok() => {
-                    verified.insert(header.dot, (record, b.as_slice()));
-                    BodyStatus::Verified
+            let body = match record.body.as_deref() {
+                Some(envelope) => {
+                    // A body served again (a duplicated record, a re-fetch) is the one the
+                    // device holds when both the envelope and the verified header are the
+                    // held ones: it was opened under that header and parsed when accepted.
+                    let held = self.bodies.get(&header.dot).filter(|held| {
+                        held.envelope == envelope && self.log.header(header.dot) == Some(&header)
+                    });
+                    let data = if !statement.matches_envelope(envelope) {
+                        None
+                    } else if let Some(held) = held {
+                        Some(held.data.clone())
+                    } else {
+                        crypto::open_op(&header, envelope)
+                            .filter(|data| parse_op(data.expose_secret()).is_ok())
+                            .map(|data| data.expose_secret().to_vec())
+                    };
+                    match data {
+                        Some(data) => {
+                            verified.insert(header.dot, Opened { envelope, data });
+                            BodyStatus::Verified
+                        }
+                        None => BodyStatus::Rejected,
+                    }
                 }
-                Some(_) => BodyStatus::Rejected,
                 None => BodyStatus::Bodiless,
             };
+            signed.entry(header.dot).or_insert(&record.signed);
             served.push(ServedOp { header, body });
         }
-        let mut covers: Vec<(SnapshotHeader, &SnapRecord)> = Vec::new();
+        let mut covers: Vec<(SnapshotHeader, &SnapRecord, SecretBytes)> = Vec::new();
         for record in &page.covers {
-            let Ok(header) = SnapshotHeader::parse_statement(&record.statement) else {
+            let Some((statement, header)) =
+                crypto::verify_snapshot(&record.signed, record.header.author)
+            else {
                 continue;
             };
-            if record.statement.matches_envelope(&record.data)
-                && parse_snapshot(&header.covered, &record.data).is_ok()
-            {
-                covers.push((header, record));
+            if !statement.matches_envelope(&record.data) {
+                continue;
+            }
+            let Some(data) = crypto::open_snapshot(&header, &record.data) else {
+                continue;
+            };
+            if parse_snapshot(&header.covered, data.expose_secret()).is_ok() {
+                covers.push((header, record, data));
             }
         }
-        let cover_headers: Vec<SnapshotHeader> = covers.iter().map(|(h, _)| h.clone()).collect();
+        let cover_headers: Vec<SnapshotHeader> = covers.iter().map(|(h, _, _)| h.clone()).collect();
         // 2. Plan.
         let plan = self.log.plan_covers(&served, &cover_headers);
         for dot in &plan.links {
@@ -861,19 +934,19 @@ impl Device {
         }
         // 3. Absorb each named cover, with the verified bodies of this page on its item.
         for &i in &plan.absorb {
-            let Some((header, record)) = covers.get(i) else {
+            let Some((header, record, opened)) = covers.get(i) else {
                 continue;
             };
             let item = header.item_id;
-            let Ok(data) = parse_snapshot(&header.covered, &record.data) else {
+            let Ok(data) = parse_snapshot(&header.covered, opened.expose_secret()) else {
                 continue;
             };
             let bodies: Vec<(&OpHeader, OpData<'_>)> = served
                 .iter()
                 .filter(|s| s.header.item_id == item)
                 .filter_map(|s| {
-                    let (_, body) = verified.get(&s.header.dot)?;
-                    Some((&s.header, parse_op(body).ok()?))
+                    let body = verified.get(&s.header.dot)?;
+                    Some((&s.header, parse_op(&body.data).ok()?))
                 })
                 .collect();
             let with: Vec<OpInput<'_>> = bodies
@@ -954,11 +1027,17 @@ impl Device {
                 self.errors
                     .push(format!("record_header failed at {dot:?}: {e:?}"));
             }
-            if let Some(record) = page.ops.iter().find(|r| r.header.dot == dot) {
-                self.statements.insert(dot, record.statement.clone());
+            if let Some(statement) = signed.get(&dot) {
+                self.signed.insert(dot, statement.to_vec());
             }
-            if let Some((_, body)) = verified.get(&dot) {
-                self.bodies.insert(dot, body.to_vec());
+            if let Some(body) = verified.get(&dot) {
+                self.bodies.insert(
+                    dot,
+                    HeldBody {
+                        envelope: body.envelope.to_vec(),
+                        data: body.data.clone(),
+                    },
+                );
             }
         }
         // 5. Deliver.
@@ -976,7 +1055,8 @@ impl Device {
                     .push(format!("a delivery without its body at {:?}", delivery.dot));
                 continue;
             };
-            let Ok(data) = parse_op(body) else {
+            // What the held envelope opened to, under the header the log accepted.
+            let Ok(data) = parse_op(&body.data) else {
                 self.errors
                     .push("a delivered body did not parse".to_owned());
                 continue;
@@ -1027,6 +1107,27 @@ impl Device {
     pub(super) fn outbox_empty(&self) -> bool {
         self.outbox_snaps.is_empty() && self.log.unacknowledged().next().is_none()
     }
+}
+
+/// An op body of a page that passed every check of the verify step.
+struct Opened<'a> {
+    /// The `ITEM_OP` envelope as served, which the device keeps.
+    envelope: &'a [u8],
+    /// The op `data` it opened to.
+    data: Vec<u8>,
+}
+
+/// An op body a device holds: an envelope it sealed itself, or one that passed the verify
+/// step. The device opens each envelope once, when it accepts it, and keeps the `data` for the
+/// delivery (a generated history opens the same record on several devices and pages, and
+/// unoptimised test builds make each open slow). Synthetic test data, so plain vectors.
+#[derive(Clone, Debug)]
+struct HeldBody {
+    /// The `ITEM_OP` envelope, as it travels.
+    envelope: Vec<u8>,
+    /// The op `data`: what the author sealed, or what the envelope opened to under the
+    /// verified header.
+    data: Vec<u8>,
 }
 
 /// The kind of a merge refusal, for the harness's failure analysis (synthetic test data; the

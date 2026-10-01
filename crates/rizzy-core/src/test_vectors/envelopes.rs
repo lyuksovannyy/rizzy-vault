@@ -7,17 +7,25 @@
 //! through the generic entry points and, where a typed key can be built from those inputs,
 //! through the typed wrap function too, and requires the same bytes from both.
 //!
+//! The `ITEM_OP` and `ITEM_SNAPSHOT` vectors each carry their record's canonical header
+//! (ADR 0012 §3) as the input `canonical_header`: the context's fields are the header's, and
+//! its header hash is `SHA-256` of those bytes, as `rizzy-sync` builds the context from a
+//! header. The headers are `rizzy-sync`'s, which this crate cannot depend on, so the generator
+//! encodes them by hand ([`super::headers`]); a `rizzy-sync` test parses them with its own
+//! parser, re-encodes them byte for byte, rebuilds each context from the parsed header and
+//! opens the envelope under it.
+//!
 //! The plaintexts of `ITEM_OP`, `ITEM_SNAPSHOT`, `ACCOUNT_SETTINGS`, `EXPORT_FILE` and the
-//! server purposes are opaque placeholder bytes, and so are the `ITEM_OP` and `ITEM_SNAPSHOT`
-//! header hashes. The item-record encoding (ADR 0018) and the canonical headers (ADR 0012 §3)
-//! are implemented in `rizzy-sync`, which this crate cannot depend on; the other plaintext
-//! formats are not implemented yet. The envelope does not look inside any of them.
+//! server purposes are opaque placeholder bytes. The item-record encoding (ADR 0018) is
+//! implemented in `rizzy-sync`; the other plaintext formats are not implemented yet. The
+//! envelope does not look inside any of them.
 
 use chacha20::ChaCha20Rng;
 use chacha20poly1305::aead::{Aead as _, Payload};
 use chacha20poly1305::{KeyInit as _, XChaCha20Poly1305, XNonce};
 use serde_json::{Map, Value};
 
+use super::headers::{OpHeaderFields, SnapshotHeaderFields};
 use super::{ExactRng, Obj, Vector, arr, bytes, num, object, random, random_vec, small, u64_of};
 use crate::envelope::purpose::{
     AccountKeyDeviceGrantCtx, AccountKeyLocalWrapCtx, AccountKeyRecoveryWrapCtx,
@@ -184,31 +192,97 @@ pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
     out.push(vector("ITEM_KEY_WRAP", 0, symmetric(rng, ctx, &pt)));
 
     // Padded purposes: one plaintext inside the 256-byte minimum frame, one past it.
+    //
+    // Each of the four carries its record's canonical header (ADR 0012 §3) as the input
+    // `canonical_header`, written by hand ([`super::headers`]); the context's ids, sequence
+    // number and HLC are the header's, and its header hash is `SHA-256` of those bytes. The
+    // generator draws exactly what it drew when the header hash was 32 opaque bytes, in the
+    // same order, so no other vector of the file moves: those 32 bytes are now the two device
+    // ids the context itself does not give (two other devices of an op's causal context; a
+    // snapshot's author and one other device of its covered VV).
+    let halves = |drawn: [u8; 32]| -> ([u8; 16], [u8; 16]) {
+        let (a, b) = drawn.split_at(16);
+        (
+            a.try_into().expect("16 bytes"),
+            b.try_into().expect("16 bytes"),
+        )
+    };
     for (i, len) in [40usize, 700].into_iter().enumerate() {
+        let (vault_id, item_id) = (id(rng), id(rng));
+        let (op_id, device_id) = (id(rng), id(rng));
+        let device_seq = 1 + u64::from(small(rng, 1000));
+        let hlc = (1_780_000_000_000u64 << 16) | u64::from(small(rng, 100));
+        let (first, second) = halves(random::<32>(rng));
+        // Vector 0 is a create (an empty causal context, vault key epoch 0); vector 1 an edit
+        // after a vault-key rotation, by a device that had seen ops of two other devices.
+        let header = OpHeaderFields {
+            vault_id,
+            item_id,
+            op_id,
+            device_id,
+            device_seq,
+            vault_prev_seq: device_seq - 1,
+            hlc,
+            item_schema_version: 1,
+            vault_key_epoch: u32::try_from(i).expect("0 or 1"),
+            causal_context: if i == 0 {
+                Vec::new()
+            } else {
+                vec![(first, 3), (second, 12)]
+            },
+        }
+        .encode();
         let ctx = Obj::new()
-            .bytes("vault_id", &id(rng))
-            .bytes("item_id", &id(rng))
+            .bytes("vault_id", &vault_id)
+            .bytes("item_id", &item_id)
             .num("item_schema_version", 1)
-            .bytes("op_id", &id(rng))
-            .bytes("device_id", &id(rng))
-            .u64("device_seq", 1 + u64::from(small(rng, 1000)))
-            .u64(
-                "hlc",
-                (1_780_000_000_000u64 << 16) | u64::from(small(rng, 100)),
-            )
-            .bytes("op_header_hash", &random::<32>(rng));
+            .bytes("op_id", &op_id)
+            .bytes("device_id", &device_id)
+            .u64("device_seq", device_seq)
+            .u64("hlc", hlc)
+            .bytes("op_header_hash", &ItemOpCtx::header_hash(&header));
         let pt = random_vec(rng, len);
-        out.push(vector("ITEM_OP", i, symmetric(rng, ctx, &pt)));
+        out.push(vector(
+            "ITEM_OP",
+            i,
+            symmetric(rng, ctx, &pt).bytes("canonical_header", &header),
+        ));
     }
     for (i, len) in [0usize, 1500].into_iter().enumerate() {
+        let (vault_id, item_id) = (id(rng), id(rng));
+        let snapshot_id = id(rng);
+        let (author, other) = halves(random::<32>(rng));
+        // Vector 0 covers its author's ops only; vector 1 those of two devices, after a
+        // vault-key rotation.
+        let header = SnapshotHeaderFields {
+            vault_id,
+            item_id,
+            snapshot_id,
+            author,
+            item_schema_version: 1,
+            vault_key_epoch: u32::try_from(i).expect("0 or 1"),
+            covered: if i == 0 {
+                vec![(author, 5)]
+            } else {
+                vec![(author, 5), (other, 2)]
+            },
+        }
+        .encode();
         let ctx = Obj::new()
-            .bytes("vault_id", &id(rng))
-            .bytes("item_id", &id(rng))
+            .bytes("vault_id", &vault_id)
+            .bytes("item_id", &item_id)
             .num("item_schema_version", 1)
-            .bytes("snapshot_id", &id(rng))
-            .bytes("snapshot_header_hash", &random::<32>(rng));
+            .bytes("snapshot_id", &snapshot_id)
+            .bytes(
+                "snapshot_header_hash",
+                &ItemSnapshotCtx::header_hash(&header),
+            );
         let pt = random_vec(rng, len);
-        out.push(vector("ITEM_SNAPSHOT", i, symmetric(rng, ctx, &pt)));
+        out.push(vector(
+            "ITEM_SNAPSHOT",
+            i,
+            symmetric(rng, ctx, &pt).bytes("canonical_header", &header),
+        ));
     }
 
     let ctx = Obj::new()
@@ -499,9 +573,8 @@ pub(super) fn compute(name: &str, m: &Map<String, Value>) -> Map<String, Value> 
             assert_eq!(again, env, "wrap_item_key");
             out
         }
-        "ITEM_OP" => symmetric_outputs(
-            m,
-            &ItemOpCtx {
+        "ITEM_OP" => {
+            let ctx = ItemOpCtx {
                 vault_id: vault(c),
                 item_id: ItemId::from_bytes(arr(c, "item_id")),
                 item_schema_version: num(c, "item_schema_version"),
@@ -510,18 +583,50 @@ pub(super) fn compute(name: &str, m: &Map<String, Value>) -> Map<String, Value> 
                 device_seq: u64_of(c, "device_seq"),
                 hlc: u64_of(c, "hlc"),
                 op_header_hash: arr(c, "op_header_hash"),
-            },
-        ),
-        "ITEM_SNAPSHOT" => symmetric_outputs(
-            m,
-            &ItemSnapshotCtx {
+            };
+            // The context is the one the record's canonical header gives (CRYPTO.md §8.4): the
+            // header's own fields, and `SHA-256` of exactly its bytes.
+            let canonical = bytes(m, "canonical_header");
+            let header = OpHeaderFields::decode(&canonical);
+            let from_header = ItemOpCtx {
+                vault_id: VaultId::from_bytes(header.vault_id),
+                item_id: ItemId::from_bytes(header.item_id),
+                item_schema_version: header.item_schema_version,
+                op_id: OpId::from_bytes(header.op_id),
+                device_id: DeviceId::from_bytes(header.device_id),
+                device_seq: header.device_seq,
+                hlc: header.hlc,
+                op_header_hash: ItemOpCtx::header_hash(&canonical),
+            };
+            assert_eq!(ctx.ctx_bytes(), from_header.ctx_bytes(), "ITEM_OP ctx");
+            symmetric_outputs(m, &ctx)
+        }
+        "ITEM_SNAPSHOT" => {
+            let ctx = ItemSnapshotCtx {
                 vault_id: vault(c),
                 item_id: ItemId::from_bytes(arr(c, "item_id")),
                 item_schema_version: num(c, "item_schema_version"),
                 snapshot_id: SnapshotId::from_bytes(arr(c, "snapshot_id")),
                 snapshot_header_hash: arr(c, "snapshot_header_hash"),
-            },
-        ),
+            };
+            // As for ops: the header's fields, and the hash of its bytes, which binds the
+            // author and the covered VV (ADR 0012 §3).
+            let canonical = bytes(m, "canonical_header");
+            let header = SnapshotHeaderFields::decode(&canonical);
+            let from_header = ItemSnapshotCtx {
+                vault_id: VaultId::from_bytes(header.vault_id),
+                item_id: ItemId::from_bytes(header.item_id),
+                item_schema_version: header.item_schema_version,
+                snapshot_id: SnapshotId::from_bytes(header.snapshot_id),
+                snapshot_header_hash: ItemSnapshotCtx::header_hash(&canonical),
+            };
+            assert_eq!(
+                ctx.ctx_bytes(),
+                from_header.ctx_bytes(),
+                "ITEM_SNAPSHOT ctx"
+            );
+            symmetric_outputs(m, &ctx)
+        }
         "EXPORT_FILE" => symmetric_outputs(
             m,
             &ExportFileCtx {

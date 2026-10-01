@@ -4,9 +4,10 @@
 //! vectors under `crates/rizzy-core/tests/vectors/`, in its published JSON schema, which item
 //! 8 runs on every target and through the bindings. For now they are Rust test constants here
 //! and in the header tests, which no binding or wasm harness can read: `rizzy-core` cannot
-//! depend on this crate, and this crate has no JSON reader. §15 item 1(A) records this as the
-//! current state. Their final home, and the regeneration of `rizzy-core`'s placeholder
-//! `canonical_header` statement vectors over real headers, wait for an owner decision.
+//! depend on this crate, so its generator cannot build a record. §15 item 1(A) records this as
+//! the current state, and their final home waits for an owner decision. (`rizzy-core`'s
+//! statement and envelope vectors do carry canonical headers, written by hand in its
+//! generator; [`crate::header`]'s `core_vectors` tests read them from the JSON files.)
 //!
 //! **Positive vectors.** Each is a record built through this module's types, the same record
 //! written field by field by the independent [`Spec`] writer, and the committed hex. The test

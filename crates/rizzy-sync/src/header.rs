@@ -467,6 +467,8 @@ impl SnapshotHeader {
 }
 
 #[cfg(test)]
+mod core_vectors;
+#[cfg(test)]
 #[expect(
     clippy::indexing_slicing,
     reason = "test code edits fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"

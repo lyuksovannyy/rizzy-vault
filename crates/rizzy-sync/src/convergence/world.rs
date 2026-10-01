@@ -241,7 +241,7 @@ impl World {
         let devs = (0..devices)
             .map(|d| {
                 let skew = rng.next() % 50;
-                Device::new(device_id(d), T0 + skew)
+                Device::new(device_id(d), T0 + skew, seed)
             })
             .collect();
         Self {

@@ -40,6 +40,11 @@ mod derivations;
 )]
 mod encodings;
 mod envelopes;
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
+mod headers;
 mod items;
 mod statements;
 mod transcript;

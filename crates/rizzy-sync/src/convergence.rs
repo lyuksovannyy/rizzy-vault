@@ -13,7 +13,7 @@
 //! |---|---|
 //! | 3–7 simulated devices, a simulated server | [`world::World`], [`device::Device`], [`server::Server`] (which calls [`crate::compaction`]), checked by the independent [`checker`] (ADR 0021 §8) |
 //! | a deterministic scheduler and a seeded RNG | [`oracle::Rng`] (xorshift64*, as the merge spike's `random.rs`); proptest draws only the seed and the family |
-//! | real `rizzy-core` crypto with a test RNG | partly: see "Crypto" below |
+//! | real `rizzy-core` crypto with a test RNG | [`crypto`]: signed statements and sealed `ITEM_OP`/`ITEM_SNAPSHOT` envelopes under a seeded `ChaCha20Rng`; see "Crypto" below for what is not modelled |
 //! | creates, field edits, list-element edits, trash, restore, purge, concurrent edits, offline devices | every family of [`generate`]; list elements are the `tag/<hex>` and `uri/<id>/value` keys of [`KEYS`], some ops write several keys |
 //! | duplicated, delayed and reordered delivery | [`world::Faults`]: pages, shuffles, duplicate records and pages; lost upload answers and re-uploads ("Already stored") |
 //! | a server rolled back to an earlier state | backups and restores with healing requests ([`generate`] family `restore`, [`named`]) |
@@ -26,23 +26,29 @@
 //!
 //! # Crypto
 //!
-//! `rizzy-core` builds a device signing key and seals an envelope only with an injected
-//! `rand_core` 0.10 `CryptoRng`, whose traits it re-exports only as `CryptoRng` (not the
-//! `TryRng`/`TryCryptoRng` traits an implementation needs), and its seeded test RNG is
-//! crate-private. `rizzy-sync` depends on no RNG crate, and adding one is out of this change's
-//! scope (and the owner's call: a public seeded `CryptoRng` behind a `rizzy-core` test
-//! feature, or `rand_core` as a `rizzy-sync` dev-dependency), so records are **not** encrypted
-//! or signed here. Signature verification, the AAD binding of the item VV and item id
-//! (ADR 0018 owner decision 3) and property 6's decryption half are therefore untested by this
-//! harness. What the harness does run of `rizzy-core`'s verification path: every op and
-//! snapshot travels as its
-//! [`OpStatement`](rizzy_core::sign::OpStatement) or
-//! [`SnapshotStatement`](rizzy_core::sign::SnapshotStatement), the exact bytes a signature
-//! covers (canonical header, `SHA-256` of the envelope), with the record's `data` standing in
-//! for the envelope; the server and the clients check the envelope hash and parse the header
-//! from the statement ([`crate::header::OpHeader::parse_statement`]). Property 6 as ADR 0012
-//! §12 words it ("cannot decrypt anything written after the rotation") needs rotation and real
-//! envelopes and is not tested; its sync-engine half (cut-offs) is.
+//! Records are signed and encrypted with `rizzy-core` ([`crypto`]). Every op and snapshot
+//! travels as its [`OpStatement`](rizzy_core::sign::OpStatement) or
+//! [`SnapshotStatement`](rizzy_core::sign::SnapshotStatement) in the signed wire form, by its
+//! author's device key, with its sealed `ITEM_OP` or `ITEM_SNAPSHOT` envelope under the
+//! item's key. The server and the devices verify each signature under the key of the device
+//! the record names, parse the header from the verified statement
+//! ([`crate::header::OpHeader::parse_statement`]) and check the envelope against the signed
+//! hash; a device then opens the envelope under the AAD context that header gives
+//! ([`crate::header::OpHeader::envelope_context`]), which binds the item id, the dot, the HLC
+//! and, through the header hash, the causal context or a snapshot's covered VV (ADR 0018 owner
+//! decision 3), and only then runs the record parser. The server holds no item key.
+//!
+//! `rizzy-core` takes randomness only as an injected `rand_core` 0.10 `CryptoRng`; the harness
+//! injects `chacha20`'s seeded `ChaCha20Rng`, a dev-dependency (ADR 0009 "RNG rules"), into
+//! `rizzy-core`'s public key-generation and seal functions. `rizzy-core`'s API is unchanged.
+//!
+//! The generated histories exchange honest signatures and envelopes only (a faulty device
+//! lies in what it signs and seals, not in the crypto), so what the crypto refuses is pinned
+//! by the tests of [`crypto`]. Not modelled: certificates (a directory of verifying keys
+//! stands in for the verified device set), the vault key and the `ITEM_KEY_WRAP` envelope
+//! (every device holds every item key), and key rotation. So property 6 as ADR 0012 §12 words
+//! it ("cannot decrypt anything written after the rotation") is still not tested; its
+//! sync-engine half (cut-offs) is.
 //!
 //! # Findings
 //!
@@ -58,6 +64,7 @@
 //! with several items ([`device`]), what the server compares for "Already stored" ([`server`]).
 
 mod checker;
+mod crypto;
 mod device;
 mod faults;
 mod generate;
@@ -104,9 +111,10 @@ fn item_id(i: usize) -> ItemId {
     ItemId::from_bytes([0xa0 | (b & 0x0f); 16])
 }
 
-/// The one item key of `item`: every op of the item is under it (no rotation is modelled).
+/// The key id of the one item key of `item` ([`crypto`]): every op and snapshot of the item
+/// is sealed under that key (no rotation is modelled), and its envelopes carry this id.
 fn item_key(item: ItemId) -> SymmetricKeyId {
-    SymmetricKeyId::from_bytes(item.to_bytes())
+    crypto::item_key_id(item)
 }
 
 /// The `n`th fresh value the generators write to `key` (ADR 0018 §6, §7): for a tag, Bool

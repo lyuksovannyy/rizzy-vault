@@ -1487,8 +1487,11 @@ dependencies = [
 name = "rizzy-sync"
 version = "0.0.0"
 dependencies = [
+ "chacha20",
  "proptest",
+ "rand_core 0.10.1",
  "rizzy-core",
+ "serde_json",
 ]
 
 [[package]]

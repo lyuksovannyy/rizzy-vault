@@ -6,15 +6,22 @@
 //! a state signed by the new identity key), then a silent bundle update and a settings change.
 //! The rotation states keep `settings_seq = 0` (§11.6 step 3, §15 item 1).
 //!
-//! The `op` and `snapshot` vectors sign opaque header bytes of a valid length, not canonical
-//! headers: the headers are ADR 0012 §3's, encoded by `rizzy-sync`, which this crate cannot
-//! depend on, and whose header parser rejects these bytes. Regenerating them over real headers
-//! waits for an owner decision (see `tests/vectors/README.md`, "Not covered yet").
+//! The `op` and `snapshot` vectors sign canonical headers of ADR 0012 §3, and they are the
+//! first records of one item, all by the desktop device: `op/0` creates the item (an empty
+//! causal context, and the item-key wrap a create carries), `snapshot/0` is the desktop's
+//! snapshot of it right after (its covered VV is that one op), and `op/1` is a later edit whose
+//! causal context names two devices, so the vectors hold a version vector with more than one
+//! entry in its canonical order. The headers are `rizzy-sync`'s, which this crate cannot depend
+//! on, so the generator encodes them by hand ([`super::headers`]); a `rizzy-sync` test parses
+//! them with its own parser and re-encodes them byte for byte. The `envelope` and
+//! `item_key_wrap` inputs of these vectors are still opaque bytes of a real envelope's length:
+//! the statement signs only their `SHA-256`.
 
 use chacha20::ChaCha20Rng;
 use serde_json::{Map, Value};
 use sha2::{Digest as _, Sha256};
 
+use super::headers::{OpHeaderFields, SnapshotHeaderFields};
 use super::{Obj, Vector, arr, boolean, bytes, num, opt_bytes, random, random_vec, text, u64_of};
 use crate::encoding::{put_str, put_u64};
 use crate::envelope::Purpose;
@@ -384,11 +391,25 @@ pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
     );
 
     // Records and grants by the desktop device.
+    //
+    // The three records are the first of one item (see the module documentation). Each header
+    // is a canonical ADR 0012 §3 header, written by hand. The generator draws exactly the
+    // bytes it drew when these vectors signed opaque header bytes (145, 97 and 97 bytes, each
+    // before its record's envelope and wrap), so no other vector of the file moves. The 16
+    // drawn bytes at the offsets of `vault_id`, `item_id` and `op_id` or `snapshot_id` become
+    // those ids (the vault and item of all three are the first draw's); the rest of each draw
+    // is unused.
     let dev_seed = desktop.seed;
-    let record = |header_len: usize, wrap: bool, rng: &mut ChaCha20Rng| {
+    let drawn_id = |drawn: &[u8], at: usize| -> [u8; 16] {
+        drawn
+            .get(at..at + 16)
+            .and_then(|id| id.try_into().ok())
+            .expect("16 drawn bytes")
+    };
+    let record = |canonical_header: &[u8], wrap: bool, rng: &mut ChaCha20Rng| {
         let obj = Obj::new()
             .bytes("signer_seed", &dev_seed)
-            .bytes("canonical_header", &random_vec(rng, header_len))
+            .bytes("canonical_header", canonical_header)
             .bytes("envelope", &random_vec(rng, 90 + 256));
         if wrap {
             obj.bytes("item_key_wrap", &random_vec(rng, 90 + 37))
@@ -396,9 +417,52 @@ pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
             obj.null("item_key_wrap")
         }
     };
-    let op_wrap = vector("op", 0, record(97 + 2 * 24, true, rng));
-    let op_plain = vector("op", 1, record(97, false, rng));
-    let snapshot = vector("snapshot", 0, record(73 + 24, true, rng));
+    // The desktop's 41st op creates the item: no causal context, and the wrap of the new item
+    // key. Its previous op in this vault was its 40th.
+    let drawn = random_vec(rng, 97 + 2 * 24);
+    let (vault_id, item_id) = (drawn_id(&drawn, 1), drawn_id(&drawn, 17));
+    let create = OpHeaderFields {
+        vault_id,
+        item_id,
+        op_id: drawn_id(&drawn, 33),
+        device_id: desktop.id,
+        device_seq: 41,
+        vault_prev_seq: 40,
+        hlc: (T0 + 20 * HOUR) << 16,
+        item_schema_version: 1,
+        vault_key_epoch: 0,
+        causal_context: Vec::new(),
+    };
+    let op_wrap = vector("op", 0, record(&create.encode(), true, rng));
+    // A later edit by the desktop, after the mobile device's 9th op wrote to the item too: the
+    // context is the item VV the desktop held. Its 42nd op went to another vault, so
+    // `vault_prev_seq` (41) is not `device_seq - 1`.
+    let drawn = random_vec(rng, 97);
+    let edit = OpHeaderFields {
+        vault_id,
+        item_id,
+        op_id: drawn_id(&drawn, 33),
+        device_id: desktop.id,
+        device_seq: 43,
+        vault_prev_seq: 41,
+        hlc: ((T0 + 21 * HOUR) << 16) | 3,
+        item_schema_version: 1,
+        vault_key_epoch: 0,
+        causal_context: vec![(desktop.id, 41), (mobile.id, 9)],
+    };
+    let op_plain = vector("op", 1, record(&edit.encode(), false, rng));
+    // The desktop's snapshot of the item right after the create: it covers that one op.
+    let drawn = random_vec(rng, 73 + 24);
+    let covering = SnapshotHeaderFields {
+        vault_id,
+        item_id,
+        snapshot_id: drawn_id(&drawn, 33),
+        author: desktop.id,
+        item_schema_version: 1,
+        vault_key_epoch: 0,
+        covered: vec![(desktop.id, 41)],
+    };
+    let snapshot = vector("snapshot", 0, record(&covering.encode(), true, rng));
 
     let grant_envelope = |rng: &mut ChaCha20Rng, sender: &[u8; 16], recipient: &Device| {
         let ctx = AccountKeyDeviceGrantCtx {
@@ -552,6 +616,7 @@ pub(super) fn check_file(vectors: &[Vector]) {
             v.id
         );
     }
+    check_records(vectors);
     // ADR 0028 item 5: every `device-request` target is signed as written: the signed body
     // holds `str(path_and_query)` unchanged.
     let requests: Vec<&Vector> = vectors
@@ -612,6 +677,80 @@ pub(super) fn check_file(vectors: &[Vector]) {
         PATHOLOGICAL_TARGETS.len(),
         "targets that differ give signed messages that differ"
     );
+}
+
+/// The `op` and `snapshot` vectors carry canonical ADR 0012 §3 headers that fit the story:
+/// each header names the device whose key signed the statement (CRYPTO.md §10.2, INV-22: the
+/// device of the certificate with that public key), the three records are of one item of one
+/// vault, the create has an empty causal context and carries the item-key wrap, and the later
+/// edit's context and the snapshot's covered VV both cover the create.
+fn check_records(vectors: &[Vector]) {
+    // The device a record's signer is: the `device_id` of the certificate for its public key.
+    let signer_device = |v: &Vector| -> [u8; 16] {
+        let public_key = bytes(&v.outputs, "signer_public_key");
+        let certificate = vectors
+            .iter()
+            .find(|c| {
+                c.name == "device-certificate"
+                    && bytes(&c.inputs, "device_ed25519_public_key") == public_key
+            })
+            .unwrap_or_else(|| panic!("{}: no certificate for the signer", v.id));
+        arr(&certificate.inputs, "device_id")
+    };
+    let covers = |vv: &[([u8; 16], u64)], device: [u8; 16], seq: u64| {
+        vv.iter().any(|&(d, s)| d == device && s >= seq)
+    };
+    let ops: Vec<(&Vector, OpHeaderFields)> = vectors
+        .iter()
+        .filter(|v| v.name == "op")
+        .map(|v| {
+            let header = OpHeaderFields::decode(&bytes(&v.inputs, "canonical_header"));
+            (v, header)
+        })
+        .collect();
+    let [(create_vector, create), (edit_vector, edit)] = ops.as_slice() else {
+        panic!("two op vectors, the create first");
+    };
+    for (v, header) in &ops {
+        assert_eq!(header.device_id, signer_device(v), "{}", v.id);
+    }
+    assert!(create.causal_context.is_empty(), "{}", create_vector.id);
+    assert!(
+        opt_bytes(&create_vector.inputs, "item_key_wrap").is_some(),
+        "{}: a create carries the item-key wrap",
+        create_vector.id
+    );
+    assert_eq!(
+        (edit.vault_id, edit.item_id),
+        (create.vault_id, create.item_id),
+        "{}",
+        edit_vector.id
+    );
+    assert!(
+        edit.causal_context.len() > 1
+            && covers(&edit.causal_context, create.device_id, create.device_seq),
+        "{}: a context of several devices that covers the create",
+        edit_vector.id
+    );
+    assert!(edit.vault_prev_seq >= create.device_seq && edit.vault_prev_seq < edit.device_seq);
+    assert!(edit.hlc > create.hlc);
+    let snapshots: Vec<&Vector> = vectors.iter().filter(|v| v.name == "snapshot").collect();
+    assert!(!snapshots.is_empty());
+    for v in snapshots {
+        let header = SnapshotHeaderFields::decode(&bytes(&v.inputs, "canonical_header"));
+        assert_eq!(header.author, signer_device(v), "{}", v.id);
+        assert_eq!(
+            (header.vault_id, header.item_id),
+            (create.vault_id, create.item_id),
+            "{}",
+            v.id
+        );
+        assert!(
+            covers(&header.covered, create.device_id, create.device_seq),
+            "{}: the snapshot covers the create",
+            v.id
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -939,10 +1078,17 @@ pub(super) fn compute(name: &str, m: &Map<String, Value>) -> Map<String, Value> 
     }
 }
 
-/// `op` and `snapshot`: the hashed record statements.
+/// `op` and `snapshot`: the hashed record statements. The header must be a canonical ADR 0012
+/// §3 header of its kind: the statement itself checks only its length, so the strict decoder
+/// of [`super::headers`] runs here, and a header `rizzy-sync` would reject fails the replay.
 fn record(name: &str, m: &Map<String, Value>) -> Map<String, Value> {
     let key = DeviceSigningKey::from_seed(&seed(m));
     let header = bytes(m, "canonical_header");
+    if name == "op" {
+        OpHeaderFields::decode(&header);
+    } else {
+        SnapshotHeaderFields::decode(&header);
+    }
     let envelope = bytes(m, "envelope");
     let wrap = opt_bytes(m, "item_key_wrap");
     let (wire, hash, label) = if name == "op" {

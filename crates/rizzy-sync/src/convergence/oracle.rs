@@ -22,8 +22,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use rizzy_core::ids::ItemId;
 
-use super::item_key;
 use super::server::SnapRecord;
+use super::{crypto, item_key};
 use crate::dot::Dot;
 use crate::header::OpHeader;
 use crate::hlc::Hlc;
@@ -37,12 +37,14 @@ pub(super) type Val = (Dot, Hlc, Vec<u8>);
 /// Per key, a set of values.
 pub(super) type Registers = BTreeMap<String, BTreeSet<Val>>;
 
-/// An op of the harness's ledger: its header and body, and what it wrote.
+/// An op of the harness's ledger: its header and body, and what it wrote. The ledger is the
+/// harness's ground truth, so it holds the op `data` in the clear, as its author encoded it,
+/// not the envelope that travels.
 #[derive(Clone, Debug)]
 pub(super) struct LedgerOp {
     /// The header.
     pub(super) header: OpHeader,
-    /// The encoded op data.
+    /// The encoded op data (the plaintext of the op's `ITEM_OP` envelope).
     pub(super) body: Vec<u8>,
     /// Its lifecycle marker.
     pub(super) lifecycle: Lifecycle,
@@ -422,7 +424,10 @@ fn absorb(
             data,
         })
         .collect();
-    let data = parse_snapshot(&snap.header.covered, &snap.data)
+    // The record's data is its sealed `ITEM_SNAPSHOT` envelope, opened under its own header.
+    let opened = crypto::open_snapshot(&snap.header, &snap.data)
+        .ok_or_else(|| "a snapshot envelope did not open".to_owned())?;
+    let data = parse_snapshot(&snap.header.covered, opened.expose_secret())
         .map_err(|e| format!("parse_snapshot: {e:?}"))?;
     let absorption = merge
         .absorb_snapshot(
