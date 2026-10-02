@@ -83,7 +83,7 @@ jobs:
       - run: cargo check --manifest-path fuzz/Cargo.toml --locked --bins
 
   wasm:
-    name: core builds for wasm32
+    name: no-I/O crates and rizzy-wasm build for wasm32
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -126,6 +126,69 @@ jobs:
           manifest-path: fuzz/Cargo.toml
           command: check
           arguments: --all-features
+
+  web:
+    name: web vault (wasm, pnpm, Vitest, Playwright)
+    # M1 step 5 (ADR 0013 §4, ADR 0014 §3): build rizzy-wasm with the locked wasm-bindgen-cli
+    # into packages/core, then the pnpm workspace's policy check, lint, build, unit tests, and
+    # the Playwright tests in Chromium against the real rizzy-vault built with `embed-web`.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # packages/core's end-to-end test fails instead of skipping when no server binary exists.
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install || rustup show
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      # pnpm at exactly the version in package.json's `packageManager` field, through Node's
+      # own corepack (no third-party action).
+      - run: corepack enable
+      # wasm-bindgen-cli at exactly the `wasm-bindgen` version in Cargo.lock ("the two must
+      # match", ADR 0013 §4; `cargo xtask build-wasm` refuses any other).
+      - name: Install wasm-bindgen-cli (locked version)
+        run: |
+          version="$(cargo metadata --format-version 1 --locked | jq -r '.packages[] | select(.name == "wasm-bindgen") | .version')"
+          cargo install wasm-bindgen-cli --version "=$version" --locked
+      - run: cargo xtask build-wasm
+      # No dependency install scripts run (ADR 0014 §3; the allow-list is empty).
+      - run: pnpm install --frozen-lockfile
+      # Exact versions, pinned pnpm, empty install-script allow-list, deny.toml licences and
+      # `pnpm audit` (ADR 0014 §3).
+      - run: cargo xtask check-js
+      - run: pnpm run lint
+      - run: pnpm run build
+      # The server packages/core's end-to-end test starts.
+      - run: cargo build --locked -p rizzy-server --bin rizzy-vault
+      - run: pnpm run test
+      - run: pnpm --filter @rizzy-vault/web exec playwright install --with-deps chromium
+      # Builds rizzy-vault with `embed-web` first, then runs Playwright against it.
+      - run: pnpm run e2e
+
+  bindings-baseline:
+    name: wasm-bindgen expansion baseline (ADR 0019 §4.1)
+    # Regenerates the macro expansion of rizzy-wasm and fails on any difference from the
+    # committed crates/rizzy-wasm/generated/ (ADR 0019 §4.1: "CI regenerates and fails on any
+    # difference"). `-Zunpretty=expanded` needs unstable flags; this job runs the pinned
+    # toolchain with RUSTC_BOOTSTRAP=1, the toolchain the baseline was made with (recorded in
+    # counts.txt). Only this job sets it; no build artefact of it is used anywhere else.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup toolchain install || rustup show
+      - name: Regenerate and compare the expansion
+        env:
+          RUSTC_BOOTSTRAP: "1"
+        run: cargo xtask expand-bindings
 
   dco:
     name: DCO sign-off
@@ -201,7 +264,7 @@ jobs:
   # ROADMAP §4.9).
   image-publish:
     name: publish image (${{ matrix.arch }}, off by default)
-    needs: [fmt, clippy, test, fuzz-check, wasm, docs, deny, dco, image]
+    needs: [fmt, clippy, test, fuzz-check, wasm, docs, deny, dco, image, web, bindings-baseline]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.RIZZY_PUBLISH_IMAGE == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60

@@ -26,15 +26,15 @@
 //!   the generated glue carries its reviewed diff and counts (§4.1 (b)). This is a staleness
 //!   signal on the stable toolchain, not the regeneration itself: check-deps cannot expand the
 //!   crate, so a baseline edited by hand to match the fingerprint passes it, and only
-//!   `expand-bindings` (below) proves the expansion. Until a CI job runs `expand-bindings`,
-//!   §4.1's "CI regenerates and fails on any difference" is not met (reported).
+//!   `expand-bindings` (below) proves the expansion; CI runs it in the `bindings-baseline` job
+//!   (`.github/workflows/ci.yml`), which meets §4.1's "CI regenerates and fails on any difference".
 //! - `cargo xtask expand-bindings` (a separate job, like fuzzing): regenerates the expansion
 //!   and fails on any difference from the committed one; `--write` replaces both files. The
 //!   expansion needs `-Zunpretty=expanded`, which a stable rustc refuses. xtask never switches
 //!   toolchains or sets `RUSTC_BOOTSTRAP` itself: the job runs it under the toolchain it pins
-//!   (ADR 0019 §4.1, "it runs in a separate job on its own toolchain"). Which toolchain that
-//!   is, is open (reported); the committed baseline was made with the workspace's pinned rustc
-//!   1.94.1 with `RUSTC_BOOTSTRAP=1` set by the caller, recorded in `counts.txt`.
+//!   (ADR 0019 §4.1, "it runs in a separate job on its own toolchain"): CI uses the
+//!   pinned rustc 1.94.1 with `RUSTC_BOOTSTRAP=1` in that job only, the toolchain the
+//!   committed baseline was made with (recorded in `counts.txt`).
 //! - `cargo xtask build-wasm`: the release build of `rizzy-wasm`, then `wasm-bindgen-cli` into
 //!   `packages/core/generated/` (not committed, ADR 0013 §4). It refuses a `wasm-bindgen`
 //!   CLI whose version is not exactly the `wasm-bindgen` crate's in `Cargo.lock` ("the two
