@@ -116,6 +116,13 @@ pub(crate) struct CredentialPart {
     pub(crate) pw_in: PasswordInput,
     /// OPAQUE `RegistrationUpload` of the new record.
     pub(crate) registration_upload: OpaqueMessage,
+    /// The `setup_id` the registration started under, echoed in the commit (ADR 0031 point 3).
+    pub(crate) setup_id: u32,
+    /// The OPAQUE state of a registration restarted after `setup_retired` (ADR 0031 point 8),
+    /// between its request and answer.
+    pub(crate) restart: Option<ClientRegistrationState>,
+    /// Whether the registration was restarted once already (at most once, ADR 0031 "Risks").
+    pub(crate) restarted: bool,
     /// The new record's `kdf_id`, which the new state names and the device state keeps.
     pub(crate) kdf_id: KdfId,
     /// `password_epoch + 1`.
@@ -127,6 +134,57 @@ pub(crate) struct CredentialPart {
 }
 
 impl CredentialPart {
+    /// ADR 0031 point 8: starts the registration again with the same `pw_in`, once.
+    ///
+    /// # Errors
+    /// [`ClientError::SetupRetired`] when it was restarted once already;
+    /// [`ClientError::Internal`].
+    pub(crate) fn restart_registration<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<ReregisterStartRequest, ClientError> {
+        if self.restarted {
+            return Err(ClientError::SetupRetired);
+        }
+        let (state, message) = client_registration_start(rng, &self.pw_in).map_err(internal)?;
+        self.restart = Some(state);
+        self.restarted = true;
+        Ok(ReregisterStartRequest {
+            registration_request: bytes(message)?,
+        })
+    }
+
+    /// ADR 0031 point 8: finishes the restarted registration on `response`: the new upload and
+    /// `setup_id`, and `wrap` (`E_srv'`) rebuilt for `account_key` under the new `export_key`
+    /// at its own locator.
+    ///
+    /// # Errors
+    /// [`ClientError::InvalidInput`] without a restart; as
+    /// [`crate::reregister::finish_registration`].
+    pub(crate) fn on_registration_restarted<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        response: &ReregisterStartResponse,
+        account_id: AccountId,
+        account_key: &AccountKey,
+        wrap: &mut AccountKeyServerWrap,
+    ) -> Result<(), ClientError> {
+        let state = self.restart.take().ok_or(ClientError::InvalidInput)?;
+        let (upload, new_wrap) = crate::reregister::finish_registration(
+            rng,
+            state,
+            &self.pw_in,
+            response.registration_response.as_slice(),
+            account_id,
+            account_key,
+            crate::reregister::Locator::from(&*wrap),
+        )?;
+        self.registration_upload = upload;
+        self.setup_id = response.setup_id;
+        *wrap = new_wrap;
+        Ok(())
+    }
+
     /// `E_local'` of `account_key` under the new password's local unlock key, at the new
     /// `password_epoch` and `kdf_id`. The key is derived on the first call and kept.
     pub(crate) fn local_wrap<R: CryptoRng + ?Sized>(
@@ -372,6 +430,9 @@ impl CredentialChangeStarted {
             secret_key: self.secret_key,
             pw_in: self.pw_in,
             registration_upload: bytes(registration.upload)?,
+            setup_id: response.setup_id,
+            restart: None,
+            restarted: false,
             kdf_id,
             password_epoch,
             device_salt,
@@ -497,6 +558,7 @@ impl PlainChange {
             request: CommitChangeRequest {
                 account_state: bytes(account.pin.state_wire.clone())?,
                 registration_upload: None,
+                setup_id: None,
                 account_key_server_wrap: None,
                 recovery: None,
                 account_settings: None,
@@ -528,6 +590,7 @@ impl PlainChange {
         let wire = state.sign(self.identity.signing_key()).map_err(internal)?;
         self.request.account_state = bytes(wire.clone())?;
         self.request.registration_upload = Some(self.credential.registration_upload.clone());
+        self.request.setup_id = Some(self.credential.setup_id);
         self.request.account_key_server_wrap = Some(self.e_srv.clone());
         self.state = (state, wire);
         Ok(())
@@ -577,6 +640,26 @@ impl PlainChange {
         self.assemble()?;
         self.rebuilds += 1;
         Ok(ConflictOutcome::Resend)
+    }
+
+    /// ADR 0031 point 8, on the answer to the restarted registration: only the OPAQUE upload,
+    /// the `setup_id` and `E_srv'` of the request change.
+    fn on_registration_restarted<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        response: &ReregisterStartResponse,
+    ) -> Result<(), ClientError> {
+        self.credential.on_registration_restarted(
+            rng,
+            response,
+            self.account_id,
+            &self.account_key,
+            &mut self.e_srv,
+        )?;
+        self.request.registration_upload = Some(self.credential.registration_upload.clone());
+        self.request.setup_id = Some(self.credential.setup_id);
+        self.request.account_key_server_wrap = Some(self.e_srv.clone());
+        Ok(())
     }
 
     /// `E_local'` once.
@@ -768,6 +851,47 @@ impl PendingCredentialChange {
                     device_keys_wrap: None,
                 })
             }
+        }
+    }
+
+    /// ADR 0031 point 8: the commit was refused with `setup_retired` (the setup this change's
+    /// registration started under was retired, and the commit was not applied). Starts the
+    /// registration again with the same `pw_in`, at most once; send the request to
+    /// `account/reregister/start` over [`PendingCredentialChange::bearer_token`] and pass the
+    /// answer to [`PendingCredentialChange::on_registration_restarted`]. Never take the
+    /// `state_conflict` path for it: that resends the same upload.
+    ///
+    /// # Errors
+    /// [`ClientError::EmergencyKitNotConfirmed`]; [`ClientError::SetupRetired`] when the
+    /// registration was restarted once already; [`ClientError::Internal`].
+    pub fn restart_registration<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<ReregisterStartRequest, ClientError> {
+        self.released()?;
+        match &mut self.change {
+            Change::Rotation(r) => r.restart_registration(rng),
+            Change::Plain(p) => p.credential.restart_registration(rng),
+        }
+    }
+
+    /// The answer to [`PendingCredentialChange::restart_registration`]: rebuilds only the
+    /// OPAQUE upload, the `setup_id` and `E_srv'` of the commit; the new Secret Key, the keys,
+    /// the pending record (`E_local'`, `device_salt`, `E_dev'`) and every other object of the
+    /// commit stay byte for byte (ADR 0031 point 8). The host writes the new commit body over
+    /// the stored one before it sends it.
+    ///
+    /// # Errors
+    /// [`ClientError::InvalidInput`] without a restart; [`ClientError::InvalidServerResponse`];
+    /// [`ClientError::Internal`].
+    pub fn on_registration_restarted<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        response: &ReregisterStartResponse,
+    ) -> Result<(), ClientError> {
+        match &mut self.change {
+            Change::Rotation(r) => r.on_registration_restarted(rng, response),
+            Change::Plain(p) => p.on_registration_restarted(rng, response),
         }
     }
 

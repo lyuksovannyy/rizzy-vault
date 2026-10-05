@@ -4,10 +4,13 @@
 //!    signup policy (invite-only by default, §5.9), the rate limits per source, per (name,
 //!    source) and per name (§5.9, INV-7), and the reservation
 //!    of the name for the client-chosen `account_id`; then OPAQUE `ServerRegistration::start`
-//!    with `credential_identifier = account_id` under the current `server_setup`.
+//!    with `credential_identifier = account_id` under the current `server_setup`, and its
+//!    `setup_id` in the answer (ADR 0031 point 3).
 //! 2. [`AuthService::register_finish`]: the cheap consistency checks of §11.1 step 8
 //!    ([`rules::check_signup`]), then every object in one transaction; a byte-identical repeat
-//!    for the same `account_id` is success.
+//!    for the same `account_id` is success, whatever its `setup_id`. Otherwise the echoed
+//!    `setup_id` must be loaded and not retired ([`AuthError::SetupRetired`]), and the record
+//!    is labelled with it, never with the setup current at commit time (ADR 0031 point 3).
 //!
 //! Registration is an enumeration oracle ("name taken", §5.9): it answers
 //! [`AuthError::Conflict`] for a taken name, which is why signup is closed or invite-only by
@@ -97,7 +100,7 @@ impl<V: VaultPort> AuthService<V> {
         )
         .await?;
         let account = account_id(&req.account_id);
-        let (_, setup) = self.secrets.current_setup()?;
+        let (setup_id, setup) = self.secrets.current_setup()?;
         let response = server_registration_start(
             setup,
             req.registration_request.as_slice(),
@@ -133,12 +136,13 @@ impl<V: VaultPort> AuthService<V> {
         Ok(RegisterStartResponse {
             registration_response: Bytes::new(response)
                 .map_err(|_| AuthError::Internal("M2 exceeds its wire limit"))?,
+            setup_id,
         })
     }
 
     /// Signup commit (CRYPTO.md §11.1 step 8): checks the bundle self-signature, the state and
     /// the certificate chain and every locator ([`rules::check_signup`]), then stores the OPAQUE
-    /// record with the current `setup_id` and the state's `kdf_id` and `password_epoch`, `E_srv`,
+    /// record with the echoed `setup_id` (ADR 0031 point 3) and the state's `kdf_id` and `password_epoch`, `E_srv`,
     /// `E_id`, the bundle, the state, the certificate, `E_rec` and `H_rec` with the state's
     /// `recovery_epoch`, and the personal vault ([`VaultPort::create_personal_vault`]), in one
     /// transaction.
@@ -149,6 +153,8 @@ impl<V: VaultPort> AuthService<V> {
     /// # Errors
     /// - [`AuthError::InvalidRequest`]: a check failed, or no signup was started for the id;
     /// - [`AuthError::Conflict`]: the account exists with other objects;
+    /// - [`AuthError::SetupRetired`]: the echoed `setup_id` is retired or unknown, and this is
+    ///   not a repeat of the applied signup;
     /// - storage errors.
     pub async fn register_finish(
         &self,
@@ -160,18 +166,22 @@ impl<V: VaultPort> AuthService<V> {
             .map_err(|_| AuthError::InvalidRequest)?
             .to_bytes();
         let account = checked.account_id;
-        let (setup_id, _) = self.secrets.current_setup()?;
+        // ADR 0031 point 3: the record is labelled with the setup its registration started
+        // under, as echoed, never with the one current at commit time.
         let credential = Credential {
-            setup_id,
+            setup_id: req.setup_id,
             record,
             kdf_id: checked.state.kdf_id.get(),
             password_epoch: checked.state.password_epoch,
             e_srv: req.account_key_server_wrap.envelope.as_slice().to_vec(),
+            // ADR 0032 §4: the record carries the `account_key_epoch` of its signed state.
+            account_key_epoch: Some(checked.state.account_key_epoch),
         };
         let recovery = req.recovery.as_ref().map(|r| RecoveryRow {
             recovery_epoch: r.recovery_wrap.recovery_epoch,
             e_rec: r.recovery_wrap.envelope.as_slice().to_vec(),
             h_rec: r.recovery_token_hash.to_bytes(),
+            account_key_epoch: Some(checked.state.account_key_epoch),
         });
         let mut tx = self.db.begin_write().await?;
         lock_account(&mut tx, account.as_bytes()).await?;
@@ -193,6 +203,8 @@ impl<V: VaultPort> AuthService<V> {
                 Err(AuthError::Conflict)
             };
         }
+        // After the repeat check above (a repeat is success whatever its `setup_id`).
+        self.check_echoed_setup(tx.conn(), req.setup_id).await?;
         store::put_credential(tx.conn(), account, &credential, now_ms).await?;
         store::put_identity(
             tx.conn(),
@@ -259,7 +271,12 @@ async fn signup_is_repeat(
             req.identity_secret_keys.identity_epoch,
             req.identity_secret_keys.envelope.as_slice(),
         ));
-    Ok(held == offered
+    // ADR 0031 point 3: "a repeat of an applied commit is success whatever its `setup_id`".
+    let offered = Credential {
+        setup_id: held.setup_id,
+        ..offered.clone()
+    };
+    Ok(*held == offered
         && trust.state_wire.as_slice() == req.account_state.as_slice()
         && trust.chain_wires.len() == 1
         && trust.head_wire()? == req.bundle.as_slice()

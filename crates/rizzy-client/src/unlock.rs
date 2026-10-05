@@ -12,6 +12,10 @@
 //! 3. On [`ClientError::AccountKeyRotated`]: fetch this device's grants and pass them to
 //!    [`apply_device_grants`] (§11.3 step 4), persist, send the acknowledgement it returns, and
 //!    run [`verify_unlock`] again.
+//!
+//!    On [`ClientError::NoDeviceGrant`] (no grant served after a restore undid a rotation this
+//!    device missed, ADR 0032 §4): the device stays read-only; at a password unlock the host
+//!    runs an OPAQUE login and [`catch_up_account_key`], then [`verify_unlock`] again.
 //! 4. On [`ClientError::PasswordChangedElsewhere`]: the host prompts for the new password (and
 //!    Secret Key) and runs an OPAQUE login (§11.3 step 5), then
 //!    [`crate::credentials::follow_credential_change`] re-creates `E_local` with a new salt.
@@ -41,6 +45,7 @@ use rizzy_proto::account::{
 use crate::account::{Anchor, VerifiedAccount, verify_account_view, verify_public};
 use crate::device::{DeviceState, UnlockedDevice};
 use crate::error::ClientError;
+use crate::login::LoggedIn;
 
 /// What an enrolled device fetches after device authentication (§11.3 step 2.2).
 ///
@@ -120,7 +125,9 @@ pub fn verify_unlock(
 /// [`ClientError::AccountKeyRotated`]; its public part is verified again here.
 ///
 /// # Errors
-/// [`ClientError::InvalidServerResponse`] for a missing, misaddressed or failing grant, or a
+/// [`ClientError::NoDeviceGrant`] when no grant for an epoch of the chain is served (ADR 0032
+/// §4: the host catches up with [`catch_up_account_key`]);
+/// [`ClientError::InvalidServerResponse`] for a misaddressed, duplicate or failing grant, or a
 /// delivered key that is not the state's; [`ClientError::InvalidInput`] if the unlock key was
 /// already dropped (a keystore unlock, which this build does not support); the errors of the
 /// public verification.
@@ -157,7 +164,9 @@ pub fn apply_device_grants<R: CryptoRng + ?Sized>(
             g.account_key_epoch == next
                 && g.recipient_device_id.to_bytes() == state.device_id.to_bytes()
         });
-        let grant = matching.next().ok_or(bad)?;
+        // No grant at all for the next epoch: a restore undid the grants of a rotation this
+        // device missed (ADR 0032 §4), which the host follows by `catch_up_account_key`.
+        let grant = matching.next().ok_or(ClientError::NoDeviceGrant)?;
         if matching.next().is_some() {
             return Err(bad);
         }
@@ -237,4 +246,61 @@ pub fn identity_change_fingerprint(
         changed
             .then(|| AccountFingerprint::compute(state.account_id, &head.identity_public_keys())),
     )
+}
+
+/// ADR 0032 §4 "A device that missed the rotation": the server serves a newer `account_key_epoch`
+/// but no device grant for this device ([`ClientError::NoDeviceGrant`]), because a restore undid
+/// the grants of a rotation this device missed. At a password unlock, once the server's OPAQUE
+/// record no longer lags (`login/finish` answers `credentials_stale` until an enrolled device
+/// re-registered it), the host runs an OPAQUE login (CRYPTO.md §11.2 steps 2–6) with the typed
+/// password and this device's Secret Key over its device session; `login` is that login, whose
+/// account key came from `E_srv` and matched its answer's `account_key_id`. This checks `view`
+/// (the account answer [`verify_unlock`] refused with [`ClientError::AccountKeyRotated`]) again
+/// against the pin, requires the login's key to be the one its signed state names, and then
+/// continues as §11.3 step 4.3: `E_local` and `E_dev` are re-wrapped under it. The device gets
+/// what a new-device login gets, nothing more. Nothing is acknowledged: no grant was used. The
+/// host persists the record and runs [`verify_unlock`] again.
+///
+/// # Errors
+/// [`ClientError::InvalidInput`] for another device's keys or another account's login, or when
+/// the unlock key was dropped; [`ClientError::InvalidServerResponse`] when the login's key is not
+/// the one the verified state names, or the state does not move the epoch on; the errors of the
+/// public verification ([`ClientError::Rollback`], [`ClientError::Fork`],
+/// [`ClientError::IdentityChangeUnconfirmed`]).
+pub fn catch_up_account_key<R: CryptoRng + ?Sized>(
+    rng: &mut R,
+    state: &mut DeviceState,
+    unlocked: &mut UnlockedDevice,
+    view: &AccountView,
+    login: LoggedIn,
+    confirmed: Option<&AccountFingerprint>,
+) -> Result<(), ClientError> {
+    if unlocked.account_id != state.account_id
+        || unlocked.device_id != state.device_id
+        || login.account.account_id != state.account_id
+    {
+        return Err(ClientError::InvalidInput);
+    }
+    let public = verify_public(
+        view,
+        state.account_id,
+        &Anchor::Enrolled {
+            pin: &state.pin,
+            confirmed,
+        },
+        None,
+    )?;
+    let LoggedIn { account_key, .. } = login;
+    if public.state.account_key_epoch <= unlocked.account_key.epoch()
+        || !public.state.matches_account_key(&account_key)
+    {
+        return Err(ClientError::InvalidServerResponse);
+    }
+    let local = unlocked
+        .local_unlock_key
+        .as_ref()
+        .ok_or(ClientError::InvalidInput)?;
+    state.rewrap(rng, local, &account_key, &unlocked.device_keys)?;
+    unlocked.account_key = account_key;
+    Ok(())
 }

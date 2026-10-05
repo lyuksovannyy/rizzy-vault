@@ -45,6 +45,7 @@ USAGE:
     rv recovery start --server <url> --name <login>
     rv recovery complete --server <url> --name <login> [--skip-rotation]
     rv recovery cancel
+    rv recovery repair --name <login> [--retype]
     rv password --name <login> [--rotate]
     rv secret-key --name <login> [--skip-rotation | --full-rotation]
     rv 2fa enable --name <login> | disable --name <login>
@@ -68,6 +69,9 @@ Every export first asks for the master password again and checks it with the ser
 encrypted export then asks for a new password for that file, needed to import it.
 Import recognises the file's format; --format overrides it. Import formats: bitwarden-json,
 1pux, keepass-xml, csv, chrome-csv, firefox-csv, rizzy-json, rizzy-encrypted.
+After the server was restored from a backup, `recovery repair` makes the recovery code work
+again: a new code and Emergency Kit by default, or with --retype the current code, which the
+server takes only when the code did not change since the backup.
 
 SECRETS are never taken from the command line or the environment. rv asks for them on the
 terminal without echo; when standard input is not a terminal it reads them from it, one per
@@ -283,6 +287,13 @@ pub enum Command {
     },
     /// `recovery cancel`.
     RecoveryCancel,
+    /// `recovery repair`: the recovery repair after a restore (ADR 0032 §4 step 6).
+    RecoveryRepair {
+        /// `--name`: the login name, for the re-authentication.
+        name: String,
+        /// `--retype`: re-type the current recovery code instead of issuing a new one.
+        retype: bool,
+    },
     /// `password`: a new master password (CRYPTO.md §11.5).
     Password {
         /// `--name`: the login name, for the re-authentication.
@@ -459,30 +470,7 @@ pub fn parse(arguments: Vec<OsString>) -> Result<Invocation, CliError> {
                 full,
             }
         }
-        Some("recovery") => match args.next().as_deref() {
-            Some("start") => {
-                let (server, name) = server_and_name(&mut args)?;
-                Command::RecoveryStart { server, name }
-            }
-            Some("complete") => {
-                let (mut server, mut name, mut rotate) = (None, None, true);
-                while let Some(option) = args.next() {
-                    match option.as_str() {
-                        "--server" => server = Some(args.value("--server")?),
-                        "--name" => name = Some(args.value("--name")?),
-                        "--skip-rotation" => rotate = false,
-                        other => return Err(unknown(other)),
-                    }
-                }
-                Command::RecoveryComplete {
-                    server: required(server, "--server")?,
-                    name: required(name, "--name")?,
-                    rotate,
-                }
-            }
-            Some("cancel") => Command::RecoveryCancel,
-            _ => return Err(usage("recovery needs start, complete or cancel")),
-        },
+        Some("recovery") => recovery_command(&mut args)?,
         Some(word @ ("password" | "secret-key" | "2fa")) => account_command(&mut args, word)?,
         Some(other) => return Err(unknown(other)),
         None => return Err(usage("no command")),
@@ -492,6 +480,48 @@ pub fn parse(arguments: Vec<OsString>) -> Result<Invocation, CliError> {
         account,
         ca_file,
         command,
+    })
+}
+
+/// `recovery start`, `complete`, `cancel` or `repair`, after the word `recovery`.
+fn recovery_command(args: &mut Args) -> Result<Command, CliError> {
+    Ok(match args.next().as_deref() {
+        Some("start") => {
+            let (server, name) = server_and_name(args)?;
+            Command::RecoveryStart { server, name }
+        }
+        Some("complete") => {
+            let (mut server, mut name, mut rotate) = (None, None, true);
+            while let Some(option) = args.next() {
+                match option.as_str() {
+                    "--server" => server = Some(args.value("--server")?),
+                    "--name" => name = Some(args.value("--name")?),
+                    "--skip-rotation" => rotate = false,
+                    other => return Err(unknown(other)),
+                }
+            }
+            Command::RecoveryComplete {
+                server: required(server, "--server")?,
+                name: required(name, "--name")?,
+                rotate,
+            }
+        }
+        Some("cancel") => Command::RecoveryCancel,
+        Some("repair") => {
+            let (mut name, mut retype) = (None, false);
+            while let Some(option) = args.next() {
+                match option.as_str() {
+                    "--name" => name = Some(args.value("--name")?),
+                    "--retype" => retype = true,
+                    other => return Err(unknown(other)),
+                }
+            }
+            Command::RecoveryRepair {
+                name: required(name, "--name")?,
+                retype,
+            }
+        }
+        _ => return Err(usage("recovery needs start, complete, cancel or repair")),
     })
 }
 
@@ -810,6 +840,27 @@ mod tests {
 
     fn command(line: &str) -> Command {
         parsed(line).unwrap().command
+    }
+
+    /// `recovery repair` (ADR 0032 §4 step 6): `--name` required, `--retype` optional.
+    #[test]
+    fn recovery_repair_parses() {
+        assert_eq!(
+            command("recovery repair --name alice"),
+            Command::RecoveryRepair {
+                name: "alice".to_owned(),
+                retype: false
+            }
+        );
+        assert_eq!(
+            command("recovery repair --retype --name alice"),
+            Command::RecoveryRepair {
+                name: "alice".to_owned(),
+                retype: true
+            }
+        );
+        assert!(parsed("recovery repair --retype").is_err());
+        assert!(parsed("recovery repair --name alice --code x").is_err());
     }
 
     #[test]

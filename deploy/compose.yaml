@@ -82,7 +82,8 @@ services:
         ipv4_address: ${RIZZY_PROXY_IP:-172.30.87.10}
 
   # ---- one-off admin commands (`--profile admin run --rm <name>`); the server must be stopped
-  # for secrets-rotate and migrate (they take the SQLite writer lock, ADR 0010 §2) ----
+  # for secrets-rotate, secrets-retire-setups and migrate (they take the SQLite writer lock,
+  # ADR 0010 §2) ----
 
   secrets-init:
     <<: *hardening
@@ -99,6 +100,17 @@ services:
     profiles: [admin]
     # Add "--data-key" to rotate the data key instead of the OPAQUE setup.
     command: ["secrets", "rotate"]
+    network_mode: none
+    volumes:
+      - data:/data
+      - secrets:/run/rizzy-secrets
+
+  # Retires old OPAQUE setups (ADR 0031): add "--grace-days", "N" (default 90; 0 at once).
+  secrets-retire-setups:
+    <<: *hardening
+    image: ${RIZZY_IMAGE:-localhost/rizzy-vault:dev}
+    profiles: [admin]
+    command: ["secrets", "retire-setups"]
     network_mode: none
     volumes:
       - data:/data

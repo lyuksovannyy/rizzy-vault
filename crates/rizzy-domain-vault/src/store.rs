@@ -43,6 +43,9 @@ pub(crate) enum Refusal {
     PrevSeq,
     /// The record's `vault_key_epoch` is below the vault's (§9 "Stale epoch").
     Stale,
+    /// The session may not make this repair (ADR 0032 §3: a self-grant that lags is repaired only
+    /// over a device session of a durable device of the held device set).
+    Unauthorized,
 }
 
 impl Refusal {
@@ -53,6 +56,7 @@ impl Refusal {
             Self::Conflict => ErrorCode::RecordConflict,
             Self::PrevSeq => ErrorCode::PrevSeqMismatch,
             Self::Stale => ErrorCode::StaleEpoch,
+            Self::Unauthorized => ErrorCode::Unauthorized,
         }
     }
 }

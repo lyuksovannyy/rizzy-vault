@@ -151,9 +151,19 @@ pub(crate) async fn signup(
     rng: &mut ChaCha20Rng,
     recovery: bool,
 ) -> (SignedUp, String, Option<String>) {
+    signup_named(server, rng, NAME, recovery).await
+}
+
+/// As [`signup`], for the login name `name`.
+pub(crate) async fn signup_named(
+    server: &Server,
+    rng: &mut ChaCha20Rng,
+    name: &str,
+    recovery: bool,
+) -> (SignedUp, String, Option<String>) {
     let input = SignupInput {
         server_origin: ORIGIN,
-        login_name: NAME,
+        login_name: name,
         password: PASSWORD,
         invite: None,
         issue_recovery_code: recovery,
@@ -221,11 +231,22 @@ pub(crate) async fn login(
     server: &Server,
     rng: &mut ChaCha20Rng,
     sk: &str,
+    device: Option<(&mut DeviceSession, &UnlockedDevice)>,
+) -> LoggedIn {
+    login_named(server, rng, NAME, sk, device).await
+}
+
+/// As [`login`], for the login name `name`.
+pub(crate) async fn login_named(
+    server: &Server,
+    rng: &mut ChaCha20Rng,
+    name: &str,
+    sk: &str,
     mut device: Option<(&mut DeviceSession, &UnlockedDevice)>,
 ) -> LoggedIn {
     let input = LoginInput {
         server_origin: ORIGIN,
-        login_name: NAME,
+        login_name: name,
         secret_key: sk,
         password: PASSWORD,
     };
@@ -315,7 +336,7 @@ impl Client {
     }
 
     /// Refreshes the pin and the authors (a device enrolled since, a rotation).
-    async fn refresh(&mut self, server: &Server) -> VerifiedAccount {
+    pub(crate) async fn refresh(&mut self, server: &Server) -> VerifiedAccount {
         let view = self.account_view(server).await;
         let view = serde_json::from_value(view).unwrap();
         let account = verify_unlock(&mut self.state, &self.unlocked, &view, None).unwrap();

@@ -17,6 +17,10 @@
 //!   each suspended one, the suspension of revocation phase 1 (ADR 0012 §6).
 //!
 //! A certificate that does not verify is left out, so every record it signed is refused.
+//!
+//! [`DeviceDirectory::account_key`] returns the `account_key_epoch` and `account_key_id` of the
+//! account's held signed `account-state`, verified from the stored chain, read on the same
+//! connection: what healing step 3b checks a re-published self-grant against (ADR 0032 §3).
 
 use core::fmt;
 use core::future::Future;
@@ -161,6 +165,17 @@ impl fmt::Display for DirectoryError {
 
 impl std::error::Error for DirectoryError {}
 
+/// The account key the account's held signed `account-state` names (CRYPTO.md §10.2), as the
+/// `auth` domain verified it: what a re-published self-grant is checked against (ADR 0032 §3,
+/// healing step 3b). Public values only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AccountKeyState {
+    /// The state's `account_key_epoch`.
+    pub account_key_epoch: u32,
+    /// The state's `account_key_id`.
+    pub account_key_id: [u8; 16],
+}
+
 /// The source of device certificates (ADR 0016 R4: a domain that needs something from another
 /// defines a trait for it, and `rizzy-server` implements it). See the module docs for the
 /// implementer's contract.
@@ -175,4 +190,17 @@ pub trait DeviceDirectory: Send + Sync {
         conn: Conn<'a>,
         account_id: AccountId,
     ) -> impl Future<Output = Result<Authors, DirectoryError>> + Send + 'a;
+
+    /// The account key of `account_id`'s held signed `account-state`, verified from the stored
+    /// bundle chain, read on `conn` (the caller's write transaction, which holds the account
+    /// lock); `None` for an account without a verified state. Healing step 3b checks a
+    /// re-published self-grant against it (ADR 0032 §3).
+    ///
+    /// # Errors
+    /// [`DirectoryError`] when the state cannot be read; the caller fails the request.
+    fn account_key<'a>(
+        &'a self,
+        conn: Conn<'a>,
+        account_id: AccountId,
+    ) -> impl Future<Output = Result<Option<AccountKeyState>, DirectoryError>> + Send + 'a;
 }

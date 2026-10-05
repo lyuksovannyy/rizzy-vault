@@ -28,16 +28,33 @@ queries! {
     ACCOUNT_BY_NAME = "account_by_name";
     /// The login name of an account.
     ACCOUNT_BY_ID = "account_by_id";
-    /// A stored OPAQUE setup's AKE public-key hash.
+    /// A stored OPAQUE setup's AKE public-key hash and retirement time.
     SETUP_GET = "setup_get";
     /// Records an OPAQUE setup's AKE public-key hash.
     SETUP_INSERT = "setup_insert";
-    /// The OPAQUE record, `kdf_id`, `password_epoch` and `E_srv` of an account.
+    /// Every recorded OPAQUE setup with its recording and retirement times.
+    SETUPS_ALL = "setups_all";
+    /// When one OPAQUE setup was retired, if it was.
+    SETUP_RETIRED_AT = "setup_retired_at";
+    /// Retires one OPAQUE setup, keeping an earlier retirement time.
+    SETUP_RETIRE = "setup_retire";
+    /// How many OPAQUE records name each `setup_id`.
+    CREDENTIAL_SETUP_COUNTS = "credential_setup_counts";
+    /// Deletes every sealed login state.
+    LOGIN_STATES_DELETE_ALL = "login_states_delete_all";
+    /// The OPAQUE record, `kdf_id`, `password_epoch`, `E_srv` and `account_key_epoch` of an
+    /// account.
     CREDENTIAL_GET = "credential_get";
     /// Stores or replaces the OPAQUE record and `E_srv`.
     CREDENTIAL_UPSERT = "credential_upsert";
     /// Every `setup_id` a record names.
     CREDENTIAL_SETUP_IDS = "credential_setup_ids";
+    /// The accounts with a credential or recovery row whose `account_key_epoch` is missing.
+    CREDENTIAL_EPOCHS_MISSING = "credential_epochs_missing";
+    /// Fills a missing `account_key_epoch` of a credential row.
+    CREDENTIAL_EPOCH_FILL = "credential_epoch_fill";
+    /// Fills a missing `account_key_epoch` of a recovery row.
+    RECOVERY_EPOCH_FILL = "recovery_epoch_fill";
     /// `E_id` of an account.
     IDENTITY_GET = "identity_get";
     /// Stores or replaces `E_id`.

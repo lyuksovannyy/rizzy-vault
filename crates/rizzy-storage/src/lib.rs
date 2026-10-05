@@ -44,7 +44,7 @@
 //! | [`writer_lock`] | ADR 0010 §2 | [`WriterLock`]: one process writes an SQLite file |
 //! | [`lock`] | ADR 0011 "Transactions and concurrency"; ADR 0010 §2 | [`lock_account`]: `pg_advisory_xact_lock` in its own key space, nothing on SQLite |
 //! | [`leader_lock`] | ADR 0010 §2 | [`WorkerLeader`] from [`Database::try_lead_worker`]: one active `worker` per database, a session-level advisory lock on a dedicated PostgreSQL connection outside the pool; on SQLite the writer lock already covers it |
-//! | [`instance_lock`] | ADR 0023 §5 step 1 | [`InstanceLock`] from [`Database::try_instance_lock`]: every server process on PostgreSQL holds it shared, `restore`, `migrate` and `secrets rotate` take it exclusively, on a dedicated connection outside the pool; on SQLite the writer lock already covers it |
+//! | [`instance_lock`] | ADR 0023 §5 step 1 | [`InstanceLock`] from [`Database::try_instance_lock`]: every server process on PostgreSQL holds it shared, `restore`, `migrate`, `secrets rotate` and `secrets retire-setups` take it exclusively, on a dedicated connection outside the pool; on SQLite the writer lock already covers it |
 //! | [`migrate`] | ADR 0011 points 8–10 | Embedded forward-only migrations per engine; the startup rule with the `VACUUM INTO` pre-migration copy (SQLite) or the refusal (PostgreSQL) |
 //! | [`backup`] | ADR 0011 "Backups"; ADR 0023 | `VACUUM INTO`; the logical [`Dump`], [`Database::check_restore_target`] and [`Database::restore`] into an empty database, which draws a new restore generation, opens every account's reconciliation epoch and raises the store-sequence counters; [`backup::file`], the backup file's canonical writer and strict parser (format version 1, trailing SHA-256, size limits) |
 //! | [`tables`] | ADR 0011 "Backups" | The backed-up tables and columns, in restore order |
@@ -54,10 +54,13 @@
 //!
 //! # Schema (M1)
 //!
-//! `migrations/<engine>/0001_auth_initial.sql`, `0002_vault_initial.sql` and
-//! `0003_storage_restore.sql`: the tables of [ADR 0011] "What is stored" as [ADR 0022] §2
-//! replaces it, plus the clamped VV, store sequence, bodiless headers and restore generation of
-//! [ADR 0021] §2, and the reconciliation epochs of INV-59. Each file documents its tables.
+//! `migrations/<engine>/0001_auth_initial.sql`, `0002_vault_initial.sql`,
+//! `0003_storage_restore.sql`, `0004_auth_retired_setups.sql` and
+//! `0005_auth_credential_epochs.sql`: the tables of [ADR 0011] "What is stored" as [ADR 0022] §2 replaces it, plus the clamped VV,
+//! store sequence, bodiless headers and restore generation of [ADR 0021] §2, the reconciliation
+//! epochs of INV-59, the retirement time of an OPAQUE setup (ADR 0031 point 1), and the
+//! `account_key_epoch` of the credential and recovery rows (ADR 0032 §4). Each file documents its
+//! tables.
 //!
 //! # Tests
 //!

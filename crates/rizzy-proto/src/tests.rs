@@ -263,9 +263,11 @@ fn known_answer_fetch_request() {
 fn every_auth_message_round_trips() {
     round_trip(&RegisterStartResponse {
         registration_response: b(b"m2"),
+        setup_id: 2,
     });
     round_trip(&RegisterFinishRequest {
         registration_upload: b(b"upload"),
+        setup_id: 1,
         account_key_server_wrap: AccountKeyServerWrap {
             account_key_epoch: 0,
             password_epoch: 0,
@@ -338,6 +340,8 @@ fn every_account_and_vault_message_round_trips() {
         account_state: b(b"state"),
         device_certificates: l(vec![b(b"cert")]),
         device_revocations: l(vec![b(b"revocation")]),
+        identity_secret_keys: None,
+        account_settings: None,
     });
     round_trip(&PublishGrantsRequest {
         vault_self_grants: l(vec![vault_self_grant()]),
@@ -372,6 +376,7 @@ fn every_account_and_vault_message_round_trips() {
         vault_id: id(3),
         item_key_wraps: l(vec![item_key_wrap()]),
         records: l(records()),
+        self_grant: None,
     });
     round_trip(&HealingResponse {
         restore_generation: Fixed::from_bytes([2; 16]),
@@ -404,11 +409,13 @@ fn messages_with_secrets_round_trip() {
             envelope: b(b"e_srv"),
         },
         account: account_view(),
+        reregister: true,
     };
     round_trip(&response);
     round_trip(&DeviceAuthFinishResponse {
         session_token: SessionToken::new(Zeroizing::new([1; 32])),
         session_id: id(4),
+        reregister: false,
     });
 }
 
@@ -428,6 +435,7 @@ fn debug_output_never_shows_secrets() {
     let response = DeviceAuthFinishResponse {
         session_token: SessionToken::new(Zeroizing::new([0xab; 32])),
         session_id: id(4),
+        reregister: false,
     };
     let token_text = response.session_token.to_b64url();
     let shown = format!("{register:?} {finish:?} {response:?}");
@@ -448,6 +456,7 @@ fn requests_reject_unknown_fields() {
     // CRYPTO.md §11.1 step 8: no field can carry E_dev; an unknown field fails the request.
     let finish = serde_json::to_value(RegisterFinishRequest {
         registration_upload: b(b"upload"),
+        setup_id: 1,
         account_key_server_wrap: AccountKeyServerWrap {
             account_key_epoch: 0,
             password_epoch: 0,
@@ -614,6 +623,7 @@ fn commit_change() -> CommitChangeRequest {
     CommitChangeRequest {
         account_state: b(b"state"),
         registration_upload: Some(b(b"upload")),
+        setup_id: Some(2),
         account_key_server_wrap: Some(AccountKeyServerWrap {
             account_key_epoch: 0,
             password_epoch: 1,
@@ -651,6 +661,7 @@ fn known_answer_change_recovery_and_totp() {
     let commit = CommitChangeRequest {
         account_state: b(b"foobar"),
         registration_upload: None,
+        setup_id: None,
         account_key_server_wrap: None,
         recovery: None,
         account_settings: Some(AccountSettings {
@@ -708,6 +719,7 @@ fn every_change_recovery_and_totp_message_round_trips() {
     });
     round_trip(&ReregisterStartResponse {
         registration_response: b(b"m2"),
+        setup_id: 2,
     });
     round_trip(&commit_change());
     round_trip(&RecoveryStartResponse {
@@ -843,6 +855,7 @@ fn bare_commit(state: &[u8]) -> CommitChangeRequest {
     CommitChangeRequest {
         account_state: b(state),
         registration_upload: None,
+        setup_id: None,
         account_key_server_wrap: None,
         recovery: None,
         account_settings: None,
@@ -1037,4 +1050,83 @@ fn recovery_complete_carries_vaults_and_ignores_unknown_fields() {
     value["later"] = 1.into();
     let parsed: RecoveryCompleteResponse = serde_json::from_value(value).unwrap();
     assert_eq!(parsed.vaults.as_slice(), complete.vaults.as_slice());
+}
+
+#[test]
+fn setup_fields_of_adr_0031() {
+    // `reregister` is additive: an answer without it reads as `false` (ADR 0031 point 2).
+    let response = DeviceAuthFinishResponse {
+        session_token: SessionToken::new(Zeroizing::new([1; 32])),
+        session_id: id(4),
+        reregister: true,
+    };
+    let mut json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["reregister"], true);
+    json.as_object_mut().unwrap().remove("reregister");
+    let back: DeviceAuthFinishResponse = serde_json::from_value(json).unwrap();
+    assert!(!back.reregister);
+    // The echoed `setup_id` travels with the upload and is absent without one (point 3).
+    let with = serde_json::to_value(commit_change()).unwrap();
+    assert_eq!(with["setup_id"], 2);
+    let without = serde_json::to_value(bare_commit(b"state")).unwrap();
+    assert!(without.get("setup_id").is_none());
+    assert_eq!(
+        serde_json::to_string(&crate::error::ErrorResponse::new(ErrorCode::SetupRetired)).unwrap(),
+        r#"{"error":"setup_retired"}"#
+    );
+}
+
+#[test]
+fn healing_fields_of_adr_0032() {
+    // Step 2 carries `E_id` and the settings as optional fields: absent when `None`, and an
+    // older request without them still parses (ADR 0032 §2).
+    let bare = PublishAccountStateRequest {
+        account_state: b(b"state"),
+        device_certificates: l(vec![b(b"cert")]),
+        device_revocations: List::empty(),
+        identity_secret_keys: None,
+        account_settings: None,
+    };
+    let json = serde_json::to_value(&bare).unwrap();
+    assert!(json.get("identity_secret_keys").is_none());
+    assert!(json.get("account_settings").is_none());
+    let full = PublishAccountStateRequest {
+        identity_secret_keys: Some(IdentitySecretKeys {
+            identity_epoch: 1,
+            envelope: b(b"e_id"),
+        }),
+        account_settings: Some(AccountSettings {
+            settings_seq: 2,
+            envelope: b(b"settings"),
+        }),
+        ..bare
+    };
+    round_trip(&full);
+    // Step 3b: a healing request with a self-grant and no records (§2); `self_grant` is absent
+    // when `None`.
+    let step_3b = HealingRequest {
+        vault_id: id(3),
+        item_key_wraps: l(vec![item_key_wrap()]),
+        records: List::empty(),
+        self_grant: Some(vault_self_grant()),
+    };
+    round_trip(&step_3b);
+    let plain = HealingRequest {
+        self_grant: None,
+        ..step_3b
+    };
+    assert!(
+        serde_json::to_value(&plain)
+            .unwrap()
+            .get("self_grant")
+            .is_none()
+    );
+    // The new `409` code (ADR 0028 item 3 as ADR 0032 amends it).
+    assert_eq!(
+        serde_json::to_string(&crate::error::ErrorResponse::new(
+            ErrorCode::CredentialsStale
+        ))
+        .unwrap(),
+        r#"{"error":"credentials_stale"}"#
+    );
 }

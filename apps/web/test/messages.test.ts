@@ -8,6 +8,8 @@ describe("messages", () => {
   it("words known codes and names unknown ones", () => {
     expect(messageFor("wrong_password_or_secret_key")).toContain("Secret Key");
     expect(messageFor("core_crashed")).toContain("Reload");
+    // ADR 0032 §4: a login refused after a restore says what to do, without any value.
+    expect(messageFor("server_credentials_stale")).toContain("restored from a backup");
     expect(messageFor("something_new")).toBe("Something went wrong (something_new).");
   });
 });

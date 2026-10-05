@@ -20,8 +20,8 @@ use rizzy_core::ids::{AccountId, DeviceId, ItemId, OpId, SnapshotId, VaultId};
 use rizzy_core::sign::statements::DeviceKind;
 use rizzy_core::sign::{DeviceSigningKey, OpStatement, SnapshotStatement};
 use rizzy_domain_vault::{
-    AuthorCertificate, AuthorStatus, Authors, DeviceDirectory, DirectoryError, FetchOutcome,
-    VaultDomain, create_vault,
+    AccountKeyState, AuthorCertificate, AuthorStatus, Authors, DeviceDirectory, DirectoryError,
+    FetchOutcome, VaultDomain, create_vault,
 };
 use rizzy_proto::objects::{self, Envelope, KeyEnvelope, VaultSelfGrant};
 use rizzy_proto::vault::{
@@ -95,11 +95,20 @@ pub(crate) const fn item(n: u8) -> ItemId {
 }
 
 /// The in-memory certificate source: what `rizzy-server` wires in from `rizzy-domain-auth`.
-/// Clones share the certificates, so a test can revoke a device while the domain holds one.
+/// Clones share the certificates and the account key, so a test can revoke a device or move the
+/// held state's account key while the domain holds one.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Directory(Arc<Mutex<BTreeMap<DeviceId, AuthorCertificate>>>);
+pub(crate) struct Directory(
+    Arc<Mutex<BTreeMap<DeviceId, AuthorCertificate>>>,
+    Arc<Mutex<Option<AccountKeyState>>>,
+);
 
 impl Directory {
+    /// Sets the account key of the held signed state ([`DeviceDirectory::account_key`]).
+    pub(crate) fn set_account_key(&self, key: AccountKeyState) {
+        *self.1.lock().unwrap() = Some(key);
+    }
+
     /// Registers or replaces `device`'s certificate with `status`.
     pub(crate) fn set(&self, device: &Device, status: AuthorStatus) {
         self.0
@@ -125,6 +134,19 @@ impl DeviceDirectory for Directory {
                 what: "duplicate certificate",
             })
         }
+    }
+
+    fn account_key<'a>(
+        &'a self,
+        _conn: Conn<'a>,
+        account_id: AccountId,
+    ) -> impl Future<Output = Result<Option<AccountKeyState>, DirectoryError>> + Send + 'a {
+        let key = if account_id == ACCOUNT {
+            *self.1.lock().unwrap()
+        } else {
+            None
+        };
+        async move { Ok(key) }
     }
 }
 

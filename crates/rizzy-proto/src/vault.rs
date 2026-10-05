@@ -32,7 +32,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ErrorCode;
 use crate::limits::{MAX_ITEM_KEY_WRAPS, MAX_RECORDS, MAX_VV_ENTRIES, RESTORE_GENERATION_LEN};
-use crate::objects::{Envelope, ItemKeyWrap, KeyEnvelope, OpStatement, SnapshotStatement};
+use crate::objects::{
+    Envelope, ItemKeyWrap, KeyEnvelope, OpStatement, SnapshotStatement, VaultSelfGrant,
+};
 use crate::wire::{Fixed, Id, List, WireError};
 
 /// A server database's restore generation (ADR 0021 §2): 128 random bits, redrawn by each
@@ -252,6 +254,13 @@ pub struct FetchResponse {
 /// holds the body of a record the server stored before, else without it behind the request's
 /// fresh snapshot or a held snapshot sent verbatim". Atomic under the account lock: the server
 /// stores all of it or refuses all of it (§9 "Server acceptance").
+///
+/// A request may instead carry the vault's self-grant, its wrap set at that grant's
+/// `vault_key_epoch` and no records: restore healing step 3b of [ADR 0032] §2, which repairs a
+/// self-grant that lags the signed `account-state` under the lag rule of its §3, sent before
+/// step 4.
+///
+/// [ADR 0032]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0032-healing-rotation-after-backup.md
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HealingRequest {
@@ -259,8 +268,13 @@ pub struct HealingRequest {
     pub vault_id: Id,
     /// The item-key wraps the server lacks.
     pub item_key_wraps: List<ItemKeyWrap, MAX_ITEM_KEY_WRAPS>,
-    /// Headers (with or without bodies) and snapshots, in storing order.
+    /// Headers (with or without bodies) and snapshots, in storing order; empty with a
+    /// `self_grant`.
     pub records: List<Record, MAX_RECORDS>,
+    /// Step 3b of ADR 0032 §2: the vault's self-grant, with `item_key_wraps` its wrap set at
+    /// the grant's `vault_key_epoch` and no records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_grant: Option<VaultSelfGrant>,
 }
 
 /// The answer to an accepted [`HealingRequest`]; a refused one gets an

@@ -4,7 +4,7 @@
 //! ADR 0023 §5 step 1: "every `rizzy-vault` process on PostgreSQL, whatever its roles, holds
 //! `pg_advisory_lock_shared(K)` on a dedicated connection outside the sqlx pool for its whole
 //! life, checked alive as ADR 0010 §2 does for the worker lock, and exits when that connection
-//! drops. `restore` (and `migrate`, `secrets rotate`) take `pg_try_advisory_lock(K)` on their
+//! drops. `restore` (and `migrate`, `secrets rotate`, `secrets retire-setups`) take `pg_try_advisory_lock(K)` on their
 //! own dedicated connection and refuse if any holder remains."
 //!
 //! [`Database::try_instance_lock`] takes the lock in either mode and returns an
@@ -21,7 +21,7 @@
 //!   error, and the caller stops.
 //!   - [`InstanceLockMode::Shared`] is what a server process holds. Any number of them hold it
 //!     together; it is refused only while an admin command holds the exclusive lock.
-//!   - [`InstanceLockMode::Exclusive`] is what `restore`, `migrate` and `secrets rotate` take.
+//!   - [`InstanceLockMode::Exclusive`] is what `restore`, `migrate`, `secrets rotate` and `secrets retire-setups` take.
 //!     It is refused while any server process, or another such command, holds the lock.
 //! - **SQLite:** nothing to take. A writable SQLite [`Database`] exists only with the file's
 //!   [`WriterLock`](crate::WriterLock) (ADR 0010 §2), which already excludes every other server
@@ -90,7 +90,7 @@ pub enum InstanceLockMode {
     /// A server process: shared with every other server process, refused while an admin
     /// command holds the exclusive lock.
     Shared,
-    /// `restore`, `migrate` or `secrets rotate`: refused while anything else holds the lock.
+    /// `restore`, `migrate`, `secrets rotate` or `secrets retire-setups`: refused while anything else holds the lock.
     Exclusive,
 }
 

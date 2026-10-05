@@ -44,6 +44,12 @@ pub enum ClientError {
     /// The account key was rotated elsewhere; the device grants must be fetched and opened
     /// first (CRYPTO.md §11.3 step 4).
     AccountKeyRotated,
+    /// The account key was rotated elsewhere, and the server holds no device grant for this
+    /// device's next epoch: a restore undid the grants of a rotation this device missed
+    /// (ADR 0032 §4 "A device that missed the rotation"). The device stays read-only; at a
+    /// password unlock, once the server's OPAQUE record no longer lags, it catches up with an
+    /// OPAQUE login ([`crate::unlock::catch_up_account_key`]).
+    NoDeviceGrant,
     /// The password or the Secret Key was changed on another device; this device needs an
     /// OPAQUE login with the new password (CRYPTO.md §11.3 step 5).
     PasswordChangedElsewhere,
@@ -137,6 +143,10 @@ pub enum ClientError {
     /// The device state holds no `E_local` (ADR 0026 §2, `has_local = 0`): it cannot unlock;
     /// the one path left is CRYPTO.md §11.3 step 5, "I changed my password on another device".
     LocalUnlockUnavailable,
+    /// The server refused a registration's OPAQUE setup (`setup_retired`) again after the
+    /// registration was restarted once under the current setup (ADR 0031 point 8, "Risks": at
+    /// most one restart per commit attempt). The pending change is kept; the host reports it.
+    SetupRetired,
     /// The device state is older than this device's own history (ADR 0026 §4 step 7, owner
     /// decision on open question 5): the server holds an own `device_seq` this file lacks, or
     /// holds another record at an own dot. A restored image or a copied profile. The device is
@@ -163,6 +173,7 @@ impl ClientError {
             Self::Fork => "fork",
             Self::IdentityChangeUnconfirmed => "identity_change_unconfirmed",
             Self::AccountKeyRotated => "account_key_rotated",
+            Self::NoDeviceGrant => "no_device_grant",
             Self::PasswordChangedElsewhere => "password_changed_elsewhere",
             Self::ReadOnly => "read_only",
             Self::UnknownItem => "unknown_item",
@@ -189,6 +200,7 @@ impl ClientError {
             Self::SignupPending => "signup_pending",
             Self::LocalUnlockUnavailable => "local_unlock_unavailable",
             Self::DeviceStateOutdated => "device_state_outdated",
+            Self::SetupRetired => "setup_retired",
             Self::Internal => "internal",
         }
     }
@@ -211,6 +223,10 @@ impl fmt::Display for ClientError {
                 "the account's identity key changed and is not confirmed"
             }
             Self::AccountKeyRotated => "the account key was rotated on another device",
+            Self::NoDeviceGrant => {
+                "the account key was rotated on another device, and the server holds no key for \
+                 this device; open a device that saw the change"
+            }
             Self::PasswordChangedElsewhere => "the password was changed on another device",
             Self::ReadOnly => "the vault is read-only",
             Self::UnknownItem => "no such item",
@@ -251,6 +267,9 @@ impl fmt::Display for ClientError {
             Self::SignupPending => "the signup has not been acknowledged yet",
             Self::LocalUnlockUnavailable => "this device can no longer unlock with a password",
             Self::DeviceStateOutdated => "the local data is older than this device's own history",
+            Self::SetupRetired => {
+                "the server refused the registration again after it was restarted; try later"
+            }
             Self::Internal => "internal error",
         })
     }
@@ -281,6 +300,7 @@ mod tests {
             ClientError::Fork,
             ClientError::IdentityChangeUnconfirmed,
             ClientError::AccountKeyRotated,
+            ClientError::NoDeviceGrant,
             ClientError::PasswordChangedElsewhere,
             ClientError::ReadOnly,
             ClientError::UnknownItem,
@@ -307,6 +327,7 @@ mod tests {
             ClientError::SignupPending,
             ClientError::LocalUnlockUnavailable,
             ClientError::DeviceStateOutdated,
+            ClientError::SetupRetired,
             ClientError::Internal,
         ];
         let mut codes: Vec<&str> = all.iter().map(|e| e.code()).collect();

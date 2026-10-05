@@ -9,8 +9,7 @@
 //! | Function | The `auth` flow it serves |
 //! |---|---|
 //! | [`create_personal_vault`] | Signup (CRYPTO.md §11.1 step 8), with its byte-identical repeat |
-//! | [`self_grants`] | Account views (§11.2 step 5, §11.3 step 2.2) |
-//! | [`store_self_grants`] | Restore healing step 3 (ADR 0012 §7) |
+//! | [`self_grants`] | Account views (§11.2 step 5, §11.3 step 2.2); healing step 3a compares re-sent self-grants with them (ADR 0032 §3) |
 //! | [`device_head`] | Revocation phase 1, H (§11.8 step 0; ADR 0012 §6) |
 //! | [`recovery_vaults`] | Recovery complete, the vaults with their heads and wraps (§11.9 step 3; ADR 0025 §1) |
 //! | [`crate::rotation::apply_rotation`] | The vault half of a rotation (§11.6 step 9; ADR 0025 §3) |
@@ -24,7 +23,7 @@ use rizzy_proto::wire::{Id, List};
 use rizzy_storage::{Conn, WriteTx};
 
 use crate::error::VaultError;
-use crate::keys::{create_vault, republish_in};
+use crate::keys::create_vault;
 use crate::repo;
 
 /// The outcome of [`create_personal_vault`].
@@ -112,28 +111,6 @@ pub async fn self_grants(
         });
     }
     Ok(grants)
-}
-
-/// Restore healing step 3 (ADR 0012 §7): stores re-uploaded self-grants of the account's
-/// vaults, each under the rules of [`VaultDomain::republish_self_grant`](crate::VaultDomain):
-/// only during the account's reconciliation epoch, only when newer in both epochs (a stored
-/// grant with a newer `account_key_epoch` is kept), never above a `vault_key_epoch` the server
-/// verified. In the caller's write transaction, which holds the account lock.
-///
-/// # Errors
-/// [`VaultError::NotFound`] for a vault of another account or none; [`VaultError::Invalid`]
-/// outside the reconciliation epoch or for an unverified `vault_key_epoch`;
-/// [`VaultError::Storage`] or [`VaultError::Corrupt`]. The caller drops the transaction then.
-pub async fn store_self_grants(
-    tx: &mut WriteTx,
-    account_id: AccountId,
-    grants: &[VaultSelfGrant],
-    now_ms: u64,
-) -> Result<(), VaultError> {
-    for grant in grants {
-        republish_in(tx, account_id, grant, now_ms).await?;
-    }
-    Ok(())
 }
 
 /// H: the highest `device_seq` the server holds from `device_id` in any of the account's

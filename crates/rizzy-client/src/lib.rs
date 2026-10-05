@@ -40,12 +40,13 @@
 //! | [`device`] | CRYPTO.md §4.2, §5.6 | The in-memory device state; the offline unlock |
 //! | [`signup`] | CRYPTO.md §7, §11 "Secrets before commit", §11.1 | Signup and the Emergency Kit |
 //! | [`login`] | CRYPTO.md §5.3, §11.2, §11.4 | Login on a new device, enrolment, the web vault's ephemeral device and its account refresh |
-//! | [`unlock`] | CRYPTO.md §11.3 | The online part of an unlock, device grants after a rotation |
+//! | [`unlock`] | CRYPTO.md §11.3; ADR 0032 §4 | The online part of an unlock, device grants after a rotation, the catch-up by password of a device whose grant a restore lost |
+//! | [`reregister`] | CRYPTO.md §5.8 steps 3–4; ADR 0031 points 2, 3, 8 | The same-password re-registration a `reregister` answer asks for; restarting a pending registration refused with `setup_retired` |
 //! | [`rotation`] | CRYPTO.md §11.6, §11.8 steps 1–3; ADR 0025 §2 | Standard and full key rotation with an optional revocation: new keys, the auth half, the vault half, the retry rule |
 //! | [`credentials`] | CRYPTO.md §11.5, §11.3 step 5 | Master password and Secret Key change, with or without a rotation; following a change made elsewhere |
 //! | [`two_factor`] | CRYPTO.md §5.10, §11.15 | Server-side 2FA enrolment (the otpauth URI) and removal requests |
 //! | [`session`] | CRYPTO.md §5.10; ADR 0012 §7 "A device enrolled after the backup" | Device authentication (also certificate-carrying, after a restore) and request signing |
-//! | [`healing`] | ADR 0012 §7 steps 1–3; ADR 0021 §9 "Server behind" | Account-side restore healing: the bundle chain, the newest `account-state`, the self-grants; the reconciliation objects |
+//! | [`healing`] | ADR 0012 §7 steps 1–3 as ADR 0032 §1–§4 replace them; ADR 0021 §9 "Server behind" | Account-side restore healing: the older-chain rollback, the bundle chain, the newest `account-state` with `E_id` and the settings, the self-grants of step 3b; the recovery repair; the reconciliation objects |
 //! | [`sync`] | ADR 0012 §4, §7; ADR 0018 §3, §10; ADR 0021 §2, §4, §9 | The sync driver of one vault |
 //! | [`items`] | ADR 0018 §2, §6–§9; ADR 0012 §5; ADR 0027 §2 steps 3–5 | Item create, edit, trash, restore, purge and reads; the import path, which splits an item over a create op and the ops that follow |
 //! | [`lists`] | ADR 0018 §6 "List elements", "List order" | The writes that add, edit and remove URIs, custom fields, password-history entries and tags of an item |
@@ -104,6 +105,7 @@ pub mod items;
 pub mod lists;
 pub mod login;
 pub mod recovery;
+pub mod reregister;
 pub mod rotation;
 pub mod session;
 pub mod signup;

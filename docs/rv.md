@@ -25,7 +25,7 @@ Each account has one SQLite file, `<account id>.sqlite3`, and a lock file next t
 
 Do not restore the file from a copy either. If `rv` finds that the server has seen newer requests or edits from this device than the file knows, it raises the alarm "device state outdated", goes read-only, and asks you to enrol again: `rv device forget`, then `rv login`.
 
-Only one `rv` runs on an account at a time; a second one fails with "in use".
+Only one `rv` runs on an account at a time; a second one waits up to two seconds for the first to finish, then fails with "in use".
 
 ## First use
 
@@ -139,6 +139,8 @@ Each of them first logs in again with the current master password (and a two-fac
 
 If such a change is interrupted after it was sent, it is kept like an interrupted rotation: the next `rv` run opens with the **current** master password, asks for the new one, and finishes the change or sends it again. If the server does not take it then, `rv` says so, and the previous master password and Emergency Kit stay the valid ones.
 
+**When the server retires its old login setup** ([ADR 0031](adr/0031-retiring-old-opaque-setups.md)). After the operator runs `rizzy-vault secrets rotate`, the server asks clients to move each account to its new login setup. `rv` does it by itself the next time it goes online, with the master password you typed to open the device (no prompt, no change to your password, Secret Key or kit). If the operator later retires the old setup (`secrets retire-setups`) before an account moved, its password login stops working, but its enrolled devices still open: `rv` moves the account then, and password logins work again. An interrupted signup that was waiting when the setup was retired is registered again: `rv` asks for its master password, the login name and the invite, and sends it once more; its Emergency Kit stays valid. If the server refuses it a second time, the signup stays saved and the next run tries again. An interrupted master password or Secret Key change, or key rotation, cannot be sent once the account's own setup was retired: it needs a password login, which the retired setup no longer allows. `rv` then says so and keeps the change saved, nothing is changed, and your current master password, Secret Key and Emergency Kit stay the valid ones; tell the operator (a recovery with the Emergency Kit also restores the password login).
+
 `2fa enable` shows the secret once, as an `otpauth://` URI and in Base32, for your authenticator app, then asks for the app's current code. From then on every login asks for a code. `2fa disable` needs a current code too, a newer one than the code its own login used. Codes are typed at the terminal or piped in, never given on the command line. Losing the authenticator needs the server administrator.
 
 ## Forgotten master password
@@ -155,7 +157,18 @@ rv recovery cancel                      # on a device that is still enrolled
 
 If the server's operator restored it from an older backup, the edits made after that backup are gone from the server but not from your devices. The next `rv sync` on a device that holds them notices that the server is behind, says so ("The server has lost changes this device holds"), sends them back in one request, and goes on. Until that has happened the device does not write: an edit is refused as read-only, and reading works as before. Run `rv sync` on each device that was in use after the backup. If the server refuses the request, or a device cannot send back everything the server lost, `rv` says so and the device stays read-only.
 
-The restore can also take the account back: a device added after the backup, for example. `rv` then sees an older account state than the one it holds, raises the rollback alarm, and sends the newer state back ("Sending the newer one back"); a device the restored server does not know at all first shows the server its certificate. If the server takes them, the alarm is lifted ("The server holds this device's account state again") and the device goes on as above. A server put back from a plain file copy rather than with `rizzy-vault restore` does not take them: the alarm stays, and every run tries again. A key rotation, a device removal or a Secret Key change made after the backup is not healed by this version: the device stays read-only or reports the server's answer as invalid.
+The restore can also take the account back: a device added after the backup, for example. `rv` then sees an older account state than the one it holds, raises the rollback alarm, and sends the newer state back ("Sending the newer one back"); a device the restored server does not know at all first shows the server its certificate. If the server takes them, the alarm is lifted ("The server holds this device's account state again") and the device goes on as above. A server put back from a plain file copy rather than with `rizzy-vault restore` does not take them: the alarm stays, and every run tries again.
+
+A key rotation, a device removal, a password change or a Secret Key change made after the backup is healed the same way ([ADR 0032](adr/0032-healing-rotation-after-backup.md)): the first device that saw it and runs `rv sync` sends back the newer account state with its keys and the vault's key, then the lost edits, and, with the master password you typed, registers your login with the server again. Until that last step has run, `rv login` on a new device is refused with "restored from a backup" even with the right password; run `rv sync` on a device that is already set up, then try again. A device that missed the change (it did not run between the change and the restore) catches up by logging in with your master password at its next `rv sync`, once the login works again; until then it says to open a device that saw the change.
+
+After such a restore your recovery code does not start a recovery until you repair it on an enrolled device:
+
+```sh
+rv recovery repair --name alice            # a new recovery code and Emergency Kit
+rv recovery repair --name alice --retype   # or: type the current recovery code again
+```
+
+`--retype` works only when the code did not change since the backup; if the server does not take it, run the command without `--retype` and keep the new kit it shows (the old recovery code then stops working).
 
 ## Alarms
 

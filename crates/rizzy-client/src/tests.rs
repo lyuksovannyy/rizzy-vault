@@ -89,6 +89,10 @@ struct Stored {
 struct Server {
     /// The OPAQUE setup.
     setup: ServerSetup,
+    /// The `setup_id` of `setup` (ADR 0031 point 3).
+    setup_id: u32,
+    /// The `reregister` flag every login and device authentication answers (ADR 0031 point 2).
+    reregister: bool,
     /// The canonical origin.
     origin: ServerOrigin,
     /// The account.
@@ -127,6 +131,8 @@ impl Server {
         let mut rng = ChaCha20Rng::seed_from_u64(seed);
         Self {
             setup: ServerSetup::generate(&mut rng),
+            setup_id: 1,
+            reregister: false,
             origin: ServerOrigin::parse(ORIGIN).unwrap(),
             account: None,
             logins: Vec::new(),
@@ -154,6 +160,7 @@ impl Server {
             .unwrap();
         RegisterStartResponse {
             registration_response: bytes(&m2),
+            setup_id: self.setup_id,
         }
     }
 
@@ -253,6 +260,7 @@ impl Server {
             account_id: Id::from_bytes(self.stored().account_id.to_bytes()),
             account_key_server_wrap: self.stored().e_srv.clone(),
             account: self.view(),
+            reregister: self.reregister,
         })
     }
 
@@ -331,6 +339,7 @@ impl Server {
         Ok(DeviceAuthFinishResponse {
             session_token: self.token(),
             session_id: Id::from_bytes(sid),
+            reregister: self.reregister,
         })
     }
 
@@ -1447,7 +1456,7 @@ fn unlock_after_rotation_opens_device_grants() {
         verify_unlock(&mut a_state, &a_unlocked, &view, None).unwrap_err(),
         ClientError::AccountKeyRotated
     );
-    // No grant: refused.
+    // No grant: refused as a missing grant (ADR 0032 §4: the host catches up by password).
     let empty = DeviceGrantsResponse {
         grants: List::empty(),
     };
@@ -1461,7 +1470,7 @@ fn unlock_after_rotation_opens_device_grants() {
             None
         )
         .unwrap_err(),
-        ClientError::InvalidServerResponse
+        ClientError::NoDeviceGrant
     );
     let ack = crate::unlock::apply_device_grants(
         &mut rng,

@@ -91,6 +91,7 @@ pub const TABLES: &[TableSpec] = &[
             col("setup_id", Kind::Integer, false),
             col("ake_public_key_hash", Kind::Blob, false),
             col("created_at_ms", Kind::Integer, false),
+            col("retired_at_ms", Kind::Integer, true),
         ],
     },
     TableSpec {
@@ -105,6 +106,7 @@ pub const TABLES: &[TableSpec] = &[
             col("password_epoch", Kind::Integer, false),
             col("e_srv", Kind::Blob, false),
             col("updated_at_ms", Kind::Integer, false),
+            col("account_key_epoch", Kind::Integer, true),
         ],
     },
     TableSpec {
@@ -128,6 +130,7 @@ pub const TABLES: &[TableSpec] = &[
             col("e_rec", Kind::Blob, false),
             col("h_rec", Kind::Blob, false),
             col("updated_at_ms", Kind::Integer, false),
+            col("account_key_epoch", Kind::Integer, true),
         ],
     },
     TableSpec {

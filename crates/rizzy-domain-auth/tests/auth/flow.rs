@@ -351,6 +351,7 @@ fn flow_futures_are_send() {
             account_state: stmt.clone(),
             bundle: None,
             registration_upload: None,
+            setup_id: None,
             account_key_server_wrap: None,
             identity_secret_keys: None,
             recovery: rizzy_domain_auth::RecoveryUpload::None,
@@ -370,6 +371,8 @@ fn flow_futures_are_send() {
             account_state: stmt.clone(),
             device_certificates: rizzy_proto::wire::List::empty(),
             device_revocations: rizzy_proto::wire::List::empty(),
+            identity_secret_keys: None,
+            account_settings: None,
         };
         send(svc.publish_account_state(&session, &state, now));
         let grants = rizzy_proto::account::PublishGrantsRequest {

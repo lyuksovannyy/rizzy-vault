@@ -10,9 +10,11 @@
 //! | `recovery` | the waiting period, cancellation, release and the recovery commit (§11.9) |
 //! | `second_factor` | TOTP enrolment, login with 2FA, replay of a step (§11.15) |
 //! | `requests` | the `rizzy-proto` entry points the server calls: password change, settings, suspension, self-revocation, recovery, TOTP |
+//! | `lag` | the lag rule and the credentials that need the user after a restore: `credentials_stale` after KE3, `reregister`, the startup fill, the recovery repair, `E_id` and settings in healing step 2 (ADR 0032 §3–§4) |
 //! | `restore` | the reconciliation epoch after a restore: its end, its limit, the device-set check (INV-59) |
 //! | `single_use` | login states and challenges used once on every path; no login across a credential change (§5.10, §5.11, INV-59) |
 //! | `secrets` | the startup checks and what the database never holds (INV-8, INV-50) |
+//! | `setups` | retiring old OPAQUE setups: the `reregister` flag, the echoed `setup_id`, the two steps of `retire-setups`, the startup refusal, an account left on a retired setup (ADR 0031) |
 //! | `data_key` | after a data-key rotation: TOTP rows re-sealed under the account lock, the old key dropped once no row names it (§5.11 "Rotation") |
 //! | `window` | the replay window at its edges, through the database: the first counter, `max − 63`, `max − 64`, jumps, forged requests, a restart, the highest recordable counter (ADR 0028 item 5) |
 
@@ -27,12 +29,14 @@ mod common;
 mod data_key;
 mod enumeration;
 mod flow;
+mod lag;
 mod recovery;
 mod requests;
 mod restore;
 mod revocation;
 mod second_factor;
 mod secrets;
+mod setups;
 mod single_use;
 mod state;
 mod window;

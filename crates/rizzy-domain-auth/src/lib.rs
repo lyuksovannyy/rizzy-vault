@@ -41,10 +41,11 @@
 //! |---|---|---|
 //! | [`config`] | ADR 0008 decision 5; ADR 0010 §5; ADR 0012 §7; CRYPTO.md §5.9, §5.10 | [`AuthConfig`]: origin, signup policy, lifetimes, recovery wait, rate limits |
 //! | [`secrets`] | CRYPTO.md §5.8, §5.11; ADR 0010 §4 | [`ServerSecrets`] (`format = 1`): generation, rotation, dropping unused data keys, startup checks against the database |
+//! | [`retirement`] | CRYPTO.md §5.8 steps 3–4; ADR 0031 | Retiring old OPAQUE setups: successor time, selection by grace, the two crash-safe steps of `secrets retire-setups`, the echoed-`setup_id` check, the `reregister` flag, the worker's report |
 //! | [`rules`] | CRYPTO.md §10.2, §11 | Pure checks on untrusted statements and state transitions; the request-counter window |
 //! | [`ports`] | ADR 0016 R4 | [`VaultPort`], the vault domain's side |
 //! | [`session`] | CRYPTO.md §5.10; INV-8 | Sessions: token hashes, kinds, freshness |
-//! | [`directory`] | ADR 0012 §7 "Upload"; ADR 0016 R4 | [`directory::device_authors`]: the verified certificates `rizzy-server` hands the vault domain |
+//! | [`directory`] | ADR 0012 §7 "Upload"; ADR 0016 R4; ADR 0032 §3 | [`directory::device_authors`]: the verified certificates `rizzy-server` hands the vault domain; [`directory::signed_account_key`]: the held state's account key, for the self-grant lag rule |
 //! | [`types`] | ADR 0016 §3 notes, R4 | The `rizzy-core` and `rizzy-proto` items this API is written in, re-exported one by one for `rizzy-server` |
 //! | [`error`] | ADR 0002 point 3 | [`AuthError`] and its API code |
 //! | `signup` | CRYPTO.md §11.1, §5.9 | [`AuthService::register_start`], [`AuthService::register_finish`] |
@@ -54,7 +55,7 @@
 //! | `recovery` | CRYPTO.md §11.9; ADR 0008 | [`AuthService::recovery_start`], [`AuthService::recovery_cancel`], [`AuthService::recovery_complete`] |
 //! | `totp` | CRYPTO.md §5.11, §11.15 | Server-side 2FA enrolment and removal |
 //! | `requests` | CRYPTO.md §11 "Replacing credentials", §11.5, §11.8 step 0, §11.9, §11.15 | The `rizzy-proto` entry points of the flows above that take typed arguments ([`AuthService::commit_change_request`] and the others) |
-//! | `healing` | ADR 0012 §7 "Healing a server rollback" steps 1–3; INV-59 | The reconciliation epoch after a restore |
+//! | `healing` | ADR 0012 §7 "Healing a server rollback" steps 1–3 as ADR 0032 §2–§3 replace them; INV-59 | The reconciliation epoch after a restore; the lag rule for `E_id` and `ACCOUNT_SETTINGS` |
 //! | `maintenance` | ADR 0010 §5; ADR 0012 §7; CRYPTO.md §5.11 "Rotation" | What `worker` runs: expired auth state, stale reconciliation epochs, re-sealing TOTP secrets after a data-key rotation |
 //!
 //! # Readings of the specs (the conservative choice, where they leave room)
@@ -75,6 +76,14 @@
 //! - **Outside the reconciliation epoch, healing only accepts repeats**: every new
 //!   `account-state` goes through the flow that makes it (enrolment, [`AuthService::commit_change`])
 //!   and its compare-and-swap; bundles and grants are published through those flows too.
+//! - **Lag after a restore** (ADR 0032 §3–§4): the credential and recovery rows carry the
+//!   `account_key_epoch` of their commit's state. A record that lags the signed state answers
+//!   `credentials_stale` after KE3 and the second factor (and `reregister` on device
+//!   authentication); a lagging recovery row is refused like a wrong code until the user's
+//!   repair; a lagging `E_id` or `ACCOUNT_SETTINGS` is repaired in healing step 2 over a device
+//!   session of the held device set only, inside or outside the reconciliation epoch. Rows
+//!   migration 0005 found are filled from the current state at startup
+//!   ([`AuthService::fill_credential_epochs`]); one left empty reads as lagging.
 //! - **A revocation without a rotation** is accepted only in the self-revocation shape of
 //!   CRYPTO.md §11.3 step 5 (one new durable device and one revoked device, over a fresh OPAQUE
 //!   session); every other revocation must come with the rotation of §11.8 step 3.
@@ -133,6 +142,7 @@ pub mod config;
 pub mod directory;
 pub mod error;
 pub mod ports;
+pub mod retirement;
 pub mod rules;
 pub mod secrets;
 pub mod session;
@@ -327,6 +337,7 @@ pub(crate) const fn is_refusal(e: &AuthError) -> bool {
         AuthError::Unauthorized
             | AuthError::InvalidRequest
             | AuthError::SecondFactorRequired
+            | AuthError::CredentialsStale
             | AuthError::RateLimited { .. }
     )
 }

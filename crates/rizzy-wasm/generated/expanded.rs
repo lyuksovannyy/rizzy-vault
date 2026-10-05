@@ -587,6 +587,8 @@ pub mod error {
                     ErrorCode::StaleEpoch => "server_stale_epoch",
                     ErrorCode::RecordConflict => "server_record_conflict",
                     ErrorCode::PrevSeqMismatch => "server_prev_seq_mismatch",
+                    ErrorCode::SetupRetired => "server_setup_retired",
+                    ErrorCode::CredentialsStale => "server_credentials_stale",
                     ErrorCode::Internal => "server_internal",
                     _ => "server_unknown",
                 })
@@ -6952,16 +6954,29 @@ mod login {
     //!   §11.4): unlocking is a new login, and a lock drops the [`Session`].
     //! - **Re-authentication** for a plaintext export ([`Session::reauth`]) runs the same OPAQUE
     //!   steps, keeps none of the new login's keys and uploads no certificate.
+    //! - **Moving to the server's current OPAQUE setup** ([ADR 0031] point 2). When `login/finish`
+    //!   answers `reregister`, the session login holds the typed password, so before the ephemeral
+    //!   certificate it runs the same-password re-registration over its OPAQUE session
+    //!   (`account/reregister/start`, then `account/commit`; [`rizzy_client::reregister`]), once
+    //!   per login. It is transparent: any failure (a lost compare-and-swap, a refusal, a bad
+    //!   answer) skips it, the login goes on, and the next login tries again. A re-authentication
+    //!   does not run it.
+    //!
+    //! [ADR 0031]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0031-retiring-old-opaque-setups.md
     use core::fmt;
     use rizzy_client::ClientError;
     use rizzy_client::login::{
         LoggedIn, LoginAwaitingSession, LoginInput, LoginStarted, WebSession,
         start_login,
     };
+    use rizzy_client::reregister::{
+        PendingReregistration, ReregistrationStarted,
+    };
     use rizzy_client::rizzy_core::ids::AccountId;
     use rizzy_client::rizzy_proto::auth::{
         LoginFinishResponse, LoginStartResponse,
     };
+    use rizzy_client::rizzy_proto::change::ReregisterStartResponse;
     use rizzy_client::rizzy_proto::error::ErrorCode;
     use rizzy_client::rizzy_proto::http::paths;
     use wasm_bindgen::prelude::wasm_bindgen;
@@ -7047,6 +7062,13 @@ mod login {
 
         /// `login/finish` is outstanding.
         Finish(LoginAwaitingSession),
+
+        /// `account/reregister/start` of the same-password re-registration is outstanding (ADR
+        /// 0031 point 2).
+        Reregister(Box<LoggedIn>, ReregistrationStarted),
+
+        /// Its `account/commit` is outstanding.
+        ReregisterCommit(Box<LoggedIn>, Box<PendingReregistration>),
 
         /// `devices/web-certificate` is outstanding.
         Certificate(Box<WebSession>),
@@ -7683,8 +7705,9 @@ mod login {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             match self.stage {
-                    Stage::Start(_) | Stage::Finish(_) | Stage::Certificate(_)
-                        => "request",
+                    Stage::Start(_) | Stage::Finish(_) | Stage::Reregister(..) |
+                        Stage::ReregisterCommit(..) | Stage::Certificate(_) =>
+                        "request",
                     Stage::NeedsTotp => "needs_totp",
                     Stage::Done(_) | Stage::Reauthenticated(_) => "done",
                     Stage::Spent => "failed",
@@ -8331,7 +8354,39 @@ mod login {
                     }
                     let answer: LoginFinishResponse = http::json(status, body)?;
                     let logged_in = awaiting.complete(answer)?;
+                    if self.purpose == Purpose::Session &&
+                            logged_in.reregister() {
+                        return self.reregister(logged_in, now_ms);
+                    }
                     self.logged_in(logged_in, now_ms)
+                }
+                Stage::Reregister(login, started) => {
+                    let built =
+                        http::json::<ReregisterStartResponse>(status,
+                                    body).and_then(|answer|
+                                    Ok(started.finish_login(&mut self.rng, &answer,
+                                                &login)?)).and_then(|pending|
+                                {
+                                    let request =
+                                        HttpRequest::post(paths::ACCOUNT_COMMIT,
+                                                pending.commit_request(), Some(login.bearer_token()))?;
+                                    Ok((pending, request))
+                                });
+                    match built {
+                        Ok((pending, request)) => {
+                            self.pending = Some(request);
+                            self.stage =
+                                Stage::ReregisterCommit(login, Box::new(pending));
+                            Ok(())
+                        }
+                        Err(_) => self.logged_in(*login, now_ms),
+                    }
+                }
+                Stage::ReregisterCommit(mut login, pending) => {
+                    if http::empty(status, body).is_ok() {
+                        login.adopt_reregistration(*pending)?;
+                    }
+                    self.logged_in(*login, now_ms)
                 }
                 Stage::Certificate(web) => {
                     http::empty(status, body)?;
@@ -8342,6 +8397,29 @@ mod login {
                     | Stage::Spent => {
                     Err(CoreError::new(WRONG_STATE))
                 }
+            }
+        }
+        /// ADR 0031 point 2 (module docs): starts the same-password re-registration over the
+        /// login's OPAQUE session; if it cannot even start, the login goes on without it.
+        fn reregister(&mut self, logged_in: LoggedIn, now_ms: u64)
+            -> CoreResult<()> {
+            let started =
+                logged_in.start_reregistration(&mut self.rng).map_err(CoreError::from).and_then(|(started,
+                            request)|
+                        {
+                            let request =
+                                HttpRequest::post(paths::ACCOUNT_REREGISTER_START, &request,
+                                        Some(logged_in.bearer_token()))?;
+                            Ok((started, request))
+                        });
+            match started {
+                Ok((started, request)) => {
+                    self.pending = Some(request);
+                    self.stage =
+                        Stage::Reregister(Box::new(logged_in), started);
+                    Ok(())
+                }
+                Err(_) => self.logged_in(logged_in, now_ms),
             }
         }
         /// After a verified login: the ephemeral device (CRYPTO.md §11.4), or the end of a
@@ -17866,8 +17944,17 @@ mod signup {
     //!   with the signup's origin, login name, Secret Key and password, which stay in Rust until
     //!   then. That login certifies a second ephemeral kind-4 device: the signup's own certificate
     //!   (§11.1 step 5) has no session to sign ops under. Both expire after 12 h.
+    //! - **`setup_retired`** on `register/finish` ([ADR 0031] point 8): the server retired the
+    //!   OPAQUE setup the signup registered under (between `register/start` and the commit), and
+    //!   the signup was not applied. The flow reruns `register/start` with the same password,
+    //!   name, account and invite, rebuilds only the OPAQUE upload, the `setup_id` and `E_srv` of
+    //!   the commit, and sends it again; the kit already shown stays valid. At most once: a second
+    //!   `setup_retired` fails the flow.
+    //!
+    //! [ADR 0031]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0031-retiring-old-opaque-setups.md
     use core::fmt;
     use rizzy_client::rizzy_proto::auth::RegisterStartResponse;
+    use rizzy_client::rizzy_proto::error::ErrorCode;
     use rizzy_client::rizzy_proto::http::paths;
     use rizzy_client::signup::{
         DeviceKind, PendingSignup, SignupInput, SignupStarted, start_signup,
@@ -17890,6 +17977,10 @@ mod signup {
 
         /// `register/finish` is outstanding.
         Commit(Box<PendingSignup>),
+
+        /// `register/start` of a registration restarted after `setup_retired` is outstanding (ADR
+        /// 0031 point 8).
+        Restart(Box<PendingSignup>),
 
         /// The server acknowledged the commit.
         Done,
@@ -19268,7 +19359,8 @@ mod signup {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             match self.stage {
-                    Stage::Start(_) | Stage::Commit(_) => "request",
+                    Stage::Start(_) | Stage::Commit(_) | Stage::Restart(_) =>
+                        "request",
                     Stage::Kit(_) => "confirm_kit",
                     Stage::Done => "done",
                     Stage::Spent => "failed",
@@ -19385,7 +19477,11 @@ mod signup {
         #[doc =
         " flow is `\"failed\"`, except `wrong_state` and an error answer to `register/finish`, which"]
         #[doc =
-        " leaves the commit outstanding so that the host may send it again."]
+        " leaves the commit outstanding so that the host may send it again. A `setup_retired`"]
+        #[doc =
+        " answer to `register/finish` is no error: the restarted `register/start` becomes the"]
+        #[doc =
+        " outstanding request (module docs); a second one fails the flow with `setup_retired`."]
         pub fn respond(&mut self, status: u16, body: &[u8])
             -> Result<(), CoreError> {
             #[automatically_derived]
@@ -19404,7 +19500,11 @@ mod signup {
                     #[doc =
                     " flow is `\"failed\"`, except `wrong_state` and an error answer to `register/finish`, which"]
                     #[doc =
-                    " leaves the commit outstanding so that the host may send it again."]
+                    " leaves the commit outstanding so that the host may send it again. A `setup_retired`"]
+                    #[doc =
+                    " answer to `register/finish` is no error: the restarted `register/start` becomes the"]
+                    #[doc =
+                    " outstanding request (module docs); a second one fails the flow with `setup_retired`."]
                     #[export_name = "signupflow_respond_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_SignupFlow_respond(me:
                             <SignupFlow as
@@ -19491,7 +19591,11 @@ mod signup {
                     #[doc =
                     " flow is `\"failed\"`, except `wrong_state` and an error answer to `register/finish`, which"]
                     #[doc =
-                    " leaves the commit outstanding so that the host may send it again."]
+                    " leaves the commit outstanding so that the host may send it again. A `setup_retired`"]
+                    #[doc =
+                    " answer to `register/finish` is no error: the restarted `register/start` becomes the"]
+                    #[doc =
+                    " outstanding request (module docs); a second one fails the flow with `setup_retired`."]
                     #[no_mangle]
                     #[doc(hidden)]
                     pub extern "C-unwind" fn __wbindgen_describe_signupflow_respond_e09cc0eb35f8b583() {
@@ -19514,7 +19618,7 @@ mod signup {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\nSignupFlow\x08V Passes in the answer to the outstanding request. The `register/start` answer runs the? registration's Argon2id and builds every object of the commit.\0\t # ErrorsX `invalid_server_response`; the server's code (`server_invalid_request` for a login nameX already taken is not distinguished, CRYPTO.md \xc2\xa75.9); `wrong_state`. After an error theY flow is `\"failed\"`, except `wrong_state` and an error answer to `register/finish`, whichB leaves the commit outstanding so that the host may send it again.\0\x02\x06status\0\0\0\x04body\0\0\0\0\0\x07respond\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\nSignupFlow\nV Passes in the answer to the outstanding request. The `register/start` answer runs the? registration's Argon2id and builds every object of the commit.\0\t # ErrorsX `invalid_server_response`; the server's code (`server_invalid_request` for a login nameX already taken is not distinguished, CRYPTO.md \xc2\xa75.9); `wrong_state`. After an error theY flow is `\"failed\"`, except `wrong_state` and an error answer to `register/finish`, whichT leaves the commit outstanding so that the host may send it again. A `setup_retired`T answer to `register/finish` is no error: the restarted `register/start` becomes theU outstanding request (module docs); a second one fails the flow with `setup_retired`.\0\x02\x06status\0\0\0\x04body\0\0\0\0\0\x07respond\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -19554,7 +19658,7 @@ mod signup {
                     self.stage = Stage::Kit(Box::new(pending));
                     Ok(())
                 }
-                Stage::Commit(pending) =>
+                Stage::Commit(mut pending) =>
                     match http::empty(status, body) {
                         Ok(()) => {
                             pending.finalize()?;
@@ -19562,8 +19666,28 @@ mod signup {
                             self.stage = Stage::Done;
                             Ok(())
                         }
+                        Err(_) if
+                            http::server_code(status, body) ==
+                                Some(ErrorCode::SetupRetired) => {
+                            let request = pending.restart_registration(&mut self.rng)?;
+                            self.pending =
+                                Some(HttpRequest::post(paths::REGISTER_START, &request,
+                                            None)?);
+                            self.stage = Stage::Restart(pending);
+                            Ok(())
+                        }
                         Err(e) => { self.stage = Stage::Commit(pending); Err(e) }
                     },
+                Stage::Restart(mut pending) => {
+                    let answer: RegisterStartResponse =
+                        http::json(status, body)?;
+                    pending.on_registration_restarted(&mut self.rng, &answer)?;
+                    self.pending =
+                        Some(HttpRequest::post(paths::REGISTER_FINISH,
+                                    pending.commit_request()?, None)?);
+                    self.stage = Stage::Commit(pending);
+                    Ok(())
+                }
                 other => {
                     self.stage = other;
                     Err(CoreError::new(WRONG_STATE))

@@ -679,14 +679,13 @@ fn pre_migration_copy() {
         let last = MIGRATIONS.last().unwrap().version;
         let mut w = db.begin_write().await.unwrap();
         on_engine!(w.conn(), |c| {
-            sqlx::query("DROP TABLE storage_reconciliation")
-                .execute(&mut *c)
-                .await
-                .unwrap();
-            sqlx::query("DROP TABLE storage_meta")
-                .execute(&mut *c)
-                .await
-                .unwrap();
+            // Undo the last migration (0005: one column in each of two tables).
+            for undo in [
+                "ALTER TABLE auth_credentials DROP COLUMN account_key_epoch",
+                "ALTER TABLE auth_recovery DROP COLUMN account_key_epoch",
+            ] {
+                sqlx::query(undo).execute(&mut *c).await.unwrap();
+            }
             sqlx::query("DELETE FROM _sqlx_migrations WHERE version = $1")
                 .bind(last)
                 .execute(&mut *c)
@@ -745,8 +744,16 @@ fn schema_must_match_this_release() {
         db.restore(&fixture(), RestoreGeneration([5; 16]), 0)
             .await
             .unwrap();
-        exec(&db, "DROP TABLE storage_reconciliation").await;
-        exec(&db, "DROP TABLE storage_meta").await;
+        exec(
+            &db,
+            "ALTER TABLE auth_credentials DROP COLUMN account_key_epoch",
+        )
+        .await;
+        exec(
+            &db,
+            "ALTER TABLE auth_recovery DROP COLUMN account_key_epoch",
+        )
+        .await;
         exec(
             &db,
             "DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM \

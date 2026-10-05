@@ -12,7 +12,7 @@
 //!    ([ADR 0010] §2; a second server refuses to start), open it, then migrate: automatically,
 //!    with the `VACUUM INTO` pre-migration copy when migrations are pending on an existing
 //!    database ([ADR 0011] point 9). `PostgreSQL`: connect, take the shared instance lock
-//!    (below; a server refuses to start while `restore`, `migrate` or `secrets rotate` runs),
+//!    (below; a server refuses to start while `restore`, `migrate`, `secrets rotate` or `secrets retire-setups` runs),
 //!    and refuse to start if a migration is pending, naming `rizzy-vault migrate`.
 //! 4. **Draw the restore generation** if the database has none ([ADR 0021] §2), from the OS
 //!    CSPRNG.
@@ -20,7 +20,9 @@
 //!    key hash differs, a restored database next to a fresh secrets file, a sealed row naming a
 //!    data key the file lacks): any mismatch refuses to start.
 //! 6. **Build the domains**: the auth domain with the configured origin and signup mode, the
-//!    vault domain with the in-process event bus ([`rizzy_bus`]).
+//!    vault domain with the in-process event bus ([`rizzy_bus`]). The auth domain first fills
+//!    the `account_key_epoch` of every credential and recovery row that has none from the
+//!    account's current signed state (ADR 0032 §4; migration 0005 cannot read the state).
 //!
 //! Then the `worker` task starts ([`crate::worker`]) and, for `api` or `web`, the listener.
 //! A `web`-only process opens no database and reads no secrets.
@@ -34,7 +36,7 @@
 //! **The instance lock** ([ADR 0023] §5 step 1). Every process that opens a `PostgreSQL`
 //! database holds the instance lock in shared mode on a dedicated connection outside the pool,
 //! through `rizzy-storage`, from before it reads anything until its pools are closed
-//! ([`take_instance_lock`]). `restore`, `migrate` and `secrets rotate` take it exclusively and
+//! ([`take_instance_lock`]). `restore`, `migrate`, `secrets rotate` and `secrets retire-setups` take it exclusively and
 //! refuse to run while a server holds it ([`crate::admin`]). The lock is "checked alive as ADR
 //! 0010 §2 does for the worker lock", and the process "exits when that connection drops": a
 //! watchdog asks the database every [`INSTANCE_LOCK_CHECK`] whether the session still holds the
@@ -169,8 +171,9 @@ impl fmt::Display for ServeError {
             Self::Auth(e) => write!(f, "startup check: {e}"),
             Self::Listener(kind) => write!(f, "listener: {kind}"),
             Self::InstanceLockRefused(InstanceLockMode::Shared) => f.write_str(
-                "the database's instance lock is held exclusively: restore, migrate or secrets \
-                 rotate is running against it; start the server when it has finished",
+                "the database's instance lock is held exclusively: an admin command (restore, \
+                 migrate, secrets rotate or secrets retire-setups) is running against it; start \
+                 the server when it has finished",
             ),
             Self::InstanceLockRefused(InstanceLockMode::Exclusive) => f.write_str(
                 "the database's instance lock is held: a server process (any role, any \
@@ -233,7 +236,7 @@ pub async fn open_database(config: &Config) -> Result<Database, ServeError> {
 }
 
 /// Takes the instance lock of `db` in `mode`, within [`INSTANCE_LOCK_TIMEOUT`] (module docs):
-/// shared for a server process, exclusive for `restore`, `migrate` and `secrets rotate`. On
+/// shared for a server process, exclusive for `restore`, `migrate`, `secrets rotate` and `secrets retire-setups`. On
 /// `SQLite` it is always granted: the writer lock `db` owns already excludes everyone else.
 ///
 /// # Errors
@@ -381,6 +384,21 @@ pub async fn open_services(config: &Config) -> Result<Services, ServeError> {
     }
     let auth = AuthService::new(db.clone(), secrets, auth_config, VaultBridge)
         .map_err(ServeError::AuthConfig)?;
+    // ADR 0032 §4: the rows migration 0005 found get their `account_key_epoch` from the
+    // current signed state before anything is served.
+    let filled = auth
+        .fill_credential_epochs()
+        .await
+        .map_err(ServeError::Auth)?;
+    if filled > 0 {
+        log::info(
+            "credential_epochs_filled",
+            &[Field::U64(
+                "accounts",
+                u64::try_from(filled).unwrap_or(u64::MAX),
+            )],
+        );
+    }
     let bus = Bus::default();
     let vault = VaultDomain::new(db.clone(), AuthDirectory, bus.clone());
     Ok(Services {
@@ -737,7 +755,7 @@ mod tests {
     #[test]
     fn instance_lock_errors_say_what_to_do_and_name_no_value() {
         let shared = ServeError::InstanceLockRefused(InstanceLockMode::Shared).to_string();
-        assert!(shared.contains("restore, migrate or secrets rotate"));
+        assert!(shared.contains("restore, migrate, secrets rotate or secrets retire-setups"));
         let exclusive = ServeError::InstanceLockRefused(InstanceLockMode::Exclusive).to_string();
         assert!(exclusive.contains("stop them first"));
         assert!(ServeError::InstanceLockLost.to_string().contains("lost"));

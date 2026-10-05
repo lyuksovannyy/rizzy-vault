@@ -400,6 +400,12 @@ pub struct VaultSync {
     /// The (item, item-key id) pairs of the wrap-set rows of the last Fetch page that opened
     /// at the held epoch.
     served_wraps: BTreeSet<(ItemId, [u8; 16])>,
+    /// The vault-key epoch at which [`VaultSync::known_wraps`] holds the whole wrap set: the
+    /// held epoch after a complete Fetch at it, or after a load (the cache writes the wrap set
+    /// of an epoch in the transaction that adopts its key, ADR 0026 §4 step 3); `None` after a
+    /// new key was adopted and before the next complete Fetch. Healing step 3b needs it (ADR
+    /// 0032 §3 "Client precondition").
+    wraps_complete_at: Option<u32>,
     /// The own `device_seq`s of the healing request in flight, for its answer.
     healing: Option<heal::HealInFlight>,
 }
@@ -491,6 +497,7 @@ impl VaultSync {
             server_heads: None,
             known_wraps: BTreeMap::new(),
             served_wraps: BTreeSet::new(),
+            wraps_complete_at: None,
             healing: None,
         })
     }
@@ -1081,6 +1088,9 @@ impl VaultSync {
                 _ => false,
             });
         self.synced = response.complete && !self.server_behind && !outcome.own_history_ahead;
+        if response.complete {
+            self.wraps_complete_at = Some(self.vault_key.epoch());
+        }
         self.server_heads = Some(heads);
         self.prune_bodies();
         Ok(outcome)
@@ -2110,6 +2120,7 @@ impl VaultSync {
         // new one come with the next Fetch.
         self.known_wraps.clear();
         self.served_wraps.clear();
+        self.wraps_complete_at = None;
         self.synced = false;
         Ok(())
     }
@@ -2255,6 +2266,7 @@ impl VaultSync {
             vault.remember_wrap(item, wrap.vault_key_epoch, wrap.envelope.as_slice());
         }
         vault.wrap_rows.clone_from(&image.wraps);
+        vault.wraps_complete_at = Some(vault.vault_key.epoch());
         // The item keys that records carry, before any envelope is opened: a cover may be
         // sealed under an item key whose wrap only an own op carries (a fresh key of the
         // writer rule), and the own ops are put back after the covers are absorbed. A wrap

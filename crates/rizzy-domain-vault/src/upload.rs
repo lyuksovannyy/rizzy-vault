@@ -42,7 +42,7 @@
 
 use std::collections::BTreeMap;
 
-use rizzy_core::ids::{AccountId, ItemId, VaultId};
+use rizzy_core::ids::{AccountId, DeviceId, ItemId, VaultId};
 use rizzy_proto::vault::{
     HealingRequest, HealingResponse, OpRecord, Record, SnapshotRecord, UploadRequest,
     UploadResponse, UploadResult,
@@ -55,6 +55,7 @@ use rizzy_sync::dot::Dot;
 use crate::authors::DeviceDirectory;
 use crate::error::{HealingError, VaultError};
 use crate::intake::{WrapRule, verify_op, verify_snapshot};
+use crate::keys::heal_self_grant;
 use crate::repo::{self, WrapRow};
 use crate::store::{
     Existing, Refusal, Session, chain_check, existing_op, existing_snapshot, op_author_allows,
@@ -216,7 +217,13 @@ impl<D: DeviceDirectory> VaultDomain<D> {
     }
 
     /// Stores a restore-healing request atomically, or refuses all of it (ADR 0021 §9
-    /// "Healing request", "Server acceptance"). See the module docs.
+    /// "Healing request", "Server acceptance"). See the module docs. A request that carries a
+    /// self-grant is healing step 3b instead ([ADR 0032] §2–§3, [`crate::keys`]): `healer` is the
+    /// device of the caller's session when it is a device session, `None` otherwise (an OPAQUE,
+    /// web or recovery session), and only a durable device of the held device set may repair a
+    /// lagging self-grant.
+    ///
+    /// [ADR 0032]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0032-healing-rotation-after-backup.md
     ///
     /// # Errors
     /// [`HealingError::Refused`] with the reason when a rule refuses the request;
@@ -225,6 +232,7 @@ impl<D: DeviceDirectory> VaultDomain<D> {
     pub async fn heal(
         &self,
         account_id: AccountId,
+        healer: Option<DeviceId>,
         request: &HealingRequest,
         now_ms: u64,
     ) -> Result<HealingResponse, HealingError> {
@@ -233,7 +241,14 @@ impl<D: DeviceDirectory> VaultDomain<D> {
         let mut session =
             open_session(&mut tx, self.directory(), account_id, vault_id, now_ms).await?;
         let generation = restore_generation(tx.conn()).await?;
-        match heal_in(&mut tx, &mut session, request).await? {
+        let outcome = match &request.self_grant {
+            Some(grant) => {
+                let key = self.directory().account_key(tx.conn(), account_id).await?;
+                heal_self_grant(&mut tx, &session, healer, key, grant, request).await?
+            }
+            None => heal_in(&mut tx, &mut session, request).await?,
+        };
+        match outcome {
             Ok(()) => {}
             Err(refusal) => {
                 tx.rollback().await?;

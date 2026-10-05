@@ -3,7 +3,7 @@
 
 use rizzy_domain_vault::{AuthorStatus, VaultError};
 use rizzy_proto::error::ErrorCode;
-use rizzy_proto::objects::{Envelope, KeyEnvelope, VaultSelfGrant};
+use rizzy_proto::objects::Envelope;
 use rizzy_proto::vault::{FetchRequest, Record, SeqVector, UploadRequest, UploadResult};
 use rizzy_proto::wire::{Id, List};
 use rizzy_storage::on_engine;
@@ -473,118 +473,5 @@ fn other_accounts_see_no_vault() {
         ));
         assert_eq!(env.domain.vaults(ACCOUNT).await.unwrap(), vec![VAULT]);
         assert!(env.domain.vaults(OTHER_ACCOUNT).await.unwrap().is_empty());
-    });
-}
-
-/// A self-grant of the test vault with the given epochs.
-#[expect(
-    clippy::unwrap_used,
-    reason = "a test helper: a failure fails the test, which CLAUDE.md allows in test code"
-)]
-fn grant(account_key_epoch: u32, vault_key_epoch: u32, fill: u8) -> VaultSelfGrant {
-    VaultSelfGrant {
-        vault_id: Id::from_bytes(VAULT.to_bytes()),
-        account_key_epoch,
-        vault_key_epoch,
-        envelope: KeyEnvelope::new(vec![fill; 98]).unwrap(),
-    }
-}
-
-#[test]
-fn self_grants_are_republished_only_in_the_reconciliation_epoch() {
-    block_on(async {
-        let env = Env::new(1).await;
-        // Not newer: kept, answered false.
-        let same = env.domain.self_grant(ACCOUNT, VAULT).await.unwrap();
-        assert!(
-            !env.domain
-                .republish_self_grant(ACCOUNT, &same, NOW)
-                .await
-                .unwrap()
-        );
-        // Newer in the account epoch only: stored.
-        let newer = grant(1, 0, 0x5b);
-        assert!(
-            env.domain
-                .republish_self_grant(ACCOUNT, &newer, NOW)
-                .await
-                .unwrap()
-        );
-        assert_eq!(env.domain.self_grant(ACCOUNT, VAULT).await.unwrap(), newer);
-        // Once the epoch ends, a re-publication is refused.
-        let mut tx = env.db.begin_write().await.unwrap();
-        rizzy_storage::lock_account(&mut tx, ACCOUNT.as_bytes())
-            .await
-            .unwrap();
-        assert!(
-            rizzy_storage::meta::end_reconciliation_epoch(&mut tx, ACCOUNT.as_bytes())
-                .await
-                .unwrap()
-        );
-        tx.commit().await.unwrap();
-        assert!(matches!(
-            env.domain
-                .republish_self_grant(ACCOUNT, &grant(2, 0, 0x5c), NOW)
-                .await,
-            Err(VaultError::Invalid)
-        ));
-        assert_eq!(env.domain.self_grant(ACCOUNT, VAULT).await.unwrap(), newer);
-    });
-}
-
-/// A re-published self-grant carries unsigned epochs (CRYPTO.md §4.2). It must never lock the
-/// vault: its `vault_key_epoch` is bounded by what the server verified, it never goes down, and
-/// it never moves the vault's stale-epoch reference.
-#[test]
-fn a_bogus_self_grant_epoch_cannot_lock_the_vault() {
-    block_on(async {
-        let env = Env::new(1).await;
-        let a = Device::new(1);
-        env.enrol(&[&a]);
-        env.store(chain(&a, item(1), 1, 1)).await;
-        let original = env.domain.self_grant(ACCOUNT, VAULT).await.unwrap();
-
-        // Above every epoch the server verified (the vault's 0, the stored headers' 0).
-        for bogus in [grant(0, u32::MAX, 0x66), grant(u32::MAX, 1, 0x67)] {
-            assert!(matches!(
-                env.domain.republish_self_grant(ACCOUNT, &bogus, NOW).await,
-                Err(VaultError::Invalid)
-            ));
-        }
-        assert_eq!(
-            env.domain.self_grant(ACCOUNT, VAULT).await.unwrap(),
-            original
-        );
-
-        // A signed op at epoch 1 justifies a grant at epoch 1, which is stored; the vault's
-        // own epoch stays 0, so an epoch-0 op is still accepted.
-        let mut at_one = OpSpec::new(item(1), 2, 1);
-        at_one.epoch = 1;
-        env.store(vec![Record::Op(sign_op(&a, VAULT, &at_one))])
-            .await;
-        let rotated = grant(1, 1, 0x68);
-        assert!(
-            env.domain
-                .republish_self_grant(ACCOUNT, &rotated, NOW)
-                .await
-                .unwrap()
-        );
-        assert_eq!(
-            env.domain.self_grant(ACCOUNT, VAULT).await.unwrap(),
-            rotated
-        );
-        env.store(chain(&a, item(1), 3, 3)).await;
-
-        // Component-wise: a higher account epoch with a lower vault epoch is left out.
-        assert!(
-            !env.domain
-                .republish_self_grant(ACCOUNT, &grant(2, 0, 0x69), NOW)
-                .await
-                .unwrap()
-        );
-        assert_eq!(
-            env.domain.self_grant(ACCOUNT, VAULT).await.unwrap(),
-            rotated
-        );
     });
 }

@@ -30,6 +30,22 @@ pub(crate) struct Credential {
     pub(crate) password_epoch: u32,
     /// `E_srv`.
     pub(crate) e_srv: Vec<u8>,
+    /// The `account_key_epoch` of the signed state of the commit that wrote the row (ADR 0032
+    /// §4); `None` for a row migration 0005 found and the startup fill has not reached yet,
+    /// which lags (fail closed).
+    pub(crate) account_key_epoch: Option<u32>,
+}
+
+impl Credential {
+    /// Whether the record lags `state`: its (`password_epoch`, `kdf_id`, `account_key_epoch`) is
+    /// not the state's (ADR 0032 §4 "Record lag"). Possible only after a restore to before a
+    /// credential change or a key rotation, since every flow that moves them writes the record
+    /// in the transaction of the state.
+    pub(crate) fn lags(&self, state: &AccountState) -> bool {
+        self.password_epoch != state.password_epoch
+            || self.kdf_id != state.kdf_id.get()
+            || self.account_key_epoch != Some(state.account_key_epoch)
+    }
 }
 
 impl core::fmt::Debug for Credential {
@@ -38,6 +54,7 @@ impl core::fmt::Debug for Credential {
             .field("setup_id", &self.setup_id)
             .field("kdf_id", &self.kdf_id)
             .field("password_epoch", &self.password_epoch)
+            .field("account_key_epoch", &self.account_key_epoch)
             .finish_non_exhaustive()
     }
 }
@@ -51,6 +68,19 @@ pub(crate) struct RecoveryRow {
     pub(crate) e_rec: Vec<u8>,
     /// `H_rec = SHA-256(recovery_auth_token)`.
     pub(crate) h_rec: [u8; 32],
+    /// The `account_key_epoch` of the signed state of the commit that wrote the row (ADR 0032
+    /// §4); `None` as for [`Credential::account_key_epoch`].
+    pub(crate) account_key_epoch: Option<u32>,
+}
+
+impl RecoveryRow {
+    /// Whether the row lags `state`: its `recovery_epoch` or its `account_key_epoch` is not the
+    /// state's (ADR 0032 §4 "Step 6"). `H_rec` and `E_rec` are one credential, so either
+    /// makes the whole row lag.
+    pub(crate) fn lags(&self, state: &AccountState) -> bool {
+        self.recovery_epoch != state.recovery_epoch
+            || self.account_key_epoch != Some(state.account_key_epoch)
+    }
 }
 
 /// The account id of a normalised login name.
@@ -83,17 +113,22 @@ pub(crate) async fn credential(
     conn: Conn<'_>,
     credential_identifier: &[u8; 16],
 ) -> Result<Option<Credential>, AuthError> {
-    type Row = (i64, Vec<u8>, i64, i64, Vec<u8>);
+    type Row = (i64, Vec<u8>, i64, i64, Vec<u8>, Option<i64>);
     let row: Option<Row> = fetch_opt!(conn, Row, sql::CREDENTIAL_GET, &credential_identifier[..])?;
-    row.map(|(setup_id, record, kdf_id, password_epoch, e_srv)| {
-        Ok(Credential {
-            setup_id: sql::sql_u32(setup_id, "setup_id")?,
-            record,
-            kdf_id: u16::try_from(kdf_id).map_err(|_| AuthError::Internal("kdf_id"))?,
-            password_epoch: sql::sql_u32(password_epoch, "password_epoch")?,
-            e_srv,
-        })
-    })
+    row.map(
+        |(setup_id, record, kdf_id, password_epoch, e_srv, account_key_epoch)| {
+            Ok(Credential {
+                setup_id: sql::sql_u32(setup_id, "setup_id")?,
+                record,
+                kdf_id: u16::try_from(kdf_id).map_err(|_| AuthError::Internal("kdf_id"))?,
+                password_epoch: sql::sql_u32(password_epoch, "password_epoch")?,
+                e_srv,
+                account_key_epoch: account_key_epoch
+                    .map(|e| sql::sql_u32(e, "account_key_epoch"))
+                    .transpose()?,
+            })
+        },
+    )
     .transpose()
 }
 
@@ -127,6 +162,7 @@ pub(crate) async fn put_credential(
         i64::from(credential.password_epoch),
         &credential.e_srv[..],
         sql::u64_sql(now_ms, "updated_at_ms")?,
+        credential.account_key_epoch.map(i64::from),
     )?;
     Ok(())
 }
@@ -170,17 +206,16 @@ pub(crate) async fn recovery(
     conn: Conn<'_>,
     account_id: AccountId,
 ) -> Result<Option<RecoveryRow>, AuthError> {
-    let row: Option<(i64, Vec<u8>, Vec<u8>)> = fetch_opt!(
-        conn,
-        (i64, Vec<u8>, Vec<u8>),
-        sql::RECOVERY_GET,
-        &account_id.as_bytes()[..]
-    )?;
-    row.map(|(epoch, e_rec, h_rec)| {
+    type Row = (i64, Vec<u8>, Vec<u8>, Option<i64>);
+    let row: Option<Row> = fetch_opt!(conn, Row, sql::RECOVERY_GET, &account_id.as_bytes()[..])?;
+    row.map(|(epoch, e_rec, h_rec, account_key_epoch)| {
         Ok(RecoveryRow {
             recovery_epoch: sql::sql_u32(epoch, "recovery_epoch")?,
             e_rec,
             h_rec: sql::hash32(&h_rec, "h_rec")?,
+            account_key_epoch: account_key_epoch
+                .map(|e| sql::sql_u32(e, "account_key_epoch"))
+                .transpose()?,
         })
     })
     .transpose()
@@ -201,6 +236,7 @@ pub(crate) async fn put_recovery(
         &row.e_rec[..],
         &row.h_rec[..],
         sql::u64_sql(now_ms, "updated_at_ms")?,
+        row.account_key_epoch.map(i64::from),
     )?;
     Ok(())
 }

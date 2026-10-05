@@ -14,6 +14,7 @@
 //! | `account_key_epoch + 1` (standard rotation, §11.6) | `E_srv'`, `E_id'`, a device grant per remaining device, the vault half ([`VaultPort::apply_rotation`]), `E_rec'` if recovery is on, new settings if any | fresh OPAQUE or recovery-only |
 //! | `identity_epoch + 1` (full rotation) | all of the above, the new bundle signed by both identity keys, a re-issue of every certificate and revocation | fresh OPAQUE or recovery-only |
 //! | `recovery_epoch + 1` (new code) | `E_rec` and `H_rec` | fresh OPAQUE or recovery-only |
+//! | same `recovery_epoch`, nothing else moving, while the stored recovery row lags the state (the recovery repair of ADR 0032 §4 step 6, "re-type the current code") | `E_rec` and `H_rec`, the sent `H_rec` equal to the stored one | fresh OPAQUE |
 //! | recovery switched off | nothing; `E_rec` and `H_rec` are deleted | fresh OPAQUE or recovery-only |
 //! | `settings_seq + 1` | the new `ACCOUNT_SETTINGS` | fresh OPAQUE or a device session |
 //! | a new durable device | its certificate (enrolment in a recovery, §11.9 step 5; re-enrolment, §11.3 step 5) | fresh OPAQUE or recovery-only |
@@ -22,6 +23,13 @@
 //! The recovery-only session commits only the recovery of §11.9 step 5: a new password
 //! (`password_epoch + 1`) and a new code (`recovery_epoch + 1`), optionally with a rotation and
 //! the recovering client's own enrolment.
+//!
+//! A new OPAQUE record is labelled with the `setup_id` its registration echoes
+//! ([`AuthService::reregister_start`] answers it), checked after the byte-identical-repeat
+//! checks: a retired or unknown one is [`AuthError::SetupRetired`] (ADR 0031 point 3).
+//!
+//! Every credential row this writes carries the `account_key_epoch` of the new state (ADR 0032
+//! §4), so a restore that undoes a rotation leaves rows the server sees lagging.
 //!
 //! The new state is applied by compare-and-swap on `state_seq`; a byte-identical repeat of a
 //! committed state is success (the client that crashed after sending resends, §11). After the
@@ -86,6 +94,9 @@ pub struct AccountChange<R> {
     /// A new OPAQUE registration upload, registered through
     /// [`AuthService::reregister_start`] under `credential_identifier = account_id`.
     pub registration_upload: Option<OpaqueMessage>,
+    /// The `setup_id` [`AuthService::reregister_start`] answered, echoed; present exactly when
+    /// `registration_upload` is (ADR 0031 point 3).
+    pub setup_id: Option<u32>,
     /// `E_srv'`, with a new registration or a rotation.
     pub account_key_server_wrap: Option<AccountKeyServerWrap>,
     /// `E_id'`, with a rotation.
@@ -111,6 +122,7 @@ impl<R> fmt::Debug for AccountChange<R> {
         f.debug_struct("AccountChange")
             .field("bundle", &self.bundle.is_some())
             .field("registration_upload", &self.registration_upload.is_some())
+            .field("setup_id", &self.setup_id)
             .field("device_certificates", &self.device_certificates.len())
             .field("device_revocations", &self.device_revocations.len())
             .field("device_grants", &self.device_grants.len())
@@ -166,7 +178,8 @@ impl DevicePlan {
 
 impl<V: VaultPort> AuthService<V> {
     /// OPAQUE re-registration start (CRYPTO.md §11.5 step 3, §11.9 step 5, §5.8): M2 for a new
-    /// record under `credential_identifier = account_id`, with the current `server_setup`. The
+    /// record under `credential_identifier = account_id`, with the current `server_setup`, and
+    /// that setup's `setup_id`, which the client echoes in the commit (ADR 0031 point 3). The
     /// record is committed with [`AuthService::commit_change`].
     ///
     /// Allowed over a fresh OPAQUE session, the recovery-only session, or a device session (a
@@ -181,7 +194,7 @@ impl<V: VaultPort> AuthService<V> {
         session: &Session,
         registration_request: &OpaqueMessage,
         now_ms: u64,
-    ) -> Result<OpaqueMessage, AuthError> {
+    ) -> Result<(u32, OpaqueMessage), AuthError> {
         let mut tx = self.db.begin_read().await?;
         let session = session::reload(tx.conn(), session, now_ms).await?;
         let allowed = session.is_fresh_opaque(now_ms)
@@ -200,14 +213,16 @@ impl<V: VaultPort> AuthService<V> {
             }
         }
         tx.finish().await?;
-        let (_, setup) = self.secrets.current_setup()?;
+        let (setup_id, setup) = self.secrets.current_setup()?;
         let response = server_registration_start(
             setup,
             registration_request.as_slice(),
             &CredentialIdentifier::for_account(session.account_id),
         )
         .map_err(|_| AuthError::InvalidRequest)?;
-        Bytes::new(response).map_err(|_| AuthError::Internal("M2 exceeds its wire limit"))
+        let response =
+            Bytes::new(response).map_err(|_| AuthError::Internal("M2 exceeds its wire limit"))?;
+        Ok((setup_id, response))
     }
 
     /// Commits one atomic change of the account (see the module docs), under the account lock,
@@ -220,6 +235,8 @@ impl<V: VaultPort> AuthService<V> {
     ///   locator disagrees with the state, a device-set hash or grant set is wrong;
     /// - [`AuthError::StateConflict`], [`AuthError::StateFork`]: the compare-and-swap lost, or
     ///   a revocation's H is no longer the head (the client fetches and retries);
+    /// - [`AuthError::SetupRetired`]: the echoed `setup_id` of a new registration is retired or
+    ///   unknown, and the commit is not a repeat of the applied one (ADR 0031 point 3);
     /// - [`AuthError::Unauthorized`]: an ended session;
     /// - the vault half's errors; storage errors.
     pub async fn commit_change(
@@ -259,11 +276,23 @@ impl<V: VaultPort> AuthService<V> {
             tx.commit().await?;
             return Ok(());
         }
+        // ADR 0031 point 3: after the byte-identical-repeat checks, the echoed setup. It travels
+        // exactly with a registration upload.
+        match (&change.registration_upload, change.setup_id) {
+            (Some(_), Some(setup_id)) => self.check_echoed_setup(tx.conn(), setup_id).await?,
+            (None, None) => {}
+            _ => return Err(AuthError::InvalidRequest),
+        }
         let step = rules::classify(&trust.state, &new)?;
         if step.identity_changed != new_bundle.is_some() {
             return Err(AuthError::InvalidRequest);
         }
         check_objects(step, &new, change)?;
+        if let (RecoveryUpload::Register(reg), RecoveryTransition::Unchanged) =
+            (&change.recovery, step.recovery)
+        {
+            check_recovery_repair(&mut tx, account, &trust.state, reg).await?;
+        }
         let plan = self
             .plan_devices(&mut tx, &trust, &devices, &new_head, &step, change, now_ms)
             .await?;
@@ -433,19 +462,27 @@ impl<V: VaultPort> AuthService<V> {
             let record = server_registration_finish(upload.as_slice())
                 .map_err(|_| AuthError::InvalidRequest)?
                 .to_bytes();
-            let (setup_id, _) = self.secrets.current_setup()?;
+            // ADR 0031 point 3: labelled with the echoed setup the registration started
+            // under (checked in `commit_change`), never the one current at commit time.
+            let setup_id = change.setup_id.ok_or(AuthError::InvalidRequest)?;
             return Ok(Some(Credential {
                 setup_id,
                 record,
                 kdf_id: new.kdf_id.get(),
                 password_epoch: new.password_epoch,
                 e_srv,
+                account_key_epoch: Some(new.account_key_epoch),
             }));
         }
         let held = store::credential(tx.conn(), account.as_bytes())
             .await?
             .ok_or(AuthError::Internal("an account without an OPAQUE record"))?;
-        Ok(Some(Credential { e_srv, ..held }))
+        // ADR 0032 §4: `E_srv` is under the new state's account key, and the row says so.
+        Ok(Some(Credential {
+            e_srv,
+            account_key_epoch: Some(new.account_key_epoch),
+            ..held
+        }))
     }
 
     /// Writes every object of a checked change, applies the vault half, the compare-and-swap
@@ -483,7 +520,7 @@ impl<V: VaultPort> AuthService<V> {
             )
             .await?;
         }
-        self.write_recovery(tx, account, step, change, now_ms)
+        self.write_recovery(tx, account, new, step, change, now_ms)
             .await?;
         if let Some(settings) = &change.account_settings {
             exec!(
@@ -576,6 +613,7 @@ impl<V: VaultPort> AuthService<V> {
         &self,
         tx: &mut WriteTx,
         account: AccountId,
+        new: &AccountState,
         step: &Transition,
         change: &AccountChange<V::Rotation>,
         now_ms: u64,
@@ -586,6 +624,7 @@ impl<V: VaultPort> AuthService<V> {
                     recovery_epoch: reg.recovery_wrap.recovery_epoch,
                     e_rec: reg.recovery_wrap.envelope.as_slice().to_vec(),
                     h_rec: reg.recovery_token_hash.to_bytes(),
+                    account_key_epoch: Some(new.account_key_epoch),
                 };
                 store::put_recovery(tx.conn(), account, &row, now_ms).await?;
             }
@@ -596,6 +635,7 @@ impl<V: VaultPort> AuthService<V> {
                     .ok_or(AuthError::InvalidRequest)?;
                 let row = RecoveryRow {
                     e_rec: wrap.envelope.as_slice().to_vec(),
+                    account_key_epoch: Some(new.account_key_epoch),
                     ..held
                 };
                 store::put_recovery(tx.conn(), account, &row, now_ms).await?;
@@ -652,6 +692,20 @@ fn check_objects<R>(
             r.recovery_wrap.account_key_epoch == new.account_key_epoch
                 && r.recovery_wrap.recovery_epoch == new.recovery_epoch
         }
+        // ADR 0032 §4 step 6, "re-type the current code": `H_rec` and `E_rec` again at the same
+        // `recovery_epoch`, under the current account key, nothing else moving; the stored row is
+        // checked in `commit_change` ([`check_recovery_repair`]).
+        (RecoveryUpload::Register(r), RecoveryTransition::Unchanged) => {
+            !rotated
+                && !registration
+                && !step.password_bumped
+                && !step.kdf_changed
+                && !step.settings_changed
+                && !step.device_set_changed
+                && new.recovery_enabled
+                && r.recovery_wrap.account_key_epoch == new.account_key_epoch
+                && r.recovery_wrap.recovery_epoch == new.recovery_epoch
+        }
         (RecoveryUpload::Rewrap(w), RecoveryTransition::Unchanged) => {
             rotated
                 && new.recovery_enabled
@@ -696,7 +750,8 @@ fn authorize<R>(
 ) -> Result<(), AuthError> {
     let credentials = change.registration_upload.is_some()
         || step.account_key_rotated
-        || step.recovery != RecoveryTransition::Unchanged;
+        || step.recovery != RecoveryTransition::Unchanged
+        || !matches!(change.recovery, RecoveryUpload::None);
     let heavy = credentials
         || step.password_bumped
         || !plan.new_certs.is_empty()
@@ -705,6 +760,7 @@ fn authorize<R>(
         && !step.password_bumped
         && !step.account_key_rotated
         && step.recovery == RecoveryTransition::Unchanged
+        && matches!(change.recovery, RecoveryUpload::None)
         && plan.new_certs.is_empty()
         && plan.new_revocations.is_empty();
     match session.kind {
@@ -810,4 +866,32 @@ fn check_grants<R>(
         }
     }
     Ok(())
+}
+
+/// ADR 0032 §4 step 6, the "re-type the current code" form of the recovery repair: a commit that
+/// carries `H_rec` and `E_rec` again at the state's `recovery_epoch` (classified as recovery
+/// unchanged, [`check_objects`]). Allowed only while the stored recovery row lags the held
+/// signed state and its `recovery_epoch` already equals the state's (the code is unchanged since
+/// the backup), and only with the stored code: the sent `H_rec` must equal the stored one byte
+/// for byte. A stored `recovery_epoch` below the state's is an older code's, which may be
+/// exposed; it takes only the new-code form (`recovery_epoch + 1`), never this one.
+///
+/// # Errors
+/// [`AuthError::InvalidRequest`] for anything else, a row that does not lag included (nothing to
+/// repair); storage errors.
+async fn check_recovery_repair(
+    tx: &mut WriteTx,
+    account: AccountId,
+    held: &AccountState,
+    reg: &RecoveryRegistration,
+) -> Result<(), AuthError> {
+    let stored = store::recovery(tx.conn(), account)
+        .await?
+        .ok_or(AuthError::InvalidRequest)?;
+    let same_code = stored.h_rec == reg.recovery_token_hash.to_bytes();
+    if stored.lags(held) && stored.recovery_epoch == held.recovery_epoch && same_code {
+        Ok(())
+    } else {
+        Err(AuthError::InvalidRequest)
+    }
 }

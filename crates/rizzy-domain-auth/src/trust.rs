@@ -143,6 +143,39 @@ impl AccountTrust {
     }
 }
 
+impl AccountTrust {
+    /// The stored certificate of `device_id` verified under the bundle of the chain whose
+    /// identity key signed it, whichever epoch that is: unlike [`AccountTrust::devices`], which
+    /// keeps only what the head vouches for. ADR 0032 §2 compares a re-issued certificate
+    /// outside the device set with it ("stored only with the device keys of the stored
+    /// certificate of that `device_id`"). `None` when no stored certificate of that device
+    /// verifies under any bundle of the chain.
+    ///
+    /// # Errors
+    /// Storage errors.
+    pub(crate) async fn stored_certificate(
+        &self,
+        conn: Conn<'_>,
+        device_id: DeviceId,
+    ) -> Result<Option<Verified<DeviceCertificate>>, AuthError> {
+        let id = &self.account_id.as_bytes()[..];
+        let rows: Vec<CertRow> = fetch_all!(conn, CertRow, sql::CERTS_ALL, id)?;
+        for (stored_id, _kind, wire, _suspended, _stored_at) in rows {
+            if stored_id[..] != device_id.as_bytes()[..] {
+                continue;
+            }
+            for bundle in self.chain.iter().rev() {
+                if let Ok(cert) = rules::verify_certificate(&wire, bundle, self.account_id)
+                    && cert.device_id == device_id
+                {
+                    return Ok(Some(cert));
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
 /// Reborrows a [`Conn`] for one more query.
 pub(crate) fn reborrow<'a>(conn: &'a mut Conn<'_>) -> Conn<'a> {
     match conn {

@@ -16,11 +16,11 @@
 //! | Call | Spec | Module |
 //! |---|---|---|
 //! | [`VaultDomain::upload`] | ADR 0012 §7 "Upload" as ADR 0021 §9 supersedes it in part | [`upload`] |
-//! | [`VaultDomain::heal`] | ADR 0021 §9 "Healing request", "Server acceptance" | [`upload`] |
+//! | [`VaultDomain::heal`] | ADR 0021 §9 "Healing request", "Server acceptance"; ADR 0032 §2–§3 (step 3b, a request with a self-grant) | [`upload`], [`keys`] |
 //! | [`VaultDomain::fetch`] | ADR 0012 §7 "Fetch" as ADR 0021 §4 supersedes it in part | [`fetch`] |
 //! | [`VaultDomain::compact_item`], [`VaultDomain::run_compaction`] | ADR 0021 §3, §7 (the `worker` job) | [`compact`] |
-//! | [`create_vault`], [`VaultDomain::self_grant`], [`VaultDomain::republish_self_grant`], [`VaultDomain::vaults`] | CRYPTO.md §4.2, §4.4; ADR 0012 §7 healing step 3 | [`keys`] |
-//! | [`port::create_personal_vault`], [`port::self_grants`], [`port::store_self_grants`], [`port::device_head`], [`port::recovery_vaults`] | ADR 0016 R4; CRYPTO.md §11.1 step 8, §11.2 step 5, §11.8 step 0, §11.9 step 3; ADR 0012 §7 healing step 3; ADR 0025 §1 | [`port`]: the vault side of the `auth` flows, on the caller's transaction |
+//! | [`create_vault`], [`VaultDomain::self_grant`], [`VaultDomain::vaults`] | CRYPTO.md §4.2, §4.4 | [`keys`] |
+//! | [`port::create_personal_vault`], [`port::self_grants`], [`port::device_head`], [`port::recovery_vaults`] | ADR 0016 R4; CRYPTO.md §11.1 step 8, §11.2 step 5, §11.8 step 0, §11.9 step 3; ADR 0025 §1; ADR 0032 §3 (healing step 3a compares re-sent self-grants) | [`port`]: the vault side of the `auth` flows, on the caller's transaction |
 //! | [`rotation::apply_rotation`] | CRYPTO.md §11.6 steps 3 and 9; ADR 0012 §6; ADR 0021 §9 "Rotation cut-off"; ADR 0025 §3 | [`rotation`]: the vault half of a key rotation, in the `auth` domain's commit transaction |
 //! | [`DeviceDirectory`] | ADR 0012 §7 "Certificates come from the `auth` domain through a trait"; ADR 0016 R4 | [`authors`] |
 //!
@@ -75,10 +75,14 @@
 //!   is refused, whoever uploads it ([`AuthorStatus::Suspended`]).
 //! - **Stale epoch inside a healing request**: no record of a healing request gets the check
 //!   (see [`upload`], "Stale epoch inside a healing request").
-//! - **Re-published self-grants** are accepted only during the account's reconciliation epoch,
-//!   only when newer in both epochs and no higher in `vault_key_epoch` than a value the server
-//!   verified, and never change the vault's `vault_key_epoch`: no Accepted ADR says how a
-//!   restore's epoch rollback is healed, so that stays open for the owner ([`keys`]).
+//! - **Re-published self-grants** follow the lag rule of ADR 0032 §3 in healing step 3b: a
+//!   self-grant behind the held signed state's `account_key_epoch` is replaced, inside or outside
+//!   the reconciliation epoch, by a device session of a durable device of the held device set,
+//!   raising the vault's `vault_key_epoch` above the restored one and deleting the wrap rows and
+//!   record wraps below it. A step-3b wrap whose row the server lacks is left out (re-published in
+//!   step 4), the conservative reading of "replaces each stored row". Self-grants sent through
+//!   `healing/grants` keep the earlier reading: only during the epoch, never above a verified
+//!   epoch, never moving `vault_key_epoch` ([`keys`]).
 //! - **Compaction failures** are isolated per item: a failing item is moved behind every other
 //!   queued item and reported, and the job goes on with the next one ([`compact`]).
 //! - **"Already stored"** compares the signed statement and every attachment held on both sides
@@ -106,7 +110,8 @@
 //! authors, bogus self-grant epochs, compaction with two-author covers and a failing item, the
 //! page byte budget, a Fetch racing compaction (200 runs by default, `RIZZY_TEST_RACE_RUNS` to
 //! change it, 1,000 for the ADR 0021 §8 figure; it requires a Fetch that read the old state
-//! while the compaction committed), and a healing request after a backup and restore.
+//! while the compaction committed), a healing request after a backup and restore, and healing
+//! step 3b (ADR 0032): a lagging self-grant repaired with its wrap set, one test per refusal.
 //!
 //! [ADR 0010]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0010-server-shape.md
 //! [ADR 0011]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0011-storage.md
@@ -137,7 +142,8 @@ mod store;
 pub mod upload;
 
 pub use authors::{
-    AuthorCertificate, AuthorStatus, Authors, DeviceDirectory, DirectoryError, DuplicateDevice,
+    AccountKeyState, AuthorCertificate, AuthorStatus, Authors, DeviceDirectory, DirectoryError,
+    DuplicateDevice,
 };
 pub use compact::{CompactionFailure, CompactionReport, CompactionRun};
 pub use error::{HealingError, VaultError};

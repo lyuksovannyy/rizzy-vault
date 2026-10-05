@@ -137,6 +137,8 @@ pub struct SignupStarted {
     device_kind: DeviceKind,
     /// The host clock at the start.
     now_ms: u64,
+    /// The invite token, kept for a restart of the registration (ADR 0031 point 8).
+    invite: Option<Zeroizing<String>>,
 }
 
 impl fmt::Debug for SignupStarted {
@@ -205,6 +207,7 @@ pub fn start_signup<R: CryptoRng + ?Sized>(
             },
             device_kind: input.device_kind,
             now_ms: input.now_ms,
+            invite: input.invite.map(|i| Zeroizing::new(i.to_owned())),
         },
         request,
     ))
@@ -375,6 +378,8 @@ impl SignupStarted {
         };
         let request = RegisterFinishRequest {
             registration_upload: bytes(reg.upload)?,
+            // ADR 0031 point 3: the setup the registration started under, echoed.
+            setup_id: response.setup_id,
             account_key_server_wrap: AccountKeyServerWrap {
                 account_key_epoch: 0,
                 password_epoch: 0,
@@ -434,6 +439,13 @@ impl SignupStarted {
             kit,
             secret_key,
             confirmed: false,
+            restart: SignupRestart {
+                pw_in: self.pw_in,
+                login_name: self.login_name,
+                invite: self.invite,
+                state: None,
+                restarted: false,
+            },
             request,
             device,
             own_certificate: CertifiedDevice {
@@ -498,6 +510,21 @@ impl EmergencyKit {
     }
 }
 
+/// What restarting a signup's registration needs (ADR 0031 point 8): `pw_in`, the login name
+/// and invite of `register/start`, and the restarted OPAQUE state. Holds secrets; no `Debug`.
+struct SignupRestart {
+    /// `pw_in` of the signup.
+    pw_in: PasswordInput,
+    /// The normalised login name.
+    login_name: LoginName,
+    /// The invite token, if the signup had one.
+    invite: Option<Zeroizing<String>>,
+    /// The OPAQUE client state of the restarted registration, between its request and answer.
+    state: Option<ClientRegistrationState>,
+    /// Whether the registration was restarted already: at most once (ADR 0031 "Risks").
+    restarted: bool,
+}
+
 /// Signup with every object built, waiting for the kit confirmation and the commit.
 pub struct PendingSignup {
     /// The kit to render.
@@ -507,7 +534,10 @@ pub struct PendingSignup {
     secret_key: Option<SecretKey>,
     /// Whether the user re-typed the last group of the Secret Key.
     confirmed: bool,
-    /// The commit, built once.
+    /// What a restart of the registration needs (ADR 0031 point 8).
+    restart: SignupRestart,
+    /// The commit, built once; only a restart of the registration replaces its OPAQUE upload,
+    /// `setup_id` and `E_srv`.
     request: RegisterFinishRequest,
     /// The pending device state of a durable device.
     device: Option<DeviceState>,
@@ -571,6 +601,76 @@ impl PendingSignup {
         } else {
             Err(ClientError::EmergencyKitNotConfirmed)
         }
+    }
+
+    /// ADR 0031 point 8: the commit was refused with `setup_retired` (the server's OPAQUE setup
+    /// was retired between `register/start` and the commit, and the commit was not applied).
+    /// Starts the registration again with the same `pw_in`; the host sends the request to
+    /// `register/start` and passes the answer to [`PendingSignup::on_registration_restarted`].
+    /// Everything else of the signup (the Secret Key, the keys, the kit) stays.
+    ///
+    /// # Errors
+    /// [`ClientError::EmergencyKitNotConfirmed`] before the kit was confirmed;
+    /// [`ClientError::SetupRetired`] when the registration was restarted once already (at most
+    /// once, ADR 0031 "Risks"); [`ClientError::InvalidInput`] for an invite out of bounds;
+    /// [`ClientError::Internal`].
+    pub fn restart_registration<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<RegisterStartRequest, ClientError> {
+        if !self.confirmed {
+            return Err(ClientError::EmergencyKitNotConfirmed);
+        }
+        if self.restart.restarted {
+            return Err(ClientError::SetupRetired);
+        }
+        let (state, m1) = client_registration_start(rng, &self.restart.pw_in).map_err(internal)?;
+        let request = RegisterStartRequest {
+            invite: self
+                .restart
+                .invite
+                .as_ref()
+                .map(|i| SecretText::new(i.as_str()))
+                .transpose()
+                .map_err(|_| ClientError::InvalidInput)?,
+            login_name: Text::new(self.restart.login_name.as_str().to_owned())
+                .map_err(|_| ClientError::InvalidInput)?,
+            account_id: id(self.unlocked.account_id.to_bytes()),
+            registration_request: bytes(m1)?,
+        };
+        self.restart.state = Some(state);
+        self.restart.restarted = true;
+        Ok(request)
+    }
+
+    /// The answer to [`PendingSignup::restart_registration`]: rebuilds only the OPAQUE upload,
+    /// the echoed `setup_id` and `E_srv` (under the new `export_key`, at the same locator) in
+    /// the commit, which [`PendingSignup::commit_request`] then returns. A durable device writes
+    /// the new commit body over the stored one (`crate::store::pending_writes`) before it
+    /// sends it.
+    ///
+    /// # Errors
+    /// [`ClientError::InvalidInput`] without a restart; [`ClientError::InvalidServerResponse`]
+    /// for a malformed answer; [`ClientError::Internal`].
+    pub fn on_registration_restarted<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        response: &RegisterStartResponse,
+    ) -> Result<(), ClientError> {
+        let state = self.restart.state.take().ok_or(ClientError::InvalidInput)?;
+        let (upload, wrap) = crate::reregister::finish_registration(
+            rng,
+            state,
+            &self.restart.pw_in,
+            response.registration_response.as_slice(),
+            self.unlocked.account_id,
+            &self.unlocked.account_key,
+            crate::reregister::Locator::from(&self.request.account_key_server_wrap),
+        )?;
+        self.request.registration_upload = upload;
+        self.request.setup_id = response.setup_id;
+        self.request.account_key_server_wrap = wrap;
+        Ok(())
     }
 
     /// Step 9: after the server acknowledged the commit, the device state is final.

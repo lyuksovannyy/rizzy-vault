@@ -13,17 +13,20 @@
 //!   stored"), `prev_seq_mismatch` (ADR 0021 §9 "Already stored", last sentence),
 //!   `state_conflict` (the lost compare-and-swap on `state_seq`, CRYPTO.md §10.2),
 //!   `fresh_session_required` (CRYPTO.md §11 "Replacing credentials": a fresh OPAQUE session of
-//!   at most 5 minutes).
+//!   at most 5 minutes), `setup_retired` (ADR 0031 point 3: a registration whose echoed OPAQUE
+//!   `setup_id` is retired or unknown), `credentials_stale` (ADR 0032 §4: after KE3 verified, the
+//!   account's OPAQUE record lags its signed state).
 //! - Generic, this crate's: `invalid_request`, `payload_too_large`, `unauthorized`,
 //!   `second_factor_required`, `rate_limited`, `not_found`, `internal`.
 //!
 //! ADR 0028 item 3 freezes the whole set for `v1`, with the HTTP status of each code:
 //! `invalid_request` and `client_too_old` 400; `unauthorized` and `second_factor_required` 401;
 //! `fresh_session_required` 403; `not_found` 404; `state_conflict`, `stale_epoch`,
-//! `record_conflict` and `prev_seq_mismatch` 409; `api_version_gone` 410; `payload_too_large`
-//! 413; `rate_limited` 429, with `Retry-After` in whole seconds; `internal` 500. A method a
-//! route does not serve is `405` with `invalid_request`. **Clients branch on the code, never on
-//! the status.**
+//! `record_conflict`, `prev_seq_mismatch`, `setup_retired` (ADR 0031 point 3, which adds it to
+//! item 3's list) and `credentials_stale` (ADR 0032, which adds it to item 3's list) 409;
+//! `api_version_gone` 410; `payload_too_large` 413; `rate_limited` 429, with `Retry-After` in
+//! whole seconds; `internal` 500. A method a route does not serve is `405` with
+//! `invalid_request`. **Clients branch on the code, never on the status.**
 //!
 //! **Forward compatibility.** A client that reads a code it does not know gets
 //! [`ErrorCode::Unknown`] instead of a parse failure: a new code is a new response value, which
@@ -75,6 +78,18 @@ pub enum ErrorCode {
     /// An op whose `vault_prev_seq` is not the last op the server holds from that device in
     /// that vault (ADR 0021 §9 "Already stored").
     PrevSeqMismatch,
+    /// A signup or credential commit whose echoed OPAQUE `setup_id` the server no longer
+    /// accepts: retired by `rizzy-vault secrets retire-setups`, or unknown (ADR 0031 point 3).
+    /// Distinct from [`ErrorCode::StateConflict`]: the client reruns the registration with the
+    /// same `pw_in` and rebuilds only the OPAQUE upload and `E_srv` (point 8), never resends
+    /// the same upload.
+    SetupRetired,
+    /// After KE3 verified, the account's OPAQUE record lags the signed `account-state` the
+    /// server holds: its (`password_epoch`, `kdf_id`, `account_key_epoch`) is not the state's, after a
+    /// restore to before a credential change or a key rotation (ADR 0032 §4). Sent only after
+    /// authentication, so it tells an unauthenticated prober nothing (CRYPTO.md §5.9). The client
+    /// waits for an enrolled device to re-register the record at its next password unlock.
+    CredentialsStale,
     /// The server failed. No detail.
     Internal,
     /// A code this build does not know; only ever produced by parsing a newer server's answer.
@@ -130,6 +145,8 @@ mod tests {
             ErrorCode::StateConflict,
             ErrorCode::RecordConflict,
             ErrorCode::PrevSeqMismatch,
+            ErrorCode::SetupRetired,
+            ErrorCode::CredentialsStale,
         ] {
             let json = serde_json::to_string(&ErrorResponse::new(code)).unwrap();
             assert_eq!(

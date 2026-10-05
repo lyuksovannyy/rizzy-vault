@@ -206,6 +206,25 @@ impl Server {
         self.stop();
         self.child = Self::spawn(&self.dir, self.port, &self.origin);
     }
+
+    /// Stops the server, runs the operator's command `args` on its data, and starts it again.
+    fn admin(&mut self, args: &[&str]) {
+        self.stop();
+        let out = Self::command(&self.dir, self.port, &self.origin)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "rizzy-vault {args:?} failed");
+        self.child = Self::spawn(&self.dir, self.port, &self.origin);
+    }
+
+    /// ADR 0031 as an operator runs it after a leak: `secrets rotate`, a start (which records
+    /// the new setup's time), then `secrets retire-setups --grace-days 0`, which retires the
+    /// first setup at once, and a start.
+    fn retire_first_setup(&mut self) {
+        self.admin(&["secrets", "rotate"]);
+        self.admin(&["secrets", "retire-setups", "--grace-days", "0"]);
+    }
 }
 
 impl Drop for Server {
@@ -1506,6 +1525,217 @@ fn interrupted_commits_are_settled_by_the_next_run() {
     );
     b.ok(&["sync"], &[]);
     assert_eq!(b.field(&first, "item.name"), "After three");
+}
+
+/// ADR 0031 point 8 for an `rv` signup: a signup interrupted after the stage-2 cache was
+/// written, the setup it registered under retired at once (`--grace-days 0`) and the server
+/// restarted. The next run resends the stored body, gets `setup_retired`, asks for the
+/// password, the login name and the invite, registers again under the current setup, and
+/// finishes the signup; the kit it showed is the account's.
+#[test]
+fn an_interrupted_signup_is_registered_again_after_its_setup_was_retired() {
+    let mut server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("ra");
+    let mut script = Script {
+        secrets: VecDeque::from([PASSWORD.to_owned(), PASSWORD.to_owned()]),
+        ..Script::default()
+    };
+    {
+        let mut env = Env {
+            data_dir: a.dir.clone(),
+            account: None,
+            trust: rizzy_cli::tls::Trust::default(),
+            ui: &mut script,
+        };
+        let prepared = a
+            .runtime
+            .block_on(rizzy_cli::enrol::prepare_signup(
+                &mut env, &origin, "alice", true, false,
+            ))
+            .unwrap();
+        drop(prepared);
+    }
+    let secret_key = script.printed("Secret Key:");
+    server.retire_first_setup();
+
+    // The password, then an empty invite; the login name is a line.
+    let (outcome, listed) = a.try_run(&["item", "list"], &[PASSWORD, ""], &["alice"], &[]);
+    outcome.unwrap_or_else(|e| panic!("{e:?}: {:?}", listed.notes));
+    assert!(listed.noted("Finishing the signup"), "{:?}", listed.notes);
+    assert!(
+        listed.noted("retired the login setup"),
+        "{:?}",
+        listed.notes
+    );
+    // Finished for good, and the record is on the current setup: a second device logs in
+    // with the kit the interrupted signup showed.
+    let created = a.ok(
+        &[
+            "item",
+            "create",
+            "--type",
+            "note",
+            "--field",
+            "item.name=One",
+        ],
+        &[],
+    );
+    assert!(!created.noted("Finishing the signup"));
+    let b = Rv::new("rb");
+    log_in(&b, &origin, "alice", &secret_key);
+    assert_eq!(b.items().len(), 1);
+}
+
+/// The new master password of an interrupted password change.
+const NEW_PASSWORD: &str = "tremble lantern orbit vintage";
+
+/// The credential change [`interrupt_change`] leaves pending.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Interrupted {
+    /// `rv password` (no rotation): a new master password.
+    Password,
+    /// `rv secret-key` (with its default rotation): a new Secret Key.
+    SecretKey,
+}
+
+impl Interrupted {
+    /// The master password once the change is applied.
+    const fn new_password(self) -> &'static str {
+        match self {
+            Self::Password => NEW_PASSWORD,
+            Self::SecretKey => PASSWORD,
+        }
+    }
+}
+
+/// Signs `name` up on `rv` with one note, then runs `change` with its commit lost on the way
+/// to the server (`Fault::NeverSent`: a gateway's `502`, so the outcome is unknown and the
+/// pending record and the commit body stay saved). Returns the Secret Key that logs in once the
+/// change is applied.
+fn interrupt_change(
+    rv: &Rv,
+    proxy: &Proxy,
+    origin: &str,
+    name: &str,
+    change: Interrupted,
+) -> String {
+    use rizzy_client::rizzy_proto::http::paths;
+
+    let (secret_key, _) = sign_up(rv, origin, name);
+    create_note(rv, "Kept");
+    proxy.arm(paths::ACCOUNT_COMMIT, Fault::NeverSent);
+    let (outcome, lost) = match change {
+        Interrupted::Password => rv.try_run(
+            &["password", "--name", name],
+            &[PASSWORD, NEW_PASSWORD, NEW_PASSWORD],
+            &[],
+            &[],
+        ),
+        Interrupted::SecretKey => {
+            rv.try_run(&["secret-key", "--name", name], &[PASSWORD], &[], &[])
+        }
+    };
+    assert!(proxy.fired());
+    assert!(outcome.is_err(), "{outcome:?}");
+    assert!(lost.noted("stays saved"), "{:?}", lost.notes);
+    match change {
+        Interrupted::Password => secret_key,
+        Interrupted::SecretKey => lost.printed("Secret Key:"),
+    }
+}
+
+/// ADR 0031 point 8 and CRYPTO.md §11 "Secrets before commit" for `rv`: an interrupted password
+/// change and an interrupted Secret Key change, then `secrets rotate` and a restart. Each
+/// device's record is still on the old, accepted setup, so its device authentication answers
+/// `reregister`. The next run settles the pending change **first**: it logs in on the old setup
+/// and resends the stored commit byte for byte, which the server takes (its echoed setup is
+/// loaded and not retired). Only then, with nothing pending, does the same-password
+/// re-registration of point 2 move the record to the current setup, with the new credentials.
+/// Re-registering first would take the `state_seq + 1` the stored commit was signed for, and the
+/// change would be refused and dropped. Proven by retiring the old setup afterwards: a new
+/// device still logs in with the changed credentials.
+#[test]
+fn interrupted_credential_changes_are_resent_before_the_record_moves_to_a_new_setup() {
+    let (proxy, mut server) = Proxy::start();
+    let origin = server.origin();
+    let accounts = [
+        (Rv::new("sa"), "alice", Interrupted::Password),
+        (Rv::new("sb"), "bob", Interrupted::SecretKey),
+    ];
+    let keys: Vec<String> = accounts
+        .iter()
+        .map(|(rv, name, change)| interrupt_change(rv, &proxy, &origin, name, *change))
+        .collect();
+    server.admin(&["secrets", "rotate"]);
+
+    for (rv, name, change) in &accounts {
+        let new_password = change.new_password();
+        let (outcome, settled) = rv.try_run(&["sync"], &[PASSWORD, new_password], &[name], &[]);
+        outcome.unwrap_or_else(|e| panic!("{change:?}: {e:?}: {:?}", settled.notes));
+        assert!(settled.noted("was interrupted"), "{:?}", settled.notes);
+        assert!(!settled.noted("NOT made"), "{:?}", settled.notes);
+        assert!(!settled.noted("did not work"), "{:?}", settled.notes);
+        // Settled for good: the device opens with the new password and asks nothing more.
+        let (outcome, again) = rv.try_run(&["sync"], &[new_password], &[], &[]);
+        outcome.unwrap_or_else(|e| panic!("{change:?}: {e:?}: {:?}", again.notes));
+        let (outcome, listed) = rv.try_run(&["item", "list"], &[new_password], &[], &[]);
+        outcome.unwrap_or_else(|e| panic!("{change:?}: {e:?}: {:?}", listed.notes));
+        assert_eq!(listed.out.len(), 1);
+    }
+
+    // The old setup goes; a record still on it would answer every login like an unknown name.
+    server.admin(&["secrets", "retire-setups", "--grace-days", "0"]);
+    for ((_, name, change), secret_key) in accounts.iter().zip(&keys) {
+        let fresh = Rv::new("sn");
+        let (outcome, login) = fresh.try_run(
+            &["login", "--server", &origin, "--name", name],
+            &[secret_key, change.new_password()],
+            &[],
+            &[],
+        );
+        outcome.unwrap_or_else(|e| panic!("{change:?}: login: {e:?}: {:?}", login.notes));
+    }
+}
+
+/// ADR 0031 points 7 and 8 for an interrupted password change and an interrupted Secret Key
+/// change in `rv`, after the accounts' own setup was retired at once and the server restarted:
+/// neither change was applied, and neither can be resent, because a credential change needs a
+/// fresh OPAQUE session and the retired record no longer answers a login. Moving the record
+/// first with the same-password re-registration (allowed over the device session) would take
+/// the `state_seq + 1` the stored commit was signed for, so the commit would be refused and the
+/// change dropped. The change is therefore kept untouched, every run says so, nothing moves the
+/// record, and the device still opens with the current password. (The case is reported to the
+/// owner: ADR 0031 has no rule that settles it.)
+#[test]
+fn interrupted_credential_changes_on_a_retired_setup_are_kept() {
+    let (proxy, mut server) = Proxy::start();
+    let origin = server.origin();
+    let accounts = [
+        (Rv::new("rc"), "alice", Interrupted::Password),
+        (Rv::new("rd"), "bob", Interrupted::SecretKey),
+    ];
+    for (rv, name, change) in &accounts {
+        interrupt_change(rv, &proxy, &origin, name, *change);
+    }
+    server.retire_first_setup();
+
+    for (rv, name, change) in &accounts {
+        for _ in 0..2 {
+            let (outcome, kept) =
+                rv.try_run(&["sync"], &[PASSWORD, change.new_password()], &[name], &[]);
+            assert!(
+                matches!(outcome, Err(CliError::Server(ErrorCode::SetupRetired))),
+                "{change:?}: {outcome:?}: {:?}",
+                kept.notes
+            );
+            assert!(kept.noted("cannot be sent"), "{:?}", kept.notes);
+            assert!(!kept.noted("NOT made"), "{:?}", kept.notes);
+        }
+        // Nothing was dropped or moved: the device still opens offline with the current
+        // password, and the pending change is still there for the next run.
+        assert_eq!(rv.items().len(), 1);
+    }
 }
 
 /// The cache file of the one account enrolled in `rv`'s data directory.

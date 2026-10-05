@@ -1,29 +1,48 @@
-//! Healing a server rollback (ADR 0012 §7 steps 1–3; THREAT_MODEL §5.8, INV-59).
+//! Healing a server rollback (ADR 0012 §7 steps 1–3, as ADR 0032 §2–§3 replace steps 2 and 3;
+//! THREAT_MODEL §5.8, INV-59).
 //!
 //! `rizzy-vault restore` opens a reconciliation epoch for every restored account
-//! (`rizzy-storage`). While it is open, a device that finds the server behind its own
-//! accepted state re-publishes, in this order:
+//! (`rizzy-storage`). A device that finds the server behind its own accepted state re-publishes,
+//! in this order:
 //!
 //! 1. [`AuthService::publish_bundles`]: the bundle chain. Each uploaded bundle at or below the
 //!    stored head must be the stored one; each above must continue the chain under the chain
-//!    rules (CRYPTO.md §10.2, §10.3), so the stored bundle 1 stays the trust root.
-//! 2. [`AuthService::publish_account_state`]: its newest `account-state`, with the
-//!    certificates of that state's device set and every revocation it holds. The server
-//!    accepts any state that verifies under the current identity key (the head) with a
-//!    strictly higher `state_seq`, whose device-set hash the uploaded and stored certificates
-//!    and revocations reproduce. From then on the general INV-59 checks refuse credentials
-//!    older than it and devices it revokes. The epoch ends when a device of the restored set
-//!    (its certificate was in the restored database) has done this.
-//! 3. [`AuthService::publish_grants`]: device grants and vault self-grants it holds.
+//!    rules (CRYPTO.md §10.2, §10.3), so the stored bundle 1 stays the trust root. During the
+//!    epoch only.
+//! 2. [`AuthService::publish_account_state`]: its newest `account-state`, with every certificate
+//!    and revocation it holds and, as last served, `E_id` and `ACCOUNT_SETTINGS` (ADR 0032 §2).
+//!    During the epoch the server accepts any state that verifies under the current identity
+//!    key (the head) with a strictly higher `state_seq`, whose device-set hash the uploaded and
+//!    stored certificates and revocations reproduce; outside it, only the held state re-sent
+//!    byte for byte. From then on the general INV-59 checks refuse credentials older than it and
+//!    devices it revokes. The epoch ends when a device of the restored set (its certificate was
+//!    in the restored database) has done this.
+//! 3. [`AuthService::publish_grants`] (step 3a): device grants it holds. The vault self-grants
+//!    and wrap sets travel per vault in `vault/heal` (step 3b, `rizzy-domain-vault`), under the
+//!    lag rule only: a self-grant in a step 3a request is accepted only when the server already
+//!    holds it byte for byte, inside the epoch or outside it, and is never stored from there. A
+//!    self-grant stored outside the lag rule would no longer lag (its `account_key_epoch` would
+//!    be the state's) while the vault's `vault_key_epoch` and wrap set stayed behind, so step 3b
+//!    could never repair the vault (ADR 0032 §3; ADR 0012 §7 step 2 as ADR 0032 replaces it).
 //!
-//! **Outside the epoch** these calls accept only what the server already holds (a repeat is
+//! **The lag rule** (ADR 0032 §3). An object lags when the server's copy disagrees with the
+//! signed `account-state` it holds, which happens only after a restore (every flow that rotates
+//! writes the objects and the state in one transaction). Step 2 repairs a lagging `E_id` or
+//! `ACCOUNT_SETTINGS` inside or outside the epoch, checked against the held state, never
+//! against the request, over a device session of a durable device of the held device set only
+//! (`repair_lagging`). The first valid repair wins: the server cannot tell a junk envelope under
+//! a copied `key_id` from a genuine one, and clients reject it when it does not open.
+//!
+//! **Outside the epoch** steps 1 and 3a accept only what the server already holds (a repeat is
 //! success): a new state goes through the flow that makes it and its compare-and-swap
 //! (enrolment, [`AuthService::commit_change`]), and a new bundle travels with its state (the
 //! conservative reading of ADR 0012 §7 "Outside that epoch, a new `account-state` is accepted
 //! only by compare-and-swap").
 
+use rizzy_core::envelope::parse::{EnvelopeRef, parse_for_purpose};
+use rizzy_core::envelope::purpose::{PlaintextRule, Purpose};
 use rizzy_core::ids::{AccountId, DeviceId};
-use rizzy_core::sign::{DeviceCertificate, DeviceRevocation, KeyGrant, Verified};
+use rizzy_core::sign::{AccountState, DeviceCertificate, DeviceRevocation, KeyGrant, Verified};
 use rizzy_proto::account::{
     PublishAccountStateRequest, PublishBundlesRequest, PublishGrantsRequest,
 };
@@ -141,18 +160,33 @@ impl<V: VaultPort> AuthService<V> {
         Ok(())
     }
 
-    /// Healing step 2 (ADR 0012 §7): adopts a strictly newer verified state during the
-    /// reconciliation epoch, with the certificates of its device set and every revocation the
-    /// device holds, and ends the sessions of the devices it revokes. Ends the epoch when the
-    /// uploader is a device of the restored set. A byte-identical repeat of the held state is
-    /// success at any time; it too ends the epoch when the uploader is a device of the restored
-    /// set and the held state was stored after the epoch opened (so it is newer than the
-    /// restored one: another session, which could not end the epoch, adopted it first).
+    /// Healing step 2 ([ADR 0032] §2, replacing ADR 0012 §7 step 2): adopts a strictly newer
+    /// verified state during the reconciliation epoch, with every certificate and revocation
+    /// the device holds, and ends the sessions of the devices it revokes; then repairs `E_id`
+    /// and `ACCOUNT_SETTINGS` where the server's copy lags the held signed state (the lag rule,
+    /// `repair_lagging`), inside or outside the epoch. All of it in one transaction under the
+    /// account lock.
+    ///
+    /// A byte-identical repeat of the held state is accepted at any time (ADR 0028 "Retry", row
+    /// "Healing"); it too ends the epoch when the uploader is a device of the restored set and
+    /// the held state was stored after the epoch opened (so it is newer than the restored one:
+    /// another session, which could not end the epoch, adopted it first).
+    ///
+    /// **Certificates** (§2): each must verify under the chain head. One of the new state's
+    /// device set is stored; one outside it (a revoked device's, a kind-4 one, both re-issued by
+    /// a full rotation) is stored only when the stored certificate of that `device_id` has the
+    /// same device keys, and is left out otherwise: with no stored certificate of that device
+    /// it is left out too (this crate's reading of "if any", the stricter one).
+    ///
+    /// [ADR 0032]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0032-healing-rotation-after-backup.md
     ///
     /// # Errors
-    /// [`AuthError::InvalidRequest`] for statements that do not verify under the head or a
-    /// device-set hash they do not reproduce; [`AuthError::StateConflict`] outside the epoch or
-    /// for a state not strictly newer; storage errors.
+    /// [`AuthError::InvalidRequest`] for statements that do not verify under the head, a
+    /// device-set hash they do not reproduce, or an `E_id` or `ACCOUNT_SETTINGS` that fails the
+    /// lag rule's checks; [`AuthError::StateConflict`] outside the epoch or for a state not
+    /// strictly newer; [`AuthError::Unauthorized`] for a repair of a lagging object over a
+    /// session that is not a device session of a durable device of the held device set;
+    /// storage errors. Nothing is stored on any error.
     pub async fn publish_account_state(
         &self,
         session: &Session,
@@ -182,69 +216,48 @@ impl<V: VaultPort> AuthService<V> {
                     meta::end_reconciliation_epoch(&mut tx, account.as_bytes()).await?;
                 }
             }
-            tx.commit().await?;
-            return Ok(());
+        } else {
+            let Some(opened_at_ms) = epoch else {
+                tx.commit().await?;
+                return Err(AuthError::StateConflict);
+            };
+            if state.state_seq <= trust.state.state_seq {
+                return Err(AuthError::StateConflict);
+            }
+            adopt_state(
+                &mut tx,
+                &session,
+                &trust,
+                &devices,
+                (&state, wire),
+                req,
+                opened_at_ms,
+                now_ms,
+            )
+            .await?;
         }
-        let Some(opened_at_ms) = epoch else {
-            tx.commit().await?;
-            return Err(AuthError::StateConflict);
-        };
-        if state.state_seq <= trust.state.state_seq {
-            return Err(AuthError::StateConflict);
-        }
-        let certs = verify_all(&req.device_certificates, |w| {
-            rules::verify_certificate(w, head, account)
-        })?;
-        let revocations = verify_all(&req.device_revocations, |w| {
-            rules::verify_revocation(w, head, account)
-        })?;
-        let supplied: Vec<Verified<DeviceCertificate>> =
-            certs.iter().map(|(c, _)| c.clone()).collect();
-        let revoked: Vec<Verified<DeviceRevocation>> =
-            revocations.iter().map(|(r, _)| r.clone()).collect();
-        if rules::device_set(account, &supplied, &revoked)? != state.device_set_hash
-            || devices.device_set_with(account, &supplied, &revoked)? != state.device_set_hash
-        {
-            return Err(AuthError::InvalidRequest);
-        }
-        for (cert, wire) in &certs {
-            store::put_cert(tx.conn(), cert, wire, now_ms).await?;
-        }
-        for (revocation, wire) in &revocations {
-            store::put_revocation(tx.conn(), revocation, wire, now_ms).await?;
-            session::end_device(tx.conn(), account, revocation.device_id).await?;
-        }
-        let changed = exec!(
-            tx.conn(),
-            sql::STATE_REPLACE,
-            &account.as_bytes()[..],
-            sql::u64_sql(state.state_seq, "state_seq")?,
-            wire,
-            sql::u64_sql(now_ms, "updated_at_ms")?,
-        )?;
-        if changed != 1 {
-            return Err(AuthError::StateConflict);
-        }
-        let revoking: Vec<DeviceId> = revocations.iter().map(|(r, _)| r.device_id).collect();
-        if is_restored_device(&session, &devices, &revoking, opened_at_ms) {
-            meta::end_reconciliation_epoch(&mut tx, account.as_bytes()).await?;
-        }
+        // ADR 0032 §3: the lag repairs, checked against the signed state now held.
+        let current = AccountTrust::load(tx.conn(), account).await?;
+        let current_devices = current.devices(tx.conn()).await?;
+        repair_lagging(&mut tx, &session, &current, &current_devices, req, now_ms).await?;
         tx.commit().await?;
         Ok(())
     }
 
-    /// Healing step 3 (ADR 0012 §7): device grants and vault self-grants the device holds, during
-    /// the reconciliation epoch. Each device grant must be addressed to a durable device of the
-    /// account, at an `account_key_epoch` no higher than the state's, and verify under its
-    /// sender's certificate (a revoked sender too, CRYPTO.md §11.3 step 4.2) or, for a sender
-    /// the server holds no durable certificate for, under the identity key. Self-grants go to
-    /// [`VaultPort::store_self_grants`], which keeps a newer stored one. Outside the epoch, a
-    /// request whose every grant the server already holds byte for byte is a success that stores
-    /// nothing (ADR 0028, "re-sent grants are accepted").
+    /// Healing step 3a (ADR 0032 §2): device grants the device holds, during the reconciliation
+    /// epoch. Each device grant must be addressed to a durable device of the account, at an
+    /// `account_key_epoch` no higher than the state's, and verify under its sender's certificate
+    /// (a revoked sender too, CRYPTO.md §11.3 step 4.2) or, for a sender the server holds no
+    /// durable certificate for, under the identity key. A vault self-grant is repaired only by
+    /// the lag rule of step 3b (module docs): here it must be one the server already holds byte
+    /// for byte, and nothing of it is stored. Outside the epoch, a request whose every grant the
+    /// server already holds byte for byte is a success that stores nothing (ADR 0028, "re-sent
+    /// grants are accepted").
     ///
     /// # Errors
-    /// [`AuthError::InvalidRequest`] for a grant that does not verify or fit, or a call outside
-    /// the epoch that carries a grant the server does not hold; storage errors.
+    /// [`AuthError::InvalidRequest`] for a grant that does not verify or fit, a self-grant the
+    /// server does not hold, or a call outside the epoch that carries a grant the server does not
+    /// hold; storage errors.
     pub async fn publish_grants(
         &self,
         session: &Session,
@@ -302,9 +315,10 @@ impl<V: VaultPort> AuthService<V> {
                 sql::u64_sql(now_ms, "stored_at_ms")?,
             )?;
         }
-        self.vault
-            .store_self_grants(&mut tx, account, req.vault_self_grants.as_slice(), now_ms)
-            .await?;
+        // ADR 0032 §3: a self-grant is repaired only by the lag rule (`vault/heal`, step 3b).
+        if !self_grants_held(&self.vault, &mut tx, account, req).await? {
+            return Err(AuthError::InvalidRequest);
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -336,6 +350,17 @@ async fn held_already<V: VaultPort>(
             return Ok(false);
         }
     }
+    self_grants_held(vault, tx, account, req).await
+}
+
+/// Whether the server holds every self-grant of `req` byte for byte, among the account's
+/// current self-grants under its `account_key_epoch`. In the caller's write transaction.
+async fn self_grants_held<V: VaultPort>(
+    vault: &V,
+    tx: &mut WriteTx,
+    account: AccountId,
+    req: &PublishGrantsRequest,
+) -> Result<bool, AuthError> {
     for grant in &req.vault_self_grants {
         let stored = vault
             .self_grants(tx.conn(), account, grant.account_key_epoch)
@@ -390,4 +415,178 @@ impl DeviceStatement for DeviceRevocation {
     fn device(&self) -> DeviceId {
         self.device_id
     }
+}
+
+/// The adoption half of healing step 2 inside the reconciliation epoch (ADR 0012 §7 step 2 as
+/// ADR 0032 §2 replaces it): every certificate and revocation verifies under the head and
+/// reproduces the new state's `device_set_hash`, alone and with the stored ones; the members'
+/// certificates, the re-issued non-members' ones that keep their stored device keys, and the
+/// revocations are stored; the revoked devices' sessions end; the state replaces the held one;
+/// the epoch ends when the uploader is a device of the restored set.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the verified parts of one step-2 request, passed once from `publish_account_state`"
+)]
+async fn adopt_state(
+    tx: &mut WriteTx,
+    session: &Session,
+    trust: &AccountTrust,
+    devices: &Devices,
+    (state, wire): (&Verified<AccountState>, &[u8]),
+    req: &PublishAccountStateRequest,
+    opened_at_ms: u64,
+    now_ms: u64,
+) -> Result<(), AuthError> {
+    let account = trust.account_id;
+    let head = trust.head()?;
+    let certs = verify_all(&req.device_certificates, |w| {
+        rules::verify_certificate(w, head, account)
+    })?;
+    let revocations = verify_all(&req.device_revocations, |w| {
+        rules::verify_revocation(w, head, account)
+    })?;
+    let supplied: Vec<Verified<DeviceCertificate>> = certs.iter().map(|(c, _)| c.clone()).collect();
+    let revoked: Vec<Verified<DeviceRevocation>> =
+        revocations.iter().map(|(r, _)| r.clone()).collect();
+    if rules::device_set(account, &supplied, &revoked)? != state.device_set_hash
+        || devices.device_set_with(account, &supplied, &revoked)? != state.device_set_hash
+    {
+        return Err(AuthError::InvalidRequest);
+    }
+    let revoking: Vec<DeviceId> = revocations.iter().map(|(r, _)| r.device_id).collect();
+    for (cert, wire) in &certs {
+        let member = cert.in_device_set()
+            && !revoking.contains(&cert.device_id)
+            && !devices.is_revoked(cert.device_id);
+        if !member {
+            // ADR 0032 §2: outside the device set, only with the stored device keys.
+            let same_keys = trust
+                .stored_certificate(tx.conn(), cert.device_id)
+                .await?
+                .is_some_and(|stored| {
+                    stored.device_ed25519 == cert.device_ed25519
+                        && stored.device_x25519 == cert.device_x25519
+                        && stored.device_kind == cert.device_kind
+                });
+            if !same_keys {
+                continue;
+            }
+        }
+        store::put_cert(tx.conn(), cert, wire, now_ms).await?;
+    }
+    for (revocation, wire) in &revocations {
+        store::put_revocation(tx.conn(), revocation, wire, now_ms).await?;
+        session::end_device(tx.conn(), account, revocation.device_id).await?;
+    }
+    let changed = exec!(
+        tx.conn(),
+        sql::STATE_REPLACE,
+        &account.as_bytes()[..],
+        sql::u64_sql(state.state_seq, "state_seq")?,
+        wire,
+        sql::u64_sql(now_ms, "updated_at_ms")?,
+    )?;
+    if changed != 1 {
+        return Err(AuthError::StateConflict);
+    }
+    if is_restored_device(session, devices, &revoking, opened_at_ms) {
+        meta::end_reconciliation_epoch(tx, account.as_bytes()).await?;
+    }
+    Ok(())
+}
+
+/// Whether `envelope` parses as a symmetric envelope of `purpose` (its algorithm on the
+/// purpose's allow-list and, for a fixed-size purpose, exactly that plaintext length) whose
+/// header `key_id` is `key_id` (ADR 0032 §3). The server cannot open it: a junk envelope under a
+/// copied `key_id` passes, and clients detect it (CRYPTO.md §11.2 step 6).
+pub(crate) fn symmetric_under(envelope: &[u8], purpose: Purpose, key_id: &[u8; 16]) -> bool {
+    let Ok(EnvelopeRef::Symmetric(parsed)) =
+        parse_for_purpose(envelope, purpose.client_decrypt_allow_list())
+    else {
+        return false;
+    };
+    let length_ok = match purpose.plaintext_rule() {
+        PlaintextRule::Fixed(len) => parsed.ciphertext().len() == len,
+        PlaintextRule::Padded | PlaintextRule::Unpadded | PlaintextRule::Unspecified => true,
+    };
+    length_ok && parsed.key_id() == key_id
+}
+
+/// The lag rule of ADR 0032 §3 for `E_id` and `ACCOUNT_SETTINGS`, against the signed state
+/// `held` that the server holds (never against the request):
+///
+/// - **`E_id`** lags when its envelope header `key_id` is not `account_key_id`. A replacement
+///   parses as a symmetric `IDENTITY_SECRET_KEYS` envelope under `account_key_id` and names the
+///   state's `identity_epoch`; it is stored with the state's `identity_epoch`.
+/// - **`ACCOUNT_SETTINGS`** lags, while `settings_seq > 0`, when the stored envelope is missing,
+///   at another `settings_seq` or hashes to another `settings_hash`. A replacement must hash to
+///   `settings_hash` at the state's `settings_seq`.
+///
+/// A lagging object is repaired only over a device session of a durable device of the held
+/// device set (not revoked, suspended or expired, kinds 1–3; a kind-4, OPAQUE-only or recovery
+/// session is refused). An object that does not lag is not written: a byte-identical or
+/// otherwise valid repeat is success (the first valid repair wins); an invalid one is refused.
+/// An object the request does not carry is left as it is.
+async fn repair_lagging(
+    tx: &mut WriteTx,
+    session: &Session,
+    held: &AccountTrust,
+    devices: &Devices,
+    req: &PublishAccountStateRequest,
+    now_ms: u64,
+) -> Result<(), AuthError> {
+    let account = held.account_id;
+    let state = &held.state;
+    let key_id = *state.account_key_id.as_bytes();
+    let may_repair = session.kind == SessionKind::Device
+        && session
+            .device_id
+            .is_some_and(|d| devices.usable_durable(d, now_ms).is_some());
+    if let Some(keys) = &req.identity_secret_keys {
+        let envelope = keys.envelope.as_slice();
+        let valid = keys.identity_epoch == state.identity_epoch
+            && symmetric_under(envelope, Purpose::IdentitySecretKeys, &key_id);
+        if !valid {
+            return Err(AuthError::InvalidRequest);
+        }
+        let lags = store::identity(tx.conn(), account)
+            .await?
+            .is_none_or(|(_, stored)| {
+                !symmetric_under(&stored, Purpose::IdentitySecretKeys, &key_id)
+            });
+        if lags {
+            if !may_repair {
+                return Err(AuthError::Unauthorized);
+            }
+            store::put_identity(tx.conn(), account, state.identity_epoch, envelope, now_ms).await?;
+        }
+    }
+    if let Some(settings) = &req.account_settings {
+        let envelope = settings.envelope.as_slice();
+        let valid = state.settings_seq > 0
+            && settings.settings_seq == state.settings_seq
+            && state.matches_settings(Some(envelope));
+        if !valid {
+            return Err(AuthError::InvalidRequest);
+        }
+        let lags = store::settings(tx.conn(), account)
+            .await?
+            .is_none_or(|(seq, stored)| {
+                seq != state.settings_seq || !state.matches_settings(Some(&stored))
+            });
+        if lags {
+            if !may_repair {
+                return Err(AuthError::Unauthorized);
+            }
+            exec!(
+                tx.conn(),
+                sql::SETTINGS_UPSERT,
+                &account.as_bytes()[..],
+                sql::u64_sql(state.settings_seq, "settings_seq")?,
+                envelope,
+                sql::u64_sql(now_ms, "updated_at_ms")?,
+            )?;
+        }
+    }
+    Ok(())
 }

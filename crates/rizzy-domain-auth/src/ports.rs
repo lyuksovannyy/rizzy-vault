@@ -13,7 +13,8 @@
 //! - **Recovery complete** (§11.9 step 3; ADR 0025 §1) also carries every vault's heads and
 //!   wrap set, so the recovering client can rotate without a vault endpoint.
 //! - **Revocation** needs H, the highest `device_seq` the server holds from a device (§11.8
-//!   step 0; ADR 0012 §6), and healing step 3 stores self-grants (ADR 0012 §7).
+//!   step 0; ADR 0012 §6); healing step 3a compares re-sent self-grants with the stored ones
+//!   and never stores one (ADR 0032 §3: only `vault/heal` repairs a self-grant).
 //! - **Rotation** (§11.6 steps 3 and 9, and the revocation and recovery that carry one) hands
 //!   the vault half of the upload (its fetch cursor, self-grants and re-wrapped item keys) to
 //!   the vault domain in the same transaction ([`VaultPort::apply_rotation`], ADR 0025 §3–§4).
@@ -102,16 +103,6 @@ pub trait VaultPort: Send + Sync {
         conn: Conn<'_>,
         account_id: AccountId,
     ) -> impl Future<Output = Result<Vec<RecoveryVault>, AuthError>> + Send;
-
-    /// Healing step 3 (ADR 0012 §7): stores re-uploaded self-grants of the account's vaults.
-    /// An implementation keeps a stored grant whose `account_key_epoch` is newer.
-    fn store_self_grants(
-        &self,
-        tx: &mut WriteTx,
-        account_id: AccountId,
-        grants: &[VaultSelfGrant],
-        now_ms: u64,
-    ) -> impl Future<Output = Result<(), AuthError>> + Send;
 
     /// H: the highest `device_seq` the server holds from `device_id` in any of the account's
     /// vaults, 0 for none (§11.8 step 0, ADR 0012 §6).

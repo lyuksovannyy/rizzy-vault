@@ -94,6 +94,11 @@ const WRAP_DELETE: &str = include_str!("../queries/wrap_delete.sql");
 const OPS_CLEAR_WRAPS: &str = include_str!("../queries/ops_clear_wraps.sql");
 /// See `queries/snapshots_clear_wraps.sql`.
 const SNAPSHOTS_CLEAR_WRAPS: &str = include_str!("../queries/snapshots_clear_wraps.sql");
+/// See `queries/ops_clear_wraps_below.sql`.
+const OPS_CLEAR_WRAPS_BELOW: &str = include_str!("../queries/ops_clear_wraps_below.sql");
+/// See `queries/snapshots_clear_wraps_below.sql`.
+const SNAPSHOTS_CLEAR_WRAPS_BELOW: &str =
+    include_str!("../queries/snapshots_clear_wraps_below.sql");
 
 /// A 16-byte id read back from a column.
 fn id16(bytes: &[u8], what: &'static str) -> Result<[u8; 16], VaultError> {
@@ -976,6 +981,30 @@ pub(crate) async fn clear_record_wraps(
         };
         on_engine!(c, |c| sqlx::query(query)
             .bind(&vault_id.as_bytes()[..])
+            .execute(&mut *c)
+            .await
+            .map(|_| ()))?;
+    }
+    Ok(())
+}
+
+/// Drops the wrap carried with every op and snapshot of the vault whose header names a
+/// `vault_key_epoch` below `epoch` (healing step 3b, ADR 0032 §3): those wraps are under a vault
+/// key the healed rotation superseded. Records at `epoch` keep theirs. The signed wrap hashes
+/// stay.
+pub(crate) async fn clear_record_wraps_below(
+    mut conn: Conn<'_>,
+    vault_id: VaultId,
+    epoch: u32,
+) -> Result<(), VaultError> {
+    for query in [OPS_CLEAR_WRAPS_BELOW, SNAPSHOTS_CLEAR_WRAPS_BELOW] {
+        let c = match &mut conn {
+            Conn::Sqlite(c) => Conn::Sqlite(c),
+            Conn::Postgres(c) => Conn::Postgres(c),
+        };
+        on_engine!(c, |c| sqlx::query(query)
+            .bind(&vault_id.as_bytes()[..])
+            .bind(u32_to_sql(epoch))
             .execute(&mut *c)
             .await
             .map(|_| ()))?;

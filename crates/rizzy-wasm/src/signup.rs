@@ -23,10 +23,19 @@
 //!   with the signup's origin, login name, Secret Key and password, which stay in Rust until
 //!   then. That login certifies a second ephemeral kind-4 device: the signup's own certificate
 //!   (§11.1 step 5) has no session to sign ops under. Both expire after 12 h.
+//! - **`setup_retired`** on `register/finish` ([ADR 0031] point 8): the server retired the
+//!   OPAQUE setup the signup registered under (between `register/start` and the commit), and
+//!   the signup was not applied. The flow reruns `register/start` with the same password,
+//!   name, account and invite, rebuilds only the OPAQUE upload, the `setup_id` and `E_srv` of
+//!   the commit, and sends it again; the kit already shown stays valid. At most once: a second
+//!   `setup_retired` fails the flow.
+//!
+//! [ADR 0031]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0031-retiring-old-opaque-setups.md
 
 use core::fmt;
 
 use rizzy_client::rizzy_proto::auth::RegisterStartResponse;
+use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::rizzy_proto::http::paths;
 use rizzy_client::signup::{DeviceKind, PendingSignup, SignupInput, SignupStarted, start_signup};
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -46,6 +55,9 @@ enum Stage {
     Kit(Box<PendingSignup>),
     /// `register/finish` is outstanding.
     Commit(Box<PendingSignup>),
+    /// `register/start` of a registration restarted after `setup_retired` is outstanding (ADR
+    /// 0031 point 8).
+    Restart(Box<PendingSignup>),
     /// The server acknowledged the commit.
     Done,
     /// Failed, or its result was taken.
@@ -184,7 +196,7 @@ impl SignupFlow {
     #[must_use]
     pub fn state(&self) -> String {
         match self.stage {
-            Stage::Start(_) | Stage::Commit(_) => "request",
+            Stage::Start(_) | Stage::Commit(_) | Stage::Restart(_) => "request",
             Stage::Kit(_) => "confirm_kit",
             Stage::Done => "done",
             Stage::Spent => "failed",
@@ -210,7 +222,9 @@ impl SignupFlow {
     /// `invalid_server_response`; the server's code (`server_invalid_request` for a login name
     /// already taken is not distinguished, CRYPTO.md §5.9); `wrong_state`. After an error the
     /// flow is `"failed"`, except `wrong_state` and an error answer to `register/finish`, which
-    /// leaves the commit outstanding so that the host may send it again.
+    /// leaves the commit outstanding so that the host may send it again. A `setup_retired`
+    /// answer to `register/finish` is no error: the restarted `register/start` becomes the
+    /// outstanding request (module docs); a second one fails the flow with `setup_retired`.
     pub fn respond(&mut self, status: u16, body: &[u8]) -> Result<(), CoreError> {
         if self.pending.is_none() {
             return Err(CoreError::new(WRONG_STATE));
@@ -225,11 +239,18 @@ impl SignupFlow {
                 self.stage = Stage::Kit(Box::new(pending));
                 Ok(())
             }
-            Stage::Commit(pending) => match http::empty(status, body) {
+            Stage::Commit(mut pending) => match http::empty(status, body) {
                 Ok(()) => {
                     pending.finalize()?;
                     self.pending = None;
                     self.stage = Stage::Done;
+                    Ok(())
+                }
+                // ADR 0031 point 8 (module docs): restart the registration, once.
+                Err(_) if http::server_code(status, body) == Some(ErrorCode::SetupRetired) => {
+                    let request = pending.restart_registration(&mut self.rng)?;
+                    self.pending = Some(HttpRequest::post(paths::REGISTER_START, &request, None)?);
+                    self.stage = Stage::Restart(pending);
                     Ok(())
                 }
                 Err(e) => {
@@ -239,6 +260,17 @@ impl SignupFlow {
                     Err(e)
                 }
             },
+            Stage::Restart(mut pending) => {
+                let answer: RegisterStartResponse = http::json(status, body)?;
+                pending.on_registration_restarted(&mut self.rng, &answer)?;
+                self.pending = Some(HttpRequest::post(
+                    paths::REGISTER_FINISH,
+                    pending.commit_request()?,
+                    None,
+                )?);
+                self.stage = Stage::Commit(pending);
+                Ok(())
+            }
             other => {
                 self.stage = other;
                 Err(CoreError::new(WRONG_STATE))

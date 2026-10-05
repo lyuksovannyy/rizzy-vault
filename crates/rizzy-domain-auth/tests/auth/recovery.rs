@@ -112,6 +112,7 @@ fn recovery_wait_cancel_release_and_commit() {
             account_state: bytes(client.next_state(|_| {}).1),
             bundle: None,
             registration_upload: None,
+            setup_id: None,
             account_key_server_wrap: None,
             identity_secret_keys: None,
             recovery: RecoveryUpload::None,
@@ -134,7 +135,7 @@ fn recovery_wait_cancel_release_and_commit() {
         let new_sk = SecretKey::generate(&mut env.rng);
         let pw_in = PasswordInput::derive_for_new_password("remembered", &new_sk).unwrap();
         let (reg_state, m1) = client_registration_start(&mut env.rng, &pw_in).unwrap();
-        let m2 = env
+        let (setup_id, m2) = env
             .svc
             .reregister_start(&recovery_session, &bytes(m1), env.now)
             .await
@@ -172,6 +173,7 @@ fn recovery_wait_cancel_release_and_commit() {
         let change = AccountChange::<Vec<rizzy_proto::objects::VaultSelfGrant>> {
             account_state: bytes(next.1.clone()),
             registration_upload: Some(bytes(reg.upload)),
+            setup_id: Some(setup_id),
             account_key_server_wrap: Some(AccountKeyServerWrap {
                 account_key_epoch: 0,
                 password_epoch: 1,

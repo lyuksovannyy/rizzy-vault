@@ -6,6 +6,7 @@
 //! | `secrets init` | ADR 0010 §4: "creates the secrets once, run as a one-off with the secrets mount writable" | none (no database) |
 //! | `secrets rotate` | CRYPTO.md §5.8 "Rotating `server_setup`" steps 1–2; ADR 0010 §4 | exclusive |
 //! | `secrets rotate --data-key` | CRYPTO.md §5.11 "Rotation" | exclusive |
+//! | `secrets retire-setups [--grace-days N]` | CRYPTO.md §5.8 "Rotating `server_setup`" step 4; [ADR 0031] points 4–6 | exclusive |
 //! | `backup-secrets` | ADR 0011 "Backups" and owner decision 3; CRYPTO.md §5.11 | none (reads the secrets file only) |
 //! | `migrate` | ADR 0011 point 9 | exclusive |
 //! | `backup --out <file\|->` | ADR 0011 "Backups"; [ADR 0023] §4, §6 | none: the read-only reader on `SQLite`, a `REPEATABLE READ` transaction on `PostgreSQL` |
@@ -77,14 +78,28 @@
 //! Any failure leaves the target with no application row; it may be left migrated to this
 //! release's schema, and a retry into it is allowed.
 //!
+//! # `secrets retire-setups` ([ADR 0031])
+//!
+//! Retires every OPAQUE setup that is not the current one, is not retired yet, and whose
+//! successor was recorded at least `--grace-days` days ago (default 90, 0–3650; 0 retires at
+//! once, for a setup known to be leaked, with no further confirmation). With every server
+//! process shut out, like `secrets rotate`, and the database at this release's schema:
+//! 0. **Report**: each selected `setup_id`, its successor time and how many OPAQUE records
+//!    still name it (ids and counts only, no account names): the accounts that lose OPAQUE
+//!    login and take the device or recovery path.
+//! 1. **One database transaction** (`ServerSecrets::retire_in_database`): `retired_at_ms` set
+//!    on the selected rows where it is still NULL, and every pending login state deleted.
+//! 2. **The secrets file** rewritten without every setup the database marks retired, this
+//!    run's and any earlier one's (`ServerSecrets::remove_retired_setups`,
+//!    [`fsutil::replace_private`]); nothing is written when none is in the file.
+//!
+//! A setup stops being accepted at the first server start after step 2. The startup check
+//! refuses a secrets file that holds a retired setup, so a crash between the steps fails
+//! closed, and running the command again (with any grace period) finishes it. The server never
+//! retires by itself; its worker only reports setups past 90 days ([`crate::worker`]). A new
+//! secrets backup is due afterwards: an old one still holds the retired setup.
+//!
 //! **Not here, and why** (reported to the owner):
-//! - Deleting an old OPAQUE setup after the grace period (CRYPTO.md §5.8 "Rotating
-//!   `server_setup`" step 4: "After a grace period set by the admin, delete #1"). The section
-//!   names no command, no setting for the grace period, no rule for which setup may go (the
-//!   startup check already tolerates records that name a setup the file lacks) and nothing
-//!   about the records left behind ("when the admin marks the records invalid" has no
-//!   mechanism either). It is not specified concretely enough to implement without inventing
-//!   an operator interface, so an old setup stays in the file until the owner decides.
 //! - A way to drop an unused data key without adding a new one (section above).
 //! - The bootstrap token (INV-69) is generated into the file by `secrets init` and never
 //!   printed or logged: its only reader is the M3 admin API, which defines how it is shown once.
@@ -92,6 +107,7 @@
 //! [ADR 0010]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0010-server-shape.md
 //! [ADR 0011]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0011-storage.md
 //! [ADR 0023]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0023-logical-backup-format.md
+//! [ADR 0031]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0031-retiring-old-opaque-setups.md
 
 use core::fmt;
 use std::io::{IsTerminal as _, Read as _, Write as _};
@@ -99,6 +115,7 @@ use std::path::Path;
 
 use rand_core::Rng as _;
 use rizzy_domain_auth::AuthError;
+use rizzy_domain_auth::retirement::{RetirableSetup, grace_days_allowed};
 use rizzy_domain_auth::secrets::SecretsError;
 use rizzy_domain_auth::{ServerSecrets, StartupCheckError};
 use rizzy_storage::backup::file::{
@@ -155,6 +172,13 @@ pub enum AdminError {
     Input(std::io::ErrorKind),
     /// The secrets file does not belong to the backup (ADR 0023 §5 step 4).
     SecretsMismatch(StartupCheckError),
+    /// `--grace-days` outside 0–3650 (ADR 0031 point 4). A usage error.
+    GraceDays,
+    /// The database is not at this release's schema: start the server once (`SQLite`) or run
+    /// `rizzy-vault migrate` first.
+    SchemaNotCurrent,
+    /// `secrets retire-setups` could not read or write the database.
+    Retire(AuthError),
 }
 
 impl AdminError {
@@ -162,7 +186,7 @@ impl AdminError {
     /// failure (exit code 1).
     #[must_use]
     pub const fn is_usage(&self) -> bool {
-        matches!(self, Self::StdoutIsTerminal)
+        matches!(self, Self::StdoutIsTerminal | Self::GraceDays)
     }
 }
 
@@ -198,6 +222,18 @@ impl fmt::Display for AdminError {
             Self::Storage(e) => write!(f, "database: {e}"),
             Self::BackupFile(e) => write!(f, "{e}"),
             Self::Input(kind) => write!(f, "cannot read the backup file: {kind}"),
+            Self::GraceDays => {
+                f.write_str("--grace-days must be a whole number of days, 0 to 3650")
+            }
+            Self::SchemaNotCurrent => f.write_str(
+                "the database is not at this release's schema; start the server once, or run \
+                 `rizzy-vault migrate`, then run the command again",
+            ),
+            Self::Retire(e) => write!(
+                f,
+                "retiring OPAQUE setups failed ({e}); if it failed after the database step, the \
+                 server refuses to start until the command is run again"
+            ),
             Self::SecretsMismatch(e) => write!(
                 f,
                 "the secrets file does not belong to this backup ({e}); restore the instance's \
@@ -358,6 +394,85 @@ async fn rotate_excluded(
     Ok(Rotated {
         id,
         dropped_data_keys,
+    })
+}
+
+/// What `secrets retire-setups` did (module docs).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetiredSetups {
+    /// The grace period of this run, in days.
+    pub grace_days: u32,
+    /// The setups this run selected and marked retired, with their record counts.
+    pub selected: Vec<RetirableSetup>,
+    /// The setups removed from the secrets file: this run's, and any earlier retirement still
+    /// in it. Empty when the file was not written.
+    pub removed: Vec<u32>,
+    /// The time of this run, ms since the Unix epoch.
+    pub now_ms: u64,
+}
+
+/// `rizzy-vault secrets retire-setups [--grace-days N]` (module docs): shuts every server
+/// process out (the `SQLite` writer lock, or the `PostgreSQL` instance lock taken exclusively),
+/// then the report and the two steps of ADR 0031 point 5.
+///
+/// # Errors
+/// [`AdminError`]. A failure before step 1 changes nothing; one between the steps leaves the
+/// database step done and the file unchanged, which the startup check refuses until the
+/// command runs again.
+pub async fn secrets_retire_setups(
+    config: &Config,
+    grace_days: u32,
+) -> Result<RetiredSetups, AdminError> {
+    check_location(config)?;
+    if !grace_days_allowed(grace_days) {
+        return Err(AdminError::GraceDays);
+    }
+    let (db, mut lock) = open_exclusive(config).await?;
+    let outcome = retire_excluded(config, &db, &mut lock, grace_days).await;
+    Exclusion::Database(db, lock).end().await;
+    outcome
+}
+
+/// [`secrets_retire_setups`] on the database `lock` shuts every server process out of.
+async fn retire_excluded(
+    config: &Config,
+    db: &Database,
+    lock: &mut InstanceLock,
+    grace_days: u32,
+) -> Result<RetiredSetups, AdminError> {
+    if !schema_is_current(db).await {
+        return Err(AdminError::SchemaNotCurrent);
+    }
+    let mut secrets = secrets_file::load(&config.secrets_file).map_err(AdminError::Secrets)?;
+    let now_ms = now_ms();
+    let selected = secrets
+        .plan_retirement(db, now_ms, grace_days)
+        .await
+        .map_err(AdminError::Retire)?;
+    // The servers must still be shut out when the writes start.
+    if !server::instance_lock_held(lock).await {
+        return Err(AdminError::Serve(ServeError::InstanceLockLost));
+    }
+    if !selected.is_empty() {
+        let ids: Vec<u32> = selected.iter().map(|s| s.setup_id).collect();
+        ServerSecrets::retire_in_database(db, &ids, now_ms)
+            .await
+            .map_err(AdminError::Retire)?;
+    }
+    let removed = secrets
+        .remove_retired_setups(db)
+        .await
+        .map_err(AdminError::Retire)?;
+    if !removed.is_empty() {
+        let bytes = secrets_file::serialize(&secrets).map_err(AdminError::Secrets)?;
+        fsutil::replace_private(&config.secrets_file, &bytes)
+            .map_err(|e| AdminError::Write(e.kind()))?;
+    }
+    Ok(RetiredSetups {
+        grace_days,
+        selected,
+        removed,
+        now_ms,
     })
 }
 

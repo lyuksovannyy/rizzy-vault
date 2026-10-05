@@ -4,7 +4,9 @@
 //!
 //! - [`VaultBridge`] is the `auth` domain's [`VaultPort`], over `rizzy_domain_vault::port`.
 //! - [`AuthDirectory`] is the `vault` domain's [`DeviceDirectory`], over
-//!   `rizzy_domain_auth::directory::device_authors`.
+//!   `rizzy_domain_auth::directory::device_authors` and
+//!   `rizzy_domain_auth::directory::signed_account_key` (the held state's account key, which
+//!   healing step 3b checks a self-grant against, ADR 0032 §3).
 //!
 //! Both run on the transaction or connection they are handed, so every cross-domain read or
 //! write joins the caller's one transaction and account lock (ADR 0011 "Transactions and
@@ -23,12 +25,12 @@
 //!
 //! [ADR 0016]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0016-workspace-layout.md
 
-use rizzy_domain_auth::directory::{DeviceStanding, device_authors};
+use rizzy_domain_auth::directory::{DeviceStanding, device_authors, signed_account_key};
 use rizzy_domain_auth::types::{AccountId, DeviceId};
 use rizzy_domain_auth::types::{RecoveryVault, VaultRotationUpload, VaultSelfGrant};
 use rizzy_domain_auth::{AuthError, PersonalVault, VaultPort};
 use rizzy_domain_vault::{
-    AuthorCertificate, AuthorStatus, Authors, DeviceDirectory, DirectoryError,
+    AccountKeyState, AuthorCertificate, AuthorStatus, Authors, DeviceDirectory, DirectoryError,
     PersonalVaultOutcome, VaultError,
 };
 use rizzy_domain_vault::{port, rotation};
@@ -111,18 +113,6 @@ impl VaultPort for VaultBridge {
             .map_err(|e| vault_error(&e))
     }
 
-    async fn store_self_grants(
-        &self,
-        tx: &mut WriteTx,
-        account_id: AccountId,
-        grants: &[VaultSelfGrant],
-        now_ms: u64,
-    ) -> Result<(), AuthError> {
-        port::store_self_grants(tx, account_id, grants, now_ms)
-            .await
-            .map_err(|e| vault_error(&e))
-    }
-
     async fn device_head(
         &self,
         conn: Conn<'_>,
@@ -173,5 +163,21 @@ impl DeviceDirectory for AuthDirectory {
         .map_err(|_| DirectoryError {
             what: "two certificates name one device or one key",
         })
+    }
+
+    async fn account_key<'a>(
+        &'a self,
+        conn: Conn<'a>,
+        account_id: AccountId,
+    ) -> Result<Option<AccountKeyState>, DirectoryError> {
+        let key = signed_account_key(conn, account_id)
+            .await
+            .map_err(|_| DirectoryError {
+                what: "the auth domain could not read the account's signed state",
+            })?;
+        Ok(key.map(|k| AccountKeyState {
+            account_key_epoch: k.account_key_epoch,
+            account_key_id: k.account_key_id,
+        }))
     }
 }

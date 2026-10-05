@@ -29,6 +29,7 @@ fn bare(state: Vec<u8>) -> CommitChangeRequest {
     CommitChangeRequest {
         account_state: bytes(state),
         registration_upload: None,
+        setup_id: None,
         account_key_server_wrap: None,
         recovery: None,
         account_settings: None,
@@ -130,6 +131,7 @@ async fn password_change(
     let next = client.next_state(|s| s.password_epoch = password_epoch);
     let commit = CommitChangeRequest {
         registration_upload: Some(bytes(reg.upload)),
+        setup_id: Some(m2.setup_id),
         account_key_server_wrap: Some(AccountKeyServerWrap {
             account_key_epoch: client.state.account_key_epoch,
             password_epoch,
@@ -180,6 +182,7 @@ fn password_change_from_the_wire_types() {
         // Without the new record the step is incomplete: refused.
         let partial = CommitChangeRequest {
             registration_upload: None,
+            setup_id: None,
             ..commit.clone()
         };
         assert!(matches!(

@@ -239,6 +239,7 @@ fn build() -> Fixture {
             &mut rng,
             &RegisterStartResponse {
                 registration_response: bytes(&m2),
+                setup_id: 1,
             },
         )
         .expect("signup finishes");
@@ -369,6 +370,7 @@ fn build() -> Fixture {
             account_id: Id::from_bytes(account_id.to_bytes()),
             account_key_server_wrap: e_srv,
             account: view.clone(),
+            reregister: false,
         })
         .expect("the login answer verifies");
     let (enrolment, enrol_request) = logged_in

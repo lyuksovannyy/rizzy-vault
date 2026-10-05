@@ -98,3 +98,34 @@ pub async fn device_authors(
         })
         .collect())
 }
+
+/// The account key the held signed `account-state` names: its `account_key_epoch` and
+/// `account_key_id` (CRYPTO.md §10.2). The vault domain checks a re-published self-grant against
+/// them (ADR 0032 §3, the lag rule of healing step 3b).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SignedAccountKey {
+    /// The state's `account_key_epoch`.
+    pub account_key_epoch: u32,
+    /// The state's `account_key_id`.
+    pub account_key_id: [u8; 16],
+}
+
+/// The account key of `account_id`'s held `account-state`, verified from the stored chain, read
+/// on `conn` (the caller's transaction holds the account lock). `None` for an account without a
+/// verified chain and state.
+///
+/// # Errors
+/// [`AuthError::Internal`] when the stored chain or state no longer verifies; storage errors.
+pub async fn signed_account_key(
+    conn: Conn<'_>,
+    account_id: AccountId,
+) -> Result<Option<SignedAccountKey>, AuthError> {
+    match AccountTrust::load(conn, account_id).await {
+        Ok(trust) => Ok(Some(SignedAccountKey {
+            account_key_epoch: trust.state.account_key_epoch,
+            account_key_id: *trust.state.account_key_id.as_bytes(),
+        })),
+        Err(AuthError::NotFound) => Ok(None),
+        Err(e) => Err(e),
+    }
+}

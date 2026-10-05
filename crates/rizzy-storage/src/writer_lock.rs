@@ -1,7 +1,7 @@
 //! The SQLite writer lock: one process writes the database file (ADR 0010 §2).
 //!
 //! "At startup the server takes an exclusive writer lock on a lock file next to the database,
-//! and refuses to start if another process holds it." `restore`, `migrate` and `secrets rotate`
+//! and refuses to start if another process holds it." `restore`, `migrate`, `secrets rotate` and `secrets retire-setups`
 //! take it too; `backup` does not (it opens the database read-only, next to the running
 //! server). [`WriterLock::acquire`] takes the lock on `<database file>.lock`, and
 //! [`Database::open_sqlite`](crate::Database::open_sqlite) takes one for the same file and owns

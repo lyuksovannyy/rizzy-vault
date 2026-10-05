@@ -9,8 +9,8 @@
 //! | Pending device grants, §11.3 step 4.1 | – | [`DeviceGrantsResponse`] |
 //! | Grant acknowledgement, §10.1, §11.3 step 4.5 | [`AckDeviceGrantsRequest`] | empty success |
 //! | Healing step 1, the bundle chain | [`PublishBundlesRequest`] | empty success |
-//! | Healing step 2, the newest `account-state` | [`PublishAccountStateRequest`] | empty success |
-//! | Healing step 3, grants and self-grants | [`PublishGrantsRequest`] | empty success |
+//! | Healing step 2, the newest `account-state` with every certificate, revocation, `E_id` and `ACCOUNT_SETTINGS` (ADR 0032 §2) | [`PublishAccountStateRequest`] | empty success |
+//! | Healing step 3a, grants | [`PublishGrantsRequest`] | empty success |
 //!
 //! Everything signed here is verified by the client against its cached identity key and
 //! persisted state (INV-25) before it is trusted; the server's copy is never the authority.
@@ -114,19 +114,33 @@ pub struct PublishBundlesRequest {
     pub bundles: List<AccountStatement, MAX_BUNDLES>,
 }
 
-/// Restore healing, step 2: the device's newest signed `account-state` "in one request with the
-/// device certificates of that state's device set and every `device-revocation` it holds" (ADR
-/// 0012 §7). Accepted as that step's session rules say: during the reconciliation epoch any
-/// state that verifies with a strictly higher `state_seq`, otherwise only by compare-and-swap.
+/// Restore healing, step 2 ([ADR 0032] §2, replacing ADR 0012 §7 step 2): the device's newest
+/// signed `account-state`, "in one request with every device certificate and `device-revocation`
+/// it holds and, as last served, `E_id` and `ACCOUNT_SETTINGS`". The state is accepted as that
+/// step's session rules say: during the reconciliation epoch any state that verifies with a
+/// strictly higher `state_seq`, otherwise only the held state re-sent byte for byte. `E_id` and
+/// `ACCOUNT_SETTINGS` repair a lagging server copy under the lag rule of ADR 0032 §3, checked
+/// against the signed state the server holds, inside or outside the epoch.
+///
+/// [ADR 0032]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0032-healing-rotation-after-backup.md
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublishAccountStateRequest {
     /// The `account-state`.
     pub account_state: AccountStatement,
-    /// The certificates of its device set.
+    /// Every certificate the device holds: its device set's, revoked devices' and kind-4
+    /// certificates re-issued by a full rotation (ADR 0032 §2).
     pub device_certificates: List<AccountStatement, MAX_DEVICE_STATEMENTS>,
     /// Every revocation the device holds.
     pub device_revocations: List<AccountStatement, MAX_DEVICE_STATEMENTS>,
+    /// `E_id` of the state's `identity_epoch`, verbatim as last served and cached (ADR 0032 §2;
+    /// ADR 0026 §1). Absent from a client that holds none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_secret_keys: Option<IdentitySecretKeys>,
+    /// `ACCOUNT_SETTINGS` the state commits to, verbatim as last served and cached, when
+    /// `settings_seq > 0` (ADR 0032 §2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_settings: Option<AccountSettings>,
 }
 
 /// Restore healing, step 3: "key grants, vault self-grants … that it holds, or can re-create

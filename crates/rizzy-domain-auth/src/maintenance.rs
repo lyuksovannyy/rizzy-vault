@@ -27,6 +27,16 @@
 //! changed underneath the running server.) The old key is dropped from the secrets file only
 //! once no row names it ([`crate::ServerSecrets::drop_unused_data_keys`]), so a skipped account
 //! keeps its key in the file.
+//!
+//! # Filling the credential epochs at startup
+//!
+//! Migration 0005 adds `account_key_epoch` to the credential and recovery rows (ADR 0032 §4),
+//! NULL in the rows it finds: the value is a field of the signed `account-state`, which SQL cannot
+//! read. [`AuthService::fill_credential_epochs`] fills every NULL from the account's current
+//! verified state, once per server start and before anything is served, which is ADR 0032 §4's
+//! "a migration fills existing rows from the current state". A NULL that stays (an account
+//! whose stored chain or state does not verify) reads as lagging, so its login and recovery stay
+//! refused: fail closed.
 
 use rizzy_core::envelope::purpose::ServerTotpSecretCtx;
 use rizzy_core::ids::AccountId;
@@ -38,6 +48,7 @@ use crate::error::AuthError;
 use crate::ports::VaultPort;
 use crate::sql::{self, exec, fetch_all};
 use crate::totp;
+use crate::trust::AccountTrust;
 
 /// How many rows one purge deleted, per table.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -66,7 +77,41 @@ pub struct Resealed {
 }
 
 impl<V: VaultPort> AuthService<V> {
-    /// Deletes the short-lived auth state expired at `now_ms` (ADR 0010 §5), in one
+    /// Fills the `account_key_epoch` of every credential and recovery row that has none from the
+    /// account's current verified `account-state` (module docs, "Filling the credential
+    /// epochs at startup"): one transaction per account, under the account lock. Returns how many
+    /// accounts were filled. Idempotent: a row that has a value is never touched.
+    ///
+    /// An account whose stored chain or state does not verify is skipped and keeps its NULL,
+    /// which reads as lagging (fail closed).
+    ///
+    /// # Errors
+    /// Storage errors.
+    pub async fn fill_credential_epochs(&self) -> Result<usize, AuthError> {
+        let mut tx = self.db.begin_read().await?;
+        let missing: Vec<(Vec<u8>,)> =
+            fetch_all!(tx.conn(), (Vec<u8>,), sql::CREDENTIAL_EPOCHS_MISSING)?;
+        tx.finish().await?;
+        let mut filled = 0;
+        for (account,) in missing {
+            let account = AccountId::from_bytes(sql::id16(&account, "account_id")?);
+            let mut tx = self.db.begin_write().await?;
+            lock_account(&mut tx, account.as_bytes()).await?;
+            let epoch = match AccountTrust::load(tx.conn(), account).await {
+                Ok(trust) => trust.state.account_key_epoch,
+                Err(AuthError::Storage(e)) => return Err(AuthError::Storage(e)),
+                Err(_) => continue,
+            };
+            let id = &account.as_bytes()[..];
+            exec!(tx.conn(), sql::CREDENTIAL_EPOCH_FILL, id, i64::from(epoch))?;
+            exec!(tx.conn(), sql::RECOVERY_EPOCH_FILL, id, i64::from(epoch))?;
+            tx.commit().await?;
+            filled += 1;
+        }
+        Ok(filled)
+    }
+
+    /// Deletes the short-lived auth state expired) at `now_ms` (ADR 0010 §5), in one
     /// transaction.
     ///
     /// # Errors

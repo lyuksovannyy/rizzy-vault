@@ -5,6 +5,7 @@
 //! rizzy-vault migrate [--config <file>]
 //! rizzy-vault secrets init [--config <file>]
 //! rizzy-vault secrets rotate [--data-key] [--config <file>]
+//! rizzy-vault secrets retire-setups [--grace-days <n>] [--config <file>]
 //! rizzy-vault backup-secrets --out <file> --passphrase-file <file|-> [--config <file>]
 //! rizzy-vault backup --out <file|-> [--config <file>]
 //! rizzy-vault restore --in <file|-> [--config <file>]
@@ -34,6 +35,7 @@ use crate::admin::{self, Rotate};
 use crate::config::{self, Config, Sources};
 use crate::coredump;
 use crate::server;
+use rizzy_domain_auth::retirement::{DAY_MS, DEFAULT_GRACE_DAYS, MAX_GRACE_DAYS};
 
 /// The help text, printed on `--help` (stdout) and on a usage error (stderr).
 pub const USAGE: &str = "\
@@ -44,6 +46,7 @@ USAGE:
     rizzy-vault migrate [--config <file>]
     rizzy-vault secrets init [--config <file>]
     rizzy-vault secrets rotate [--data-key] [--config <file>]
+    rizzy-vault secrets retire-setups [--grace-days <n>] [--config <file>]
     rizzy-vault backup-secrets --out <file> --passphrase-file <file|-> [--config <file>]
     rizzy-vault backup --out <file|-> [--config <file>]
     rizzy-vault restore --in <file|-> [--config <file>]
@@ -51,6 +54,8 @@ USAGE:
 OPTIONS:
     --roles <list>    Roles to run: api, web, worker (default: all three; or RIZZY_ROLES)
     --config <file>   Configuration file of NAME=value lines (or RIZZY_CONFIG)
+    --grace-days <n>  retire-setups: days since a setup's successor was recorded (default 90,
+                      0 to 3650; 0 retires at once)
     -h, --help        Print this help
     -V, --version     Print version
 
@@ -88,6 +93,13 @@ pub enum Command {
     SecretsRotate {
         /// `--data-key`.
         data_key: bool,
+        /// `--config`.
+        config: Option<PathBuf>,
+    },
+    /// `secrets retire-setups [--grace-days N]` (ADR 0031 points 4–5).
+    SecretsRetireSetups {
+        /// `--grace-days`, or the default 90.
+        grace_days: u32,
         /// `--config`.
         config: Option<PathBuf>,
     },
@@ -135,6 +147,8 @@ struct Flags {
     passphrase_file: Option<PathBuf>,
     /// `--in`.
     input: Option<PathBuf>,
+    /// `--grace-days`.
+    grace_days: Option<u32>,
 }
 
 /// Which flags a subcommand accepts.
@@ -154,6 +168,8 @@ struct Allowed {
     passphrase_file: bool,
     /// `--in`.
     input: bool,
+    /// `--grace-days`.
+    grace_days: bool,
 }
 
 /// Parses the flags in `args` that `allowed` admits; each at most once.
@@ -179,10 +195,60 @@ fn flags(args: &[OsString], allowed: Allowed) -> Result<Flags, UsageError> {
             "--in" if allowed.input && out.input.is_none() => {
                 out.input = Some(PathBuf::from(it.next().ok_or(UsageError)?));
             }
+            "--grace-days" if allowed.grace_days && out.grace_days.is_none() => {
+                let value = it.next().and_then(|v| v.to_str()).ok_or(UsageError)?;
+                out.grace_days = Some(grace_days(value)?);
+            }
             _ => return Err(UsageError),
         }
     }
     Ok(out)
+}
+
+/// No flag but `--config`.
+const NONE: Allowed = Allowed {
+    roles: false,
+    data_key: false,
+    out: false,
+    passphrase_file: false,
+    input: false,
+    grace_days: false,
+};
+
+/// Parses `secrets <sub>` with the arguments after `sub`.
+fn parse_secrets(sub: &str, rest: &[OsString]) -> Result<Command, UsageError> {
+    match sub {
+        "init" => Ok(Command::SecretsInit {
+            config: flags(rest, NONE)?.config,
+        }),
+        "rotate" => {
+            let f = flags(
+                rest,
+                Allowed {
+                    data_key: true,
+                    ..NONE
+                },
+            )?;
+            Ok(Command::SecretsRotate {
+                data_key: f.data_key,
+                config: f.config,
+            })
+        }
+        "retire-setups" => {
+            let f = flags(
+                rest,
+                Allowed {
+                    grace_days: true,
+                    ..NONE
+                },
+            )?;
+            Ok(Command::SecretsRetireSetups {
+                grace_days: f.grace_days.unwrap_or(DEFAULT_GRACE_DAYS),
+                config: f.config,
+            })
+        }
+        _ => Err(UsageError),
+    }
 }
 
 /// Parses the arguments after the program name.
@@ -190,14 +256,6 @@ fn flags(args: &[OsString], allowed: Allowed) -> Result<Flags, UsageError> {
 /// # Errors
 /// [`UsageError`] for anything but the forms of the module docs.
 pub fn parse(args: &[OsString]) -> Result<Command, UsageError> {
-    /// No flag but `--config`.
-    const NONE: Allowed = Allowed {
-        roles: false,
-        data_key: false,
-        out: false,
-        passphrase_file: false,
-        input: false,
-    };
     /// `serve`'s flags.
     const SERVE: Allowed = Allowed {
         roles: true,
@@ -232,22 +290,7 @@ pub fn parse(args: &[OsString]) -> Result<Command, UsageError> {
         (Some("migrate"), _) => Ok(Command::Migrate {
             config: flags(rest(1), NONE)?.config,
         }),
-        (Some("secrets"), Some("init")) => Ok(Command::SecretsInit {
-            config: flags(rest(2), NONE)?.config,
-        }),
-        (Some("secrets"), Some("rotate")) => {
-            let f = flags(
-                rest(2),
-                Allowed {
-                    data_key: true,
-                    ..NONE
-                },
-            )?;
-            Ok(Command::SecretsRotate {
-                data_key: f.data_key,
-                config: f.config,
-            })
-        }
+        (Some("secrets"), Some(sub)) => parse_secrets(sub, rest(2)),
         (Some("backup-secrets"), _) => {
             let f = flags(
                 rest(1),
@@ -285,6 +328,17 @@ pub fn parse(args: &[OsString]) -> Result<Command, UsageError> {
         }
         _ => Err(UsageError),
     }
+}
+
+/// `--grace-days`: decimal digits only, 0 to [`MAX_GRACE_DAYS`] (ADR 0031 point 4).
+fn grace_days(text: &str) -> Result<u32, UsageError> {
+    if text.is_empty() || text.len() > 4 || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(UsageError);
+    }
+    text.parse::<u32>()
+        .ok()
+        .filter(|days| *days <= MAX_GRACE_DAYS)
+        .ok_or(UsageError)
 }
 
 /// Writes `message` and a newline to stderr, ignoring a closed stderr.
@@ -355,6 +409,7 @@ pub fn main() -> ExitCode {
         Command::Migrate { config }
         | Command::SecretsInit { config }
         | Command::SecretsRotate { config, .. }
+        | Command::SecretsRetireSetups { config, .. }
         | Command::BackupSecrets { config, .. }
         | Command::Backup { config, .. }
         | Command::Restore { config, .. } => (config.clone(), None),
@@ -393,6 +448,9 @@ pub fn main() -> ExitCode {
             .map(|()| "secrets file written".to_owned())
             .map_err(|e| e.to_string()),
         Command::SecretsRotate { data_key, .. } => run_secrets_rotate(&config, data_key),
+        Command::SecretsRetireSetups { grace_days, .. } => {
+            return run_retire_setups(&config, grace_days);
+        }
         Command::BackupSecrets {
             out,
             passphrase_file,
@@ -459,6 +517,86 @@ fn rotation_message(what: Rotate, rotated: &admin::Rotated) -> String {
             )
         }
     }
+}
+
+/// `secrets retire-setups`: the report of ADR 0031 point 5 on stdout (ids, times and counts
+/// only, no account names), or the failure on stderr.
+fn run_retire_setups(config: &Config, grace_days: u32) -> ExitCode {
+    let rt = match runtime() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprint_line(&format!("cannot start the runtime: {}", e.kind()));
+            return ExitCode::FAILURE;
+        }
+    };
+    match rt.block_on(admin::secrets_retire_setups(config, grace_days)) {
+        Ok(report) => {
+            if print_line(&retirement_message(&report)) {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(e) => admin_failure(&e),
+    }
+}
+
+/// The lines `secrets retire-setups` prints (ADR 0031 point 5): per selected setup its id, its
+/// successor time and the records that still name it, the cost of `--grace-days 0`, what was
+/// removed from the secrets file, and the reminder to make a new secrets backup.
+#[must_use]
+pub fn retirement_message(report: &admin::RetiredSetups) -> String {
+    let mut lines = Vec::new();
+    for setup in &report.selected {
+        let age_days = report
+            .now_ms
+            .saturating_sub(setup.successor_at_ms)
+            .checked_div(DAY_MS)
+            .unwrap_or(0);
+        lines.push(format!(
+            "setup {}: successor recorded at {} ms since the Unix epoch ({age_days} days ago); \
+             {} account record(s) still on it",
+            setup.setup_id, setup.successor_at_ms, setup.records
+        ));
+    }
+    let on_retired: u64 = report.selected.iter().map(|s| s.records).sum();
+    if !report.selected.is_empty() {
+        let ids: Vec<String> = report
+            .selected
+            .iter()
+            .map(|s| s.setup_id.to_string())
+            .collect();
+        lines.push(format!(
+            "retired OPAQUE setup(s) {} (grace period {} days)",
+            ids.join(", "),
+            report.grace_days
+        ));
+        if on_retired > 0 {
+            lines.push(format!(
+                "{on_retired} account(s) lose password login at the next server start: they log in \
+                 through an enrolled device, which moves them to the current setup, or with their \
+                 recovery code{}",
+                if report.grace_days == 0 {
+                    " (--grace-days 0: retired at once, without a grace period)"
+                } else {
+                    ""
+                }
+            ));
+        }
+    }
+    if report.removed.is_empty() {
+        if report.selected.is_empty() {
+            lines.push("no OPAQUE setup to retire; the secrets file is unchanged".to_owned());
+        }
+    } else {
+        let ids: Vec<String> = report.removed.iter().map(u32::to_string).collect();
+        lines.push(format!(
+            "removed OPAQUE setup(s) {} from the secrets file; they stop being accepted at the \
+             next server start. Make a new secrets backup: an old one still holds them",
+            ids.join(", ")
+        ));
+    }
+    lines.join("\n")
 }
 
 /// The exit code of a failed admin command: 2 for a usage error, 1 otherwise.
@@ -579,6 +717,22 @@ mod tests {
         );
         assert_eq!(parse(&args(&["--version"])), Ok(Command::Version));
         assert_eq!(
+            parse(&args(&["secrets", "retire-setups"])),
+            Ok(Command::SecretsRetireSetups {
+                grace_days: 90,
+                config: None
+            })
+        );
+        for (text, days) in [("0", 0), ("3650", 3650), ("007", 7)] {
+            assert_eq!(
+                parse(&args(&["secrets", "retire-setups", "--grace-days", text])),
+                Ok(Command::SecretsRetireSetups {
+                    grace_days: days,
+                    config: None
+                })
+            );
+        }
+        assert_eq!(
             parse(&args(&["backup", "--out", "-"])),
             Ok(Command::Backup {
                 out: PathBuf::from("-"),
@@ -620,6 +774,20 @@ mod tests {
             &["restore", "--in"],
             &["backup-secrets", "--in", "f", "--passphrase-file", "p"],
             &["restore", "x"],
+            &["secrets", "retire-setups", "--grace-days"],
+            &["secrets", "retire-setups", "--grace-days", "3651"],
+            &["secrets", "retire-setups", "--grace-days", "-1"],
+            &["secrets", "retire-setups", "--grace-days", "+5"],
+            &[
+                "secrets",
+                "retire-setups",
+                "--grace-days",
+                "1",
+                "--grace-days",
+                "2",
+            ],
+            &["secrets", "retire-setups", "--data-key"],
+            &["secrets", "rotate", "--grace-days", "1"],
             &["--database-url", "postgres://u:p@h/d"],
         ] {
             assert_eq!(parse(&args(bad)), Err(UsageError), "{bad:?}");

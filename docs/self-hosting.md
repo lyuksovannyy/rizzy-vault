@@ -86,7 +86,7 @@ docker compose up -d
 docker compose logs rizzy-vault
 ```
 
-A healthy start logs `database_created` (first start only) and `listening`. A start that fails logs why and exits; see [§4](#4-configuration-reference) for configuration errors (exit code 2). The server refuses to start if the secrets file is inside the data directory, if it does not fit the database (a different setup, a missing data key), or, with SQLite, if another process holds the database's writer lock (with PostgreSQL: while `restore`, `migrate` or `secrets rotate` holds the instance lock, [§9](#9-restore)).
+A healthy start logs `database_created` (first start only) and `listening`. A start that fails logs why and exits; see [§4](#4-configuration-reference) for configuration errors (exit code 2). The server refuses to start if the secrets file is inside the data directory, if it does not fit the database (a different setup, a missing data key), or, with SQLite, if another process holds the database's writer lock (with PostgreSQL: while `restore`, `migrate`, `secrets rotate` or `secrets retire-setups` holds the instance lock, [§9](#9-restore)), or if the secrets file holds an OPAQUE setup the database marks retired ([§5](#5-the-secrets-file)).
 
 **Create the first accounts.** Signup is `closed` by default, and the admin panel that issues invites comes in M3. Until then:
 
@@ -134,12 +134,13 @@ Settings are `RIZZY_*` names. Each comes from the environment, or from a configu
 | `rizzy-vault [serve] [--roles <list>]` | `rizzy-vault` | – |
 | `rizzy-vault secrets init` | `secrets-init` | the secrets volume writable |
 | `rizzy-vault secrets rotate [--data-key]` | `secrets-rotate` | the server stopped (it takes the SQLite writer lock, or the PostgreSQL instance lock); the secrets volume writable; with `--data-key`, the data volume too ([§5](#5-the-secrets-file)) |
+| `rizzy-vault secrets retire-setups [--grace-days <n>]` | `secrets-retire-setups` | the server stopped (it takes the SQLite writer lock, or the PostgreSQL instance lock); the secrets and data volumes writable ([§5](#5-the-secrets-file)) |
 | `rizzy-vault backup-secrets --out <file> --passphrase-file <file\|->` | `backup-secrets` | the secrets volume (read-only is enough) |
 | `rizzy-vault migrate` | `migrate` | the server stopped (it takes the SQLite writer lock, or the PostgreSQL instance lock) |
 | `rizzy-vault backup --out <file\|->` | none: `docker compose exec` into the running server ([§8](#8-backup)) | nothing: it runs next to the server |
 | `rizzy-vault restore --in <file\|->` | `restore` (reads standard input) | the server stopped (it takes the SQLite writer lock, or the PostgreSQL instance lock), an empty database, the instance's secrets file ([§9](#9-restore)) |
 
-The one-off services of `compose.yaml` are written for SQLite: they mount the data volume and have no network. On PostgreSQL, `migrate`, `restore` and `secrets-rotate` also need `RIZZY_DATABASE_URL` and the database's network, like the server.
+The one-off services of `compose.yaml` are written for SQLite: they mount the data volume and have no network. On PostgreSQL, `migrate`, `restore`, `secrets-rotate` and `secrets-retire-setups` also need `RIZZY_DATABASE_URL` and the database's network, like the server.
 
 Exit codes: 0 success, 1 a runtime failure, 2 a usage or configuration error. Messages name the setting or file that failed, never a value.
 
@@ -148,7 +149,7 @@ Exit codes: 0 success, 1 a runtime failure, 2 a usage or configuration error. Me
 What it holds: every OPAQUE server setup (the OPRF seed and server keypair) by `setup_id`, `enum_key` (fake login answers for unknown names), every server data key by `data_key_id` (they seal 2FA secrets and in-flight login state), and the bootstrap token ([CRYPTO.md §5.11](CRYPTO.md#511-server-side-encryption-not-zero-knowledge)).
 
 **Handling.**
-- It lives on its own volume, `rizzy-vault-secrets`, mounted **read-only** into the server. Only `secrets init` and `secrets rotate` mount it writable, as one-offs. The server never writes it.
+- It lives on its own volume, `rizzy-vault-secrets`, mounted **read-only** into the server. Only `secrets init`, `secrets rotate` and `secrets retire-setups` mount it writable, as one-offs. The server never writes it.
 - Mode 0600, owned by UID 65532. Nothing else on the host needs to read it.
 - Instead of the named volume you may bind-mount a host directory, a Docker or Podman secret, or a systemd credential at `/run/rizzy-secrets` ([ADR 0010](adr/0010-server-shape.md) §4). Never inside the data directory: the server refuses that.
 - A whole-host backup (a VM snapshot, a backup of `/var/lib/docker`) captures the database and the secrets together, which is exactly what INV-50 forbids. Exclude one of the two volumes from such a backup, or encrypt that backup as carefully as the secrets themselves.
@@ -176,7 +177,7 @@ The file is written with mode 0600 and never overwrites, so move it away before 
 >
 > In this build that encrypted copy is the **only** way to restore the secrets.
 
-**Rotation** ([CRYPTO.md §5.8](CRYPTO.md#58-loss-or-rotation-of-the-server-opaque-secrets), §5.11): `secrets rotate` adds a new OPAQUE setup, which new registrations use; existing accounts keep theirs until their next password change. `secrets rotate --data-key` adds a new data key and marks it current. Stop the server first (every replica, on PostgreSQL; the command refuses otherwise):
+**Rotation** ([CRYPTO.md §5.8](CRYPTO.md#58-loss-or-rotation-of-the-server-opaque-secrets), §5.11): `secrets rotate` adds a new OPAQUE setup, which new registrations use; an existing account moves to it the next time a client logs in, or unlocks an enrolled device, with the typed password (a transparent re-registration with the same password, [ADR 0031](adr/0031-retiring-old-opaque-setups.md)). `secrets rotate --data-key` adds a new data key and marks it current. Stop the server first (every replica, on PostgreSQL; the command refuses otherwise):
 
 ```sh
 docker compose stop rizzy-vault
@@ -190,7 +191,20 @@ docker compose start rizzy-vault
 3. The old key is **removed from the file by the next `secrets rotate --data-key`**, once no row names it; the command prints which keys it dropped. The server never writes the secrets file, so nothing drops a key while it runs, and this build has no command that drops a key without adding a new one.
 4. Make a new secrets backup after every rotation, and **keep the previous one as long as you keep database backups taken before the 2FA secrets were re-sealed**: such a backup still names the old key, and `restore` refuses it when the secrets file no longer holds that key ([§9](#9-restore) step 4).
 
-> **Gap: old OPAQUE setups are never removed.** [CRYPTO.md §5.8](CRYPTO.md#58-loss-or-rotation-of-the-server-opaque-secrets) step 4 says an old setup is deleted "after a grace period set by the admin", but no ADR defines the command, the grace period or what happens to the accounts still on the old setup, so this build has none: every setup stays in the file.
+**Retiring old OPAQUE setups** ([CRYPTO.md §5.8](CRYPTO.md#58-loss-or-rotation-of-the-server-opaque-secrets) step 4, [ADR 0031](adr/0031-retiring-old-opaque-setups.md)): `secrets retire-setups --grace-days N` (default 90, 0 to 3650) retires every OPAQUE setup that is not the current one and whose successor the server recorded at least N days ago (the successor is recorded at the first server start after `secrets rotate`). Stop the server first, as for `secrets rotate`:
+
+```sh
+docker compose stop rizzy-vault
+docker compose --profile admin run --rm secrets-retire-setups          # default: 90 days
+# docker compose --profile admin run --rm secrets-retire-setups secrets retire-setups --grace-days 0
+docker compose start rizzy-vault
+```
+
+- It prints, per retired setup, its `setup_id`, when its successor was recorded and how many accounts are still on it (ids and counts only). Those accounts lose password login at the next start: they log in through an enrolled device, which moves them to the current setup with the typed password, or with their recovery code. A web-only account without a device needs its recovery code, and its login only says "wrong password".
+- `--grace-days 0` retires at once, for a setup you know leaked; it asks for no confirmation.
+- It marks the setups retired in the database (and drops pending logins), then rewrites the secrets file without them. The server refuses to start with a secrets file that holds a retired setup ("run `secrets retire-setups` again"): after a crash between the two steps, or with an old secrets backup, run the command again (any `--grace-days`) and it finishes.
+- The server never retires a setup by itself. Its worker logs `opaque_setup_retirable` (the `setup_id` and the count) at most once a day for a setup whose successor is more than 90 days old.
+- Make a new secrets backup afterwards: an old one still holds the retired setups, and a leaked old backup is a leaked setup.
 
 **If the secrets are lost** and no backup exists, nobody can log in with a password: the OPAQUE records cannot be used without their setup. The design's way out is that users with an enrolled device re-register OPAQUE from that device the next time they type their password, and others use their recovery code ([CRYPTO.md §5.8](CRYPTO.md#58-loss-or-rotation-of-the-server-opaque-secrets)). Starting the old database with a new secrets file is refused (the setup does not match), which is what you want.
 
@@ -325,9 +339,13 @@ This archives the data volume: the database, its WAL and shared-memory files (th
 - **old passwords**: a password changed after the backup works again (with the Secret Key);
 - **old recovery codes**: an Emergency Kit replaced after the backup works again.
 
-**The reconciliation-epoch notice.** The design's defence is the reconciliation epoch ([INV-59](THREAT_MODEL.md#8-security-invariants)): `rizzy-vault restore` puts every restored account into a reconciliation epoch and draws a new restore generation ([ADR 0021](adr/0021-server-compaction.md) §2). Devices that reconnect then re-upload their newest signed account state, their bundle chain and every device revocation they hold; the server adopts the newest valid state and from then on refuses the old password, the old recovery code and the revoked devices. Until some device of an account reconnects, that account stays exposed, and accounts whose devices never reconnect stay rolled back ([AR-19](THREAT_MODEL.md#9-accepted-risks-and-out-of-scope)). An enrolled device re-registers the password the next time the user types it; recovery stays refused until a device issues a new recovery code.
+**The reconciliation-epoch notice.** The design's defence is the reconciliation epoch ([INV-59](THREAT_MODEL.md#8-security-invariants)): `rizzy-vault restore` puts every restored account into a reconciliation epoch and draws a new restore generation ([ADR 0021](adr/0021-server-compaction.md) §2). Devices that reconnect then re-upload their newest signed account state, their bundle chain and every device revocation they hold; the server adopts the newest valid state and from then on refuses the old password, the old recovery code and the revoked devices. Until some device of an account reconnects, that account stays exposed, and accounts whose devices never reconnect stay rolled back ([AR-19](THREAT_MODEL.md#9-accepted-risks-and-out-of-scope)). An enrolled device re-registers the password the next time the user types it; recovery stays refused until the user repairs it from an enrolled device (`rv recovery repair`).
 
-> **Gap: a key rotation made after the backup is not healed in this build.** `rv` re-publishes the newer account state, the bundle chain, the device set and the vault self-grants, and a device added after the backup proves itself with its certificate, so a restore after enrolments and vault edits heals. A key rotation (also every device revocation and Secret Key change, which rotate) re-wraps the account's identity keys and the server's copy of the account key; no Accepted design names how those are re-published, so after such a restore the devices stay read-only (the rollback warning) or cannot verify the account. Prefer a backup taken after the last rotation, and report the case.
+**Key rotations made after the backup** ([ADR 0032](adr/0032-healing-rotation-after-backup.md)): every standalone rotation, device revocation, Secret Key change and full rotation is healed by the first enrolled device that saw it and reconnects (`rv sync`, or any command that goes online). It re-publishes the bundle chain, the newer account state with every certificate and revocation, the identity keys wrapped under the current account key, the settings, and each vault's self-grant with its wrap set, then the vault records; the server checks each repair against the signed state it now holds, inside or outside the reconciliation epoch. Two things wait for the users:
+- **Logins.** Until a device of the account re-registers the login record (at its next unlock with the master password, which `rv` does in the same run), a new login with the correct password is refused with `credentials_stale`, and `rv login` says so. A device that missed the rotation logs in with the password to catch up once that is done.
+- **Recovery.** The recovery code stays refused until the user runs `rv recovery repair --name <login>` on an enrolled device: a new code and Emergency Kit, or with `--retype` the current code when it did not change since the backup.
+
+An account used only from the web vault has no device that can heal it, and stays as the backup left it ([AR-19](THREAT_MODEL.md#9-accepted-risks-and-out-of-scope)). A native restore opens no reconciliation epoch: the newer state is never taken back, and users repeat their changes.
 
 ### `rizzy-vault restore`
 
@@ -406,7 +424,7 @@ The server refuses to start against a database whose OPAQUE setup does not match
 
 **After a restore:**
 1. Tell every user that the server was restored to a backup of `<date>`, and ask them to open each of their devices soon, so the devices detect the rollback ([INV-25](THREAT_MODEL.md#8-security-invariants)) and re-upload what the server lost.
-2. Security changes made after the backup (a password change, a device revocation, a recovery-code replacement) are undone by the restore. The design heals them when a device of the account reconnects during the reconciliation epoch that `rizzy-vault restore` opens (a native restore opens none, see above), and otherwise has users repeat them. **In this build** the account commit accepts a device revocation with its key rotation and a standalone key rotation ([ADR 0025](adr/0025-rotation-vault-half.md)), and the client core can make both; the client has no password-change or recovery-code flow yet. Ask users to repeat every revocation and rotation made after the backup (a rotation after a restore goes above the epoch the restore rolled back, ADR 0025 §3), and every other such change once the clients can make it.
+2. Security changes made after the backup (a password change, a device revocation, a recovery-code replacement) are undone by the restore. The design heals them when a device of the account reconnects during the reconciliation epoch that `rizzy-vault restore` opens (a native restore opens none, see above), and otherwise has users repeat them. **In this build** `rv` heals them as [§9](#9-restore) says, key rotations included ([ADR 0032](adr/0032-healing-rotation-after-backup.md)); tell users who had recovery on to run `rv recovery repair` once their devices are online again.
 3. Accounts whose devices never reconnect stay as the backup left them.
 
 ## 10. The restore drill
@@ -415,7 +433,7 @@ A backup you have never restored is a hope, not a backup ([ROADMAP §4.9](ROADMA
 
 **Automated (runs with `cargo test`).** [`crates/rizzy-server/tests/drill.rs`](../crates/rizzy-server/tests/drill.rs) runs the backup → wipe → restore drill in a fast form, against real SQLite files, through the functions the binary runs: `secrets init`, a populated instance, a start with the startup checks, `rizzy-vault backup` to a file next to the running server, `backup-secrets`, the native copy, a wipe, the secrets restored byte for byte from the encrypted backup, `rizzy-vault restore` of the backup file into an empty database, and a restart. It checks that the data reads back exactly, that the restore draws a new restore generation and opens a reconciliation epoch for every account (INV-59), that the backup file holds none of the secrets file's secrets (INV-50: every OPAQUE server setup, `enum_key`, every data key and the bootstrap token, searched for both as bytes and as their base64url text), and that a restore next to the running server, into a non-empty database, with a fresh secrets file, or of a damaged file is refused, as is a wrong passphrase. It also checks the warning of [§9](#9-restore): a native copy restored in place starts, but keeps the old restore generation and opens no epoch. `crates/rizzy-server/tests/cli.rs` runs the two commands as processes: through a pipe and a file, the digest on stderr, and the refusals.
 
-> **Gap: the full drill of ADR 0011 is not automated yet.** ADR 0011 requires simulated clients that change a password, enrol and revoke devices and rotate keys after the backup, then reconnect to the restored server and heal it, on SQLite and PostgreSQL. `rv`'s end-to-end tests (`crates/rizzy-cli/tests/e2e.rs`) now cover a SQLite restore after an enrolment and after vault edits: both devices, the one enrolled after the backup included, heal the server and keep working. Revocations and key rotations made after the backup are not healed yet (see the gap in [§9](#9-restore)), nor is the password re-registered after a password change, so the full drill stays open.
+> **Gap: the full drill of ADR 0011 is automated on SQLite only.** ADR 0011 requires simulated clients that change a password, enrol and revoke devices and rotate keys after the backup, then reconnect to the restored server and heal it, on SQLite and PostgreSQL. `rv`'s end-to-end tests run it on SQLite against the built binary: a restore after an enrolment and after vault edits (`crates/rizzy-cli/tests/e2e.rs`), and after a standard rotation, a revocation with a full rotation, a password change and a Secret Key change with a full rotation, with the login record re-registered, a device that missed the rotation catching up and the recovery repair ([ADR 0032](adr/0032-healing-rotation-after-backup.md); `crates/rizzy-cli/tests/healing.rs`). The same drill against PostgreSQL is not run yet.
 
 **Manual, on your own backups (monthly, and after every upgrade).** Restore the newest backups into **scratch volumes**, start a server on them **with no network**, and check that it passes its startup checks. The scratch server never talks to clients: it would honour the backup's old credentials.
 

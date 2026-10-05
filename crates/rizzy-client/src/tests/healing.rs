@@ -131,11 +131,16 @@ fn a_restored_account_state_is_re_published_and_verifies_again() {
             .collect::<Vec<_>>(),
         server.stored().bundles
     );
-    assert_eq!(
-        healing.grants.vault_self_grants.as_slice(),
-        server.stored().grants
-    );
+    // ADR 0032 §2: no self-grant in step 3a; step 3b carries the one under the pinned key.
+    assert!(healing.grants.vault_self_grants.is_empty());
+    assert_eq!(healing.self_grants, server.stored().grants);
     assert!(healing.grants.device_grants.is_empty());
+    // `E_id` as last served, of the pinned `identity_epoch`, and no settings (none written).
+    assert_eq!(
+        healing.account_state.identity_secret_keys.as_ref(),
+        Some(&server.stored().e_id)
+    );
+    assert!(healing.account_state.account_settings.is_none());
 
     // Outside the reconciliation epoch the server refuses it: still a rollback.
     assert_eq!(
@@ -274,4 +279,70 @@ fn the_rollback_alarm_is_cleared_only_with_an_adopted_state() {
         .into_iter()
         .collect();
     floors.admit(&resolved).unwrap();
+}
+
+/// Healing step 3b (ADR 0032 §2, §3 "Client precondition"): the request carries the vault's
+/// self-grant, every wrap-set row held at its epoch and no record, and only once a complete
+/// Fetch at the held vault-key epoch is behind it; another vault's or epoch's grant is refused.
+#[test]
+fn step_3b_needs_a_complete_fetch_at_the_held_epoch() {
+    let mut rng = ChaCha20Rng::seed_from_u64(95);
+    let mut server = Server::new(96);
+    let a = signup(&mut server, &mut rng, DeviceKind::DesktopCli);
+    let grant = server.stored().grants[0].clone();
+    let vault_id = a.vault_key.vault_id();
+    let authors = server.authors();
+    let (mut vault, unlocked, items) = synced_writer(&mut server, &mut rng, a, &authors, 2);
+    super::rotation::settle(&mut server, &mut rng, &mut vault, &unlocked);
+    let request = vault.self_grant_healing_request(&grant).unwrap();
+    assert_eq!(request.self_grant.as_ref(), Some(&grant));
+    assert!(request.records.is_empty());
+    assert_eq!(request.item_key_wraps.len(), items.len());
+    assert!(
+        request
+            .item_key_wraps
+            .as_slice()
+            .iter()
+            .all(|w| w.vault_key_epoch == grant.vault_key_epoch)
+    );
+    let mut later = grant.clone();
+    later.vault_key_epoch += 1;
+    assert_eq!(
+        vault.self_grant_healing_request(&later).unwrap_err(),
+        ClientError::InvalidInput
+    );
+    let mut other = grant;
+    other.vault_id = Id::from_bytes([0xee; 16]);
+    assert_eq!(
+        vault.self_grant_healing_request(&other).unwrap_err(),
+        ClientError::InvalidInput
+    );
+    // A new vault key adopted and no complete Fetch at its epoch yet: the precondition fails.
+    let next = rizzy_core::keys::VaultKey::generate(&mut rng, vault_id, later.vault_key_epoch);
+    vault.adopt_vault_key(next).unwrap();
+    assert_eq!(
+        vault.self_grant_healing_request(&later).unwrap_err(),
+        ClientError::CannotHeal
+    );
+}
+
+/// ADR 0032 "Risks", junk first repair: the server cannot tell a junk `E_id` under the copied
+/// `key_id` from a genuine one, and stores the first one a session sends; the clients reject it,
+/// because `E_id` must open under the account key and match the bundle (CRYPTO.md §11.2 step 6).
+#[test]
+fn a_junk_e_id_under_the_right_key_id_is_rejected_by_the_client() {
+    let mut rng = ChaCha20Rng::seed_from_u64(97);
+    let mut server = Server::new(98);
+    let a = signup(&mut server, &mut rng, DeviceKind::DesktopCli);
+    let mut a_state = a.device.unwrap();
+    let a_unlocked = a_state.unlock(PASSWORD).unwrap();
+    verify_unlock(&mut a_state, &a_unlocked, &server.view(), None).unwrap();
+    let mut junk = server.stored().e_id.envelope.as_slice().to_vec();
+    let last = junk.len() - 1;
+    junk[last] ^= 0x01;
+    server.account.as_mut().unwrap().e_id.envelope = bytes(&junk);
+    assert_eq!(
+        verify_unlock(&mut a_state, &a_unlocked, &server.view(), None).unwrap_err(),
+        ClientError::InvalidServerResponse
+    );
 }

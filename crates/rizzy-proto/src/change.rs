@@ -56,13 +56,17 @@ pub struct ReregisterStartRequest {
     pub registration_request: OpaqueMessage,
 }
 
-/// The answer to [`ReregisterStartRequest`]: OPAQUE `RegistrationResponse` ("M2").
+/// The answer to [`ReregisterStartRequest`]: OPAQUE `RegistrationResponse` ("M2") and the
+/// `setup_id` it was made under, which the client echoes in
+/// [`CommitChangeRequest::setup_id`] (ADR 0031 point 3).
 ///
 /// A response type: unknown fields are ignored.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReregisterStartResponse {
     /// OPAQUE `RegistrationResponse`.
     pub registration_response: OpaqueMessage,
+    /// The `setup_id` the registration started under.
+    pub setup_id: u32,
 }
 
 /// One atomic change of the account (CRYPTO.md §11 "Replacing credentials"): the new
@@ -70,8 +74,8 @@ pub struct ReregisterStartResponse {
 ///
 /// | The new state… | …carries |
 /// |---|---|
-/// | `password_epoch + 1` (password or Secret Key change, §11.5; the recovery commit, §11.9 step 5) | `registration_upload` and `account_key_server_wrap` |
-/// | same `password_epoch`, a new record (same-password re-registration, §5.8, §6.3) | `registration_upload` and `account_key_server_wrap` |
+/// | `password_epoch + 1` (password or Secret Key change, §11.5; the recovery commit, §11.9 step 5) | `registration_upload` with its `setup_id`, and `account_key_server_wrap` |
+/// | same `password_epoch`, a new record (same-password re-registration, §5.8, §6.3; ADR 0031 point 2) | `registration_upload` with its `setup_id`, and `account_key_server_wrap` |
 /// | `recovery_epoch + 1` (a new recovery code) | `recovery` |
 /// | recovery switched off | nothing more; the server deletes `E_rec` and `H_rec` |
 /// | `settings_seq + 1` | `account_settings` |
@@ -92,6 +96,11 @@ pub struct CommitChangeRequest {
     /// OPAQUE `RegistrationUpload` of the new record, after [`ReregisterStartRequest`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registration_upload: Option<OpaqueMessage>,
+    /// [`ReregisterStartResponse::setup_id`], echoed; present exactly when
+    /// `registration_upload` is. The server labels the record with it and refuses a retired or
+    /// unknown one with `setup_retired` (ADR 0031 point 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_id: Option<u32>,
     /// `E_srv'`, with a new record; its locator equals the new state's epochs and `kdf_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_key_server_wrap: Option<AccountKeyServerWrap>,

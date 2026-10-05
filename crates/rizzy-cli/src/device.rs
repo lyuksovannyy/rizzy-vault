@@ -33,6 +33,14 @@
 //!   Each run with the alarm tries again, except while a pending commit waits (settling it
 //!   would write a new state, not re-publish one). A refused challenge is asked for once more
 //!   with this device's certificate, state and chain ("A device enrolled after the backup").
+//!   A served state that does not verify under the pin is a rollback too when the chain this
+//!   device holds shows a restore to before a full rotation (ADR 0032 §1). Healing then also
+//!   repairs `E_id`, the settings and the vault's self-grant and wrap set (ADR 0032 §2–§3), and
+//!   a new device authentication tells whether the login record needs the same-password
+//!   re-registration of step 5 (`heal`);
+//! - the account key rotated elsewhere and no grant served (a restore lost it, ADR 0032 §4): the
+//!   device logs in with the typed password to catch up once the server's login record no
+//!   longer lags (`heal`).
 //!
 //! # Write order (ADR 0026 §4)
 //!
@@ -109,13 +117,16 @@ use rizzy_client::device::{DeviceState, UnlockedDevice};
 use rizzy_client::export::gate::ExportGate;
 use rizzy_client::healing::{self, HeldAccount};
 use rizzy_client::login::{LoggedIn, LoginInput, start_login};
+use rizzy_client::reregister::start_device_reregistration;
 use rizzy_client::rizzy_proto::account::{AccountStateQuery, AccountView, DeviceGrantsResponse};
 use rizzy_client::rizzy_proto::auth::{
     DeviceAuthFinishResponse, DeviceAuthStartResponse, LoginFinishResponse, LoginStartResponse,
     Reconciliation,
 };
+use rizzy_client::rizzy_proto::auth::{RegisterFinishRequest, RegisterStartResponse};
 use rizzy_client::rizzy_proto::change::{
-    CommitChangeRequest, DeviceSuspensionRequest, SuspendDeviceResponse,
+    CommitChangeRequest, DeviceSuspensionRequest, ReregisterStartRequest, ReregisterStartResponse,
+    SuspendDeviceResponse,
 };
 use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::rizzy_proto::http::paths;
@@ -199,6 +210,61 @@ pub(crate) fn pick_account(env: &Env<'_>) -> Result<[u8; 16], CliError> {
     }
 }
 
+/// ADR 0031 point 8 for a signup stored in stage 2 and refused with `setup_retired`: asks for
+/// the password, the login name and the invite again (none of them is stored), checks the
+/// password against the stored device state, reruns `register/start` with the same `pw_in`,
+/// rebuilds only the OPAQUE upload, the `setup_id` and `E_srv`, writes the new body over the
+/// stored one, and resends it once. Returns the typed password, which the unlock reuses, and
+/// the answer to the resend.
+async fn restart_pending_signup(
+    env: &mut Env<'_>,
+    http: &Http,
+    db: &mut Db,
+    record: &DeviceRecord,
+    stored: &[u8],
+) -> Result<(Zeroizing<String>, Result<(), CliError>), CliError> {
+    env.ui.note(
+        "The server retired the login setup the saved signup was registered under. It is \
+         registered again; the Emergency Kit stays valid.",
+    );
+    let password = env.ui.secret("Master password of the new account")?;
+    // `unlock` refuses a stage-2 record (ADR 0026 §2); the restart needs its keys.
+    let unlocked = record.unlock_signup(&password)?;
+    let name = env.ui.line("Login name")?;
+    let invite = env
+        .ui
+        .secret("Invite token (leave empty if the server needs none)")?;
+    let invite = (!invite.trim().is_empty()).then(|| invite.trim().to_owned());
+    let mut rng = os_rng();
+    let restart = record.registration_restart(&mut rng, &password)?;
+    let start = restart.register_request(name.trim(), invite.as_deref(), record.account_id())?;
+    let answer: RegisterStartResponse =
+        http.post(paths::REGISTER_START, &start, Auth::None).await?;
+    // The stored body is parsed back only through `rizzy-proto` (ADR 0026 §3).
+    let mut request: RegisterFinishRequest =
+        serde_json::from_slice(stored).map_err(|_| ClientError::CacheCorrupt)?;
+    restart.rebuild_signup(&mut rng, &answer, &unlocked, &mut request)?;
+    let body = serde_json::to_vec(&request).map_err(|_| ClientError::Internal)?;
+    db.write(&store::pending_writes(record, &body)?).await?;
+    let sent = http
+        .post_bytes_empty(paths::REGISTER_FINISH, body, Auth::None)
+        .await;
+    Ok((password, sent))
+}
+
+/// What [`Device::resend_restarted`] rebuilds a stored credential change from.
+#[derive(Clone, Copy)]
+struct Restarted<'a> {
+    /// The stored commit.
+    request: &'a CommitChangeRequest,
+    /// The record with the pending Secret Key promoted.
+    promoted: &'a DeviceRecord,
+    /// The pending keys, unlocked with the new password.
+    pending_unlocked: &'a UnlockedDevice,
+    /// The new master password of the change.
+    new_password: &'a str,
+}
+
 /// An OPAQUE login (CRYPTO.md §11.2 steps 1–6), over `device`'s session when there is one (a
 /// re-authentication the server binds to the device, §11.6 step 1). If the server asks for the
 /// second factor, the code is asked for and the login starts again: the login state is taken
@@ -239,6 +305,16 @@ pub(crate) async fn opaque_login(
             // The server answers a wrong password and an unknown name alike (§5.9).
             Err(CliError::Server(ErrorCode::Unauthorized)) => {
                 return Err(CliError::Client(ClientError::WrongPasswordOrSecretKey));
+            }
+            // ADR 0032 §4: the password is right, but the server was restored from a backup and
+            // its login record lags the account; an enrolled device re-registers it first.
+            Err(e @ CliError::Server(ErrorCode::CredentialsStale)) => {
+                ui.note(
+                    "The server was restored from a backup and does not take this login yet. \
+                     Run `rv sync` on a device that is already set up for this account (it \
+                     repairs the server with your master password), then try again.",
+                );
+                return Err(e);
             }
             Err(e) => return Err(e),
         }
@@ -283,6 +359,9 @@ pub struct Device {
     /// Whether this run authenticated with the reconciliation objects (a restored server that
     /// did not know this device).
     reconciled: bool,
+    /// Whether this run already tried the same-password re-registration a `reregister` answer
+    /// asks for (ADR 0031 point 2: at most once per unlock).
+    reregistered: bool,
     /// The master password, kept for this run's re-authentications and the pending record.
     password: Zeroizing<String>,
     /// The OS CSPRNG.
@@ -315,6 +394,7 @@ impl Device {
         let mut rows = db.read().await?;
         let mut record = load::open(&rows)?;
         let http = Http::new(record.server_origin().as_str(), &env.trust)?;
+        let mut typed_password = None;
         if record.stage() == Stage::SignupPending {
             // ADR 0026 §2: the stored `register/finish` is resent as it is; the server treats
             // a byte-identical repeat as success, and its answer finalises the record. The
@@ -326,10 +406,27 @@ impl Device {
                 .ok_or(ClientError::CacheCorrupt)?;
             env.ui
                 .note("Finishing the signup that was interrupted before the server answered…");
-            if let Err(e) = http
-                .post_bytes_empty(paths::REGISTER_FINISH, request, Auth::None)
-                .await
+            let mut sent = http
+                .post_bytes_empty(paths::REGISTER_FINISH, request.clone(), Auth::None)
+                .await;
+            if let Err(e) = &sent
+                && e.restarts_registration()
             {
+                // ADR 0031 point 8: the setup the signup registered under was retired and the
+                // signup was not applied: register again with the same password, then resend.
+                let (password, again) =
+                    restart_pending_signup(env, &http, &mut db, &record, &request).await?;
+                typed_password = Some(password);
+                sent = again;
+            }
+            if let Err(e) = sent {
+                if e.restarts_registration() {
+                    env.ui.note(
+                        "The server refused the saved signup's registration again. It stays \
+                         saved; run an rv command again later, and keep the Emergency Kit.",
+                    );
+                    return Err(e);
+                }
                 if e.refuses_commit() {
                     // A byte-identical repeat of a stored signup is a success (§11.1 step 8),
                     // so a refusal means this signup is not registered. The file is not
@@ -352,7 +449,10 @@ impl Device {
             rows = db.read().await?;
             record = load::open(&rows)?;
         }
-        let password = env.ui.secret("Master password")?;
+        let password = match typed_password {
+            Some(password) => password,
+            None => env.ui.secret("Master password")?,
+        };
         let unlocked = record.unlock(&password)?;
         let Loaded {
             device: state,
@@ -387,6 +487,7 @@ impl Device {
             session: None,
             refreshed: false,
             reconciled: false,
+            reregistered: false,
             password,
             rng: os_rng(),
         })
@@ -429,6 +530,7 @@ impl Device {
             session: None,
             refreshed: false,
             reconciled: false,
+            reregistered: false,
             password,
             rng: os_rng(),
         })
@@ -665,7 +767,59 @@ impl Device {
             self.refresh(ui).await?;
         }
         self.refreshed = true;
+        // ADR 0031 point 2: the record is on an old OPAQUE setup; this unlock holds the typed
+        // password, so it moves the record, once. A failure leaves the record where it was.
+        match self.reregister_device().await {
+            Ok(true) => self.refresh(ui).await?,
+            Ok(false) => {}
+            Err(CliError::Alarm(alarm)) => return Err(CliError::Alarm(alarm)),
+            Err(_) => ui.note(
+                "Moving this account to the server's current login setup did not work this \
+                 time; the next rv command that goes online tries again.",
+            ),
+        }
         Ok(())
+    }
+
+    /// The same-password re-registration of ADR 0031 point 2 (`rizzy_client::reregister`), over
+    /// the device session, when its device authentication answered `reregister`: at most once
+    /// per run, never while an alarm or a pending commit stands, and only when the served state
+    /// verifies at this device's own `password_epoch` (so the typed password is the account's
+    /// current one). Returns whether the server took the new record; the caller then refreshes
+    /// to pin the new state.
+    ///
+    /// Never with a pending commit: the re-registration takes `state_seq + 1`, the very state the
+    /// stored commit was signed for, so the stored commit could then never be applied (its
+    /// compare-and-swap would fail) and settling would drop it.
+    async fn reregister_device(&mut self) -> Result<bool, CliError> {
+        let asked = self.session.as_ref().is_some_and(DeviceSession::reregister);
+        let pending = self.record.has_pending();
+        if !asked || self.reregistered || !self.alarms.is_empty() || pending {
+            return Ok(false);
+        }
+        self.reregistered = true;
+        let view = self.account_view().await?;
+        let mut probe = self.record.to_state(self.state.pin().clone())?;
+        let Ok(verified) = verify_unlock(&mut probe, &self.unlocked, &view, None) else {
+            return Ok(false);
+        };
+        let (started, request) =
+            start_device_reregistration(&mut self.rng, &self.state, &self.password)?;
+        let answer: ReregisterStartResponse =
+            self.call(paths::ACCOUNT_REREGISTER_START, &request).await?;
+        let pending = started.finish_device(&mut self.rng, &answer, &verified, &self.unlocked)?;
+        let session = self
+            .session
+            .as_mut()
+            .ok_or(CliError::Client(ClientError::Internal))?;
+        self.http
+            .post_empty(
+                paths::ACCOUNT_COMMIT,
+                pending.commit_request(),
+                Auth::Device(session, &self.unlocked),
+            )
+            .await?;
+        Ok(true)
     }
 
     /// The account answer over the device session (CRYPTO.md §11.3 step 2.2).
@@ -679,19 +833,53 @@ impl Device {
     /// A rollback (the server's state, or its self-grant, behind this device's) is written as
     /// the alarm, then healed once: the account objects are re-published
     /// ([`Device::heal_account`]) and the answer is asked for and verified again, which lifts
-    /// the alarm if the server no longer serves anything older.
+    /// the alarm if the server no longer serves anything older. A served state that does not
+    /// verify under the pin is checked once more against the chain this device holds (ADR 0032
+    /// §1, [`Device::older_chain`]): a restore to before a full rotation is a rollback too.
+    /// After healing, the device authenticates again: its answer's `reregister` says whether the
+    /// server's OPAQUE record lags the healed state (ADR 0032 §4 step 5).
     async fn refresh(&mut self, ui: &mut dyn Ui) -> Result<(), CliError> {
         let view = self.account_view().await?;
-        match self.apply_view(ui, &view, Changeset::new(), false).await {
+        let outcome = match self.apply_view(ui, &view, Changeset::new(), false).await {
+            Err(CliError::Client(ClientError::InvalidServerResponse)) => {
+                self.older_chain(&view).await
+            }
+            other => other,
+        };
+        match outcome {
             Err(CliError::Alarm(Alarm::Rollback)) => {
                 self.heal_account(ui).await?;
                 let view = self.account_view().await?;
                 self.apply_view(ui, &view, Changeset::new(), false).await?;
                 ui.note("The server holds this device's account state again.");
+                self.authenticate().await?;
+                if self.state.pin().state().recovery_enabled {
+                    ui.note(
+                        "If the restore undid a change of the recovery code or of the keys, the \
+                         recovery code does not work until it is repaired: run `rv recovery \
+                         repair --name <login>`.",
+                    );
+                }
                 Ok(())
             }
             other => other,
         }
+    }
+
+    /// ADR 0032 §1: after an answer whose state does not verify under the pin, the chain this
+    /// device holds is asked for (`rizzy_client::healing::older_chain_query`). When it shows a
+    /// restored server's older chain, the rollback alarm is written (with the pinned and the
+    /// served state as evidence) and returned, and the caller heals; nothing of either answer is
+    /// adopted. Otherwise the answer stays the invalid one it was.
+    async fn older_chain(&mut self, view: &AccountView) -> Result<(), CliError> {
+        let query = healing::older_chain_query(&self.held);
+        let older: AccountView = self.call(paths::ACCOUNT_STATE, &query).await?;
+        if !healing::is_older_chain_rollback(&self.state, &self.held, &older) {
+            return Err(CliError::Client(ClientError::InvalidServerResponse));
+        }
+        let pinned = self.state.pin().state_wire().to_vec();
+        let served = view.account_state.as_slice().to_vec();
+        Err(self.alarm(Alarm::Rollback, &[&pinned, &served]).await)
     }
 
     /// Verifies `view` against the pin and persists the outcome. `before` holds writes that
@@ -750,14 +938,22 @@ impl Device {
                     .http
                     .get(paths::DEVICES_GRANTS, Auth::Device(session, &self.unlocked))
                     .await?;
-                let ack = apply_device_grants(
+                let ack = match apply_device_grants(
                     &mut self.rng,
                     &mut self.state,
                     &mut self.unlocked,
                     view,
                     &grants,
                     confirmed.as_ref(),
-                )?;
+                ) {
+                    Ok(ack) => Some(ack),
+                    // ADR 0032 §4: a restore undid the grants of a rotation this device missed.
+                    Err(ClientError::NoDeviceGrant) => {
+                        Box::pin(self.catch_up(ui, view, confirmed.as_ref())).await?;
+                        None
+                    }
+                    Err(e) => return Err(e.into()),
+                };
                 let account = match verify_unlock(
                     &mut self.state,
                     &self.unlocked,
@@ -777,18 +973,21 @@ impl Device {
                 let mut changeset = before;
                 changeset.push(store::record_write(&self.record)?);
                 self.adopt(account, changeset, confirmed.is_some()).await?;
-                // §11.3 step 4.5: acknowledged only after the re-wrapped objects are written.
-                let session = self
-                    .session
-                    .as_mut()
-                    .ok_or(CliError::Client(ClientError::Internal))?;
-                self.http
-                    .post_empty(
-                        paths::DEVICES_GRANTS_ACK,
-                        &ack,
-                        Auth::Device(session, &self.unlocked),
-                    )
-                    .await?;
+                // §11.3 step 4.5: acknowledged only after the re-wrapped objects are written. A
+                // catch-up used no grant and acknowledges none.
+                if let Some(ack) = ack {
+                    let session = self
+                        .session
+                        .as_mut()
+                        .ok_or(CliError::Client(ClientError::Internal))?;
+                    self.http
+                        .post_empty(
+                            paths::DEVICES_GRANTS_ACK,
+                            &ack,
+                            Auth::Device(session, &self.unlocked),
+                        )
+                        .await?;
+                }
                 return Ok(());
             }
             Err(ClientError::Rollback) => {
@@ -1156,7 +1355,7 @@ impl Device {
                 Some((name, _)) => name.clone(),
                 None => ui.line("Login name")?,
             };
-            let reauth = match self.reauth(ui, &name).await {
+            let reauth = match self.reauth_for_settling(ui, &name, &view).await {
                 Ok(reauth) => reauth,
                 // The current credentials no longer log in, and the change was found not
                 // applied (for a credential change: its own credentials did not log in
@@ -1169,15 +1368,16 @@ impl Device {
                 }
                 Err(e) => return Err(e),
             };
-            let sent = self
-                .http
-                .post_bytes_empty(
-                    paths::ACCOUNT_COMMIT,
-                    commit,
-                    Auth::Bearer(reauth.bearer_token()),
-                )
-                .await;
-            match sent {
+            let restarted = credential.as_ref().map(|(_, new_password)| Restarted {
+                request: &request,
+                promoted: &promoted,
+                pending_unlocked: &pending_unlocked,
+                new_password,
+            });
+            match self
+                .resend_pending(commit, restarted, reauth.bearer_token())
+                .await
+            {
                 Ok(()) => {
                     view = self.account_view().await?;
                     applied = true;
@@ -1245,6 +1445,119 @@ impl Device {
             (Some(own), Some(head)) => own == head,
             _ => false,
         }
+    }
+
+    /// The fresh OPAQUE session `settle_pending` resends over. When the login fails because
+    /// the account's own setup was retired ([`Device::on_retired_setup`] on `view`), the run
+    /// ends with [`Device::kept_on_retired_setup`]'s error instead of the wrong-credentials one,
+    /// which the caller would take for credentials changed elsewhere and drop the change.
+    async fn reauth_for_settling(
+        &mut self,
+        ui: &mut dyn Ui,
+        name: &str,
+        view: &AccountView,
+    ) -> Result<LoggedIn, CliError> {
+        match self.reauth(ui, name).await {
+            Err(CliError::Client(ClientError::WrongPasswordOrSecretKey))
+                if self.on_retired_setup(view)? =>
+            {
+                Err(Self::kept_on_retired_setup(ui))
+            }
+            other => other,
+        }
+    }
+
+    /// Tells the user why a pending change found not applied cannot be resent, and returns the
+    /// error the run ends with. ADR 0031 point 7: the current credentials are still the
+    /// account's ([`Device::on_retired_setup`]), yet no OPAQUE login reaches the record: its
+    /// setup was retired and the login took the fake-record path. The stored commit needs a
+    /// fresh OPAQUE session (`commit_change` refuses a credential change or a rotation over a
+    /// device session), and moving the record first (point 2) would take the `state_seq + 1`
+    /// the stored commit was signed for, so the commit could then never be applied. The change
+    /// is therefore kept untouched, nothing is moved, and the next run asks again. ADR 0031
+    /// has no rule that settles this case; it is reported to the owner.
+    fn kept_on_retired_setup(ui: &mut dyn Ui) -> CliError {
+        ui.note(
+            "The interrupted change cannot be sent: the server's operator retired the login \
+             setup this account is registered under, and a change of the master password, the \
+             Secret Key or the keys needs a password login, which that setup no longer allows. \
+             Nothing was changed and the change stays saved; your current master password, \
+             Secret Key and Emergency Kit stay the valid ones. Tell the server's operator; a \
+             recovery with the Emergency Kit (`rv recovery start`) also restores the password \
+             login.",
+        );
+        CliError::Server(ErrorCode::SetupRetired)
+    }
+
+    /// Whether a failed OPAQUE re-authentication while settling is explained by a retired
+    /// setup (ADR 0031 point 7) rather than by credentials changed elsewhere: the device
+    /// session reports the record on a non-current setup (`reregister`), and the served state
+    /// `view` verifies under this device's own keys at its own `password_epoch`, so the typed
+    /// password is still the account's current one.
+    fn on_retired_setup(&self, view: &AccountView) -> Result<bool, CliError> {
+        if !self.session.as_ref().is_some_and(DeviceSession::reregister) {
+            return Ok(false);
+        }
+        let mut probe = self.record.to_state(self.state.pin().clone())?;
+        Ok(verify_unlock(&mut probe, &self.unlocked, view, None).is_ok())
+    }
+
+    /// The resend of `settle_pending`: the stored body `commit` over `token`; when it is refused
+    /// with `setup_retired` and the change carries a registration (`restarted`), the restart of
+    /// ADR 0031 point 8 ([`Device::resend_restarted`]). That restart needs the fresh OPAQUE
+    /// session `token`, so it runs only while the account's own record is on an accepted setup;
+    /// when that setup was retired too, [`Device::reauth_for_settling`] already ended the run.
+    async fn resend_pending(
+        &mut self,
+        commit: Vec<u8>,
+        restarted: Option<Restarted<'_>>,
+        token: &SessionToken,
+    ) -> Result<(), CliError> {
+        let sent = self
+            .http
+            .post_bytes_empty(paths::ACCOUNT_COMMIT, commit, Auth::Bearer(token))
+            .await;
+        match (sent, restarted) {
+            (Err(e), Some(restarted)) if e.restarts_registration() => {
+                self.resend_restarted(&restarted, token).await
+            }
+            (sent, _) => sent,
+        }
+    }
+
+    /// ADR 0031 point 8 for a stored credential change refused with `setup_retired`: reruns its
+    /// registration with the pending password and Secret Key (`promoted`), rebuilds only the
+    /// OPAQUE upload, the `setup_id` and `E_srv'` (under the pending keys, `pending_unlocked`),
+    /// writes the new body over the stored one, and resends it once over `token`.
+    async fn resend_restarted(
+        &mut self,
+        restarted: &Restarted<'_>,
+        token: &SessionToken,
+    ) -> Result<(), CliError> {
+        let Restarted {
+            request,
+            promoted,
+            pending_unlocked,
+            new_password,
+        } = *restarted;
+        let restart = promoted.registration_restart(&mut self.rng, new_password)?;
+        let answer: ReregisterStartResponse = self
+            .http
+            .post(
+                paths::ACCOUNT_REREGISTER_START,
+                &restart.reregister_request(),
+                Auth::Bearer(token),
+            )
+            .await?;
+        let mut rebuilt = request.clone();
+        restart.rebuild_commit(&mut self.rng, &answer, pending_unlocked, &mut rebuilt)?;
+        let body = serde_json::to_vec(&rebuilt).map_err(|_| ClientError::Internal)?;
+        self.commit(store::pending_writes(&self.record, &body)?)
+            .await?;
+        self.pending_commit = Some(body.clone());
+        self.http
+            .post_bytes_empty(paths::ACCOUNT_COMMIT, body, Auth::Bearer(token))
+            .await
     }
 
     /// Whether the server's account is built on this device's pending rotation: the served
@@ -1472,6 +1785,28 @@ impl Device {
                         }
                     }
                 }
+                // ADR 0031 point 8: the setup the change's registration started under was
+                // retired, and the commit was not applied. The registration is rerun with the
+                // same `pw_in` (once; never the `state_conflict` path, which resends the same
+                // upload), and the loop persists the rebuilt body before it resends.
+                Err(e) if e.restarts_registration() => {
+                    let Ok(request) = flight.pending.restart_registration(&mut self.rng) else {
+                        // No registration to restart, or restarted once already: the pending
+                        // record stays for the next run.
+                        return Err(e);
+                    };
+                    let answer: ReregisterStartResponse = self
+                        .http
+                        .post(
+                            paths::ACCOUNT_REREGISTER_START,
+                            &request,
+                            Auth::Bearer(&flight.token),
+                        )
+                        .await?;
+                    flight
+                        .pending
+                        .on_registration_restarted(&mut self.rng, &answer)?;
+                }
                 // A refusal: the server's state is read once more before the only copy of
                 // the rotation's keys is dropped. If that read fails, the record stays.
                 Err(e) if e.refuses_commit() => {
@@ -1634,6 +1969,30 @@ impl Flight {
         match self {
             Self::Rotation(r) => r.on_state_conflict(rng, view, unlocked, vaults),
             Self::Credential(c) => c.on_state_conflict(rng, view, unlocked, vaults),
+        }
+    }
+
+    /// ADR 0031 point 8: restarts the registration of a credential change; a rotation alone
+    /// has none.
+    fn restart_registration(
+        &mut self,
+        rng: &mut OsRng,
+    ) -> Result<ReregisterStartRequest, ClientError> {
+        match self {
+            Self::Rotation(_) => Err(ClientError::InvalidInput),
+            Self::Credential(c) => c.restart_registration(rng),
+        }
+    }
+
+    /// ADR 0031 point 8: the answer to the restarted registration.
+    fn on_registration_restarted(
+        &mut self,
+        rng: &mut OsRng,
+        answer: &ReregisterStartResponse,
+    ) -> Result<(), ClientError> {
+        match self {
+            Self::Rotation(_) => Err(ClientError::InvalidInput),
+            Self::Credential(c) => c.on_registration_restarted(rng, answer),
         }
     }
 

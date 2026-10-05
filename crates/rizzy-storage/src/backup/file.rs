@@ -720,6 +720,7 @@ mod tests {
                 Value::Integer(1),
                 Value::Blob((0..32).collect()),
                 Value::Integer(-1),
+                Value::Null,
             ]],
         );
         set(

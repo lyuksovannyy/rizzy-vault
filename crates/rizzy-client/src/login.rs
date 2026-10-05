@@ -244,6 +244,7 @@ impl LoginAwaitingSession {
             account,
             account_key,
             session_token: response.session_token,
+            reregister: response.reregister,
         })
     }
 }
@@ -265,6 +266,8 @@ pub struct LoggedIn {
     pub(crate) account_key: AccountKey,
     /// The OPAQUE session's bearer token.
     pub(crate) session_token: SessionToken,
+    /// The answer's `reregister` flag (ADR 0031 point 2; [`crate::reregister`]).
+    pub(crate) reregister: bool,
 }
 
 impl fmt::Debug for LoggedIn {

@@ -29,13 +29,11 @@
 //!    opens no reconciliation epoch. This pins the warning of the operator docs: a native
 //!    restore does not give INV-59's protections, `rizzy-vault restore` does.
 //!
-//! **Not in this fast form** (ADR 0011's full drill, reported as open): simulated clients that
-//! change a password, enrol and revoke devices and rotate keys after the backup, then reconnect
-//! and heal the server. The rotation and revocation endpoints exist now (ADR 0025) and
-//! `tests/http/rotation.rs` drives them with `rizzy-client`; `rizzy-cli`'s end-to-end tests heal a
-//! restored server after an enrolment and vault edits, but rotations and revocations after the
-//! backup are not healed yet (`rizzy-client` `healing`), so the full drill stays open.
-//! `rizzy-domain-vault` and `rizzy-domain-auth` test the healing requests themselves.
+//! **Not in this fast form**: the clients. ADR 0011's full drill, with clients that change a
+//! password and the Secret Key, enrol and revoke devices and rotate keys after the backup, then
+//! reconnect and heal the server (ADR 0032), runs in `rizzy-cli`'s end-to-end tests against the
+//! built binary (`tests/healing.rs`, `tests/e2e.rs`); `rizzy-domain-vault` and
+//! `rizzy-domain-auth` test the healing requests and the lag rule themselves.
 //!
 //! [docs/self-hosting.md]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/self-hosting.md
 
@@ -176,6 +174,7 @@ fn populated(secrets_path: &Path) -> Dump {
                 int(setup_id),
                 Value::Blob(setup.public_key_hash().to_vec()),
                 int(10),
+                Value::Null,
             ]],
         ),
         (
@@ -189,6 +188,7 @@ fn populated(secrets_path: &Path) -> Dump {
                     int(0),
                     blob(3, 90),
                     int(11),
+                    int(0),
                 ],
                 vec![
                     a2(),
@@ -198,6 +198,7 @@ fn populated(secrets_path: &Path) -> Dump {
                     int(2),
                     blob(5, 90),
                     int(12),
+                    Value::Null,
                 ],
             ],
         ),
@@ -207,7 +208,14 @@ fn populated(secrets_path: &Path) -> Dump {
         ),
         (
             "auth_recovery",
-            vec![vec![a1(), int(1), blob(7, 90), blob(8, 32), int(14)]],
+            vec![vec![
+                a1(),
+                int(1),
+                blob(7, 90),
+                blob(8, 32),
+                int(14),
+                Value::Null,
+            ]],
         ),
         (
             "auth_bundles",

@@ -99,6 +99,13 @@ pub enum StartupCheckError {
         /// The `data_key_id`.
         data_key_id: u32,
     },
+    /// The secrets file holds a setup the database marks retired (ADR 0031 point 6): a crash
+    /// between the two steps of `rizzy-vault secrets retire-setups`, or an old secrets backup
+    /// that would bring the setup back. Running `secrets retire-setups` again removes it.
+    RetiredSetupLoaded {
+        /// The `setup_id`.
+        setup_id: u32,
+    },
     /// A logical backup checked by [`ServerSecrets::check_dump`] lacks one of the tables the
     /// check reads, or holds a value of the wrong kind or range there (an id outside `u32`).
     DumpShape,
@@ -119,6 +126,11 @@ impl fmt::Display for StartupCheckError {
                     "a sealed row names data key {data_key_id}, which the secrets lack"
                 )
             }
+            Self::RetiredSetupLoaded { setup_id } => write!(
+                f,
+                "the secrets file holds OPAQUE setup {setup_id}, which the database marks \
+                 retired; run `rizzy-vault secrets retire-setups` again"
+            ),
             Self::DumpShape => f.write_str(
                 "the backup's OPAQUE setup, credential or TOTP rows do not have the expected shape",
             ),
@@ -334,9 +346,24 @@ impl ServerSecrets {
             .ok_or(AuthError::Internal("no OPAQUE setup"))
     }
 
-    /// The setup with `setup_id`, if the file still has it (§5.8 step 4 deletes old ones).
+    /// The setup with `setup_id`, if the file still has it (§5.8 step 4: `secrets
+    /// retire-setups` removes retired ones, ADR 0031 point 5).
     pub(crate) fn setup(&self, setup_id: u32) -> Option<&ServerSetup> {
         self.setups.get(&setup_id)
+    }
+
+    /// The `setup_id` new registrations use: the highest one (§5.8 step 2). Construction
+    /// requires a setup, so there always is one; `0` is never returned for a constructed value.
+    #[must_use]
+    pub fn current_setup_id(&self) -> u32 {
+        self.setups.keys().next_back().copied().unwrap_or(0)
+    }
+
+    /// Removes the setup `setup_id` from the file's contents (ADR 0031 point 5 step 2), unless
+    /// it is the current one, which is never removed. Returns whether it was removed; dropping
+    /// the setup wipes its OPRF seed and private key (opaque-ke's types wipe themselves).
+    pub(crate) fn remove_setup(&mut self, setup_id: u32) -> bool {
+        setup_id != self.current_setup_id() && self.setups.remove(&setup_id).is_some()
     }
 
     /// `enum_key`, for the server's writer and the fake `kdf_id` selector.
@@ -388,15 +415,20 @@ impl ServerSecrets {
     /// (ADR 0010 §4 "refuses to start"):
     ///
     /// 1. For every loaded setup whose `setup_id` the database records, the recorded
-    ///    `SHA-256(AKE public key)` must equal the loaded setup's.
+    ///    `SHA-256(AKE public key)` must equal the loaded setup's, and the database must not
+    ///    mark it retired (ADR 0031 point 6: a crash between the two steps of
+    ///    `secrets retire-setups` fails closed, and an old secrets backup cannot revive it).
     /// 2. If the database holds OPAQUE records, at least one loaded setup must be recorded
     ///    there already, so a fresh secrets file next to a restored database is refused rather
     ///    than silently answering with a new seed.
     /// 3. Every `data_key_id` a sealed row names (TOTP secrets, login states) must be loaded.
     /// 4. Then every loaded setup the database does not record yet is recorded, with `now_ms`.
     ///
-    /// Records naming a `setup_id` the file no longer has are allowed: §5.8 step 4 deletes an
-    /// old setup after its grace period, and those accounts take the device or recovery path.
+    /// Records naming a `setup_id` the file no longer has are allowed: `secrets retire-setups`
+    /// removes a retired setup from the file (CRYPTO.md §5.8 step 4, ADR 0031 point 5), and
+    /// those accounts take the fake-record path at login and the device or recovery path
+    /// (point 7). So is a database restored from before a retirement next to a file without
+    /// the setup (point 6).
     ///
     /// # Errors
     /// `Ok(Err(StartupCheckError))` when the server must refuse to start; `Err(AuthError)` when
@@ -411,12 +443,19 @@ impl ServerSecrets {
         let mut recorded_any = false;
         let mut unrecorded = Vec::new();
         for (id, setup) in &self.setups {
-            let stored: Option<(Vec<u8>,)> =
-                fetch_opt!(tx.conn(), (Vec<u8>,), sql::SETUP_GET, i64::from(*id))?;
+            let stored: Option<(Vec<u8>, Option<i64>)> = fetch_opt!(
+                tx.conn(),
+                (Vec<u8>, Option<i64>),
+                sql::SETUP_GET,
+                i64::from(*id)
+            )?;
             match stored {
-                Some((hash,)) => {
+                Some((hash, retired_at_ms)) => {
                     if hash.as_slice() != setup.public_key_hash().as_slice() {
                         return Ok(Err(StartupCheckError::SetupMismatch { setup_id: *id }));
+                    }
+                    if retired_at_ms.is_some() {
+                        return Ok(Err(StartupCheckError::RetiredSetupLoaded { setup_id: *id }));
                     }
                     recorded_any = true;
                 }
@@ -452,7 +491,8 @@ impl ServerSecrets {
     ///
     /// # Errors
     ///
-    /// [`StartupCheckError`] when the restore must be refused: a setup mismatch, OPAQUE records
+    /// [`StartupCheckError`] when the restore must be refused: a setup mismatch, a loaded setup
+    /// the dump marks retired (ADR 0031 point 6: an old secrets backup must not revive it), OPAQUE records
     /// with none of the loaded setups recorded (a fresh secrets file next to an old backup), a
     /// TOTP row naming a data key the file lacks, or [`StartupCheckError::DumpShape`] when one
     /// of those tables is missing or a value there is not the integer or blob it must be.
@@ -491,10 +531,10 @@ impl ServerSecrets {
         }
 
         // 1. Every loaded setup the dump records must match; 2. OPAQUE records need one.
-        let (setups, [id_col, hash_col]) = table(
+        let (setups, [id_col, hash_col, retired_col]) = table(
             dump,
             "auth_opaque_setups",
-            ["setup_id", "ake_public_key_hash"],
+            ["setup_id", "ake_public_key_hash", "retired_at_ms"],
         )?;
         let mut recorded_any = false;
         for row in setups {
@@ -502,12 +542,20 @@ impl ServerSecrets {
             let Some(Value::Blob(hash)) = row.get(hash_col) else {
                 return Err(StartupCheckError::DumpShape);
             };
+            let retired = match row.get(retired_col) {
+                Some(Value::Null) => false,
+                Some(Value::Integer(_)) => true,
+                _ => return Err(StartupCheckError::DumpShape),
+            };
             let loaded = u32::try_from(id)
                 .ok()
                 .and_then(|id| Some((id, self.setup(id)?)));
             if let Some((setup_id, setup)) = loaded {
                 if hash.as_slice() != setup.public_key_hash().as_slice() {
                     return Err(StartupCheckError::SetupMismatch { setup_id });
+                }
+                if retired {
+                    return Err(StartupCheckError::RetiredSetupLoaded { setup_id });
                 }
                 recorded_any = true;
             }

@@ -19,6 +19,11 @@ const MESSAGES: Readonly<Record<string, string>> = {
   server_not_found: "The server does not offer this.",
   server_unknown: "The server answered with an error this web vault does not know.",
   server_fresh_session_required: "Log in again to do this.",
+  server_setup_retired:
+    "The server changed its login setup while you signed up. Sign up again, or try again later.",
+  setup_retired: "The server refused the registration again after it was restarted. Try again later.",
+  server_credentials_stale:
+    "The server was restored from a backup and does not take this login yet. Open rizzy-vault on a device that is already set up for this account (it repairs the server with your master password), then log in again.",
   transport_failed: "Cannot reach the server. Check the connection and try again.",
   response_too_large: "The server's answer was too large.",
   locked: "The vault is locked.",

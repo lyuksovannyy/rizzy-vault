@@ -48,6 +48,7 @@ fn account_change<V: VaultPort>(
         account_state: req.account_state,
         bundle: req.bundle,
         registration_upload: req.registration_upload,
+        setup_id: req.setup_id,
         account_key_server_wrap: req.account_key_server_wrap,
         identity_secret_keys: req.identity_secret_keys,
         recovery,
@@ -76,11 +77,12 @@ impl<V: VaultPort> AuthService<V> {
         req: &ReregisterStartRequest,
         now_ms: u64,
     ) -> Result<ReregisterStartResponse, AuthError> {
-        let registration_response = self
+        let (setup_id, registration_response) = self
             .reregister_start(session, &req.registration_request, now_ms)
             .await?;
         Ok(ReregisterStartResponse {
             registration_response,
+            setup_id,
         })
     }
 

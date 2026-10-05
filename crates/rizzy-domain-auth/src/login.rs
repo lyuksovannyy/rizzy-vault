@@ -191,6 +191,8 @@ impl<V: VaultPort> AuthService<V> {
     /// - [`AuthError::SecondFactorRequired`]: KE3 verified but the account has 2FA and the
     ///   code is missing or wrong; the login must start again;
     /// - [`AuthError::RateLimited`]: too many TOTP checks for the account;
+    /// - [`AuthError::CredentialsStale`]: KE3 and the second factor verified, but the record lags
+    ///   the signed state (ADR 0032 §4); an enrolled device re-registers it first;
     /// - [`AuthError::InvalidRequest`]: a malformed KE3;
     /// - storage errors.
     pub async fn login_finish<R: CryptoRng + Send + ?Sized>(
@@ -293,6 +295,13 @@ impl<V: VaultPort> AuthService<V> {
         {
             return Err(AuthError::SecondFactorRequired);
         }
+        if credential.lags(&trust.state) {
+            // ADR 0032 §4: the record lags the signed state (a restore undid a credential change
+            // or a rotation; a password the restore undid was refused above, INV-59). Answered
+            // only now, after KE3 and the second factor verified, so it tells an unauthenticated
+            // prober nothing (§5.9); serving `E_srv` would only yield a key the client rejects.
+            return Err(AuthError::CredentialsStale);
+        }
         let device = reauth.and_then(|s| {
             (s.kind == SessionKind::Device && s.account_id == account_id)
                 .then_some(s.device_id)
@@ -316,11 +325,15 @@ impl<V: VaultPort> AuthService<V> {
         let account =
             view::build(&self.vault, tx.conn(), &trust, &devices, ViewScope::Current).await?;
         let wrap = server_wrap(&credential, trust.state.account_key_epoch)?;
+        // ADR 0031 point 2: KE3 verified, so the flag tells nothing an unauthenticated prober
+        // could not learn.
+        let reregister = self.needs_reregistration(credential.setup_id);
         Ok(LoginFinishResponse {
             session_token: token,
             account_id: Id::from_bytes(account_id.to_bytes()),
             account_key_server_wrap: wrap,
             account,
+            reregister,
         })
     }
 }

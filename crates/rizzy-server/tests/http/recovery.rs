@@ -25,11 +25,11 @@ use crate::rotation::{
 };
 
 /// The master password set by the recovery.
-const NEW_PASSWORD: &str = "a brand new master password";
+pub(crate) const NEW_PASSWORD: &str = "a brand new master password";
 
 /// Runs a recovery with `code` to its commit. Returns the recovered device and the new kit's
 /// Secret Key and recovery code.
-async fn recover(
+pub(crate) async fn recover(
     server: &Server,
     rng: &mut ChaCha20Rng,
     code: &str,

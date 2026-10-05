@@ -60,6 +60,9 @@
 //! - **Not under an alarm.** While the host holds the vault read-only (a rollback, a fork, an
 //!   unconfirmed identity change, an outdated device state) no healing request is built: the
 //!   device state itself may be the older copy (ADR 0026 §4 step 7).
+//! - **Step 3b** (ADR 0032 §2): the vault's self-grant and its wrap set at that grant's epoch, in
+//!   a request without records ([`VaultSync::self_grant_healing_request`]), sent before this
+//!   module's request so that no record waits on the epoch.
 //! - **Account healing** (ADR 0012 §7 steps 1–3: the bundle chain, the `account-state`, grants
 //!   and self-grants) is not here but in [`crate::healing`]: a server whose `account-state` is
 //!   behind is reported by the unlock checks of [`crate::unlock`] as a rollback, the host
@@ -75,7 +78,7 @@
 //! [`VaultSync::take_writes`] returns next. A refusal changes no row.
 
 use rizzy_proto::limits::{MAX_ITEM_KEY_WRAPS, MAX_RECORDS};
-use rizzy_proto::objects::ItemKeyWrap;
+use rizzy_proto::objects::{ItemKeyWrap, VaultSelfGrant};
 use rizzy_proto::vault::{HealingRequest, HealingResponse, OpRecord, Record};
 use rizzy_proto::wire::List;
 use rizzy_sync::causal::RestoreGeneration;
@@ -229,6 +232,7 @@ impl VaultSync {
             vault_id: id(self.vault_id.to_bytes()),
             item_key_wraps: List::new(wraps).map_err(|_| ClientError::CannotHeal)?,
             records: List::new(records).map_err(|_| ClientError::CannotHeal)?,
+            self_grant: None,
         };
         self.healing = Some(HealInFlight {
             own: own_seqs,
@@ -288,6 +292,54 @@ impl VaultSync {
         self.synced = false;
         self.prune_bodies();
         Ok(in_flight.outcome)
+    }
+
+    /// Healing step 3b of [ADR 0032] §2 for this vault: `grant`, the vault's self-grant under
+    /// the pinned state's account key (from [`crate::healing::AccountHealing::self_grants`]),
+    /// and in `item_key_wraps` every wrap-set row this device holds at that grant's
+    /// `vault_key_epoch`, without records. The server repairs its self-grant with it while the
+    /// stored one lags the signed state (ADR 0032 §3), and takes a repeat as success. Building
+    /// it changes nothing here; the host sends it before step 4 and fetches afterwards (the next
+    /// Fetch shows the healed wrap set and restore generation), so no answer needs applying.
+    ///
+    /// **Client precondition** (§3): only for a vault whose last complete Fetch was at the current
+    /// `vault_key_epoch`, that is, while this device holds the whole wrap set at the held epoch
+    /// (after a load from the cache, or a complete Fetch since the key was adopted). A row the
+    /// server lacks afterwards is re-published with step 4's request.
+    ///
+    /// [ADR 0032]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0032-healing-rotation-after-backup.md
+    ///
+    /// # Errors
+    /// [`ClientError::InvalidInput`] for another vault's grant or a grant at another epoch than
+    /// the held vault key's;
+    /// [`ClientError::CannotHeal`] when the precondition does not hold or the wraps exceed the
+    /// wire limit.
+    pub fn self_grant_healing_request(
+        &self,
+        grant: &VaultSelfGrant,
+    ) -> Result<HealingRequest, ClientError> {
+        let epoch = self.vault_key.epoch();
+        if grant.vault_id.to_bytes() != self.vault_id.to_bytes() || grant.vault_key_epoch != epoch {
+            return Err(ClientError::InvalidInput);
+        }
+        if self.wraps_complete_at != Some(epoch) {
+            return Err(ClientError::CannotHeal);
+        }
+        let wraps: Vec<ItemKeyWrap> = self
+            .known_wraps
+            .values()
+            .filter(|w| w.vault_key_epoch == epoch)
+            .cloned()
+            .collect();
+        if wraps.len() > MAX_ITEM_KEY_WRAPS {
+            return Err(ClientError::CannotHeal);
+        }
+        Ok(HealingRequest {
+            vault_id: id(self.vault_id.to_bytes()),
+            item_key_wraps: List::new(wraps).map_err(|_| ClientError::CannotHeal)?,
+            records: List::empty(),
+            self_grant: Some(grant.clone()),
+        })
     }
 
     /// The server refused the last [`VaultSync::healing_request`] (ADR 0021 §9: "else it

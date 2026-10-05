@@ -700,6 +700,7 @@ pub(crate) fn start_rotation_with<R: CryptoRng + ?Sized>(
         request: CommitChangeRequest {
             account_state: bytes(account.pin.state_wire.clone())?,
             registration_upload: None,
+            setup_id: None,
             account_key_server_wrap: None,
             recovery: None,
             account_settings: None,
@@ -1017,6 +1018,49 @@ impl PendingRotation {
         Ok(())
     }
 
+    /// ADR 0031 point 8, for a credential change that rides with this rotation: starts its
+    /// registration again with the same `pw_in`, at most once.
+    ///
+    /// # Errors
+    /// [`ClientError::InvalidInput`] for a rotation without a credential change;
+    /// [`ClientError::SetupRetired`] when it was restarted once already;
+    /// [`ClientError::Internal`].
+    pub(crate) fn restart_registration<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<rizzy_proto::change::ReregisterStartRequest, ClientError> {
+        self.credential
+            .as_mut()
+            .ok_or(ClientError::InvalidInput)?
+            .restart_registration(rng)
+    }
+
+    /// ADR 0031 point 8, on the answer to the restarted registration: only the OPAQUE upload,
+    /// the `setup_id` and `E_srv'` (under the new account key, at its locator) of the request
+    /// change; every other object, the signed state included, stays byte for byte.
+    ///
+    /// # Errors
+    /// [`ClientError::InvalidInput`] without a credential change or a restart; as
+    /// [`crate::reregister::finish_registration`].
+    pub(crate) fn on_registration_restarted<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        response: &rizzy_proto::change::ReregisterStartResponse,
+    ) -> Result<(), ClientError> {
+        let credential = self.credential.as_mut().ok_or(ClientError::InvalidInput)?;
+        credential.on_registration_restarted(
+            rng,
+            response,
+            self.account_id,
+            &self.new_account_key,
+            &mut self.built.e_srv,
+        )?;
+        self.request.registration_upload = Some(credential.registration_upload.clone());
+        self.request.setup_id = Some(credential.setup_id);
+        self.request.account_key_server_wrap = Some(self.built.e_srv.clone());
+        Ok(())
+    }
+
     /// The request of the current attempt.
     fn assemble(&mut self) -> Result<(), ClientError> {
         let statements = |v: &[CertifiedDevice]| {
@@ -1041,6 +1085,7 @@ impl PendingRotation {
                 .credential
                 .as_ref()
                 .map(|c| c.registration_upload.clone()),
+            setup_id: self.credential.as_ref().map(|c| c.setup_id),
             account_key_server_wrap: Some(self.built.e_srv.clone()),
             recovery: self.built.recovery.clone(),
             account_settings: self.built.settings.clone(),

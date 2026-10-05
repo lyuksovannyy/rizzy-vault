@@ -106,7 +106,7 @@ pub(crate) fn fixture() -> Dump {
         ),
         (
             "auth_opaque_setups",
-            vec![vec![int(1), blob(1, 32), int(10)]],
+            vec![vec![int(1), blob(1, 32), int(10), Value::Null]],
         ),
         (
             "auth_credentials",
@@ -118,6 +118,7 @@ pub(crate) fn fixture() -> Dump {
                 int(0),
                 blob(3, 90),
                 int(11),
+                int(2),
             ]],
         ),
         (
@@ -126,7 +127,14 @@ pub(crate) fn fixture() -> Dump {
         ),
         (
             "auth_recovery",
-            vec![vec![a1(), int(1), blob(5, 90), blob(6, 32), int(13)]],
+            vec![vec![
+                a1(),
+                int(1),
+                blob(5, 90),
+                blob(6, 32),
+                int(13),
+                Value::Null,
+            ]],
         ),
         (
             "auth_bundles",

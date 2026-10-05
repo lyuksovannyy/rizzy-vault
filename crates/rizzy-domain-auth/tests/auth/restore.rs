@@ -26,7 +26,7 @@ pub(crate) async fn reregister(
 ) -> Result<(), AuthError> {
     let pw_in = PasswordInput::derive_for_new_password(password, &client.secret_key).unwrap();
     let (state, m1) = client_registration_start(&mut env.rng, &pw_in).unwrap();
-    let m2 = env
+    let (setup_id, m2) = env
         .svc
         .reregister_start(session, &bytes(m1), env.now)
         .await?;
@@ -54,6 +54,7 @@ pub(crate) async fn reregister(
         account_state: bytes(next.1.clone()),
         bundle: None,
         registration_upload: Some(bytes(reg.upload)),
+        setup_id: Some(setup_id),
         account_key_server_wrap: Some(AccountKeyServerWrap {
             account_key_epoch: client.account_key.epoch(),
             password_epoch: pe,
@@ -127,6 +128,7 @@ async fn reconcile(
         token: done.session_token,
         session_id: rizzy_core::ids::SessionId::from_bytes(done.session_id.to_bytes()),
         counter: 1,
+        reregister: done.reregister,
     })
 }
 
@@ -256,6 +258,8 @@ fn restore_drill_reconciliation_epoch() {
             )
             .unwrap(),
             device_revocations: List::empty(),
+            identity_secret_keys: None,
+            account_settings: None,
         };
         env.svc
             .publish_account_state(&a_session, &publish, env.now)
@@ -352,6 +356,8 @@ fn restored_device_repeating_an_adopted_state_ends_the_epoch() {
             )
             .unwrap(),
             device_revocations: List::empty(),
+            identity_secret_keys: None,
+            account_settings: None,
         };
         env.svc
             .publish_account_state(&opaque, &publish, env.now)
@@ -466,5 +472,65 @@ fn reconciliation_limit_holds_without_the_worker() {
             .await,
             Err(AuthError::Unauthorized)
         ));
+    });
+}
+
+/// ADR 0032 §3 and finding "self-grants outside the lag rule": inside the reconciliation epoch,
+/// healing step 3a (`healing/grants`) no longer stores a vault self-grant. A self-grant stored
+/// there would stop lagging (its `account_key_epoch` the state's) while the vault's epoch and
+/// wrap set stayed behind, so step 3b could never repair the vault. Only the stored self-grant,
+/// byte for byte, is accepted; any other, at the same or a newer account epoch, is refused and
+/// nothing changes.
+#[test]
+fn healing_grants_never_store_a_self_grant() {
+    block_on(async {
+        let mut env = Env::new(64).await;
+        let client = env.signup("pia", "pw").await;
+        let backup = env.db.dump().await.unwrap();
+        restore(&mut env, &backup, |_| {}).await;
+        let a = device_session(&mut env, &client, &client.devices[0]).await;
+        assert!(epoch_open(&env, &a).await);
+        let query = || rizzy_proto::account::AccountStateQuery {
+            known_bundle_seq: 0,
+            known_settings_seq: 0,
+        };
+        let held = env
+            .svc
+            .account_view(&a, query(), env.now)
+            .await
+            .unwrap()
+            .vault_self_grants;
+        assert_eq!(held.len(), 1);
+
+        // The stored self-grant, re-sent: a success that stores nothing.
+        let resent = PublishGrantsRequest {
+            vault_self_grants: held.clone(),
+            device_grants: List::empty(),
+        };
+        env.svc.publish_grants(&a, &resent, env.now).await.unwrap();
+
+        // Another envelope at the same epochs, and one at a newer account epoch: refused.
+        let same_epochs = crate::common::self_grant(&mut env.rng, &client);
+        let mut newer: VaultSelfGrant = same_epochs.clone();
+        newer.account_key_epoch += 1;
+        newer.vault_key_epoch += 1;
+        for grant in [same_epochs, newer] {
+            let request = PublishGrantsRequest {
+                vault_self_grants: List::new(vec![grant]).unwrap(),
+                device_grants: List::empty(),
+            };
+            assert!(matches!(
+                env.svc.publish_grants(&a, &request, env.now).await,
+                Err(AuthError::InvalidRequest)
+            ));
+        }
+        let after = env
+            .svc
+            .account_view(&a, query(), env.now)
+            .await
+            .unwrap()
+            .vault_self_grants;
+        assert_eq!(after, held);
+        assert!(epoch_open(&env, &a).await);
     });
 }

@@ -608,6 +608,8 @@ impl Reregistering {
         let request = CommitChangeRequest {
             account_state: bytes(state_wire.clone())?,
             registration_upload: Some(bytes(registration.upload)?),
+            // ADR 0031 point 3: the setup the registration started under, echoed.
+            setup_id: Some(response.setup_id),
             account_key_server_wrap: Some(AccountKeyServerWrap {
                 account_key_epoch,
                 password_epoch,

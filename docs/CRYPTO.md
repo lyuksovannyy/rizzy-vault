@@ -393,8 +393,8 @@ Parked post-1.0 by [ADR 0022](adr/0022-server-mode-only.md): Server mode is the 
 **Rotating `server_setup`.** This is for a suspected leak only; with the SK, a leak alone is not an offline attack.
 1. Add setup #2 and tag every record with its `setup_id`.
 2. New registrations use #2.
-3. A successful login against a #1 record triggers a transparent re-registration under #2. This costs one extra Argon2id, once.
-4. After a grace period set by the admin, delete #1. Accounts that never logged in during the grace period take the device or recovery path.
+3. After a successful OPAQUE login or device authentication against a #1 record, the server answers `reregister = true`, and a client holding the typed password re-registers under #2 with the same password (one extra Argon2id, once). Registrations echo the `setup_id` they started under, and the server labels the record with it; it refuses a retired or unknown one with `setup_retired` ([ADR 0031](adr/0031-retiring-old-opaque-setups.md)).
+4. `rizzy-vault secrets retire-setups --grace-days N` (default 90), with the server stopped, marks every non-current setup whose successor was recorded at least N days ago as retired in the DB and removes it from the secrets file. From the next start its records take the fake-record path ([§5.9](#59-account-enumeration)) and their accounts take the device or recovery path. The server refuses a secrets file that holds a retired setup.
 
 ### 5.9 Account enumeration
 
@@ -928,7 +928,7 @@ Flows from kind 4 follow the secrets-before-commit rule below. A kind-4 client h
 4. Upload.
 5. Only after the server acknowledges the commit, finalise the device state and delete the pending record.
 
-On restart with a pending record, the client fetches `account-state`: if the server holds the new state it finalises, otherwise it resends the same request. The server treats a repeat of an already-applied commit (byte-identical new state) as success.
+On restart with a pending record, the client fetches `account-state`: if the server holds the new state it finalises, otherwise it resends the same request. The server treats a repeat of an already-applied commit (byte-identical new state) as success, checked before anything else. If the request's OPAQUE setup was retired meanwhile, the server answers `setup_retired`; the client then reruns the registration with the same `pw_in`, replaces only the OPAQUE upload and `E_srv` in the persisted request, keeps every other object and secret of the pending record, and resends ([ADR 0031](adr/0031-retiring-old-opaque-setups.md) point 8).
 
 **Replacing credentials (normative).** The server replaces the OPAQUE record, `E_srv`, `E_rec` or `H_rec` only in a request that also carries a new `account-state`. That state must verify under the current identity key and is applied by compare-and-swap (`state_seq + 1`). In it:
 - `password_epoch` is the current value + 1 when the password or SK changed, and unchanged for a same-password re-registration ([§5.8](#58-loss-or-rotation-of-the-server-opaque-secrets), [§6.3](#63-upgrade-path));
@@ -936,7 +936,7 @@ On restart with a pending record, the client fetches `account-state`: if the ser
 - `recovery_epoch` is the current value + 1 when a new code is issued;
 - the epochs in the ctx of the new `E_srv` and `E_rec` equal the state's.
 
-The server stores `kdf_id` and `password_epoch` from that state with the OPAQUE record, and `recovery_epoch` with `H_rec`. The request also needs a fresh OPAQUE session (≤ 5 min), the recovery-only session ([§11.9](#119-recovery-with-the-emergency-kit)), or, for a same-password re-registration only, a device session.
+The server stores `kdf_id` and `password_epoch` from that state with the OPAQUE record, and `recovery_epoch` with `H_rec`. The server stores `account_key_epoch` from that state with the OPAQUE record and with `H_rec` and `E_rec`, and refuses a login or recovery against one that lags the state (ADR 0032 §4). The request also needs a fresh OPAQUE session (≤ 5 min), the recovery-only session ([§11.9](#119-recovery-with-the-emergency-kit)), or, for a same-password re-registration only, a device session.
 
 ### 11.1 Signup (Server mode)
 
@@ -967,7 +967,7 @@ The server stores `kdf_id` and `password_epoch` from that state with the OPAQUE 
 8. **Commit.** `POST /api/v1/register/finish` with exactly these objects: the OPAQUE `upload`, `E_srv`, `E_id`, the bundle, `account-state`, the vault self-grant, the device certificate, and `E_rec` with `H_rec`. **`E_dev` is never uploaded**: it is written locally in step 7. The API has no field that could carry it, and the server rejects requests with unknown fields. The server:
    - checks the bundle self-signature and the certificate chain (cheap consistency checks),
    - stores everything in one transaction,
-   - records the `setup_id`, `kdf_id` and `password_epoch` with the OPAQUE record, and `recovery_epoch` with `H_rec`,
+   - records the `setup_id` echoed from step 4.2's answer (refused with `setup_retired` if retired or unknown), `kdf_id` and `password_epoch` with the OPAQUE record, and `recovery_epoch` with `H_rec`,
    - treats a byte-identical repeat for the same `account_id` as success, so a client that crashed after sending can resend.
 9. **Finalise.** After the server acknowledges, the client finalises its device state.
 
@@ -1006,7 +1006,7 @@ The server stores `kdf_id` and `password_epoch` from that state with the OPAQUE 
 2. **Online part.**
    1. Authenticate with the device key ([§5.10](#510-sessions-after-authentication)).
    2. Fetch `account-state`, every bundle with `bundle_seq` above the cached one, the device certificates and revocations, and `ACCOUNT_SETTINGS` if `settings_seq` changed.
-   3. If the state's `identity_epoch` is higher than the cached one, run step 3 before anything else. Otherwise verify the state with the cached identity key.
+   3. If the state's `identity_epoch` is higher than the cached one, run step 3 before anything else. Otherwise verify the state with the cached identity key. A served chain whose head is below the cached `bundle_seq`, every served bundle byte-identical to the one this device holds at that `bundle_seq`, with a state that verifies under the served head and a `state_seq` below the stored one, is a rollback (step 2.5); nothing it signs is accepted (ADR 0032 §1).
    4. Check, as in [§11.2](#112-login-on-a-new-device-server-mode) step 6: `account_id`, `bundle_hash`, `device_set_hash`, `settings_hash`, and, unless `account_key_epoch` increased (step 4), that the account key this device holds has key id `state.account_key_id`.
    5. If `state_seq` or `settings_seq` is lower than the stored value, warn "possible rollback by the server" and go read-only. If `state_seq` equals the stored value but the state's body differs from the stored state, it is a fork ([§10.2](#102-ed25519-signatures-and-signed-statements)): warn "the server has shown two versions of this account" and go read-only.
 3. **If `identity_epoch` increased** (a full rotation happened elsewhere):
@@ -1017,7 +1017,7 @@ The server stores `kdf_id` and `password_epoch` from that state with the OPAQUE 
 
    If the user declines or any check fails, the device stays read-only, keeps the old key, and shows why.
 4. **If `account_key_epoch` increased** (a rotation happened elsewhere):
-   1. Fetch this device's `ACCOUNT_KEY_DEVICE_GRANT`s for every epoch between the cached and the current one, and open them in epoch order with the device X25519 key and the device-grant PSK ([§10.1](#101-hpke-key-wrapping)).
+   1. Fetch this device's `ACCOUNT_KEY_DEVICE_GRANT`s for every epoch between the cached and the current one, and open them in epoch order with the device X25519 key and the device-grant PSK ([§10.1](#101-hpke-key-wrapping)). If no grant is served for an epoch, the device stays read-only; at a password unlock, once the server's OPAQUE record no longer lags, it runs §11.2 steps 2–6 instead and requires the key from `E_srv` to have key id `state.account_key_id` (ADR 0032 §4).
    2. Each grant's signature must verify under a certificate of the account for the sender `device_id` named in its AAD, which may since have been revoked, or under the identity key for a grant from a kind-4 client ([§10.1](#101-hpke-key-wrapping)). The key delivered by the last grant MUST have key id = `state.account_key_id`; otherwise abort and stay read-only.
    3. After a password unlock, keep `local_unlock_key` in a `Zeroizing` buffer until the online part completes, then re-wrap `E_local`, `E_ks` (if present) and `E_dev`. After a keystore unlock, re-wrap `E_ks` and `E_dev` only. Leave `E_local` unchanged, store its ctx epochs next to it (the reader rebuilds its ctx from those, not from the current state), and write a local, never-uploaded `ACCOUNT_KEY_FORWARD` envelope from the old account key to the new one. At the next password unlock, open `E_local`, follow the forward envelopes to the key whose id equals `state.account_key_id`, re-wrap `E_local` and delete the forward envelopes. No Argon2id runs beyond the unlock's own.
    4. Fetch the new `E_id` and self-grants.
@@ -1049,7 +1049,7 @@ The server stores `kdf_id` and `password_epoch` from that state with the OPAQUE 
 
 1. **Re-authenticate.** On an unlocked, online device, run an OPAQUE login with the current password. The server marks the session fresh for 5 minutes.
 2. **New inputs.** The user enters the new password. Optionally, generate a new SK. Compute `pw_in'`.
-3. **OPAQUE registration** under the same `credential_identifier = account_id`, with the current preferred `kdf_id` → `(upload', export_key')`.
+3. **OPAQUE registration** under the same `credential_identifier = account_id`, with the current preferred `kdf_id` → `(upload', export_key')`. The client echoes the `setup_id` of `ReregisterStartResponse` in the commit.
 4. **Build the new state:**
    - `E_srv'` under the new `server_unlock_key`, with context `password_epoch + 1`.
    - `account-state'` with `state_seq + 1` and `password_epoch + 1`.

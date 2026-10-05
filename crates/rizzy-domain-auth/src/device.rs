@@ -335,9 +335,17 @@ impl<V: VaultPort> AuthService<V> {
             self.config.device_session_ttl_ms,
         )
         .await?;
+        // The device signature verified; the flag says whether the record names a setup other
+        // than the current one (ADR 0031 point 2) or lags the signed state (ADR 0032 §4 step 5:
+        // "`reregister: true` while the record lags"). The state is the one this transaction
+        // read, after any reconciliation above.
+        let reregister = store::credential(tx.conn(), account.as_bytes())
+            .await?
+            .is_some_and(|c| self.needs_reregistration(c.setup_id) || c.lags(&trust.state));
         Ok(DeviceAuthFinishResponse {
             session_token: token,
             session_id: Id::from_bytes(session.session_id.to_bytes()),
+            reregister,
         })
     }
 

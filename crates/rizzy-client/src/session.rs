@@ -126,6 +126,8 @@ pub struct DeviceSession {
     account_id: AccountId,
     /// The device.
     device_id: DeviceId,
+    /// The answer's `reregister` flag (ADR 0031 point 2).
+    reregister: bool,
 }
 
 impl fmt::Debug for DeviceSession {
@@ -148,7 +150,16 @@ impl DeviceSession {
             server_origin: state.server_origin.clone(),
             account_id: state.account_id,
             device_id: state.device_id,
+            reregister: answer.reregister,
         }
+    }
+
+    /// Whether the server asked for a same-password re-registration (ADR 0031 point 2): the
+    /// account's record is on an old OPAQUE setup. A host holding the typed password runs
+    /// [`crate::reregister::start_device_reregistration`] at most once per unlock.
+    #[must_use]
+    pub const fn reregister(&self) -> bool {
+        self.reregister
     }
 
     /// The bearer token, for the host's transport. Never log it.

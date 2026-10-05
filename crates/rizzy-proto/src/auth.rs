@@ -61,11 +61,16 @@ pub struct RegisterStartRequest {
 }
 
 /// The answer to [`RegisterStartRequest`]: OPAQUE `RegistrationResponse` ("M2", §11.1 step
-/// 4.3).
+/// 4.3), and the `setup_id` of the `server_setup` it was made under ([ADR 0031] point 3), which
+/// the client echoes in [`RegisterFinishRequest::setup_id`].
+///
+/// [ADR 0031]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0031-retiring-old-opaque-setups.md
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterStartResponse {
     /// OPAQUE `RegistrationResponse`.
     pub registration_response: OpaqueMessage,
+    /// The `setup_id` the registration started under.
+    pub setup_id: u32,
 }
 
 /// The signup commit (CRYPTO.md §11.1 step 8), "with exactly these objects: the OPAQUE
@@ -80,6 +85,9 @@ pub struct RegisterStartResponse {
 pub struct RegisterFinishRequest {
     /// OPAQUE `RegistrationUpload`.
     pub registration_upload: OpaqueMessage,
+    /// [`RegisterStartResponse::setup_id`], echoed: the server labels the record with it and
+    /// refuses a retired or unknown one with `setup_retired` (ADR 0031 point 3).
+    pub setup_id: u32,
     /// `E_srv`.
     pub account_key_server_wrap: AccountKeyServerWrap,
     /// `E_id`.
@@ -168,6 +176,12 @@ pub struct LoginFinishResponse {
     pub account_key_server_wrap: AccountKeyServerWrap,
     /// The signed account objects and wraps.
     pub account: AccountView,
+    /// The account's OPAQUE record names a `setup_id` other than the current one: a client
+    /// that holds the typed password re-registers with it, at most once per unlock (ADR 0031
+    /// point 2). Sent only after KE3 verified, so it tells an unauthenticated prober nothing.
+    /// Absent reads as `false`.
+    #[serde(default)]
+    pub reregister: bool,
 }
 
 /// The objects a device enrolled after a restored backup sends with its device-auth request,
@@ -248,6 +262,10 @@ pub struct DeviceAuthFinishResponse {
     pub session_token: SessionToken,
     /// The session id for request signing.
     pub session_id: Id,
+    /// As [`LoginFinishResponse::reregister`]; sent only after the device signature verified
+    /// (ADR 0031 point 2). Absent reads as `false`.
+    #[serde(default)]
+    pub reregister: bool,
 }
 
 /// The two values a native client (kinds 1–3) sends with every request over a

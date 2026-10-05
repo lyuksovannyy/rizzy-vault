@@ -6,8 +6,10 @@
 //!    time, comparing against a dummy hash when the name is unknown or has no code, so unknown
 //!    names and wrong codes answer the same way (§5.9). A code whose `recovery_epoch` is not the
 //!    signed state's current one, or whose state says recovery is off, is refused like a
-//!    wrong code (INV-59). On success it opens a pending recovery whose waiting period is the
-//!    configured one (default 72 h, 0 to 30 days).
+//!    wrong code (INV-59); so is one whose row lags the state's `account_key_epoch` (ADR 0032
+//!    §4 step 6: `E_rec` under an older account key, until the user repairs it). On success it
+//!    opens a pending recovery whose waiting period is the configured one (default 72 h, 0 to
+//!    30 days).
 //! 2. Any enrolled durable device with a device session cancels it:
 //!    [`AuthService::recovery_cancel`].
 //! 3. [`AuthService::recovery_complete`], after the wait: `E_rec` with its epochs, the account
@@ -139,7 +141,10 @@ impl<V: VaultPort> AuthService<V> {
         // The code matched: only now load the signed state (nothing that differs between
         // accounts runs for a wrong code). INV-59: the code must be the state's current one.
         let trust = AccountTrust::load(tx.conn(), account).await?;
-        if !trust.state.recovery_enabled || trust.state.recovery_epoch != row.recovery_epoch {
+        // ADR 0032 §4 step 6: a row that lags the state (its `recovery_epoch` or its
+        // `account_key_epoch` is not the state's, after a restore) is refused like a wrong code
+        // until the user repairs it.
+        if !trust.state.recovery_enabled || row.lags(&trust.state) {
             return Ok(None);
         }
         Ok(Some((account, row)))

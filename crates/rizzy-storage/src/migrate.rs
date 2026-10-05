@@ -74,6 +74,18 @@ pub const MIGRATIONS: &[MigrationFile] = &[
         sqlite: include_str!("../migrations/sqlite/0003_storage_restore.sql"),
         postgres: include_str!("../migrations/postgres/0003_storage_restore.sql"),
     },
+    MigrationFile {
+        version: 4,
+        description: "auth_retired_setups",
+        sqlite: include_str!("../migrations/sqlite/0004_auth_retired_setups.sql"),
+        postgres: include_str!("../migrations/postgres/0004_auth_retired_setups.sql"),
+    },
+    MigrationFile {
+        version: 5,
+        description: "auth_credential_epochs",
+        sqlite: include_str!("../migrations/sqlite/0005_auth_credential_epochs.sql"),
+        postgres: include_str!("../migrations/postgres/0005_auth_credential_epochs.sql"),
+    },
 ];
 
 /// This release's schema version: the last migration's version. A logical backup is stamped

@@ -90,10 +90,10 @@
 //!
 //! # Not in this build (reported to the owner)
 //!
-//! - Deleting an old OPAQUE setup after its grace period (CRYPTO.md §5.8 step 4), and dropping
-//!   an unused data key without adding a new one: neither has a command in any ADR ([`admin`]).
+//! - Dropping an unused data key without adding a new one: no ADR names a command for it
+//!   ([`admin`]).
 //! - A run of the `PostgreSQL` paths against a real server: the instance lock (ADR 0023 §5 step
-//!   1; [`server`]), and `restore`, `migrate` and `secrets rotate` under it, are tested on
+//!   1; [`server`]), and `restore`, `migrate`, `secrets rotate` and `secrets retire-setups` under it, are tested on
 //!   `SQLite` here and by `rizzy-storage`'s `#[ignore]`d `PostgreSQL` tests.
 //! - Recording a change of the recovery waiting period in the users' security event log
 //!   (threat model §7.19, INV-69): that log is M3's.

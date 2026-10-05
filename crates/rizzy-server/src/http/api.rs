@@ -494,7 +494,8 @@ impl Endpoint {
     }
 }
 
-/// The HTTP status of an error code ([ADR 0028] item 3). A code this build does not send
+/// The HTTP status of an error code ([ADR 0028] item 3, with `setup_retired` 409 as ADR 0031 point
+/// 3 adds it and `credentials_stale` 409 as ADR 0032 adds it). A code this build does not send
 /// (`unknown`) maps to `500` like `internal`. Clients branch on the code, never on the status.
 ///
 /// [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
@@ -510,7 +511,9 @@ pub const fn status(code: ErrorCode) -> StatusCode {
         ErrorCode::StateConflict
         | ErrorCode::StaleEpoch
         | ErrorCode::RecordConflict
-        | ErrorCode::PrevSeqMismatch => StatusCode::CONFLICT,
+        | ErrorCode::PrevSeqMismatch
+        | ErrorCode::SetupRetired
+        | ErrorCode::CredentialsStale => StatusCode::CONFLICT,
         ErrorCode::ApiVersionGone => StatusCode::GONE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -1103,7 +1106,18 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
         }
         Endpoint::Heal => match api
             .vault
-            .heal(need()?.account_id, &parse(&body)?, now)
+            .heal(
+                need()?.account_id,
+                // ADR 0032 §3: only a device session names a healer that may repair a
+                // lagging self-grant (healing step 3b).
+                need().ok().and_then(|s| {
+                    (s.kind == SessionKind::Device)
+                        .then_some(s.device_id)
+                        .flatten()
+                }),
+                &parse(&body)?,
+                now,
+            )
             .await
         {
             Ok(answer) => json(&answer),
@@ -1193,6 +1207,8 @@ mod tests {
             (ErrorCode::StaleEpoch, 409),
             (ErrorCode::RecordConflict, 409),
             (ErrorCode::PrevSeqMismatch, 409),
+            (ErrorCode::SetupRetired, 409),
+            (ErrorCode::CredentialsStale, 409),
             (ErrorCode::ApiVersionGone, 410),
             (ErrorCode::PayloadTooLarge, 413),
             (ErrorCode::RateLimited, 429),

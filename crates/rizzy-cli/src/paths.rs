@@ -26,6 +26,15 @@
 //! cache and then wrote could each sign an op at the same `device_seq`; the lock prevents
 //! that, and the SQL of [`crate::db`] refuses it a second time.
 //!
+//! A lock that is still taken is tried again for up to [`LOCK_WAIT`] before the answer is "in
+//! use". The advisory lock belongs to the open file description (`flock` on macOS and BSD), and
+//! a process spawned by another thread of the same program shares that description until its
+//! `exec` closes the copy (the handle is close-on-exec). So a lock this program has just
+//! released can look taken for a few milliseconds while it spawns: measured up to about 50 ms
+//! on macOS with four threads spawning at once, which is what made the end-to-end tests, which
+//! start servers while `rv` commands run, fail now and then with "in use". A second `rv` that
+//! really holds the lock still gets "in use", [`LOCK_WAIT`] later.
+//!
 //! # Output files
 //!
 //! [`write_new_file`] is the one way `rv` writes an export: `create_new` (so nothing, a
@@ -39,6 +48,7 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::error::{CliError, io_error};
 
@@ -189,6 +199,12 @@ pub fn enrolled_accounts(dir: &Path) -> Result<Vec<[u8; 16]>, CliError> {
     Ok(accounts)
 }
 
+/// How long [`AccountLock::acquire`] tries again before it answers "in use" (module docs).
+pub const LOCK_WAIT: Duration = Duration::from_secs(2);
+
+/// The pause between two tries of [`AccountLock::acquire`].
+const LOCK_RETRY: Duration = Duration::from_millis(10);
+
 /// The exclusive lock of one account's cache (module docs). Released when dropped or when the
 /// process exits.
 #[derive(Debug)]
@@ -198,10 +214,12 @@ pub struct AccountLock {
 }
 
 impl AccountLock {
-    /// Locks the cache of `account_id` in `dir`.
+    /// Locks the cache of `account_id` in `dir`, trying again for up to [`LOCK_WAIT`] while the
+    /// lock is taken (module docs).
     ///
     /// # Errors
-    /// [`CliError::InUse`] if another process holds it; [`CliError::Io`].
+    /// [`CliError::InUse`] if another process still holds it after [`LOCK_WAIT`];
+    /// [`CliError::Io`].
     pub fn acquire(dir: &Path, account_id: &[u8; 16]) -> Result<Self, CliError> {
         let path = dir.join(format!("{}.lock", hex(account_id)));
         let mut options = OpenOptions::new();
@@ -214,10 +232,18 @@ impl AccountLock {
         let file = options
             .open(path)
             .map_err(io_error("cannot open the lock file"))?;
-        match file.try_lock() {
-            Ok(()) => Ok(Self { _file: file }),
-            Err(fs::TryLockError::WouldBlock) => Err(CliError::InUse),
-            Err(fs::TryLockError::Error(e)) => Err(io_error("cannot lock the local data")(e)),
+        let started = Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { _file: file }),
+                Err(fs::TryLockError::WouldBlock) if started.elapsed() < LOCK_WAIT => {
+                    std::thread::sleep(LOCK_RETRY);
+                }
+                Err(fs::TryLockError::WouldBlock) => return Err(CliError::InUse),
+                Err(fs::TryLockError::Error(e)) => {
+                    return Err(io_error("cannot lock the local data")(e));
+                }
+            }
         }
     }
 }

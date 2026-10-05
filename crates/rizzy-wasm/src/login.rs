@@ -24,6 +24,15 @@
 //!   §11.4): unlocking is a new login, and a lock drops the [`Session`].
 //! - **Re-authentication** for a plaintext export ([`Session::reauth`]) runs the same OPAQUE
 //!   steps, keeps none of the new login's keys and uploads no certificate.
+//! - **Moving to the server's current OPAQUE setup** ([ADR 0031] point 2). When `login/finish`
+//!   answers `reregister`, the session login holds the typed password, so before the ephemeral
+//!   certificate it runs the same-password re-registration over its OPAQUE session
+//!   (`account/reregister/start`, then `account/commit`; [`rizzy_client::reregister`]), once
+//!   per login. It is transparent: any failure (a lost compare-and-swap, a refusal, a bad
+//!   answer) skips it, the login goes on, and the next login tries again. A re-authentication
+//!   does not run it.
+//!
+//! [ADR 0031]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0031-retiring-old-opaque-setups.md
 
 use core::fmt;
 
@@ -31,8 +40,10 @@ use rizzy_client::ClientError;
 use rizzy_client::login::{
     LoggedIn, LoginAwaitingSession, LoginInput, LoginStarted, WebSession, start_login,
 };
+use rizzy_client::reregister::{PendingReregistration, ReregistrationStarted};
 use rizzy_client::rizzy_core::ids::AccountId;
 use rizzy_client::rizzy_proto::auth::{LoginFinishResponse, LoginStartResponse};
+use rizzy_client::rizzy_proto::change::ReregisterStartResponse;
 use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::rizzy_proto::http::paths;
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -82,6 +93,11 @@ enum Stage {
     Start(Box<LoginStarted>),
     /// `login/finish` is outstanding.
     Finish(LoginAwaitingSession),
+    /// `account/reregister/start` of the same-password re-registration is outstanding (ADR
+    /// 0031 point 2).
+    Reregister(Box<LoggedIn>, ReregistrationStarted),
+    /// Its `account/commit` is outstanding.
+    ReregisterCommit(Box<LoggedIn>, Box<PendingReregistration>),
     /// `devices/web-certificate` is outstanding.
     Certificate(Box<WebSession>),
     /// The account has 2FA and the login carried no code.
@@ -162,7 +178,11 @@ impl LoginFlow {
     #[must_use]
     pub fn state(&self) -> String {
         match self.stage {
-            Stage::Start(_) | Stage::Finish(_) | Stage::Certificate(_) => "request",
+            Stage::Start(_)
+            | Stage::Finish(_)
+            | Stage::Reregister(..)
+            | Stage::ReregisterCommit(..)
+            | Stage::Certificate(_) => "request",
             Stage::NeedsTotp => "needs_totp",
             Stage::Done(_) | Stage::Reauthenticated(_) => "done",
             Stage::Spent => "failed",
@@ -298,7 +318,38 @@ impl LoginFlow {
                 }
                 let answer: LoginFinishResponse = http::json(status, body)?;
                 let logged_in = awaiting.complete(answer)?;
+                if self.purpose == Purpose::Session && logged_in.reregister() {
+                    return self.reregister(logged_in, now_ms);
+                }
                 self.logged_in(logged_in, now_ms)
+            }
+            Stage::Reregister(login, started) => {
+                let built = http::json::<ReregisterStartResponse>(status, body)
+                    .and_then(|answer| Ok(started.finish_login(&mut self.rng, &answer, &login)?))
+                    .and_then(|pending| {
+                        let request = HttpRequest::post(
+                            paths::ACCOUNT_COMMIT,
+                            pending.commit_request(),
+                            Some(login.bearer_token()),
+                        )?;
+                        Ok((pending, request))
+                    });
+                match built {
+                    Ok((pending, request)) => {
+                        self.pending = Some(request);
+                        self.stage = Stage::ReregisterCommit(login, Box::new(pending));
+                        Ok(())
+                    }
+                    // Transparent (module docs): the login goes on without it.
+                    Err(_) => self.logged_in(*login, now_ms),
+                }
+            }
+            Stage::ReregisterCommit(mut login, pending) => {
+                if http::empty(status, body).is_ok() {
+                    // The server holds the new record and state: the login pins the state.
+                    login.adopt_reregistration(*pending)?;
+                }
+                self.logged_in(*login, now_ms)
             }
             Stage::Certificate(web) => {
                 http::empty(status, body)?;
@@ -308,6 +359,30 @@ impl LoginFlow {
             Stage::NeedsTotp | Stage::Done(_) | Stage::Reauthenticated(_) | Stage::Spent => {
                 Err(CoreError::new(WRONG_STATE))
             }
+        }
+    }
+
+    /// ADR 0031 point 2 (module docs): starts the same-password re-registration over the
+    /// login's OPAQUE session; if it cannot even start, the login goes on without it.
+    fn reregister(&mut self, logged_in: LoggedIn, now_ms: u64) -> CoreResult<()> {
+        let started = logged_in
+            .start_reregistration(&mut self.rng)
+            .map_err(CoreError::from)
+            .and_then(|(started, request)| {
+                let request = HttpRequest::post(
+                    paths::ACCOUNT_REREGISTER_START,
+                    &request,
+                    Some(logged_in.bearer_token()),
+                )?;
+                Ok((started, request))
+            });
+        match started {
+            Ok((started, request)) => {
+                self.pending = Some(request);
+                self.stage = Stage::Reregister(Box::new(logged_in), started);
+                Ok(())
+            }
+            Err(_) => self.logged_in(logged_in, now_ms),
         }
     }
 

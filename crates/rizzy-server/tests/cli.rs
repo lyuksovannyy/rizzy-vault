@@ -399,3 +399,140 @@ fn not_utf8() -> OsString {
     // An unpaired surrogate.
     OsString::from_wide(&[u16::from(b'-'), 0xD800])
 }
+
+/// Runs the startup check of `secrets` against the `SQLite` database of `data` at `now_ms`, as a
+/// server start does (it records unrecorded setups).
+fn start_check(
+    data: &Path,
+    secrets: &Path,
+    now_ms: u64,
+) -> Result<(), rizzy_domain_auth::StartupCheckError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let path = data.join(rizzy_server::config::SQLITE_FILE_NAME);
+            let lock = rizzy_storage::WriterLock::acquire(&path).unwrap();
+            let db = rizzy_storage::Database::open_sqlite(
+                &rizzy_storage::SqliteOptions::new(&path),
+                lock,
+            )
+            .await
+            .unwrap();
+            let loaded = rizzy_server::secrets_file::load(secrets).unwrap();
+            let outcome = loaded.check_database(&db, now_ms).await.unwrap();
+            db.close().await;
+            outcome
+        })
+}
+
+/// `secrets retire-setups` (ADR 0031 points 4–6) as the operator runs it: nothing to retire
+/// before a successor is recorded; a setup whose successor is older than the grace period
+/// selected, counted, marked and dropped from the file; the old file refused at startup; a
+/// re-run that changes nothing; `--grace-days` out of range a usage error.
+#[test]
+fn retire_setups_command() {
+    let dir = temp_dir("retire");
+    let data = dir.join("data");
+    let secrets_dir = dir.join("secrets");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::create_dir_all(&secrets_dir).unwrap();
+    let secrets = secrets_dir.join("secrets.json");
+    let env = [
+        ("RIZZY_DATA_DIR", data.as_path()),
+        ("RIZZY_SECRETS_FILE", secrets.as_path()),
+    ];
+    assert!(rizzy(&["secrets", "init"], &env).status.success());
+    assert!(rizzy(&["migrate"], &env).status.success());
+    let day = 24 * 60 * 60 * 1000;
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    // A server first started 200 days ago with setup 1.
+    start_check(&data, &secrets, now - 200 * day).unwrap();
+
+    let out = rizzy(&["secrets", "retire-setups", "--grace-days", "3651"], &env);
+    assert_eq!(out.status.code(), Some(2));
+    let out = rizzy(&["secrets", "retire-setups", "--grace-days", "0"], &env);
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("no OPAQUE setup to retire")
+    );
+
+    // `secrets rotate`, and a start 100 days ago recorded setup 2.
+    assert!(rizzy(&["secrets", "rotate"], &env).status.success());
+    // Not recorded yet: setup 1 has no successor time and is not selected.
+    let out = rizzy(&["secrets", "retire-setups", "--grace-days", "0"], &env);
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("no OPAQUE setup")
+    );
+    start_check(&data, &secrets, now - 100 * day).unwrap();
+    let old_file = std::fs::read(&secrets).unwrap();
+    // 120 days of grace: nothing yet.
+    let out = rizzy(&["secrets", "retire-setups", "--grace-days", "120"], &env);
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("no OPAQUE setup")
+    );
+    assert_eq!(std::fs::read(&secrets).unwrap(), old_file);
+    // The default 90 days: setup 1 goes.
+    let out = rizzy(&["secrets", "retire-setups"], &env);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("setup 1: successor recorded"), "{stdout}");
+    assert!(stdout.contains("100 days ago"), "{stdout}");
+    assert!(
+        stdout.contains("0 account record(s) still on it"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("removed OPAQUE setup(s) 1"), "{stdout}");
+    assert!(stdout.contains("Make a new secrets backup"), "{stdout}");
+    let file: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&secrets).unwrap()).unwrap();
+    assert_eq!(file["setups"].as_array().unwrap().len(), 1);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&secrets).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    start_check(&data, &secrets, now).unwrap();
+    // A re-run changes nothing.
+    let after = std::fs::read(&secrets).unwrap();
+    let out = rizzy(&["secrets", "retire-setups", "--grace-days", "0"], &env);
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("no OPAQUE setup")
+    );
+    assert_eq!(std::fs::read(&secrets).unwrap(), after);
+    // The old file (an old secrets backup) is refused at startup.
+    std::fs::write(&secrets, &old_file).unwrap();
+    assert_eq!(
+        start_check(&data, &secrets, now),
+        Err(rizzy_domain_auth::StartupCheckError::RetiredSetupLoaded { setup_id: 1 })
+    );
+    // Running the command again removes it once more.
+    let out = rizzy(&["secrets", "retire-setups", "--grace-days", "3650"], &env);
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("removed OPAQUE setup(s) 1")
+    );
+    start_check(&data, &secrets, now).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}

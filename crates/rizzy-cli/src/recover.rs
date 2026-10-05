@@ -13,6 +13,9 @@
 //!   open gap" below).
 //! - `rv recovery cancel`, on an enrolled device: cancels a pending recovery (§11.9 step 2:
 //!   "Any enrolled device with a device-authenticated session can cancel").
+//! - `rv recovery repair`, on an enrolled device, after the server was restored from a backup
+//!   (ADR 0032 §4 step 6): replaces the server's `H_rec` and `E_rec` together, with a new code
+//!   and kit, or with `--retype` the current code ([`repair`]).
 //!
 //! A computer that still holds this account's cache must run `rv device forget` first: its
 //! device state is under the forgotten password and cannot be carried over.
@@ -241,4 +244,17 @@ pub async fn cancel(env: &mut Env<'_>) -> Result<(), CliError> {
         env.ui.note("No recovery was pending.");
     }
     Ok(())
+}
+
+/// `recovery repair`, on an enrolled device (ADR 0032 §4 step 6): after a restore the server's
+/// `H_rec` and `E_rec` may lag the account, and recovery is refused until the user repairs them.
+/// The device goes online (healing the server first if it is behind), re-authenticates with
+/// the master password, and commits `H_rec` and `E_rec` together: a new recovery code and kit
+/// by default, or the current code re-typed with `--retype`.
+///
+/// # Errors
+/// As [`Device::open`] and [`Device::repair_recovery`].
+pub async fn repair(env: &mut Env<'_>, name: &str, retype: bool) -> Result<(), CliError> {
+    let mut device = Device::open(env).await?;
+    Box::pin(device.repair_recovery(env.ui, name, retype)).await
 }

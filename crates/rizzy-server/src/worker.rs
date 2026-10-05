@@ -30,6 +30,12 @@
 //!    again; a server restarted more often than daily keeps the copy (the conservative side:
 //!    the rollback point stays) until one run lasts 24 h, or the operator deletes it.
 //!
+//! 7. **Old OPAQUE setups** (ADR 0031 point 10): read only, the setups below the current one
+//!    that are not retired and whose successor is more than 90 days old, logged as
+//!    `opaque_setup_retirable` with their record counts at most once a day
+//!    ([`notice_retirable_setups`]). The worker never retires one: `rizzy-vault secrets
+//!    retire-setups` does, with the server stopped ([`crate::admin`]).
+//!
 //! **When it runs.** Once at startup, then every configured interval, and early when the vault
 //! domain publishes `CompactionQueued` on the in-process bus (the durable queue, not the event,
 //! is the record of truth: a missed or lagged event only delays the item to the next run).
@@ -134,6 +140,7 @@ pub async fn run(
     let mut events = Some(events);
     let mut leader: Option<WorkerLeader> = None;
     let mut standby_logged = false;
+    let mut retirable_logged: Option<Instant> = None;
     loop {
         if leader.is_none() {
             leader = take_leadership(&db, &mut standby_logged).await;
@@ -153,6 +160,9 @@ pub async fn run(
                     Field::U64("compaction_failures", count(report.compaction_failures)),
                 ],
             );
+            if !report.leadership_lost {
+                notice_retirable_setups(&api, &mut retirable_logged).await;
+            }
             if report.leadership_lost {
                 // Dropping the leader drops its connection: whatever is left of the session
                 // and its lock is released by the server.
@@ -266,6 +276,46 @@ async fn still_leader(leader: &mut WorkerLeader) -> bool {
                 &[Field::Str("error", "checking the leader lock timed out")],
             );
             false
+        }
+    }
+}
+
+/// How often `worker` logs `opaque_setup_retirable`, at most (ADR 0031 point 10: "at most once a
+/// day").
+pub const RETIRABLE_NOTICE_INTERVAL: Duration = Duration::from_secs(24 * 3600);
+
+/// ADR 0031 point 10, once per run and read only: every setup below the current one, not
+/// retired, whose successor was recorded more than 90 days ago, with the number of records
+/// that still name it (`rizzy_domain_auth::AuthService::retirable_setups`). When there is one
+/// and `last` is unset or [`RETIRABLE_NOTICE_INTERVAL`] old, one `opaque_setup_retirable` line
+/// per setup is logged (the `setup_id` and the count, nothing else) and `last` is set. The
+/// worker never retires a setup or writes the secrets file: the operator runs `rizzy-vault
+/// secrets retire-setups`. Returns how many setups were logged.
+pub async fn notice_retirable_setups(api: &Api, last: &mut Option<Instant>) -> usize {
+    if last.is_some_and(|at| at.elapsed() < RETIRABLE_NOTICE_INTERVAL) {
+        return 0;
+    }
+    match api.auth.retirable_setups(now_ms()).await {
+        Ok(setups) if setups.is_empty() => 0,
+        Ok(setups) => {
+            for setup in &setups {
+                log::warn(
+                    "opaque_setup_retirable",
+                    &[
+                        Field::U64("setup_id", u64::from(setup.setup_id)),
+                        Field::U64("records", setup.records),
+                    ],
+                );
+            }
+            *last = Some(Instant::now());
+            setups.len()
+        }
+        Err(e) => {
+            log::error(
+                "worker_retirable_setups_failed",
+                &[Field::Error("error", &e)],
+            );
+            0
         }
     }
 }

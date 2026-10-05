@@ -555,6 +555,7 @@ fn every_refusal_leaves_the_vault_unchanged() {
         env.domain
             .heal(
                 ACCOUNT,
+                None,
                 &HealingRequest {
                     vault_id: Id::from_bytes(VAULT.to_bytes()),
                     item_key_wraps: List::new(vec![ItemKeyWrap {
@@ -565,6 +566,7 @@ fn every_refusal_leaves_the_vault_unchanged() {
                     }])
                     .unwrap(),
                     records: List::empty(),
+                    self_grant: None,
                 },
                 NOW,
             )
@@ -679,6 +681,7 @@ fn healing_below_the_current_epoch_fills_nothing() {
         env.domain
             .heal(
                 ACCOUNT,
+                None,
                 &HealingRequest {
                     vault_id: Id::from_bytes(VAULT.to_bytes()),
                     item_key_wraps: List::new(vec![
@@ -692,6 +695,7 @@ fn healing_below_the_current_epoch_fills_nothing() {
                     ])
                     .unwrap(),
                     records: List::empty(),
+                    self_grant: None,
                 },
                 NOW,
             )
@@ -734,10 +738,12 @@ fn a_healed_old_epoch_record_brings_back_no_old_wrap() {
         env.domain
             .heal(
                 ACCOUNT,
+                None,
                 &HealingRequest {
                     vault_id: Id::from_bytes(VAULT.to_bytes()),
                     item_key_wraps: List::empty(),
                     records: List::new(vec![Record::Op(healed)]).unwrap(),
+                    self_grant: None,
                 },
                 NOW,
             )
@@ -948,9 +954,10 @@ fn the_restore_drill_heals_then_rotates_past_the_rollback() {
             vault_id: Id::from_bytes(VAULT.to_bytes()),
             item_key_wraps: List::empty(),
             records: List::new(records).unwrap(),
+            self_grant: None,
         };
         env.domain
-            .heal(ACCOUNT, &heal(vec![op_3]), NOW)
+            .heal(ACCOUNT, None, &heal(vec![op_3]), NOW)
             .await
             .unwrap();
         let (_, pages) = observe(&env).await;
@@ -982,7 +989,7 @@ fn the_restore_drill_heals_then_rotates_past_the_rollback() {
             },
         ));
         env.domain
-            .heal(ACCOUNT, &heal(vec![op_4]), NOW)
+            .heal(ACCOUNT, None, &heal(vec![op_4]), NOW)
             .await
             .unwrap();
         let (grant, pages) = observe(&env).await;

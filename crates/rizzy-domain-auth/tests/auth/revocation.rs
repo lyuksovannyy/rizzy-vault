@@ -111,6 +111,7 @@ fn rotation(
         account_state: bytes(vec![0]),
         bundle: None,
         registration_upload: None,
+        setup_id: None,
         account_key_server_wrap: Some(AccountKeyServerWrap {
             account_key_epoch: epoch,
             password_epoch: client.state.password_epoch,
@@ -369,6 +370,7 @@ fn revocation_rules() {
             account_state: bytes(next.1),
             bundle: None,
             registration_upload: None,
+            setup_id: None,
             account_key_server_wrap: None,
             identity_secret_keys: None,
             recovery: RecoveryUpload::None,

@@ -146,6 +146,9 @@ impl CliError {
     ///   cannot read, possibly after the transaction committed;
     /// - [`CliError::RateLimited`]: not applied, but the same bytes are good later, so the
     ///   saved state is kept and sent again rather than thrown away.
+    /// - `setup_retired` (ADR 0031 point 8): not applied, and the saved state is kept: the
+    ///   registration is rerun once ([`CliError::restarts_registration`]), and a second refusal
+    ///   leaves the change saved for the next run.
     #[must_use]
     pub const fn refuses_commit(&self) -> bool {
         matches!(
@@ -165,6 +168,16 @@ impl CliError {
                     | ErrorCode::ApiVersionGone
             )
         )
+    }
+
+    /// Whether this answer to a commit (`account/commit` with a new OPAQUE registration,
+    /// `register/finish`) is `setup_retired` (ADR 0031 points 3 and 8): the setup the
+    /// registration started under was retired and the commit was not applied. The host reruns
+    /// the registration with the same `pw_in` and resends, once; it never takes the
+    /// `state_conflict` path for it, which would resend the same upload.
+    #[must_use]
+    pub const fn restarts_registration(&self) -> bool {
+        matches!(self, Self::Server(ErrorCode::SetupRetired))
     }
 
     /// Whether this error, as the answer to a commit, leaves unknown whether the server
@@ -284,6 +297,13 @@ mod tests {
         ] {
             let e = CliError::Server(refusal);
             assert!(e.refuses_commit() && !e.outcome_unknown(), "{refusal:?}");
+            // ADR 0031 point 3: only `setup_retired` restarts the registration; a
+            // `state_conflict` never does, and `setup_retired` is never a `state_conflict`.
+            assert_eq!(
+                e.restarts_registration(),
+                refusal == ErrorCode::SetupRetired,
+                "{refusal:?}"
+            );
         }
         for unknown in [
             CliError::Network,
@@ -296,6 +316,10 @@ mod tests {
                 "{unknown:?}"
             );
         }
+        // ADR 0031 point 8: not applied, but kept for the restart of its registration.
+        let retired = CliError::Server(ErrorCode::SetupRetired);
+        assert!(retired.restarts_registration());
+        assert!(!retired.refuses_commit() && !retired.outcome_unknown());
         // Not applied, but the same bytes are good later: kept, and not "unknown".
         let limited = CliError::RateLimited(Some(3));
         assert!(!limited.refuses_commit() && !limited.outcome_unknown());

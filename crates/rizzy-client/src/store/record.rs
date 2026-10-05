@@ -435,6 +435,37 @@ impl DeviceRecord {
         )
     }
 
+    /// The offline unlock of a **signup-pending** (stage 2) record, for one purpose only: the
+    /// restart of its stored `register/finish` after the server refused it with
+    /// `setup_retired` (ADR 0031 point 8). The restart checks the re-typed password and needs
+    /// the signup's account key to rebuild `E_srv`; [`DeviceRecord::unlock`] refuses stage 2
+    /// (ADR 0026 §2), so this reads the stage-2 `E_local` that [`DeviceRecord::parse`] requires.
+    /// The host must not use the keys for anything else: the account does not exist on the
+    /// server until the signup's commit is acknowledged.
+    ///
+    /// # Errors
+    /// [`ClientError::InvalidInput`] for a record that is not in stage 2;
+    /// [`ClientError::CacheCorrupt`] without `E_local` (which `parse` already refuses);
+    /// otherwise as [`DeviceRecord::unlock`].
+    pub fn unlock_signup(&self, password: &str) -> Result<UnlockedDevice, ClientError> {
+        if self.stage != Stage::SignupPending {
+            return Err(ClientError::InvalidInput);
+        }
+        let local_wrap = self.local_wrap.as_ref().ok_or(ClientError::CacheCorrupt)?;
+        offline_unlock(
+            password,
+            &OfflineUnlock {
+                account_id: self.account_id,
+                device_id: self.device_id,
+                secret_key: &self.secret_key,
+                device_salt: &self.device_salt,
+                kdf_id: self.kdf_id,
+                local_wrap,
+                device_keys_wrap: &self.device_keys_wrap,
+            },
+        )
+    }
+
     /// The offline unlock from the **pending** record: the keys this device holds once the
     /// outstanding commit is applied (CRYPTO.md §11 "Secrets before commit": "On restart with a
     /// pending record, the client fetches `account-state`: if the server holds the new state

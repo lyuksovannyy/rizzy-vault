@@ -58,6 +58,15 @@ pub enum AuthError {
     Conflict,
     /// Signup is closed on this server, or the invite was refused (CRYPTO.md §5.9).
     SignupRefused,
+    /// A registration's echoed OPAQUE `setup_id` is retired or unknown (ADR 0031 point 3).
+    /// Checked after the byte-identical-repeat check, so a repeat of an applied commit is
+    /// success whatever its `setup_id`.
+    SetupRetired,
+    /// KE3 verified, but the account's OPAQUE record lags the signed `account-state` the server
+    /// holds: its (`password_epoch`, `kdf_id`, `account_key_epoch`) is not the state's, after a
+    /// restore to before a credential change or a rotation (ADR 0032 §4). Only ever returned
+    /// after KE3 and the second factor verified (§5.9).
+    CredentialsStale,
     /// A pending recovery exists but its waiting period has not ended (CRYPTO.md §11.9 step 3,
     /// ADR 0008 decision 5).
     RecoveryWaiting {
@@ -90,6 +99,8 @@ impl AuthError {
             Self::RateLimited { .. } | Self::RecoveryWaiting { .. } => ErrorCode::RateLimited,
             Self::NotFound => ErrorCode::NotFound,
             Self::StateConflict | Self::StateFork => ErrorCode::StateConflict,
+            Self::SetupRetired => ErrorCode::SetupRetired,
+            Self::CredentialsStale => ErrorCode::CredentialsStale,
             Self::Storage(_) | Self::Internal(_) => ErrorCode::Internal,
         }
     }
@@ -122,6 +133,8 @@ impl fmt::Display for AuthError {
             Self::StateFork => f.write_str("account-state fork refused"),
             Self::Conflict => f.write_str("conflict with stored data"),
             Self::SignupRefused => f.write_str("signup refused"),
+            Self::SetupRetired => f.write_str("OPAQUE setup retired or unknown"),
+            Self::CredentialsStale => f.write_str("OPAQUE record lags the signed state"),
             Self::RecoveryWaiting { .. } => f.write_str("recovery waiting period not over"),
             Self::Storage(e) => write!(f, "storage: {e}"),
             Self::Internal(what) => write!(f, "internal: {what}"),

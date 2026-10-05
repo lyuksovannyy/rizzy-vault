@@ -221,26 +221,6 @@ impl VaultPort for SharedVault {
             .unwrap_or_default())
     }
 
-    async fn store_self_grants(
-        &self,
-        _tx: &mut WriteTx,
-        account_id: AccountId,
-        grants: &[VaultSelfGrant],
-        _now_ms: u64,
-    ) -> Result<(), AuthError> {
-        let mut held = self.grants.lock().unwrap();
-        let entry = held.entry(account_id.to_bytes()).or_default();
-        for grant in grants {
-            if !entry.iter().any(|g| {
-                g.vault_id == grant.vault_id && g.account_key_epoch >= grant.account_key_epoch
-            }) {
-                entry.retain(|g| g.vault_id != grant.vault_id);
-                entry.push(grant.clone());
-            }
-        }
-        Ok(())
-    }
-
     async fn device_head(
         &self,
         _conn: Conn<'_>,
@@ -390,6 +370,8 @@ pub(crate) struct DeviceSession {
     pub(crate) session_id: SessionId,
     /// The next request counter.
     pub(crate) counter: u64,
+    /// The answer's `reregister` flag (ADR 0031 point 2).
+    pub(crate) reregister: bool,
 }
 
 /// The client side of an account: every secret and every signed object it holds.
@@ -526,6 +508,20 @@ impl Env {
         name: &str,
         password: &str,
     ) -> (Client, RegisterFinishRequest) {
+        let (client, finish, outcome) = self.signup_across(name, password, None).await;
+        outcome.unwrap();
+        (client, finish)
+    }
+
+    /// As [`Env::signup_full`], restarting the server with `restart` (when given) between
+    /// `register_start` and `register_finish` (ADR 0031 point 3's race), and returning the
+    /// commit's outcome instead of unwrapping it.
+    pub(crate) async fn signup_across(
+        &mut self,
+        name: &str,
+        password: &str,
+        restart: Option<ServerSecrets>,
+    ) -> (Client, RegisterFinishRequest, Result<(), AuthError>) {
         let rng = &mut self.rng;
         let secret_key = SecretKey::generate(rng);
         let account_id = AccountId::generate(rng);
@@ -547,6 +543,9 @@ impl Env {
             .register_start(&start, &self.source, self.now)
             .await
             .unwrap();
+        if let Some(secrets) = restart {
+            self.restart_with(secrets).await.unwrap();
+        }
         let rng = &mut self.rng;
         let reg = client_registration_finish(
             rng,
@@ -607,10 +606,24 @@ impl Env {
         let state_wire = state.sign(client.identity.signing_key()).unwrap();
         client.state = state;
         client.state_wire = state_wire;
-        let finish = self.finish_request(&client, &reg.upload, &reg.export_key, &device);
+        let finish =
+            self.finish_request(&client, &reg.upload, m2.setup_id, &reg.export_key, &device);
         client.devices.push(device);
-        self.svc.register_finish(&finish, self.now).await.unwrap();
-        (client, finish)
+        let outcome = self.svc.register_finish(&finish, self.now).await;
+        (client, finish, outcome)
+    }
+
+    /// A server restart with `secrets`: the startup check against the database, then a new
+    /// service over the same database and vault.
+    pub(crate) async fn restart_with(
+        &mut self,
+        secrets: ServerSecrets,
+    ) -> Result<(), rizzy_domain_auth::StartupCheckError> {
+        secrets.check_database(&self.db, self.now).await.unwrap()?;
+        self.secrets = Arc::new(secrets);
+        let db = self.db.clone();
+        self.reopen(db, |_| {});
+        Ok(())
     }
 
     /// The signup commit of `client` (§11.1 step 8).
@@ -618,6 +631,7 @@ impl Env {
         &mut self,
         client: &Client,
         upload: &[u8],
+        setup_id: u32,
         export_key: &ExportKey,
         device: &Device,
     ) -> RegisterFinishRequest {
@@ -652,6 +666,7 @@ impl Env {
         let e_rec = recovery_wrap(rng, client, 1);
         RegisterFinishRequest {
             registration_upload: bytes(upload.to_vec()),
+            setup_id,
             account_key_server_wrap: AccountKeyServerWrap {
                 account_key_epoch: 0,
                 password_epoch: 0,
@@ -869,6 +884,7 @@ impl Env {
             token: done.session_token,
             session_id: SessionId::from_bytes(done.session_id.to_bytes()),
             counter: 1,
+            reregister: done.reregister,
         })
     }
 

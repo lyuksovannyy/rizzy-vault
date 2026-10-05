@@ -91,6 +91,8 @@ impl CoreError {
             ErrorCode::StaleEpoch => "server_stale_epoch",
             ErrorCode::RecordConflict => "server_record_conflict",
             ErrorCode::PrevSeqMismatch => "server_prev_seq_mismatch",
+            ErrorCode::SetupRetired => "server_setup_retired",
+            ErrorCode::CredentialsStale => "server_credentials_stale",
             ErrorCode::Internal => "server_internal",
             _ => "server_unknown",
         })
@@ -131,6 +133,18 @@ mod tests {
         assert_eq!(
             CoreError::server(ErrorCode::Unknown).as_str(),
             "server_unknown"
+        );
+        assert_eq!(
+            CoreError::server(ErrorCode::SetupRetired).as_str(),
+            "server_setup_retired"
+        );
+        assert_eq!(
+            CoreError::server(ErrorCode::CredentialsStale).as_str(),
+            "server_credentials_stale"
+        );
+        assert_eq!(
+            CoreError::from(ClientError::SetupRetired).as_str(),
+            "setup_retired"
         );
         assert_eq!(CoreError::new(LOCKED).code(), "locked");
         assert_eq!(CoreError::new(LOCKED).to_string(), "locked");
