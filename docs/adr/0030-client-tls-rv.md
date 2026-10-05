@@ -1,6 +1,6 @@
 # ADR 0030: Client-side TLS for `rv`
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-01
 - Deciders: project owner
 - Milestone: M1
@@ -63,6 +63,8 @@ Facts (V = read in the local registry, `cargo info`, the RustSec checkout `advis
 - **Keep loopback only** (SSH tunnel to the VPS). No new crate, but unusable as a daily client.
 
 ## Open questions for the owner
+
+Answered on acceptance (2026-10-05): the owner accepted the ADR with every recommendation below; the Decision already states them.
 
 1. **TLS 1.2.** Recommendation: TLS 1.3 only. Allow 1.2 only if a real deployment needs it.
 2. **Private CA replaces or adds to the roots?** Recommendation: replaces. A self-hoster's CA file names exactly whom `rv` trusts; adding would keep 121 public CAs able to impersonate the server.
