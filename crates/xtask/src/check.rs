@@ -116,6 +116,7 @@ pub(crate) fn run(inputs: &Inputs) -> Vec<Violation> {
     clippy_configs(inputs, &mut out);
     wasm_alias(g, &inputs.cargo_config, &mut out);
     unsafe_tokens(&inputs.rust_sources, &mut out);
+    danger_tokens(&inputs.rust_sources, &mut out);
     for message in crate::bindings::check(&inputs.bindings) {
         out.push(violation(
             "ADR 0019 §4.1",
@@ -1251,6 +1252,35 @@ fn unsafe_tokens(sources: &[(String, String)], out: &mut Vec<Violation>) {
                 format!("{e}; the rest of the file cannot be scanned, so it cannot pass"),
             )),
         }
+    }
+}
+
+/// ADR 0030 Decision 3: no rustls `dangerous()` API in `crates/*/src`. Reports every
+/// [`rules::DANGER_WORDS`] token, comments and literals excluded, in the files
+/// [`rules::danger_scanned`] selects. A file the lexer cannot finish is already a violation of
+/// [`unsafe_tokens`], which scans the same files, so it is not reported twice here.
+fn danger_tokens(sources: &[(String, String)], out: &mut Vec<Violation>) {
+    let rule = "ADR 0030 Decision 3";
+    for (path, text) in sources {
+        if !rules::danger_scanned(path) {
+            continue;
+        }
+        let Ok(found) = unsafe_scan::word_tokens(text, rules::DANGER_WORDS) else {
+            continue;
+        };
+        out.extend(found.into_iter().map(|(index, at)| {
+            let word = rules::DANGER_WORDS.get(index).copied().unwrap_or("?");
+            violation(
+                rule,
+                path,
+                format!(
+                    "line {}, column {}: the token `{word}` in first-party source. The rustls \
+                     `dangerous()` APIs (a custom or disabled certificate verifier) must not \
+                     appear in our code; trust is the public roots or a private CA file",
+                    at.line, at.column
+                ),
+            )
+        }));
     }
 }
 

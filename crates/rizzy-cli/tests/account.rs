@@ -461,6 +461,7 @@ impl Rv {
                 let mut env = Env {
                     data_dir: self.dir.clone(),
                     account: None,
+                    trust: rizzy_cli::tls::Trust::default(),
                     ui: &mut script,
                 };
                 self.runtime.block_on(run(invocation, &mut env))

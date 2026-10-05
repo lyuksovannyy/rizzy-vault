@@ -37,8 +37,6 @@ rv signup --server https://vault.example.org --name alice
 
 The server address must be `https://`. Plain `http://` is accepted only for `localhost` and loopback addresses ([ADR 0028](adr/0028-api-v1-http-conventions.md)).
 
-**This build cannot dial `https://` yet.** The TLS client crates need the owner's approval under [ADR 0009](adr/0009-crypto-dependency-policy.md), which has not been given. Until it is, `rv` refuses an `https://` address and works only against a server on `localhost` or a loopback address (the same machine, or a tunnel you trust that ends there).
-
 On another computer:
 
 ```sh
@@ -46,6 +44,26 @@ rv login --server https://vault.example.org --name alice
 ```
 
 It asks for the master password and the Secret Key from the kit.
+
+### TLS and a private CA
+
+`rv` speaks TLS 1.3 only, through rustls with the `ring` provider ([ADR 0030](adr/0030-client-tls-rv.md)). A server, or the reverse proxy in front of it, that offers only TLS 1.2 is refused. `rv` follows no redirect and uses no HTTP proxy (`HTTPS_PROXY` is not read).
+
+By default `rv` trusts Mozilla's root CAs, built into `rv` (the operating system's trust store is not used). A server with a certificate from a public CA, such as the Let's Encrypt certificate the shipped Caddy obtains, works as is.
+
+If the server's certificate comes from your own CA, give `rv` that CA's certificate:
+
+```sh
+rv --ca-file /path/to/ca.pem login --server https://vault.example.org --name alice
+# or, for every command:
+export RIZZY_CLI_CA_FILE=/path/to/ca.pem
+```
+
+`--ca-file` (it may stand anywhere on the command line) wins over `RIZZY_CLI_CA_FILE`. Neither is stored, so set one for every run: every command that opens an account on an `https://` server reads the file, even one that then works offline. The file's certificates **replace** the public roots: with it, `rv` trusts only your CA. It must be PEM, at most 64 KiB, with one to 16 `CERTIFICATE` blocks (other blocks are ignored), each one a CA certificate (`CA:TRUE` in its basic constraints) that rustls accepts as a trust anchor. A file that breaks a rule stops `rv` before it contacts the server.
+
+The CA file is not a certificate pin. A self-signed server certificate placed in it does not work: one with `CA:FALSE` (like the server certificate itself) is refused when the file is read, and one with `CA:TRUE` is refused at the handshake. The server needs a certificate issued by a separate CA certificate (see [self-hosting.md §6](self-hosting.md#6-tls-the-reverse-proxy-and-ports)). There is no certificate pinning and no revocation checking in this version.
+
+A refused handshake names the server and the reason (unknown CA, expired, wrong name, no TLS 1.3, …); nothing was sent, so the command can simply be repeated once the cause is fixed.
 
 ## Daily use
 
@@ -142,4 +160,4 @@ The restore can also take the account back: a device added after the backup, for
 
 ## Not in this build
 
-`https://` (and with it a private CA: the TLS crates await approval), a full key rotation together with a Secret Key change, reordering list elements, and no-echo input on platforms without `stty` (there, pipe the secrets in).
+Certificate pinning, revocation checking, the operating system's trust store and TLS 1.2 ([ADR 0030](adr/0030-client-tls-rv.md)); a full key rotation together with a Secret Key change, reordering list elements, and no-echo input on platforms without `stty` (there, pipe the secrets in).

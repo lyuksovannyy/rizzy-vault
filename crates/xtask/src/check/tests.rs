@@ -1652,3 +1652,60 @@ fn unsafe_scan_fails_closed_on_an_unterminated_literal() {
         "unterminated string literal at line 1, column 17; the rest of the file cannot be scanned",
     );
 }
+
+// ---- ADR 0030 Decision 3: no rustls `dangerous()` API in `crates/*/src` ----------------------
+
+#[test]
+fn rustls_danger_tokens_in_crate_sources_fail() {
+    let mut t = Tree::current();
+    t.rust_sources.push((
+        "crates/rizzy-cli/src/tls.rs".to_owned(),
+        "// dangerous() is banned\nfn f(c: &mut C) {\n    c.dangerous().set_x();\n}\n".to_owned(),
+    ));
+    assert_only(
+        &t.run(),
+        "ADR 0030 Decision 3",
+        "crates/rizzy-cli/src/tls.rs",
+        "line 3, column 7: the token `dangerous`",
+    );
+
+    // `danger::`, and the module named without `::` (an alias), are reported too.
+    let mut t = Tree::current();
+    t.rust_sources.push((
+        "crates/rizzy-cli/src/v.rs".to_owned(),
+        "use rustls::client::danger::ServerCertVerifier;\nuse rustls::client::danger as d;\n"
+            .to_owned(),
+    ));
+    let v = t.run();
+    assert_eq!(v.len(), 2, "{v:?}");
+    assert!(v.iter().all(|x| x.rule == "ADR 0030 Decision 3"));
+    assert!(
+        v[0].message
+            .starts_with("line 1, column 21: the token `danger`")
+    );
+    assert!(
+        v[1].message
+            .starts_with("line 2, column 21: the token `danger`")
+    );
+}
+
+#[test]
+fn rustls_danger_words_elsewhere_pass() {
+    let mut t = Tree::current();
+    // Comments, literals and longer words in crate sources; any token outside `crates/*/src`.
+    t.rust_sources.push((
+        "crates/rizzy-cli/src/x.rs".to_owned(),
+        "/// No `dangerous()`, no `danger::`.\nconst S: &str = \"danger::x dangerous\";\n\
+         fn not_dangerous_at_all() {}\nfn danger_scanned() {}\n"
+            .to_owned(),
+    ));
+    t.rust_sources.push((
+        "crates/rizzy-cli/tests/tls.rs".to_owned(),
+        "fn f(c: &mut C) { c.dangerous(); }\n".to_owned(),
+    ));
+    t.rust_sources.push((
+        "fuzz/fuzz_targets/x.rs".to_owned(),
+        "use rustls::client::danger;\n".to_owned(),
+    ));
+    assert_eq!(t.run(), []);
+}

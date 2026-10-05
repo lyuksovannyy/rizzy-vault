@@ -1,12 +1,6 @@
 //! The HTTP transport of `rv`: the `/api/v1` conventions of [ADR 0028] over hyper's HTTP/1.1
-//! client connection (ADR 0013 §2: "HTTP transport … Rust HTTP client, rustls").
-//!
-//! **TLS is held in this build.** ADR 0009 puts "any other … TLS crate on the client side"
-//! under its approval procedure, and no Accepted ADR admits the crates an `https://` dial
-//! needs (`tokio-rustls` with a crypto provider, a root set) or decides the protocol versions.
-//! Until the owner approves them, an `https://` origin is refused with
-//! [`CliError::TlsUnavailable`] before anything is sent, and only loopback `http://` is
-//! dialled (reported; CLAUDE.md "The ADR gate").
+//! client connection (ADR 0013 §2: "HTTP transport … Rust HTTP client, rustls"), over TLS 1.3
+//! for `https://` origins ([ADR 0030]; the configuration and trust store are [`crate::tls`]'s).
 //!
 //! # What it sends (ADR 0028)
 //!
@@ -31,10 +25,22 @@
 //!
 //! # Which origins it dials
 //!
-//! `http://` only to `localhost` or a loopback address, where the listener is the operator's
-//! own reverse-proxy hop or a test server ([`CliError::InsecureOrigin`] otherwise: tokens and
-//! signed requests never travel in clear to another host). An `https://` origin is parsed and
-//! refused ([`CliError::TlsUnavailable`], above).
+//! `https://` to any host (ADR 0030 Decision 6). `http://` only to `localhost` or a loopback
+//! address, where the listener is the operator's own reverse-proxy hop or a test server
+//! ([`CliError::InsecureOrigin`] otherwise: tokens and signed requests never travel in clear to
+//! another host). No redirect is followed and no HTTP proxy is used (`HTTPS_PROXY` and its
+//! kin are not read): the TCP connection goes to the origin's host and port.
+//!
+//! # TLS
+//!
+//! For an `https://` origin the TCP connection is wrapped by `tokio-rustls` with the
+//! configuration of [`crate::tls`] (TLS 1.3 only, ring provider, ALPN `http/1.1`, the public
+//! roots or the private CA file), and the server name is the origin's host or IP address. The
+//! request is written only after the handshake has verified the server. A handshake failure is
+//! [`CliError::Tls`] with the origin and a fixed kind
+//! ([`TlsFailure`](crate::error::TlsFailure)), never data from the peer; a connection that
+//! breaks after the handshake is [`CliError::Network`], as on plain TCP. A CA file that cannot
+//! be used is [`CliError::BadInput`] before any connection is made.
 //!
 //! # Secrets
 //!
@@ -48,8 +54,10 @@
 //! 10 s idle timeout anyway (ADR 0028 item 9).
 //!
 //! [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
+//! [ADR 0030]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0030-client-tls-rv.md
 
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use http_body_util::{BodyExt as _, Full, LengthLimitError, Limited};
@@ -69,12 +77,17 @@ use rizzy_client::rizzy_proto::meta::CLIENT_HEADER;
 use rizzy_client::rizzy_proto::wire::SessionToken;
 use rizzy_client::session::DeviceSession;
 use rizzy_core::normalize::{Scheme, ServerOrigin};
+use rustls::ClientConfig;
+use rustls::pki_types::ServerName;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
 use zeroize::Zeroizing;
 
 use crate::error::CliError;
+use crate::tls::{Trust, failure_of};
 
 /// The most bytes of a response body this client reads: the largest body `v1` sizes anything
 /// for (ADR 0028 item 7, `MAX_UPLOAD_BODY_LEN`).
@@ -125,6 +138,9 @@ pub struct Http {
     port: u16,
     /// The `Host` header: the origin's authority.
     authority: HeaderValue,
+    /// For an `https://` origin, the TLS configuration and the name the certificate must
+    /// carry; `None` for loopback `http://`.
+    tls: Option<(Arc<ClientConfig>, ServerName<'static>)>,
 }
 
 impl std::fmt::Debug for Http {
@@ -160,29 +176,35 @@ fn is_loopback(host: &str) -> bool {
 
 impl Http {
     /// The transport for `origin`, a server URL as the user typed it or as the device state
-    /// holds it.
+    /// holds it, trusting `trust` for an `https://` origin.
     ///
     /// # Errors
-    /// [`CliError::BadInput`] for a URL that is no origin; [`CliError::InsecureOrigin`] for an
-    /// `http://` origin that is not loopback; [`CliError::TlsUnavailable`] for an `https://`
-    /// origin (module docs).
-    pub fn new(origin: &str) -> Result<Self, CliError> {
+    /// [`CliError::BadInput`] for a URL that is no origin, or for a CA file that cannot be
+    /// used (an `https://` origin only); [`CliError::InsecureOrigin`] for an `http://` origin
+    /// that is not loopback (module docs).
+    pub fn new(origin: &str, trust: &Trust) -> Result<Self, CliError> {
         let bad = CliError::BadInput("the server address is not a valid https:// origin");
         let origin = ServerOrigin::parse(origin).map_err(|_| bad)?;
         let bad = || CliError::BadInput("the server address is not a valid https:// origin");
         let (_, authority) = origin.as_str().split_once("://").ok_or_else(bad)?;
         let (host, port) = host_and_port(authority).ok_or_else(bad)?;
         let scheme = origin.scheme();
-        match scheme {
-            Scheme::Https => return Err(CliError::TlsUnavailable),
-            Scheme::Http if is_loopback(host) => {}
+        let tls = match scheme {
+            Scheme::Https => {
+                // A DNS name or an IP literal (brackets already removed), as the certificate
+                // must name it.
+                let name = ServerName::try_from(host.to_owned()).map_err(|_| bad())?;
+                Some((trust.client_config(origin.as_str())?, name))
+            }
+            Scheme::Http if is_loopback(host) => None,
             Scheme::Http => return Err(CliError::InsecureOrigin),
-        }
+        };
         Ok(Self {
             host: host.to_owned(),
             port: port.unwrap_or_else(|| scheme.default_port()),
             authority: HeaderValue::from_str(authority).map_err(|_| bad())?,
             origin,
+            tls,
         })
     }
 
@@ -330,11 +352,37 @@ impl Http {
             .map_err(|_| CliError::Network)?;
             // A request is small writes and one read: no reason to wait for more bytes.
             let _ = tcp.set_nodelay(true);
-            exchange(tcp, request, max_body).await
+            match &self.tls {
+                None => exchange(tcp, request, max_body).await,
+                Some((config, name)) => {
+                    // The request is written only after the handshake verified the server.
+                    let stream = TlsConnector::from(config.clone())
+                        .connect(name.clone(), tcp)
+                        .await
+                        .map_err(|e| self.tls_error(&e))?;
+                    exchange(stream, request, max_body).await
+                }
+            }
         };
         tokio::time::timeout(deadline, exchange)
             .await
             .map_err(|_| CliError::Network)?
+    }
+
+    /// The error of a failed TLS handshake: [`CliError::Tls`] with the fixed kind of the
+    /// rustls error inside, or [`CliError::Network`] when the connection itself failed (it
+    /// closed or broke during the handshake). Nothing of the peer's data is kept.
+    fn tls_error(&self, error: &std::io::Error) -> CliError {
+        match error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+        {
+            Some(rustls_error) => CliError::Tls {
+                origin: self.origin.as_str().to_owned(),
+                failure: failure_of(rustls_error),
+            },
+            None => CliError::Network,
+        }
     }
 }
 
@@ -366,10 +414,10 @@ fn error_of(reply: &Reply) -> CliError {
     }
 }
 
-/// One request over one connection: the HTTP/1.1 handshake, the request, the answer's body up
+/// One request over one connection (TCP, or TLS over TCP): the HTTP/1.1 handshake, the request, the answer's body up
 /// to `max_body` bytes.
-async fn exchange(
-    stream: TcpStream,
+async fn exchange<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    stream: S,
     request: Request<Full<Bytes>>,
     max_body: usize,
 ) -> Result<Reply, CliError> {
@@ -443,19 +491,40 @@ mod tests {
         assert!(is_loopback("localhost") && is_loopback("127.0.0.1") && is_loopback("::1"));
         assert!(!is_loopback("vault.example.com") && !is_loopback("192.0.2.1"));
 
-        let local = Http::new("http://127.0.0.1:18080/").unwrap();
+        let trust = Trust::default();
+        let local = Http::new("http://127.0.0.1:18080/", &trust).unwrap();
         assert_eq!(local.origin().as_str(), "http://127.0.0.1:18080");
         assert_eq!((local.host.as_str(), local.port), ("127.0.0.1", 18080));
         assert!(matches!(
-            Http::new("http://vault.example.com"),
+            Http::new("http://vault.example.com", &trust),
             Err(CliError::InsecureOrigin)
         ));
-        // TLS is held until its crates are approved (module docs): refused, never dialled.
+        // https to any host, with TLS; the name the certificate must carry is the host.
+        let public = Http::new("HTTPS://Vault.Example.com:443", &trust).unwrap();
+        assert_eq!(public.origin().as_str(), "https://vault.example.com");
+        assert_eq!(
+            (public.host.as_str(), public.port),
+            ("vault.example.com", 443)
+        );
         assert!(matches!(
-            Http::new("HTTPS://Vault.Example.com:443"),
-            Err(CliError::TlsUnavailable)
+            &public.tls,
+            Some((_, ServerName::DnsName(name))) if name.as_ref() == "vault.example.com"
         ));
-        assert!(matches!(Http::new("ftp://x"), Err(CliError::BadInput(_))));
+        let ip = Http::new("https://[::1]:8443", &trust).unwrap();
+        assert!(matches!(&ip.tls, Some((_, ServerName::IpAddress(_)))));
+        assert!(local.tls.is_none());
+        // A CA file that cannot be used stops the transport before any connection.
+        assert!(matches!(
+            Http::new(
+                "https://vault.example.com",
+                &Trust::ca_file("/nonexistent/rv-ca.pem".into())
+            ),
+            Err(CliError::BadInput(_))
+        ));
+        assert!(matches!(
+            Http::new("ftp://x", &trust),
+            Err(CliError::BadInput(_))
+        ));
         assert_eq!(CLIENT, concat!("cli/", env!("CARGO_PKG_VERSION")));
     }
 

@@ -159,7 +159,7 @@ pub async fn prepare_signup(
     recovery_code: bool,
     invite: bool,
 ) -> Result<PreparedSignup, CliError> {
-    let http = Http::new(server)?;
+    let http = Http::new(server, &env.trust)?;
     check_server(&http).await?;
     let invite = if invite {
         Some(env.ui.secret("Invite token")?)
@@ -305,7 +305,7 @@ impl PreparedSignup {
 /// [`CliError::AlreadyEnrolled`] before anything is enrolled; the flow's and the transport's
 /// errors.
 pub async fn login(env: &mut Env<'_>, server: &str, login_name: &str) -> Result<Device, CliError> {
-    let http = Http::new(server)?;
+    let http = Http::new(server, &env.trust)?;
     check_server(&http).await?;
     let secret_key = env.ui.secret("Secret Key (RV1-…)")?;
     let password = env.ui.secret("Master password")?;

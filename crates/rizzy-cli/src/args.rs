@@ -51,6 +51,8 @@ USAGE:
 
 OPTIONS:
     --account <id>   The account (hex id) when several are enrolled here
+    --ca-file <path> A PEM file of the private CA that issued the server's certificate; it
+                     replaces the public roots (also RIZZY_CLI_CA_FILE)
     -h, --help       Print this help
     -V, --version    Print version
 
@@ -308,6 +310,9 @@ pub enum Command {
 pub struct Invocation {
     /// `--account`.
     pub account: Option<String>,
+    /// `--ca-file`: the private CA file whose certificates replace the public roots for
+    /// `https://` servers (ADR 0030 Decision 4). Read only when a command dials one.
+    pub ca_file: Option<PathBuf>,
     /// The command.
     pub command: Command,
 }
@@ -396,8 +401,8 @@ pub fn parse(arguments: Vec<OsString>) -> Result<Invocation, CliError> {
                 .map_err(|_| usage("an argument is not valid UTF-8"))?,
         );
     }
-    // `--account` may come anywhere; take it out first.
-    let mut account = None;
+    // `--account` and `--ca-file` may come anywhere; take them out first.
+    let (mut account, mut ca_file) = (None, None);
     let mut rest = Vec::with_capacity(strings.len());
     let mut iter = strings.into_iter();
     while let Some(argument) = iter.next() {
@@ -407,6 +412,12 @@ pub fn parse(arguments: Vec<OsString>) -> Result<Invocation, CliError> {
                     .filter(|v| !v.is_empty())
                     .ok_or_else(|| usage("--account needs a value"))?,
             );
+        } else if argument == "--ca-file" {
+            ca_file = Some(PathBuf::from(
+                iter.next()
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| usage("--ca-file needs a value"))?,
+            ));
         } else {
             rest.push(argument);
         }
@@ -473,7 +484,11 @@ pub fn parse(arguments: Vec<OsString>) -> Result<Invocation, CliError> {
         None => return Err(usage("no command")),
     };
     args.done()?;
-    Ok(Invocation { account, command })
+    Ok(Invocation {
+        account,
+        ca_file,
+        command,
+    })
 }
 
 /// `--server` and `--name`, both required, in any order.
@@ -863,6 +878,15 @@ mod tests {
         let with_account = parsed("sync --account 00ff").unwrap();
         assert_eq!(with_account.account.as_deref(), Some("00ff"));
         assert_eq!(with_account.command, Command::Sync);
+        assert_eq!(with_account.ca_file, None);
+        let with_ca =
+            parsed("--ca-file /etc/rv/ca.pem login --server https://v.example --name a").unwrap();
+        assert_eq!(
+            with_ca.ca_file.as_deref(),
+            Some(std::path::Path::new("/etc/rv/ca.pem"))
+        );
+        assert!(matches!(with_ca.command, Command::Login { .. }));
+        assert!(matches!(parsed("sync --ca-file"), Err(CliError::Usage(_))));
     }
 
     #[test]

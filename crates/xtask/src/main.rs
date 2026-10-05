@@ -12,7 +12,8 @@
 //!
 //! `check-deps` enforces the crate-boundary rules of ADR 0016 (R1–R8) and the dependency rules
 //! of ADR 0009 on the resolved graph and the manifests, as ADR 0022 and ADR 0019 partially
-//! supersede them, and runs the `unsafe` token scan of ADR 0019 §4.1 on the sources:
+//! supersede them, and runs the `unsafe` token scan of ADR 0019 §4.1 and the rustls `dangerous()`
+//! token scan of ADR 0030 Decision 3 on the sources:
 //!
 //! - **R1** no-I/O crates (`rizzy-core`, `rizzy-sync`, and the planned `rizzy-proto`,
 //!   `rizzy-client`, `rizzy-import`, `rizzy-match`): only allow-listed external crates over
@@ -46,6 +47,9 @@
 //! - **ADR 0019 §4.1** no `unsafe` keyword token in any first-party `.rs` file, comments and
 //!   literals excluded, including `unsafe` that `forbid(unsafe_code)` can miss in a macro's
 //!   input ([`mod@unsafe_scan`]).
+//! - **ADR 0030 Decision 3** no `dangerous` or `danger` word token (the rustls APIs that
+//!   replace or disable certificate verification) in any `.rs` file under `crates/*/src`,
+//!   comments and literals excluded (`rules::DANGER_WORDS`).
 //! - **ADR 0019 §4.1 (b)** the committed expansion baseline of `rizzy-wasm` exists, records the
 //!   `wasm-bindgen` version of `Cargo.lock`, and its `unsafe`/`extern`/`no_mangle`/`export_name`
 //!   counts are those of the committed expansion ([`mod@bindings`]).
@@ -130,6 +134,7 @@ USAGE:
 COMMANDS:
     check-deps      Check the crate-boundary and dependency rules (ADR 0016 R1–R8, ADR 0009),
                     and scan first-party .rs files for the `unsafe` keyword (ADR 0019 §4.1)
+                    and crate sources for the rustls `dangerous()` APIs (ADR 0030)
     check-clippy    Run clippy as `cargo lint` does; fail on any warning about a clippy.toml
                     entry, such as \"found a module\" (ADR 0016 §5, R1 API side)
     check-signoff <base>..<head>
@@ -224,7 +229,7 @@ fn check_deps() -> ExitCode {
         let _ = writeln!(
             io::stdout().lock(),
             "check-deps: ok ({members} workspace crates, {sources} first-party .rs files; \
-             ADR 0016 R1–R8, ADR 0009, ADR 0019 §4.1, ADR 0024)"
+             ADR 0016 R1–R8, ADR 0009, ADR 0019 §4.1, ADR 0024, ADR 0030)"
         );
         return ExitCode::SUCCESS;
     }
@@ -234,7 +239,8 @@ fn check_deps() -> ExitCode {
     let _ = writeln!(
         err,
         "check-deps: {} violation(s) of the crate-boundary rules (ADR 0016 §4, ADR 0009) or \
-         the `unsafe` token scan (ADR 0019 §4.1). The rules table is crates/xtask/src/rules.rs; \
+         the token scans (`unsafe`: ADR 0019 §4.1; rustls `dangerous()`: ADR 0030). The rules \
+         table is crates/xtask/src/rules.rs; \
          changing it is a security review.",
         violations.len()
     );

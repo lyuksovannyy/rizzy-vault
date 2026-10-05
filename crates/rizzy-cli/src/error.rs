@@ -37,9 +37,15 @@ pub enum CliError {
     /// travel in clear. Only `https://` origins, and `http://` to `localhost` or a loopback
     /// address, are dialled.
     InsecureOrigin,
-    /// The origin is `https://`, which this build cannot dial: the client-side TLS crates are
-    /// not approved under ADR 0009 yet (`crate::http`, module docs).
-    TlsUnavailable,
+    /// The TLS handshake with an `https://` origin failed (ADR 0030 Decision 6): the origin
+    /// and a fixed kind, never data from the peer. Nothing was sent: the request was not
+    /// applied.
+    Tls {
+        /// The canonical origin dialled.
+        origin: String,
+        /// What failed.
+        failure: TlsFailure,
+    },
     /// A file or directory operation failed; the kind says how, the text names what.
     Io(&'static str, io::ErrorKind),
     /// Something already exists at the output path. `rv` never overwrites (ADR 0027 §5).
@@ -65,6 +71,54 @@ pub enum CliError {
     Import(ImportError),
     /// The answer to a prompt was not acceptable (a mismatched confirmation, an empty value).
     BadInput(&'static str),
+}
+
+/// The fixed kind of a TLS handshake failure (ADR 0030 Decision 6), from the rustls error's
+/// kind alone (`crate::tls::failure_of`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TlsFailure {
+    /// The certificate chain does not lead to a trusted root: the public roots, or the private
+    /// CA file when one is given.
+    UnknownIssuer,
+    /// The certificate has expired.
+    Expired,
+    /// The certificate is not valid yet.
+    NotValidYet,
+    /// The certificate does not name the origin's host or IP address.
+    WrongName,
+    /// The certificate was refused for another reason (a CA certificate used as the server's
+    /// own, a bad signature, an unsupported algorithm, revocation data).
+    BadCertificate,
+    /// The server offers no TLS 1.3, or nothing this client offers.
+    Incompatible,
+    /// The handshake failed otherwise.
+    Handshake,
+    /// rustls refused this client's configuration.
+    Configuration,
+}
+
+impl TlsFailure {
+    /// What the user reads.
+    #[must_use]
+    pub const fn text(self) -> &'static str {
+        match self {
+            Self::UnknownIssuer => {
+                "the server's certificate is not issued by a trusted CA (a private CA is \
+                 trusted with --ca-file or RIZZY_CLI_CA_FILE)"
+            }
+            Self::Expired => "the server's certificate has expired",
+            Self::NotValidYet => "the server's certificate is not valid yet (check the clock)",
+            Self::WrongName => "the server's certificate is for another name",
+            Self::BadCertificate => {
+                "the server's certificate was refused (a self-signed or CA certificate cannot \
+                 be the server's own)"
+            }
+            Self::Incompatible => "the server does not offer TLS 1.3",
+            Self::Handshake => "the TLS handshake failed",
+            Self::Configuration => "the TLS client could not be configured",
+        }
+    }
 }
 
 impl CliError {
@@ -145,9 +199,10 @@ impl fmt::Display for CliError {
             Self::InsecureOrigin => f.write_str(
                 "refusing an http:// server that is not localhost or a loopback address; use https://",
             ),
-            Self::TlsUnavailable => f.write_str(
-                "this build cannot dial https:// servers yet (the TLS client is not approved, \
-                 ADR 0009); only an http:// server on localhost or a loopback address works",
+            Self::Tls { origin, failure } => write!(
+                f,
+                "TLS with {origin} failed: {}; nothing was sent",
+                failure.text()
             ),
             Self::Io(what, kind) => write!(f, "{what}: {kind}"),
             Self::FileExists => {
@@ -244,5 +299,13 @@ mod tests {
         // Not applied, but the same bytes are good later: kept, and not "unknown".
         let limited = CliError::RateLimited(Some(3));
         assert!(!limited.refuses_commit() && !limited.outcome_unknown());
+        // A failed handshake sent nothing: not applied, but no API refusal either, so what
+        // was saved for the commit is kept (ADR 0030 Decision 6).
+        let tls = CliError::Tls {
+            origin: "https://vault.example.com".to_owned(),
+            failure: TlsFailure::UnknownIssuer,
+        };
+        assert!(!tls.refuses_commit() && !tls.outcome_unknown());
+        assert!(tls.to_string().contains("https://vault.example.com"));
     }
 }

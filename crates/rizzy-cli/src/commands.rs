@@ -93,6 +93,10 @@ pub async fn run(invocation: Invocation, env: &mut Env<'_>) -> Result<(), CliErr
                 .ok_or_else(|| CliError::Usage("--account takes a hex id".into()))?,
         );
     }
+    // `--ca-file` wins over `RIZZY_CLI_CA_FILE`, which the caller read into `env.trust`.
+    if let Some(path) = invocation.ca_file {
+        env.trust = crate::tls::Trust::ca_file(path);
+    }
     match invocation.command {
         Command::Help => env.ui.print(USAGE.trim_end()),
         Command::Version => env.ui.print(concat!("rv ", env!("CARGO_PKG_VERSION"))),

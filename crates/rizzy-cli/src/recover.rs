@@ -57,7 +57,7 @@ use crate::sys::{now_ms, os_rng};
 /// [`CliError::Server`] with `unauthorized` for a wrong code or an unknown name (one answer,
 /// CRYPTO.md §5.9); the transport's errors.
 pub async fn start(env: &mut Env<'_>, server: &str, login_name: &str) -> Result<(), CliError> {
-    let http = Http::new(server)?;
+    let http = Http::new(server, &env.trust)?;
     let code = env.ui.secret("Recovery code (RVR1-…)")?;
     let started = start_recovery(&RecoveryInput {
         server_origin: http.origin().as_str(),
@@ -95,7 +95,7 @@ pub async fn complete(
     login_name: &str,
     rotate: bool,
 ) -> Result<(), CliError> {
-    let http = Http::new(server)?;
+    let http = Http::new(server, &env.trust)?;
     let code = env.ui.secret("Recovery code (RVR1-…)")?;
     let started = start_recovery(&RecoveryInput {
         server_origin: http.origin().as_str(),

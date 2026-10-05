@@ -611,6 +611,23 @@ pub(crate) const LINT_EXCEPTIONS: &[&str] = &[];
 /// reviewed like the rest of this table.
 pub(crate) const GENERATED_RUST: &[&str] = &[crate::bindings::BASELINE_DIR];
 
+/// ADR 0030 Decision 3: the rustls `dangerous()` APIs (a custom or disabled server-certificate
+/// verifier, in the `danger` modules) must not appear in first-party code. The scan reports
+/// these word tokens, comments and literals excluded, in the files [`danger_scanned`] selects.
+/// The ADR names the tokens `dangerous` and `danger::`; the bare word `danger` is reported
+/// whatever follows it, the conservative reading, so `use rustls::client::danger as d;` is
+/// caught as well.
+pub(crate) const DANGER_WORDS: &[&str] = &["dangerous", "danger"];
+
+/// Whether `path` (relative to the workspace root, `/` separators) is in the scope of the
+/// [`DANGER_WORDS`] scan: `crates/<crate>/src/…` (ADR 0030 Decision 3). Tests, fuzz targets and
+/// spikes are outside it.
+pub(crate) fn danger_scanned(path: &str) -> bool {
+    path.strip_prefix("crates/")
+        .and_then(|rest| rest.split_once('/'))
+        .is_some_and(|(krate, rest)| !krate.is_empty() && rest.starts_with("src/"))
+}
+
 /// ADR 0016 §3 notes: only `xtask` enables `rizzy-proto`'s `openapi` feature.
 pub(crate) const OPENAPI_FEATURE: (&str, &str, &str) = ("rizzy-proto", "openapi", "xtask");
 
@@ -910,6 +927,20 @@ mod tests {
     #[test]
     fn only_the_wasm_baseline_is_skipped() {
         assert_eq!(GENERATED_RUST, ["crates/rizzy-wasm/generated"]);
+    }
+
+    /// ADR 0030 Decision 3: the tokens and the scope of the rustls `dangerous()` scan.
+    #[test]
+    fn the_danger_scan_covers_crate_sources() {
+        assert_eq!(DANGER_WORDS, ["dangerous", "danger"]);
+        assert!(danger_scanned("crates/rizzy-cli/src/tls.rs"));
+        assert!(danger_scanned("crates/rizzy-cli/src/device/x.rs"));
+        assert!(danger_scanned("crates/xtask/src/main.rs"));
+        assert!(!danger_scanned("crates/rizzy-cli/tests/tls.rs"));
+        assert!(!danger_scanned("crates/rizzy-cli/build.rs"));
+        assert!(!danger_scanned("crates//src/x.rs"));
+        assert!(!danger_scanned("fuzz/fuzz_targets/ca_pem.rs"));
+        assert!(!danger_scanned("spikes/x/src/main.rs"));
     }
 
     /// ADR 0009 "Required feature sets" and its 2026-09-26 amendment, restated: these are the

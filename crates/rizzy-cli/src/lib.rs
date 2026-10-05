@@ -6,7 +6,7 @@
 //!
 //! | Capability (ADR 0013 §2) | Module | How |
 //! |---|---|---|
-//! | HTTP transport | [`http`] | hyper's HTTP/1.1 client connection; the `/api/v1` conventions of ADR 0028. Loopback `http://` only: TLS awaits ADR 0009's approval |
+//! | HTTP transport | [`http`], [`tls`] | hyper's HTTP/1.1 client connection; the `/api/v1` conventions of ADR 0028. `https://` over TLS 1.3 (rustls, ring provider; ADR 0030) with Mozilla's roots or a private CA file; `http://` to loopback only |
 //! | Persistent storage | [`db`], [`paths`] | `SQLite` through sqlx (`sqlite` driver only, ADR 0016 R5), running `rizzy-client`'s cache schema and changesets (ADR 0026); one file per account, mode 0600, one `rv` at a time |
 //! | Randomness | [`sys`] | `rand_core::UnwrapErr(getrandom::SysRng)` (ADR 0009 "RNG rules") |
 //! | Wall clock | [`sys`] | `std` |
@@ -42,13 +42,12 @@
 //!
 //! - Turning terminal echo off without the system `stty` (see [`ui`]); on platforms without
 //!   it, secrets are read from standard input only.
-//! - `https://` origins: the client-side TLS crates are not approved under ADR 0009 yet, so
-//!   they are refused (see [`http`]). Only a loopback `http://` server can be used.
 //! - A persisted pending stage for `rv login` and `rv recovery complete` (ADR 0026 defines one
 //!   for signup only; see [`enrol`] and [`recover`]).
 //! - Editing URIs and custom fields of an existing item.
-//! - A private CA file to trust besides the public roots: there is no `https://` path to
-//!   apply it to until the TLS crates are approved (above).
+//! - Certificate pinning, revocation checking, the OS trust store, TLS 1.2 and HTTP proxies
+//!   (ADR 0030 Decisions 3, 5 and 6, open question 4). A private CA file replaces the public
+//!   roots; it does not add to them.
 //!
 //! [ADR 0013]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0013-shared-client-core.md
 
@@ -70,6 +69,7 @@ mod lists;
 pub mod paths;
 pub mod recover;
 pub mod sys;
+pub mod tls;
 pub mod ui;
 
 pub use error::CliError;
@@ -120,6 +120,7 @@ fn run(arguments: Vec<OsString>) -> Result<(), CliError> {
     let mut env = device::Env {
         data_dir,
         account: None,
+        trust: tls::Trust::from_settings(None, &|name| std::env::var_os(name)),
         ui: &mut terminal,
     };
     let runtime = tokio::runtime::Builder::new_current_thread()

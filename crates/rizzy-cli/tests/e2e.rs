@@ -107,8 +107,9 @@ struct Server {
     dir: PathBuf,
     /// Its loopback port.
     port: u16,
-    /// The port of its public origin: its own, or the port of the [`Proxy`] in front of it.
-    origin_port: u16,
+    /// Its public origin (`RIZZY_ORIGIN`): its own loopback port, or the [`Proxy`] or
+    /// [`TlsProxy`] in front of it.
+    origin: String,
 }
 
 impl Server {
@@ -120,6 +121,12 @@ impl Server {
     /// A new server whose public origin is `origin_port` on loopback (a [`Proxy`] in front of
     /// it), or its own port.
     fn start_behind(origin_port: Option<u16>) -> Self {
+        Self::start_at(origin_port.map(|p| format!("http://127.0.0.1:{p}")))
+    }
+
+    /// A new server whose public origin is `origin` (a proxy in front of it), or
+    /// `http://127.0.0.1:<its own port>`.
+    fn start_at(origin: Option<String>) -> Self {
         let dir = temp_dir("server");
         std::fs::create_dir_all(dir.join("data")).unwrap();
         std::fs::create_dir_all(dir.join("secrets")).unwrap();
@@ -128,8 +135,8 @@ impl Server {
             .local_addr()
             .unwrap()
             .port();
-        let origin_port = origin_port.unwrap_or(port);
-        let init = Self::command(&dir, port, origin_port)
+        let origin = origin.unwrap_or_else(|| format!("http://127.0.0.1:{port}"));
+        let init = Self::command(&dir, port, &origin)
             .args(["secrets", "init"])
             .output()
             .unwrap();
@@ -138,21 +145,21 @@ impl Server {
             "{}",
             String::from_utf8_lossy(&init.stderr)
         );
-        let child = Self::spawn(&dir, port, origin_port);
+        let child = Self::spawn(&dir, port, &origin);
         Self {
             child,
             dir,
             port,
-            origin_port,
+            origin,
         }
     }
 
     /// The server's command with its settings.
-    fn command(dir: &Path, port: u16, origin_port: u16) -> Command {
+    fn command(dir: &Path, port: u16, origin: &str) -> Command {
         let mut command = Command::new(server_binary());
         command
             .env_clear()
-            .env("RIZZY_ORIGIN", format!("http://127.0.0.1:{origin_port}"))
+            .env("RIZZY_ORIGIN", origin)
             .env("RIZZY_LISTEN", format!("127.0.0.1:{port}"))
             .env("RIZZY_SIGNUP", "open")
             .env("RIZZY_DATA_DIR", dir.join("data"))
@@ -167,8 +174,8 @@ impl Server {
     }
 
     /// Spawns the serving process and waits until it accepts connections.
-    fn spawn(dir: &Path, port: u16, origin_port: u16) -> Child {
-        let mut child = Self::command(dir, port, origin_port).spawn().unwrap();
+    fn spawn(dir: &Path, port: u16, origin: &str) -> Child {
+        let mut child = Self::command(dir, port, origin).spawn().unwrap();
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
@@ -184,7 +191,7 @@ impl Server {
 
     /// The origin `rv` dials.
     fn origin(&self) -> String {
-        format!("http://127.0.0.1:{}", self.origin_port)
+        self.origin.clone()
     }
 
     /// Stops the server (the data stays).
@@ -196,7 +203,7 @@ impl Server {
     /// Starts it again on the same data and port.
     fn restart(&mut self) {
         self.stop();
-        self.child = Self::spawn(&self.dir, self.port, self.origin_port);
+        self.child = Self::spawn(&self.dir, self.port, &self.origin);
     }
 }
 
@@ -417,6 +424,93 @@ impl Drop for Proxy {
     }
 }
 
+/// The committed TLS test fixture `name` (`tests/fixtures/tls/README.md`).
+fn tls_fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/tls")
+        .join(name)
+}
+
+/// A loopback TLS-terminating reverse proxy in front of a [`Server`], as an operator's Caddy
+/// would be (ADR 0010 §4): TLS 1.3 with the committed test certificate for `localhost`
+/// (issued by the test CA), the plaintext bytes forwarded to the server's loopback listener
+/// unchanged. The server's public origin is `https://localhost:<port>`.
+struct TlsProxy {
+    /// Its port.
+    port: u16,
+    /// Set on drop.
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl TlsProxy {
+    /// A TLS proxy on a free loopback port and the server behind it.
+    fn start() -> (Self, Server) {
+        use rustls::pki_types::pem::PemObject as _;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = Server::start_at(Some(format!("https://localhost:{port}")));
+        let upstream = server.port;
+        let chain: Vec<CertificateDer<'static>> =
+            CertificateDer::pem_file_iter(tls_fixture("leaf.pem"))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+        let key = PrivateKeyDer::from_pem_file(tls_fixture("leaf.key")).unwrap();
+        let config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(chain, key)
+        .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                loop {
+                    let Ok((client, _)) = listener.accept().await else {
+                        break;
+                    };
+                    if thread_stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let acceptor = acceptor.clone();
+                    tokio::spawn(async move {
+                        let Ok(mut tls) = acceptor.accept(client).await else {
+                            return;
+                        };
+                        let Ok(mut server) =
+                            tokio::net::TcpStream::connect(("127.0.0.1", upstream)).await
+                        else {
+                            return;
+                        };
+                        let _ = tokio::io::copy_bidirectional(&mut tls, &mut server).await;
+                    });
+                }
+            });
+        });
+        (Self { port, stop }, server)
+    }
+}
+
+impl Drop for TlsProxy {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        // Wakes the accepting task so it sees the flag.
+        let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
+    }
+}
+
 /// The scripted user: answers in order, and everything `rv` printed.
 #[derive(Default)]
 struct Script {
@@ -486,6 +580,9 @@ struct Rv {
     dir: PathBuf,
     /// The runtime commands run on.
     runtime: tokio::runtime::Runtime,
+    /// The private CA file this device trusts, as `RIZZY_CLI_CA_FILE` would name it; `None`
+    /// for the public roots.
+    ca_file: Option<PathBuf>,
 }
 
 impl Rv {
@@ -497,6 +594,7 @@ impl Rv {
                 .enable_all()
                 .build()
                 .unwrap(),
+            ca_file: None,
         }
     }
 
@@ -521,6 +619,11 @@ impl Rv {
                 let mut env = Env {
                     data_dir: self.dir.clone(),
                     account: None,
+                    trust: rizzy_cli::tls::Trust::from_settings(None, &|name| {
+                        (name == rizzy_cli::tls::CA_FILE_ENV)
+                            .then(|| self.ca_file.clone().map(OsString::from))
+                            .flatten()
+                    }),
                     ui: &mut script,
                 };
                 self.runtime.block_on(run(invocation, &mut env))
@@ -599,8 +702,8 @@ fn rv_end_to_end() {
         &[],
     );
     assert!(matches!(outcome, Err(CliError::InsecureOrigin)));
-    // An https origin is refused too in this build, before anything is asked or sent: the
-    // client-side TLS crates await approval under ADR 0009.
+    // A CA file that cannot be used stops an https signup before anything is asked or sent
+    // (ADR 0030 Decision 4).
     let (outcome, asked) = a.try_run(
         &[
             "signup",
@@ -608,12 +711,14 @@ fn rv_end_to_end() {
             "https://vault.example.com",
             "--name",
             "alice",
+            "--ca-file",
+            "/nonexistent/rv-e2e-ca.pem",
         ],
         &[PASSWORD, PASSWORD],
         &[],
         &[],
     );
-    assert!(matches!(outcome, Err(CliError::TlsUnavailable)));
+    assert!(matches!(outcome, Err(CliError::BadInput(_))));
     assert!(asked.out.is_empty());
 
     // Signup on A: the kit is shown once, confirmed, and the device is enrolled and synced.
@@ -1155,6 +1260,7 @@ fn rv_end_to_end() {
         let mut env = Env {
             data_dir: a.dir.clone(),
             account: None,
+            trust: rizzy_cli::tls::Trust::default(),
             ui: &mut script,
         };
         let held = a
@@ -1185,6 +1291,7 @@ fn open_device(rv: &Rv, script: &mut Script) -> rizzy_cli::device::Device {
     let mut env = Env {
         data_dir: rv.dir.clone(),
         account: None,
+        trust: rizzy_cli::tls::Trust::default(),
         ui: script,
     };
     rv.runtime
@@ -1218,6 +1325,7 @@ fn interrupted_commits_are_settled_by_the_next_run() {
         let mut env = Env {
             data_dir: a.dir.clone(),
             account: None,
+            trust: rizzy_cli::tls::Trust::default(),
             ui: &mut script,
         };
         let prepared = a
@@ -1824,7 +1932,7 @@ impl Server {
     /// `rizzy-vault backup` next to the running server, into a new file in its directory.
     fn backup(&self, name: &str) -> PathBuf {
         let file = self.dir.join(name);
-        let backup = Self::command(&self.dir, self.port, self.origin_port)
+        let backup = Self::command(&self.dir, self.port, &self.origin)
             .args(["backup", "--out"])
             .arg(&file)
             .output()
@@ -1845,7 +1953,7 @@ impl Server {
         let data = self.dir.join("data");
         std::fs::remove_dir_all(&data).unwrap();
         std::fs::create_dir_all(&data).unwrap();
-        let restore = Self::command(&self.dir, self.port, self.origin_port)
+        let restore = Self::command(&self.dir, self.port, &self.origin)
             .args(["restore", "--in"])
             .arg(backup)
             .output()
@@ -1855,7 +1963,7 @@ impl Server {
             "{}",
             String::from_utf8_lossy(&restore.stderr)
         );
-        self.child = Self::spawn(&self.dir, self.port, self.origin_port);
+        self.child = Self::spawn(&self.dir, self.port, &self.origin);
     }
 }
 
@@ -1914,7 +2022,7 @@ impl Server {
         self.stop();
         let copy = self.dir.join(name);
         copy_tree(&self.dir.join("data"), &copy);
-        self.child = Self::spawn(&self.dir, self.port, self.origin_port);
+        self.child = Self::spawn(&self.dir, self.port, &self.origin);
         copy
     }
 
@@ -1925,7 +2033,7 @@ impl Server {
         let data = self.dir.join("data");
         std::fs::remove_dir_all(&data).unwrap();
         copy_tree(copy, &data);
-        self.child = Self::spawn(&self.dir, self.port, self.origin_port);
+        self.child = Self::spawn(&self.dir, self.port, &self.origin);
     }
 }
 
@@ -2461,4 +2569,72 @@ fn item_edit_moves_uris_and_custom_fields() {
     let on_b = b.ok(&["item", "show", &item, "--reveal"], &[]);
     let on_a = a.ok(&["item", "show", &item, "--reveal"], &[]);
     assert_eq!(on_b.out, on_a.out);
+}
+
+/// ADR 0030 through `rv` against the real `rizzy-vault` behind a loopback TLS-terminating
+/// proxy ([`TlsProxy`]): the test certificate is refused under the public roots before
+/// anything is asked; with the test CA (`--ca-file` once, then `RIZZY_CLI_CA_FILE` as the
+/// device's setting) a signup, an item, a login on a second device and a sync all go over TLS
+/// 1.3, and the device requests signed for the `https://` origin verify on the server.
+#[test]
+fn rv_reaches_the_server_through_a_tls_proxy() {
+    let (_proxy, server) = TlsProxy::start();
+    let origin = server.origin();
+    assert!(origin.starts_with("https://localhost:"), "{origin}");
+    let ca = tls_fixture("ca.pem");
+    let ca_text = ca.to_str().unwrap();
+
+    // The public roots do not hold the test CA: refused before anything is asked or sent.
+    let mut a = Rv::new("tls-a");
+    let (outcome, asked) = a.try_run(
+        &["signup", "--server", &origin, "--name", "alice"],
+        &[PASSWORD, PASSWORD],
+        &[],
+        &[],
+    );
+    match outcome {
+        Err(CliError::Tls {
+            origin: named,
+            failure,
+        }) => {
+            assert_eq!(named, origin);
+            assert_eq!(failure, rizzy_cli::error::TlsFailure::UnknownIssuer);
+        }
+        other => panic!("expected a TLS failure, got {other:?}"),
+    }
+    assert!(asked.out.is_empty());
+
+    // With the flag: signup over TLS.
+    let (outcome, signup) = a.try_run(
+        &[
+            "signup",
+            "--server",
+            &origin,
+            "--name",
+            "alice",
+            "--ca-file",
+            ca_text,
+        ],
+        &[PASSWORD, PASSWORD],
+        &[],
+        &[],
+    );
+    outcome.unwrap_or_else(|e| panic!("signup failed: {e:?}; {:?}", signup.notes));
+    let secret_key = signup.printed("Secret Key:");
+
+    // From here on, the CA file is the device's setting, as `RIZZY_CLI_CA_FILE` would set it.
+    a.ca_file = Some(ca.clone());
+    let id = create_note(&a, "Over TLS");
+    a.ok(&["sync"], &[]);
+
+    let mut b = Rv::new("tls-b");
+    b.ca_file = Some(ca);
+    log_in(&b, &origin, "alice", &secret_key);
+    b.ok(&["sync"], &[]);
+    assert_eq!(b.field(&id, "item.name"), "Over TLS");
+
+    // Without the CA, the enrolled device's next online step is refused as well.
+    b.ca_file = None;
+    let (outcome, _) = b.try_run(&["sync"], &[PASSWORD], &[], &[]);
+    assert!(matches!(outcome, Err(CliError::Tls { .. })), "{outcome:?}");
 }

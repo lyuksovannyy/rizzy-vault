@@ -125,14 +125,26 @@ sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-toki
 # hyper the server is tested with. What it needs beside them:
 # - http-body-util: `Full` and `Limited` bodies. Already in Cargo.lock through axum (hyperium,
 #   MIT); no new crate enters the graph.
-#
-# TLS for `https://` origins is NOT here yet. A client-side TLS crate needs ADR 0009's approval
-# procedure ("any other AEAD, KDF, curve, signature, PAKE, RNG or TLS crate on the client
-# side"): an exact pin, the checklist, the protocol-version decision, and an ADR 0009 and
-# CRYPTO.md §3 update the owner accepts. Until then `rv` refuses `https://` origins
-# (`crates/rizzy-cli/src/http.rs`). The candidates, for that ADR: `tokio-rustls` (the tokio
-# adapter of rustls, with the `ring` provider sqlx already uses) and `webpki-roots`.
 http-body-util = { version = "0.1.5", default-features = false }
+
+# TLS for `https://` origins (ADR 0030 Decision 1, approved under ADR 0009's procedure on
+# 2026-10-05; ADR 0009 "Amendments"; CRYPTO.md §3 "Transport (`rv`)"). `rizzy-cli` only, a leaf
+# (ADR 0016 unchanged). Exact pins; bumps are reviewed like crypto changes and never
+# auto-merged. TLS 1.3 only, with the `ring` provider passed explicitly, is set at run time in
+# `crates/rizzy-cli/src/tls.rs`: a feature cannot keep TLS 1.2 out, because sqlx's
+# `tls-rustls-ring-webpki` turns `rustls/tls12` on in a `--workspace` build.
+# - tokio-rustls: the tokio adapter of rustls (the one new package in Cargo.lock). `ring` only;
+#   never `aws_lc_rs`, `fips`, `early-data` or `logging`.
+# - rustls: the TLS 1.3 client, declared directly so the pin holds (0.23.45 is the first release
+#   fixed for RUSTSEC-2026-0285). `std` and `ring` only; never `aws_lc_rs`, `fips`.
+# - webpki-roots: Mozilla's root set, compiled in; the default trust anchors. A private CA
+#   file replaces them (`--ca-file`, `RIZZY_CLI_CA_FILE`; ADR 0030 Decision 4).
+# Lockfile-pinned, transitive (already shipped with the server through sqlx): `ring` (≥ 0.17.12,
+# RUSTSEC-2025-0009), `rustls-webpki` (≥ 0.103.13), `rustls-pki-types`, `untrusted`, and
+# `getrandom` 0.2 (ring's OS RNG for the handshake only; our RNG stays `UnwrapErr(SysRng)`).
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["std", "ring"] }
+webpki-roots = { version = "=1.0.9", default-features = false }
 # sqlx for a client leaf crate (ADR 0016 R5: "only with the `sqlite` driver and no other driver
 # feature"; ADR 0019 §5; ADR 0026 §3). The same exact pin as `sqlx` above, without `postgres`,
 # TLS and `migrate`: the cache schema is `rizzy-client`'s SQL text, run by the leaf.

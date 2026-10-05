@@ -160,6 +160,9 @@ pub struct Env<'a> {
     pub data_dir: PathBuf,
     /// `--account`, parsed.
     pub account: Option<[u8; 16]>,
+    /// The trust anchors of `https://` origins: the public roots, or the private CA file of
+    /// `--ca-file` or `RIZZY_CLI_CA_FILE` (ADR 0030 Decision 4; [`crate::tls`]).
+    pub trust: crate::tls::Trust,
     /// The user.
     pub ui: &'a mut dyn Ui,
 }
@@ -310,7 +313,7 @@ impl Device {
         let mut db = Db::open(&cache_path(&env.data_dir, &account)).await?;
         let mut rows = db.read().await?;
         let mut record = load::open(&rows)?;
-        let http = Http::new(record.server_origin().as_str())?;
+        let http = Http::new(record.server_origin().as_str(), &env.trust)?;
         if record.stage() == Stage::SignupPending {
             // ADR 0026 §2: the stored `register/finish` is resent as it is; the server treats
             // a byte-identical repeat as success, and its answer finalises the record. The
@@ -1249,7 +1252,7 @@ impl Device {
         level: RotationLevel,
         revoke: Option<DeviceId>,
     ) -> Result<usize, CliError> {
-        let mut flight = self.begin_rotation(ui, login_name, level, revoke).await?;
+        let mut flight = Box::pin(self.begin_rotation(ui, login_name, level, revoke)).await?;
         if let Err(e) = self.send_rotation(&mut flight).await {
             // The stored body is there exactly while a commit is persisted and not settled.
             if self.pending_commit.is_some() && !matches!(e, CliError::Alarm(_)) {

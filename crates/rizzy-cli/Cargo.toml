@@ -36,8 +36,12 @@ hyper-util.workspace = true
 # `Full` (the request body) and `Limited` (the bounded response read). Already in the graph
 # through axum; see the workspace entry.
 http-body-util.workspace = true
-# No TLS crate: a client-side TLS crate awaits ADR 0009's approval procedure (see the workspace
-# manifest). `https://` origins are refused until then.
+# TLS for `https://` origins (ADR 0030; approved under ADR 0009 on 2026-10-05): rustls with the
+# `ring` provider, TLS 1.3 only, set at run time (`src/tls.rs`); the tokio adapter; Mozilla's
+# roots, replaced by a private CA file when one is given. Pins and features: the workspace entries.
+tokio-rustls.workspace = true
+rustls.workspace = true
+webpki-roots.workspace = true
 # The cache executor (ADR 0026 §3–§4; ADR 0019 §5: sqlx sits in `rizzy-cli` for M1), with the
 # `sqlite` driver only (ADR 0016 R5, checked by `cargo xtask check-deps`). The workspace entry
 # `sqlx-client` is the same pinned sqlx without the PostgreSQL driver.
@@ -59,6 +63,16 @@ zeroize.workspace = true
 # `cargo xtask check-deps` reads no quoted `[target.'cfg(..)']` table headers; on Windows it is
 # compiled but unused.
 rustix.workspace = true
+
+# The loopback TLS tests (ADR 0030 Decision 7, `tests/tls.rs`): their test server offers TLS 1.2
+# only, to show that `rv` refuses it, which needs rustls' `tls12` feature. Test builds only; a
+# `--workspace` build has it on anyway through sqlx, and the client's configuration admits TLS
+# 1.3 alone whatever the features (`src/tls.rs`). No new package.
+[dev-dependencies]
+rustls = { workspace = true, features = ["tls12"] }
+# The test servers and the TLS-terminating test proxy copy bytes with tokio's I/O utilities.
+# Already on in the workspace through hyper-util and axum; no new package.
+tokio = { workspace = true, features = ["rt", "net", "time", "io-util"] }
 
 [lints]
 workspace = true

@@ -77,6 +77,8 @@
 #   wasm_host_input    rizzy-wasm's readers of what JavaScript hands in: response status and
 #                      body (`checkMeta`, `expectNoContent`), hex ids, item-draft entries, and
 #                      the start of a login and a signup (ADR 0013 §3 rule 8)
+#   ca_pem             rv's private CA file reader (ADR 0030 Decision 4): the 64 KiB and
+#                      16-certificate limits, PEM sections, trust-anchor parsing of arbitrary DER
 #
 # The `import_*` targets share `fuzz_targets/import_common/mod.rs` (the checks on an import
 # result and a counting RNG), included with `#[path]`; it is not a target.
@@ -132,6 +134,10 @@ rizzy-import = { path = "../crates/rizzy-import" }
 # crates (wasm-bindgen and its macro crates, getrandom with `wasm_js`) are the ones the main
 # workspace already locks and `cargo deny` already checks. Built for the host here.
 rizzy-wasm = { path = "../crates/rizzy-wasm" }
+# `rv`'s private CA file reader (`ca_pem`). A path crate over rizzy-client; its external crates
+# (tokio-rustls, rustls, webpki-roots, hyper, sqlx with the SQLite driver, rustix) are the ones
+# the main workspace already locks and `cargo deny` already checks.
+rizzy-cli = { path = "../crates/rizzy-cli" }
 
 # One [[bin]] per target. `test`, `doc` and `bench` are off because a libFuzzer entry point
 # (`#![no_main]` with `fuzz_target!`) is not a test, has no API to document and is not a benchmark.
@@ -390,6 +396,13 @@ bench = false
 [[bin]]
 name = "wasm_host_input"
 path = "fuzz_targets/wasm_host_input.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ca_pem"
+path = "fuzz_targets/ca_pem.rs"
 test = false
 doc = false
 bench = false
