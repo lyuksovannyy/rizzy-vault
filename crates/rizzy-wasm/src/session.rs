@@ -17,8 +17,8 @@
 //! | Save | [`Session::create_item`], [`Session::edit_item`] with an [`ItemDraft`] |
 //! | Trash, restore, purge | [`Session::trash_item`], [`Session::restore_item`], [`Session::purge_item`] |
 //! | TOTP code | [`Session::totp`] |
-//! | Export | [`Session::export_encrypted`]; [`Session::reauth`] + [`Session::confirm_reauth`] + [`Session::export_plaintext`] |
-//! | Import | [`Session::import_file`], [`Session::import_encrypted`] |
+//! | Export | [`Session::reauth`] + [`Session::confirm_reauth`], then [`Session::export_encrypted`], or [`Session::plaintext_warning_shown`] + [`Session::export_plaintext`] after the hold |
+//! | Import | [`detect_import_format`], then [`Session::import_file`] or [`Session::import_encrypted`] |
 //! | Devices | [`Session::devices`] |
 //! | 2FA | [`Session::two_factor_enrol_request`], [`Session::two_factor_enrol_response`], [`Session::two_factor_confirm_request`], [`Session::two_factor_disable_request`] |
 //!
@@ -28,14 +28,19 @@
 //!
 //! # Readings
 //!
-//! - **Re-authentication before a plaintext export** (ADR 0013 §3 rule 2: "an explicit
-//!   plaintext export, after re-authentication"). The web vault has no local password check, so
+//! - **Re-authentication before any export** (owner decision 2026-10-05; for plaintext also ADR
+//!   0013 §3 rule 2: "an explicit plaintext export, after re-authentication"). The web vault has no local password check, so
 //!   the re-authentication is an OPAQUE login of the same account ([`Session::reauth`]),
 //!   accepted by [`Session::confirm_reauth`] for [`REAUTH_WINDOW_MS`] (the freshness window
 //!   CRYPTO.md §11 "Replacing credentials" gives the server's fresh session) and spent by one
 //!   export. The host's clock decides the window; a host that lies to itself only weakens its
 //!   own check, as any code on the vault origin could call the same API (ADR 0013 §4, "Honest
 //!   limit").
+//! - **The hold after the plaintext warning** (owner decision 2026-10-05): the host calls
+//!   [`Session::plaintext_warning_shown`] when it shows the warning, shows a countdown of
+//!   [`plaintext_export_hold_ms`], and keeps its confirm control disabled until it ends;
+//!   [`Session::export_plaintext`] refuses before (`plaintext_export_hold`). The gates live in
+//!   `rizzy_client::export::gate`, shared with `rv`.
 //! - **Devices** are those of the account answer last verified: the login's, then each sync's
 //!   refresh ([`crate::sync`]). The host syncs before it lists them, as `rv device list` reads
 //!   `account/state` first.
@@ -45,6 +50,8 @@ use core::fmt;
 use rizzy_client::ClientError;
 use rizzy_client::account::VerifiedAccount;
 use rizzy_client::device::UnlockedDevice;
+use rizzy_client::export::detect::{DetectedFormat, detect_format};
+use rizzy_client::export::gate::{self, ExportGate, check_export_password};
 use rizzy_client::export::plaintext::{
     PLAINTEXT_EXPORT_PHRASE, PLAINTEXT_EXPORT_WARNING, PlaintextExportAck, csv_export_warning,
 };
@@ -64,9 +71,7 @@ use rizzy_client::two_factor::{TotpEnrolment, disable_request};
 use wasm_bindgen::prelude::wasm_bindgen;
 use zeroize::Zeroizing;
 
-use crate::error::{
-    CoreError, CoreResult, IMPORT_FAILED, LOCKED, REAUTH_REQUIRED, UNKNOWN_FORMAT, WRONG_STATE,
-};
+use crate::error::{CoreError, CoreResult, IMPORT_FAILED, LOCKED, UNKNOWN_FORMAT, WRONG_STATE};
 use crate::http::{self, HttpRequest};
 use crate::items::{self, FieldView, ItemDraft, ItemSummary, hex, type_from_name, visible_item};
 use crate::login::{Credentials, LoginFlow, Purpose};
@@ -74,8 +79,9 @@ use crate::rng::{Rng, os_rng};
 use crate::secret::take_secret;
 use crate::sync::{Ctx, SyncDriver};
 
-/// How long a re-authentication allows a plaintext export: 5 minutes (module docs).
-pub const REAUTH_WINDOW_MS: u64 = 5 * 60 * 1000;
+/// How long a re-authentication allows one export: 5 minutes (module docs;
+/// `rizzy_client::export::gate::REAUTH_WINDOW_MS`).
+pub const REAUTH_WINDOW_MS: u64 = gate::REAUTH_WINDOW_MS;
 
 /// The largest import file read: the largest input any importer accepts (a 1PUX archive), as
 /// `rv` bounds it.
@@ -102,8 +108,9 @@ struct Inner {
     vault: VaultSync,
     /// The sync step driver.
     sync: SyncDriver,
-    /// When the last accepted re-authentication happened, if it is unspent.
-    reauth_at_ms: Option<u64>,
+    /// The export gates: the re-authentication every export needs and the hold after the
+    /// plaintext warning (`rizzy_client::export::gate`).
+    gate: ExportGate,
     /// The RNG.
     rng: Rng,
 }
@@ -160,7 +167,7 @@ impl Session {
                 account,
                 vault,
                 sync: SyncDriver::default(),
-                reauth_at_ms: None,
+                gate: ExportGate::new(),
                 rng: os_rng(),
             })),
         })
@@ -490,13 +497,17 @@ impl Session {
         })
     }
 
-    /// The vault as an encrypted export file (CRYPTO.md §11.14; ADR 0027), under a new export
-    /// password. Ciphertext: the host saves the bytes as a download.
+    /// The vault as an encrypted export file (CRYPTO.md §11.14; ADR 0027), under a new
+    /// password for that file, which is needed to import it. Needs a re-authentication
+    /// confirmed within [`REAUTH_WINDOW_MS`] ([`Session::reauth`], [`Session::confirm_reauth`];
+    /// owner decision 2026-10-05), and spends it. Ciphertext: the host saves the bytes as a
+    /// download.
     ///
     /// # Errors
-    /// `locked`; `export_oversize_items`; `export_too_large`; `invalid_input` for an empty
-    /// export password or one with an unassigned code point. `export_password` is UTF-8 bytes,
-    /// zeroed on return ([`crate::secret`]).
+    /// `locked`; `invalid_input` for an empty export password or one with an unassigned code
+    /// point (checked first, so it spends nothing); `reauth_required`;
+    /// `export_oversize_items`; `export_too_large`. `export_password` is UTF-8 bytes, zeroed
+    /// on return ([`crate::secret`]).
     #[wasm_bindgen(js_name = exportEncrypted)]
     pub fn export_encrypted(
         &mut self,
@@ -505,9 +516,12 @@ impl Session {
     ) -> Result<EncryptedExport, CoreError> {
         let export_password = take_secret(export_password)?;
         let inner = self.inner_mut()?;
-        let exported = inner
-            .vault
-            .export_encrypted(&mut inner.rng, &export_password, now_ms)?;
+        check_export_password(&export_password)?;
+        let auth = inner.gate.authorize_encrypted(now_ms)?;
+        let exported =
+            inner
+                .vault
+                .export_encrypted(&mut inner.rng, auth, &export_password, now_ms)?;
         Ok(EncryptedExport {
             file: exported.file,
             items: exported.items,
@@ -542,9 +556,10 @@ impl Session {
         Ok(csv_export_warning(loss.items_losing_data()))
     }
 
-    /// Starts the re-authentication a plaintext export needs: an OPAQUE login of this
-    /// session's account, with the Secret Key and master password typed again. The host runs
-    /// the returned flow to `"done"` and passes it to [`Session::confirm_reauth`].
+    /// Starts the re-authentication every export needs (owner decision 2026-10-05; for a
+    /// plaintext export also ADR 0013 §3 rule 2): an OPAQUE login of this session's account,
+    /// with the Secret Key and master password typed again. The host runs the returned flow
+    /// to `"done"` and passes it to [`Session::confirm_reauth`].
     ///
     /// # Errors
     /// `locked`; as [`LoginFlow::start`], whose byte-array rules `secret_key` and `password`
@@ -571,7 +586,7 @@ impl Session {
         )
     }
 
-    /// Accepts a finished re-authentication of this account, for one plaintext export within
+    /// Accepts a finished re-authentication of this account, for one export within
     /// [`REAUTH_WINDOW_MS`] of `now_ms`.
     ///
     /// # Errors
@@ -584,22 +599,54 @@ impl Session {
             return Err(CoreError::new(WRONG_STATE));
         }
         let account = flow.reauthenticated().ok_or(CoreError::new(WRONG_STATE))?;
-        if account != inner.account_id {
-            return Err(ClientError::WrongPasswordOrSecretKey.into());
-        }
-        inner.reauth_at_ms = Some(now_ms);
+        inner
+            .gate
+            .accept_reauth(account, inner.account_id, now_ms)?;
         Ok(())
+    }
+
+    /// Whether an unspent re-authentication allows an export at `now_ms`.
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(js_name = reauthFresh)]
+    pub fn reauth_fresh(&self, now_ms: u64) -> Result<bool, CoreError> {
+        Ok(self.inner()?.gate.reauth_fresh(now_ms))
+    }
+
+    /// Records that the plaintext-export warning is shown at `now_ms`: the hold of
+    /// [`plaintext_export_hold_ms`] starts, or starts over (a dialog opened again). Returns
+    /// the hold in milliseconds, for the host's countdown.
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(js_name = plaintextWarningShown)]
+    pub fn plaintext_warning_shown(&mut self, now_ms: u64) -> Result<u32, CoreError> {
+        self.inner_mut()?.gate.plaintext_warning_shown(now_ms);
+        Ok(plaintext_export_hold_ms())
+    }
+
+    /// How much of the hold after the plaintext warning is left at `now_ms`, in milliseconds:
+    /// the whole hold when the warning was not shown, 0 once it is over.
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(js_name = plaintextHoldRemainingMs)]
+    pub fn plaintext_hold_remaining_ms(&self, now_ms: u64) -> Result<u32, CoreError> {
+        let left = self.inner()?.gate.plaintext_hold_remaining_ms(now_ms);
+        Ok(u32::try_from(left).unwrap_or(u32::MAX))
     }
 
     /// The plaintext export (ADR 0027 §3–§5): `format` is `json` or `csv`; `typed_phrase` is
     /// what the user typed after the warning, which must be exactly
     /// [`plaintext_export_phrase`]. Needs a re-authentication confirmed within
-    /// [`REAUTH_WINDOW_MS`], and spends it. The bytes are plaintext: the host hands them to the
-    /// user as a download and keeps no copy.
+    /// [`REAUTH_WINDOW_MS`] and the hold after [`Session::plaintext_warning_shown`] to be over
+    /// (owner decision 2026-10-05), and spends both. The bytes are plaintext: the host hands
+    /// them to the user as a download and keeps no copy.
     ///
     /// # Errors
-    /// `locked`; `reauth_required`; `plaintext_export_not_acknowledged`; `unknown_format`;
-    /// `export_oversize_items`; `export_too_large`.
+    /// `locked`; `reauth_required`; `unknown_format`; `plaintext_export_not_acknowledged`;
+    /// `plaintext_export_hold`; `export_oversize_items`; `export_too_large`.
     #[wasm_bindgen(js_name = exportPlaintext)]
     pub fn export_plaintext(
         &mut self,
@@ -608,11 +655,8 @@ impl Session {
         now_ms: u64,
     ) -> Result<Vec<u8>, CoreError> {
         let inner = self.inner_mut()?;
-        let fresh = inner
-            .reauth_at_ms
-            .is_some_and(|at| now_ms >= at && now_ms - at <= REAUTH_WINDOW_MS);
-        if !fresh {
-            return Err(CoreError::new(REAUTH_REQUIRED));
+        if !inner.gate.reauth_fresh(now_ms) {
+            return Err(ClientError::ReauthRequired.into());
         }
         let json = match format {
             "json" => true,
@@ -620,11 +664,11 @@ impl Session {
             _ => return Err(CoreError::new(UNKNOWN_FORMAT)),
         };
         let ack = PlaintextExportAck::from_typed_phrase(typed_phrase)?;
-        inner.reauth_at_ms = None;
+        let auth = inner.gate.authorize_plaintext(now_ms)?;
         let bytes = if json {
-            inner.vault.export_plaintext_json(ack, now_ms)?
+            inner.vault.export_plaintext_json(auth, ack, now_ms)?
         } else {
-            inner.vault.export_plaintext_csv(ack)?
+            inner.vault.export_plaintext_csv(auth, ack)?
         };
         Ok(bytes.expose_secret().to_vec())
     }
@@ -820,6 +864,45 @@ pub fn plaintext_export_warning() -> String {
 #[must_use]
 pub fn plaintext_export_phrase() -> String {
     PLAINTEXT_EXPORT_PHRASE.to_owned()
+}
+
+/// How long the host holds the user after the plaintext-export warning, in milliseconds: 10
+/// seconds (owner decision 2026-10-05; `rizzy_client::export::gate`).
+#[wasm_bindgen(js_name = plaintextExportHoldMs)]
+#[must_use]
+pub fn plaintext_export_hold_ms() -> u32 {
+    u32::try_from(gate::PLAINTEXT_EXPORT_HOLD_MS).unwrap_or(u32::MAX)
+}
+
+/// The format of an import file, recognised from its bytes (owner decision 2026-10-05;
+/// `rizzy_client::export::detect`): `rizzy-encrypted` (open it with
+/// [`Session::import_encrypted`] and the file's password), an [`Session::import_file`] format
+/// name, `rizzy-csv` (our plaintext CSV export, which cannot be imported), or `unknown` (the
+/// host asks the user to name the format). A file over [`MAX_IMPORT_FILE_LEN`] is `unknown`.
+/// The answer names a kind only, never a byte of the file.
+#[wasm_bindgen(js_name = detectImportFormat)]
+#[must_use]
+pub fn detect_import_format(file: &[u8]) -> String {
+    let name = if file.len() > MAX_IMPORT_FILE_LEN {
+        "unknown"
+    } else {
+        match detect_format(file) {
+            Some(DetectedFormat::RizzyEncrypted) => "rizzy-encrypted",
+            Some(DetectedFormat::RizzyPlaintextCsv) => "rizzy-csv",
+            Some(DetectedFormat::Import(format)) => match format {
+                Format::BitwardenJson => "bitwarden-json",
+                Format::OnePux => "1pux",
+                Format::KeePassXml => "keepass-xml",
+                Format::GenericCsv => "csv",
+                Format::ChromeCsv => "chrome-csv",
+                Format::FirefoxCsv => "firefox-csv",
+                Format::RizzyPlaintextJson => "rizzy-json",
+                _ => "unknown",
+            },
+            _ => "unknown",
+        }
+    };
+    name.to_owned()
 }
 
 /// A TOTP code (CRYPTO.md §11.15). The code is wiped when freed.

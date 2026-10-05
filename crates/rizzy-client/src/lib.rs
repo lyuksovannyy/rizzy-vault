@@ -52,6 +52,8 @@
 //! | [`export`] | CRYPTO.md §11.14 | The encrypted export file writer and bounded reader |
 //! | [`export::payload`] | ADR 0027 §1–§2 | The export payload: encoding, bounded reader, import of our own export as new items |
 //! | [`export::plaintext`] | ADR 0027 §3–§5 | Plaintext JSON and CSV behind the typed acknowledgement; the frozen warning texts |
+//! | [`export::gate`] | owner decision 2026-10-05 | The re-authentication before any export and the 10-second hold after the plaintext warning |
+//! | [`export::detect`] | owner decision 2026-10-05 | Recognising an import file's format |
 //!
 //! Import files of other products, and our own plaintext JSON export, are read by
 //! `rizzy-import`, re-exported as [`rizzy_import`] for hosts that link only this crate

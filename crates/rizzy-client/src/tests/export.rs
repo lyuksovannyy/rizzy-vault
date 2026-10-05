@@ -22,6 +22,7 @@ use rizzy_sync::record::{
 use rizzy_sync::vv::VersionVector;
 
 use super::*;
+use crate::export::gate::test_auth;
 use crate::export::payload::{
     MAX_PAYLOAD_ENTRIES, MAX_PAYLOAD_LEN, PayloadImport, PayloadItem, PayloadPreview,
     encode_payload, parse_payload, preview_payload,
@@ -342,7 +343,7 @@ fn encrypted_export_round_trips_into_a_new_vault() {
     assert!(a.vault.export_blockers().is_empty());
     let export = a
         .vault
-        .export_encrypted(&mut a.rng, "export pw", T0 + 100)
+        .export_encrypted(&mut a.rng, test_auth().0, "export pw", T0 + 100)
         .unwrap();
     assert_eq!(export.items, 4);
     assert!(export.unresolved.is_empty());
@@ -397,7 +398,7 @@ fn encrypted_export_round_trips_into_a_new_vault() {
     // Exporting the importing vault again gives the same displayed values.
     let again = b
         .vault
-        .export_encrypted(&mut b.rng, "second pw", T0 + 300)
+        .export_encrypted(&mut b.rng, test_auth().0, "second pw", T0 + 300)
         .unwrap();
     let mut c = fixture(33);
     c.vault
@@ -427,7 +428,10 @@ fn plaintext_json_round_trips_into_a_new_vault() {
         );
     }
     let ack = PlaintextExportAck::from_typed_phrase(PLAINTEXT_EXPORT_PHRASE).unwrap();
-    let json = a.vault.export_plaintext_json(ack, T0 + 100).unwrap();
+    let json = a
+        .vault
+        .export_plaintext_json(test_auth().1, ack, T0 + 100)
+        .unwrap();
     let doc = core::str::from_utf8(json.expose_secret()).unwrap();
     // The shape of ADR 0027 §3: no BOM, LF only, members in order, one item per line.
     assert!(doc.starts_with(&format!(
@@ -548,7 +552,7 @@ fn plaintext_csv_is_rfc_4180_and_counts_its_losses() {
          instead."
     );
     let ack = PlaintextExportAck::from_typed_phrase("EXPORT PLAINTEXT").unwrap();
-    let csv = a.vault.export_plaintext_csv(ack).unwrap();
+    let csv = a.vault.export_plaintext_csv(test_auth().1, ack).unwrap();
     let doc = core::str::from_utf8(csv.expose_secret()).unwrap();
     let empty = |n: usize| vec!["\"\""; n].join(",");
     let header = csv_columns()
@@ -1243,17 +1247,21 @@ fn exports_refuse_oversize_vaults_and_oversize_items() {
     // Refused before any key derivation: the export password is not even looked at.
     assert_eq!(
         f.vault
-            .export_encrypted(&mut f.rng, "", T0 + 200)
+            .export_encrypted(&mut f.rng, test_auth().0, "", T0 + 200)
             .unwrap_err(),
         ClientError::ExportOversizeItems
     );
     let ack = || PlaintextExportAck::from_typed_phrase(PLAINTEXT_EXPORT_PHRASE).unwrap();
     assert_eq!(
-        f.vault.export_plaintext_json(ack(), T0).unwrap_err(),
+        f.vault
+            .export_plaintext_json(test_auth().1, ack(), T0)
+            .unwrap_err(),
         ClientError::ExportOversizeItems
     );
     assert_eq!(
-        f.vault.export_plaintext_csv(ack()).unwrap_err(),
+        f.vault
+            .export_plaintext_csv(test_auth().1, ack())
+            .unwrap_err(),
         ClientError::ExportOversizeItems
     );
     assert_eq!(
@@ -1270,4 +1278,55 @@ fn exports_refuse_oversize_vaults_and_oversize_items() {
         .unwrap();
     assert!(f.vault.export_blockers().is_empty());
     assert_eq!(f.vault.export_payload().unwrap().items, 1);
+}
+
+#[test]
+fn gated_exports_are_recognised_on_import() {
+    use crate::export::detect::{DetectedFormat, detect_format};
+    use crate::export::gate::{ExportGate, PLAINTEXT_EXPORT_HOLD_MS};
+
+    let (mut a, _) = populated(36);
+    let me = rizzy_core::ids::AccountId::from_bytes([7; 16]);
+    let mut gate = ExportGate::new();
+    assert_eq!(
+        gate.authorize_encrypted(T0).unwrap_err(),
+        ClientError::ReauthRequired
+    );
+    gate.accept_reauth(me, me, T0).unwrap();
+    let auth = gate.authorize_encrypted(T0 + 1).unwrap();
+    let export = a
+        .vault
+        .export_encrypted(&mut a.rng, auth, "file pw", T0 + 1)
+        .unwrap();
+    assert_eq!(
+        detect_format(&export.file),
+        Some(DetectedFormat::RizzyEncrypted)
+    );
+
+    let ack = || PlaintextExportAck::from_typed_phrase(PLAINTEXT_EXPORT_PHRASE).unwrap();
+    gate.accept_reauth(me, me, T0).unwrap();
+    gate.plaintext_warning_shown(T0);
+    assert_eq!(
+        gate.authorize_plaintext(T0 + PLAINTEXT_EXPORT_HOLD_MS - 1)
+            .unwrap_err(),
+        ClientError::PlaintextExportHold
+    );
+    let auth = gate
+        .authorize_plaintext(T0 + PLAINTEXT_EXPORT_HOLD_MS)
+        .unwrap();
+    let json = a.vault.export_plaintext_json(auth, ack(), T0).unwrap();
+    assert_eq!(
+        detect_format(json.expose_secret()),
+        Some(DetectedFormat::Import(Format::RizzyPlaintextJson))
+    );
+    gate.accept_reauth(me, me, T0).unwrap();
+    gate.plaintext_warning_shown(T0);
+    let auth = gate
+        .authorize_plaintext(T0 + PLAINTEXT_EXPORT_HOLD_MS)
+        .unwrap();
+    let csv = a.vault.export_plaintext_csv(auth, ack()).unwrap();
+    assert_eq!(
+        detect_format(csv.expose_secret()),
+        Some(DetectedFormat::RizzyPlaintextCsv)
+    );
 }

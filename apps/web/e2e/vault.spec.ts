@@ -8,6 +8,11 @@
 // - INV-68: every secret field has `spellcheck="false"` and `autocomplete="off"` before and
 //   after a reveal;
 // - the Emergency Kit download.
+//
+// A second test runs the export and import flow (owner decision 2026-10-05): every export
+// behind a re-authentication, the encrypted export under a password for the file, the
+// plaintext dialog's 10-second countdown, and an import into a second account that recognises
+// the file and round-trips an item.
 import { readFile } from "node:fs/promises";
 
 import { type Locator, type Page, expect, test } from "@playwright/test";
@@ -235,4 +240,116 @@ test("the server serves only the embedded files", async ({ request }) => {
     const r = await request.get(server.origin + path);
     expect(r.status(), path).toBe(404);
   }
+});
+
+/** Signs up `name` and confirms the kit; returns the Secret Key. */
+async function signUp(page: Page, name: string): Promise<string> {
+  await page.goto(server.origin);
+  await page.getByRole("button", { name: "Create an account" }).click();
+  await page.getByLabel("Login name").fill(name);
+  await page.getByLabel("Master password", { exact: true }).fill(PASSWORD);
+  await page.getByLabel("Repeat the master password", { exact: true }).fill(PASSWORD);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByTestId("emergency-kit")).toBeVisible();
+  const secretKey = (await page.getByTestId("kit-secret-key").textContent()) ?? "";
+  await page.getByLabel(/last group of your Secret Key/).fill(secretKey.split("-").at(-1) ?? "");
+  await page.getByRole("button", { name: "Create the account" }).click();
+  await expect(page.getByRole("button", { name: "Lock" })).toBeVisible();
+  return secretKey;
+}
+
+/** Confirms the Secret Key and master password on the export pane. */
+async function reauthenticate(page: Page, secretKey: string, password = PASSWORD): Promise<void> {
+  await page.getByLabel("Secret Key", { exact: true }).fill(secretKey);
+  await page.getByLabel("Master password", { exact: true }).fill(password);
+  await page.getByRole("button", { name: "Confirm", exact: true }).click();
+}
+
+test("encrypted export, then import into a second account", async ({ browser }) => {
+  const FILE_PASSWORD = "a password for this file only";
+
+  // The first account, with one item.
+  const first = await browser.newPage();
+  const { problems } = watch(first);
+  const firstKey = await signUp(first, "exporter");
+  await first.getByRole("button", { name: "New login" }).click();
+  await first.getByLabel("Title").fill("Round trip");
+  await first.getByLabel("Username", { exact: true }).fill("carol@example.com");
+  await first.getByLabel("Password", { exact: true }).fill(ITEM_PASSWORD);
+  await first.getByRole("button", { name: "Save" }).click();
+  await expect(first.getByText("Synced", { exact: true })).toBeVisible();
+
+  // Every export needs the Secret Key and master password again; a wrong one allows nothing.
+  await first.getByRole("button", { name: "Export and import", exact: true }).click();
+  await expect(first.getByRole("button", { name: "Export encrypted" })).toHaveCount(0);
+  await reauthenticate(first, firstKey, "not the master password");
+  await expect(first.locator('[data-code="wrong_password_or_secret_key"]')).toBeVisible();
+  await expect(first.getByRole("button", { name: "Export encrypted" })).toHaveCount(0);
+  await reauthenticate(first, firstKey);
+
+  // The encrypted export, under a password for the file, typed twice.
+  await first.getByLabel("Password for this export file", { exact: true }).fill(FILE_PASSWORD);
+  await first.getByLabel("Repeat the password for this export file", { exact: true }).fill(FILE_PASSWORD);
+  const [download] = await Promise.all([
+    first.waitForEvent("download"),
+    first.getByRole("button", { name: "Export encrypted" }).click(),
+  ]);
+  expect(download.suggestedFilename()).toMatch(/^rizzy-vault-export-\d{4}-\d{2}-\d{2}\.json$/);
+  const exportPath = await download.path();
+  const exported = (await readFile(exportPath)).toString("utf8");
+  expect(exported.startsWith('{"format":"rizzy-vault-export"')).toBe(true);
+  expect(exported).not.toContain(ITEM_PASSWORD);
+  // One export per confirmation: the pane asks again.
+  await expect(first.getByRole("button", { name: "Confirm", exact: true })).toBeVisible();
+
+  // The plaintext export: the warning, a 10-second countdown with the button disabled, which
+  // starts over when the dialog is opened again; then the phrase.
+  await reauthenticate(first, firstKey);
+  await first.getByRole("button", { name: "Export in plaintext…" }).click();
+  const dialog = first.getByRole("dialog");
+  await expect(dialog.getByTestId("plaintext-warning")).toContainText("unencrypted");
+  const confirm = dialog.getByRole("button", { name: "Export in plaintext", exact: true });
+  await expect(confirm).toBeDisabled();
+  await expect(dialog.getByTestId("plaintext-countdown")).toContainText("continue in");
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await first.getByRole("button", { name: "Export in plaintext…" }).click();
+  await expect(confirm).toBeDisabled();
+  await expect(dialog.getByTestId("plaintext-countdown")).toContainText(/continue in (10|9) s/);
+  await dialog.getByLabel(/to continue/).fill("EXPORT PLAINTEXT");
+  await first.waitForTimeout(8_000);
+  await expect(confirm).toBeDisabled();
+  await expect(confirm).toBeEnabled({ timeout: 5_000 });
+  const [plain] = await Promise.all([
+    first.waitForEvent("download"),
+    confirm.click(),
+  ]);
+  expect(plain.suggestedFilename()).toMatch(/^rizzy-vault-plaintext-.*\.json$/);
+  expect((await readFile(await plain.path())).toString("utf8")).toContain(ITEM_PASSWORD);
+  expect(problems).toEqual([]);
+
+  // A second account imports the encrypted file: the format is recognised, and the file's
+  // password opens it.
+  const second = await browser.newPage();
+  const secondKey = await signUp(second, "importer");
+  expect(secondKey).not.toBe(firstKey);
+  await expect(second.getByText("No items yet.")).toBeVisible();
+  await second.getByRole("button", { name: "Export and import", exact: true }).click();
+  await second.getByLabel("File", { exact: true }).setInputFiles(exportPath);
+  await expect(second.getByTestId("import-detected")).toHaveText(
+    "Recognised: rizzy-vault encrypted export.",
+  );
+  await second.getByLabel("Password of this export file", { exact: true }).fill("wrong");
+  await second.getByRole("button", { name: "Import", exact: true }).click();
+  await expect(second.locator('[data-code="export_decryption_failed"]')).toBeVisible();
+  await second.getByLabel("Password of this export file", { exact: true }).fill(FILE_PASSWORD);
+  await second.getByRole("button", { name: "Import", exact: true }).click();
+  await expect(second.getByTestId("import-report")).toContainText("Imported 1");
+  await second.getByRole("button", { name: "Items", exact: true }).click();
+  await second.getByRole("button", { name: /Round trip/ }).click();
+  await expect(second.getByText("carol@example.com").first()).toBeVisible();
+  const row = second.locator('[data-field="login.password"]');
+  await row.getByRole("button", { name: "Reveal" }).click();
+  await expect(row.locator("input[data-secret-field]")).toHaveValue(ITEM_PASSWORD);
+  await first.close();
+  await second.close();
 });

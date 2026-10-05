@@ -109,6 +109,7 @@ use rizzy_sync::record::{
 use rizzy_sync::vv::VersionVector;
 use zeroize::Zeroizing;
 
+use super::gate::EncryptedExportAuth;
 use super::state;
 use super::{read_export, write_export};
 use crate::device::UnlockedDevice;
@@ -570,6 +571,10 @@ impl VaultSync {
     /// ADR 0027 §1): the payload, then one Argon2id run and the `EXPORT_FILE` envelope. Every
     /// refusal of the payload comes before the key derivation.
     ///
+    /// `auth` is the permission of [`ExportGate::authorize_encrypted`](super::gate::ExportGate::authorize_encrypted):
+    /// no export without a fresh re-authentication (owner decision 2026-10-05). It is consumed
+    /// whatever the outcome.
+    ///
     /// # Errors
     /// [`ClientError::ExportOversizeItems`] while [`VaultSync::export_blockers`] is not
     /// empty; [`ClientError::ExportTooLarge`] for a payload over 16 MiB;
@@ -578,9 +583,11 @@ impl VaultSync {
     pub fn export_encrypted<R: CryptoRng + ?Sized>(
         &self,
         rng: &mut R,
+        auth: EncryptedExportAuth,
         export_password: &str,
         now_ms: u64,
     ) -> Result<EncryptedExport, ClientError> {
+        auth.spend();
         let payload = self.export_payload()?;
         let file = write_export(rng, export_password, payload.expose_secret(), now_ms)?;
         Ok(EncryptedExport {

@@ -80,6 +80,14 @@ pub enum ClientError {
     /// A plaintext export was asked for without the typed acknowledgement `EXPORT PLAINTEXT`
     /// (ADR 0027 §5). Nothing was written.
     PlaintextExportNotAcknowledged,
+    /// An export was asked for without a fresh, unspent re-authentication of the account
+    /// (owner decision 2026-10-05; [`crate::export::gate`]): log in again with the master
+    /// password (and Secret Key), then export within five minutes. Nothing was written.
+    ReauthRequired,
+    /// A plaintext export was asked for before the hold after its warning ended
+    /// ([`crate::export::gate::PLAINTEXT_EXPORT_HOLD_MS`], owner decision 2026-10-05), or
+    /// without the warning shown. Nothing was written.
+    PlaintextExportHold,
     /// An upload was asked for before any Fetch response or upload answer was seen: the
     /// restore generation the own-chain bookkeeping needs is unknown (ADR 0021 §2). Fetch
     /// first.
@@ -166,6 +174,8 @@ impl ClientError {
             Self::ExportTooLarge => "export_too_large",
             Self::ExportOversizeItems => "export_oversize_items",
             Self::PlaintextExportNotAcknowledged => "plaintext_export_not_acknowledged",
+            Self::ReauthRequired => "reauth_required",
+            Self::PlaintextExportHold => "plaintext_export_hold",
             Self::FetchRequired => "fetch_required",
             Self::SessionExhausted => "session_exhausted",
             Self::SyncRequired => "sync_required",
@@ -215,6 +225,12 @@ impl fmt::Display for ClientError {
             Self::ExportOversizeItems => "an item is too large to export; duplicate it first",
             Self::PlaintextExportNotAcknowledged => {
                 "the plaintext export was not confirmed by typing EXPORT PLAINTEXT"
+            }
+            Self::ReauthRequired => {
+                "confirm your master password (and Secret Key) again before exporting"
+            }
+            Self::PlaintextExportHold => {
+                "read the warning: the plaintext export waits 10 seconds after it is shown"
             }
             Self::FetchRequired => "fetch the vault before uploading",
             Self::SessionExhausted => "the session must be renewed",
@@ -276,6 +292,8 @@ mod tests {
             ClientError::ExportTooLarge,
             ClientError::ExportOversizeItems,
             ClientError::PlaintextExportNotAcknowledged,
+            ClientError::ReauthRequired,
+            ClientError::PlaintextExportHold,
             ClientError::FetchRequired,
             ClientError::SessionExhausted,
             ClientError::SyncRequired,

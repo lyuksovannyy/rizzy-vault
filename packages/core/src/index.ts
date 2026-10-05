@@ -31,11 +31,13 @@ import initWasm, {
   TwoFactorEnrolment,
   checkMeta,
   coreVersion,
+  detectImportFormat as wasmDetectImportFormat,
   expectNoContent,
   generatePassphrase as wasmGeneratePassphrase,
   generatePassword as wasmGeneratePassword,
   initSync,
   metaRequest,
+  plaintextExportHoldMs as wasmPlaintextExportHoldMs,
   plaintextExportPhrase as wasmPlaintextExportPhrase,
   plaintextExportWarning as wasmPlaintextExportWarning,
 } from "../generated/rizzy_core.js";
@@ -586,6 +588,13 @@ export type ImportFormat =
   | "firefox-csv"
   | "rizzy-json";
 
+/**
+ * What {@link detectImportFormat} recognised: an {@link ImportFormat}, our encrypted export
+ * (`rizzy-encrypted`, opened with the file's own password), our plaintext CSV export
+ * (`rizzy-csv`, which cannot be imported), or `unknown` (ask the user to name the format).
+ */
+export type DetectedImportFormat = ImportFormat | "rizzy-encrypted" | "rizzy-csv" | "unknown";
+
 /** One durable device of the account. */
 export interface DeviceView {
   readonly id: string;
@@ -857,7 +866,11 @@ export class VaultSession {
     );
   }
 
-  /** The vault as an encrypted export file under a new export password. */
+  /**
+   * The vault as an encrypted export file under a new password for that file, which is needed
+   * to import it. Needs {@link reauthenticate} within five minutes, and spends it
+   * (`reauth_required` otherwise).
+   */
   exportEncrypted(exportPassword: SecretInput): EncryptedExport {
     const s = this.#s();
     return mapOne(
@@ -877,8 +890,8 @@ export class VaultSession {
   }
 
   /**
-   * Re-authenticates (an OPAQUE login of this account) for one plaintext export within five
-   * minutes.
+   * Re-authenticates (an OPAQUE login of this account, with the Secret Key and master
+   * password typed again) for one export, encrypted or plaintext, within five minutes.
    */
   async reauthenticate(
     secretKey: SecretInput,
@@ -898,9 +911,28 @@ export class VaultSession {
     }
   }
 
+  /** Whether an unspent {@link reauthenticate} still allows an export. */
+  reauthFresh(): boolean {
+    return call(() => this.#s().reauthFresh(this.#now()));
+  }
+
   /**
-   * The plaintext export, after {@link plaintextExportWarning} was shown and the user typed
-   * {@link plaintextExportPhrase}, within five minutes of {@link reauthenticate}.
+   * Records that {@link plaintextExportWarning} is shown now: the hold starts, or starts over
+   * when the dialog is shown again. Returns the hold in milliseconds, for the countdown.
+   */
+  plaintextWarningShown(): number {
+    return call(() => this.#s().plaintextWarningShown(this.#now()));
+  }
+
+  /** How much of the hold after the plaintext warning is left, in milliseconds. */
+  plaintextHoldRemainingMs(): number {
+    return call(() => this.#s().plaintextHoldRemainingMs(this.#now()));
+  }
+
+  /**
+   * The plaintext export, after {@link plaintextExportWarning} was shown
+   * ({@link plaintextWarningShown}), its hold of {@link plaintextExportHoldMs} ended, and the
+   * user typed {@link plaintextExportPhrase}, within five minutes of {@link reauthenticate}.
    */
   exportPlaintext(format: "json" | "csv", typedPhrase: string): Uint8Array {
     return call(() => this.#s().exportPlaintext(format, typedPhrase, this.#now()));
@@ -1023,4 +1055,33 @@ export function plaintextExportWarning(): string {
 export function plaintextExportPhrase(): string {
   ensureReady();
   return wasmPlaintextExportPhrase();
+}
+
+/** How long the host holds the user after the plaintext-export warning, in milliseconds. */
+export function plaintextExportHoldMs(): number {
+  ensureReady();
+  return wasmPlaintextExportHoldMs();
+}
+
+/**
+ * The format of an import file, recognised from its bytes; a kind only, never a byte of the
+ * file. The reader the answer picks still checks the whole file.
+ */
+export function detectImportFormat(file: Uint8Array): DetectedImportFormat {
+  ensureReady();
+  const found = wasmDetectImportFormat(file);
+  switch (found) {
+    case "bitwarden-json":
+    case "1pux":
+    case "keepass-xml":
+    case "csv":
+    case "chrome-csv":
+    case "firefox-csv":
+    case "rizzy-json":
+    case "rizzy-encrypted":
+    case "rizzy-csv":
+      return found;
+    default:
+      return "unknown";
+  }
 }

@@ -403,6 +403,11 @@ impl Ui for Script {
     fn note(&mut self, text: &str) {
         self.notes.push(text.to_owned());
     }
+
+    fn hold(&mut self, duration: Duration) -> Duration {
+        // No export runs here; a hold is recorded as served at once.
+        duration
+    }
 }
 
 impl Script {

@@ -27,8 +27,9 @@ pub const WRONG_STATE: &str = "wrong_state";
 pub const LOCKED: &str = "locked";
 /// A response body larger than anything `/api/v1` sizes (ADR 0028 item 7).
 pub const RESPONSE_TOO_LARGE: &str = "response_too_large";
-/// A plaintext export needs a re-authentication less than [`crate::session::REAUTH_WINDOW_MS`]
-/// old (ADR 0013 §3 rule 2: "an explicit plaintext export, after re-authentication").
+/// An export needs a re-authentication less than [`crate::session::REAUTH_WINDOW_MS`]
+/// old (owner decision 2026-10-05; ADR 0013 §3 rule 2: "an explicit plaintext export, after
+/// re-authentication"). The same code as `rizzy-client`'s `ClientError::ReauthRequired`.
 pub const REAUTH_REQUIRED: &str = "reauth_required";
 /// The Emergency Kit was already handed out once (ADR 0013 §3 rule 2: "go out once").
 pub const ALREADY_SHOWN: &str = "already_shown";

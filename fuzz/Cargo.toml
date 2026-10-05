@@ -59,6 +59,8 @@
 #   client_export_payload rizzy-client's export payload reader and the import mapping behind
 #                      it: arbitrary bytes as the plaintext of an `EXPORT_FILE` envelope
 #                      (ADR 0027 §2)
+#   client_detect_format rizzy-client's import-format recognition: arbitrary bytes, and
+#                      agreement with the encrypted export's strict reader
 #   client_device_state rizzy-client's device-state record codec (ADR 0026 §2): arbitrary bytes,
 #                      and the lifecycle steps on every record that parses
 #   client_cache_load  rizzy-client's cache loader (ADR 0026 §3-§6): the rows of a valid cache
@@ -368,6 +370,13 @@ bench = false
 [[bin]]
 name = "client_export_payload"
 path = "fuzz_targets/client_export_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_detect_format"
+path = "fuzz_targets/client_detect_format.rs"
 test = false
 doc = false
 bench = false

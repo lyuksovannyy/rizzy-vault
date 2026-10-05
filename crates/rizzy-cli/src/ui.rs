@@ -18,6 +18,13 @@
 //! - **Lines** are at most [`MAX_LINE_LEN`] bytes; a longer one is refused, never truncated.
 //! - **The plaintext-export phrase** is read only from a terminal (ADR 0027 §5: "`rv` reads
 //!   the phrase from the terminal, so a plaintext export never runs unattended").
+//! - **The plaintext-export hold** (owner decision 2026-10-05): after the warning, [`Ui::hold`]
+//!   blocks for the whole hold, measured with a monotonic clock, before the phrase is asked
+//!   for. No flag or environment variable shortens it. The one seam is this trait: the
+//!   end-to-end tests implement [`Ui`] with scripted answers and record the hold instead of
+//!   sleeping. What the user types during the hold stays in the terminal's input buffer and
+//!   is read by the phrase prompt after it: `rv` cannot flush the terminal's input without
+//!   `tcflush`, which needs `unsafe` or a crate not admitted for it (reported).
 //! - **Results** go to stdout, notes and prompts to stderr, through `write!` on locked handles
 //!   (never `println!`, which panics on a closed pipe). A failed write is an error.
 //!
@@ -26,6 +33,7 @@
 //! (INV-60).
 
 use std::io::{self, BufRead as _, IsTerminal as _, Write as _};
+use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
 
@@ -63,6 +71,10 @@ pub trait Ui {
     /// Writes one line for the user to read (a warning, a progress note) to standard error.
     /// A failure to write a note is not an error.
     fn note(&mut self, text: &str);
+
+    /// Holds the user for `duration` (the plaintext-export hold) and returns how long it held,
+    /// never less than `duration` for the terminal.
+    fn hold(&mut self, duration: Duration) -> Duration;
 }
 
 /// The terminal (module docs).
@@ -200,5 +212,32 @@ impl Ui for Terminal {
 
     fn note(&mut self, text: &str) {
         let _ = writeln!(io::stderr().lock(), "{text}");
+    }
+
+    fn hold(&mut self, duration: Duration) -> Duration {
+        let start = Instant::now();
+        // `sleep` may wake early on some platforms: sleep again until the monotonic clock
+        // has passed the whole hold.
+        loop {
+            let held = start.elapsed();
+            match duration.checked_sub(held) {
+                Some(left) if !left.is_zero() => std::thread::sleep(left),
+                _ => return held,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_terminal_holds_for_the_whole_duration() {
+        let wanted = Duration::from_millis(30);
+        let start = Instant::now();
+        let held = Terminal::new().hold(wanted);
+        assert!(held >= wanted);
+        assert!(start.elapsed() >= wanted);
     }
 }

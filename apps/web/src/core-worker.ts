@@ -18,6 +18,7 @@ import {
   type Transport,
   type VaultSession,
   checkServer,
+  detectImportFormat,
   fetchTransport,
   generatePassphrase,
   generatePassword,
@@ -247,6 +248,8 @@ async function run(m: CallMessage): Promise<unknown> {
     exportBlockers: () => current().exportBlockers(),
     csvExportWarning: () => current().csvExportWarning(),
     reauthenticate: () => current().reauthenticate(bytes(a[0]), bytes(a[1]), askTotp(m.id)),
+    reauthFresh: () => current().reauthFresh(),
+    plaintextWarningShown: () => current().plaintextWarningShown(),
     exportPlaintext: () => {
       const format = str(a[0]);
       if (format !== "json" && format !== "csv") {
@@ -254,6 +257,8 @@ async function run(m: CallMessage): Promise<unknown> {
       }
       return current().exportPlaintext(format, str(a[1]));
     },
+    // Recognition needs no session: the file is read here and never leaves the Worker.
+    detectImportFormat: () => detectImportFormat(bytes(a[0])),
     importFile: () => current().importFile(str(a[0]) as never, bytes(a[1])),
     importEncrypted: () => current().importEncrypted(bytes(a[0]), bytes(a[1])),
     devices: () => current().devices(),

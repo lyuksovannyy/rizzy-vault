@@ -7,6 +7,8 @@
 //! | The encrypted file: the JSON document, its strict bounded reader | CRYPTO.md §11.14 | this module |
 //! | The payload inside `data`: encoding, reader, import as new items | ADR 0027 §1–§2 | [`payload`] |
 //! | Plaintext JSON and CSV, the warning and the typed acknowledgement | ADR 0027 §3–§5 | [`plaintext`] |
+//! | The re-authentication before any export and the hold after the plaintext warning | owner decision 2026-10-05 | [`gate`] |
+//! | Recognising an import file's format | owner decision 2026-10-05 | [`detect`] |
 //!
 //! **An export is not a backup** (ADR 0027 Context): it is a user-level portability file, the
 //! items of a vault as one client sees them. It holds no account, device, key, grant or op
@@ -59,6 +61,8 @@
 //!
 //! [ADR 0027]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0027-export-payload.md
 
+pub mod detect;
+pub mod gate;
 pub mod payload;
 pub mod plaintext;
 mod state;

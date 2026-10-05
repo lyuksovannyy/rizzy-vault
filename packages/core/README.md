@@ -6,6 +6,8 @@ The core is sans-I/O: Rust builds every request and verifies every answer, and `
 
 Secrets the user types (master password, Secret Key, export password) are passed as `SecretInput`: a `Uint8Array` is zeroed when the call returns, whatever its outcome, and a string is encoded into an array that is zeroed (the string itself cannot be wiped). The Emergency Kit returns the Secret Key and recovery code as `Uint8Array`, to zero after rendering. When the transport throws during `sync()`, the sync is aborted in the core and the unsent changes stay queued for the next `sync()`.
 
+Every export needs `reauthenticate()` first (the Secret Key and master password typed again), which allows one export within five minutes; otherwise the core throws `reauth_required`. A plaintext export also needs `plaintextWarningShown()` when the warning is on screen and the hold of `plaintextExportHoldMs()` (10 s) to be over, or it throws `plaintext_export_hold`. `detectImportFormat(file)` names an import file's format from its bytes, so the host does not ask for it in the common case (owner decision 2026-10-05).
+
 ## Build and test
 
 From the repository root:

@@ -47,6 +47,7 @@ use rizzy_cli::commands::run;
 use rizzy_cli::device::Env;
 use rizzy_cli::ui::Ui;
 use rizzy_client::ClientError;
+use rizzy_client::export::plaintext::PLAINTEXT_EXPORT_WARNING;
 use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::store::rows::Alarm;
 use zeroize::Zeroizing;
@@ -524,6 +525,12 @@ struct Script {
     out: Vec<String>,
     /// Standard error.
     notes: Vec<String>,
+    /// The holds `rv` asked for, recorded instead of slept (the test seam of `Ui::hold`).
+    holds: Vec<Duration>,
+    /// How many notes there were at each hold.
+    notes_at_hold: Vec<usize>,
+    /// How many holds there had been at each phrase prompt.
+    holds_at_typed: Vec<usize>,
 }
 
 impl Ui for Script {
@@ -544,6 +551,7 @@ impl Ui for Script {
     }
 
     fn typed(&mut self, _prompt: &str) -> Result<String, CliError> {
+        self.holds_at_typed.push(self.holds.len());
         self.typed.pop_front().ok_or(CliError::NoTerminal)
     }
 
@@ -554,6 +562,12 @@ impl Ui for Script {
 
     fn note(&mut self, text: &str) {
         self.notes.push(text.to_owned());
+    }
+
+    fn hold(&mut self, duration: Duration) -> Duration {
+        self.notes_at_hold.push(self.notes.len());
+        self.holds.push(duration);
+        duration
     }
 }
 
@@ -981,48 +995,87 @@ fn rv_end_to_end() {
     let (outcome, _) = a.try_run(&["item", "purge", &plan], &[PASSWORD], &[], &[]);
     assert!(outcome.is_err(), "only a trashed item is purged");
 
-    // Export: encrypted, then plaintext behind the typed phrase; never an overwrite.
+    // Export (owner decision 2026-10-05): every export first re-authenticates with the master
+    // password, and a wrong one refuses the export and writes nothing; the encrypted export is
+    // under a new password for the file, typed twice; the plaintext export comes after the
+    // warning, a 10-second hold and the typed phrase; never an overwrite.
     let out = temp_dir("out");
     let encrypted = out.join("vault.rvexport");
-    a.ok(
-        &["export", "--out", encrypted.to_str().unwrap()],
-        &["export password", "export password"],
+    let enc = encrypted.to_str().unwrap();
+    let (outcome, refused) = a.try_run(
+        &["export", "--out", enc, "--name", "alice"],
+        &[
+            PASSWORD,
+            "not the master password",
+            "export password",
+            "export password",
+        ],
+        &[],
+        &[],
     );
+    assert!(matches!(
+        outcome,
+        Err(CliError::Client(ClientError::WrongPasswordOrSecretKey))
+    ));
+    assert!(!encrypted.exists());
+    // The file's password was never asked for.
+    assert_eq!(refused.secrets.len(), 2);
+    let (outcome, _) = a.try_run(
+        &["export", "--out", enc, "--name", "alice"],
+        &[PASSWORD, PASSWORD, "export password", "export passwrod"],
+        &[],
+        &[],
+    );
+    assert!(matches!(outcome, Err(CliError::BadInput(_))));
+    assert!(!encrypted.exists());
+    let exported = a.ok(
+        &["export", "--out", enc, "--name", "alice"],
+        &[PASSWORD, "export password", "export password"],
+    );
+    assert!(exported.noted("needed to import the file"));
+    assert!(exported.holds.is_empty());
     let file = std::fs::read(&encrypted).unwrap();
     assert!(file.starts_with(br#"{"format":"rizzy-vault-export""#));
     assert!(!file.windows(7).any(|w| w == b"settled"));
     let (outcome, _) = a.try_run(
-        &["export", "--out", encrypted.to_str().unwrap()],
-        &[PASSWORD, "x", "x"],
+        &["export", "--out", enc, "--name", "alice"],
+        &[PASSWORD, PASSWORD, "x", "x"],
         &[],
         &[],
     );
     assert!(matches!(outcome, Err(CliError::FileExists)));
     assert_eq!(std::fs::read(&encrypted).unwrap(), file);
     let json = out.join("vault.json");
-    // Without a terminal, or with anything but the phrase, nothing is written.
-    let (outcome, _) = a.try_run(
-        &[
-            "export",
-            "--out",
-            json.to_str().unwrap(),
-            "--format",
-            "json",
-        ],
-        &[PASSWORD],
-        &[],
-        &[],
-    );
+    let plaintext_args = |path: &Path, format: &'static str| {
+        [
+            "export".to_owned(),
+            "--out".to_owned(),
+            path.to_str().unwrap().to_owned(),
+            "--name".to_owned(),
+            "alice".to_owned(),
+            "--format".to_owned(),
+            format.to_owned(),
+        ]
+    };
+    let json_args = plaintext_args(&json, "json");
+    let json_args: Vec<&str> = json_args.iter().map(String::as_str).collect();
+    // A wrong master password: no warning, no hold, nothing written.
+    let (outcome, refused) =
+        a.try_run(&json_args, &[PASSWORD, "wrong"], &[], &["EXPORT PLAINTEXT"]);
+    assert!(matches!(
+        outcome,
+        Err(CliError::Client(ClientError::WrongPasswordOrSecretKey))
+    ));
+    assert!(!refused.noted("unencrypted") && refused.holds.is_empty());
+    assert!(!json.exists());
+    // Without a terminal, or with anything but the phrase, nothing is written; the hold runs
+    // after the warning and before the phrase is asked for, whatever comes next.
+    let (outcome, held) = a.try_run(&json_args, &[PASSWORD, PASSWORD], &[], &[]);
     assert!(matches!(outcome, Err(CliError::NoTerminal)));
+    assert_eq!(held.holds, [Duration::from_secs(10)]);
     let (outcome, warned) = a.try_run(
-        &[
-            "export",
-            "--out",
-            json.to_str().unwrap(),
-            "--format",
-            "json",
-        ],
-        &[PASSWORD],
+        &json_args,
+        &[PASSWORD, PASSWORD],
         &[],
         &["export plaintext"],
     );
@@ -1034,19 +1087,22 @@ fn rv_end_to_end() {
     ));
     assert!(warned.noted("unencrypted"));
     assert!(!json.exists());
-    let (outcome, _) = a.try_run(
-        &[
-            "export",
-            "--out",
-            json.to_str().unwrap(),
-            "--format",
-            "json",
-        ],
-        &[PASSWORD],
+    let (outcome, written) = a.try_run(
+        &json_args,
+        &[PASSWORD, PASSWORD],
         &[],
         &["EXPORT PLAINTEXT"],
     );
     outcome.unwrap();
+    // The warning, verbatim, then the 10-second hold, then the phrase.
+    assert_eq!(written.holds, [Duration::from_secs(10)]);
+    let warning_at = written
+        .notes
+        .iter()
+        .position(|n| n == PLAINTEXT_EXPORT_WARNING)
+        .unwrap();
+    assert!(warning_at < written.notes_at_hold[0]);
+    assert_eq!(written.holds_at_typed, [1]);
     assert!(std::fs::read_to_string(&json).unwrap().contains("settled"));
     #[cfg(unix)]
     {
@@ -1057,26 +1113,20 @@ fn rv_end_to_end() {
         );
     }
     let csv = out.join("vault.csv");
-    let (outcome, warned) = a.try_run(
-        &["export", "--out", csv.to_str().unwrap(), "--format", "csv"],
-        &[PASSWORD],
-        &[],
-        &["EXPORT PLAINTEXT"],
-    );
+    let csv_args = plaintext_args(&csv, "csv");
+    let csv_args: Vec<&str> = csv_args.iter().map(String::as_str).collect();
+    let (outcome, warned) = a.try_run(&csv_args, &[PASSWORD, PASSWORD], &[], &["EXPORT PLAINTEXT"]);
     outcome.unwrap();
     assert!(warned.noted("spreadsheet"));
+    assert_eq!(warned.holds, [Duration::from_secs(10)]);
     assert!(std::fs::read_to_string(&csv).unwrap().contains("settled"));
 
-    // Import: our encrypted export (a wrong password imports nothing), our plaintext JSON,
-    // and another product's file. Each item arrives as a new item.
-    let (outcome, _) = b.try_run(
-        &[
-            "import",
-            "--format",
-            "rizzy-encrypted",
-            "--in",
-            encrypted.to_str().unwrap(),
-        ],
+    // Import: the format is recognised from the file. Our encrypted export asks for the file's
+    // own password (a wrong one imports nothing); our plaintext JSON and another product's
+    // file need nothing more; our CSV export and a file of no known format are refused before
+    // the cache is unlocked. `--format` still overrides. Each item arrives as a new item.
+    let (outcome, asked) = b.try_run(
+        &["import", "--in", enc],
         &[PASSWORD, "not the export password"],
         &[],
         &[],
@@ -1085,30 +1135,26 @@ fn rv_end_to_end() {
         outcome,
         Err(CliError::Client(ClientError::ExportDecryptionFailed))
     ));
+    assert!(asked.noted("Recognised: a rizzy-vault encrypted export"));
     assert_eq!(b.items().len(), 2);
-    let imported = b.ok(
-        &[
-            "import",
-            "--format",
-            "rizzy-encrypted",
-            "--in",
-            encrypted.to_str().unwrap(),
-        ],
-        &["export password"],
-    );
+    let imported = b.ok(&["import", "--in", enc], &["export password"]);
     assert!(imported.noted("Imported 2 items"));
     assert_eq!(b.items().len(), 4);
-    b.ok(
-        &[
-            "import",
-            "--format",
-            "rizzy-json",
-            "--in",
-            json.to_str().unwrap(),
-        ],
+    let imported = b.ok(&["import", "--in", json.to_str().unwrap()], &[]);
+    assert!(imported.noted("Recognised: a rizzy-vault plaintext JSON export"));
+    assert_eq!(b.items().len(), 6);
+    let (outcome, asked) = b.try_run(&["import", "--in", csv.to_str().unwrap()], &[], &[], &[]);
+    assert!(matches!(outcome, Err(CliError::BadInput(_))));
+    assert!(asked.secrets.is_empty() || asked.notes.is_empty());
+    let unknown = out.join("notes.txt");
+    std::fs::write(&unknown, "just some text\n").unwrap();
+    let (outcome, _) = b.try_run(
+        &["import", "--in", unknown.to_str().unwrap()],
+        &[],
+        &[],
         &[],
     );
-    assert_eq!(b.items().len(), 6);
+    assert!(matches!(outcome, Err(CliError::BadInput(_))));
     let bitwarden = out.join("bitwarden.json");
     std::fs::write(
         &bitwarden,

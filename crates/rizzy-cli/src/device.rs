@@ -106,6 +106,7 @@ use rizzy_client::ClientError;
 use rizzy_client::account::{CertifiedDevice, RevokedDevice, VerifiedAccount};
 use rizzy_client::credentials::PendingCredentialChange;
 use rizzy_client::device::{DeviceState, UnlockedDevice};
+use rizzy_client::export::gate::ExportGate;
 use rizzy_client::healing::{self, HeldAccount};
 use rizzy_client::login::{LoggedIn, LoginInput, start_login};
 use rizzy_client::rizzy_proto::account::{AccountStateQuery, AccountView, DeviceGrantsResponse};
@@ -1009,6 +1010,57 @@ impl Device {
             Some((session, &self.unlocked)),
         )
         .await
+    }
+
+    /// The re-authentication every export needs (owner decision 2026-10-05;
+    /// `rizzy_client::export::gate`): the master password typed again, then an OPAQUE login
+    /// with it and this device's Secret Key over the device session (one Argon2id run),
+    /// accepted into `gate` when it verifies this account. A wrong password is
+    /// [`ClientError::WrongPasswordOrSecretKey`] and nothing is accepted.
+    ///
+    /// The device authenticates without the account refresh of [`Device::online`]: an export
+    /// reads the cache as it is, and stays possible while an alarm is raised, when the local
+    /// copy may be the user's only good one.
+    ///
+    /// # Errors
+    /// [`CliError::Client`] with [`ClientError::WrongPasswordOrSecretKey`]; the transport's
+    /// errors ([`CliError::Network`] when the server cannot be reached: no export then).
+    pub async fn reauthenticate_for_export(
+        &mut self,
+        ui: &mut dyn Ui,
+        login_name: &str,
+        gate: &mut ExportGate,
+    ) -> Result<(), CliError> {
+        let password = ui.secret("Master password, to confirm the export")?;
+        if self.session.is_none() {
+            self.authenticate().await?;
+        }
+        let secret_key = self.record.secret_key_text();
+        let origin = self.http.origin().as_str().to_owned();
+        let input = LoginInput {
+            server_origin: &origin,
+            login_name,
+            secret_key: &secret_key,
+            password: &password,
+        };
+        let session = self
+            .session
+            .as_mut()
+            .ok_or(CliError::Client(ClientError::Internal))?;
+        let logged_in = opaque_login(
+            &self.http,
+            &mut self.rng,
+            ui,
+            &input,
+            Some((session, &self.unlocked)),
+        )
+        .await?;
+        gate.accept_reauth(
+            logged_in.account().account_id(),
+            self.state.account_id(),
+            now_ms(),
+        )?;
+        Ok(())
     }
 
     /// Drops a pending rotation whose commit the server refused for good.

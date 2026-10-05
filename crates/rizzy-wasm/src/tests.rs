@@ -175,3 +175,31 @@ fn secrets_passed_in_are_zeroed_whatever_the_outcome() {
     SignupFlow::start("not an origin", "alice", &mut pw, None, true, 0).unwrap_err();
     assert!(pw.iter().all(|&b| b == 0));
 }
+
+#[test]
+fn import_files_are_recognised_by_kind_only() {
+    use crate::session::{detect_import_format, plaintext_export_hold_ms};
+
+    assert_eq!(plaintext_export_hold_ms(), 10_000);
+    assert_eq!(
+        detect_import_format(br#"{"format":"rizzy-vault-export","version":1}"#),
+        "rizzy-encrypted"
+    );
+    assert_eq!(
+        detect_import_format(
+            br#"{"format":"rizzy-vault-plaintext-export","version":1,"items":[]}"#
+        ),
+        "rizzy-json"
+    );
+    assert_eq!(
+        detect_import_format(br#"{"encrypted":false,"items":[]}"#),
+        "bitwarden-json"
+    );
+    assert_eq!(detect_import_format(b"PK\x03\x04"), "1pux");
+    assert_eq!(
+        detect_import_format(b"name,url,username,password\n"),
+        "chrome-csv"
+    );
+    assert_eq!(detect_import_format(b"hello\n"), "unknown");
+    assert_eq!(detect_import_format(b""), "unknown");
+}

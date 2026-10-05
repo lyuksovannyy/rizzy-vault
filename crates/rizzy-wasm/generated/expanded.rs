@@ -35,6 +35,7 @@
 //! | [`generate_password_js`] (`generatePassword`), [`generate_passphrase_js`] (`generatePassphrase`), [`Generated`] | the generator |
 //! | [`TotpCode`], [`EncryptedExport`], [`ImportReport`], [`DeviceView`], [`TwoFactorEnrolment`] | results |
 //! | [`plaintext_export_warning`], [`plaintext_export_phrase`] | the frozen texts of ADR 0027 §5 |
+//! | [`plaintext_export_hold_ms`], [`detect_import_format`] | the hold after the plaintext warning; recognising an import file (owner decision 2026-10-05) |
 //! | [`CoreError`] | the one thrown error: a stable code ([`error`]) |
 //!
 //! # Rules of the boundary ([ADR 0013] §3)
@@ -43,7 +44,7 @@
 //!   device key, `export_key`, `pw_in` or an unlock key. The named exceptions this crate uses:
 //!   the master password, the Secret Key, the export password and the 2FA code go in; the
 //!   Emergency Kit goes out once ([`SignupFlow::emergency_kit`]); a plaintext export goes out
-//!   after a re-authentication ([`Session::export_plaintext`]). The OPAQUE session's bearer
+//!   after a re-authentication, the warning and its hold ([`Session::export_plaintext`]). The OPAQUE session's bearer
 //!   token goes out in the `Authorization` value of each request (it is the transport's
 //!   credential, ADR 0028 item 4, not a key of rule 1).
 //! - **Plaintext crosses at the smallest useful size** (rule 3): summaries for lists,
@@ -118,8 +119,9 @@ pub mod error {
     pub const LOCKED: &str = "locked";
     /// A response body larger than anything `/api/v1` sizes (ADR 0028 item 7).
     pub const RESPONSE_TOO_LARGE: &str = "response_too_large";
-    /// A plaintext export needs a re-authentication less than [`crate::session::REAUTH_WINDOW_MS`]
-    /// old (ADR 0013 §3 rule 2: "an explicit plaintext export, after re-authentication").
+    /// An export needs a re-authentication less than [`crate::session::REAUTH_WINDOW_MS`]
+    /// old (owner decision 2026-10-05; ADR 0013 §3 rule 2: "an explicit plaintext export, after
+    /// re-authentication"). The same code as `rizzy-client`'s `ClientError::ReauthRequired`.
     pub const REAUTH_REQUIRED: &str = "reauth_required";
     /// The Emergency Kit was already handed out once (ADR 0013 §3 rule 2: "go out once").
     pub const ALREADY_SHOWN: &str = "already_shown";
@@ -8456,8 +8458,8 @@ pub mod session {
     //! | Save | [`Session::create_item`], [`Session::edit_item`] with an [`ItemDraft`] |
     //! | Trash, restore, purge | [`Session::trash_item`], [`Session::restore_item`], [`Session::purge_item`] |
     //! | TOTP code | [`Session::totp`] |
-    //! | Export | [`Session::export_encrypted`]; [`Session::reauth`] + [`Session::confirm_reauth`] + [`Session::export_plaintext`] |
-    //! | Import | [`Session::import_file`], [`Session::import_encrypted`] |
+    //! | Export | [`Session::reauth`] + [`Session::confirm_reauth`], then [`Session::export_encrypted`], or [`Session::plaintext_warning_shown`] + [`Session::export_plaintext`] after the hold |
+    //! | Import | [`detect_import_format`], then [`Session::import_file`] or [`Session::import_encrypted`] |
     //! | Devices | [`Session::devices`] |
     //! | 2FA | [`Session::two_factor_enrol_request`], [`Session::two_factor_enrol_response`], [`Session::two_factor_confirm_request`], [`Session::two_factor_disable_request`] |
     //!
@@ -8467,14 +8469,19 @@ pub mod session {
     //!
     //! # Readings
     //!
-    //! - **Re-authentication before a plaintext export** (ADR 0013 §3 rule 2: "an explicit
-    //!   plaintext export, after re-authentication"). The web vault has no local password check, so
+    //! - **Re-authentication before any export** (owner decision 2026-10-05; for plaintext also ADR
+    //!   0013 §3 rule 2: "an explicit plaintext export, after re-authentication"). The web vault has no local password check, so
     //!   the re-authentication is an OPAQUE login of the same account ([`Session::reauth`]),
     //!   accepted by [`Session::confirm_reauth`] for [`REAUTH_WINDOW_MS`] (the freshness window
     //!   CRYPTO.md §11 "Replacing credentials" gives the server's fresh session) and spent by one
     //!   export. The host's clock decides the window; a host that lies to itself only weakens its
     //!   own check, as any code on the vault origin could call the same API (ADR 0013 §4, "Honest
     //!   limit").
+    //! - **The hold after the plaintext warning** (owner decision 2026-10-05): the host calls
+    //!   [`Session::plaintext_warning_shown`] when it shows the warning, shows a countdown of
+    //!   [`plaintext_export_hold_ms`], and keeps its confirm control disabled until it ends;
+    //!   [`Session::export_plaintext`] refuses before (`plaintext_export_hold`). The gates live in
+    //!   `rizzy_client::export::gate`, shared with `rv`.
     //! - **Devices** are those of the account answer last verified: the login's, then each sync's
     //!   refresh ([`crate::sync`]). The host syncs before it lists them, as `rv device list` reads
     //!   `account/state` first.
@@ -8482,6 +8489,8 @@ pub mod session {
     use rizzy_client::ClientError;
     use rizzy_client::account::VerifiedAccount;
     use rizzy_client::device::UnlockedDevice;
+    use rizzy_client::export::detect::{DetectedFormat, detect_format};
+    use rizzy_client::export::gate::{self, ExportGate, check_export_password};
     use rizzy_client::export::plaintext::{
         PLAINTEXT_EXPORT_PHRASE, PLAINTEXT_EXPORT_WARNING, PlaintextExportAck,
         csv_export_warning,
@@ -8502,8 +8511,8 @@ pub mod session {
     use wasm_bindgen::prelude::wasm_bindgen;
     use zeroize::Zeroizing;
     use crate::error::{
-        CoreError, CoreResult, IMPORT_FAILED, LOCKED, REAUTH_REQUIRED,
-        UNKNOWN_FORMAT, WRONG_STATE,
+        CoreError, CoreResult, IMPORT_FAILED, LOCKED, UNKNOWN_FORMAT,
+        WRONG_STATE,
     };
     use crate::http::{self, HttpRequest};
     use crate::items::{
@@ -8514,8 +8523,9 @@ pub mod session {
     use crate::rng::{Rng, os_rng};
     use crate::secret::take_secret;
     use crate::sync::{Ctx, SyncDriver};
-    /// How long a re-authentication allows a plaintext export: 5 minutes (module docs).
-    pub const REAUTH_WINDOW_MS: u64 = 5 * 60 * 1000;
+    /// How long a re-authentication allows one export: 5 minutes (module docs;
+    /// `rizzy_client::export::gate::REAUTH_WINDOW_MS`).
+    pub const REAUTH_WINDOW_MS: u64 = gate::REAUTH_WINDOW_MS;
     /// The largest import file read: the largest input any importer accepts (a 1PUX archive), as
     /// `rv` bounds it.
     pub const MAX_IMPORT_FILE_LEN: usize =
@@ -8541,8 +8551,9 @@ pub mod session {
         vault: VaultSync,
         /// The sync step driver.
         sync: SyncDriver,
-        /// When the last accepted re-authentication happened, if it is unspent.
-        reauth_at_ms: Option<u64>,
+        /// The export gates: the re-authentication every export needs and the hold after the
+        /// plaintext warning (`rizzy_client::export::gate`).
+        gate: ExportGate,
         /// The RNG.
         rng: Rng,
     }
@@ -8841,7 +8852,7 @@ pub mod session {
                                 account,
                                 vault,
                                 sync: SyncDriver::default(),
-                                reauth_at_ms: None,
+                                gate: ExportGate::new(),
                                 rng: os_rng(),
                             })),
                 })
@@ -11637,32 +11648,46 @@ pub mod session {
                 })
         }
         #[doc =
-        " The vault as an encrypted export file (CRYPTO.md §11.14; ADR 0027), under a new export"]
+        " The vault as an encrypted export file (CRYPTO.md §11.14; ADR 0027), under a new"]
         #[doc =
-        " password. Ciphertext: the host saves the bytes as a download."]
+        " password for that file, which is needed to import it. Needs a re-authentication"]
+        #[doc =
+        " confirmed within [`REAUTH_WINDOW_MS`] ([`Session::reauth`], [`Session::confirm_reauth`];"]
+        #[doc =
+        " owner decision 2026-10-05), and spends it. Ciphertext: the host saves the bytes as a"]
+        #[doc = " download."]
         #[doc = ""]
         #[doc = " # Errors"]
         #[doc =
-        " `locked`; `export_oversize_items`; `export_too_large`; `invalid_input` for an empty"]
+        " `locked`; `invalid_input` for an empty export password or one with an unassigned code"]
         #[doc =
-        " export password or one with an unassigned code point. `export_password` is UTF-8 bytes,"]
-        #[doc = " zeroed on return ([`crate::secret`])."]
+        " point (checked first, so it spends nothing); `reauth_required`;"]
+        #[doc =
+        " `export_oversize_items`; `export_too_large`. `export_password` is UTF-8 bytes, zeroed"]
+        #[doc = " on return ([`crate::secret`])."]
         pub fn export_encrypted(&mut self, export_password: &mut [u8],
             now_ms: u64) -> Result<EncryptedExport, CoreError> {
             #[automatically_derived]
             const _: () =
                 {
                     #[doc =
-                    " The vault as an encrypted export file (CRYPTO.md §11.14; ADR 0027), under a new export"]
+                    " The vault as an encrypted export file (CRYPTO.md §11.14; ADR 0027), under a new"]
                     #[doc =
-                    " password. Ciphertext: the host saves the bytes as a download."]
+                    " password for that file, which is needed to import it. Needs a re-authentication"]
+                    #[doc =
+                    " confirmed within [`REAUTH_WINDOW_MS`] ([`Session::reauth`], [`Session::confirm_reauth`];"]
+                    #[doc =
+                    " owner decision 2026-10-05), and spends it. Ciphertext: the host saves the bytes as a"]
+                    #[doc = " download."]
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
-                    " `locked`; `export_oversize_items`; `export_too_large`; `invalid_input` for an empty"]
+                    " `locked`; `invalid_input` for an empty export password or one with an unassigned code"]
                     #[doc =
-                    " export password or one with an unassigned code point. `export_password` is UTF-8 bytes,"]
-                    #[doc = " zeroed on return ([`crate::secret`])."]
+                    " point (checked first, so it spends nothing); `reauth_required`;"]
+                    #[doc =
+                    " `export_oversize_items`; `export_too_large`. `export_password` is UTF-8 bytes, zeroed"]
+                    #[doc = " on return ([`crate::secret`])."]
                     #[export_name = "session_exportEncrypted_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_exportEncrypted(me:
                             <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
@@ -11736,16 +11761,23 @@ pub mod session {
             const _: () =
                 {
                     #[doc =
-                    " The vault as an encrypted export file (CRYPTO.md §11.14; ADR 0027), under a new export"]
+                    " The vault as an encrypted export file (CRYPTO.md §11.14; ADR 0027), under a new"]
                     #[doc =
-                    " password. Ciphertext: the host saves the bytes as a download."]
+                    " password for that file, which is needed to import it. Needs a re-authentication"]
+                    #[doc =
+                    " confirmed within [`REAUTH_WINDOW_MS`] ([`Session::reauth`], [`Session::confirm_reauth`];"]
+                    #[doc =
+                    " owner decision 2026-10-05), and spends it. Ciphertext: the host saves the bytes as a"]
+                    #[doc = " download."]
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
-                    " `locked`; `export_oversize_items`; `export_too_large`; `invalid_input` for an empty"]
+                    " `locked`; `invalid_input` for an empty export password or one with an unassigned code"]
                     #[doc =
-                    " export password or one with an unassigned code point. `export_password` is UTF-8 bytes,"]
-                    #[doc = " zeroed on return ([`crate::secret`])."]
+                    " point (checked first, so it spends nothing); `reauth_required`;"]
+                    #[doc =
+                    " `export_oversize_items`; `export_too_large`. `export_password` is UTF-8 bytes, zeroed"]
+                    #[doc = " on return ([`crate::secret`])."]
                     #[no_mangle]
                     #[doc(hidden)]
                     pub extern "C-unwind" fn __wbindgen_describe_session_exportEncrypted_e09cc0eb35f8b583() {
@@ -11770,7 +11802,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\x07X The vault as an encrypted export file (CRYPTO.md \xc2\xa711.14; ADR 0027), under a new export> password. Ciphertext: the host saves the bytes as a download.\0\t # ErrorsT `locked`; `export_oversize_items`; `export_too_large`; `invalid_input` for an emptyX export password or one with an unassigned code point. `export_password` is UTF-8 bytes,& zeroed on return ([`crate::secret`]).\0\x02\x0fexport_password\0\0\0\x06now_ms\0\0\0\0\0\x0fexportEncrypted\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\x0bQ The vault as an encrypted export file (CRYPTO.md \xc2\xa711.14; ADR 0027), under a newP password for that file, which is needed to import it. Needs a re-authenticationY confirmed within [`REAUTH_WINDOW_MS`] ([`Session::reauth`], [`Session::confirm_reauth`];U owner decision 2026-10-05), and spends it. Ciphertext: the host saves the bytes as a\n download.\0\t # ErrorsV `locked`; `invalid_input` for an empty export password or one with an unassigned code@ point (checked first, so it spends nothing); `reauth_required`;V `export_oversize_items`; `export_too_large`. `export_password` is UTF-8 bytes, zeroed\x1f on return ([`crate::secret`]).\0\x02\x0fexport_password\0\0\0\x06now_ms\0\0\0\0\0\x0fexportEncrypted\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -11798,9 +11830,11 @@ pub mod session {
                 };
             let export_password = take_secret(export_password)?;
             let inner = self.inner_mut()?;
+            check_export_password(&export_password)?;
+            let auth = inner.gate.authorize_encrypted(now_ms)?;
             let exported =
-                inner.vault.export_encrypted(&mut inner.rng, &export_password,
-                        now_ms)?;
+                inner.vault.export_encrypted(&mut inner.rng, auth,
+                        &export_password, now_ms)?;
             Ok(EncryptedExport {
                     file: exported.file,
                     items: exported.items,
@@ -12013,11 +12047,13 @@ pub mod session {
             Ok(csv_export_warning(loss.items_losing_data()))
         }
         #[doc =
-        " Starts the re-authentication a plaintext export needs: an OPAQUE login of this"]
+        " Starts the re-authentication every export needs (owner decision 2026-10-05; for a"]
         #[doc =
-        " session\'s account, with the Secret Key and master password typed again. The host runs"]
+        " plaintext export also ADR 0013 §3 rule 2): an OPAQUE login of this session\'s account,"]
         #[doc =
-        " the returned flow to `\"done\"` and passes it to [`Session::confirm_reauth`]."]
+        " with the Secret Key and master password typed again. The host runs the returned flow"]
+        #[doc =
+        " to `\"done\"` and passes it to [`Session::confirm_reauth`]."]
         #[doc = ""]
         #[doc = " # Errors"]
         #[doc =
@@ -12029,11 +12065,13 @@ pub mod session {
             const _: () =
                 {
                     #[doc =
-                    " Starts the re-authentication a plaintext export needs: an OPAQUE login of this"]
+                    " Starts the re-authentication every export needs (owner decision 2026-10-05; for a"]
                     #[doc =
-                    " session\'s account, with the Secret Key and master password typed again. The host runs"]
+                    " plaintext export also ADR 0013 §3 rule 2): an OPAQUE login of this session\'s account,"]
                     #[doc =
-                    " the returned flow to `\"done\"` and passes it to [`Session::confirm_reauth`]."]
+                    " with the Secret Key and master password typed again. The host runs the returned flow"]
+                    #[doc =
+                    " to `\"done\"` and passes it to [`Session::confirm_reauth`]."]
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
@@ -12135,11 +12173,13 @@ pub mod session {
             const _: () =
                 {
                     #[doc =
-                    " Starts the re-authentication a plaintext export needs: an OPAQUE login of this"]
+                    " Starts the re-authentication every export needs (owner decision 2026-10-05; for a"]
                     #[doc =
-                    " session\'s account, with the Secret Key and master password typed again. The host runs"]
+                    " plaintext export also ADR 0013 §3 rule 2): an OPAQUE login of this session\'s account,"]
                     #[doc =
-                    " the returned flow to `\"done\"` and passes it to [`Session::confirm_reauth`]."]
+                    " with the Secret Key and master password typed again. The host runs the returned flow"]
+                    #[doc =
+                    " to `\"done\"` and passes it to [`Session::confirm_reauth`]."]
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
@@ -12169,7 +12209,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\x07O Starts the re-authentication a plaintext export needs: an OPAQUE login of thisV session's account, with the Secret Key and master password typed again. The host runsL the returned flow to `\"done\"` and passes it to [`Session::confirm_reauth`].\0\t # ErrorsV `locked`; as [`LoginFlow::start`], whose byte-array rules `secret_key` and `password`3 follow (both zeroed on return, [`crate::secret`]).\0\x03\nsecret_key\0\0\0\x08password\0\0\0\x04totp\0\0\0\0\0\x06reauth\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\x08R Starts the re-authentication every export needs (owner decision 2026-10-05; for aW plaintext export also ADR 0013 \xc2\xa73 rule 2): an OPAQUE login of this session's account,U with the Secret Key and master password typed again. The host runs the returned flow: to `\"done\"` and passes it to [`Session::confirm_reauth`].\0\t # ErrorsV `locked`; as [`LoginFlow::start`], whose byte-array rules `secret_key` and `password`3 follow (both zeroed on return, [`crate::secret`]).\0\x03\nsecret_key\0\0\0\x08password\0\0\0\x04totp\0\0\0\0\0\x06reauth\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -12206,7 +12246,7 @@ pub mod session {
                 }, totp.map(Zeroizing::new), Purpose::Reauth)
         }
         #[doc =
-        " Accepts a finished re-authentication of this account, for one plaintext export within"]
+        " Accepts a finished re-authentication of this account, for one export within"]
         #[doc = " [`REAUTH_WINDOW_MS`] of `now_ms`."]
         #[doc = ""]
         #[doc = " # Errors"]
@@ -12220,7 +12260,7 @@ pub mod session {
             const _: () =
                 {
                     #[doc =
-                    " Accepts a finished re-authentication of this account, for one plaintext export within"]
+                    " Accepts a finished re-authentication of this account, for one export within"]
                     #[doc = " [`REAUTH_WINDOW_MS`] of `now_ms`."]
                     #[doc = ""]
                     #[doc = " # Errors"]
@@ -12301,7 +12341,7 @@ pub mod session {
             const _: () =
                 {
                     #[doc =
-                    " Accepts a finished re-authentication of this account, for one plaintext export within"]
+                    " Accepts a finished re-authentication of this account, for one export within"]
                     #[doc = " [`REAUTH_WINDOW_MS`] of `now_ms`."]
                     #[doc = ""]
                     #[doc = " # Errors"]
@@ -12331,7 +12371,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\x06V Accepts a finished re-authentication of this account, for one plaintext export within\" [`REAUTH_WINDOW_MS`] of `now_ms`.\0\t # ErrorsR `locked`; `wrong_state` unless the flow is a re-authentication in state `\"done\"`;? `wrong_password_or_secret_key` if it verified another account.\0\x02\x04flow\0\0\0\x06now_ms\0\0\0\0\0\rconfirmReauth\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\x06L Accepts a finished re-authentication of this account, for one export within\" [`REAUTH_WINDOW_MS`] of `now_ms`.\0\t # ErrorsR `locked`; `wrong_state` unless the flow is a re-authentication in state `\"done\"`;? `wrong_password_or_secret_key` if it verified another account.\0\x02\x04flow\0\0\0\x06now_ms\0\0\0\0\0\rconfirmReauth\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -12363,11 +12403,385 @@ pub mod session {
             }
             let account =
                 flow.reauthenticated().ok_or(CoreError::new(WRONG_STATE))?;
-            if account != inner.account_id {
-                return Err(ClientError::WrongPasswordOrSecretKey.into());
-            }
-            inner.reauth_at_ms = Some(now_ms);
+            inner.gate.accept_reauth(account, inner.account_id, now_ms)?;
             Ok(())
+        }
+        #[doc =
+        " Whether an unspent re-authentication allows an export at `now_ms`."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `locked`."]
+        pub fn reauth_fresh(&self, now_ms: u64) -> Result<bool, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Whether an unspent re-authentication allows an export at `now_ms`."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[export_name = "session_reauthFresh_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_reauthFresh(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<bool, CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <u64 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let _ret = me.reauth_fresh(arg1);
+                                            _ret
+                                        }
+                                    });
+                        <Result<bool, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Whether an unspent re-authentication allows an export at `now_ms`."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_reauthFresh_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(1u32);
+                        <u64 as WasmDescribe>::describe();
+                        <Result<bool, CoreError> as WasmDescribe>::describe();
+                        <Result<bool, CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x04C Whether an unspent re-authentication allows an export at `now_ms`.\0\t # Errors\n `locked`.\0\x01\x06now_ms\0\0\0\0\0\x0breauthFresh\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            Ok(self.inner()?.gate.reauth_fresh(now_ms))
+        }
+        #[doc =
+        " Records that the plaintext-export warning is shown at `now_ms`: the hold of"]
+        #[doc =
+        " [`plaintext_export_hold_ms`] starts, or starts over (a dialog opened again). Returns"]
+        #[doc = " the hold in milliseconds, for the host\'s countdown."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `locked`."]
+        pub fn plaintext_warning_shown(&mut self, now_ms: u64)
+            -> Result<u32, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Records that the plaintext-export warning is shown at `now_ms`: the hold of"]
+                    #[doc =
+                    " [`plaintext_export_hold_ms`] starts, or starts over (a dialog opened again). Returns"]
+                    #[doc =
+                    " the hold in milliseconds, for the host\'s countdown."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[export_name =
+                    "session_plaintextWarningShown_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_plaintextWarningShown(me:
+                            <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<u32, CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let mut me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <u64 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let _ret = me.plaintext_warning_shown(arg1);
+                                            _ret
+                                        }
+                                    });
+                        <Result<u32, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Records that the plaintext-export warning is shown at `now_ms`: the hold of"]
+                    #[doc =
+                    " [`plaintext_export_hold_ms`] starts, or starts over (a dialog opened again). Returns"]
+                    #[doc =
+                    " the hold in milliseconds, for the host\'s countdown."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_plaintextWarningShown_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(1u32);
+                        <u64 as WasmDescribe>::describe();
+                        <Result<u32, CoreError> as WasmDescribe>::describe();
+                        <Result<u32, CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x06L Records that the plaintext-export warning is shown at `now_ms`: the hold ofU [`plaintext_export_hold_ms`] starts, or starts over (a dialog opened again). Returns4 the hold in milliseconds, for the host's countdown.\0\t # Errors\n `locked`.\0\x01\x06now_ms\0\0\0\0\0\x15plaintextWarningShown\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.inner_mut()?.gate.plaintext_warning_shown(now_ms);
+            Ok(plaintext_export_hold_ms())
+        }
+        #[doc =
+        " How much of the hold after the plaintext warning is left at `now_ms`, in milliseconds:"]
+        #[doc =
+        " the whole hold when the warning was not shown, 0 once it is over."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `locked`."]
+        pub fn plaintext_hold_remaining_ms(&self, now_ms: u64)
+            -> Result<u32, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " How much of the hold after the plaintext warning is left at `now_ms`, in milliseconds:"]
+                    #[doc =
+                    " the whole hold when the warning was not shown, 0 once it is over."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[export_name =
+                    "session_plaintextHoldRemainingMs_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_plaintextHoldRemainingMs(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<u32, CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <u64 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let _ret = me.plaintext_hold_remaining_ms(arg1);
+                                            _ret
+                                        }
+                                    });
+                        <Result<u32, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " How much of the hold after the plaintext warning is left at `now_ms`, in milliseconds:"]
+                    #[doc =
+                    " the whole hold when the warning was not shown, 0 once it is over."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_plaintextHoldRemainingMs_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(1u32);
+                        <u64 as WasmDescribe>::describe();
+                        <Result<u32, CoreError> as WasmDescribe>::describe();
+                        <Result<u32, CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x05W How much of the hold after the plaintext warning is left at `now_ms`, in milliseconds:B the whole hold when the warning was not shown, 0 once it is over.\0\t # Errors\n `locked`.\0\x01\x06now_ms\0\0\0\0\0\x18plaintextHoldRemainingMs\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let left = self.inner()?.gate.plaintext_hold_remaining_ms(now_ms);
+            Ok(u32::try_from(left).unwrap_or(u32::MAX))
         }
         #[doc =
         " The plaintext export (ADR 0027 §3–§5): `format` is `json` or `csv`; `typed_phrase` is"]
@@ -12376,13 +12790,16 @@ pub mod session {
         #[doc =
         " [`plaintext_export_phrase`]. Needs a re-authentication confirmed within"]
         #[doc =
-        " [`REAUTH_WINDOW_MS`], and spends it. The bytes are plaintext: the host hands them to the"]
-        #[doc = " user as a download and keeps no copy."]
+        " [`REAUTH_WINDOW_MS`] and the hold after [`Session::plaintext_warning_shown`] to be over"]
+        #[doc =
+        " (owner decision 2026-10-05), and spends both. The bytes are plaintext: the host hands"]
+        #[doc = " them to the user as a download and keeps no copy."]
         #[doc = ""]
         #[doc = " # Errors"]
         #[doc =
-        " `locked`; `reauth_required`; `plaintext_export_not_acknowledged`; `unknown_format`;"]
-        #[doc = " `export_oversize_items`; `export_too_large`."]
+        " `locked`; `reauth_required`; `unknown_format`; `plaintext_export_not_acknowledged`;"]
+        #[doc =
+        " `plaintext_export_hold`; `export_oversize_items`; `export_too_large`."]
         pub fn export_plaintext(&mut self, format: &str, typed_phrase: &str,
             now_ms: u64) -> Result<Vec<u8>, CoreError> {
             #[automatically_derived]
@@ -12395,13 +12812,17 @@ pub mod session {
                     #[doc =
                     " [`plaintext_export_phrase`]. Needs a re-authentication confirmed within"]
                     #[doc =
-                    " [`REAUTH_WINDOW_MS`], and spends it. The bytes are plaintext: the host hands them to the"]
-                    #[doc = " user as a download and keeps no copy."]
+                    " [`REAUTH_WINDOW_MS`] and the hold after [`Session::plaintext_warning_shown`] to be over"]
+                    #[doc =
+                    " (owner decision 2026-10-05), and spends both. The bytes are plaintext: the host hands"]
+                    #[doc =
+                    " them to the user as a download and keeps no copy."]
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
-                    " `locked`; `reauth_required`; `plaintext_export_not_acknowledged`; `unknown_format`;"]
-                    #[doc = " `export_oversize_items`; `export_too_large`."]
+                    " `locked`; `reauth_required`; `unknown_format`; `plaintext_export_not_acknowledged`;"]
+                    #[doc =
+                    " `plaintext_export_hold`; `export_oversize_items`; `export_too_large`."]
                     #[export_name = "session_exportPlaintext_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_exportPlaintext(me:
                             <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
@@ -12503,13 +12924,17 @@ pub mod session {
                     #[doc =
                     " [`plaintext_export_phrase`]. Needs a re-authentication confirmed within"]
                     #[doc =
-                    " [`REAUTH_WINDOW_MS`], and spends it. The bytes are plaintext: the host hands them to the"]
-                    #[doc = " user as a download and keeps no copy."]
+                    " [`REAUTH_WINDOW_MS`] and the hold after [`Session::plaintext_warning_shown`] to be over"]
+                    #[doc =
+                    " (owner decision 2026-10-05), and spends both. The bytes are plaintext: the host hands"]
+                    #[doc =
+                    " them to the user as a download and keeps no copy."]
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
-                    " `locked`; `reauth_required`; `plaintext_export_not_acknowledged`; `unknown_format`;"]
-                    #[doc = " `export_oversize_items`; `export_too_large`."]
+                    " `locked`; `reauth_required`; `unknown_format`; `plaintext_export_not_acknowledged`;"]
+                    #[doc =
+                    " `plaintext_export_hold`; `export_oversize_items`; `export_too_large`."]
                     #[no_mangle]
                     #[doc(hidden)]
                     pub extern "C-unwind" fn __wbindgen_describe_session_exportPlaintext_e09cc0eb35f8b583() {
@@ -12533,7 +12958,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\tZ The plaintext export (ADR 0027 \xc2\xa73\xe2\x80\x93\xc2\xa75): `format` is `json` or `csv`; `typed_phrase` is= what the user typed after the warning, which must be exactlyH [`plaintext_export_phrase`]. Needs a re-authentication confirmed withinY [`REAUTH_WINDOW_MS`], and spends it. The bytes are plaintext: the host hands them to the& user as a download and keeps no copy.\0\t # ErrorsT `locked`; `reauth_required`; `plaintext_export_not_acknowledged`; `unknown_format`;- `export_oversize_items`; `export_too_large`.\0\x03\x06format\0\0\0\x0ctyped_phrase\0\0\0\x06now_ms\0\0\0\0\0\x0fexportPlaintext\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\nZ The plaintext export (ADR 0027 \xc2\xa73\xe2\x80\x93\xc2\xa75): `format` is `json` or `csv`; `typed_phrase` is= what the user typed after the warning, which must be exactlyH [`plaintext_export_phrase`]. Needs a re-authentication confirmed withinX [`REAUTH_WINDOW_MS`] and the hold after [`Session::plaintext_warning_shown`] to be overV (owner decision 2026-10-05), and spends both. The bytes are plaintext: the host hands2 them to the user as a download and keeps no copy.\0\t # ErrorsT `locked`; `reauth_required`; `unknown_format`; `plaintext_export_not_acknowledged`;F `plaintext_export_hold`; `export_oversize_items`; `export_too_large`.\0\x03\x06format\0\0\0\x0ctyped_phrase\0\0\0\x06now_ms\0\0\0\0\0\x0fexportPlaintext\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -12560,10 +12985,9 @@ pub mod session {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             let inner = self.inner_mut()?;
-            let fresh =
-                inner.reauth_at_ms.is_some_and(|at|
-                        now_ms >= at && now_ms - at <= REAUTH_WINDOW_MS);
-            if !fresh { return Err(CoreError::new(REAUTH_REQUIRED)); }
+            if !inner.gate.reauth_fresh(now_ms) {
+                return Err(ClientError::ReauthRequired.into());
+            }
             let json =
                 match format {
                     "json" => true,
@@ -12571,11 +12995,11 @@ pub mod session {
                     _ => return Err(CoreError::new(UNKNOWN_FORMAT)),
                 };
             let ack = PlaintextExportAck::from_typed_phrase(typed_phrase)?;
-            inner.reauth_at_ms = None;
+            let auth = inner.gate.authorize_plaintext(now_ms)?;
             let bytes =
                 if json {
-                    inner.vault.export_plaintext_json(ack, now_ms)?
-                } else { inner.vault.export_plaintext_csv(ack)? };
+                    inner.vault.export_plaintext_json(auth, ack, now_ms)?
+                } else { inner.vault.export_plaintext_csv(auth, ack)? };
             Ok(bytes.expose_secret().to_vec())
         }
         #[doc =
@@ -13828,6 +14252,241 @@ pub mod session {
                 {
                     const _CHUNK_SLICES: [&[u8]; 1usize] =
                         [b"\x01\0\x01F The phrase the user types to allow a plaintext export (ADR 0027 \xc2\xa75).\0\0\0\0\x15plaintextExportPhrase\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    #[allow(dead_code)]
+    #[doc =
+    " How long the host holds the user after the plaintext-export warning, in milliseconds: 10"]
+    #[doc =
+    " seconds (owner decision 2026-10-05; `rizzy_client::export::gate`)."]
+    #[must_use]
+    pub fn plaintext_export_hold_ms() -> u32 {
+        u32::try_from(gate::PLAINTEXT_EXPORT_HOLD_MS).unwrap_or(u32::MAX)
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " How long the host holds the user after the plaintext-export warning, in milliseconds: 10"]
+            #[doc =
+            " seconds (owner decision 2026-10-05; `rizzy_client::export::gate`)."]
+            #[must_use]
+            #[export_name = "plaintextExportHoldMs_e09cc0eb35f8b583"]
+            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_plaintextExportHoldMs()
+                ->
+                    wasm_bindgen::convert::WasmRet<<u32 as
+                    wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                const _: () = {};
+                let _ret =
+                    wasm_bindgen::__rt::maybe_catch_unwind(||
+                            { { let _ret = plaintext_export_hold_ms(); _ret } });
+                <u32 as
+                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " How long the host holds the user after the plaintext-export warning, in milliseconds: 10"]
+            #[doc =
+            " seconds (owner decision 2026-10-05; `rizzy_client::export::gate`)."]
+            #[must_use]
+            #[no_mangle]
+            #[doc(hidden)]
+            pub extern "C-unwind" fn __wbindgen_describe_plaintextExportHoldMs_e09cc0eb35f8b583() {
+                use wasm_bindgen::describe::*;
+                wasm_bindgen::__rt::link_mem_intrinsics();
+                inform(FUNCTION);
+                inform(0);
+                inform(0u32);
+                <u32 as WasmDescribe>::describe();
+                <u32 as WasmDescribe>::describe();
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\x01\0\x02Y How long the host holds the user after the plaintext-export warning, in milliseconds: 10C seconds (owner decision 2026-10-05; `rizzy_client::export::gate`).\0\0\0\0\x15plaintextExportHoldMs\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    #[allow(dead_code)]
+    #[doc =
+    " The format of an import file, recognised from its bytes (owner decision 2026-10-05;"]
+    #[doc =
+    " `rizzy_client::export::detect`): `rizzy-encrypted` (open it with"]
+    #[doc =
+    " [`Session::import_encrypted`] and the file\'s password), an [`Session::import_file`] format"]
+    #[doc =
+    " name, `rizzy-csv` (our plaintext CSV export, which cannot be imported), or `unknown` (the"]
+    #[doc =
+    " host asks the user to name the format). A file over [`MAX_IMPORT_FILE_LEN`] is `unknown`."]
+    #[doc = " The answer names a kind only, never a byte of the file."]
+    #[must_use]
+    pub fn detect_import_format(file: &[u8]) -> String {
+        let name =
+            if file.len() > MAX_IMPORT_FILE_LEN {
+                "unknown"
+            } else {
+                match detect_format(file) {
+                    Some(DetectedFormat::RizzyEncrypted) => "rizzy-encrypted",
+                    Some(DetectedFormat::RizzyPlaintextCsv) => "rizzy-csv",
+                    Some(DetectedFormat::Import(format)) =>
+                        match format {
+                            Format::BitwardenJson => "bitwarden-json",
+                            Format::OnePux => "1pux",
+                            Format::KeePassXml => "keepass-xml",
+                            Format::GenericCsv => "csv",
+                            Format::ChromeCsv => "chrome-csv",
+                            Format::FirefoxCsv => "firefox-csv",
+                            Format::RizzyPlaintextJson => "rizzy-json",
+                            _ => "unknown",
+                        },
+                    _ => "unknown",
+                }
+            };
+        name.to_owned()
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " The format of an import file, recognised from its bytes (owner decision 2026-10-05;"]
+            #[doc =
+            " `rizzy_client::export::detect`): `rizzy-encrypted` (open it with"]
+            #[doc =
+            " [`Session::import_encrypted`] and the file\'s password), an [`Session::import_file`] format"]
+            #[doc =
+            " name, `rizzy-csv` (our plaintext CSV export, which cannot be imported), or `unknown` (the"]
+            #[doc =
+            " host asks the user to name the format). A file over [`MAX_IMPORT_FILE_LEN`] is `unknown`."]
+            #[doc =
+            " The answer names a kind only, never a byte of the file."]
+            #[must_use]
+            #[export_name = "detectImportFormat_e09cc0eb35f8b583"]
+            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_detectImportFormat(arg0_1:
+                    <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg0_2:
+                    <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg0_3:
+                    <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg0_4:
+                    <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4)
+                ->
+                    wasm_bindgen::convert::WasmRet<<String as
+                    wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                const _: () = {};
+                let _ret =
+                    wasm_bindgen::__rt::maybe_catch_unwind(||
+                            {
+                                {
+                                    wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                    let arg0 =
+                                        unsafe {
+                                            <[u8] as
+                                                    wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                        as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg0_1, arg0_2,
+                                                    arg0_3, arg0_4))
+                                        };
+                                    let arg0 = &*arg0;
+                                    let _ret = detect_import_format(arg0);
+                                    _ret
+                                }
+                            });
+                <String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " The format of an import file, recognised from its bytes (owner decision 2026-10-05;"]
+            #[doc =
+            " `rizzy_client::export::detect`): `rizzy-encrypted` (open it with"]
+            #[doc =
+            " [`Session::import_encrypted`] and the file\'s password), an [`Session::import_file`] format"]
+            #[doc =
+            " name, `rizzy-csv` (our plaintext CSV export, which cannot be imported), or `unknown` (the"]
+            #[doc =
+            " host asks the user to name the format). A file over [`MAX_IMPORT_FILE_LEN`] is `unknown`."]
+            #[doc =
+            " The answer names a kind only, never a byte of the file."]
+            #[must_use]
+            #[no_mangle]
+            #[doc(hidden)]
+            pub extern "C-unwind" fn __wbindgen_describe_detectImportFormat_e09cc0eb35f8b583() {
+                use wasm_bindgen::describe::*;
+                wasm_bindgen::__rt::link_mem_intrinsics();
+                inform(FUNCTION);
+                inform(0);
+                inform(1u32);
+                <&[u8] as WasmDescribe>::describe();
+                <String as WasmDescribe>::describe();
+                <String as WasmDescribe>::describe();
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\x01\0\x06T The format of an import file, recognised from its bytes (owner decision 2026-10-05;A `rizzy_client::export::detect`): `rizzy-encrypted` (open it with[ [`Session::import_encrypted`] and the file's password), an [`Session::import_file`] formatZ name, `rizzy-csv` (our plaintext CSV export, which cannot be imported), or `unknown` (theZ host asks the user to name the format). A file over [`MAX_IMPORT_FILE_LEN`] is `unknown`.8 The answer names a kind only, never a byte of the file.\0\x01\x04file\0\0\0\0\0\x12detectImportFormat\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                     #[allow(long_running_const_eval)]
                     const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                     #[allow(long_running_const_eval)]
@@ -19729,7 +20388,8 @@ pub use items::{FieldView, ItemDraft, ItemSummary};
 pub use login::LoginFlow;
 pub use session::{
     DeviceView, EncryptedExport, ImportReport, Session, TotpCode,
-    TwoFactorEnrolment, plaintext_export_phrase, plaintext_export_warning,
+    TwoFactorEnrolment, detect_import_format, plaintext_export_hold_ms,
+    plaintext_export_phrase, plaintext_export_warning,
 };
 pub use signup::{EmergencyKit, SignupFlow};
 use wasm_bindgen::prelude::wasm_bindgen;

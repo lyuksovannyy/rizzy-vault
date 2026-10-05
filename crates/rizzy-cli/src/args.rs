@@ -36,8 +36,8 @@ USAGE:
     rv item trash <item> | restore <item> | purge <item>
     rv generate [--length <n>] [--no-symbols] [--no-ambiguous] | [--words <n>]
     rv totp <item>
-    rv export --out <file> [--format encrypted|json|csv]
-    rv import --in <file> --format <format>
+    rv export --out <file> --name <login> [--format encrypted|json|csv]
+    rv import --in <file> [--format <format>]
     rv device list
     rv device revoke <device> --name <login> [--standard]
     rv device forget
@@ -64,8 +64,10 @@ id as `item show` prints it in the field's key (uri/<id>/value), or a unique pre
 <type> is login, note, card, identity, ssh-key, api-credential, software-license, wifi,
 bank-account or passkey. Field keys are the item schema's (item.name, item.notes,
 login.username, login.password, login.totp, card.number, …).
-Import formats: bitwarden-json, 1pux, keepass-xml, csv, chrome-csv, firefox-csv, rizzy-json,
-rizzy-encrypted.
+Every export first asks for the master password again and checks it with the server. An
+encrypted export then asks for a new password for that file, needed to import it.
+Import recognises the file's format; --format overrides it. Import formats: bitwarden-json,
+1pux, keepass-xml, csv, chrome-csv, firefox-csv, rizzy-json, rizzy-encrypted.
 
 SECRETS are never taken from the command line or the environment. rv asks for them on the
 terminal without echo; when standard input is not a terminal it reads them from it, one per
@@ -231,6 +233,8 @@ pub enum Command {
     Export {
         /// `--out`.
         out: PathBuf,
+        /// `--name`: the login name, for the re-authentication every export needs.
+        name: String,
         /// `--format`.
         format: ExportFormat,
     },
@@ -238,8 +242,8 @@ pub enum Command {
     Import {
         /// `--in`.
         input: PathBuf,
-        /// `--format`.
-        format: ImportFormat,
+        /// `--format`: an override; `None` lets `rv` recognise the format.
+        format: Option<ImportFormat>,
     },
     /// `device list`.
     DeviceList,
@@ -720,10 +724,11 @@ fn generate(args: &mut Args) -> Result<Command, CliError> {
 
 /// `export`.
 fn export(args: &mut Args) -> Result<Command, CliError> {
-    let (mut out, mut format) = (None, ExportFormat::Encrypted);
+    let (mut out, mut name, mut format) = (None, None, ExportFormat::Encrypted);
     while let Some(option) = args.next() {
         match option.as_str() {
             "--out" => out = Some(args.value("--out")?),
+            "--name" => name = Some(args.value("--name")?),
             "--format" => {
                 format = match args.value("--format")?.as_str() {
                     "encrypted" => ExportFormat::Encrypted,
@@ -737,6 +742,7 @@ fn export(args: &mut Args) -> Result<Command, CliError> {
     }
     Ok(Command::Export {
         out: PathBuf::from(required(out, "--out")?),
+        name: required(name, "--name")?,
         format,
     })
 }
@@ -765,7 +771,7 @@ fn import(args: &mut Args) -> Result<Command, CliError> {
     }
     Ok(Command::Import {
         input: PathBuf::from(required(input, "--in")?),
-        format: format.ok_or_else(|| usage("--format is required"))?,
+        format,
     })
 }
 
@@ -853,9 +859,10 @@ mod tests {
             Command::Generate(Generate::Words(5))
         );
         assert_eq!(
-            command("export --out f.rvx"),
+            command("export --out f.rvx --name alice"),
             Command::Export {
                 out: PathBuf::from("f.rvx"),
+                name: "alice".to_owned(),
                 format: ExportFormat::Encrypted
             }
         );
@@ -863,7 +870,14 @@ mod tests {
             command("import --format 1pux --in a.1pux"),
             Command::Import {
                 input: PathBuf::from("a.1pux"),
-                format: ImportFormat::OnePux
+                format: Some(ImportFormat::OnePux)
+            }
+        );
+        assert_eq!(
+            command("import --in a.json"),
+            Command::Import {
+                input: PathBuf::from("a.json"),
+                format: None
             }
         );
         assert_eq!(
@@ -901,8 +915,10 @@ mod tests {
             "item create --field novalue --type login",
             "generate --length many",
             "export",
-            "export --out f --format xml",
-            "import --in f",
+            "export --out f --name a --format xml",
+            "export --out f",
+            "import",
+            "import --format f",
             "sync extra",
             "device revoke ab",
             "--account",

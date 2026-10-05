@@ -9,6 +9,7 @@
 //
 // This module is types and pure checks only; it imports no wasm.
 import type {
+  DetectedImportFormat,
   DeviceView,
   EncryptedExport,
   FieldView,
@@ -79,7 +80,10 @@ export interface CoreApi {
   exportBlockers(): string[];
   csvExportWarning(): string;
   reauthenticate(secretKey: Uint8Array, password: Uint8Array): void;
+  reauthFresh(): boolean;
+  plaintextWarningShown(): number;
   exportPlaintext(format: "json" | "csv", typedPhrase: string): Uint8Array;
+  detectImportFormat(file: Uint8Array): DetectedImportFormat;
   importFile(format: ImportFormat, file: Uint8Array): ImportReport;
   importEncrypted(file: Uint8Array, password: Uint8Array): ImportReport;
   devices(): DeviceView[];
@@ -122,7 +126,10 @@ export const METHODS: readonly Method[] = [
   "exportBlockers",
   "csvExportWarning",
   "reauthenticate",
+  "reauthFresh",
+  "plaintextWarningShown",
   "exportPlaintext",
+  "detectImportFormat",
   "importFile",
   "importEncrypted",
   "devices",

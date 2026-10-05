@@ -32,6 +32,27 @@ TypeScript ([ADR 0014](../../docs/adr/0014-ui-stack.md)), served by the `web` ro
 - **Fixed output names** (`assets.ts`): the server embeds exactly these files; the build fails
   on any other.
 
+## Export and import
+
+`src/views/TransferPane.tsx`, with its steps in `src/export-flow.ts` and the countdown in
+`src/hold.ts` (owner decision 2026-10-05; [ADR 0027](../../docs/adr/0027-export-payload.md)).
+The core enforces every gate below itself (`rizzy-client`'s `export::gate`); the view collects
+and shows them.
+
+- **Every export** first asks for the Secret Key and master password again: an OPAQUE login of
+  the same account, which allows one export within five minutes (`reauth_required` otherwise).
+  A wrong password allows nothing.
+- **Encrypted export**: under a password for this export file, typed twice, which is needed to
+  import the file. It is not the master password; it must not be empty.
+- **Plaintext export** (JSON or CSV): a dialog shows ADR 0027 §5's warning verbatim (with the
+  CSV addition), counts down 10 seconds with the confirm button disabled, and needs the typed
+  `EXPORT PLAINTEXT`. Closing and opening the dialog starts the count over, in the view and in
+  the core (`plaintext_export_hold` before it ends).
+- **Import** recognises the file's format from its bytes (`detectImportFormat` of
+  `@rizzy-vault/core`): our encrypted export then asks for that file's password; our plaintext
+  JSON and other products' files need nothing more; our CSV export and unknown files are
+  refused with a message. The format can still be chosen by hand.
+
 ## Build and test
 
 From the repository root:

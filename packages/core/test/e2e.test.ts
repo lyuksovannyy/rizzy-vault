@@ -1,7 +1,8 @@
 // packages/core end to end against a real `rizzy-vault` server, through the wasm module:
 // signup → Emergency Kit → login → items → sync → a second session sees them → reveal → edit →
-// trash and restore → TOTP → encrypted export and import → plaintext export behind a
-// re-authentication → devices → 2FA enrolment and the second-factor login state → lock.
+// trash and restore → TOTP → encrypted export behind a re-authentication, recognised and
+// imported → plaintext export behind a re-authentication and the 10-second hold → devices →
+// 2FA enrolment and the second-factor login state → lock.
 //
 // The server is the built binary (`cargo build -p rizzy-server`, or `cargo test --workspace`),
 // spawned on a loopback port with a temporary SQLite database and a fresh secrets file, as
@@ -24,7 +25,9 @@ import {
   type VaultSession,
   checkServer,
   fetchTransport,
+  detectImportFormat,
   login,
+  plaintextExportHoldMs,
   plaintextExportPhrase,
 } from "../src/index.js";
 import { loadCore } from "./load.js";
@@ -132,13 +135,21 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     const transport = fetchTransport(origin);
     await checkServer(transport);
 
+    // The host's clock, which the test moves forward over the plaintext-export hold.
+    let skew = 0;
+    const clock = () => Date.now() + skew;
+
     // Signup, in the order of "Secrets before commit".
-    const signup = await Signup.start(transport, {
-      origin,
-      loginName: "Alice",
-      password: PASSWORD,
-      issueRecoveryCode: true,
-    });
+    const signup = await Signup.start(
+      transport,
+      {
+        origin,
+        loginName: "Alice",
+        password: PASSWORD,
+        issueRecoveryCode: true,
+      },
+      clock,
+    );
     const kit = signup.emergencyKit();
     // The kit's secrets are bytes the host zeroes once rendered (ADR 0019 §3).
     expect(kit.secretKey).toBeInstanceOf(Uint8Array);
@@ -235,8 +246,27 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     expect(code.periodSeconds).toBe(30);
     await first.sync();
 
-    // Encrypted export, imported back as new items.
+    // Encrypted export (behind a re-authentication: a wrong password is refused and allows
+    // nothing), imported back as new items; the file is recognised from its bytes.
+    expect(() => first.exportEncrypted("export password 1")).toThrowError(
+      expect.objectContaining({ code: "reauth_required" }),
+    );
+    await expect(first.reauthenticate(secretKey, "not the password")).rejects.toMatchObject({
+      code: "wrong_password_or_secret_key",
+    });
+    expect(first.reauthFresh()).toBe(false);
+    expect(() => first.exportEncrypted("export password 1")).toThrowError(
+      expect.objectContaining({ code: "reauth_required" }),
+    );
+    await first.reauthenticate(secretKey, PASSWORD);
+    expect(first.reauthFresh()).toBe(true);
+    // A refused file password spends nothing.
+    expect(() => first.exportEncrypted("")).toThrowError(
+      expect.objectContaining({ code: "invalid_input" }),
+    );
     const exported = first.exportEncrypted("export password 1");
+    expect(first.reauthFresh()).toBe(false);
+    expect(detectImportFormat(exported.file)).toBe("rizzy-encrypted");
     expect(exported.items).toBe(2);
     expect(exported.file.byteLength).toBeGreaterThan(0);
     await expect(
@@ -255,7 +285,22 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     expect(() => first.exportPlaintext("json", "export plaintext")).toThrowError(
       expect.objectContaining({ code: "plaintext_export_not_acknowledged" }),
     );
-    const json = new TextDecoder().decode(first.exportPlaintext("json", plaintextExportPhrase()));
+    // The warning must be shown, and its hold of ten seconds over.
+    expect(() => first.exportPlaintext("json", plaintextExportPhrase())).toThrowError(
+      expect.objectContaining({ code: "plaintext_export_hold" }),
+    );
+    expect(plaintextExportHoldMs()).toBe(10_000);
+    expect(first.plaintextWarningShown()).toBe(10_000);
+    skew += 9_000;
+    expect(first.plaintextHoldRemainingMs()).toBeGreaterThan(0);
+    expect(() => first.exportPlaintext("json", plaintextExportPhrase())).toThrowError(
+      expect.objectContaining({ code: "plaintext_export_hold" }),
+    );
+    skew += 1_000;
+    expect(first.plaintextHoldRemainingMs()).toBe(0);
+    const jsonBytes = first.exportPlaintext("json", plaintextExportPhrase());
+    expect(detectImportFormat(jsonBytes)).toBe("rizzy-json");
+    const json = new TextDecoder().decode(jsonBytes);
     expect(json).toContain("a-new-password");
     // One export per re-authentication.
     expect(() => first.exportPlaintext("csv", plaintextExportPhrase())).toThrowError(

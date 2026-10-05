@@ -7,12 +7,13 @@
 //!
 //! # What runs offline
 //!
-//! `item list`, `item show`, `totp`, `export` and `generate` need no network: the cache is
-//! unlocked and loaded, and that is all (ROADMAP §4.2 "Offline read access"). `rv sync` brings
-//! the cache up to date. A command that writes (`item create/edit/trash/restore/purge`,
-//! `import`) commits the new ops to the cache first and then syncs; if the server cannot be
-//! reached the ops stay queued, the command says so and still succeeds, and the next sync
-//! uploads them.
+//! `item list`, `item show`, `totp` and `generate` need no network: the cache is unlocked and
+//! loaded, and that is all (ROADMAP §4.2 "Offline read access"). `export` reads the cache as it
+//! is too, but first re-authenticates with the server (owner decision 2026-10-05), so it needs
+//! the server. `rv sync` brings the cache up to date. A command that writes (`item
+//! create/edit/trash/restore/purge`, `import`) commits the new ops to the cache first and then
+//! syncs; if the server cannot be reached the ops stay queued, the command says so and still
+//! succeeds, and the next sync uploads them.
 //!
 //! # Secrets (threat model INV-56)
 //!
@@ -37,8 +38,11 @@
 //! mistyped password never removes a file that is evidence.
 
 use std::path::Path;
+use std::time::Duration;
 
 use rizzy_client::ClientError;
+use rizzy_client::export::detect::{DetectedFormat, detect_format};
+use rizzy_client::export::gate::{ExportGate, PLAINTEXT_EXPORT_HOLD_MS, check_export_password};
 use rizzy_client::export::plaintext::{
     PLAINTEXT_EXPORT_PHRASE, PLAINTEXT_EXPORT_WARNING, PlaintextExportAck, csv_export_warning,
 };
@@ -168,7 +172,7 @@ pub async fn run(invocation: Invocation, env: &mut Env<'_>) -> Result<(), CliErr
             let device = Device::open(env).await?;
             totp(&device, env.ui, &item)
         }
-        Command::Export { out, format } => export(env, &out, format).await,
+        Command::Export { out, name, format } => Box::pin(export(env, &out, &name, format)).await,
         Command::Import { input, format } => Box::pin(import(env, &input, format)).await,
         Command::DeviceList => Box::pin(device_list(env)).await,
         Command::DeviceRevoke {
@@ -636,16 +640,33 @@ fn totp(device: &Device, ui: &mut dyn Ui, item: &str) -> Result<(), CliError> {
     ui.print(&code.to_digits())
 }
 
-/// `export` (ADR 0027 §5; CRYPTO.md §11.14): the cache as it is, to a new file.
-async fn export(env: &mut Env<'_>, out: &Path, format: ExportFormat) -> Result<(), CliError> {
+/// `export` (ADR 0027 §5; CRYPTO.md §11.14; owner decision 2026-10-05): the cache as it is, to
+/// a new file, after a re-authentication with the master password.
+///
+/// 1. The output path is checked, the cache unlocked and the oversize items named.
+/// 2. The master password is typed again and checked with an OPAQUE login over the device
+///    session ([`Device::reauthenticate_for_export`]): a wrong one ends the export, and nothing
+///    is written.
+/// 3. Encrypted: a new password for this file, typed twice, with CRYPTO.md §2's new-password
+///    checks; it is needed to import the file and is not the master password.
+/// 4. Plaintext: ADR 0027 §5's warning (with the CSV addition), then a hold of 10 seconds that
+///    no flag or environment variable shortens ([`Ui::hold`]), then the typed `EXPORT
+///    PLAINTEXT` from the terminal.
+/// 5. The export takes the gate's permission (`rizzy_client::export::gate`): one export per
+///    re-authentication, within five minutes of it.
+async fn export(
+    env: &mut Env<'_>,
+    out: &Path,
+    login_name: &str,
+    format: ExportFormat,
+) -> Result<(), CliError> {
     // Nothing is derived or typed for a path that cannot be written: the check the final
     // `create_new` makes again.
     if out.symlink_metadata().is_ok() {
         return Err(CliError::FileExists);
     }
-    let device = Device::open(env).await?;
-    let vault = device.vault();
-    let blockers = vault.export_blockers();
+    let mut device = Device::open(env).await?;
+    let blockers = device.vault().export_blockers();
     if !blockers.is_empty() {
         for item in blockers {
             env.ui.note(&format!(
@@ -655,20 +676,36 @@ async fn export(env: &mut Env<'_>, out: &Path, format: ExportFormat) -> Result<(
         }
         return Err(CliError::Client(ClientError::ExportOversizeItems));
     }
+    let mut gate = ExportGate::new();
+    device
+        .reauthenticate_for_export(env.ui, login_name, &mut gate)
+        .await?;
+    let vault = device.vault();
     match format {
         ExportFormat::Encrypted => {
-            let password = env
-                .ui
-                .secret("Export password (not your master password)")?;
-            let again = env.ui.secret("Export password, again")?;
+            env.ui.note(
+                "Choose a password for this export file. It is needed to import the file. It \
+                 is not your master password, and nobody can recover it if it is lost.",
+            );
+            let password = env.ui.secret("Password for this export file")?;
+            let again = env.ui.secret("Password for this export file, again")?;
             if *password != *again {
                 return Err(CliError::BadInput("the two passwords differ"));
             }
+            check_export_password(&password).map_err(|_| {
+                CliError::BadInput(
+                    "the export file's password must not be empty or hold unassigned characters",
+                )
+            })?;
+            let auth = gate.authorize_encrypted(now_ms())?;
             let mut rng = os_rng();
-            let exported = vault.export_encrypted(&mut rng, &password, now_ms())?;
+            let exported = vault.export_encrypted(&mut rng, auth, &password, now_ms())?;
             write_new_file(out, &exported.file)?;
-            env.ui
-                .note(&format!("Exported {} items, encrypted.", exported.items));
+            env.ui.note(&format!(
+                "Exported {} items, encrypted. Keep the file's password: it is needed to import \
+                 the file.",
+                exported.items
+            ));
             if !exported.unresolved.is_empty() {
                 env.ui.note(&format!(
                     "{} items hold conflicting values; the export holds the merged state.",
@@ -684,14 +721,27 @@ async fn export(env: &mut Env<'_>, out: &Path, format: ExportFormat) -> Result<(
                 let loss = vault.csv_export_loss()?;
                 env.ui.note(&csv_export_warning(loss.items_losing_data()));
             }
+            // The hold after the warning (owner decision 2026-10-05).
+            let shown = now_ms();
+            gate.plaintext_warning_shown(shown);
+            env.ui.note(&format!(
+                "Read the warning above. rv waits {} seconds before it asks for the phrase.",
+                PLAINTEXT_EXPORT_HOLD_MS / 1000
+            ));
+            let held = env.ui.hold(Duration::from_millis(PLAINTEXT_EXPORT_HOLD_MS));
             let typed = env
                 .ui
                 .typed(&format!("Type {PLAINTEXT_EXPORT_PHRASE} to write the file"))?;
             let ack = PlaintextExportAck::from_typed_phrase(&typed)?;
+            // The hold was measured on the monotonic clock; the wall clock may have moved
+            // less (or back) meanwhile.
+            let held_ms = u64::try_from(held.as_millis()).unwrap_or(u64::MAX);
+            let now = now_ms().max(shown.saturating_add(held_ms));
+            let auth = gate.authorize_plaintext(now)?;
             let plaintext = if format == ExportFormat::Json {
-                vault.export_plaintext_json(ack, now_ms())?
+                vault.export_plaintext_json(auth, ack, now_ms())?
             } else {
-                vault.export_plaintext_csv(ack)?
+                vault.export_plaintext_csv(auth, ack)?
             };
             write_new_file(out, plaintext.expose_secret())?;
             env.ui
@@ -701,56 +751,126 @@ async fn export(env: &mut Env<'_>, out: &Path, format: ExportFormat) -> Result<(
     }
 }
 
-/// `import`: every `rizzy-import` format, and our own encrypted export.
-async fn import(env: &mut Env<'_>, input: &Path, format: ImportFormat) -> Result<(), CliError> {
-    let file = Zeroizing::new(read_limited(input, MAX_IMPORT_FILE_LEN)?);
-    let mut device = Device::open(env).await?;
-    let foreign = match format {
-        ImportFormat::BitwardenJson => Some(Format::BitwardenJson),
-        ImportFormat::OnePux => Some(Format::OnePux),
-        ImportFormat::KeePassXml => Some(Format::KeePassXml),
-        ImportFormat::Csv => Some(Format::GenericCsv),
-        ImportFormat::ChromeCsv => Some(Format::ChromeCsv),
-        ImportFormat::FirefoxCsv => Some(Format::FirefoxCsv),
-        ImportFormat::RizzyJson => Some(Format::RizzyPlaintextJson),
-        ImportFormat::RizzyEncrypted => None,
+/// What `import` reads a file as.
+#[derive(Clone, Copy, Debug)]
+enum ImportAs {
+    /// A `rizzy-import` format.
+    Foreign(Format),
+    /// Our own encrypted export.
+    Encrypted,
+}
+
+/// The name of an import format as the user reads it.
+const fn format_name(format: Format) -> &'static str {
+    match format {
+        Format::BitwardenJson => "a Bitwarden JSON export",
+        Format::OnePux => "a 1Password 1PUX export",
+        Format::KeePassXml => "a KeePass XML export",
+        Format::GenericCsv => "a CSV file",
+        Format::ChromeCsv => "a Chrome password CSV",
+        Format::FirefoxCsv => "a Firefox password CSV",
+        Format::RizzyPlaintextJson => "a rizzy-vault plaintext JSON export",
+        _ => "a file of a known format",
+    }
+}
+
+/// What `import` reads `file` as: `--format` when given, else the format recognised from the
+/// bytes (`rizzy_client::export::detect`). Checked before the cache is unlocked, so a file
+/// that cannot be imported asks for no password.
+fn import_as(
+    ui: &mut dyn Ui,
+    file: &[u8],
+    format: Option<ImportFormat>,
+) -> Result<ImportAs, CliError> {
+    let Some(format) = format else {
+        let found = match detect_format(file) {
+            Some(DetectedFormat::RizzyEncrypted) => {
+                ui.note("Recognised: a rizzy-vault encrypted export.");
+                ImportAs::Encrypted
+            }
+            Some(DetectedFormat::Import(format)) => {
+                ui.note(&format!("Recognised: {}.", format_name(format)));
+                ImportAs::Foreign(format)
+            }
+            Some(DetectedFormat::RizzyPlaintextCsv) => {
+                return Err(CliError::BadInput(
+                    "this is a rizzy-vault CSV export, which cannot be imported (CSV leaves data \
+                     out); import the JSON or the encrypted export instead",
+                ));
+            }
+            _ => {
+                return Err(CliError::BadInput(
+                    "the file's format was not recognised; name it with --format",
+                ));
+            }
+        };
+        return Ok(found);
     };
-    if let Some(format) = foreign {
-        let mut rng = os_rng();
-        let parsed = rizzy_import::import(format, &file, &mut rng).map_err(CliError::Import)?;
-        let done = device
-            .edit(|vault, rng, unlocked, now| vault.import_items(rng, unlocked, &parsed.items, now))
-            .await?;
-        // Counts and positions only (INV-48): never a name or a value of the file.
-        env.ui.note(&format!(
-            "Imported {} items; {} skipped; {} entries with warnings.",
-            done.imported.len(),
-            done.skipped.len() + parsed.counts.skipped_items,
-            parsed.warnings.len()
-        ));
-        let counts = parsed.counts;
-        if counts.collapsed_conflicts + counts.dropped_history + counts.dropped_fields > 0 {
+    Ok(match format {
+        ImportFormat::BitwardenJson => ImportAs::Foreign(Format::BitwardenJson),
+        ImportFormat::OnePux => ImportAs::Foreign(Format::OnePux),
+        ImportFormat::KeePassXml => ImportAs::Foreign(Format::KeePassXml),
+        ImportFormat::Csv => ImportAs::Foreign(Format::GenericCsv),
+        ImportFormat::ChromeCsv => ImportAs::Foreign(Format::ChromeCsv),
+        ImportFormat::FirefoxCsv => ImportAs::Foreign(Format::FirefoxCsv),
+        ImportFormat::RizzyJson => ImportAs::Foreign(Format::RizzyPlaintextJson),
+        ImportFormat::RizzyEncrypted => ImportAs::Encrypted,
+    })
+}
+
+/// `import`: every `rizzy-import` format, and our own encrypted export, recognised from the
+/// file unless `--format` names it (owner decision 2026-10-05).
+async fn import(
+    env: &mut Env<'_>,
+    input: &Path,
+    format: Option<ImportFormat>,
+) -> Result<(), CliError> {
+    let file = Zeroizing::new(read_limited(input, MAX_IMPORT_FILE_LEN)?);
+    let read_as = import_as(env.ui, &file, format)?;
+    let mut device = Device::open(env).await?;
+    match read_as {
+        ImportAs::Foreign(format) => {
+            let mut rng = os_rng();
+            let parsed = rizzy_import::import(format, &file, &mut rng).map_err(CliError::Import)?;
+            let done = device
+                .edit(|vault, rng, unlocked, now| {
+                    vault.import_items(rng, unlocked, &parsed.items, now)
+                })
+                .await?;
+            // Counts and positions only (INV-48): never a name or a value of the file.
             env.ui.note(&format!(
-                "{} conflicts collapsed, {} history entries and {} fields not carried.",
-                counts.collapsed_conflicts, counts.dropped_history, counts.dropped_fields
+                "Imported {} items; {} skipped; {} entries with warnings.",
+                done.imported.len(),
+                done.skipped.len() + parsed.counts.skipped_items,
+                parsed.warnings.len()
+            ));
+            let counts = parsed.counts;
+            if counts.collapsed_conflicts + counts.dropped_history + counts.dropped_fields > 0 {
+                env.ui.note(&format!(
+                    "{} conflicts collapsed, {} history entries and {} fields not carried.",
+                    counts.collapsed_conflicts, counts.dropped_history, counts.dropped_fields
+                ));
+            }
+        }
+        ImportAs::Encrypted => {
+            let password = env
+                .ui
+                .secret("Password of this export file (the one chosen when it was exported)")?;
+            let done = device
+                .edit(|vault, rng, unlocked, now| {
+                    vault.import_encrypted(rng, unlocked, &file, &password, now)
+                })
+                .await?;
+            env.ui.note(&format!(
+                "Imported {} items; {} skipped; {} conflicts collapsed, {} history entries and \
+                 {} fields not carried.",
+                done.imported.len(),
+                done.skipped_items,
+                done.collapsed_fields,
+                done.history_not_carried,
+                done.fields_not_carried
             ));
         }
-    } else {
-        let password = env.ui.secret("Export password")?;
-        let done = device
-            .edit(|vault, rng, unlocked, now| {
-                vault.import_encrypted(rng, unlocked, &file, &password, now)
-            })
-            .await?;
-        env.ui.note(&format!(
-            "Imported {} items; {} skipped; {} conflicts collapsed, {} history entries and {} \
-             fields not carried.",
-            done.imported.len(),
-            done.skipped_items,
-            done.collapsed_fields,
-            done.history_not_carried,
-            done.fields_not_carried
-        ));
     }
     sync_after_write(&mut device, env.ui).await
 }

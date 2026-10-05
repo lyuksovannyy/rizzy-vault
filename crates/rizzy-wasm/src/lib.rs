@@ -34,6 +34,7 @@
 //! | [`generate_password_js`] (`generatePassword`), [`generate_passphrase_js`] (`generatePassphrase`), [`Generated`] | the generator |
 //! | [`TotpCode`], [`EncryptedExport`], [`ImportReport`], [`DeviceView`], [`TwoFactorEnrolment`] | results |
 //! | [`plaintext_export_warning`], [`plaintext_export_phrase`] | the frozen texts of ADR 0027 §5 |
+//! | [`plaintext_export_hold_ms`], [`detect_import_format`] | the hold after the plaintext warning; recognising an import file (owner decision 2026-10-05) |
 //! | [`CoreError`] | the one thrown error: a stable code ([`error`]) |
 //!
 //! # Rules of the boundary ([ADR 0013] §3)
@@ -42,7 +43,7 @@
 //!   device key, `export_key`, `pw_in` or an unlock key. The named exceptions this crate uses:
 //!   the master password, the Secret Key, the export password and the 2FA code go in; the
 //!   Emergency Kit goes out once ([`SignupFlow::emergency_kit`]); a plaintext export goes out
-//!   after a re-authentication ([`Session::export_plaintext`]). The OPAQUE session's bearer
+//!   after a re-authentication, the warning and its hold ([`Session::export_plaintext`]). The OPAQUE session's bearer
 //!   token goes out in the `Authorization` value of each request (it is the transport's
 //!   credential, ADR 0028 item 4, not a key of rule 1).
 //! - **Plaintext crosses at the smallest useful size** (rule 3): summaries for lists,
@@ -100,7 +101,8 @@ pub use items::{FieldView, ItemDraft, ItemSummary};
 pub use login::LoginFlow;
 pub use session::{
     DeviceView, EncryptedExport, ImportReport, Session, TotpCode, TwoFactorEnrolment,
-    plaintext_export_phrase, plaintext_export_warning,
+    detect_import_format, plaintext_export_hold_ms, plaintext_export_phrase,
+    plaintext_export_warning,
 };
 pub use signup::{EmergencyKit, SignupFlow};
 

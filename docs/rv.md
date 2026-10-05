@@ -94,17 +94,20 @@ Item types: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`, `s
 ## Export and import
 
 ```sh
-rv export --out vault.rizzy                  # encrypted; asks for an export password
-rv export --out vault.json --format json     # plaintext
-rv export --out vault.csv  --format csv      # plaintext, loses what CSV cannot hold
-rv import --in export.json --format bitwarden-json
+rv export --out vault.rizzy --name alice                 # encrypted, under a password for this file
+rv export --out vault.json  --name alice --format json   # plaintext
+rv export --out vault.csv   --name alice --format csv    # plaintext, loses what CSV cannot hold
+rv import --in vault.rizzy                               # the format is recognised from the file
+rv import --in export.csv --format chrome-csv            # name the format when it is not
 ```
 
+- **Every export asks for your master password again** and checks it with the server (an OPAQUE login with this device's Secret Key, as for a password change), so an export needs the server. A wrong password ends the export and writes nothing. `--name` is your login name.
+- **The encrypted export** then asks for a new password for that file, twice. It is needed to import the file; it is not your master password, and nobody can recover it if it is lost. It must not be empty.
+- **A plaintext export** shows a warning, waits 10 seconds, then asks you to type `EXPORT PLAINTEXT` at the terminal. No flag or environment variable skips the warning, the wait or the phrase. What you type during the wait is read by the phrase prompt afterwards. Delete the file when you are done with it.
 - An export never overwrites a file. Choose a new name.
-- A plaintext export needs you to type `EXPORT PLAINTEXT`. There is no flag that skips this. Delete the file when you are done with it.
 - Trashed items are in every export. An export larger than 16 MiB is refused in M1 ([ADR 0027](adr/0027-export-payload.md)).
 - An export holds what this computer has. Run `rv sync` first.
-- Import formats: `bitwarden-json` (unencrypted), `1pux`, `keepass-xml`, `csv`, `chrome-csv`, `firefox-csv`, `rizzy-json` (our plaintext JSON), `rizzy-encrypted` (our encrypted export). `rv` reports what it could not import.
+- **Import recognises the format** of the file: our encrypted export (it then asks for that file's password), our plaintext JSON export, Bitwarden JSON, 1Password 1PUX, KeePass XML, and Chrome, Firefox or generic CSV. Our own CSV export cannot be imported (it leaves data out): import the JSON or the encrypted export. When the format is not recognised, name it with `--format`: `bitwarden-json` (unencrypted), `1pux`, `keepass-xml`, `csv`, `chrome-csv`, `firefox-csv`, `rizzy-json` (our plaintext JSON), `rizzy-encrypted` (our encrypted export). `--format` also overrides what was recognised. `rv` reports what it could not import.
 
 ## Devices and key rotation
 

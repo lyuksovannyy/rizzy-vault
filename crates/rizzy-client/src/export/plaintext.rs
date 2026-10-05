@@ -13,6 +13,10 @@
 //! allows. The warning texts are the frozen English source; a translation keeps every
 //! sentence.
 //!
+//! Each export also takes the permission of [`super::gate`]: a fresh re-authentication of the
+//! account and, after the warning, a hold of 10 seconds (owner decision 2026-10-05). The
+//! acknowledgement stays the ADR's; the gate is in addition to it.
+//!
 //! The plaintext goes to the host as **one zeroizing byte buffer**, allocated once at its
 //! final size (the document is sized in a first pass, then written in a second), so no
 //! reallocation leaves a copy behind (CRYPTO.md §12.2). Where the host writes it is ADR 0027
@@ -110,6 +114,7 @@ use rizzy_sync::record::{LiveSnapshot, SnapshotData};
 use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
+use super::gate::PlaintextExportAuth;
 use super::state;
 use crate::error::ClientError;
 use crate::sync::VaultSync;
@@ -712,21 +717,26 @@ impl VaultSync {
     }
 
     /// The plaintext JSON export of this vault (ADR 0027 §3; module docs), in one zeroizing
-    /// buffer. `exported_at_ms` is the host's clock. Consumes the acknowledgement.
+    /// buffer. `exported_at_ms` is the host's clock. Consumes the permission of
+    /// [`ExportGate::authorize_plaintext`](super::gate::ExportGate::authorize_plaintext) (a fresh
+    /// re-authentication and the hold after the warning, owner decision 2026-10-05) and the
+    /// acknowledgement.
     ///
     /// # Errors
     /// [`ClientError::ExportOversizeItems`]; [`ClientError::ExportTooLarge`] for a document
     /// above a cap its reader applies; [`ClientError::Internal`].
     #[expect(
         clippy::needless_pass_by_value,
-        reason = "the acknowledgement is consumed by the one export it allows (ADR 0027 §5)"
+        reason = "the permission and the acknowledgement are consumed by the one export they allow (ADR 0027 §5)"
     )]
     pub fn export_plaintext_json(
         &self,
+        auth: PlaintextExportAuth,
         ack: PlaintextExportAck,
         exported_at_ms: u64,
     ) -> Result<SecretBytes, ClientError> {
         let PlaintextExportAck(()) = ack;
+        auth.spend();
         let items = self.exported_states()?;
         if items.len() > MAX_ENTRIES {
             return Err(ClientError::ExportTooLarge);
@@ -752,19 +762,22 @@ impl VaultSync {
     }
 
     /// The plaintext CSV export of this vault (ADR 0027 §4; module docs), in one zeroizing
-    /// buffer. Consumes the acknowledgement.
+    /// buffer. Consumes the permission and the acknowledgement, as
+    /// [`VaultSync::export_plaintext_json`].
     ///
     /// # Errors
     /// [`ClientError::ExportOversizeItems`]; [`ClientError::Internal`].
     #[expect(
         clippy::needless_pass_by_value,
-        reason = "the acknowledgement is consumed by the one export it allows (ADR 0027 §5)"
+        reason = "the permission and the acknowledgement are consumed by the one export they allow (ADR 0027 §5)"
     )]
     pub fn export_plaintext_csv(
         &self,
+        auth: PlaintextExportAuth,
         ack: PlaintextExportAck,
     ) -> Result<SecretBytes, ClientError> {
         let PlaintextExportAck(()) = ack;
+        auth.spend();
         let items = self.exported_states()?;
         let mut measure = Sink::measuring();
         csv_document(&mut measure, &items);
