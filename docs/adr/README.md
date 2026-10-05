@@ -83,15 +83,15 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0024 | [Disabling core dumps through rustix](0024-core-dump-disabling-rustix.md) | Accepted | M1 (server, `rv`) / M3 (bindings) |
 | 0025 | [Key rotation upload: the vault half and the rotation cut-off](0025-rotation-vault-half.md) | Accepted | M1 |
 | 0026 | [Client device state and encrypted local cache](0026-client-device-state-and-cache.md) | Accepted | M1 (`rv`) / M2 (extension) / M3 (`rizzy-ffi`) |
-| 0027 | [Export payload encoding and plaintext export](0027-export-payload.md) | Accepted | M1 |
+| 0027 | [Export payload encoding and plaintext export](0027-export-payload.md) | Partially superseded by [0034](0034-export-reauth-and-plaintext-hold.md) (§5 in part) | M1 |
 | 0028 | [`/api/v1` HTTP conventions](0028-api-v1-http-conventions.md) | Partially superseded by [0031](0031-retiring-old-opaque-setups.md) (item 3 in part); [0032](0032-healing-rotation-after-backup.md) (item 3 in part) | M1 |
 | 0029 | [KeePass KDBX import: legacy primitives in `rizzy-import`](0029-kdbx-import.md) | Accepted | M3 |
-| 0030 | [Client-side TLS for `rv`](0030-client-tls-rv.md) | Accepted | M1 |
+| 0030 | [Client-side TLS for `rv`](0030-client-tls-rv.md) | Partially superseded by [0035](0035-ca-file-ca-certificates-only.md) (Decision 5 in part) | M1 |
 | 0031 | [Retiring old OPAQUE setups](0031-retiring-old-opaque-setups.md) | Accepted | M1 |
 | 0032 | [Healing a key rotation made after a backup](0032-healing-rotation-after-backup.md) | Accepted | M1 |
 | 0033 | [Protocol Buffers encoding for client–server messages](0033-protobuf-api-encoding.md) | Proposed | M1 (JSON only) / M3 (trigger re-checked) |
-| 0034 | [Re-authentication before every export and a hold before plaintext export](0034-export-reauth-and-plaintext-hold.md) | Proposed | M1 |
-| 0035 | [A private CA file holds CA certificates only](0035-ca-file-ca-certificates-only.md) | Proposed | M1 |
+| 0034 | [Re-authentication before every export and a hold before plaintext export](0034-export-reauth-and-plaintext-hold.md) | Accepted | M1 |
+| 0035 | [A private CA file holds CA certificates only](0035-ca-file-ca-certificates-only.md) | Accepted | M1 |
 
 ## Gates
 

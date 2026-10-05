@@ -1,6 +1,6 @@
 # ADR 0034: Re-authentication before every export and a hold before plaintext export
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-05
 - Deciders: project owner
 - Milestone: M1

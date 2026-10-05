@@ -1,6 +1,6 @@
 # ADR 0035: A private CA file holds CA certificates only
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-05
 - Deciders: project owner
 - Milestone: M1
@@ -44,6 +44,8 @@ So, relying on the verifier alone, a CA file holding the server's own `cA=false`
 - **Keep Decision 5's text:** leaves an Accepted reason that is wrong for `cA=false`.
 
 ## Open questions for the owner
+
+Answered on acceptance (2026-10-05): the owner accepted the recommendation below.
 
 1. **Is the hand-written walk acceptable** under the rule "no home-made crypto"? It verifies nothing cryptographic and only narrows what the file may hold. Recommendation: yes.
 

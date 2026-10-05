@@ -1,6 +1,6 @@
 # ADR 0027: Export payload encoding and plaintext export
 
-- Status: Accepted
+- Status: Partially superseded by [ADR 0034](0034-export-reauth-and-plaintext-hold.md) (§5 in part)
 - Date: 2026-09-29
 - Deciders: project owner
 - Milestone: M1

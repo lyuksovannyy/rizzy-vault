@@ -1,6 +1,6 @@
 # ADR 0030: Client-side TLS for `rv`
 
-- Status: Accepted
+- Status: Partially superseded by [ADR 0035](0035-ca-file-ca-certificates-only.md) (Decision 5 in part)
 - Date: 2026-10-01
 - Deciders: project owner
 - Milestone: M1
