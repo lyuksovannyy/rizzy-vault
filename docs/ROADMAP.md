@@ -148,7 +148,7 @@ The problem: `youtube.com`, `youtu.be`, `m.youtube.com`, `accounts.google.com` a
 | M | Transparency page in settings: exactly what the server stores for this account (item counts, byte sizes, retention) | M3 |
 | S | **Watchtower-style health**: weak, reused, old passwords; missing 2FA where site supports it; breached passwords via HIBP k-anonymity (only 5-char SHA-1 prefix leaves the device) | M3 |
 | S | Onboarding flow (import wizard, Emergency Kit download, extension install) | M3 |
-| S | Import: KeePass KDBX files ([ADR 0029](adr/0029-kdbx-import.md), Proposed; moved out of M1 by the owner on 2026-10-01: M1 reads KeePass XML only) | M3 |
+| S | Import: KeePass KDBX files ([ADR 0029](adr/0029-kdbx-import.md), Accepted; moved out of M1 by the owner on 2026-10-01: M1 reads KeePass XML only) | M3 |
 | S | Localization framework (i18n from day one of M3, English only at first) | M3 |
 | S | Clear conflict UI: "edited on Phone and Laptop at the same time — keep both / pick one" | M3 |
 | C | Themes / accent color customization | post-1.0 |

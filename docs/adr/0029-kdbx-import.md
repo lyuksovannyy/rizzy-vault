@@ -1,6 +1,6 @@
 # ADR 0029: KeePass KDBX import: legacy primitives in `rizzy-import`
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-30
 - Deciders: project owner
 - Milestone: M3 (moved out of M1 by the owner on 2026-10-01)
@@ -124,6 +124,8 @@ With all of them on `rizzy-import`: `Cargo.lock` gains exactly four packages (`a
 - **A separate `rizzy-import-kdbx` crate.** A cleaner audit line and a simpler dependency rule, but a new crate needs an ADR 0016 change.
 
 ## Open questions for the owner
+
+Answered on acceptance (2026-10-05): question 1 by the owner on 2026-10-01, M1 reads KeePass XML only and KDBX moves to M3 (ROADMAP §4.5); every other question as recommended.
 
 1. **KDBX in M1, or XML only in M1?** Recommendation: accept this ADR and keep KDBX in M1, as the last item of step 4, after the web vault's blockers. If M1 must shrink, take the first alternative instead: that is your ROADMAP edit, and this ADR then stays Proposed for M3.
 2. **Read KDBX 3.1?** Recommendation: yes, with the warning and the required `Meta/HeaderHash` of point 1. `salsa20` is small and safe code, and old databases are the ones people migrate. **And a 3.1 file without `Meta/HeaderHash`: refuse, or import with a second warning?** Recommendation: refuse, the conservative reading. Whether KeePass 2.x and KeePassXC always write it is U; if a fixture lacks it, this comes back to you.

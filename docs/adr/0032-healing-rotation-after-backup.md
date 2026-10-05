@@ -1,6 +1,6 @@
 # ADR 0032: Healing a key rotation made after a backup
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-05
 - Deciders: project owner
 - Milestone: M1
@@ -115,6 +115,8 @@ This ADR makes none of these edits.
 - **Accept self-grants only in the reconciliation epoch, with the old "verified epoch" bound.** It cannot raise the epoch (Context) and ends with the epoch.
 
 ## Open questions for the owner
+
+Answered on acceptance (2026-10-05): the owner accepted every recommendation below.
 
 1. **Lag repairs outside the reconciliation epoch?** Recommendation: yes, bounded by the signed state (§3), since the epoch can end before a vault is healed.
 2. **First valid repair wins, or last?** Recommendation: first; the remedy is a rotation.

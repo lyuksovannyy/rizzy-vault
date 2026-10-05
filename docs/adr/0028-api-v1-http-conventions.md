@@ -1,6 +1,6 @@
 # ADR 0028: `/api/v1` HTTP conventions
 
-- Status: Accepted
+- Status: Partially superseded by [ADR 0031](0031-retiring-old-opaque-setups.md) (item 3 in part); [ADR 0032](0032-healing-rotation-after-backup.md) (item 3 in part)
 - Date: 2026-09-29
 - Deciders: project owner
 - Milestone: M1

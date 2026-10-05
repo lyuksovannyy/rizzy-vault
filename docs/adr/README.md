@@ -68,7 +68,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0009 | [Cryptographic dependency and memory-hygiene policy](0009-crypto-dependency-policy.md) | Partially superseded by [0019](0019-native-clients.md) ("RNG rules" in part) | M1 |
 | 0010 | [Server shape: modular monolith with roles](0010-server-shape.md) | Partially superseded by [0022](0022-server-mode-only.md) (§1 in part) | M1 (`api`, `web`, `worker`) / M3 (`notify`, `icons`) / M6 (`smtp`) |
 | 0011 | [Storage: SQLite and PostgreSQL via sqlx](0011-storage.md) | Partially superseded by [0022](0022-server-mode-only.md) (point 9 in part, "Transactions and concurrency" in part, "What is stored, by sync mode", "Backups" in part) | M1 (SQLite) / M3 (PostgreSQL supported) |
-| 0012 | [Sync engine: op log, HLC and version vectors](0012-sync-engine.md) | Partially superseded by [0018](0018-item-record-encoding.md) (§1 in part, §3 in part, §4 in part, §5 in part, §6 in part, §7 in part, §12 in part); [0021](0021-server-compaction.md) (§6 in part, §7 in part); [0022](0022-server-mode-only.md) (Milestone line, §5 in part, §6 in part, §8, §9 in part, §10, §11, §12 in part, owner decisions 3, 5 and 8, Risks in part) | M1 (engine, Server mode) |
+| 0012 | [Sync engine: op log, HLC and version vectors](0012-sync-engine.md) | Partially superseded by [0018](0018-item-record-encoding.md) (§1 in part, §3 in part, §4 in part, §5 in part, §6 in part, §7 in part, §12 in part); [0021](0021-server-compaction.md) (§6 in part, §7 in part); [0022](0022-server-mode-only.md) (Milestone line, §5 in part, §6 in part, §8, §9 in part, §10, §11, §12 in part, owner decisions 3, 5 and 8, Risks in part); [0032](0032-healing-rotation-after-backup.md) (§7 in part) | M1 (engine, Server mode) |
 | 0013 | [Shared Rust client core (wasm + UniFFI)](0013-shared-client-core.md) | Partially superseded by [0022](0022-server-mode-only.md) (§3 in part); [0019](0019-native-clients.md) (Milestone line, Context in part, §1 in part, §2 in part, §3 in part, §5, §6 in part, Negative in part, Risks in part) | M1 (wasm, CLI) / M3 (native desktop bindings) / M7 (UniFFI) |
 | 0014 | [UI stack for the web platforms](0014-ui-stack.md) | Partially superseded by [0022](0022-server-mode-only.md) (§6) | M1 (web vault) / M2 (extensions) / M3 (design system) / M5 (share page) |
 | 0015 | [Desktop shell: Tauri](0015-desktop-tauri.md) | Superseded by [0019](0019-native-clients.md) | M3 |
@@ -77,18 +77,18 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0018 | [Item-record encoding: canonical binary layout and the M1 item schema](0018-item-record-encoding.md) | Accepted | M1 |
 | 0019 | [Native desktop and mobile clients in separate repositories](0019-native-clients.md) | Accepted | M3 (desktop) / M7 (mobile) |
 | 0020 | [Record architecture decisions, with partial supersession](0020-partial-supersession.md) | Accepted | M0 |
-| 0021 | [Server-side compaction with concurrent snapshots](0021-server-compaction.md) | Accepted | M1 (server; Accepted before step 3) |
+| 0021 | [Server-side compaction with concurrent snapshots](0021-server-compaction.md) | Partially superseded by [0032](0032-healing-rotation-after-backup.md) (§9 "Healing request" in part) | M1 (server; Accepted before step 3) |
 | 0022 | [Server mode only: On-device sync parked](0022-server-mode-only.md) | Accepted | M1 (scope) / post-1.0 (parked) |
 | 0023 | [Logical database backup file format](0023-logical-backup-format.md) | Accepted | M1 |
 | 0024 | [Disabling core dumps through rustix](0024-core-dump-disabling-rustix.md) | Accepted | M1 (server, `rv`) / M3 (bindings) |
 | 0025 | [Key rotation upload: the vault half and the rotation cut-off](0025-rotation-vault-half.md) | Accepted | M1 |
 | 0026 | [Client device state and encrypted local cache](0026-client-device-state-and-cache.md) | Accepted | M1 (`rv`) / M2 (extension) / M3 (`rizzy-ffi`) |
 | 0027 | [Export payload encoding and plaintext export](0027-export-payload.md) | Accepted | M1 |
-| 0028 | [`/api/v1` HTTP conventions](0028-api-v1-http-conventions.md) | Accepted | M1 |
-| 0029 | [KeePass KDBX import: legacy primitives in `rizzy-import`](0029-kdbx-import.md) | Proposed | M3 |
+| 0028 | [`/api/v1` HTTP conventions](0028-api-v1-http-conventions.md) | Partially superseded by [0031](0031-retiring-old-opaque-setups.md) (item 3 in part); [0032](0032-healing-rotation-after-backup.md) (item 3 in part) | M1 |
+| 0029 | [KeePass KDBX import: legacy primitives in `rizzy-import`](0029-kdbx-import.md) | Accepted | M3 |
 | 0030 | [Client-side TLS for `rv`](0030-client-tls-rv.md) | Accepted | M1 |
-| 0031 | [Retiring old OPAQUE setups](0031-retiring-old-opaque-setups.md) | Proposed | M1 |
-| 0032 | [Healing a key rotation made after a backup](0032-healing-rotation-after-backup.md) | Proposed | M1 |
+| 0031 | [Retiring old OPAQUE setups](0031-retiring-old-opaque-setups.md) | Accepted | M1 |
+| 0032 | [Healing a key rotation made after a backup](0032-healing-rotation-after-backup.md) | Accepted | M1 |
 | 0033 | [Protocol Buffers encoding for client–server messages](0033-protobuf-api-encoding.md) | Proposed | M1 (JSON only) / M3 (trigger re-checked) |
 
 ## Gates

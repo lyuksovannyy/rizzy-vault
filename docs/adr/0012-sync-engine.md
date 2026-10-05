@@ -1,6 +1,6 @@
 # ADR 0012: Sync engine: op log, HLC and version vectors
 
-- Status: Partially superseded by [ADR 0018](0018-item-record-encoding.md) (§1 in part, §3 in part, §4 in part, §5 in part, §6 in part, §7 in part, §12 in part); [ADR 0021](0021-server-compaction.md) (§6 in part, §7 in part); [ADR 0022](0022-server-mode-only.md) (Milestone line, §5 in part, §6 in part, §8, §9 in part, §10, §11, §12 in part, owner decisions 3, 5 and 8, Risks in part)
+- Status: Partially superseded by [ADR 0018](0018-item-record-encoding.md) (§1 in part, §3 in part, §4 in part, §5 in part, §6 in part, §7 in part, §12 in part); [ADR 0021](0021-server-compaction.md) (§6 in part, §7 in part); [ADR 0022](0022-server-mode-only.md) (Milestone line, §5 in part, §6 in part, §8, §9 in part, §10, §11, §12 in part, owner decisions 3, 5 and 8, Risks in part); [ADR 0032](0032-healing-rotation-after-backup.md) (§7 in part)
 - Date: 2026-09-27
 - Deciders: project owner
 - Milestone: M1 (engine, Server mode) / M4 (On-device mode, pairing, mode switch)

@@ -1,6 +1,6 @@
 # ADR 0031: Retiring old OPAQUE setups
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-01
 - Deciders: project owner
 - Milestone: M1
@@ -57,6 +57,8 @@
 - **End sessions authenticated under the retired setup.** Sessions do not record their setup, and a setup leak does not let anyone authenticate as the user.
 
 ## Open questions for the owner
+
+Answered on acceptance (2026-10-05): the owner accepted every recommendation below.
 
 1. **Grace default 90 days, range 0–3650.** Recommendation: yes; 0 allowed for a known leak.
 2. **Wire changes before v1.0** (points 2–3). Recommendation: make them now, with the minimum client versions of ADR 0002 point 5.
