@@ -88,6 +88,8 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0029 | [KeePass KDBX import: legacy primitives in `rizzy-import`](0029-kdbx-import.md) | Proposed | M3 |
 | 0030 | [Client-side TLS for `rv`](0030-client-tls-rv.md) | Accepted | M1 |
 | 0031 | [Retiring old OPAQUE setups](0031-retiring-old-opaque-setups.md) | Proposed | M1 |
+| 0032 | [Healing a key rotation made after a backup](0032-healing-rotation-after-backup.md) | Proposed | M1 |
+| 0033 | [Protocol Buffers encoding for client–server messages](0033-protobuf-api-encoding.md) | Proposed | M1 (JSON only) / M3 (trigger re-checked) |
 
 ## Gates
 
