@@ -90,6 +90,8 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0031 | [Retiring old OPAQUE setups](0031-retiring-old-opaque-setups.md) | Accepted | M1 |
 | 0032 | [Healing a key rotation made after a backup](0032-healing-rotation-after-backup.md) | Accepted | M1 |
 | 0033 | [Protocol Buffers encoding for client–server messages](0033-protobuf-api-encoding.md) | Proposed | M1 (JSON only) / M3 (trigger re-checked) |
+| 0034 | [Re-authentication before every export and a hold before plaintext export](0034-export-reauth-and-plaintext-hold.md) | Proposed | M1 |
+| 0035 | [A private CA file holds CA certificates only](0035-ca-file-ca-certificates-only.md) | Proposed | M1 |
 
 ## Gates
 
