@@ -4,12 +4,12 @@
 // A concealed value crosses from the Worker only when the user asks (reveal or copy; ADR 0013
 // §3 rule 3), and a revealed value is shown in the secret-field component (INV-68).
 import type { FieldView, ItemSummary, TotpCode } from "@rizzy-vault/core";
-import { SecretField } from "@rizzy-vault/ui";
+import { IconStarFilled, IconStarOutline, SecretField, TypeIcon } from "@rizzy-vault/ui";
 import { useEffect, useState } from "react";
 
 import { codeOf } from "../core-client.ts";
 import { type Grouped, group, labelOf } from "../fields.ts";
-import { SafeLink } from "../SafeLink.tsx";
+import { SafeLink, SafeOpenButton } from "../SafeLink.tsx";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText, useAction } from "./common.tsx";
 
@@ -57,6 +57,7 @@ function FieldValue(props: {
       )}
       {field.conflict && <span className="badge" title="Edited on two devices at once">conflict</span>}
       <span className="field-actions">
+        {props.link === true && <SafeOpenButton url={field.value ?? ""} label={`Open ${label}`} />}
         {field.concealed && (
           <button
             type="button"
@@ -121,9 +122,29 @@ function TotpLine(props: { readonly ctx: VaultContext; readonly id: string }) {
   if (code === undefined) {
     return null;
   }
+  // The countdown ring: an SVG circle whose stroke is `fraction` of the way drawn, fraction of
+  // the current period remaining. SVG presentation attributes, not the banned `style` prop
+  // (ADR 0014 §2; the eslint rule targets the JSX `style` attribute, not `stroke-dasharray`).
+  const fraction = code.periodSeconds > 0 ? left / code.periodSeconds : 0;
+  const radius = 9;
+  const circumference = 2 * Math.PI * radius;
   return (
     <div className="field totp">
       <span className="field-label">One-time code</span>
+      <span className="totp-ring" aria-hidden="true">
+        <svg viewBox="0 0 22 22" width="22" height="22">
+          <circle cx="11" cy="11" r={radius} className="totp-ring-track" />
+          <circle
+            cx="11"
+            cy="11"
+            r={radius}
+            className="totp-ring-progress"
+            strokeDasharray={circumference}
+            strokeDashoffset={circumference * (1 - fraction)}
+            transform="rotate(-90 11 11)"
+          />
+        </svg>
+      </span>
       <span className="field-value mono" data-testid="totp-code">
         {code.code}
       </span>
@@ -177,12 +198,39 @@ export function ItemView(props: {
 
   const writable = !ctx.session.readOnly;
 
+  /** Toggles favorite through the same `editItem` op the editor's checkbox writes (`fields.ts`
+   * `item.favorite`): a one-op change over the existing write path, not a new one. */
+  const toggleFavorite = () =>
+    act(
+      () =>
+        ctx.client.call(
+          "editItem",
+          id,
+          summary.favorite ? [{ op: "clear", key: "item.favorite" }] : [{ op: "set", key: "item.favorite", value: "true" }],
+        ),
+      false,
+    );
+
   return (
     <article className="panel item" aria-labelledby="item-title">
-      <h2 id="item-title">
-        {summary.favorite && <span aria-label="favorite">★ </span>}
-        {summary.title === "" ? "(untitled)" : summary.title}
-      </h2>
+      <div className="item-header">
+        <span className="item-icon" aria-hidden="true">
+          <TypeIcon type={summary.itemType} />
+        </span>
+        <h2 id="item-title">{summary.title === "" ? "(untitled)" : summary.title}</h2>
+        {writable && !summary.trashed && (
+          <button
+            type="button"
+            className="secondary small icon-button favorite-toggle"
+            aria-pressed={summary.favorite}
+            disabled={busy}
+            onClick={toggleFavorite}
+          >
+            {summary.favorite ? <IconStarFilled /> : <IconStarOutline />}
+            <span className="sr-only">{summary.favorite ? "Remove from favorites" : "Add to favorites"}</span>
+          </button>
+        )}
+      </div>
       <p className="muted">{summary.itemType}</p>
       {grouped.fixed
         .filter((f) => f.key !== "item.name")

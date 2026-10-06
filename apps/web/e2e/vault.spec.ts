@@ -171,6 +171,27 @@ test("signup, item, reload, login, lock, unlock", async ({ page }) => {
   await expect(revealed).toHaveAttribute("spellcheck", "false");
   await expect(revealed).toHaveAttribute("readonly", "");
 
+  // The sidebar's item filters (ItemsPane.tsx's `inScope`): by type, and by favorite.
+  await page.getByRole("button", { name: "Card", exact: true }).click();
+  await expect(page.getByText("Nothing of this type yet.")).toBeVisible();
+  await page.getByRole("button", { name: "Login", exact: true }).click();
+  await expect(page.getByRole("button", { name: /Example/ })).toBeVisible();
+  await page.getByRole("button", { name: "Favorites", exact: true }).click();
+  await expect(page.getByText("No favorites yet. Star an item to find it here.")).toBeVisible();
+  await page.getByRole("button", { name: "All items", exact: true }).click();
+  await page.getByRole("button", { name: /Example/ }).click();
+
+  // The detail header's favorite toggle: it reuses the editor's own `editItem`/`item.favorite`
+  // write (ItemView.tsx module docs), so toggling it is a real, synced write, not a UI-only
+  // flag — the row's star and the Favorites filter must both pick it up.
+  await page.getByRole("button", { name: "Add to favorites" }).click();
+  await expect(page.getByRole("button", { name: "Remove from favorites" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Example/ }).getByLabel("favorite")).toBeVisible();
+  await page.getByRole("button", { name: "Favorites", exact: true }).click();
+  await expect(page.getByRole("button", { name: /Example/ })).toBeVisible();
+  await page.getByRole("button", { name: "All items", exact: true }).click();
+  await page.getByRole("button", { name: /Example/ }).click();
+
   // Reload: the web vault keeps nothing, so it is a new login, and the item comes back from
   // the server.
   await page.reload();
@@ -200,8 +221,14 @@ test("signup, item, reload, login, lock, unlock", async ({ page }) => {
   await expect(page.getByText("No items yet.")).toBeVisible();
   await page.getByRole("button", { name: "Trash", exact: true }).click();
   await page.getByRole("button", { name: /Example/ }).click();
+  // A sync must not clear the open trashed item: the trash pane's scope has to be the same
+  // stable object on every render, not a fresh `{ kind: "all" }` literal that would make
+  // `ItemsPane`'s `[trash, scope]` effect fire (and blank the detail pane) on every sync
+  // (VaultView.tsx's `ALL_SCOPE` module docs).
+  await page.getByRole("button", { name: "Sync" }).click();
+  await expect(page.getByRole("heading", { name: "Example" })).toBeVisible();
   await page.getByRole("button", { name: "Restore" }).click();
-  await page.getByRole("button", { name: "Items", exact: true }).click();
+  await page.getByRole("button", { name: "All items", exact: true }).click();
   await expect(page.getByRole("button", { name: /Example/ })).toBeVisible();
 
   // The generator.
@@ -453,7 +480,7 @@ test("encrypted export, then import into a second account", async ({ browser }) 
   await second.getByLabel("Password of this export file", { exact: true }).fill(FILE_PASSWORD);
   await second.getByRole("button", { name: "Import", exact: true }).click();
   await expect(second.getByTestId("import-report")).toContainText("Imported 1");
-  await second.getByRole("button", { name: "Items", exact: true }).click();
+  await second.getByRole("button", { name: "All items", exact: true }).click();
   await second.getByRole("button", { name: /Round trip/ }).click();
   await expect(second.getByText("carol@example.com").first()).toBeVisible();
   const row = second.locator('[data-field="login.password"]');

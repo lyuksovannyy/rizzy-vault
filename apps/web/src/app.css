@@ -23,6 +23,26 @@ main {
   padding: var(--space-4);
 }
 
+/* The unlocked vault has its own full-bleed shell (sidebar + main), so it is not boxed by
+   `main`'s max-width above; `main` still wraps the login/signup/status screens. */
+main:has(.shell) {
+  max-width: none;
+  padding: 0;
+}
+
+/* Visible to screen readers only (the favorite toggle's extra label; its icon alone is not a
+   name). Clips, not `display: none`, so it stays in the accessibility tree. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
 h1 {
   font-size: var(--font-size-title);
   margin: 0 0 var(--space-4);
@@ -221,20 +241,6 @@ code {
   overflow-wrap: anywhere;
 }
 
-.vault-header {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-4);
-  align-items: center;
-  justify-content: space-between;
-  padding-bottom: var(--space-3);
-  border-bottom: 1px solid var(--color-border);
-}
-
-.vault-header .actions {
-  margin-top: 0;
-}
-
 .badge {
   margin-left: var(--space-2);
   padding: 0 var(--space-2);
@@ -243,17 +249,137 @@ code {
   font-size: var(--font-size-small);
 }
 
-.tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1);
-  margin: var(--space-4) 0;
+/* The app shell (item 1): a fixed sidebar beside the main column (topbar + the section's own
+   pane). On narrow screens the sidebar becomes a slide-over opened by `.menu-toggle`
+   (`.shell.sidebar-open`), closed by its own backdrop button or any navigation inside it. */
+.shell {
+  display: grid;
+  grid-template-columns: 16rem 1fr;
+  align-items: start;
+  min-height: 100vh;
 }
 
-button.tab.active {
+.menu-toggle {
+  display: none;
+}
+
+.sidebar-backdrop {
+  display: none;
+}
+
+.sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  background: var(--color-surface);
+  border-right: 1px solid var(--color-border);
+}
+
+.sidebar-brand {
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.sidebar-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
+}
+
+/* The group right after the brand needs no second divider under the brand's own border
+   (`:first-of-type` would not match here: every sidebar child is a `div`, and the brand,
+   lacking this class, is the actual first one). */
+.sidebar-brand + .sidebar-group {
+  border-top: none;
+  padding-top: 0;
+}
+
+button.sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  justify-content: flex-start;
+  background: none;
+  border: 1px solid transparent;
+  color: var(--color-text);
+  border-radius: var(--radius-1);
+}
+
+button.sidebar-item.active {
   background: var(--color-accent);
   color: var(--color-on-accent);
   border-color: var(--color-accent);
+}
+
+.main {
+  min-width: 0;
+  padding: var(--space-4) var(--space-6);
+}
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: center;
+  justify-content: flex-end;
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.topbar .actions {
+  margin-top: 0;
+}
+
+@media (max-width: 48rem) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+
+  .menu-toggle {
+    display: inline-flex;
+    position: fixed;
+    top: var(--space-3);
+    left: var(--space-3);
+    z-index: 30;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 25;
+    width: 16rem;
+    transform: translateX(-100%);
+    transition: transform 120ms ease-out;
+    box-shadow: 0 0 24px rgb(0 0 0 / 0.25);
+  }
+
+  .shell.sidebar-open .sidebar {
+    transform: translateX(0);
+  }
+
+  .shell.sidebar-open .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    border: none;
+    padding: 0;
+    background: rgb(0 0 0 / 0.4);
+  }
+
+  .main {
+    padding: var(--space-4);
+    padding-top: calc(var(--space-8) + var(--space-3));
+  }
 }
 
 .items {
@@ -262,7 +388,7 @@ button.tab.active {
   gap: var(--space-4);
 }
 
-@media (max-width: 48rem) {
+@media (max-width: 64rem) {
   .items {
     grid-template-columns: 1fr;
   }
@@ -272,6 +398,30 @@ button.tab.active {
   list-style: none;
   margin: var(--space-3) 0 0;
   padding: 0;
+}
+
+.item-list-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.item-list-toolbar input[type="search"] {
+  flex: 1;
+}
+
+.item-count {
+  white-space: nowrap;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-small);
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-4) 0;
 }
 
 .new-item {
@@ -284,8 +434,8 @@ button.tab.active {
 button.row {
   width: 100%;
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
+  align-items: center;
+  gap: var(--space-2);
   text-align: left;
   margin-bottom: var(--space-1);
 }
@@ -294,9 +444,45 @@ button.row.selected {
   border-color: var(--color-accent);
 }
 
+.row-icon {
+  flex: none;
+  display: inline-flex;
+  color: var(--color-text-muted);
+  font-size: 1.15rem;
+}
+
+.row-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  overflow: hidden;
+}
+
+.row-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
 .row-sub {
   color: var(--color-text-muted);
   font-size: var(--font-size-small);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.row-favorite {
+  flex: none;
+  color: var(--color-accent);
+}
+
+.row-favorite-hidden {
+  visibility: hidden;
 }
 
 .field {
@@ -337,6 +523,46 @@ button.row.selected {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-1);
+}
+
+.item-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.item-header h2 {
+  margin: 0;
+  flex: 1;
+}
+
+.item-icon {
+  display: inline-flex;
+  font-size: 1.4rem;
+  color: var(--color-text-muted);
+}
+
+.favorite-toggle {
+  color: var(--color-accent);
+}
+
+.totp-ring {
+  display: inline-flex;
+}
+
+.totp-ring-track {
+  fill: none;
+  stroke: var(--color-border);
+  stroke-width: 2;
+}
+
+.totp-ring-progress {
+  fill: none;
+  stroke: var(--color-accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 1s linear;
 }
 
 .tag {
@@ -423,6 +649,26 @@ td {
 .icon-button {
   padding: 0 var(--space-2);
   line-height: 1;
+}
+
+/* `SafeOpenButton` (SafeLink.tsx) is an `<a>` styled as a small secondary button: the
+   `button.secondary`/`button.small` rules above are scoped to the `button` tag, so this is its
+   own rule rather than loosening those selectors to match every anchor on the page. */
+a.icon-button {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--font-size-small);
+  text-decoration: none;
+}
+
+a.icon-button:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
 }
 
 .generator-slot-error {
