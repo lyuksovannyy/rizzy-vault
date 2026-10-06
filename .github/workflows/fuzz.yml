@@ -28,7 +28,7 @@ jobs:
     outputs:
       targets: ${{ steps.list.outputs.targets }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Install toolchain from rust-toolchain.toml
@@ -52,7 +52,7 @@ jobs:
       matrix:
         target: ${{ fromJSON(needs.targets.outputs.targets) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       # Nightly for fuzzing only (ADR 0009 owner decision 4); everything else uses the pinned
