@@ -17,6 +17,8 @@ function item(over: Partial<ItemSummary>): ItemSummary {
     favorite: false,
     hasTotp: false,
     trashed: false,
+    tags: [],
+    websiteHost: undefined,
     ...over,
   };
 }
@@ -36,6 +38,13 @@ describe("inScope", () => {
     const card = item({ itemType: "card" });
     expect(inScope(card, { kind: "type", itemType: "card" })).toBe(true);
     expect(inScope(card, { kind: "type", itemType: "login" })).toBe(false);
+  });
+
+  it("'tag' keeps only items carrying that tag", () => {
+    const tagged = item({ tags: ["work", "urgent"] });
+    expect(inScope(tagged, { kind: "tag", tag: "work" })).toBe(true);
+    expect(inScope(tagged, { kind: "tag", tag: "personal" })).toBe(false);
+    expect(inScope(item({}), { kind: "tag", tag: "work" })).toBe(false);
   });
 });
 

@@ -177,14 +177,41 @@ export function fixedChanges(edits: readonly FixedEdit[]): ItemChange[] {
   return out;
 }
 
-/** Case-insensitive search over the title and username. */
-export function matches(item: { title: string; username: string | undefined }, query: string): boolean {
+/** Case-insensitive search over the title, username, website host and tags. */
+export function matches(
+  item: {
+    title: string;
+    username: string | undefined;
+    websiteHost?: string | undefined;
+    tags?: readonly string[];
+  },
+  query: string,
+): boolean {
   const q = query.trim().toLocaleLowerCase();
   if (q === "") {
     return true;
   }
   return (
     item.title.toLocaleLowerCase().includes(q) ||
-    (item.username?.toLocaleLowerCase().includes(q) ?? false)
+    (item.username?.toLocaleLowerCase().includes(q) ?? false) ||
+    (item.websiteHost?.toLocaleLowerCase().includes(q) ?? false) ||
+    (item.tags?.some((tag) => tag.toLocaleLowerCase().includes(q)) ?? false)
   );
+}
+
+/** Every distinct tag over `items`, with how many items carry it, most-used first and
+ * alphabetical among ties. Used for the sidebar's Tags section (item 6). */
+export function tagCounts(items: readonly { readonly tags: readonly string[] }[]): readonly {
+  readonly tag: string;
+  readonly count: number;
+}[] {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    for (const tag of item.tags) {
+      counts.set(tag, (counts.get(tag) ?? 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .map(([tag, count]) => ({ tag, count }))
+    .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
 }

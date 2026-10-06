@@ -4745,7 +4745,8 @@ pub mod items {
     //! writes are `rizzy-client`'s `items` and `lists`).
     //!
     //! - **A list** ([`ItemSummary`]) carries the id, the type, the name, the login's username,
-    //!   the favourite flag and whether a TOTP secret is set. Never a concealed value.
+    //!   the favourite flag, whether a TOTP secret is set, the item's tags and the host of its
+    //!   first website. Never a concealed value.
     //! - **An item view** ([`FieldView`]) carries every displayed field with its key split into
     //!   list, element and attribute, its kind, and its value **only if the schema shows it**. A
     //!   concealed value (passwords, TOTP secrets, card numbers, hidden custom fields, and to be
@@ -4770,8 +4771,8 @@ pub mod items {
     use rizzy_client::rizzy_core::item::schema::{
         ATTR_KIND, ATTR_LABEL, ATTR_VALUE, CUSTOM_KIND_BOOLEAN,
         CUSTOM_KIND_HIDDEN, CUSTOM_KIND_TEXT, Concealment, CustomFieldKind,
-        Expected, ITEM_FAVORITE, ITEM_NAME, KeyClass, LIST_FIELD, LIST_URI,
-        LOGIN_TOTP, LOGIN_USERNAME, classify,
+        Expected, ITEM_FAVORITE, ITEM_NAME, KeyClass, LIST_FIELD, LIST_TAG,
+        LIST_URI, LOGIN_TOTP, LOGIN_USERNAME, classify,
     };
     use rizzy_client::rizzy_core::item::tag::{tag_key, tag_name};
     use rizzy_client::rizzy_core::item::value::ValueRef;
@@ -4979,6 +4980,13 @@ pub mod items {
         has_totp: bool,
         #[doc = " Whether the item is in the trash."]
         trashed: bool,
+        #[doc = " The item\'s tag names, display order (ADR 0018 §6)."]
+        tags: Vec<Zeroizing<String>>,
+        #[doc =
+        " The host of the item\'s first website (`uri` list), if it has one and the host could be"]
+        #[doc =
+        " parsed out. Never the full URI, never userinfo, never path or query (module docs)."]
+        website_host: Option<Zeroizing<String>>,
     }
     #[automatically_derived]
     impl wasm_bindgen::__rt::marker::SupportsConstructor for ItemSummary { }
@@ -5899,6 +5907,191 @@ pub mod items {
                 };
             self.trashed
         }
+        #[doc = " The item\'s tag names, display order."]
+        #[must_use]
+        pub fn tags(&self) -> Vec<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The item\'s tag names, display order."]
+                    #[must_use]
+                    #[export_name = "itemsummary_tags_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_ItemSummary_tags(me:
+                            <ItemSummary as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Vec<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<ItemSummary>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<ItemSummary>();
+                                            let me =
+                                                unsafe {
+                                                    <ItemSummary as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.tags();
+                                            _ret
+                                        }
+                                    });
+                        <Vec<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The item\'s tag names, display order."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_itemsummary_tags_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Vec<String> as WasmDescribe>::describe();
+                        <Vec<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0bItemSummary\x01% The item's tag names, display order.\0\0\0\0\x04tags\x01\x01\0\0\0\0\x01\0\x02\x04tags\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.tags.iter().map(|t| t.as_str().to_owned()).collect()
+        }
+        #[doc =
+        " The host of the item\'s first website, or `undefined` (module docs)."]
+        #[must_use]
+        pub fn website_host(&self) -> Option<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The host of the item\'s first website, or `undefined` (module docs)."]
+                    #[must_use]
+                    #[export_name = "itemsummary_websiteHost_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_ItemSummary_websiteHost(me:
+                            <ItemSummary as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<ItemSummary>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<ItemSummary>();
+                                            let me =
+                                                unsafe {
+                                                    <ItemSummary as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.website_host();
+                                            _ret
+                                        }
+                                    });
+                        <Option<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The host of the item\'s first website, or `undefined` (module docs)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_itemsummary_websiteHost_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<String> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0bItemSummary\x01D The host of the item's first website, or `undefined` (module docs).\0\0\0\0\x0bwebsiteHost\x01\x01\0\0\0\0\x01\0\x02\x0bwebsiteHost\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.website_host.as_ref().map(|h| h.as_str().to_owned())
+        }
     }
     #[automatically_derived]
     const _: () =
@@ -5966,7 +6159,66 @@ pub mod items {
                 favorite,
                 has_totp,
                 trashed,
+                tags: item_tags(vault, item),
+                website_host: first_website_host(vault, item),
             })
+    }
+    /// The item's tag names, in display order ([`VaultSync::list_elements`]'s order over `tag`).
+    /// A `tag/<hex>` element whose hex is not a name [`tag_key`] could have produced (module docs
+    /// of `rizzy_core::item::tag`) is skipped: it is carried but never shown as a tag.
+    fn item_tags(vault: &VaultSync, item: ItemId) -> Vec<Zeroizing<String>> {
+        vault.list_elements(item,
+                        LIST_TAG).into_iter().filter_map(|element|
+                    {
+                        let key =
+                            FieldKey::parse(::alloc::__export::must_use({
+                                                    ::alloc::fmt::format(format_args!("{1}/{0}",
+                                                            element.element.as_str(), LIST_TAG))
+                                                }).as_bytes()).ok()?;
+                        tag_name(key.as_key()).ok()
+                    }).collect()
+    }
+    /// The host of the item's first website (the first element of the `uri` list that has a
+    /// `value`), if one is set and a host could be parsed out of it.
+    fn first_website_host(vault: &VaultSync, item: ItemId)
+        -> Option<Zeroizing<String>> {
+        let first = vault.list_elements(item, LIST_URI).into_iter().next()?;
+        let key =
+            ::alloc::__export::must_use({
+                    ::alloc::fmt::format(format_args!("{1}/{0}/{2}",
+                            first.element.as_str(), LIST_URI, ATTR_VALUE))
+                });
+        let uri = text_field(vault, item, &key)?;
+        website_host(&uri)
+    }
+    /// The host of a website address the user typed, never its userinfo, path, query or fragment.
+    ///
+    /// `uri` may or may not carry a scheme (`https://example.com/x` or just `example.com/x`).
+    /// Whichever authority segment results is split on the last `@` to drop any `user:pass@`
+    /// userinfo, and on a bracketed IPv6 literal or the first remaining `:` to drop the port.
+    /// Anything that leaves no host, or that is not useful to show (empty), yields `None`: there is
+    /// no secret in the result, but a best-effort guess that leaks a path or credential would be
+    /// worse than showing nothing.
+    fn website_host(uri: &str) -> Option<Zeroizing<String>> {
+        let uri = uri.trim();
+        let after_scheme =
+            uri.split_once("://").map_or(uri, |(_, rest)| rest);
+        let end =
+            after_scheme.find(['/', '?', '#']).unwrap_or(after_scheme.len());
+        let authority = &after_scheme[..end];
+        let host_and_port =
+            authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        let host =
+            if host_and_port.starts_with('[') {
+                let close = host_and_port.find(']')?;
+                &host_and_port[..=close]
+            } else {
+                host_and_port.split_once(':').map_or(host_and_port,
+                    |(h, _)| h)
+            };
+        if host.is_empty() {
+            None
+        } else { Some(Zeroizing::new(host.to_owned())) }
     }
     /// The summaries of the active items, or of the trashed ones.
     pub(crate) fn summaries(vault: &VaultSync, trash: bool)

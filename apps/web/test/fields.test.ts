@@ -3,7 +3,7 @@
 import type { FieldView } from "@rizzy-vault/core";
 import { describe, expect, it } from "vitest";
 
-import { FIXED_FIELDS, fixedChanges, group, labelOf, matches } from "../src/fields.ts";
+import { FIXED_FIELDS, fixedChanges, group, labelOf, matches, tagCounts } from "../src/fields.ts";
 
 /** A field view with defaults. */
 function f(key: string, more: Partial<FieldView> = {}): FieldView {
@@ -94,5 +94,39 @@ describe("layout", () => {
     expect(matches(item, "ALICE")).toBe(true);
     expect(matches(item, "bob")).toBe(false);
     expect(matches({ title: "x", username: undefined }, "y")).toBe(false);
+  });
+
+  it("also searches website host and tags, case-insensitively", () => {
+    const item = {
+      title: "Example",
+      username: undefined,
+      websiteHost: "Example.com",
+      tags: ["Work", "Finance"],
+    };
+    expect(matches(item, "example.com")).toBe(true);
+    expect(matches(item, "WORK")).toBe(true);
+    expect(matches(item, "finance")).toBe(true);
+    expect(matches(item, "personal")).toBe(false);
+    expect(matches({ title: "x", username: undefined }, "y")).toBe(false);
+  });
+});
+
+describe("tagCounts", () => {
+  it("counts tags across items, most-used first, alphabetical among ties", () => {
+    const items = [
+      { tags: ["work", "urgent"] },
+      { tags: ["work"] },
+      { tags: ["personal"] },
+      { tags: [] },
+    ];
+    expect(tagCounts(items)).toEqual([
+      { tag: "work", count: 2 },
+      { tag: "personal", count: 1 },
+      { tag: "urgent", count: 1 },
+    ]);
+  });
+
+  it("is empty when no item has a tag", () => {
+    expect(tagCounts([{ tags: [] }])).toEqual([]);
   });
 });

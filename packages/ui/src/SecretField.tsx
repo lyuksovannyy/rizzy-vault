@@ -13,7 +13,7 @@
 //
 // The input is uncontrolled by default: the secret is read from the element on submit (through
 // `inputRef`) and the caller clears the element afterwards, so it never sits in React state.
-import { type Ref, useId, useState } from "react";
+import { type KeyboardEvent, type Ref, useId, useState } from "react";
 
 /** The attributes every secret input carries, before and after a reveal (INV-68). */
 export const SECRET_INPUT_ATTRIBUTES = {
@@ -51,12 +51,26 @@ export interface SecretFieldProps {
 export function SecretField(props: SecretFieldProps) {
   const id = useId();
   const [revealed, setRevealed] = useState(props.initiallyRevealed === true);
+  // Caps Lock hint: read only `getModifierState("CapsLock")` off the keyboard event, never the
+  // key itself, so this never sees or logs a character of the secret being typed (CLAUDE.md
+  // "Never log secrets"; nothing here is logged either way, but the same rule shapes what this
+  // reads). Wired only on an editable (`!readOnly`) input: a revealed value (`value` is set) is
+  // nothing but a `readOnly` display the user cannot type into, so a keypress landing there
+  // would be a stray one, not a caps-lock-relevant one.
+  const [capsLock, setCapsLock] = useState(false);
   const readOnly = props.value !== undefined;
   const toggle = () => {
     const next = !revealed;
     setRevealed(next);
     props.onRevealChange?.(next);
   };
+  const checkCapsLock = (e: KeyboardEvent<HTMLInputElement>) => {
+    setCapsLock(e.getModifierState("CapsLock"));
+  };
+  // Leaving the field (Tab, a click elsewhere) with Caps Lock still on but no further key
+  // pressed in it must not leave a stale hint showing: there is no modifier event to read once
+  // focus is gone, so this clears it outright rather than guessing.
+  const clearCapsLockHint = () => setCapsLock(false);
   return (
     <div className="secret-field">
       <label htmlFor={id}>{props.label}</label>
@@ -71,6 +85,9 @@ export function SecretField(props: SecretFieldProps) {
           readOnly={readOnly}
           required={props.required === true}
           autoFocus={props.autoFocus === true}
+          {...(readOnly
+            ? {}
+            : { onKeyDown: checkCapsLock, onKeyUp: checkCapsLock, onBlur: clearCapsLockHint })}
           {...(readOnly ? { value: props.value } : {})}
           {...(props.onInput !== undefined
             ? { onInput: (e: { currentTarget: HTMLInputElement }) => props.onInput?.(e.currentTarget.value) }
@@ -86,6 +103,11 @@ export function SecretField(props: SecretFieldProps) {
           {revealed ? "Hide" : "Show"}
         </button>
       </div>
+      {!revealed && capsLock && (
+        <p className="hint caps-lock-hint" role="status">
+          Caps Lock is on.
+        </p>
+      )}
       {props.hint !== undefined && <p className="hint">{props.hint}</p>}
     </div>
   );

@@ -92,39 +92,144 @@ and shows them.
 ## The shell and item views (redesign, in progress)
 
 `src/views/VaultView.tsx`, `ItemsPane.tsx` and `ItemView.tsx` were restyled into a sidebar/list/
-detail shell, "1Password feel" as inspiration only (no copied look, icons or text). This is a
-first slice; see "Not yet done" below for what the full redesign still needs.
+detail shell, "1Password feel" as inspiration only (no copied look, icons or text). Slice 1
+built the shell, the item list and the item detail; slice 2 (this change) added toasts, an
+accessible confirm dialog, keyboard shortcuts, a phone-width single-pane layout, the single
+"New item" menu, the account menu and the Settings view. See "Not yet done" below for what
+still remains.
 
 - **The shell** (`VaultView.tsx`): a left sidebar — All items, Favorites, one entry per
-  creatable item type, Trash, then Generator, Export and import, Devices, Two-factor — and a
-  top bar with the sync state and the Lock button. On screens narrower than 48rem (`app.css`)
-  the sidebar becomes a slide-over opened by a menu button, closed by its own backdrop or by
-  choosing anything in it. The sidebar's filter is a pure function, `inScope` (`ItemsPane.tsx`),
-  applied on top of the existing free-text search; `emptyState` picks each section's empty
-  message. Both are covered by `test/items-pane.test.ts`.
-  - Screenshot, in words: a narrow column on the left lists "All items" (a four-square icon),
-    "Favorites" (a star), then "Login"/"Secure note"/"Card"/"Identity" each with its own
-    line-icon, then "Trash" (a bin); a divider; then "Generator", "Export and import",
-    "Devices", "Two-factor". The active entry has a solid accent background. To its right, a
-    top bar shows "Synced" (or a pending-change count) and a "Lock" button; below it, the
-    search box and item count sit above the list.
+  creatable item type, Trash, then Generator, Export and import, Settings — and a top bar with
+  the sync state, a Sync button and the account menu (Settings, Lock). On screens narrower than
+  48rem (`app.css`) the sidebar becomes a slide-over opened by a menu button, closed by its own
+  backdrop, Escape, or by choosing anything in it. The sidebar's filter is a pure function,
+  `inScope` (`ItemsPane.tsx`), applied on top of the existing free-text search; `emptyState`
+  picks each section's empty message. Both are covered by `test/items-pane.test.ts`.
 - **The item list** (`ItemsPane.tsx`): a type icon, title, the username or type as a subtitle,
   and a favorite star per row (an outline star kept in the layout but hidden for a non-favorite
   row, so rows do not shift when one is favorited); a live item count next to the search box;
-  an empty state with a section-specific message (no redundant second "create" button, since
-  the "New {type}" buttons above the list already offer one for every type whenever they are
-  shown at all).
+  an empty state with a section-specific message; a single "New item" button opening a
+  type-picker menu (replacing the old per-type button row). The list supports roving-tabindex
+  keyboard navigation (see "Keyboard shortcuts" below).
 - **The item detail** (`ItemView.tsx`): a header with the type icon, the name and a favorite
   toggle (an icon-only button, reusing the editor's own `editItem`/`item.favorite` write —
   module docs in `ItemView.tsx` — so this is the existing write path, not a new one); a website
   field's `SafeLink` now has a same-safe-URL icon-only open button beside it
   (`SafeLink.tsx`'s `SafeOpenButton`, the only other place besides `SafeLink` itself allowed a
   dynamic `href`, per `eslint.config.mjs`); the one-time code has an SVG countdown ring (static
-  `stroke-dasharray`/`stroke-dashoffset` attributes, not the banned `style` prop).
+  `stroke-dasharray`/`stroke-dashoffset` attributes, not the banned `style` prop). Moving an
+  item to trash, and deleting it for good, now confirm through the accessible dialog below
+  instead of `window.confirm`.
 - **Icons** (`packages/ui/src/icons.tsx`): inline SVG React components, `aria-hidden`, carrying
   no text of their own — a button's accessible name still comes only from its visible label, so
   swapping an icon never changes what a screen reader announces or what a Playwright
   `getByRole` selector matches.
+
+### Toasts and the confirm dialog (`@rizzy-vault/ui`)
+
+- **`Toast.tsx`** (`ToastProvider`/`useToast`): success/error/info notices, bottom-right, each
+  auto-dismissing (errors stay up longer) with its own dismiss button. Error toasts sit in their
+  own `aria-live="assertive"` region; success/info toasts sit in a separate `aria-live="polite"`
+  region, so a success notice never interrupts a screen reader mid-sentence over an error. The
+  queue itself is a pure reducer, `toastReducer` (`packages/ui/test/toast.test.ts`); errors that
+  already have their own accessible inline text (`ErrorText`, `common.tsx`) were kept as inline
+  field errors rather than moved to a toast, per the task's own either/or.
+- **`ConfirmDialog.tsx`**: `role="dialog"`, `aria-modal="true"`, a focus trap, initial focus on
+  the *safe* action (never the destructive one), Escape and a labelled backdrop button both
+  cancel. Replaces `window.confirm` for: moving an item to trash, deleting it for good
+  (`ItemView.tsx`), locking with unsaved changes (`VaultView.tsx`), and turning two-factor
+  authentication off (`TwoFactorPane.tsx`). The trap's cyclic arithmetic, `nextFocusIndex`, is
+  unit-tested directly (`packages/ui/test/confirm-dialog.test.ts`); there is no jsdom dependency
+  in this workspace, so the trap/Escape/backdrop behaviour itself is covered by Playwright
+  instead (`e2e/vault.spec.ts`'s trash confirmation).
+
+### Keyboard shortcuts (`src/shortcuts.ts`)
+
+| Key | Does |
+| --- | --- |
+| `/` or Ctrl/Cmd+K | Focus the search box |
+| ↑ / ↓ | Move the item-list selection |
+| Enter | Open the selected item (native button activation) |
+| Esc | Close a dialog, popover or the mobile sidebar |
+| `N` | New item |
+| `?` | Show the shortcuts help dialog |
+
+Shortcuts never fire while typing in a form control or a `contenteditable` element — except
+Escape (always) and the Ctrl/Cmd+K chord (always, by convention). `shortcutFor`/
+`isTypingTarget`/`moveListSelection` are pure functions, unit-tested in
+`test/shortcuts.test.ts`; the actual key dispatch lives in `VaultView.tsx`'s one `keydown`
+listener, exercised end to end by `e2e/keyboard-nav.spec.ts`.
+
+### Phone width
+
+Below 48rem, `ItemsPane.tsx` shows one pane at a time: the item list, or the open item/editor
+with a "Back" button, never both — `.items-detail-open` in `app.css` removes whichever pane is
+not current from layout entirely, so neither can force horizontal scroll. The sidebar's own
+48rem slide-over (above) is the third pane. Tablet widths (above 48rem) keep the list and
+detail side by side, unchanged. Covered by `e2e/phone.spec.ts` at 375×812.
+
+### The single "New item" menu, the account menu, and Settings
+
+- **New item** (`ItemsPane.tsx`): one button with a type-picker menu, replacing the old row of
+  "New {type}" buttons. The `N` shortcut starts a new item of the first creatable type directly.
+- **Account menu** (`VaultView.tsx`'s top bar): Settings and Lock. There is no separate sign-out
+  action — every M1 session is an OPAQUE login with no durable session to sign out of beyond
+  locking (module docs above).
+- **Settings** (`SettingsView.tsx`): one sidebar entry grouping Two-factor (`TwoFactorPane.tsx`,
+  unchanged), Devices (`DevicesPane.tsx`, unchanged) and a new Appearance group (below).
+
+### Appearance (theme), memory-only
+
+`src/theme.ts`'s `ThemeProvider`/`useThemeContext`: "system" (default), "light" or "dark",
+applied as `data-theme` on `document.documentElement` (`packages/ui/src/tokens.css` reads it).
+Kept in memory only for the session — **no** `localStorage`, `sessionStorage` or `IndexedDB` —
+pending the owner's answer on whether CRYPTO.md §11.4's "nothing is persisted" covers a
+non-secret UI preference like this one (see "Not yet done" below, carried over from slice 1).
+
+### Tags (`rizzy-wasm` → `@rizzy-vault/core` → `src/fields.ts`, `ItemsPane.tsx`, `VaultView.tsx`)
+
+`ItemSummary` now also carries `tags` (the item's tag names, display order) and `websiteHost`
+(the host of its first website, if any — never the full URI, never userinfo, path or query:
+`website_host` in `crates/rizzy-wasm/src/items.rs`, unit-tested against
+`https://user:pass@example.com/x?token=abc` → `example.com` and other edge cases). Both are
+plaintext already shown elsewhere in the item (a tag, a website address), carried at the same
+"smallest useful size" as the existing `username`/`favorite` summary fields (ADR 0013 §3 rule
+3, ADR 0018 §6–§7), so no new ADR was needed for this extension.
+
+- **Sidebar** (`VaultView.tsx`): a "Tags" group below Trash, one button per tag with its count
+  (`tagCounts`, `fields.ts`), shown only when at least one item has a tag. Choosing a tag sets
+  a new sidebar scope, `{ kind: "tag", tag }` (`ItemsPane.tsx`'s `Scope`/`inScope`).
+  `tagCounts`/`inScope` are pure and unit-tested (`test/fields.test.ts`, `test/items-pane.test.ts`).
+- **Search** (`matches`, `fields.ts`): now also matches the website host and any tag name, case
+  insensitively, alongside the existing title/username.
+
+### The item editor, restyled (item 4 of the redesign brief)
+
+`ItemEditor.tsx`'s markup, class names, accessible names and every Playwright selector over it
+are unchanged — only `app.css` changed, giving the existing `.item-editor`, `.field-edit`,
+`.secret-edit`, `.list-row`/`.custom-field-row` and `.row-actions` classes (until now
+unstyled, bare block layout) a consistent flex-row layout matching the rest of the shell: an
+input grows to fill its row, a website/custom-field/tag row's move-up/down buttons and its
+"Remove" checkbox sit together on one line, and a secret field's generate button and "Clear"
+checkbox line up under the input the same way everywhere. Covered by the existing Playwright
+specs that exercise the editor (`e2e/vault.spec.ts`'s generate-popover and two-websites specs);
+no new test was needed since no behaviour changed.
+
+### The auth screens: Caps Lock hint (item 6 of the redesign brief, partial)
+
+Login, signup, unlock and the Emergency Kit already used the centered `.panel narrow` card and
+`SecretField`'s own "Show"/"Hide" toggle before this change, so what was missing was the Caps
+Lock hint. Added to `SecretField` itself (`packages/ui/src/SecretField.tsx`), not
+copied into each screen: every masked secret input across the app — login, signup, unlock, the
+item editor's password fields — now shows "Caps Lock is on." while it is on and the field is
+still masked, reading only `KeyboardEvent.getModifierState("CapsLock")` on `keydown`/`keyup`,
+never the key itself (so this cannot see or log a character of the secret). Covered by
+`e2e/vault.spec.ts`'s Caps Lock spec, which dispatches a synthetic `keydown`/`keyup` with
+`modifierCapsLock` set directly — Playwright's `keyboard.press("CapsLock")` does not reliably
+toggle the real OS modifier in a headless browser, and the hint only cares what
+`getModifierState` reports, so the synthetic event exercises the same code path a real Caps
+Lock press would. The rest of item 6 — a numbered-steps layout for the Emergency Kit screen —
+was not built; see "Not yet done".
 
 ### Colour contrast (item 7 of the redesign brief)
 
@@ -143,38 +248,20 @@ every pair here clears with margin to spare):
 
 ### Not yet done
 
-This slice covers items 1–3 of the redesign brief (the shell, the item list, the item detail)
-and the contrast table of item 7, over the existing `prefers-color-scheme` light/dark tokens.
-Still open, left for a follow-up change:
+Slice 1 covered items 1–3 of the redesign brief and the contrast table of item 7; the centered
+card and "Show"/"Hide" toggle item 6 asks for were already present before this change. Slice 2
+(this change) covered
+item 1's Tags (above), item 4's CSS pass (above), item 5 (toasts, the confirm dialog), item 6's
+Caps Lock hint (above), item 8 (keyboard shortcuts), item 9 (phone width), and the "New item"/
+account-menu/Settings part of item 1 and 7's theme selector. Still open, left for a follow-up
+change:
 
-- **Item 1.** A single "New item" type-picker control (today each creatable type has its own
-  "New {type}" button, which is equivalent but not one dropdown); an account menu in the top
-  bar; folding Devices and Two-factor into one "Settings" entry.
-- **Item 1 (Tags).** A "Tags" sidebar entry with per-tag counts was not built: `ItemSummary`
-  (`@rizzy-vault/core`) carries no `tags` field today (only `id`, `itemType`, `title`,
-  `username`, `favorite`, `hasTotp`, `trashed`), so listing tags without fetching every item's
-  full field list would need a core/wasm API change — out of scope for a UI-only redesign.
-  Search is therefore still title/username only (the same limit holds for a website-search).
-- **Item 4.** The item editor (`ItemEditor.tsx`) was not restyled.
-- **Item 5.** No toast system and no accessible confirm-dialog component yet; the trash/purge/
-  lock-with-unsaved-changes confirmations are still `window.confirm`.
-- **Item 6.** The auth screens (login, signup, unlock, 2FA prompt, Emergency Kit) were not
-  restyled.
-- **Item 7.** A manual light/dark toggle in Settings, and storing that preference, were not
-  built: [CRYPTO.md §11.4](../../docs/CRYPTO.md#114-web-vault) states plainly "Nothing is
-  persisted" for the web vault's storage, and neither it nor
-  [ADR 0026](../../docs/adr/0026-client-device-state-and-cache.md) says whether that line
-  covers a non-secret UI preference like a theme choice or only session/key material; that is
-  worth a direct answer from the owner before writing to `localStorage` (even wrapped in
-  `try`/`catch`, for a non-secret preference only) or keeping the choice in memory for the
-  session, as the task's own fallback asks.
-- **Item 8.** No keyboard shortcuts (`/`, Ctrl/Cmd+K, arrow-key list navigation, `N`, a `?`
-  help dialog) yet.
-- **Item 9.** No phone-width single-pane-with-back-navigation layout; the list and detail panes
-  still both show side by side down to roughly 360px, which gets cramped below ~400px.
-- Vitest coverage for keyboard navigation, toasts and the confirm dialog, and Playwright specs
-  for keyboard navigation and phone width, depend on items 5, 8 and 9 above and were not added
-  yet either.
+- **Item 6 (remainder).** The Emergency Kit screen was not restyled into a numbered-steps
+  layout.
+- **Item 7 (persistence).** The owner has not yet said whether CRYPTO.md §11.4's "nothing is
+  persisted" covers a non-secret UI preference like the theme choice; until that is answered it
+  stays in memory only, per the task's own fallback (`src/theme.ts` module docs), so it resets
+  to "system" on every reload or lock.
 
 ## Build and test
 

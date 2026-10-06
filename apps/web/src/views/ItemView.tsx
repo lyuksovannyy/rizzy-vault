@@ -4,8 +4,8 @@
 // A concealed value crosses from the Worker only when the user asks (reveal or copy; ADR 0013
 // §3 rule 3), and a revealed value is shown in the secret-field component (INV-68).
 import type { FieldView, ItemSummary, TotpCode } from "@rizzy-vault/core";
-import { IconStarFilled, IconStarOutline, SecretField, TypeIcon } from "@rizzy-vault/ui";
-import { useEffect, useState } from "react";
+import { ConfirmDialog, IconStarFilled, IconStarOutline, SecretField, TypeIcon, useToast } from "@rizzy-vault/ui";
+import { useEffect, useId, useState } from "react";
 
 import { codeOf } from "../core-client.ts";
 import { type Grouped, group, labelOf } from "../fields.ts";
@@ -169,6 +169,12 @@ export function ItemView(props: {
   const [summary, setSummary] = useState<ItemSummary | undefined>();
   const [grouped, setGrouped] = useState<Grouped | undefined>();
   const { busy, error, setError, run } = useAction();
+  const { notify } = useToast();
+  const titleId = useId();
+  /** Which confirm dialog, if any, is open (module docs, item 2 of the redesign follow-up:
+   * trash and purge both confirm, now through the accessible dialog rather than
+   * `window.confirm`). */
+  const [confirming, setConfirming] = useState<"trash" | "purge" | undefined>();
 
   useEffect(() => {
     let live = true;
@@ -190,10 +196,13 @@ export function ItemView(props: {
     return <ErrorText code={error} />;
   }
 
-  const act = (f: () => Promise<void>, gone: boolean) =>
+  const act = (f: () => Promise<void>, gone: boolean, successMessage?: string) =>
     void run(async () => {
       await f();
       await props.onWritten(gone);
+      if (successMessage !== undefined) {
+        notify("success", successMessage);
+      }
     });
 
   const writable = !ctx.session.readOnly;
@@ -266,18 +275,14 @@ export function ItemView(props: {
         <div className="actions">
           {summary.trashed ? (
             <>
-              <button type="button" disabled={busy} onClick={() => act(() => ctx.client.call("restoreItem", id), true)}>
-                Restore
-              </button>
               <button
                 type="button"
-                className="danger"
                 disabled={busy}
-                onClick={() =>
-                  window.confirm("Delete this item for good? This cannot be undone.") &&
-                  act(() => ctx.client.call("purgeItem", id), true)
-                }
+                onClick={() => act(() => ctx.client.call("restoreItem", id), true, "Item restored.")}
               >
+                Restore
+              </button>
+              <button type="button" className="danger" disabled={busy} onClick={() => setConfirming("purge")}>
                 Delete for good
               </button>
             </>
@@ -286,13 +291,38 @@ export function ItemView(props: {
               <button type="button" disabled={busy} onClick={props.onEdit}>
                 Edit
               </button>
-              <button type="button" className="secondary" disabled={busy} onClick={() => act(() => ctx.client.call("trashItem", id), true)}>
+              <button type="button" className="secondary" disabled={busy} onClick={() => setConfirming("trash")}>
                 Move to trash
               </button>
             </>
           )}
         </div>
       )}
+      <ConfirmDialog
+        open={confirming === "trash"}
+        titleId={`${titleId}-trash-title`}
+        title="Move this item to trash?"
+        description="You can restore it from the trash later, or delete it for good from there."
+        confirmLabel="Move to trash"
+        onConfirm={() => {
+          setConfirming(undefined);
+          act(() => ctx.client.call("trashItem", id), true, "Item moved to trash.");
+        }}
+        onCancel={() => setConfirming(undefined)}
+      />
+      <ConfirmDialog
+        open={confirming === "purge"}
+        titleId={`${titleId}-purge-title`}
+        title="Delete this item for good?"
+        description="This cannot be undone."
+        confirmLabel="Delete for good"
+        danger
+        onConfirm={() => {
+          setConfirming(undefined);
+          act(() => ctx.client.call("purgeItem", id), true, "Item deleted for good.");
+        }}
+        onCancel={() => setConfirming(undefined)}
+      />
     </article>
   );
 }

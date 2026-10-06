@@ -3,8 +3,12 @@
 export { PasswordGenerateSlot } from "./PasswordGenerateSlot.tsx";
 export { SecretField, SECRET_INPUT_ATTRIBUTES, type SecretFieldProps } from "./SecretField.tsx";
 export {
+  IconAccount,
   IconAllItems,
+  IconBack,
   IconCard,
+  IconChevronDown,
+  IconClose,
   IconDevices,
   IconGenerator,
   IconIdentity,
@@ -13,12 +17,25 @@ export {
   IconMenu,
   IconNote,
   IconOpen,
+  IconPlus,
   IconSearch,
+  IconSettings,
   IconShield,
   IconStarFilled,
   IconStarOutline,
+  IconTag,
   IconTransfer,
   IconTrash,
   IconUnknown,
   TypeIcon,
 } from "./icons.tsx";
+export { ConfirmDialog, type ConfirmDialogProps, nextFocusIndex } from "./ConfirmDialog.tsx";
+export { isAnyModalOpen } from "./modalRegistry.ts";
+export {
+  TOAST_DURATION_MS,
+  ToastProvider,
+  type ToastItem,
+  type ToastKind,
+  toastReducer,
+  useToast,
+} from "./Toast.tsx";

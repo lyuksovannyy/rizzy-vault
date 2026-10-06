@@ -213,6 +213,8 @@ describe.skipIf(binary === undefined)("against a real server", () => {
       favorite: false,
       hasTotp: false,
       trashed: false,
+      tags: ["work"],
+      websiteHost: "example.com",
     });
 
     // Concealed values do not cross until revealed.

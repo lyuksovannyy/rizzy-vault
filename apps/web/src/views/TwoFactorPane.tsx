@@ -4,8 +4,8 @@
 // the web vault would need an encoder library, and the `otpauth://` URI and the Base32
 // secret can be typed or pasted into the authenticator.
 import type { TwoFactorSetup } from "@rizzy-vault/core";
-import { SecretField } from "@rizzy-vault/ui";
-import { type FormEvent, useState } from "react";
+import { ConfirmDialog, SecretField } from "@rizzy-vault/ui";
+import { type FormEvent, useId, useState } from "react";
 
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText, useAction } from "./common.tsx";
@@ -17,7 +17,9 @@ export function TwoFactorPane(props: { readonly ctx: VaultContext }) {
   const [code, setCode] = useState("");
   const [disableCode, setDisableCode] = useState("");
   const [done, setDone] = useState<string | undefined>();
+  const [confirmDisable, setConfirmDisable] = useState(false);
   const { busy, error, run } = useAction();
+  const titleId = useId();
 
   const confirm = (e: FormEvent) => {
     e.preventDefault();
@@ -29,8 +31,13 @@ export function TwoFactorPane(props: { readonly ctx: VaultContext }) {
     });
   };
 
-  const disable = (e: FormEvent) => {
+  const requestDisable = (e: FormEvent) => {
     e.preventDefault();
+    setConfirmDisable(true);
+  };
+
+  const disable = () => {
+    setConfirmDisable(false);
     void run(async () => {
       await ctx.client.call("disableTwoFactor", disableCode.trim());
       setDisableCode("");
@@ -79,7 +86,7 @@ export function TwoFactorPane(props: { readonly ctx: VaultContext }) {
           </div>
         </form>
       )}
-      <form onSubmit={disable}>
+      <form onSubmit={requestDisable}>
         <h3>Turn two-factor off</h3>
         <label htmlFor="totp-disable">Current code</label>
         <input
@@ -98,6 +105,16 @@ export function TwoFactorPane(props: { readonly ctx: VaultContext }) {
         </div>
       </form>
       <ErrorText code={error} />
+      <ConfirmDialog
+        open={confirmDisable}
+        titleId={titleId}
+        title="Turn two-factor authentication off?"
+        description="Logins will no longer ask for a code. You can set it up again later."
+        confirmLabel="Turn off"
+        danger
+        onConfirm={disable}
+        onCancel={() => setConfirmDisable(false)}
+      />
     </div>
   );
 }

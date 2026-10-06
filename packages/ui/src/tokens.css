@@ -42,8 +42,12 @@
   --radius-2: 8px;
 }
 
+/* The theme choice (redesign slice 2, item 5): "system" follows `prefers-color-scheme` below
+   with no attribute set; "light" or "dark" is forced by `data-theme` on the document root,
+   regardless of the system scheme. The web vault keeps this choice in memory only for the
+   session (CRYPTO.md §11.4; apps/web/src/theme.ts) — nothing here reads or writes storage. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --color-bg: #121317;
     --color-surface: #1c1d23;
     --color-border: #3b3d47;
@@ -57,4 +61,19 @@
     --color-warning-text: #ffe08a;
     --color-focus: #8fa6ff;
   }
+}
+
+:root[data-theme="dark"] {
+  --color-bg: #121317;
+  --color-surface: #1c1d23;
+  --color-border: #3b3d47;
+  --color-text: #ececf1;
+  --color-text-muted: #b4b6c2;
+  --color-accent: #8fa6ff;
+  --color-on-accent: #0b1030;
+  --color-danger: #ffb4ab;
+  --color-on-danger: #410002;
+  --color-warning-bg: #3a2c00;
+  --color-warning-text: #ffe08a;
+  --color-focus: #8fa6ff;
 }

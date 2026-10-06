@@ -3,7 +3,8 @@
 //! writes are `rizzy-client`'s `items` and `lists`).
 //!
 //! - **A list** ([`ItemSummary`]) carries the id, the type, the name, the login's username,
-//!   the favourite flag and whether a TOTP secret is set. Never a concealed value.
+//!   the favourite flag, whether a TOTP secret is set, the item's tags and the host of its
+//!   first website. Never a concealed value.
 //! - **An item view** ([`FieldView`]) carries every displayed field with its key split into
 //!   list, element and attribute, its kind, and its value **only if the schema shows it**. A
 //!   concealed value (passwords, TOTP secrets, card numbers, hidden custom fields, and to be
@@ -28,7 +29,7 @@ use rizzy_client::rizzy_core::item::key::ElementId;
 use rizzy_client::rizzy_core::item::schema::{
     ATTR_KIND, ATTR_LABEL, ATTR_VALUE, CUSTOM_KIND_BOOLEAN, CUSTOM_KIND_HIDDEN, CUSTOM_KIND_TEXT,
     Concealment, CustomFieldKind, Expected, ITEM_FAVORITE, ITEM_NAME, KeyClass, LIST_FIELD,
-    LIST_URI, LOGIN_TOTP, LOGIN_USERNAME, classify,
+    LIST_TAG, LIST_URI, LOGIN_TOTP, LOGIN_USERNAME, classify,
 };
 use rizzy_client::rizzy_core::item::tag::{tag_key, tag_name};
 use rizzy_client::rizzy_core::item::value::ValueRef;
@@ -169,6 +170,11 @@ pub struct ItemSummary {
     has_totp: bool,
     /// Whether the item is in the trash.
     trashed: bool,
+    /// The item's tag names, display order (ADR 0018 §6).
+    tags: Vec<Zeroizing<String>>,
+    /// The host of the item's first website (`uri` list), if it has one and the host could be
+    /// parsed out. Never the full URI, never userinfo, never path or query (module docs).
+    website_host: Option<Zeroizing<String>>,
 }
 
 impl fmt::Debug for ItemSummary {
@@ -231,6 +237,20 @@ impl ItemSummary {
     pub fn trashed(&self) -> bool {
         self.trashed
     }
+
+    /// The item's tag names, display order.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn tags(&self) -> Vec<String> {
+        self.tags.iter().map(|t| t.as_str().to_owned()).collect()
+    }
+
+    /// The host of the item's first website, or `undefined` (module docs).
+    #[wasm_bindgen(getter, js_name = websiteHost)]
+    #[must_use]
+    pub fn website_host(&self) -> Option<String> {
+        self.website_host.as_ref().map(|h| h.as_str().to_owned())
+    }
 }
 
 /// The summary of `item`, if it is active or trashed and not the vault-settings item.
@@ -258,7 +278,66 @@ pub(crate) fn summary(vault: &VaultSync, item: ItemId) -> Option<ItemSummary> {
         favorite,
         has_totp,
         trashed,
+        tags: item_tags(vault, item),
+        website_host: first_website_host(vault, item),
     })
+}
+
+/// The item's tag names, in display order ([`VaultSync::list_elements`]'s order over `tag`).
+/// A `tag/<hex>` element whose hex is not a name [`tag_key`] could have produced (module docs
+/// of `rizzy_core::item::tag`) is skipped: it is carried but never shown as a tag.
+fn item_tags(vault: &VaultSync, item: ItemId) -> Vec<Zeroizing<String>> {
+    vault
+        .list_elements(item, LIST_TAG)
+        .into_iter()
+        .filter_map(|element| {
+            let key =
+                FieldKey::parse(format!("{LIST_TAG}/{}", element.element.as_str()).as_bytes())
+                    .ok()?;
+            tag_name(key.as_key()).ok()
+        })
+        .collect()
+}
+
+/// The host of the item's first website (the first element of the `uri` list that has a
+/// `value`), if one is set and a host could be parsed out of it.
+fn first_website_host(vault: &VaultSync, item: ItemId) -> Option<Zeroizing<String>> {
+    let first = vault.list_elements(item, LIST_URI).into_iter().next()?;
+    let key = format!("{LIST_URI}/{}/{ATTR_VALUE}", first.element.as_str());
+    let uri = text_field(vault, item, &key)?;
+    website_host(&uri)
+}
+
+/// The host of a website address the user typed, never its userinfo, path, query or fragment.
+///
+/// `uri` may or may not carry a scheme (`https://example.com/x` or just `example.com/x`).
+/// Whichever authority segment results is split on the last `@` to drop any `user:pass@`
+/// userinfo, and on a bracketed IPv6 literal or the first remaining `:` to drop the port.
+/// Anything that leaves no host, or that is not useful to show (empty), yields `None`: there is
+/// no secret in the result, but a best-effort guess that leaks a path or credential would be
+/// worse than showing nothing.
+fn website_host(uri: &str) -> Option<Zeroizing<String>> {
+    let uri = uri.trim();
+    let after_scheme = uri.split_once("://").map_or(uri, |(_, rest)| rest);
+    let end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..end];
+    let host_and_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = if host_and_port.starts_with('[') {
+        // An IPv6 literal: the host is up to and including the closing bracket.
+        let close = host_and_port.find(']')?;
+        &host_and_port[..=close]
+    } else {
+        host_and_port
+            .split_once(':')
+            .map_or(host_and_port, |(h, _)| h)
+    };
+    if host.is_empty() {
+        None
+    } else {
+        Some(Zeroizing::new(host.to_owned()))
+    }
 }
 
 /// The summaries of the active items, or of the trashed ones.
@@ -885,6 +964,28 @@ mod tests {
                 .is_err()
         );
         assert!(!format!("{draft:?}").contains('x'));
+    }
+
+    #[test]
+    fn website_host_strips_userinfo_path_query_and_port() {
+        let cases: &[(&str, Option<&str>)] = &[
+            (
+                "https://user:pass@example.com/x?token=abc",
+                Some("example.com"),
+            ),
+            ("https://example.com", Some("example.com")),
+            ("example.com/path", Some("example.com")),
+            ("http://example.com:8080/x", Some("example.com")),
+            ("https://[2001:db8::1]:8080/x", Some("[2001:db8::1]")),
+            ("https://a@b@example.com/", Some("example.com")),
+            ("", None),
+            ("https://", None),
+            ("https:///path", None),
+        ];
+        for (input, expected) in cases {
+            let got = website_host(input);
+            assert_eq!(got.as_deref().map(String::as_str), *expected, "{input}");
+        }
     }
 
     #[test]

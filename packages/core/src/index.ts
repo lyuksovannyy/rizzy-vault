@@ -572,6 +572,10 @@ export interface ItemSummary {
   readonly favorite: boolean;
   readonly hasTotp: boolean;
   readonly trashed: boolean;
+  /** The item's tag names, display order. */
+  readonly tags: readonly string[];
+  /** The host of the item's first website, or `undefined`. Never the full URI. */
+  readonly websiteHost: string | undefined;
 }
 
 /** One displayed field. `value` is absent while `concealed`; reveal it with `reveal`. */
@@ -824,6 +828,8 @@ export class VaultSession {
         favorite: i.favorite,
         hasTotp: i.hasTotp,
         trashed: i.trashed,
+        tags: i.tags,
+        websiteHost: i.websiteHost,
       }),
     );
   }
@@ -840,6 +846,8 @@ export class VaultSession {
         favorite: i.favorite,
         hasTotp: i.hasTotp,
         trashed: i.trashed,
+        tags: i.tags,
+        websiteHost: i.websiteHost,
       }),
     );
   }

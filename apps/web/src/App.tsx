@@ -3,11 +3,13 @@
 // The web vault persists nothing (CRYPTO.md §11.4): every session is an OPAQUE login, and a
 // lock or a reload ends it. "Unlock" is therefore a new login, with the login name kept in
 // memory only.
+import { ToastProvider } from "@rizzy-vault/ui";
 import { useCallback, useEffect, useState } from "react";
 
 import { type CoreClient, codeOf } from "./core-client.ts";
 import { messageFor } from "./messages.ts";
 import type { SessionInfo } from "./protocol.ts";
+import { ThemeProvider } from "./theme.ts";
 import { LoginView } from "./views/LoginView.tsx";
 import { SignupView } from "./views/SignupView.tsx";
 import { TotpDialog } from "./views/TotpDialog.tsx";
@@ -99,9 +101,11 @@ export function App(props: { readonly client: CoreClient }) {
   }
 
   return (
-    <>
-      <main>{body}</main>
-      {totpAsk !== undefined && <TotpDialog onAnswer={totpAsk} />}
-    </>
+    <ThemeProvider>
+      <ToastProvider>
+        <main>{body}</main>
+        {totpAsk !== undefined && <TotpDialog onAnswer={totpAsk} />}
+      </ToastProvider>
+    </ThemeProvider>
   );
 }

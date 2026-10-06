@@ -244,3 +244,56 @@ export function IconOpen(props: IconProps) {
 export function IconMenu(props: IconProps) {
   return base(<path d="M4 6h16M4 12h16M4 18h16" />, props);
 }
+
+/** A close / dismiss cross (toasts, the confirm dialog's own backdrop label). */
+export function IconClose(props: IconProps) {
+  return base(<path d="M6 6l12 12M18 6 6 18" />, props);
+}
+
+/** A back arrow (the phone-width single-pane back button). */
+export function IconBack(props: IconProps) {
+  return base(<path d="M19 12H5M11 5l-6 7 6 7" />, props);
+}
+
+/** A plus (the single "New item" button). */
+export function IconPlus(props: IconProps) {
+  return base(<path d="M12 5v14M5 12h14" />, props);
+}
+
+/** A small downward chevron (menu disclosure). */
+export function IconChevronDown(props: IconProps) {
+  return base(<path d="M6 9l6 6 6-6" />, props);
+}
+
+/** A price-tag outline (the Tags sidebar entry). */
+export function IconTag(props: IconProps) {
+  return base(
+    <>
+      <path d="M12 3h6a1 1 0 0 1 1 1v6l-9.3 9.3a1 1 0 0 1-1.4 0l-5.6-5.6a1 1 0 0 1 0-1.4L12 3z" />
+      <circle cx="16.5" cy="7.5" r="1" fill="currentColor" stroke="none" />
+    </>,
+    props,
+  );
+}
+
+/** A gear (the account menu's Settings entry). */
+export function IconSettings(props: IconProps) {
+  return base(
+    <>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 13a7.4 7.4 0 0 0 0-2l2-1.5-2-3.4-2.3.8a7.4 7.4 0 0 0-1.7-1l-.4-2.4h-4L10.6 6a7.4 7.4 0 0 0-1.7 1L6.6 6.2l-2 3.4L6.6 11a7.4 7.4 0 0 0 0 2l-2 1.5 2 3.4 2.3-.8a7.4 7.4 0 0 0 1.7 1l.4 2.4h4l.4-2.4a7.4 7.4 0 0 0 1.7-1l2.3.8 2-3.4z" />
+    </>,
+    props,
+  );
+}
+
+/** An account / person outline (the top bar's account menu). */
+export function IconAccount(props: IconProps) {
+  return base(
+    <>
+      <circle cx="12" cy="8" r="3.4" />
+      <path d="M5 20c0-3.6 3.1-6 7-6s7 2.4 7 6" />
+    </>,
+    props,
+  );
+}

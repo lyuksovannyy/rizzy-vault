@@ -87,7 +87,20 @@ async function logIn(page: Page, loginName: string | undefined, secretKey: strin
   await page.getByLabel("Secret Key", { exact: true }).fill(secretKey);
   await page.getByLabel("Master password", { exact: true }).fill(PASSWORD);
   await page.getByRole("button", { name: /^(Log in|Unlock)$/ }).click();
-  await expect(page.getByRole("button", { name: "Lock" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Account menu" })).toBeVisible();
+}
+
+/** Opens the single "New item" menu and chooses `typeLabel` (redesign slice 2, item 5). */
+async function newItem(page: Page, typeLabel: string): Promise<void> {
+  await page.getByRole("button", { name: "New item" }).click();
+  await page.getByRole("menuitem", { name: typeLabel }).click();
+}
+
+/** Locks the vault through the account menu (redesign slice 2, item 5: there is no longer a
+ * standalone "Lock" button in the top bar). */
+async function lockVault(page: Page): Promise<void> {
+  await page.getByRole("button", { name: "Account menu" }).click();
+  await page.getByRole("menuitem", { name: "Lock" }).click();
 }
 
 test("signup, item, reload, login, lock, unlock", async ({ page }) => {
@@ -142,11 +155,11 @@ test("signup, item, reload, login, lock, unlock", async ({ page }) => {
   const lastGroup = secretKey.split("-").at(-1) ?? "";
   await page.getByLabel(/last group of your Secret Key/).fill(lastGroup);
   await page.getByRole("button", { name: "Create the account" }).click();
-  await expect(page.getByRole("button", { name: "Lock" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Account menu" })).toBeVisible();
   await expect(page.getByText("No items yet.")).toBeVisible();
 
   // Create a login item.
-  await page.getByRole("button", { name: "New login" }).click();
+  await newItem(page, "Login");
   await page.getByLabel("Title").fill("Example");
   await page.getByLabel("Username", { exact: true }).fill("alice@example.com");
   await checkSecretField(secretField(page, "Password"));
@@ -208,7 +221,7 @@ test("signup, item, reload, login, lock, unlock", async ({ page }) => {
   await expect(page.getByRole("button", { name: /Example/ })).toBeVisible();
 
   // Lock, then unlock (a new login with the remembered login name).
-  await page.getByRole("button", { name: "Lock" }).click();
+  await lockVault(page);
   await expect(page.getByRole("heading", { name: "Unlock rizzy-vault" })).toBeVisible();
   await logIn(page, undefined, secretKey);
   await page.getByRole("button", { name: /Example/ }).click();
@@ -216,8 +229,13 @@ test("signup, item, reload, login, lock, unlock", async ({ page }) => {
   await again.getByRole("button", { name: "Reveal" }).click();
   await expect(again.locator("input[data-secret-field]")).toHaveValue(ITEM_PASSWORD);
 
-  // Trash and restore.
+  // Trash and restore: trashing now confirms through the accessible dialog (redesign slice 2,
+  // item 2), not immediately.
   await page.getByRole("button", { name: "Move to trash" }).click();
+  await page
+    .getByRole("dialog", { name: "Move this item to trash?" })
+    .getByRole("button", { name: "Move to trash" })
+    .click();
   await expect(page.getByText("No items yet.")).toBeVisible();
   await page.getByRole("button", { name: "Trash", exact: true }).click();
   await page.getByRole("button", { name: /Example/ }).click();
@@ -238,8 +256,8 @@ test("signup, item, reload, login, lock, unlock", async ({ page }) => {
   await expect(generated).toHaveValue(/.{20}/);
   await expect(generated).toHaveAttribute("spellcheck", "false");
 
-  // Devices: none enrolled; the web session is ephemeral.
-  await page.getByRole("button", { name: "Devices", exact: true }).click();
+  // Settings: Devices (none enrolled; the web session is ephemeral).
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(page.getByText("No enrolled devices.")).toBeVisible();
 
   expect(await violations(page)).toEqual([]);
@@ -250,7 +268,7 @@ test("the editor's generate popover: custom options, save, reload, password pres
   const { problems } = watch(page);
   const secretKey = await signUp(page, "generatoruser");
 
-  await page.getByRole("button", { name: "New login" }).click();
+  await newItem(page, "Login");
   await page.getByLabel("Title").fill("Generated Co");
   await page.getByLabel("Username", { exact: true }).fill("gen@example.com");
 
@@ -297,7 +315,7 @@ test("a login with two websites, a hidden field and a tag: reorder, edit, reload
 
   // Create: two websites (added, then swapped before the first save), a hidden custom field
   // and a tag.
-  await page.getByRole("button", { name: "New login" }).click();
+  await newItem(page, "Login");
   await page.getByLabel("Title").fill("Reorder Co");
   await page.getByLabel("Username", { exact: true }).fill("riordan@example.com");
   await page.getByLabel("Password", { exact: true }).fill(ITEM_PASSWORD);
@@ -364,6 +382,36 @@ test("a wrong master password is refused", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Log in to rizzy-vault" })).toBeVisible();
 });
 
+test("a Caps Lock hint appears while typing and clears when it is masked off", async ({ page }) => {
+  // Real OS-level Caps Lock is not something Playwright's `keyboard.press` reliably toggles in
+  // a headless browser, so this dispatches the same `keydown` the real key would produce,
+  // `modifierCapsLock` set directly (the standard `EventModifierInit` field `getModifierState`
+  // reads): `SecretField`'s hint reacts the same way either way, since it only ever reads
+  // `getModifierState("CapsLock")` off the event, never a key value (module docs, SecretField.tsx).
+  await page.goto(server.origin);
+  const password = page.getByLabel("Master password", { exact: true });
+  await expect(page.getByText("Caps Lock is on.")).toBeHidden();
+  await password.evaluate((el) =>
+    el.dispatchEvent(new KeyboardEvent("keydown", { key: "x", modifierCapsLock: true, bubbles: true })),
+  );
+  await expect(page.getByText("Caps Lock is on.")).toBeVisible();
+  await password.evaluate((el) =>
+    el.dispatchEvent(new KeyboardEvent("keyup", { key: "x", modifierCapsLock: false, bubbles: true })),
+  );
+  await expect(page.getByText("Caps Lock is on.")).toBeHidden();
+
+  // Leaving the field (no further keypress in it) clears a stale hint instead of leaving it
+  // showing once Caps Lock no longer applies to whatever the user does next. `blur()` only
+  // fires if the element had focus to lose, so this focuses it first.
+  await password.focus();
+  await password.evaluate((el) =>
+    el.dispatchEvent(new KeyboardEvent("keydown", { key: "x", modifierCapsLock: true, bubbles: true })),
+  );
+  await expect(page.getByText("Caps Lock is on.")).toBeVisible();
+  await password.blur();
+  await expect(page.getByText("Caps Lock is on.")).toBeHidden();
+});
+
 test("the server serves only the embedded files", async ({ request }) => {
   for (const path of ["/assets/app.js", "/assets/core-worker.js", "/assets/style.css"]) {
     const r = await request.get(server.origin + path);
@@ -390,7 +438,7 @@ async function signUp(page: Page, name: string): Promise<string> {
   const secretKey = (await page.getByTestId("kit-secret-key").textContent()) ?? "";
   await page.getByLabel(/last group of your Secret Key/).fill(secretKey.split("-").at(-1) ?? "");
   await page.getByRole("button", { name: "Create the account" }).click();
-  await expect(page.getByRole("button", { name: "Lock" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Account menu" })).toBeVisible();
   return secretKey;
 }
 
@@ -408,7 +456,7 @@ test("encrypted export, then import into a second account", async ({ browser }) 
   const first = await browser.newPage();
   const { problems } = watch(first);
   const firstKey = await signUp(first, "exporter");
-  await first.getByRole("button", { name: "New login" }).click();
+  await newItem(first, "Login");
   await first.getByLabel("Title").fill("Round trip");
   await first.getByLabel("Username", { exact: true }).fill("carol@example.com");
   await first.getByLabel("Password", { exact: true }).fill(ITEM_PASSWORD);

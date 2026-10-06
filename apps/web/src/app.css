@@ -213,6 +213,14 @@ code {
   font-family: var(--font-mono);
 }
 
+.caps-lock-hint {
+  color: var(--color-warning-text);
+  background: var(--color-warning-bg);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-1);
+  display: inline-block;
+}
+
 .overlay {
   position: fixed;
   inset: 0;
@@ -319,6 +327,14 @@ button.sidebar-item.active {
   border-color: var(--color-accent);
 }
 
+.sidebar-group-label {
+  padding: 0 var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-small);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .main {
   min-width: 0;
   padding: var(--space-4) var(--space-6);
@@ -388,9 +404,43 @@ button.sidebar-item.active {
   gap: var(--space-4);
 }
 
-@media (max-width: 64rem) {
+/* Hidden above the single-pane breakpoint, where the list and detail panes show side by side
+   and there is nothing to go "back" from; the media query below overrides this at phone width.
+   Declared here, immediately before that query, so the two rules' source order (same
+   specificity) is the one that actually decides which wins — not wherever else in this file a
+   `.back-button` rule might otherwise land. */
+.back-button {
+  display: none;
+}
+
+/* Phone width (item 4): one pane at a time. Below `.shell`'s own 48rem breakpoint (where the
+   sidebar is already a slide-over, module docs above), the list and detail panes stop sharing
+   the screen too: whichever one is not current is removed from layout entirely (`display:
+   none`, not just visually hidden), so neither pane can force horizontal scroll at 360px by
+   sitting beside the other. `ItemsPane` toggles `.items-detail-open` depending on whether a
+   detail/editor is open, and shows the `.back-button` only here. Tablet widths (above 48rem)
+   keep both panes side by side, unaffected by this block. */
+@media (max-width: 48rem) {
   .items {
     grid-template-columns: 1fr;
+    gap: 0;
+  }
+
+  .items .item-detail {
+    display: none;
+  }
+
+  .items.items-detail-open .item-list {
+    display: none;
+  }
+
+  .items.items-detail-open .item-detail {
+    display: block;
+  }
+
+  .back-button {
+    display: inline-flex;
+    margin-bottom: var(--space-3);
   }
 }
 
@@ -675,6 +725,187 @@ a.icon-button:focus-visible {
   font-size: var(--font-size-small);
 }
 
+/* The toast stack (redesign slice 2, item 1): fixed to a bottom corner, above everything else
+   including the confirm dialog's overlay, so a toast fired by a confirmed action (e.g. "Item
+   moved to trash") is never hidden behind the overlay that is still fading out.
+   The polite and assertive live regions (`Toast.tsx`) are two separate elements, but both sit
+   inside this one positioned wrapper and share its flex layout, so the two stacks lay out one
+   above the other instead of overlapping when both have toasts showing at once. */
+.toast-stack-wrapper {
+  position: fixed;
+  bottom: var(--space-4);
+  right: var(--space-4);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: min(22rem, calc(100vw - 2 * var(--space-4)));
+}
+
+.toast-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.toast-stack:empty {
+  display: none;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-radius: var(--radius-2);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.2);
+}
+
+.toast-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 50%;
+  font-weight: 700;
+  font-size: var(--font-size-small);
+}
+
+.toast-success .toast-icon {
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+}
+
+.toast-error {
+  border-color: var(--color-danger);
+}
+
+.toast-error .toast-icon {
+  background: var(--color-danger);
+  color: var(--color-on-danger);
+}
+
+.toast-info .toast-icon {
+  background: var(--color-border);
+  color: var(--color-text);
+}
+
+.toast-message {
+  flex: 1;
+  font-size: var(--font-size-small);
+}
+
+.toast-dismiss {
+  flex: none;
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  padding: 0;
+}
+
+/* The accessible confirm dialog (redesign slice 2, item 2): the same `.overlay`/`.dialog`
+   classes `TotpDialog` already uses, plus a full-screen backdrop button (the pattern
+   `.sidebar-backdrop` above already set) so Escape-equivalent pointer dismissal is itself a
+   reachable, labelled control rather than a bare click handler on a div. */
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  border: none;
+  padding: 0;
+  background: none;
+}
+
+.confirm-dialog {
+  position: relative;
+}
+
+/* The shortcuts help dialog and Settings view reuse `.panel.dialog`/`.overlay` too; this just
+   gives the help list some breathing room. */
+.shortcuts-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-1) var(--space-4);
+  margin: var(--space-3) 0;
+}
+
+.shortcuts-list dt {
+  font-family: var(--font-mono);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+  padding: 0 var(--space-2);
+  justify-self: start;
+}
+
+.shortcuts-list dd {
+  margin: 0;
+}
+
+/* The single "New item" button and its type-picker menu (redesign slice 2, item 5), and the
+   top bar's account menu: both are a button plus an absolutely positioned menu, the same shape
+   as `.popover` above but anchored to a single trigger instead of a field. */
+.menu-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+.dropdown-menu {
+  position: absolute;
+  z-index: 20;
+  top: 100%;
+  margin-top: var(--space-1);
+  min-width: 12rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-2);
+  padding: var(--space-1);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.2);
+  display: flex;
+  flex-direction: column;
+}
+
+.account-menu .dropdown-menu {
+  right: 0;
+}
+
+.dropdown-menu button.row {
+  margin-bottom: 0;
+  border: none;
+  background: none;
+}
+
+/* The Tags sidebar section (item 6). */
+.settings-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 34rem;
+}
+
+.settings-view .panel.narrow {
+  margin: 0;
+  max-width: none;
+}
+
+.tag-counts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+button.sidebar-item .sidebar-item-count {
+  margin-left: auto;
+  color: inherit;
+  opacity: 0.75;
+  font-size: var(--font-size-small);
+}
+
 .popover {
   position: absolute;
   z-index: 20;
@@ -687,4 +918,71 @@ a.icon-button:focus-visible {
   border-radius: var(--radius-2);
   padding: var(--space-4);
   box-shadow: 0 4px 16px rgb(0 0 0 / 0.2);
+}
+
+/* The item editor (ItemEditor.tsx): fixed fields, secret fields, and the websites/custom-field/
+   tags sections, laid out consistently with the rest of the shell (redesign slice 2, item 4).
+   No markup or class names changed here, only their styling — the editor's structure, its
+   accessible names and every Playwright selector over it stay exactly as before. */
+.item-editor {
+  display: flex;
+  flex-direction: column;
+}
+
+.field-edit,
+.secret-edit {
+  margin-bottom: var(--space-3);
+}
+
+.secret-edit .actions {
+  margin-top: var(--space-2);
+  align-items: center;
+}
+
+.item-editor fieldset {
+  padding: var(--space-4);
+  margin: var(--space-2) 0 var(--space-4);
+}
+
+.item-editor legend {
+  font-weight: 600;
+  padding: 0 var(--space-2);
+}
+
+.list-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.list-row > input {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+.list-row.custom-field-row {
+  align-items: flex-start;
+}
+
+.list-row.custom-field-row > input[type="text"]:first-child {
+  flex: 1 1 10rem;
+}
+
+.list-row.custom-field-row > select {
+  flex: 0 0 8rem;
+  width: auto;
+}
+
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+}
+
+.row-actions label.check {
+  margin: 0;
+  white-space: nowrap;
 }
