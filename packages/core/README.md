@@ -8,6 +8,8 @@ Secrets the user types (master password, Secret Key, export password) are passed
 
 Every export needs `reauthenticate()` first (the Secret Key and master password typed again), which allows one export within five minutes; otherwise the core throws `reauth_required`. A plaintext export also needs `plaintextWarningShown()` when the warning is on screen and the hold of `plaintextExportHoldMs()` (10 s) to be over, or it throws `plaintext_export_hold`. `detectImportFormat(file)` names an import file's format from its bytes, so the host does not ask for it in the common case (owner decision 2026-10-05).
 
+The generator takes every option of `rizzy-core`'s: `generatePasswordWithOptions(options)` (`length`, a rule of `"excluded" | "included" | "required"` per class, `excludeAmbiguous`, `exclude`, `symbolSet`) and `generatePassphraseWithOptions(options)` (`words`, `separator`, `capitalize`, `includeNumber`), with defaults in `DEFAULT_PASSWORD_OPTIONS` and `DEFAULT_PASSPHRASE_OPTIONS` and bounds in `GENERATOR_LIMITS`. `passwordEntropy` and `passphraseEntropy` give the entropy without generating; `checkPasswordOptions` and `checkPassphraseOptions` return it, or the refusal's `generator_*` code and a sentence from `GENERATOR_ERROR_MESSAGES`, for a live display. The earlier `generatePassword(length, symbols, excludeAmbiguous)` and `generatePassphrase(words)` are unchanged.
+
 ## Build and test
 
 From the repository root:

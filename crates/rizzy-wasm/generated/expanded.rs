@@ -32,7 +32,7 @@
 //! | [`Session`] | the unlocked session: sync driver, items, TOTP, export, import, devices, 2FA, lock |
 //! | [`ItemDraft`], [`ItemSummary`], [`FieldView`] | item edits and views |
 //! | [`HttpRequest`], [`meta_request`], [`check_meta`], [`expect_no_content`] | the requests JavaScript sends and the answers it hands back |
-//! | [`generate_password_js`] (`generatePassword`), [`generate_passphrase_js`] (`generatePassphrase`), [`Generated`] | the generator |
+//! | [`generate_password_with_options`] (`generatePasswordWithOptions`), [`generate_passphrase_with_options`] (`generatePassphraseWithOptions`), [`password_entropy`] (`passwordEntropy`), [`passphrase_entropy`] (`passphraseEntropy`), [`generator_limits`] (`generatorLimits`), [`GeneratorLimits`], the earlier [`generate_password_js`] (`generatePassword`) and [`generate_passphrase_js`] (`generatePassphrase`), [`Generated`] | the generator, every option ([`generator`]) |
 //! | [`TotpCode`], [`EncryptedExport`], [`ImportReport`], [`DeviceView`], [`TwoFactorEnrolment`] | results |
 //! | [`plaintext_export_warning`], [`plaintext_export_phrase`] | the frozen texts of ADR 0027 §5 |
 //! | [`plaintext_export_hold_ms`], [`detect_import_format`] | the hold after the plaintext warning; recognising an import file (owner decision 2026-10-05) |
@@ -609,10 +609,28 @@ pub mod error {
 pub mod generator {
     //! The password generator (CRYPTO.md §12.1; ROADMAP §4.2 "generate"), as `rv generate` offers
     //! it: characters or words, drawn from the CSPRNG in Rust. No session is needed.
+    //!
+    //! Two sets of calls:
+    //! - [`generate_password_with_options`] (`generatePasswordWithOptions`) and
+    //!   [`generate_passphrase_with_options`] (`generatePassphraseWithOptions`) take every option
+    //!   of `rizzy-core`'s generator; [`password_entropy`] (`passwordEntropy`) and
+    //!   [`passphrase_entropy`] (`passphraseEntropy`) check the same options and give the entropy
+    //!   without generating, for a live display; [`generator_limits`] (`generatorLimits`) gives the
+    //!   bounds and the default character sets. Refused options throw a `generator_*` code
+    //!   ([`generator_error`]), one per reason, so the UI can say what to change.
+    //! - [`generate_password_js`] (`generatePassword`) and [`generate_passphrase_js`]
+    //!   (`generatePassphrase`), the first, smaller calls, unchanged: refused options throw
+    //!   `invalid_input`.
+    //!
+    //! Every option arrives from JavaScript and is untrusted (ADR 0013 §3 rule 8): character sets
+    //! are parsed by [`CharSet::parse`], which reads at most [`MAX_SET_TEXT_LEN`] bytes, and the
+    //! separator must be exactly one character. Options are not secrets; the generated value is.
     use core::fmt;
     use rizzy_client::ClientError;
     use rizzy_client::rizzy_core::generator::{
-        CharacterOptions, ClassRule, PassphraseOptions, generate_passphrase,
+        AMBIGUOUS, CharClass, CharSet, CharacterOptions, ClassRule,
+        GeneratorError, MAX_LENGTH, MAX_SET_TEXT_LEN, MAX_WORDS, MIN_LENGTH,
+        MIN_WORDS, PassphraseOptions, SYMBOLS, generate_passphrase,
         generate_password,
     };
     use wasm_bindgen::prelude::wasm_bindgen;
@@ -1109,6 +1127,2134 @@ pub mod generator {
             static _GENERATED: [u8; _LEN] =
                 flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
         };
+    impl From<rizzy_client::rizzy_core::generator::Generated> for Generated {
+        fn from(generated: rizzy_client::rizzy_core::generator::Generated)
+            -> Self {
+            Self {
+                value: Zeroizing::new(generated.expose_secret().to_owned()),
+                entropy_bits: generated.entropy_bits(),
+            }
+        }
+    }
+    /// A class rule as JavaScript passes it: `0` excluded, `1` included, `2` required.
+    pub const RULE_EXCLUDED: u8 = 0;
+    /// See [`RULE_EXCLUDED`].
+    pub const RULE_INCLUDED: u8 = 1;
+    /// See [`RULE_EXCLUDED`].
+    pub const RULE_REQUIRED: u8 = 2;
+    /// The code of a class rule other than `0`, `1` or `2`.
+    pub const GENERATOR_INVALID_RULE: &str = "generator_invalid_rule";
+    /// The stable `generator_*` code of a refusal (module docs). Codes never change meaning.
+    ///
+    /// | Error | Code |
+    /// |---|---|
+    /// | length out of range | `generator_invalid_length` |
+    /// | no class enabled | `generator_no_classes` |
+    /// | more required classes than characters | `generator_too_many_required` |
+    /// | every character excluded | `generator_empty_alphabet` |
+    /// | a required class left empty | `generator_required_lowercase_empty`, `…_uppercase_…`, `…_digits_…`, `…_symbols_…` |
+    /// | required classes too small for the length | `generator_requirements_too_strict` |
+    /// | a character set with a character outside `!`..=`~`, or too long | `generator_invalid_character_set` |
+    /// | custom symbols that are not ASCII punctuation | `generator_invalid_symbol_set` |
+    /// | word count out of range | `generator_invalid_word_count` |
+    /// | separator not allowed | `generator_invalid_separator` |
+    /// | RNG failure | `generator_rng_failure` |
+    /// | anything a later `rizzy-core` adds | `generator_invalid_options` |
+    #[must_use]
+    pub fn generator_error(e: GeneratorError) -> CoreError {
+        CoreError::new(match e {
+                GeneratorError::InvalidLength => "generator_invalid_length",
+                GeneratorError::NoClasses => "generator_no_classes",
+                GeneratorError::TooManyRequiredClasses =>
+                    "generator_too_many_required",
+                GeneratorError::EmptyAlphabet => "generator_empty_alphabet",
+                GeneratorError::RequiredClassEmpty(CharClass::Lowercase) => {
+                    "generator_required_lowercase_empty"
+                }
+                GeneratorError::RequiredClassEmpty(CharClass::Uppercase) => {
+                    "generator_required_uppercase_empty"
+                }
+                GeneratorError::RequiredClassEmpty(CharClass::Digits) =>
+                    "generator_required_digits_empty",
+                GeneratorError::RequiredClassEmpty(CharClass::Symbols) => {
+                    "generator_required_symbols_empty"
+                }
+                GeneratorError::RequirementsTooStrict =>
+                    "generator_requirements_too_strict",
+                GeneratorError::InvalidCharacterSet =>
+                    "generator_invalid_character_set",
+                GeneratorError::InvalidSymbolSet =>
+                    "generator_invalid_symbol_set",
+                GeneratorError::InvalidWordCount =>
+                    "generator_invalid_word_count",
+                GeneratorError::InvalidSeparator =>
+                    "generator_invalid_separator",
+                GeneratorError::RngExhausted => "generator_rng_failure",
+                _ => "generator_invalid_options",
+            })
+    }
+    /// A class rule from its number ([`RULE_EXCLUDED`]).
+    fn rule(value: u8) -> Result<ClassRule, CoreError> {
+        match value {
+            RULE_EXCLUDED => Ok(ClassRule::Excluded),
+            RULE_INCLUDED => Ok(ClassRule::Included),
+            RULE_REQUIRED => Ok(ClassRule::Required),
+            _ => Err(CoreError::new(GENERATOR_INVALID_RULE)),
+        }
+    }
+    /// Builds character options from what JavaScript passes, checking each value: rules are `0`,
+    /// `1` or `2`, `exclude` and `symbol_set` are parsed by [`CharSet::parse`] (at most
+    /// [`MAX_SET_TEXT_LEN`] bytes of printable ASCII other than space). `symbol_set` `None`
+    /// means the default 32 symbols. The options as a whole are checked by the generator.
+    ///
+    /// # Errors
+    /// [`GENERATOR_INVALID_RULE`] or `generator_invalid_character_set` ([`generator_error`]).
+    #[expect(clippy::too_many_arguments, reason =
+    "the flat argument list is the wasm-bindgen signature; JavaScript passes plain values")]
+    pub fn password_options(length: usize, lowercase: u8, uppercase: u8,
+        digits: u8, symbols: u8, exclude_ambiguous: bool, exclude: &str,
+        symbol_set: Option<&str>) -> Result<CharacterOptions, CoreError> {
+        Ok(CharacterOptions {
+                length,
+                lowercase: rule(lowercase)?,
+                uppercase: rule(uppercase)?,
+                digits: rule(digits)?,
+                symbols: rule(symbols)?,
+                exclude_ambiguous,
+                exclude: CharSet::parse(exclude).map_err(generator_error)?,
+                symbol_set: symbol_set.map(CharSet::parse).transpose().map_err(generator_error)?,
+            })
+    }
+    /// Builds passphrase options from what JavaScript passes. `separator` must be exactly one
+    /// character; which characters are allowed is the generator's check.
+    ///
+    /// # Errors
+    /// `generator_invalid_separator` ([`generator_error`]) for an empty or longer separator.
+    pub fn passphrase_options(words: usize, separator: &str, capitalize: bool,
+        include_number: bool) -> Result<PassphraseOptions, CoreError> {
+        let mut chars = separator.chars();
+        let (Some(separator), None) =
+            (chars.next(),
+                chars.next()) else {
+                return Err(generator_error(GeneratorError::InvalidSeparator));
+            };
+        Ok(PassphraseOptions { words, separator, capitalize, include_number })
+    }
+    #[allow(dead_code)]
+    #[doc =
+    " A password with every option of the generator: `length` characters; each class\'s rule"]
+    #[doc =
+    " ([`RULE_EXCLUDED`] `0`, [`RULE_INCLUDED`] `1`, [`RULE_REQUIRED`] `2`); ambiguous"]
+    #[doc =
+    " characters left out if asked; the characters of `exclude` never used; the symbols limited"]
+    #[doc =
+    " to those of `symbol_set` if given (a subset of the 32 ASCII punctuation characters)."]
+    #[doc = ""]
+    #[doc = " # Errors"]
+    #[doc =
+    " A `generator_*` code ([`generator_error`], [`GENERATOR_INVALID_RULE`])."]
+    #[expect(clippy::too_many_arguments, reason =
+    "the flat argument list is the wasm-bindgen signature; JavaScript passes plain values")]
+    #[expect(clippy::needless_pass_by_value, reason =
+    "wasm-bindgen passes an optional string by value")]
+    pub fn generate_password_with_options(length: usize, lowercase: u8,
+        uppercase: u8, digits: u8, symbols: u8, exclude_ambiguous: bool,
+        exclude: &str, symbol_set: Option<String>)
+        -> Result<Generated, CoreError> {
+        let options =
+            password_options(length, lowercase, uppercase, digits, symbols,
+                    exclude_ambiguous, exclude, symbol_set.as_deref())?;
+        Ok(generate_password(&mut os_rng(),
+                            &options).map_err(generator_error)?.into())
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " A password with every option of the generator: `length` characters; each class\'s rule"]
+            #[doc =
+            " ([`RULE_EXCLUDED`] `0`, [`RULE_INCLUDED`] `1`, [`RULE_REQUIRED`] `2`); ambiguous"]
+            #[doc =
+            " characters left out if asked; the characters of `exclude` never used; the symbols limited"]
+            #[doc =
+            " to those of `symbol_set` if given (a subset of the 32 ASCII punctuation characters)."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " A `generator_*` code ([`generator_error`], [`GENERATOR_INVALID_RULE`])."]
+            #[allow(clippy::too_many_arguments, reason =
+            "the flat argument list is the wasm-bindgen signature; JavaScript passes plain values")]
+            #[allow(clippy::needless_pass_by_value, reason =
+            "wasm-bindgen passes an optional string by value")]
+            #[export_name = "generatePasswordWithOptions_e09cc0eb35f8b583"]
+            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_generatePasswordWithOptions(arg0_1:
+                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg0_2:
+                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg0_3:
+                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg0_4:
+                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg1_1:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg1_2:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg1_3:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg1_4:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg2_1:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg2_2:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg2_3:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg2_4:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg3_1:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg3_2:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg3_3:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg3_4:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg4_1:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg4_2:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg4_3:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg4_4:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg5_1:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg5_2:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg5_3:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg5_4:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg6_1:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg6_2:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg6_3:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg6_4:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg7_1:
+                    <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                    as wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg7_2:
+                    <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                    as wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg7_3:
+                    <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                    as wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg7_4:
+                    <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                    as wasm_bindgen::convert::WasmAbi>::Prim4)
+                ->
+                    wasm_bindgen::convert::WasmRet<<Result<Generated, CoreError>
+                    as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                const _: () = {};
+                let _ret =
+                    wasm_bindgen::__rt::maybe_catch_unwind(||
+                            {
+                                {
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<usize>();
+                                    let arg0 =
+                                        unsafe {
+                                            <usize as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<usize as
+                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg0_1, arg0_2,
+                                                    arg0_3, arg0_4))
+                                        };
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<u8>();
+                                    let arg1 =
+                                        unsafe {
+                                            <u8 as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u8 as
+                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                    arg1_3, arg1_4))
+                                        };
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<u8>();
+                                    let arg2 =
+                                        unsafe {
+                                            <u8 as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u8 as
+                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                    arg2_3, arg2_4))
+                                        };
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<u8>();
+                                    let arg3 =
+                                        unsafe {
+                                            <u8 as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u8 as
+                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                    arg3_3, arg3_4))
+                                        };
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<u8>();
+                                    let arg4 =
+                                        unsafe {
+                                            <u8 as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u8 as
+                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                    arg4_3, arg4_4))
+                                        };
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<bool>();
+                                    let arg5 =
+                                        unsafe {
+                                            <bool as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<bool as
+                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg5_1, arg5_2,
+                                                    arg5_3, arg5_4))
+                                        };
+                                    wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                    let arg6 =
+                                        unsafe {
+                                            <str as
+                                                    wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                        as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg6_1, arg6_2,
+                                                    arg6_3, arg6_4))
+                                        };
+                                    let arg6 = &*arg6;
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<Option<String>>();
+                                    let arg7 =
+                                        unsafe {
+                                            <Option<String> as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Option<String>
+                                                        as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg7_1, arg7_2,
+                                                    arg7_3, arg7_4))
+                                        };
+                                    let _ret =
+                                        generate_password_with_options(arg0, arg1, arg2, arg3, arg4,
+                                            arg5, arg6, arg7);
+                                    _ret
+                                }
+                            });
+                <Result<Generated, CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " A password with every option of the generator: `length` characters; each class\'s rule"]
+            #[doc =
+            " ([`RULE_EXCLUDED`] `0`, [`RULE_INCLUDED`] `1`, [`RULE_REQUIRED`] `2`); ambiguous"]
+            #[doc =
+            " characters left out if asked; the characters of `exclude` never used; the symbols limited"]
+            #[doc =
+            " to those of `symbol_set` if given (a subset of the 32 ASCII punctuation characters)."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " A `generator_*` code ([`generator_error`], [`GENERATOR_INVALID_RULE`])."]
+            #[allow(clippy::too_many_arguments, reason =
+            "the flat argument list is the wasm-bindgen signature; JavaScript passes plain values")]
+            #[allow(clippy::needless_pass_by_value, reason =
+            "wasm-bindgen passes an optional string by value")]
+            #[no_mangle]
+            #[doc(hidden)]
+            pub extern "C-unwind" fn __wbindgen_describe_generatePasswordWithOptions_e09cc0eb35f8b583() {
+                use wasm_bindgen::describe::*;
+                wasm_bindgen::__rt::link_mem_intrinsics();
+                inform(FUNCTION);
+                inform(0);
+                inform(8u32);
+                <usize as WasmDescribe>::describe();
+                <u8 as WasmDescribe>::describe();
+                <u8 as WasmDescribe>::describe();
+                <u8 as WasmDescribe>::describe();
+                <u8 as WasmDescribe>::describe();
+                <bool as WasmDescribe>::describe();
+                <&str as WasmDescribe>::describe();
+                <Option<String> as WasmDescribe>::describe();
+                <Result<Generated, CoreError> as WasmDescribe>::describe();
+                <Result<Generated, CoreError> as WasmDescribe>::describe();
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\x01\0\x07V A password with every option of the generator: `length` characters; each class's ruleQ ([`RULE_EXCLUDED`] `0`, [`RULE_INCLUDED`] `1`, [`RULE_REQUIRED`] `2`); ambiguousZ characters left out if asked; the characters of `exclude` never used; the symbols limitedU to those of `symbol_set` if given (a subset of the 32 ASCII punctuation characters).\0\t # ErrorsH A `generator_*` code ([`generator_error`], [`GENERATOR_INVALID_RULE`]).\0\x08\x06length\0\0\0\tlowercase\0\0\0\tuppercase\0\0\0\x06digits\0\0\0\x07symbols\0\0\0\x11exclude_ambiguous\0\0\0\x07exclude\0\0\0\nsymbol_set\0\0\0\0\0\x1bgeneratePasswordWithOptions\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    #[allow(dead_code)]
+    #[doc = " The entropy, in bits, of a password with these options (as"]
+    #[doc =
+    " [`generate_password_with_options`]), without generating one: the options are checked the"]
+    #[doc = " same way, so this also validates them for a live display."]
+    #[doc = ""]
+    #[doc = " # Errors"]
+    #[doc = " As [`generate_password_with_options`]."]
+    #[expect(clippy::too_many_arguments, reason =
+    "the flat argument list is the wasm-bindgen signature; JavaScript passes plain values")]
+    #[expect(clippy::needless_pass_by_value, reason =
+    "wasm-bindgen passes an optional string by value")]
+    pub fn password_entropy(length: usize, lowercase: u8, uppercase: u8,
+        digits: u8, symbols: u8, exclude_ambiguous: bool, exclude: &str,
+        symbol_set: Option<String>) -> Result<f64, CoreError> {
+        password_options(length, lowercase, uppercase, digits, symbols,
+                        exclude_ambiguous, exclude,
+                        symbol_set.as_deref())?.entropy_bits().map_err(generator_error)
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " The entropy, in bits, of a password with these options (as"]
+            #[doc =
+            " [`generate_password_with_options`]), without generating one: the options are checked the"]
+            #[doc =
+            " same way, so this also validates them for a live display."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " As [`generate_password_with_options`]."]
+            #[allow(clippy::too_many_arguments, reason =
+            "the flat argument list is the wasm-bindgen signature; JavaScript passes plain values")]
+            #[allow(clippy::needless_pass_by_value, reason =
+            "wasm-bindgen passes an optional string by value")]
+            #[export_name = "passwordEntropy_e09cc0eb35f8b583"]
+            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_passwordEntropy(arg0_1:
+                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg0_2:
+                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg0_3:
+                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg0_4:
+                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg1_1:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg1_2:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg1_3:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg1_4:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg2_1:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg2_2:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg2_3:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg2_4:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg3_1:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg3_2:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg3_3:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg3_4:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg4_1:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg4_2:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg4_3:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg4_4:
+                    <<u8 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg5_1:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg5_2:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg5_3:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg5_4:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg6_1:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg6_2:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg6_3:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg6_4:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg7_1:
+                    <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                    as wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg7_2:
+                    <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                    as wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg7_3:
+                    <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                    as wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg7_4:
+                    <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                    as wasm_bindgen::convert::WasmAbi>::Prim4)
+                ->
+                    wasm_bindgen::convert::WasmRet<<Result<f64, CoreError> as
+                    wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                const _: () = {};
+                let _ret =
+                    wasm_bindgen::__rt::maybe_catch_unwind(||
+                            {
+                                {
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<usize>();
+                                    let arg0 =
+                                        unsafe {
+                                            <usize as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<usize as
+                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg0_1, arg0_2,
+                                                    arg0_3, arg0_4))
+                                        };
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<u8>();
+                                    let arg1 =
+                                        unsafe {
+                                            <u8 as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u8 as
+                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                    arg1_3, arg1_4))
+                                        };
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<u8>();
+                                    let arg2 =
+                                        unsafe {
+                                            <u8 as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u8 as
+                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                    arg2_3, arg2_4))
+                                        };
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<u8>();
+                                    let arg3 =
+                                        unsafe {
+                                            <u8 as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u8 as
+                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                    arg3_3, arg3_4))
+                                        };
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<u8>();
+                                    let arg4 =
+                                        unsafe {
+                                            <u8 as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u8 as
+                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                    arg4_3, arg4_4))
+                                        };
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<bool>();
+                                    let arg5 =
+                                        unsafe {
+                                            <bool as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<bool as
+                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg5_1, arg5_2,
+                                                    arg5_3, arg5_4))
+                                        };
+                                    wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                    let arg6 =
+                                        unsafe {
+                                            <str as
+                                                    wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                        as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg6_1, arg6_2,
+                                                    arg6_3, arg6_4))
+                                        };
+                                    let arg6 = &*arg6;
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<Option<String>>();
+                                    let arg7 =
+                                        unsafe {
+                                            <Option<String> as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Option<String>
+                                                        as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg7_1, arg7_2,
+                                                    arg7_3, arg7_4))
+                                        };
+                                    let _ret =
+                                        password_entropy(arg0, arg1, arg2, arg3, arg4, arg5, arg6,
+                                            arg7);
+                                    _ret
+                                }
+                            });
+                <Result<f64, CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " The entropy, in bits, of a password with these options (as"]
+            #[doc =
+            " [`generate_password_with_options`]), without generating one: the options are checked the"]
+            #[doc =
+            " same way, so this also validates them for a live display."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " As [`generate_password_with_options`]."]
+            #[allow(clippy::too_many_arguments, reason =
+            "the flat argument list is the wasm-bindgen signature; JavaScript passes plain values")]
+            #[allow(clippy::needless_pass_by_value, reason =
+            "wasm-bindgen passes an optional string by value")]
+            #[no_mangle]
+            #[doc(hidden)]
+            pub extern "C-unwind" fn __wbindgen_describe_passwordEntropy_e09cc0eb35f8b583() {
+                use wasm_bindgen::describe::*;
+                wasm_bindgen::__rt::link_mem_intrinsics();
+                inform(FUNCTION);
+                inform(0);
+                inform(8u32);
+                <usize as WasmDescribe>::describe();
+                <u8 as WasmDescribe>::describe();
+                <u8 as WasmDescribe>::describe();
+                <u8 as WasmDescribe>::describe();
+                <u8 as WasmDescribe>::describe();
+                <bool as WasmDescribe>::describe();
+                <&str as WasmDescribe>::describe();
+                <Option<String> as WasmDescribe>::describe();
+                <Result<f64, CoreError> as WasmDescribe>::describe();
+                <Result<f64, CoreError> as WasmDescribe>::describe();
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\x01\0\x06; The entropy, in bits, of a password with these options (asY [`generate_password_with_options`]), without generating one: the options are checked the: same way, so this also validates them for a live display.\0\t # Errors' As [`generate_password_with_options`].\0\x08\x06length\0\0\0\tlowercase\0\0\0\tuppercase\0\0\0\x06digits\0\0\0\x07symbols\0\0\0\x11exclude_ambiguous\0\0\0\x07exclude\0\0\0\nsymbol_set\0\0\0\0\0\x0fpasswordEntropy\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    #[allow(dead_code)]
+    #[doc =
+    " A passphrase with every option of the generator: `words` words, joined by `separator`"]
+    #[doc =
+    " (one printable ASCII character, not a letter and not `-`), capitalised if asked, with one"]
+    #[doc = " digit appended to one word if `include_number`."]
+    #[doc = ""]
+    #[doc = " # Errors"]
+    #[doc = " A `generator_*` code ([`generator_error`])."]
+    pub fn generate_passphrase_with_options(words: usize, separator: &str,
+        capitalize: bool, include_number: bool)
+        -> Result<Generated, CoreError> {
+        let options =
+            passphrase_options(words, separator, capitalize, include_number)?;
+        Ok(generate_passphrase(&mut os_rng(),
+                            &options).map_err(generator_error)?.into())
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " A passphrase with every option of the generator: `words` words, joined by `separator`"]
+            #[doc =
+            " (one printable ASCII character, not a letter and not `-`), capitalised if asked, with one"]
+            #[doc = " digit appended to one word if `include_number`."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " A `generator_*` code ([`generator_error`])."]
+            #[export_name = "generatePassphraseWithOptions_e09cc0eb35f8b583"]
+            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_generatePassphraseWithOptions(arg0_1:
+                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg0_2:
+                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg0_3:
+                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg0_4:
+                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg1_1:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg1_2:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg1_3:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg1_4:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg2_1:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg2_2:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg2_3:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg2_4:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg3_1:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg3_2:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg3_3:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg3_4:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4)
+                ->
+                    wasm_bindgen::convert::WasmRet<<Result<Generated, CoreError>
+                    as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                const _: () = {};
+                let _ret =
+                    wasm_bindgen::__rt::maybe_catch_unwind(||
+                            {
+                                {
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<usize>();
+                                    let arg0 =
+                                        unsafe {
+                                            <usize as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<usize as
+                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg0_1, arg0_2,
+                                                    arg0_3, arg0_4))
+                                        };
+                                    wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                    let arg1 =
+                                        unsafe {
+                                            <str as
+                                                    wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                        as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                    arg1_3, arg1_4))
+                                        };
+                                    let arg1 = &*arg1;
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<bool>();
+                                    let arg2 =
+                                        unsafe {
+                                            <bool as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<bool as
+                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                    arg2_3, arg2_4))
+                                        };
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<bool>();
+                                    let arg3 =
+                                        unsafe {
+                                            <bool as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<bool as
+                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                    arg3_3, arg3_4))
+                                        };
+                                    let _ret =
+                                        generate_passphrase_with_options(arg0, arg1, arg2, arg3);
+                                    _ret
+                                }
+                            });
+                <Result<Generated, CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " A passphrase with every option of the generator: `words` words, joined by `separator`"]
+            #[doc =
+            " (one printable ASCII character, not a letter and not `-`), capitalised if asked, with one"]
+            #[doc = " digit appended to one word if `include_number`."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " A `generator_*` code ([`generator_error`])."]
+            #[no_mangle]
+            #[doc(hidden)]
+            pub extern "C-unwind" fn __wbindgen_describe_generatePassphraseWithOptions_e09cc0eb35f8b583() {
+                use wasm_bindgen::describe::*;
+                wasm_bindgen::__rt::link_mem_intrinsics();
+                inform(FUNCTION);
+                inform(0);
+                inform(4u32);
+                <usize as WasmDescribe>::describe();
+                <&str as WasmDescribe>::describe();
+                <bool as WasmDescribe>::describe();
+                <bool as WasmDescribe>::describe();
+                <Result<Generated, CoreError> as WasmDescribe>::describe();
+                <Result<Generated, CoreError> as WasmDescribe>::describe();
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\x01\0\x06V A passphrase with every option of the generator: `words` words, joined by `separator`Z (one printable ASCII character, not a letter and not `-`), capitalised if asked, with one0 digit appended to one word if `include_number`.\0\t # Errors, A `generator_*` code ([`generator_error`]).\0\x04\x05words\0\0\0\tseparator\0\0\0\ncapitalize\0\0\0\x0einclude_number\0\0\0\0\0\x1dgeneratePassphraseWithOptions\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    #[allow(dead_code)]
+    #[doc =
+    " The entropy, in bits, of a passphrase with these options, without generating one."]
+    #[doc = ""]
+    #[doc = " # Errors"]
+    #[doc = " As [`generate_passphrase_with_options`]."]
+    pub fn passphrase_entropy(words: usize, separator: &str, capitalize: bool,
+        include_number: bool) -> Result<f64, CoreError> {
+        passphrase_options(words, separator, capitalize,
+                        include_number)?.entropy_bits().map_err(generator_error)
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " The entropy, in bits, of a passphrase with these options, without generating one."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " As [`generate_passphrase_with_options`]."]
+            #[export_name = "passphraseEntropy_e09cc0eb35f8b583"]
+            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_passphraseEntropy(arg0_1:
+                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg0_2:
+                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg0_3:
+                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg0_4:
+                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg1_1:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg1_2:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg1_3:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg1_4:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg2_1:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg2_2:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg2_3:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg2_4:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg3_1:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg3_2:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg3_3:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg3_4:
+                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4)
+                ->
+                    wasm_bindgen::convert::WasmRet<<Result<f64, CoreError> as
+                    wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                const _: () = {};
+                let _ret =
+                    wasm_bindgen::__rt::maybe_catch_unwind(||
+                            {
+                                {
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<usize>();
+                                    let arg0 =
+                                        unsafe {
+                                            <usize as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<usize as
+                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg0_1, arg0_2,
+                                                    arg0_3, arg0_4))
+                                        };
+                                    wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                    let arg1 =
+                                        unsafe {
+                                            <str as
+                                                    wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                        as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                    arg1_3, arg1_4))
+                                        };
+                                    let arg1 = &*arg1;
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<bool>();
+                                    let arg2 =
+                                        unsafe {
+                                            <bool as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<bool as
+                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                    arg2_3, arg2_4))
+                                        };
+                                    wasm_bindgen::__rt::ensure_unwind_safe::<bool>();
+                                    let arg3 =
+                                        unsafe {
+                                            <bool as
+                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<bool as
+                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                    arg3_3, arg3_4))
+                                        };
+                                    let _ret = passphrase_entropy(arg0, arg1, arg2, arg3);
+                                    _ret
+                                }
+                            });
+                <Result<f64, CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " The entropy, in bits, of a passphrase with these options, without generating one."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " As [`generate_passphrase_with_options`]."]
+            #[no_mangle]
+            #[doc(hidden)]
+            pub extern "C-unwind" fn __wbindgen_describe_passphraseEntropy_e09cc0eb35f8b583() {
+                use wasm_bindgen::describe::*;
+                wasm_bindgen::__rt::link_mem_intrinsics();
+                inform(FUNCTION);
+                inform(0);
+                inform(4u32);
+                <usize as WasmDescribe>::describe();
+                <&str as WasmDescribe>::describe();
+                <bool as WasmDescribe>::describe();
+                <bool as WasmDescribe>::describe();
+                <Result<f64, CoreError> as WasmDescribe>::describe();
+                <Result<f64, CoreError> as WasmDescribe>::describe();
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\x01\0\x04R The entropy, in bits, of a passphrase with these options, without generating one.\0\t # Errors) As [`generate_passphrase_with_options`].\0\x04\x05words\0\0\0\tseparator\0\0\0\ncapitalize\0\0\0\x0einclude_number\0\0\0\0\0\x11passphraseEntropy\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    #[wasm_bindgen()]
+    #[__wasm_bindgen_retried]
+    #[doc =
+    " The generator\'s bounds and default character sets, for the UI\'s controls."]
+    pub struct GeneratorLimits;
+    #[automatically_derived]
+    #[doc(hidden)]
+    unsafe impl ::core::clone::TrivialClone for GeneratorLimits { }
+    #[automatically_derived]
+    impl ::core::clone::Clone for GeneratorLimits {
+        #[inline]
+        fn clone(&self) -> GeneratorLimits { *self }
+    }
+    #[automatically_derived]
+    impl ::core::marker::Copy for GeneratorLimits { }
+    #[automatically_derived]
+    impl ::core::fmt::Debug for GeneratorLimits {
+        #[inline]
+        fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+            ::core::fmt::Formatter::write_str(f, "GeneratorLimits")
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsConstructor for GeneratorLimits {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for
+        GeneratorLimits {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsStaticProperty for
+        GeneratorLimits {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribe for GeneratorLimits {
+        fn describe() {
+            use wasm_bindgen::describe::*;
+            inform(RUST_STRUCT);
+            inform(15u32);
+            inform(71u32);
+            inform(101u32);
+            inform(110u32);
+            inform(101u32);
+            inform(114u32);
+            inform(97u32);
+            inform(116u32);
+            inform(111u32);
+            inform(114u32);
+            inform(76u32);
+            inform(105u32);
+            inform(109u32);
+            inform(105u32);
+            inform(116u32);
+            inform(115u32);
+            inform(27u32);
+            inform(114u32);
+            inform(105u32);
+            inform(122u32);
+            inform(122u32);
+            inform(121u32);
+            inform(45u32);
+            inform(119u32);
+            inform(97u32);
+            inform(115u32);
+            inform(109u32);
+            inform(45u32);
+            inform(101u32);
+            inform(48u32);
+            inform(57u32);
+            inform(99u32);
+            inform(99u32);
+            inform(48u32);
+            inform(101u32);
+            inform(98u32);
+            inform(51u32);
+            inform(53u32);
+            inform(102u32);
+            inform(56u32);
+            inform(98u32);
+            inform(53u32);
+            inform(56u32);
+            inform(51u32);
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::IntoWasmAbi for GeneratorLimits {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GeneratorLimits>>;
+        fn into_abi(self) -> Self::Abi {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+            WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self))) as
+                    *mut WasmRefCell<GeneratorLimits>)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::FromWasmAbi for GeneratorLimits {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GeneratorLimits>>;
+        unsafe fn from_abi(js: Self::Abi) -> Self {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+            use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+            let ptr = js.into_ptr();
+            assert_not_null(ptr);
+            let rc = Rc::from_raw(ptr);
+            match Rc::try_unwrap(rc) {
+                Ok(cell) => cell.into_inner(),
+                Err(_) =>
+                    wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::core::convert::From<GeneratorLimits> for
+        wasm_bindgen::JsValue {
+        fn from(value: GeneratorLimits) -> Self {
+            let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_generatorlimits_new_e09cc0eb35f8b583"]
+                fn __wbg_generatorlimits_new(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GeneratorLimits>>)
+                -> u32;
+            }
+            unsafe {
+                <wasm_bindgen::JsValue as
+                        wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_generatorlimits_new(ptr))
+            }
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[export_name = "__wbg_generatorlimits_free_e09cc0eb35f8b583"]
+            #[doc(hidden)]
+            pub unsafe extern "C-unwind" fn __wbg_generatorlimits_free(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GeneratorLimits>>,
+                allow_delayed: u32) {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                if allow_delayed != 0 {
+                    let ptr = ptr.into_ptr();
+                    wasm_bindgen::__rt::assert_not_null(ptr);
+                    drop(Rc::from_raw(ptr));
+                } else {
+                    let _ =
+                        <GeneratorLimits as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                }
+            }
+        };
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefFromWasmAbi for GeneratorLimits {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GeneratorLimits>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<GeneratorLimits>;
+        unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRef::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefMutFromWasmAbi for GeneratorLimits {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GeneratorLimits>>;
+        type Anchor = wasm_bindgen::__rt::RcRefMut<GeneratorLimits>;
+        unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRefMut::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::LongRefFromWasmAbi for GeneratorLimits {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GeneratorLimits>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<GeneratorLimits>;
+        unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            <Self as wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionIntoWasmAbi for GeneratorLimits {
+        #[inline]
+        fn none() -> Self::Abi {
+            <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GeneratorLimits>>>::null()
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionFromWasmAbi for GeneratorLimits {
+        #[inline]
+        fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::TryFromJsValue for GeneratorLimits {
+        fn try_from_js_value(value: wasm_bindgen::JsValue)
+            ->
+                wasm_bindgen::__rt::core::result::Result<Self,
+                wasm_bindgen::JsValue> {
+            Self::try_from_js_value_ref(&value).ok_or(value)
+        }
+        fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+            -> wasm_bindgen::__rt::core::option::Option<Self> {
+            let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_generatorlimits_unwrap_e09cc0eb35f8b583"]
+                fn __wbg_generatorlimits_unwrap(ptr: u32)
+                ->
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GeneratorLimits>>;
+            }
+            let ptr = unsafe { __wbg_generatorlimits_unwrap(idx) };
+            if ptr.is_null() {
+                wasm_bindgen::__rt::core::option::Option::None
+            } else {
+                unsafe {
+                    wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                }
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribeVector for GeneratorLimits {
+        fn describe_vector() {
+            use wasm_bindgen::describe::*;
+            inform(VECTOR);
+            <GeneratorLimits as
+                    wasm_bindgen::describe::WasmDescribe>::describe();
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorIntoWasmAbi for GeneratorLimits {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::IntoWasmAbi>::Abi;
+        fn vector_into_abi(vector:
+                wasm_bindgen::__rt::alloc::boxed::Box<[GeneratorLimits]>)
+            -> Self::Abi {
+            wasm_bindgen::convert::js_value_vector_into_abi(vector)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorFromWasmAbi for GeneratorLimits {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::FromWasmAbi>::Abi;
+        unsafe fn vector_from_abi(js: Self::Abi)
+            -> wasm_bindgen::__rt::alloc::boxed::Box<[GeneratorLimits]> {
+            wasm_bindgen::convert::js_value_vector_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\x01\x0fGeneratorLimits\0\x01J The generator's bounds and default character sets, for the UI's controls.\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    impl GeneratorLimits {
+        #[doc = " Shortest password."]
+        #[must_use]
+        pub fn min_length(&self) -> usize {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Shortest password."]
+                    #[must_use]
+                    #[export_name =
+                    "generatorlimits_minLength_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_GeneratorLimits_minLength(me:
+                            <GeneratorLimits as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<usize as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<GeneratorLimits>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<GeneratorLimits>();
+                                            let me =
+                                                unsafe {
+                                                    <GeneratorLimits as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.min_length();
+                                            _ret
+                                        }
+                                    });
+                        <usize as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Shortest password."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_generatorlimits_minLength_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <usize as WasmDescribe>::describe();
+                        <usize as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0fGeneratorLimits\x01\x13 Shortest password.\0\0\0\0\tminLength\x01\x01\0\0\0\0\x01\0\x02\tminLength\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            MIN_LENGTH
+        }
+        #[doc = " Longest password."]
+        #[must_use]
+        pub fn max_length(&self) -> usize {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Longest password."]
+                    #[must_use]
+                    #[export_name =
+                    "generatorlimits_maxLength_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_GeneratorLimits_maxLength(me:
+                            <GeneratorLimits as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<usize as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<GeneratorLimits>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<GeneratorLimits>();
+                                            let me =
+                                                unsafe {
+                                                    <GeneratorLimits as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.max_length();
+                                            _ret
+                                        }
+                                    });
+                        <usize as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Longest password."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_generatorlimits_maxLength_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <usize as WasmDescribe>::describe();
+                        <usize as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0fGeneratorLimits\x01\x12 Longest password.\0\0\0\0\tmaxLength\x01\x01\0\0\0\0\x01\0\x02\tmaxLength\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            MAX_LENGTH
+        }
+        #[doc = " Fewest passphrase words."]
+        #[must_use]
+        pub fn min_words(&self) -> usize {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Fewest passphrase words."]
+                    #[must_use]
+                    #[export_name = "generatorlimits_minWords_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_GeneratorLimits_minWords(me:
+                            <GeneratorLimits as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<usize as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<GeneratorLimits>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<GeneratorLimits>();
+                                            let me =
+                                                unsafe {
+                                                    <GeneratorLimits as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.min_words();
+                                            _ret
+                                        }
+                                    });
+                        <usize as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Fewest passphrase words."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_generatorlimits_minWords_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <usize as WasmDescribe>::describe();
+                        <usize as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0fGeneratorLimits\x01\x19 Fewest passphrase words.\0\0\0\0\x08minWords\x01\x01\0\0\0\0\x01\0\x02\x08minWords\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            MIN_WORDS
+        }
+        #[doc = " Most passphrase words."]
+        #[must_use]
+        pub fn max_words(&self) -> usize {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Most passphrase words."]
+                    #[must_use]
+                    #[export_name = "generatorlimits_maxWords_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_GeneratorLimits_maxWords(me:
+                            <GeneratorLimits as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<usize as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<GeneratorLimits>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<GeneratorLimits>();
+                                            let me =
+                                                unsafe {
+                                                    <GeneratorLimits as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.max_words();
+                                            _ret
+                                        }
+                                    });
+                        <usize as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Most passphrase words."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_generatorlimits_maxWords_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <usize as WasmDescribe>::describe();
+                        <usize as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0fGeneratorLimits\x01\x17 Most passphrase words.\0\0\0\0\x08maxWords\x01\x01\0\0\0\0\x01\0\x02\x08maxWords\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            MAX_WORDS
+        }
+        #[doc =
+        " The default symbols, the 32 ASCII punctuation characters; a custom set is a subset."]
+        #[must_use]
+        pub fn symbols(&self) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The default symbols, the 32 ASCII punctuation characters; a custom set is a subset."]
+                    #[must_use]
+                    #[export_name = "generatorlimits_symbols_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_GeneratorLimits_symbols(me:
+                            <GeneratorLimits as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<GeneratorLimits>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<GeneratorLimits>();
+                                            let me =
+                                                unsafe {
+                                                    <GeneratorLimits as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.symbols();
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The default symbols, the 32 ASCII punctuation characters; a custom set is a subset."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_generatorlimits_symbols_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0fGeneratorLimits\x01T The default symbols, the 32 ASCII punctuation characters; a custom set is a subset.\0\0\0\0\x07symbols\x01\x01\0\0\0\0\x01\0\x02\x07symbols\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            String::from_utf8_lossy(SYMBOLS).into_owned()
+        }
+        #[doc = " The characters \"exclude ambiguous\" leaves out."]
+        #[must_use]
+        pub fn ambiguous(&self) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The characters \"exclude ambiguous\" leaves out."]
+                    #[must_use]
+                    #[export_name =
+                    "generatorlimits_ambiguous_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_GeneratorLimits_ambiguous(me:
+                            <GeneratorLimits as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<GeneratorLimits>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<GeneratorLimits>();
+                                            let me =
+                                                unsafe {
+                                                    <GeneratorLimits as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.ambiguous();
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The characters \"exclude ambiguous\" leaves out."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_generatorlimits_ambiguous_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0fGeneratorLimits\x01/ The characters \"exclude ambiguous\" leaves out.\0\0\0\0\tambiguous\x01\x01\0\0\0\0\x01\0\x02\tambiguous\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            String::from_utf8_lossy(AMBIGUOUS).into_owned()
+        }
+        #[doc = " The longest exclude or symbol-set text, in bytes."]
+        #[must_use]
+        pub fn max_set_text_length(&self) -> usize {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The longest exclude or symbol-set text, in bytes."]
+                    #[must_use]
+                    #[export_name =
+                    "generatorlimits_maxSetTextLength_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_GeneratorLimits_maxSetTextLength(me:
+                            <GeneratorLimits as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<usize as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<GeneratorLimits>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<GeneratorLimits>();
+                                            let me =
+                                                unsafe {
+                                                    <GeneratorLimits as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.max_set_text_length();
+                                            _ret
+                                        }
+                                    });
+                        <usize as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The longest exclude or symbol-set text, in bytes."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_generatorlimits_maxSetTextLength_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <usize as WasmDescribe>::describe();
+                        <usize as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0fGeneratorLimits\x012 The longest exclude or symbol-set text, in bytes.\0\0\0\0\x10maxSetTextLength\x01\x01\0\0\0\0\x01\0\x02\x10maxSetTextLength\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            MAX_SET_TEXT_LEN
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    #[allow(dead_code)]
+    #[doc =
+    " The generator\'s bounds and default character sets ([`GeneratorLimits`])."]
+    #[must_use]
+    pub fn generator_limits() -> GeneratorLimits { GeneratorLimits }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " The generator\'s bounds and default character sets ([`GeneratorLimits`])."]
+            #[must_use]
+            #[export_name = "generatorLimits_e09cc0eb35f8b583"]
+            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_generatorLimits()
+                ->
+                    wasm_bindgen::convert::WasmRet<<GeneratorLimits as
+                    wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                const _: () = {};
+                let _ret =
+                    wasm_bindgen::__rt::maybe_catch_unwind(||
+                            { { let _ret = generator_limits(); _ret } });
+                <GeneratorLimits as
+                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " The generator\'s bounds and default character sets ([`GeneratorLimits`])."]
+            #[must_use]
+            #[no_mangle]
+            #[doc(hidden)]
+            pub extern "C-unwind" fn __wbindgen_describe_generatorLimits_e09cc0eb35f8b583() {
+                use wasm_bindgen::describe::*;
+                wasm_bindgen::__rt::link_mem_intrinsics();
+                inform(FUNCTION);
+                inform(0);
+                inform(0u32);
+                <GeneratorLimits as WasmDescribe>::describe();
+                <GeneratorLimits as WasmDescribe>::describe();
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\x01\0\x01I The generator's bounds and default character sets ([`GeneratorLimits`]).\0\0\0\0\x0fgeneratorLimits\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
     #[allow(dead_code)]
     #[doc =
     " A password of `length` characters from lowercase, uppercase and digits (each required),"]
@@ -1131,10 +3277,7 @@ pub mod generator {
                                 exclude_ambiguous,
                                 ..CharacterOptions::default()
                             }).map_err(|_| ClientError::InvalidInput)?;
-        Ok(Generated {
-                value: Zeroizing::new(generated.expose_secret().to_owned()),
-                entropy_bits: generated.entropy_bits(),
-            })
+        Ok(generated.into())
     }
     #[automatically_derived]
     const _: () =
@@ -1301,10 +3444,7 @@ pub mod generator {
                                 words,
                                 ..PassphraseOptions::default()
                             }).map_err(|_| ClientError::InvalidInput)?;
-        Ok(Generated {
-                value: Zeroizing::new(generated.expose_secret().to_owned()),
-                entropy_bits: generated.entropy_bits(),
-            })
+        Ok(generated.into())
     }
     #[automatically_derived]
     const _: () =
@@ -20506,7 +22646,12 @@ pub mod sync {
     }
 }
 pub use error::CoreError;
-pub use generator::{Generated, generate_passphrase_js, generate_password_js};
+pub use generator::{
+    Generated, GeneratorLimits, generate_passphrase_js,
+    generate_passphrase_with_options, generate_password_js,
+    generate_password_with_options, generator_limits, passphrase_entropy,
+    password_entropy,
+};
 pub use http::{HttpRequest, check_meta, expect_no_content, meta_request};
 pub use items::{FieldView, ItemDraft, ItemSummary};
 pub use login::LoginFlow;

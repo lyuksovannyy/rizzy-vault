@@ -79,6 +79,9 @@
 #   wasm_host_input    rizzy-wasm's readers of what JavaScript hands in: response status and
 #                      body (`checkMeta`, `expectNoContent`), hex ids, item-draft entries, and
 #                      the start of a login and a signup (ADR 0013 §3 rule 8)
+#   generator_options  the password generator's options as JavaScript and rv pass them: rizzy-wasm's
+#                      option readers, rizzy-core's character-set parser, option checks and
+#                      generation (CRYPTO.md §12.1)
 #   ca_pem             rv's private CA file reader (ADR 0030 Decision 4): the 64 KiB and
 #                      16-certificate limits, PEM sections, trust-anchor parsing of arbitrary DER
 #
@@ -412,6 +415,13 @@ bench = false
 [[bin]]
 name = "ca_pem"
 path = "fuzz_targets/ca_pem.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "generator_options"
+path = "fuzz_targets/generator_options.rs"
 test = false
 doc = false
 bench = false

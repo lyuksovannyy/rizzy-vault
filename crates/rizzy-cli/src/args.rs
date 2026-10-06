@@ -12,6 +12,8 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use rizzy_core::generator::{CharSet, MAX_SET_TEXT_LEN};
+
 use crate::error::CliError;
 
 /// The help text, printed on `--help` (stdout) and on a usage error (stderr).
@@ -34,7 +36,8 @@ USAGE:
                    [--remove-custom <id>]... [--move-uri <id>=<place>]...
                    [--move-custom <id>=<place>]...
     rv item trash <item> | restore <item> | purge <item>
-    rv generate [--length <n>] [--no-symbols] [--no-ambiguous] | [--words <n>]
+    rv generate [--length <n>] [--no-symbols | --symbols <chars>] [--no-ambiguous]
+                [--exclude <chars>] | --words <n> [--passphrase-number]
     rv totp <item>
     rv export --out <file> --name <login> [--format encrypted|json|csv]
     rv import --in <file> [--format <format>]
@@ -163,9 +166,19 @@ pub enum Generate {
         symbols: bool,
         /// Whether look-alike characters are left out.
         no_ambiguous: bool,
+        /// `--exclude <chars>`: characters never used.
+        exclude: CharSet,
+        /// `--symbols <chars>`: the symbols to draw from instead of all 32 (a subset of them;
+        /// the generator checks it).
+        symbol_set: Option<CharSet>,
     },
-    /// A passphrase of this many words.
-    Words(usize),
+    /// A passphrase.
+    Words {
+        /// How many words.
+        words: usize,
+        /// `--passphrase-number`: one digit appended to one word.
+        number: bool,
+    },
 }
 
 /// A parsed command.
@@ -726,29 +739,58 @@ fn pair(args: &mut Args, option: &str, form: &str) -> Result<(String, String), C
     Ok((a.to_owned(), b.to_owned()))
 }
 
-/// `generate`.
+/// `generate`. `--exclude` and `--symbols` take the characters as one argument (quote it in
+/// the shell); they are parsed here, so a character outside printable ASCII, or a space, is a
+/// usage error before anything is generated. Character options with `--words`, and
+/// `--passphrase-number` without it, are refused rather than ignored, as are `--symbols` with
+/// `--no-symbols`.
 fn generate(args: &mut Args) -> Result<Command, CliError> {
-    let (mut length, mut symbols, mut no_ambiguous, mut words) = (20usize, true, false, None);
-    let number = |text: String, name: &str| {
+    let (mut length, mut symbols, mut no_ambiguous, mut words) = (None, true, false, None);
+    let (mut exclude, mut symbol_set, mut number) = (None, None, false);
+    let count = |text: String, name: &str| {
         text.parse::<usize>()
             .map_err(|_| usage(format!("{name} takes a number")))
     };
+    let set = |text: String, name: &str| {
+        CharSet::parse(&text).map_err(|_| {
+            usage(format!(
+                "{name} takes printable ASCII characters without spaces, at most {MAX_SET_TEXT_LEN}"
+            ))
+        })
+    };
     while let Some(option) = args.next() {
         match option.as_str() {
-            "--length" => length = number(args.value("--length")?, "--length")?,
-            "--words" => words = Some(number(args.value("--words")?, "--words")?),
+            "--length" => length = Some(count(args.value("--length")?, "--length")?),
+            "--words" => words = Some(count(args.value("--words")?, "--words")?),
             "--no-symbols" => symbols = false,
             "--no-ambiguous" => no_ambiguous = true,
+            "--exclude" => exclude = Some(set(args.value("--exclude")?, "--exclude")?),
+            "--symbols" => symbol_set = Some(set(args.value("--symbols")?, "--symbols")?),
+            "--passphrase-number" => number = true,
             other => return Err(unknown(other)),
         }
     }
-    Ok(Command::Generate(match words {
-        Some(words) => Generate::Words(words),
-        None => Generate::Characters {
-            length,
-            symbols,
-            no_ambiguous,
-        },
+    if !symbols && symbol_set.is_some() {
+        return Err(usage("--symbols and --no-symbols contradict each other"));
+    }
+    if let Some(words) = words {
+        if length.is_some() || !symbols || no_ambiguous || exclude.is_some() || symbol_set.is_some()
+        {
+            return Err(usage(
+                "--words makes a passphrase; the character options do not apply",
+            ));
+        }
+        return Ok(Command::Generate(Generate::Words { words, number }));
+    }
+    if number {
+        return Err(usage("--passphrase-number needs --words"));
+    }
+    Ok(Command::Generate(Generate::Characters {
+        length: length.unwrap_or(20),
+        symbols,
+        no_ambiguous,
+        exclude: exclude.unwrap_or(CharSet::EMPTY),
+        symbol_set,
     }))
 }
 
@@ -902,12 +944,17 @@ mod tests {
             Command::Generate(Generate::Characters {
                 length: 32,
                 symbols: false,
-                no_ambiguous: false
+                no_ambiguous: false,
+                exclude: CharSet::EMPTY,
+                symbol_set: None,
             })
         );
         assert_eq!(
             command("generate --words 5"),
-            Command::Generate(Generate::Words(5))
+            Command::Generate(Generate::Words {
+                words: 5,
+                number: false
+            })
         );
         assert_eq!(
             command("export --out f.rvx --name alice"),
@@ -1050,5 +1097,44 @@ mod tests {
         ] {
             assert!(matches!(parsed(line), Err(CliError::Usage(_))), "{line}");
         }
+    }
+
+    /// `generate`'s exclusion, custom-symbol and passphrase-number flags, and the
+    /// combinations it refuses.
+    #[test]
+    fn generate_options() {
+        assert_eq!(
+            command("generate --exclude l1IO0 --symbols !#- --no-ambiguous --length 30"),
+            Command::Generate(Generate::Characters {
+                length: 30,
+                symbols: true,
+                no_ambiguous: true,
+                exclude: CharSet::parse("l1IO0").unwrap(),
+                symbol_set: Some(CharSet::parse("!#-").unwrap()),
+            })
+        );
+        assert_eq!(
+            command("generate --words 4 --passphrase-number"),
+            Command::Generate(Generate::Words {
+                words: 4,
+                number: true
+            })
+        );
+        for line in [
+            "generate --passphrase-number",
+            "generate --words 4 --exclude abc",
+            "generate --words 4 --symbols !",
+            "generate --words 4 --length 10",
+            "generate --words 4 --no-symbols",
+            "generate --symbols ! --no-symbols",
+            "generate --exclude",
+            "generate --symbols",
+            "generate --exclude é",
+        ] {
+            assert!(matches!(parsed(line), Err(CliError::Usage(_))), "{line}");
+        }
+        // Too long to be a character set.
+        let long = format!("generate --exclude {}", "a".repeat(MAX_SET_TEXT_LEN + 1));
+        assert!(matches!(parsed(&long), Err(CliError::Usage(_))));
     }
 }

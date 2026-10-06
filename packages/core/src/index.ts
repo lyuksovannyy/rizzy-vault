@@ -34,9 +34,14 @@ import initWasm, {
   detectImportFormat as wasmDetectImportFormat,
   expectNoContent,
   generatePassphrase as wasmGeneratePassphrase,
+  generatePassphraseWithOptions as wasmGeneratePassphraseWithOptions,
   generatePassword as wasmGeneratePassword,
+  generatePasswordWithOptions as wasmGeneratePasswordWithOptions,
+  generatorLimits as wasmGeneratorLimits,
   initSync,
   metaRequest,
+  passphraseEntropy as wasmPassphraseEntropy,
+  passwordEntropy as wasmPasswordEntropy,
   plaintextExportHoldMs as wasmPlaintextExportHoldMs,
   plaintextExportPhrase as wasmPlaintextExportPhrase,
   plaintextExportWarning as wasmPlaintextExportWarning,
@@ -1043,6 +1048,279 @@ export function generatePassphrase(words: number): Generated {
     call(() => wasmGeneratePassphrase(words)),
     (g) => ({ value: g.value, entropyBits: g.entropyBits }),
   );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The generator with every option (CRYPTO.md §12.1)
+//
+// The options below are those of `rizzy-core`'s generator. Rust checks them and computes the
+// entropy; this module only translates names and refuses values Rust could not even receive
+// (a non-integer length, an unknown rule name), with the same `generator_*` codes. Options are
+// not secrets; a generated value is.
+
+/** How a character class takes part in a password. */
+export type ClassRule = "excluded" | "included" | "required";
+
+/** Character-mode options. */
+export interface PasswordOptions {
+  /** Number of characters, {@link GENERATOR_LIMITS} `minLength`..`maxLength`. */
+  readonly length: number;
+  /** `a`–`z`. */
+  readonly lowercase: ClassRule;
+  /** `A`–`Z`. */
+  readonly uppercase: ClassRule;
+  /** `0`–`9`. */
+  readonly digits: ClassRule;
+  /** The symbols: all 32 ASCII punctuation characters, or {@link PasswordOptions.symbolSet}. */
+  readonly symbols: ClassRule;
+  /** Leave out look-alike characters ({@link GENERATOR_LIMITS} `ambiguous`). */
+  readonly excludeAmbiguous: boolean;
+  /**
+   * Characters never used, whatever their class; order and repeats do not matter. Printable
+   * ASCII without spaces, at most `maxSetTextLength` bytes; `""` excludes nothing.
+   */
+  readonly exclude: string;
+  /**
+   * The symbols to draw from instead of all 32: a subset of {@link GENERATOR_LIMITS}
+   * `symbols`. `null` means all 32. Checked even while symbols are excluded.
+   */
+  readonly symbolSet: string | null;
+}
+
+/** Passphrase-mode options. */
+export interface PassphraseOptions {
+  /** Number of words, {@link GENERATOR_LIMITS} `minWords`..`maxWords`. */
+  readonly words: number;
+  /** One printable ASCII character between words: not a letter and not `-`. */
+  readonly separator: string;
+  /** Capitalise the first letter of every word (adds no entropy). */
+  readonly capitalize: boolean;
+  /**
+   * Append one random digit to one random word. Adds `log2(words) + log2(10)` bits: the digit
+   * goes right after the word's last letter, before the separator.
+   */
+  readonly includeNumber: boolean;
+}
+
+/** The defaults of `rizzy-core`: 20 characters, every class required, nothing excluded. */
+export const DEFAULT_PASSWORD_OPTIONS: Readonly<PasswordOptions> = Object.freeze({
+  length: 20,
+  lowercase: "required",
+  uppercase: "required",
+  digits: "required",
+  symbols: "required",
+  excludeAmbiguous: false,
+  exclude: "",
+  symbolSet: null,
+});
+
+/** The defaults of `rizzy-core`: six words separated by `.`, not capitalised, no number. */
+export const DEFAULT_PASSPHRASE_OPTIONS: Readonly<PassphraseOptions> = Object.freeze({
+  words: 6,
+  separator: ".",
+  capitalize: false,
+  includeNumber: false,
+});
+
+/** The generator's bounds and character sets. */
+export interface GeneratorLimits {
+  readonly minLength: number;
+  readonly maxLength: number;
+  readonly minWords: number;
+  readonly maxWords: number;
+  /** The 32 default symbols; a custom symbol set is a subset of them. */
+  readonly symbols: string;
+  /** The characters `excludeAmbiguous` leaves out. */
+  readonly ambiguous: string;
+  /** The longest `exclude` or `symbolSet` text, in bytes. */
+  readonly maxSetTextLength: number;
+}
+
+/**
+ * The generator's bounds, as constants so a UI can lay out its controls before the module
+ * loads. A test checks them against {@link generatorLimits}, which reads them from Rust.
+ */
+export const GENERATOR_LIMITS: GeneratorLimits = Object.freeze({
+  minLength: 4,
+  maxLength: 256,
+  minWords: 3,
+  maxWords: 20,
+  symbols: "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~",
+  ambiguous: "lIo0O1|",
+  maxSetTextLength: 256,
+});
+
+/** The generator's bounds and character sets, read from Rust. */
+export function generatorLimits(): GeneratorLimits {
+  ensureReady();
+  return mapOne(wasmGeneratorLimits(), (l) => ({
+    minLength: l.minLength,
+    maxLength: l.maxLength,
+    minWords: l.minWords,
+    maxWords: l.maxWords,
+    symbols: l.symbols,
+    ambiguous: l.ambiguous,
+    maxSetTextLength: l.maxSetTextLength,
+  }));
+}
+
+/**
+ * The `generator_*` codes the generator throws, each with a sentence a UI can show as is.
+ * Codes never change meaning; new ones are only added.
+ */
+export const GENERATOR_ERROR_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
+  generator_invalid_length: `Length must be between ${GENERATOR_LIMITS.minLength} and ${GENERATOR_LIMITS.maxLength} characters.`,
+  generator_no_classes: "Turn on at least one kind of character.",
+  generator_too_many_required: "The password is shorter than the number of required kinds of character.",
+  generator_empty_alphabet: "Every character is excluded. Exclude fewer characters.",
+  generator_required_lowercase_empty: "Lowercase letters are required, but all of them are excluded.",
+  generator_required_uppercase_empty: "Uppercase letters are required, but all of them are excluded.",
+  generator_required_digits_empty: "Digits are required, but all of them are excluded.",
+  generator_required_symbols_empty: "Symbols are required, but none is left to use.",
+  generator_requirements_too_strict:
+    "So few characters are left that a password would rarely contain every required kind. Exclude fewer characters, require fewer kinds, or make it longer.",
+  generator_invalid_character_set: `Use printable ASCII characters only, without spaces, at most ${GENERATOR_LIMITS.maxSetTextLength}.`,
+  generator_invalid_symbol_set: "Custom symbols must be ASCII punctuation characters.",
+  generator_invalid_word_count: `A passphrase has between ${GENERATOR_LIMITS.minWords} and ${GENERATOR_LIMITS.maxWords} words.`,
+  generator_invalid_separator: "The separator must be one printable ASCII character that is not a letter or a hyphen.",
+  generator_invalid_rule: "Each kind of character is excluded, included or required.",
+  generator_rng_failure: "The random number generator failed. Reload the page.",
+  generator_invalid_options: "These generator options are not valid.",
+});
+
+/** The sentence for a `generator_*` code; a generic one for any other code. */
+export function generatorErrorMessage(code: string): string {
+  return GENERATOR_ERROR_MESSAGES[code] ?? "These generator options are not valid.";
+}
+
+/** The result of checking options: their entropy, or the code and sentence of the refusal. */
+export type GeneratorCheck =
+  | { readonly ok: true; readonly entropyBits: number }
+  | { readonly ok: false; readonly code: string; readonly message: string };
+
+/** Largest value a `usize` argument of the wasm module takes (wasm32). */
+const MAX_USIZE = 0xffff_ffff;
+
+/** `n` as a count Rust can receive, or the code `code` thrown as a {@link CoreError}. */
+function count(n: unknown, code: string): number {
+  if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > MAX_USIZE) {
+    throw new CoreError(code);
+  }
+  return n;
+}
+
+/** A rule's number on the wasm boundary: 0 excluded, 1 included, 2 required. */
+function ruleNumber(rule: unknown): number {
+  switch (rule) {
+    case "excluded":
+      return 0;
+    case "included":
+      return 1;
+    case "required":
+      return 2;
+    default:
+      throw new CoreError("generator_invalid_rule");
+  }
+}
+
+/** A text option, refused unless it is a string. */
+function text(value: unknown, code: string): string {
+  if (typeof value !== "string") {
+    throw new CoreError(code);
+  }
+  return value;
+}
+
+/** The arguments of the wasm password calls, from options over the defaults. */
+function passwordArgs(
+  options: Partial<PasswordOptions>,
+): [number, number, number, number, number, boolean, string, string | undefined] {
+  const o = { ...DEFAULT_PASSWORD_OPTIONS, ...options };
+  const symbolSet = o.symbolSet === null ? undefined : text(o.symbolSet, "generator_invalid_character_set");
+  return [
+    count(o.length, "generator_invalid_length"),
+    ruleNumber(o.lowercase),
+    ruleNumber(o.uppercase),
+    ruleNumber(o.digits),
+    ruleNumber(o.symbols),
+    o.excludeAmbiguous === true,
+    text(o.exclude, "generator_invalid_character_set"),
+    symbolSet,
+  ];
+}
+
+/** The arguments of the wasm passphrase calls, from options over the defaults. */
+function passphraseArgs(options: Partial<PassphraseOptions>): [number, string, boolean, boolean] {
+  const o = { ...DEFAULT_PASSPHRASE_OPTIONS, ...options };
+  return [
+    count(o.words, "generator_invalid_word_count"),
+    text(o.separator, "generator_invalid_separator"),
+    o.capitalize === true,
+    o.includeNumber === true,
+  ];
+}
+
+/**
+ * A password with every option; missing options take {@link DEFAULT_PASSWORD_OPTIONS}.
+ * Throws a {@link CoreError} with a `generator_*` code ({@link GENERATOR_ERROR_MESSAGES}) for
+ * options the generator refuses.
+ */
+export function generatePasswordWithOptions(options: Partial<PasswordOptions> = {}): Generated {
+  ensureReady();
+  const args = passwordArgs(options);
+  return mapOne(
+    call(() => wasmGeneratePasswordWithOptions(...args)),
+    (g) => ({ value: g.value, entropyBits: g.entropyBits }),
+  );
+}
+
+/**
+ * A passphrase with every option; missing options take {@link DEFAULT_PASSPHRASE_OPTIONS}.
+ * Throws a {@link CoreError} with a `generator_*` code for options the generator refuses.
+ */
+export function generatePassphraseWithOptions(options: Partial<PassphraseOptions> = {}): Generated {
+  ensureReady();
+  const args = passphraseArgs(options);
+  return mapOne(
+    call(() => wasmGeneratePassphraseWithOptions(...args)),
+    (g) => ({ value: g.value, entropyBits: g.entropyBits }),
+  );
+}
+
+/** The entropy, in bits, of a password with these options; throws as the generator would. */
+export function passwordEntropy(options: Partial<PasswordOptions> = {}): number {
+  ensureReady();
+  const args = passwordArgs(options);
+  return call(() => wasmPasswordEntropy(...args));
+}
+
+/** The entropy, in bits, of a passphrase with these options; throws as the generator would. */
+export function passphraseEntropy(options: Partial<PassphraseOptions> = {}): number {
+  ensureReady();
+  const args = passphraseArgs(options);
+  return call(() => wasmPassphraseEntropy(...args));
+}
+
+/** Runs a check, turning a `generator_*` refusal into a {@link GeneratorCheck}. */
+function check(f: () => number): GeneratorCheck {
+  try {
+    return { ok: true, entropyBits: f() };
+  } catch (e) {
+    if (e instanceof CoreError) {
+      return { ok: false, code: e.code, message: generatorErrorMessage(e.code) };
+    }
+    throw e;
+  }
+}
+
+/** Checks password options without generating, for a live display: entropy or refusal. */
+export function checkPasswordOptions(options: Partial<PasswordOptions> = {}): GeneratorCheck {
+  return check(() => passwordEntropy(options));
+}
+
+/** Checks passphrase options without generating, for a live display: entropy or refusal. */
+export function checkPassphraseOptions(options: Partial<PassphraseOptions> = {}): GeneratorCheck {
+  return check(() => passphraseEntropy(options));
 }
 
 /** The frozen warning before a plaintext export (ADR 0027 §5). */

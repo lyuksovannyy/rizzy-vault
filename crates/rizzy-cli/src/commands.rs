@@ -54,7 +54,8 @@ use rizzy_client::signup::DeviceKind;
 use rizzy_client::store::rows::Alarm;
 use rizzy_client::sync::VaultSync;
 use rizzy_core::generator::{
-    CharacterOptions, ClassRule, PassphraseOptions, generate_passphrase, generate_password,
+    CharClass, CharacterOptions, ClassRule, GeneratorError, MAX_LENGTH, MAX_WORDS, MIN_LENGTH,
+    MIN_WORDS, PassphraseOptions, generate_passphrase, generate_password,
 };
 use rizzy_core::ids::DeviceId;
 use rizzy_core::item::schema::{
@@ -580,12 +581,13 @@ async fn lifecycle(
 /// the command is for.
 fn generate(ui: &mut dyn Ui, options: Generate) -> Result<(), CliError> {
     let mut rng = os_rng();
-    let bad = |_| CliError::Usage("the generator options are not valid".into());
     let generated = match options {
         Generate::Characters {
             length,
             symbols,
             no_ambiguous,
+            exclude,
+            symbol_set,
         } => generate_password(
             &mut rng,
             &CharacterOptions {
@@ -596,21 +598,59 @@ fn generate(ui: &mut dyn Ui, options: Generate) -> Result<(), CliError> {
                     ClassRule::Excluded
                 },
                 exclude_ambiguous: no_ambiguous,
+                exclude,
+                symbol_set,
                 ..CharacterOptions::default()
             },
         )
-        .map_err(bad)?,
-        Generate::Words(words) => generate_passphrase(
+        .map_err(generator_usage)?,
+        Generate::Words { words, number } => generate_passphrase(
             &mut rng,
             &PassphraseOptions {
                 words,
+                include_number: number,
                 ..PassphraseOptions::default()
             },
         )
-        .map_err(bad)?,
+        .map_err(generator_usage)?,
     };
     ui.note(&format!("{:.0} bits of entropy", generated.entropy_bits()));
     ui.print(generated.expose_secret())
+}
+
+/// What to tell the user when the generator refuses the options: which rule they broke, in
+/// terms of `rv generate`'s flags. The options are not secret; no generated value is involved.
+fn generator_usage(e: GeneratorError) -> CliError {
+    CliError::Usage(match e {
+        GeneratorError::InvalidLength => {
+            format!("--length must be from {MIN_LENGTH} to {MAX_LENGTH}")
+        }
+        GeneratorError::InvalidWordCount => {
+            format!("--words must be from {MIN_WORDS} to {MAX_WORDS}")
+        }
+        GeneratorError::RequiredClassEmpty(class) => format!(
+            "--exclude removes every {}, which the password requires",
+            match class {
+                CharClass::Lowercase => "lowercase letter",
+                CharClass::Uppercase => "uppercase letter",
+                CharClass::Digits => "digit",
+                CharClass::Symbols => "symbol",
+            }
+        ),
+        GeneratorError::EmptyAlphabet => "--exclude removes every character".to_owned(),
+        GeneratorError::InvalidSymbolSet => {
+            "--symbols takes ASCII punctuation characters only".to_owned()
+        }
+        GeneratorError::RequirementsTooStrict => {
+            "so few characters are left that a password is unlikely to contain every class; \
+                 exclude fewer or raise --length"
+                .to_owned()
+        }
+        GeneratorError::TooManyRequiredClasses => {
+            "--length is shorter than the number of required classes".to_owned()
+        }
+        _ => "the generator options are not valid".to_owned(),
+    })
 }
 
 /// `totp`: the current code of an item's `login.totp`, which holds an `otpauth://` URI or a

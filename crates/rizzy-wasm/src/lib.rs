@@ -31,7 +31,7 @@
 //! | [`Session`] | the unlocked session: sync driver, items, TOTP, export, import, devices, 2FA, lock |
 //! | [`ItemDraft`], [`ItemSummary`], [`FieldView`] | item edits and views |
 //! | [`HttpRequest`], [`meta_request`], [`check_meta`], [`expect_no_content`] | the requests JavaScript sends and the answers it hands back |
-//! | [`generate_password_js`] (`generatePassword`), [`generate_passphrase_js`] (`generatePassphrase`), [`Generated`] | the generator |
+//! | [`generate_password_with_options`] (`generatePasswordWithOptions`), [`generate_passphrase_with_options`] (`generatePassphraseWithOptions`), [`password_entropy`] (`passwordEntropy`), [`passphrase_entropy`] (`passphraseEntropy`), [`generator_limits`] (`generatorLimits`), [`GeneratorLimits`], the earlier [`generate_password_js`] (`generatePassword`) and [`generate_passphrase_js`] (`generatePassphrase`), [`Generated`] | the generator, every option ([`generator`]) |
 //! | [`TotpCode`], [`EncryptedExport`], [`ImportReport`], [`DeviceView`], [`TwoFactorEnrolment`] | results |
 //! | [`plaintext_export_warning`], [`plaintext_export_phrase`] | the frozen texts of ADR 0027 §5 |
 //! | [`plaintext_export_hold_ms`], [`detect_import_format`] | the hold after the plaintext warning; recognising an import file (owner decision 2026-10-05) |
@@ -95,7 +95,11 @@ mod signup;
 pub mod sync;
 
 pub use error::CoreError;
-pub use generator::{Generated, generate_passphrase_js, generate_password_js};
+pub use generator::{
+    Generated, GeneratorLimits, generate_passphrase_js, generate_passphrase_with_options,
+    generate_password_js, generate_password_with_options, generator_limits, passphrase_entropy,
+    password_entropy,
+};
 pub use http::{HttpRequest, check_meta, expect_no_content, meta_request};
 pub use items::{FieldView, ItemDraft, ItemSummary};
 pub use login::LoginFlow;

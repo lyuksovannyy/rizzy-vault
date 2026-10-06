@@ -9,14 +9,31 @@
 //!
 //! Character mode, step by step:
 //! 1. Check the options and build the alphabet: the enabled classes in the fixed order
-//!    lowercase, uppercase, digits, symbols, minus [`AMBIGUOUS`] if asked.
+//!    lowercase, uppercase, digits, symbols (the default 32 or the caller's subset of them,
+//!    [`CharacterOptions::symbol_set`]), minus [`AMBIGUOUS`] if asked and minus the caller's
+//!    [`CharacterOptions::exclude`] set.
 //! 2. Draw each position as a uniform index into the alphabet, read the character with a
 //!    constant-time scan, and note in constant time which class the index falls in.
 //! 3. If a required class is missing, discard the whole candidate and start again.
 //!
 //! Passphrase mode draws each word as a uniform index into the 7,776-word list, copies it
 //! into a fixed-width slot with a constant-time scan, and assembles the result with the
-//! two-pass layout described below.
+//! two-pass layout described below. With [`PassphraseOptions::include_number`], one decimal
+//! digit, drawn uniformly, is appended to one word, chosen uniformly.
+//!
+//! - **Exclusions and custom symbols.** Both only remove characters from the alphabet; they
+//!   never add any. A custom symbol set must be a subset of the 32 ASCII punctuation
+//!   characters, so the four classes stay disjoint and the inclusion–exclusion count below
+//!   stays exact. A required class left with no character is refused
+//!   ([`GeneratorError::RequiredClassEmpty`]), never silently dropped; an included class left
+//!   empty simply contributes nothing. Options whose required classes are so small that fewer
+//!   than one candidate in [`MIN_ACCEPTANCE_INVERSE`] would pass are refused
+//!   ([`GeneratorError::RequirementsTooStrict`]) rather than patched, so whole-candidate
+//!   rejection always ends quickly.
+//! - **The passphrase number.** The digit goes right after the chosen word's last letter and
+//!   before its separator. Words consist of `[a-z-]` only, so the digit splits back out
+//!   unambiguously, whatever the separator: the result determines the words, the chosen word
+//!   and the digit, and the reported space is `7776^words × words × 10`.
 //!
 //! - **Uniform draws.** Every character and word is drawn uniformly from the injected CSPRNG by
 //!   rejection sampling: a 32-bit draw is masked to the next power of two above the set size and
@@ -28,16 +45,18 @@
 //!   EFF large wordlist, 7,776 words).
 //! - **Entropy** is reported as `log2` of the size of the space actually sampled: for
 //!   characters, the number of strings of that length over that alphabet that contain every
-//!   required class (inclusion–exclusion); for passphrases, `words × log2(7776)`.
+//!   required class (inclusion–exclusion), over the alphabet left after every exclusion; for
+//!   passphrases, `words × log2(7776)`, plus `log2(words) + log2(10)` with the number.
 //! - **Secrets.** Results are wiped on drop and `Debug` is redacted. Characters and words are
 //!   selected by scanning the whole alphabet or wordlist in constant time, not by indexing with
 //!   the secret draw; class membership is computed the same way (§12.3).
 //! - **Passphrase layout.** Words have different lengths, so where a word lands in the output
 //!   depends on the secret lengths of the words before it. A passphrase is therefore built in
-//!   two passes whose memory accesses depend only on the word count: each word, its separator
-//!   and its capitalisation go into a fixed-width region of their own, at offsets fixed by the
-//!   word number, and a compaction pass then moves the bytes together with constant-time
-//!   selects. Neither pass reads or writes at an offset derived from a word's length.
+//!   two passes whose memory accesses depend only on the word count: each word, its digit (if
+//!   any), its separator and its capitalisation go into a fixed-width region of their own, at
+//!   offsets fixed by the word number, and a compaction pass then moves the bytes together with
+//!   constant-time selects. Neither pass reads or writes at an offset derived from a word's
+//!   length, and every region is written the same way whether or not it receives the digit.
 //! - **What timing reveals** is how many candidates and draws were rejected, which says nothing
 //!   about the accepted result, and, for passphrases, the total output length, which the
 //!   result's length reveals anyway.
@@ -85,16 +104,25 @@ pub const MIN_WORDS: usize = 3;
 /// Most words in a passphrase.
 pub const MAX_WORDS: usize = 20;
 
-/// Candidates drawn before giving up. With at least one character per required class, the
-/// least likely valid configuration (length 4, all four classes required, ambiguous characters
-/// excluded) succeeds with probability about 0.06 per candidate, so reaching this limit has
-/// probability below 2^-80: in practice it means the injected RNG is broken.
-const MAX_CANDIDATES: usize = 1000;
+/// Options are refused ([`GeneratorError::RequirementsTooStrict`]) when fewer than one random
+/// candidate in this many would contain every required class. Without exclusions no option
+/// comes near it (the least likely, length 4 with all four classes required and ambiguous
+/// characters left out, passes about one candidate in 16); only required classes shrunk to a
+/// character or two by [`CharacterOptions::exclude`] or a tiny symbol set can.
+pub const MIN_ACCEPTANCE_INVERSE: u32 = 1024;
+/// Candidates drawn before giving up: `56 × MIN_ACCEPTANCE_INVERSE`. Every accepted option
+/// passes a candidate with probability `p ≥ 1/1024`, and `(1 − p)^k ≤ e^(−pk) ≤ e^(−56) <
+/// 2^-80`, so reaching this limit means the injected RNG is broken.
+const MAX_CANDIDATES: usize = 56 * 1024;
 /// Draws per uniform index before giving up. Each draw succeeds with probability above 1/2.
 const MAX_DRAWS: usize = 128;
 /// Bytes per word in a passphrase's fixed-width layout: the word, zero-filled to
-/// [`wordlist::MAX_WORD_LEN`], then one more byte, so the separator always fits after it.
-const WORD_WIDTH: usize = wordlist::MAX_WORD_LEN + 1;
+/// [`wordlist::MAX_WORD_LEN`], then two more bytes, so the digit of
+/// [`PassphraseOptions::include_number`] and the separator always fit after it.
+const WORD_WIDTH: usize = wordlist::MAX_WORD_LEN + 2;
+/// Longest text [`CharSet::parse`] reads, in bytes. A set holds at most 94 characters; the
+/// margin allows repeats, and anything longer is refused rather than scanned.
+pub const MAX_SET_TEXT_LEN: usize = 256;
 
 /// Lowercase letters.
 const LOWER: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
@@ -102,8 +130,9 @@ const LOWER: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
 const UPPER: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 /// Decimal digits.
 const DIGITS: &[u8] = b"0123456789";
-/// The 32 printable ASCII punctuation characters (no space).
-const SYMBOLS: &[u8] = b"!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+/// The 32 printable ASCII punctuation characters (no space): the default symbol class, and
+/// the characters a custom [`CharacterOptions::symbol_set`] may choose from.
+pub const SYMBOLS: &[u8] = b"!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
 /// Characters left out when [`CharacterOptions::exclude_ambiguous`] is set: those commonly
 /// confused with each other in print (`l`/`1`/`I`/`|`, `O`/`0`/`o`).
 pub const AMBIGUOUS: &[u8] = b"lIo0O1|";
@@ -118,6 +147,20 @@ pub enum GeneratorError {
     NoClasses,
     /// More classes are required than the password has characters.
     TooManyRequiredClasses,
+    /// Classes are enabled, but the exclusions leave no character at all.
+    EmptyAlphabet,
+    /// The named class is marked [`ClassRule::Required`] but has no character left after the
+    /// exclusions (or the custom symbol set is empty while symbols are required).
+    RequiredClassEmpty(CharClass),
+    /// The required classes are so small, for this length, that fewer than one candidate in
+    /// [`MIN_ACCEPTANCE_INVERSE`] would contain them all.
+    RequirementsTooStrict,
+    /// A character set's text holds a character outside printable ASCII `!`..=`~` (space and
+    /// control characters included), or is longer than [`MAX_SET_TEXT_LEN`] bytes.
+    InvalidCharacterSet,
+    /// A custom symbol set holds a character that is not one of the 32 ASCII punctuation
+    /// characters ([`SYMBOLS`]).
+    InvalidSymbolSet,
     /// The word count is outside [`MIN_WORDS`]..=[`MAX_WORDS`].
     InvalidWordCount,
     /// The separator is not printable ASCII, is a letter, or is `-` (which occurs inside words
@@ -133,6 +176,11 @@ impl fmt::Display for GeneratorError {
             Self::InvalidLength => "password length out of range",
             Self::NoClasses => "no character class selected",
             Self::TooManyRequiredClasses => "more required classes than characters",
+            Self::EmptyAlphabet => "every character is excluded",
+            Self::RequiredClassEmpty(_) => "a required class has no characters left",
+            Self::RequirementsTooStrict => "required classes too small for this length",
+            Self::InvalidCharacterSet => "character set not allowed",
+            Self::InvalidSymbolSet => "custom symbols must be ASCII punctuation",
             Self::InvalidWordCount => "passphrase word count out of range",
             Self::InvalidSeparator => "separator not allowed",
             Self::RngExhausted => "random number generator failure",
@@ -153,7 +201,110 @@ pub enum ClassRule {
     Required,
 }
 
+/// One of the four character classes, as [`GeneratorError::RequiredClassEmpty`] names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CharClass {
+    /// `a`–`z`.
+    Lowercase,
+    /// `A`–`Z`.
+    Uppercase,
+    /// `0`–`9`.
+    Digits,
+    /// The symbols: [`SYMBOLS`] or the custom [`CharacterOptions::symbol_set`].
+    Symbols,
+}
+
+/// A set of printable ASCII characters (`!`..=`~`, the 94 characters a password can hold),
+/// for [`CharacterOptions::exclude`] and [`CharacterOptions::symbol_set`].
+///
+/// Options are not secret, so the set is an ordinary bit mask (bit `c` for character `c`).
+/// Order and repeats in the text it is parsed from do not matter.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct CharSet(u128);
+
+impl CharSet {
+    /// The empty set.
+    pub const EMPTY: Self = Self(0);
+
+    /// The set of the characters in `text`.
+    ///
+    /// `text` is user input: it is read only up to [`MAX_SET_TEXT_LEN`] bytes, without
+    /// allocating, and every character must be printable ASCII other than space (`!`..=`~`).
+    /// The empty string gives [`CharSet::EMPTY`].
+    ///
+    /// # Errors
+    /// [`GeneratorError::InvalidCharacterSet`] for a longer text or any other character
+    /// (space, control characters, non-ASCII).
+    pub fn parse(text: &str) -> Result<Self, GeneratorError> {
+        if text.len() > MAX_SET_TEXT_LEN {
+            return Err(GeneratorError::InvalidCharacterSet);
+        }
+        let mut set = Self::EMPTY;
+        for &b in text.as_bytes() {
+            if !b.is_ascii_graphic() {
+                return Err(GeneratorError::InvalidCharacterSet);
+            }
+            set.0 |= 1u128 << b;
+        }
+        Ok(set)
+    }
+
+    /// The set of the bytes in `bytes`, ignoring any that are not printable ASCII.
+    #[must_use]
+    pub const fn from_ascii(bytes: &[u8]) -> Self {
+        let mut set = 0u128;
+        let mut rest = bytes;
+        while let [b, tail @ ..] = rest {
+            if b.is_ascii_graphic() {
+                set |= 1u128 << *b;
+            }
+            rest = tail;
+        }
+        Self(set)
+    }
+
+    /// Whether `c` is in the set.
+    #[must_use]
+    pub const fn contains(self, c: u8) -> bool {
+        c < 128 && self.0 & (1u128 << c) != 0
+    }
+
+    /// How many characters the set holds.
+    #[must_use]
+    pub const fn len(self) -> u32 {
+        self.0.count_ones()
+    }
+
+    /// Whether the set is empty.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Whether every character of `self` is in `other`.
+    #[must_use]
+    pub const fn is_subset(self, other: Self) -> bool {
+        self.0 & !other.0 == 0
+    }
+
+    /// The characters, in ASCII order, as a string (for showing the set back to the user).
+    #[must_use]
+    pub fn to_ascii_string(self) -> String {
+        (b'!'..=b'~')
+            .filter(|&c| self.contains(c))
+            .map(char::from)
+            .collect()
+    }
+}
+
+/// [`SYMBOLS`] as a set.
+const SYMBOL_SET: CharSet = CharSet::from_ascii(SYMBOLS);
+
 /// Character-mode options.
+///
+/// The defaults leave [`exclude`](Self::exclude) empty and [`symbol_set`](Self::symbol_set)
+/// unset, so options written before those fields existed generate exactly what they did
+/// (same alphabet, same draws, same results for the same RNG stream).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CharacterOptions {
     /// Number of characters.
@@ -164,14 +315,21 @@ pub struct CharacterOptions {
     pub uppercase: ClassRule,
     /// `0`–`9`.
     pub digits: ClassRule,
-    /// The 32 ASCII punctuation characters.
+    /// The symbols: the 32 ASCII punctuation characters, or [`symbol_set`](Self::symbol_set).
     pub symbols: ClassRule,
     /// Leave out [`AMBIGUOUS`] characters.
     pub exclude_ambiguous: bool,
+    /// Characters never used, whatever their class.
+    pub exclude: CharSet,
+    /// The symbol class's characters instead of all of [`SYMBOLS`]: a subset of them
+    /// ([`GeneratorError::InvalidSymbolSet`] otherwise). `None` means all 32. It is checked even
+    /// when symbols are [`ClassRule::Excluded`], so a bad set is reported, not hidden.
+    pub symbol_set: Option<CharSet>,
 }
 
 impl Default for CharacterOptions {
-    /// 20 characters, every class required, ambiguous characters allowed.
+    /// 20 characters, every class required, ambiguous characters allowed, nothing else
+    /// excluded, the default symbols.
     fn default() -> Self {
         Self {
             length: 20,
@@ -180,6 +338,8 @@ impl Default for CharacterOptions {
             digits: ClassRule::Required,
             symbols: ClassRule::Required,
             exclude_ambiguous: false,
+            exclude: CharSet::EMPTY,
+            symbol_set: None,
         }
     }
 }
@@ -194,15 +354,19 @@ pub struct PassphraseOptions {
     pub separator: char,
     /// Capitalise the first letter of every word. Adds no entropy.
     pub capitalize: bool,
+    /// Append one decimal digit, drawn uniformly, to one word, chosen uniformly. Adds
+    /// `log2(words) + log2(10)` bits (module documentation, "The passphrase number").
+    pub include_number: bool,
 }
 
 impl Default for PassphraseOptions {
-    /// Six words (about 77.5 bits) separated by `.`, not capitalised.
+    /// Six words (about 77.5 bits) separated by `.`, not capitalised, no number.
     fn default() -> Self {
         Self {
             words: 6,
             separator: '.',
             capitalize: false,
+            include_number: false,
         }
     }
 }
@@ -262,23 +426,37 @@ struct Alphabet {
 impl Alphabet {
     /// Builds the alphabet for `options`: each class not [`ClassRule::Excluded`], in the fixed
     /// order lowercase, uppercase, digits, symbols, without [`AMBIGUOUS`] characters if
-    /// requested. The class ranges are contiguous and do not overlap.
+    /// requested and without the [`CharacterOptions::exclude`] characters. The symbols are
+    /// [`SYMBOLS`], or those of them in [`CharacterOptions::symbol_set`], always in
+    /// [`SYMBOLS`] order, so the order the user typed them in changes nothing. The class
+    /// ranges are contiguous and do not overlap; an enabled class may be empty.
     ///
     /// # Errors
-    /// [`GeneratorError::NoClasses`] if no character is left. The other `NoClasses` returns
-    /// cannot happen: 94 characters and 4 classes always fit.
+    /// - [`GeneratorError::InvalidSymbolSet`] if the custom symbol set is not a subset of
+    ///   [`SYMBOLS`];
+    /// - [`GeneratorError::NoClasses`] if every class is [`ClassRule::Excluded`];
+    /// - [`GeneratorError::EmptyAlphabet`] if classes are enabled but no character is left;
+    /// - [`GeneratorError::RequiredClassEmpty`] if a required class has no character left.
+    ///
+    /// The other `NoClasses` returns cannot happen: 94 characters and 4 classes always fit.
     fn new(options: &CharacterOptions) -> Result<Self, GeneratorError> {
+        let symbols = match options.symbol_set {
+            None => SYMBOL_SET,
+            Some(set) if set.is_subset(SYMBOL_SET) => set,
+            Some(_) => return Err(GeneratorError::InvalidSymbolSet),
+        };
         let mut alphabet = Self {
             chars: [0; 94],
             len: 0,
             classes: [(0, 0, false); 4],
             class_count: 0,
         };
-        for (set, rule) in [
-            (LOWER, options.lowercase),
-            (UPPER, options.uppercase),
-            (DIGITS, options.digits),
-            (SYMBOLS, options.symbols),
+        let mut empty_required = None;
+        for (set, rule, which) in [
+            (LOWER, options.lowercase, CharClass::Lowercase),
+            (UPPER, options.uppercase, CharClass::Uppercase),
+            (DIGITS, options.digits, CharClass::Digits),
+            (SYMBOLS, options.symbols, CharClass::Symbols),
         ] {
             if rule == ClassRule::Excluded {
                 continue;
@@ -286,7 +464,10 @@ impl Alphabet {
             let start = alphabet.len;
             // The options and the character sets are public, so this loop may branch freely.
             for &c in set {
-                if options.exclude_ambiguous && AMBIGUOUS.contains(&c) {
+                if (options.exclude_ambiguous && AMBIGUOUS.contains(&c))
+                    || options.exclude.contains(c)
+                    || (which == CharClass::Symbols && !symbols.contains(c))
+                {
                     continue;
                 }
                 let slot = alphabet
@@ -302,9 +483,18 @@ impl Alphabet {
                 .ok_or(GeneratorError::NoClasses)?;
             *class = (start, alphabet.len, rule == ClassRule::Required);
             alphabet.class_count += 1;
+            if rule == ClassRule::Required && start == alphabet.len && empty_required.is_none() {
+                empty_required = Some(which);
+            }
+        }
+        if alphabet.class_count == 0 {
+            return Err(GeneratorError::NoClasses);
         }
         if alphabet.len == 0 {
-            return Err(GeneratorError::NoClasses);
+            return Err(GeneratorError::EmptyAlphabet);
+        }
+        if let Some(class) = empty_required {
+            return Err(GeneratorError::RequiredClassEmpty(class));
         }
         Ok(alphabet)
     }
@@ -329,12 +519,14 @@ impl Alphabet {
 
 impl CharacterOptions {
     /// Validates the options and builds their alphabet: the length must be in
-    /// [`MIN_LENGTH`]..=[`MAX_LENGTH`], at least one character must remain, and there must
-    /// be no more required classes than characters (otherwise no candidate could pass).
+    /// [`MIN_LENGTH`]..=[`MAX_LENGTH`], at least one character must remain, every required
+    /// class must keep a character, there must be no more required classes than characters
+    /// (otherwise no candidate could pass), and at least one random candidate in
+    /// [`MIN_ACCEPTANCE_INVERSE`] must contain every required class.
     ///
     /// # Errors
-    /// [`GeneratorError::InvalidLength`], [`GeneratorError::NoClasses`] or
-    /// [`GeneratorError::TooManyRequiredClasses`].
+    /// [`GeneratorError::InvalidLength`], the errors of [`Alphabet::new`],
+    /// [`GeneratorError::TooManyRequiredClasses`] or [`GeneratorError::RequirementsTooStrict`].
     fn checked_alphabet(&self) -> Result<Alphabet, GeneratorError> {
         if !(MIN_LENGTH..=MAX_LENGTH).contains(&self.length) {
             return Err(GeneratorError::InvalidLength);
@@ -343,11 +535,26 @@ impl CharacterOptions {
         if alphabet.required_count() > self.length {
             return Err(GeneratorError::TooManyRequiredClasses);
         }
+        // The share is at least 1/1024 here, far above `f64` rounding of the alternating sum,
+        // so the comparison is reliable; a share computed as 0 or below is refused too.
+        if acceptance(&alphabet, self.length) < 1.0 / f64::from(MIN_ACCEPTANCE_INVERSE) {
+            return Err(GeneratorError::RequirementsTooStrict);
+        }
         Ok(alphabet)
     }
 
+    /// Checks the options without generating: `Ok` exactly when [`generate_password`] would
+    /// accept them (an RNG failure aside).
+    ///
+    /// # Errors
+    /// As [`generate_password`], for invalid options.
+    pub fn validate(&self) -> Result<(), GeneratorError> {
+        self.checked_alphabet().map(|_| ())
+    }
+
     /// The entropy of a password generated with these options: `log2` of the number of strings
-    /// of `length` characters over the alphabet that contain every required class.
+    /// of `length` characters over the alphabet left after every exclusion that contain every
+    /// required class.
     ///
     /// # Errors
     /// As [`generate_password`], for invalid options.
@@ -357,10 +564,12 @@ impl CharacterOptions {
     }
 }
 
-/// `log2(count)` with, by inclusion–exclusion over the required classes `R`,
-/// `count = Σ_{S ⊆ R} (−1)^{|S|} (N − Σ_{c ∈ S} n_c)^L`. Computed as
-/// `L·log2(N) + log2(Σ (−1)^{|S|} (1 − Σ n_c / N)^L)`, which stays within `f64` range.
-fn character_entropy(alphabet: &Alphabet, length: usize) -> f64 {
+/// The share of all `N^L` strings of `length` characters over the alphabet that contain every
+/// required class, a value in (0, 1] (up to rounding): by inclusion–exclusion over the
+/// required classes `R`, `Σ_{S ⊆ R} (−1)^{|S|} (1 − Σ_{c ∈ S} n_c / N)^L`. Each subset `S`
+/// adds or removes the strings that avoid every class in `S`. It is also the probability that
+/// one random candidate is accepted.
+fn acceptance(alphabet: &Alphabet, length: usize) -> f64 {
     let n = f64::from(alphabet.len);
     let l = i32::try_from(length).unwrap_or(i32::MAX);
     let required: Vec<f64> = alphabet
@@ -369,9 +578,6 @@ fn character_entropy(alphabet: &Alphabet, length: usize) -> f64 {
         .filter(|c| c.2)
         .map(|c| f64::from(c.1 - c.0))
         .collect();
-    // `fraction` is the share of all `N^L` strings that contain every required class, a value
-    // in (0, 1]; each subset `S` of the required classes adds or removes the strings that
-    // avoid every class in `S`.
     let mut fraction = 0.0f64;
     for subset in 0u32..(1 << required.len()) {
         let excluded: f64 = required
@@ -387,7 +593,16 @@ fn character_entropy(alphabet: &Alphabet, length: usize) -> f64 {
             fraction -= term;
         }
     }
-    f64::from(l) * n.log2() + fraction.log2()
+    fraction
+}
+
+/// `log2(count)` with `count = Σ_{S ⊆ R} (−1)^{|S|} (N − Σ_{c ∈ S} n_c)^L` (inclusion–exclusion
+/// over the required classes `R`). Computed as `L·log2(N) + log2(`[`acceptance`]`)`, which
+/// stays within `f64` range.
+fn character_entropy(alphabet: &Alphabet, length: usize) -> f64 {
+    let n = f64::from(alphabet.len);
+    let l = u32::try_from(length).unwrap_or(u32::MAX);
+    f64::from(l) * n.log2() + acceptance(alphabet, length).log2()
 }
 
 impl PassphraseOptions {
@@ -396,7 +611,9 @@ impl PassphraseOptions {
     /// The word count must be in [`MIN_WORDS`]..=[`MAX_WORDS`]. The separator must be
     /// printable ASCII (space to `~`), not a letter and not `-`: words consist of lowercase
     /// letters and `-`, so any other separator keeps the passphrase splittable into exactly
-    /// one word sequence, and a non-zero byte keeps the compaction pass correct.
+    /// one word sequence, and a non-zero byte keeps the compaction pass correct. A digit
+    /// separator stays unambiguous with [`include_number`](Self::include_number): the digit
+    /// run after a word is the separator alone, or the number and then the separator.
     ///
     /// # Errors
     /// [`GeneratorError::InvalidWordCount`] or [`GeneratorError::InvalidSeparator`].
@@ -411,23 +628,40 @@ impl PassphraseOptions {
         Ok(sep)
     }
 
-    /// The entropy of a passphrase with these options: `words × log2(7776)`.
+    /// Checks the options without generating: `Ok` exactly when [`generate_passphrase`] would
+    /// accept them (an RNG failure aside).
+    ///
+    /// # Errors
+    /// As [`generate_passphrase`], for invalid options.
+    pub fn validate(&self) -> Result<(), GeneratorError> {
+        self.check().map(|_| ())
+    }
+
+    /// The entropy of a passphrase with these options: `words × log2(7776)`, plus
+    /// `log2(words) + log2(10)` with [`include_number`](Self::include_number).
     ///
     /// # Errors
     /// As [`generate_passphrase`], for invalid options.
     pub fn entropy_bits(&self) -> Result<f64, GeneratorError> {
         self.check()?;
-        Ok(passphrase_entropy(self.words))
+        Ok(passphrase_entropy(self.words, self.include_number))
     }
 }
 
-/// `words × log2(7776)`: each word is an independent uniform choice from the list. The
-/// separator and capitalisation are fixed by the options and add nothing. `words` is already
-/// checked to be at most [`MAX_WORDS`], so the conversions cannot fail.
-fn passphrase_entropy(words: usize) -> f64 {
+/// `words × log2(7776)`: each word is an independent uniform choice from the list. With the
+/// number, `+ log2(words) + log2(10)`: the word that gets the digit and the digit are
+/// independent uniform choices too, and the result determines both (module documentation).
+/// The separator and capitalisation are fixed by the options and add nothing. `words` is
+/// already checked to be at most [`MAX_WORDS`], so the conversions cannot fail.
+fn passphrase_entropy(words: usize, include_number: bool) -> f64 {
     let words = u32::try_from(words).unwrap_or(0);
     let count = u32::try_from(wordlist::WORD_COUNT).unwrap_or(0);
-    f64::from(words) * f64::from(count).log2()
+    let base = f64::from(words) * f64::from(count).log2();
+    if include_number {
+        base + f64::from(words).log2() + 10f64.log2()
+    } else {
+        base
+    }
 }
 
 /// Draws a uniform index in `0..n` by masked rejection sampling (no `%`).
@@ -520,10 +754,12 @@ pub fn generate_password<R: CryptoRng + ?Sized>(
 ///
 /// `options.words` words are drawn independently and uniformly from the
 /// [`wordlist::WORD_COUNT`] words of [`wordlist::NAME`], joined by the separator, with the
-/// first letter of each word uppercased if `capitalize` is set. The entropy is
-/// `words × log2(7776)` ([`PassphraseOptions::entropy_bits`]). The assembly's memory access
-/// pattern depends only on the word count (see the module documentation); the total length
-/// of the result is not hidden.
+/// first letter of each word uppercased if `capitalize` is set. With `include_number`, one
+/// digit is appended to one word; the word and then the digit are drawn, uniformly, before
+/// the words, and only then, so without it the RNG stream is used exactly as before. The
+/// entropy is [`PassphraseOptions::entropy_bits`]. The assembly's memory access pattern
+/// depends only on the word count (see the module documentation); the total length of the
+/// result is not hidden.
 ///
 /// `rng` must be a CSPRNG; the platform crates pass one backed by the OS (§12.1).
 ///
@@ -536,43 +772,87 @@ pub fn generate_passphrase<R: CryptoRng + ?Sized>(
 ) -> Result<Generated, GeneratorError> {
     let separator = options.check()?;
     let count = u32::try_from(wordlist::WORD_COUNT).map_err(|_| GeneratorError::NoClasses)?;
+    let mut number = if options.include_number {
+        let words = u32::try_from(options.words).map_err(|_| GeneratorError::InvalidWordCount)?;
+        let word = uniform_index(rng, words)?;
+        let digit = uniform_index(rng, 10)?;
+        // `digit < 10`, so its low byte is the digit; no branch on the secret value.
+        let [low, ..] = digit.to_le_bytes();
+        Some(Number {
+            word,
+            digit: b'0' + low,
+        })
+    } else {
+        None
+    };
     // The words are assembled only through `assemble_words`, whose memory access pattern does
     // not depend on the words' lengths (CRYPTO.md §12.3). Do not build the passphrase here by
     // appending words: that copies each secret word at a length-dependent offset. If this call
     // goes, `assemble_words` is dead code and `cargo lint` fails.
-    let out = assemble_words(options.words, separator, options.capitalize, |slot| {
-        let mut index = uniform_index(rng, count)?;
-        wordlist::select_word(index, slot);
-        index.zeroize();
-        Ok(())
-    })?;
+    let out = assemble_words(
+        options.words,
+        separator,
+        options.capitalize,
+        number.as_ref(),
+        |slot| {
+            let mut index = uniform_index(rng, count)?;
+            wordlist::select_word(index, slot);
+            index.zeroize();
+            Ok(())
+        },
+    );
+    if let Some(n) = number.as_mut() {
+        n.word.zeroize();
+        n.digit.zeroize();
+    }
     Ok(Generated {
-        value: ascii_string(out),
-        entropy_bits: passphrase_entropy(options.words),
+        value: ascii_string(out?),
+        entropy_bits: passphrase_entropy(options.words, options.include_number),
     })
 }
 
+/// The number of [`PassphraseOptions::include_number`]: which word gets it and the digit's
+/// ASCII byte. Secret; wiped after use.
+struct Number {
+    /// The word's position, `0..words`.
+    word: u32,
+    /// `b'0'..=b'9'`.
+    digit: u8,
+}
+
+impl fmt::Debug for Number {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Number([REDACTED])")
+    }
+}
+
 /// Assembles `words` words, joined by `separator`, in two passes whose memory access pattern
-/// depends only on `words` (CRYPTO.md §12.3). `select` fills the slot for the next word, as
-/// [`wordlist::select_word`] does.
+/// depends only on `words` and on whether there is a `number` (CRYPTO.md §12.3). `select`
+/// fills the slot for the next word, as [`wordlist::select_word`] does.
 ///
 /// Pass 1 writes word `n` into bytes `n * WORD_WIDTH..(n + 1) * WORD_WIDTH` of a fixed-width
-/// buffer, whatever the lengths of the words before it ([`spread_word`]). Pass 2 squeezes out
-/// the padding ([`compact`]). The result has its final capacity from the start; truncating it
-/// to the total length, which the passphrase reveals anyway, does not reallocate.
+/// buffer, whatever the lengths of the words before it ([`spread_word`]); every region is
+/// offered the number, and only the one whose position matches, by a constant-time compare,
+/// takes it. Pass 2 squeezes out the padding ([`compact`]). The result has its final capacity
+/// from the start; truncating it to the total length, which the passphrase reveals anyway,
+/// does not reallocate.
 fn assemble_words(
     words: usize,
     separator: u8,
     capitalize: bool,
+    number: Option<&Number>,
     mut select: impl FnMut(&mut [u8; wordlist::SLOT]) -> Result<(), GeneratorError>,
 ) -> Result<Zeroizing<Vec<u8>>, GeneratorError> {
     let mut wide = Zeroizing::new(vec![0u8; words * WORD_WIDTH]);
     let mut slot = Zeroizing::new([0u8; wordlist::SLOT]);
-    for (n, region) in wide.chunks_exact_mut(WORD_WIDTH).enumerate() {
+    for (n, region) in (0u32..).zip(wide.chunks_exact_mut(WORD_WIDTH)) {
         select(&mut slot)?;
         // The last word has no separator after it; which word is last is public.
-        let after = (n + 1 < words).then_some(separator);
-        spread_word(region, &slot, after, capitalize);
+        let after = usize::try_from(n)
+            .is_ok_and(|n| n + 1 < words)
+            .then_some(separator);
+        let digit = number.map(|num| (n.ct_eq(&num.word), num.digit));
+        spread_word(region, &slot, after, digit, capitalize);
     }
     let mut out = Zeroizing::new(vec![0u8; wide.len()]);
     let len = compact(&wide, &mut out);
@@ -581,23 +861,37 @@ fn assemble_words(
 }
 
 /// Writes one selected word into its fixed-width `region` (`WORD_WIDTH` bytes): the letters,
-/// then `separator` (if any) right after the last letter, then zeros. `slot` is as
-/// [`wordlist::select_word`] fills it: a length byte, then the letters, zero-filled.
+/// then the digit if `digit` is offered and its [`Choice`] is set, then `separator` (if any),
+/// then zeros. `slot` is as [`wordlist::select_word`] fills it: a length byte, then the
+/// letters, zero-filled.
 ///
-/// Every byte of the region is written the same way whatever the word's length: the
-/// separator's position is chosen by a constant-time select, not by indexing with the length.
+/// Every byte of the region is written the same way whatever the word's length and whether it
+/// takes the digit: the digit's and the separator's positions are chosen by constant-time
+/// selects, not by indexing with the length or branching on the choice.
 fn spread_word(
     region: &mut [u8],
     slot: &[u8; wordlist::SLOT],
     separator: Option<u8>,
+    digit: Option<(Choice, u8)>,
     capitalize: bool,
 ) {
     let (len, letters) = slot.split_first().unwrap_or((&0, &[]));
+    // `len ≤ MAX_WORD_LEN`, so this does not wrap.
+    let after_len = len.wrapping_add(1);
     for (i, dst) in (0u8..).zip(region.iter_mut()) {
-        // Past the word's end the slot is already zero; the region's last byte has no letter.
+        // Past the word's end the slot is already zero; the region's last bytes have no letter.
         *dst = letters.get(usize::from(i)).copied().unwrap_or(0);
-        if let Some(sep) = separator {
-            dst.conditional_assign(&sep, i.ct_eq(len));
+        let at_len = i.ct_eq(len);
+        match (separator, digit) {
+            (Some(sep), None) => dst.conditional_assign(&sep, at_len),
+            (None, None) => {}
+            (sep, Some((takes, d))) => {
+                dst.conditional_assign(&d, at_len & takes);
+                if let Some(sep) = sep {
+                    dst.conditional_assign(&sep, at_len & !takes);
+                    dst.conditional_assign(&sep, i.ct_eq(&after_len) & takes);
+                }
+            }
         }
     }
     if capitalize {
@@ -614,13 +908,13 @@ fn spread_word(
 
 /// Moves the non-zero bytes of `wide` to the front of `out`, in order, and returns how many
 /// there are. `out` must be at least as long as `wide`. Zero marks padding: no word byte is
-/// zero (the wordlist allows only `[a-z-]`) and no separator is ([`PassphraseOptions::check`]
-/// allows only printable ASCII).
+/// zero (the wordlist allows only `[a-z-]`), no separator is ([`PassphraseOptions::check`]
+/// allows only printable ASCII) and the number is an ASCII digit.
 ///
 /// The memory access pattern depends only on the two lengths. For each output byte `j`, every
 /// input byte is visited; its destination is the number of non-zero bytes before it, kept as a
 /// running count in a local rather than looked up, and the one byte whose destination is `j`
-/// is kept by a constant-time select. That is `(words × WORD_WIDTH)²` selects, at most 40,000
+/// is kept by a constant-time select. That is `(words × WORD_WIDTH)²` selects, at most 48,400
 /// for 20 words, which is small next to the wordlist scans.
 fn compact(wide: &[u8], out: &mut [u8]) -> usize {
     for (j, dst) in out.iter_mut().enumerate() {
