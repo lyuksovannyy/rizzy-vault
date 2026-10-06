@@ -74,4 +74,6 @@ export const FORMAT_LABELS: Readonly<Record<Exclude<DetectedImportFormat, "unkno
   "chrome-csv": "Chrome CSV",
   "firefox-csv": "Firefox CSV",
   csv: "Generic CSV",
+  "aliasvault-csv": "AliasVault CSV",
+  "aliasvault-avux": "AliasVault (.avux)",
 };

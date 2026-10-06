@@ -334,6 +334,37 @@ impl<'w> ItemBuilder<'w> {
         }
     }
 
+    /// As [`ItemBuilder::set_or_field`], but a repeat of an already-set `key` **replaces** its
+    /// value instead of falling back to a custom field: last write wins, not first. Used only
+    /// where the source format's own importer resolves a duplicate single-value key this way
+    /// (`AliasVault`'s `.avux`, module docs of [`crate::aliasvault`]) rather than by import
+    /// order, which `set_or_field` already gives every other format. An empty `text` is not
+    /// written anywhere, same as `set_or_field`.
+    pub(crate) fn set_or_field_last(
+        &mut self,
+        key: &'static str,
+        label: &str,
+        text: &str,
+        hidden: bool,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        if self.applies(key) {
+            if let Some(value) = self.text_value(text) {
+                self.fixed.retain(|(k, _)| *k != key);
+                self.fixed.push((key, value));
+            }
+            return;
+        }
+        let kind = if hidden {
+            FieldKind::Hidden
+        } else {
+            FieldKind::Text
+        };
+        self.add_field(label, kind, text);
+    }
+
     /// `true` if the fixed key `key` has a value.
     pub(crate) fn has(&self, key: &str) -> bool {
         self.fixed.iter().any(|(k, _)| *k == key)

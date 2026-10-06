@@ -76,6 +76,9 @@
 #   import_firefox_csv rizzy-import's Firefox CSV importer
 #   import_rizzy_json  rizzy-import's reader of rizzy-vault's own plaintext JSON export
 #                      (ADR 0027 §6)
+#   import_aliasvault_csv rizzy-import's AliasVault CSV importer and its CSV reader
+#   import_aliasvault_avux rizzy-import's AliasVault .avux importer: the zip reader and the
+#                      manifest.json mapping
 #   wasm_host_input    rizzy-wasm's readers of what JavaScript hands in: response status and
 #                      body (`checkMeta`, `expectNoContent`), hex ids, item-draft entries, and
 #                      the start of a login and a signup (ADR 0013 §3 rule 8)
@@ -387,6 +390,20 @@ bench = false
 [[bin]]
 name = "import_rizzy_json"
 path = "fuzz_targets/import_rizzy_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import_aliasvault_csv"
+path = "fuzz_targets/import_aliasvault_csv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import_aliasvault_avux"
+path = "fuzz_targets/import_aliasvault_avux.rs"
 test = false
 doc = false
 bench = false

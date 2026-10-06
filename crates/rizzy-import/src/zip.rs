@@ -96,6 +96,16 @@ const fn max_deflated_len(uncompressed: usize) -> usize {
         .saturating_add(DEFLATE_SLACK)
 }
 
+/// Whether the archive's central directory lists a member named exactly `name`, without
+/// decompressing it: for format sniffing (`rizzy-client`'s `export::detect`), which must tell
+/// a 1PUX archive (`export.data`) from an `AliasVault` `.avux` one (`manifest.json`) before
+/// either is decompressed. `false` for a damaged or unsupported archive, exactly as for a
+/// missing member.
+#[must_use]
+pub fn contains(archive: &[u8], name: &str) -> bool {
+    find(archive, name.as_bytes()).is_ok()
+}
+
 /// Extracts the member `name` of the archive `archive`, whose uncompressed size may be at most
 /// `max_len`, into a zeroizing buffer allocated once at that size.
 ///
@@ -365,6 +375,16 @@ pub(crate) mod tests {
             let out = extract(&sample(deflated), "export.data", 1 << 20).unwrap();
             assert_eq!(out.as_slice(), b"{\"accounts\": [], \"accounts2\": []}");
         }
+    }
+
+    #[test]
+    fn contains_checks_the_central_directory_only() {
+        let archive = sample(false);
+        assert!(contains(&archive, "export.data"));
+        assert!(contains(&archive, "export.attributes"));
+        assert!(!contains(&archive, "manifest.json"));
+        assert!(!contains(b"not a zip", "export.data"));
+        assert!(!contains(b"", "export.data"));
     }
 
     #[test]

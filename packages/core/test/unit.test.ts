@@ -8,9 +8,10 @@ import {
   type Transport,
   checkServer,
   fetchTransport,
-  generatePassphrase,
-  generatePassword,
+  generatePassphraseWithOptions,
+  generatePasswordWithOptions,
   login,
+  newElementId,
   plaintextExportPhrase,
   plaintextExportWarning,
   version,
@@ -36,12 +37,42 @@ describe("the module", () => {
     expect(version()).toBe("0.0.0");
   });
 
+  // The generator's full option surface (every class rule, exclude, symbol set, entropy,
+  // limits, error codes) is covered by generator.test.ts; this is only a smoke test that the
+  // module wires generatePasswordWithOptions/generatePassphraseWithOptions through to Rust.
   it("generates passwords and passphrases in Rust", () => {
-    const password = generatePassword(24, true, true);
+    const password = generatePasswordWithOptions({ length: 24, excludeAmbiguous: true });
     expect(password.value).toHaveLength(24);
     expect(password.entropyBits).toBeGreaterThan(100);
-    expect(generatePassphrase(6).value.split(".")).toHaveLength(6);
-    expect(() => generatePassword(0)).toThrow(CoreError);
+    expect(generatePassphraseWithOptions({ words: 6 }).value.split(".")).toHaveLength(6);
+    expect(() => generatePasswordWithOptions({ length: 0 })).toThrow(CoreError);
+  });
+
+  it("can include or exclude character classes", () => {
+    const digitsOnly = generatePasswordWithOptions({
+      length: 32,
+      lowercase: "excluded",
+      uppercase: "excluded",
+      digits: "required",
+      symbols: "excluded",
+    });
+    expect(digitsOnly.value).toMatch(/^[0-9]+$/);
+    expect(() =>
+      generatePasswordWithOptions({
+        length: 8,
+        lowercase: "excluded",
+        uppercase: "excluded",
+        digits: "excluded",
+        symbols: "excluded",
+      }),
+    ).toThrow(CoreError);
+  });
+
+  it("mints distinct element ids for new list rows", () => {
+    const a = newElementId();
+    const b = newElementId();
+    expect(a).toMatch(/^[0-9a-f]{32}$/);
+    expect(a).not.toBe(b);
   });
 
   it("carries the frozen plaintext-export texts", () => {

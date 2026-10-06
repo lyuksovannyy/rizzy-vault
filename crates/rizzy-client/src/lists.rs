@@ -553,20 +553,26 @@ impl VaultSync {
         Ok(plan.new_orders)
     }
 
-    /// The writes that add one element to `list`: each of `attributes` (attribute name and
-    /// encoded value) under a new random element id, and `order` as given (from
-    /// [`VaultSync::plan_list_order`]; `None` writes no `order`). Returns the element id with
-    /// the writes. The schema checks run when the host writes them.
+    /// The writes that add one element to `list` under `element` (the caller's choice of id):
+    /// each of `attributes` (attribute name and encoded value), and `order` as given (from
+    /// [`VaultSync::plan_list_order`]; `None` writes no `order`). The schema checks run when
+    /// the host writes them.
+    ///
+    /// Callers that mint `element` once on the client, before the first attempt to save, and
+    /// pass the same id again on every retry get a save that is safe to repeat: writing the
+    /// same key to the same value a second time changes nothing (ADR 0018 §6, "a list is a
+    /// map from an element id to fields"), so a retry after an unclear outcome (the earlier
+    /// attempt's answer was lost, not necessarily refused) cannot create a second element.
+    /// [`VaultSync::new_element_writes`] is this, with a fresh id instead.
     ///
     /// # Errors
     /// [`ClientError::InvalidEdit`] for a list or attribute name the key grammar refuses.
-    pub fn new_element_writes<R: CryptoRng + ?Sized>(
-        rng: &mut R,
+    pub fn element_writes(
+        element: ElementId,
         list: &str,
         attributes: Vec<(&str, Value)>,
         order: Option<&SortKey>,
-    ) -> Result<(ElementId, Vec<ElementWrite>), ClientError> {
-        let element = ElementId::generate(rng);
+    ) -> Result<Vec<ElementWrite>, ClientError> {
         let mut writes = Vec::with_capacity(attributes.len() + 1);
         for (attribute, value) in attributes {
             let key = element
@@ -580,9 +586,27 @@ impl VaultSync {
                 .map_err(|_| ClientError::InvalidEdit)?;
             writes.push((key, Value::sort_key(order)));
         }
-        Ok((element, writes))
+        Ok(writes)
     }
 
+    /// [`VaultSync::element_writes`] under a new random element id. Returns the id with the
+    /// writes.
+    ///
+    /// # Errors
+    /// As [`VaultSync::element_writes`].
+    pub fn new_element_writes<R: CryptoRng + ?Sized>(
+        rng: &mut R,
+        list: &str,
+        attributes: Vec<(&str, Value)>,
+        order: Option<&SortKey>,
+    ) -> Result<(ElementId, Vec<ElementWrite>), ClientError> {
+        let element = ElementId::generate(rng);
+        let writes = Self::element_writes(element, list, attributes, order)?;
+        Ok((element, writes))
+    }
+}
+
+impl VaultSync {
     /// The writes that remove the element `element` (its full hex id) from `list` of `item`:
     /// Cleared to each attribute of it the item holds a register of, keys an M1 client never
     /// writes left out (module docs).

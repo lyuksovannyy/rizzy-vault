@@ -32,7 +32,7 @@
 //! | [`Session`] | the unlocked session: sync driver, items, TOTP, export, import, devices, 2FA, lock |
 //! | [`ItemDraft`], [`ItemSummary`], [`FieldView`] | item edits and views |
 //! | [`HttpRequest`], [`meta_request`], [`check_meta`], [`expect_no_content`] | the requests JavaScript sends and the answers it hands back |
-//! | [`generate_password_with_options`] (`generatePasswordWithOptions`), [`generate_passphrase_with_options`] (`generatePassphraseWithOptions`), [`password_entropy`] (`passwordEntropy`), [`passphrase_entropy`] (`passphraseEntropy`), [`generator_limits`] (`generatorLimits`), [`GeneratorLimits`], the earlier [`generate_password_js`] (`generatePassword`) and [`generate_passphrase_js`] (`generatePassphrase`), [`Generated`] | the generator, every option ([`generator`]) |
+//! | [`generate_password_with_options`] (`generatePasswordWithOptions`), [`generate_passphrase_with_options`] (`generatePassphraseWithOptions`), [`password_entropy`] (`passwordEntropy`), [`passphrase_entropy`] (`passphraseEntropy`), [`generator_limits`] (`generatorLimits`), [`GeneratorLimits`], [`Generated`] | the generator, every option ([`generator`]) |
 //! | [`TotpCode`], [`EncryptedExport`], [`ImportReport`], [`DeviceView`], [`TwoFactorEnrolment`] | results |
 //! | [`plaintext_export_warning`], [`plaintext_export_phrase`] | the frozen texts of ADR 0027 §5 |
 //! | [`plaintext_export_hold_ms`], [`detect_import_format`] | the hold after the plaintext warning; recognising an import file (owner decision 2026-10-05) |
@@ -610,23 +610,20 @@ pub mod generator {
     //! The password generator (CRYPTO.md §12.1; ROADMAP §4.2 "generate"), as `rv generate` offers
     //! it: characters or words, drawn from the CSPRNG in Rust. No session is needed.
     //!
-    //! Two sets of calls:
-    //! - [`generate_password_with_options`] (`generatePasswordWithOptions`) and
-    //!   [`generate_passphrase_with_options`] (`generatePassphraseWithOptions`) take every option
-    //!   of `rizzy-core`'s generator; [`password_entropy`] (`passwordEntropy`) and
-    //!   [`passphrase_entropy`] (`passphraseEntropy`) check the same options and give the entropy
-    //!   without generating, for a live display; [`generator_limits`] (`generatorLimits`) gives the
-    //!   bounds and the default character sets. Refused options throw a `generator_*` code
-    //!   ([`generator_error`]), one per reason, so the UI can say what to change.
-    //! - [`generate_password_js`] (`generatePassword`) and [`generate_passphrase_js`]
-    //!   (`generatePassphrase`), the first, smaller calls, unchanged: refused options throw
-    //!   `invalid_input`.
+    //! [`generate_password_with_options`] (`generatePasswordWithOptions`) and
+    //! [`generate_passphrase_with_options`] (`generatePassphraseWithOptions`) take every option of
+    //! `rizzy-core`'s generator; [`password_entropy`] (`passwordEntropy`) and
+    //! [`passphrase_entropy`] (`passphraseEntropy`) check the same options and give the entropy
+    //! without generating, for a live display; [`generator_limits`] (`generatorLimits`) gives the
+    //! bounds and the default character sets. Refused options throw a `generator_*` code
+    //! ([`generator_error`]), one per reason, so the UI can say what to change. There is one set of
+    //! calls, not two: the web vault's generator page and its in-editor generate slot both build
+    //! their requests from the same options and read the same `generator_*` codes.
     //!
     //! Every option arrives from JavaScript and is untrusted (ADR 0013 §3 rule 8): character sets
     //! are parsed by [`CharSet::parse`], which reads at most [`MAX_SET_TEXT_LEN`] bytes, and the
     //! separator must be exactly one character. Options are not secrets; the generated value is.
     use core::fmt;
-    use rizzy_client::ClientError;
     use rizzy_client::rizzy_core::generator::{
         AMBIGUOUS, CharClass, CharSet, CharacterOptions, ClassRule,
         GeneratorError, MAX_LENGTH, MAX_SET_TEXT_LEN, MAX_WORDS, MIN_LENGTH,
@@ -3255,298 +3252,6 @@ pub mod generator {
             static _GENERATED: [u8; _LEN] =
                 flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
         };
-    #[allow(dead_code)]
-    #[doc =
-    " A password of `length` characters from lowercase, uppercase and digits (each required),"]
-    #[doc =
-    " with symbols required or left out, and ambiguous characters left out if asked."]
-    #[doc = ""]
-    #[doc = " # Errors"]
-    #[doc =
-    " `invalid_input` for options the generator refuses (such as a length below the number of"]
-    #[doc = " required classes)."]
-    pub fn generate_password_js(length: usize, symbols: bool,
-        exclude_ambiguous: bool) -> Result<Generated, CoreError> {
-        let generated =
-            generate_password(&mut os_rng(),
-                        &CharacterOptions {
-                                length,
-                                symbols: if symbols {
-                                    ClassRule::Required
-                                } else { ClassRule::Excluded },
-                                exclude_ambiguous,
-                                ..CharacterOptions::default()
-                            }).map_err(|_| ClientError::InvalidInput)?;
-        Ok(generated.into())
-    }
-    #[automatically_derived]
-    const _: () =
-        {
-            #[doc =
-            " A password of `length` characters from lowercase, uppercase and digits (each required),"]
-            #[doc =
-            " with symbols required or left out, and ambiguous characters left out if asked."]
-            #[doc = ""]
-            #[doc = " # Errors"]
-            #[doc =
-            " `invalid_input` for options the generator refuses (such as a length below the number of"]
-            #[doc = " required classes)."]
-            #[export_name = "generatePassword_e09cc0eb35f8b583"]
-            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_generatePassword(arg0_1:
-                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim1,
-                arg0_2:
-                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim2,
-                arg0_3:
-                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim3,
-                arg0_4:
-                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim4,
-                arg1_1:
-                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim1,
-                arg1_2:
-                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim2,
-                arg1_3:
-                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim3,
-                arg1_4:
-                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim4,
-                arg2_1:
-                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim1,
-                arg2_2:
-                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim2,
-                arg2_3:
-                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim3,
-                arg2_4:
-                    <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim4)
-                ->
-                    wasm_bindgen::convert::WasmRet<<Result<Generated, CoreError>
-                    as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
-                const _: () = {};
-                let _ret =
-                    wasm_bindgen::__rt::maybe_catch_unwind(||
-                            {
-                                {
-                                    wasm_bindgen::__rt::ensure_unwind_safe::<usize>();
-                                    let arg0 =
-                                        unsafe {
-                                            <usize as
-                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<usize as
-                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
-                                                        wasm_bindgen::convert::WasmAbi>::join(arg0_1, arg0_2,
-                                                    arg0_3, arg0_4))
-                                        };
-                                    wasm_bindgen::__rt::ensure_unwind_safe::<bool>();
-                                    let arg1 =
-                                        unsafe {
-                                            <bool as
-                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<bool as
-                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
-                                                        wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
-                                                    arg1_3, arg1_4))
-                                        };
-                                    wasm_bindgen::__rt::ensure_unwind_safe::<bool>();
-                                    let arg2 =
-                                        unsafe {
-                                            <bool as
-                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<bool as
-                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
-                                                        wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
-                                                    arg2_3, arg2_4))
-                                        };
-                                    let _ret = generate_password_js(arg0, arg1, arg2);
-                                    _ret
-                                }
-                            });
-                <Result<Generated, CoreError> as
-                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
-            }
-        };
-    #[automatically_derived]
-    const _: () =
-        {
-            #[doc =
-            " A password of `length` characters from lowercase, uppercase and digits (each required),"]
-            #[doc =
-            " with symbols required or left out, and ambiguous characters left out if asked."]
-            #[doc = ""]
-            #[doc = " # Errors"]
-            #[doc =
-            " `invalid_input` for options the generator refuses (such as a length below the number of"]
-            #[doc = " required classes)."]
-            #[no_mangle]
-            #[doc(hidden)]
-            pub extern "C-unwind" fn __wbindgen_describe_generatePassword_e09cc0eb35f8b583() {
-                use wasm_bindgen::describe::*;
-                wasm_bindgen::__rt::link_mem_intrinsics();
-                inform(FUNCTION);
-                inform(0);
-                inform(3u32);
-                <usize as WasmDescribe>::describe();
-                <bool as WasmDescribe>::describe();
-                <bool as WasmDescribe>::describe();
-                <Result<Generated, CoreError> as WasmDescribe>::describe();
-                <Result<Generated, CoreError> as WasmDescribe>::describe();
-            }
-        };
-    #[automatically_derived]
-    const _: () =
-        {
-            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
-            static _INCLUDED_FILES: &[&str] = &[];
-            const _ENCODED_BYTES: &[u8] =
-                {
-                    const _CHUNK_SLICES: [&[u8]; 1usize] =
-                        [b"\x01\0\x06X A password of `length` characters from lowercase, uppercase and digits (each required),O with symbols required or left out, and ambiguous characters left out if asked.\0\t # ErrorsX `invalid_input` for options the generator refuses (such as a length below the number of\x13 required classes).\0\x03\x06length\0\0\0\x07symbols\0\0\0\x11exclude_ambiguous\0\0\0\0\0\x10generatePassword\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
-                    #[allow(long_running_const_eval)]
-                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
-                    #[allow(long_running_const_eval)]
-                    const _CHUNKS: [u8; _CHUNK_LEN] =
-                        flat_byte_slices(_CHUNK_SLICES);
-                    const _LEN_BYTES: [u8; 4] =
-                        (_CHUNK_LEN as u32).to_le_bytes();
-                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
-                    #[allow(long_running_const_eval)]
-                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
-                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
-                    &_ENCODED_BYTES
-                };
-            const _PREFIX_JSON_BYTES: &[u8] =
-                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
-            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
-            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
-            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
-            #[link_section = "__wasm_bindgen_unstable"]
-            #[allow(long_running_const_eval)]
-            static _GENERATED: [u8; _LEN] =
-                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
-        };
-    #[allow(dead_code)]
-    #[doc =
-    " A passphrase of `words` words from the generator\'s word list, separated by `.`."]
-    #[doc = ""]
-    #[doc = " # Errors"]
-    #[doc = " `invalid_input` for a word count the generator refuses."]
-    pub fn generate_passphrase_js(words: usize)
-        -> Result<Generated, CoreError> {
-        let generated =
-            generate_passphrase(&mut os_rng(),
-                        &PassphraseOptions {
-                                words,
-                                ..PassphraseOptions::default()
-                            }).map_err(|_| ClientError::InvalidInput)?;
-        Ok(generated.into())
-    }
-    #[automatically_derived]
-    const _: () =
-        {
-            #[doc =
-            " A passphrase of `words` words from the generator\'s word list, separated by `.`."]
-            #[doc = ""]
-            #[doc = " # Errors"]
-            #[doc =
-            " `invalid_input` for a word count the generator refuses."]
-            #[export_name = "generatePassphrase_e09cc0eb35f8b583"]
-            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_generatePassphrase(arg0_1:
-                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim1,
-                arg0_2:
-                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim2,
-                arg0_3:
-                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim3,
-                arg0_4:
-                    <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim4)
-                ->
-                    wasm_bindgen::convert::WasmRet<<Result<Generated, CoreError>
-                    as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
-                const _: () = {};
-                let _ret =
-                    wasm_bindgen::__rt::maybe_catch_unwind(||
-                            {
-                                {
-                                    wasm_bindgen::__rt::ensure_unwind_safe::<usize>();
-                                    let arg0 =
-                                        unsafe {
-                                            <usize as
-                                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(<<usize as
-                                                        wasm_bindgen::convert::FromWasmAbi>::Abi as
-                                                        wasm_bindgen::convert::WasmAbi>::join(arg0_1, arg0_2,
-                                                    arg0_3, arg0_4))
-                                        };
-                                    let _ret = generate_passphrase_js(arg0);
-                                    _ret
-                                }
-                            });
-                <Result<Generated, CoreError> as
-                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
-            }
-        };
-    #[automatically_derived]
-    const _: () =
-        {
-            #[doc =
-            " A passphrase of `words` words from the generator\'s word list, separated by `.`."]
-            #[doc = ""]
-            #[doc = " # Errors"]
-            #[doc =
-            " `invalid_input` for a word count the generator refuses."]
-            #[no_mangle]
-            #[doc(hidden)]
-            pub extern "C-unwind" fn __wbindgen_describe_generatePassphrase_e09cc0eb35f8b583() {
-                use wasm_bindgen::describe::*;
-                wasm_bindgen::__rt::link_mem_intrinsics();
-                inform(FUNCTION);
-                inform(0);
-                inform(1u32);
-                <usize as WasmDescribe>::describe();
-                <Result<Generated, CoreError> as WasmDescribe>::describe();
-                <Result<Generated, CoreError> as WasmDescribe>::describe();
-            }
-        };
-    #[automatically_derived]
-    const _: () =
-        {
-            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
-            static _INCLUDED_FILES: &[&str] = &[];
-            const _ENCODED_BYTES: &[u8] =
-                {
-                    const _CHUNK_SLICES: [&[u8]; 1usize] =
-                        [b"\x01\0\x04P A passphrase of `words` words from the generator's word list, separated by `.`.\0\t # Errors8 `invalid_input` for a word count the generator refuses.\0\x01\x05words\0\0\0\0\0\x12generatePassphrase\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
-                    #[allow(long_running_const_eval)]
-                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
-                    #[allow(long_running_const_eval)]
-                    const _CHUNKS: [u8; _CHUNK_LEN] =
-                        flat_byte_slices(_CHUNK_SLICES);
-                    const _LEN_BYTES: [u8; 4] =
-                        (_CHUNK_LEN as u32).to_le_bytes();
-                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
-                    #[allow(long_running_const_eval)]
-                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
-                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
-                    &_ENCODED_BYTES
-                };
-            const _PREFIX_JSON_BYTES: &[u8] =
-                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
-            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
-            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
-            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
-            #[link_section = "__wasm_bindgen_unstable"]
-            #[allow(long_running_const_eval)]
-            static _GENERATED: [u8; _LEN] =
-                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
-        };
 }
 pub mod http {
     //! The `/api/v1` conventions of [ADR 0028] on the Rust side of a JavaScript `fetch` (ADR 0013
@@ -5055,10 +4760,13 @@ pub mod items {
     //! including an existing element's attribute such as `uri/<id>/value`), `clear`, `tag` and
     //! `untag`, `addUri`, `addCustomField` (text, hidden or boolean) and `removeElement`.
     use core::fmt;
+    use std::collections::HashMap;
     use rizzy_client::ClientError;
     use rizzy_client::items::{
         FieldKey, ItemId, ItemLifecycle, ItemType, Value,
     };
+    use rizzy_client::lists::{ListMove, ListPlace, MAX_WRITES_PER_OP};
+    use rizzy_client::rizzy_core::item::key::ElementId;
     use rizzy_client::rizzy_core::item::schema::{
         ATTR_KIND, ATTR_LABEL, ATTR_VALUE, CUSTOM_KIND_BOOLEAN,
         CUSTOM_KIND_HIDDEN, CUSTOM_KIND_TEXT, Concealment, CustomFieldKind,
@@ -5067,11 +4775,11 @@ pub mod items {
     };
     use rizzy_client::rizzy_core::item::tag::{tag_key, tag_name};
     use rizzy_client::rizzy_core::item::value::ValueRef;
-    use rizzy_client::rizzy_core::rng::CryptoRng;
     use rizzy_client::sync::VaultSync;
     use wasm_bindgen::prelude::wasm_bindgen;
     use zeroize::Zeroizing;
     use crate::error::{CoreError, CoreResult};
+    use crate::rng::os_rng;
     /// The most entries one draft takes: the writes of one op (ADR 0018 §10: 1,024).
     pub const MAX_DRAFT_ENTRIES: usize = 1024;
     /// The item types the web vault names, as `rv --type` names them.
@@ -5137,6 +4845,105 @@ pub mod items {
     pub(crate) fn item_id(text: &str) -> CoreResult<ItemId> {
         Ok(ItemId::from_bytes(parse_id(text)?))
     }
+    /// The element id a hex id names.
+    fn element_id_of(text: &str) -> CoreResult<ElementId> {
+        Ok(ElementId::from_bytes(parse_id(text)?))
+    }
+    #[allow(dead_code)]
+    #[doc =
+    " A fresh element id (32 lowercase hex digits), for the host to mint once per new list row —"]
+    #[doc =
+    " a website or a custom field the user is about to add — and pass to [`ItemDraft::add_uri`]"]
+    #[doc =
+    " or [`ItemDraft::add_custom_field`] on every attempt to save it, the first and any retry"]
+    #[doc =
+    " alike (module docs, \"An edit\"). No session is needed: the id carries no key material."]
+    #[must_use]
+    pub fn generate_element_id() -> String {
+        let element = ElementId::generate(&mut os_rng());
+        hex(element.as_bytes())
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " A fresh element id (32 lowercase hex digits), for the host to mint once per new list row —"]
+            #[doc =
+            " a website or a custom field the user is about to add — and pass to [`ItemDraft::add_uri`]"]
+            #[doc =
+            " or [`ItemDraft::add_custom_field`] on every attempt to save it, the first and any retry"]
+            #[doc =
+            " alike (module docs, \"An edit\"). No session is needed: the id carries no key material."]
+            #[must_use]
+            #[export_name = "generateElementId_e09cc0eb35f8b583"]
+            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_generateElementId()
+                ->
+                    wasm_bindgen::convert::WasmRet<<String as
+                    wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                const _: () = {};
+                let _ret =
+                    wasm_bindgen::__rt::maybe_catch_unwind(||
+                            { { let _ret = generate_element_id(); _ret } });
+                <String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " A fresh element id (32 lowercase hex digits), for the host to mint once per new list row —"]
+            #[doc =
+            " a website or a custom field the user is about to add — and pass to [`ItemDraft::add_uri`]"]
+            #[doc =
+            " or [`ItemDraft::add_custom_field`] on every attempt to save it, the first and any retry"]
+            #[doc =
+            " alike (module docs, \"An edit\"). No session is needed: the id carries no key material."]
+            #[must_use]
+            #[no_mangle]
+            #[doc(hidden)]
+            pub extern "C-unwind" fn __wbindgen_describe_generateElementId_e09cc0eb35f8b583() {
+                use wasm_bindgen::describe::*;
+                wasm_bindgen::__rt::link_mem_intrinsics();
+                inform(FUNCTION);
+                inform(0);
+                inform(0u32);
+                <String as WasmDescribe>::describe();
+                <String as WasmDescribe>::describe();
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\x01\0\x04] A fresh element id (32 lowercase hex digits), for the host to mint once per new list row \xe2\x80\x94\\ a website or a custom field the user is about to add \xe2\x80\x94 and pass to [`ItemDraft::add_uri`]X or [`ItemDraft::add_custom_field`] on every attempt to save it, the first and any retryV alike (module docs, \"An edit\"). No session is needed: the id carries no key material.\0\0\0\0\x11generateElementId\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
     /// The text of a field, if it holds one.
     fn text_field(vault: &VaultSync, item: ItemId, key: &str)
         -> Option<Zeroizing<String>> {
@@ -7369,6 +7176,11 @@ pub mod items {
         }
     }
     /// The displayed fields of `item`, concealed values withheld (module docs).
+    ///
+    /// `vault.field_keys` gives no guarantee about the order of two elements of the same list: the
+    /// `order` attribute (ADR 0018 §6) is a value elements carry, not a property of the key's
+    /// bytes. [`reorder_list_elements`] imposes it afterwards, so a host that (like `packages/core`
+    /// `group`) assumes the elements of one list arrive in display order gets that.
     pub(crate) fn fields(vault: &VaultSync, item: ItemId) -> Vec<FieldView> {
         let mut out = Vec::new();
         for key in vault.field_keys(item) {
@@ -7393,7 +7205,41 @@ pub mod items {
                     key,
                 });
         }
+        reorder_list_elements(vault, item, &mut out);
         out
+    }
+    /// Moves the rows of `out` so that, within each list, an element's attributes come before a
+    /// later element's, in [`VaultSync::list_elements`]'s order — the order ADR 0018 §6 defines,
+    /// already used to show an item's websites and custom fields. A row of a fixed key or a tag
+    /// (`list` is `None`) is not reordered against other such rows: [`Vec::sort_by_key`] is a
+    /// stable sort, so giving every one of them the same key (`0`) leaves them in their original
+    /// relative order, interleaved however they land among the ranked rows (`reorder_list_elements`
+    /// changes which list's rows come first, never a fixed field's or tag's position among its
+    /// own kind, and `packages/core`'s `group` only reads order within one list).
+    fn reorder_list_elements(vault: &VaultSync, item: ItemId,
+        out: &mut [FieldView]) {
+        let mut lists: Vec<&str> = Vec::new();
+        for field in out.iter() {
+            if let Some(list) = field.list.as_deref() &&
+                    !lists.contains(&list) {
+                lists.push(list);
+            }
+        }
+        let mut rank: HashMap<(String, String), usize> = HashMap::new();
+        for list in lists {
+            for (index, element) in
+                vault.list_elements(item, list).into_iter().enumerate() {
+                rank.insert((list.to_owned(),
+                        element.element.as_str().to_owned()), index);
+            }
+        }
+        out.sort_by_key(|field|
+                match (field.list.as_deref(), field.element.as_deref()) {
+                    (Some(list), Some(element)) =>
+                        rank.get(&(list.to_owned(),
+                                            element.to_owned())).copied().unwrap_or(usize::MAX),
+                    _ => 0,
+                });
     }
     /// The value of one field of `item` as text, concealed or not (ADR 0013 §3 rule 3: "A secret
     /// field value crosses only when the user reveals it").
@@ -7472,14 +7318,34 @@ pub mod items {
         /// A tag removed.
         Untag(Zeroizing<String>),
 
-        /// A new URI.
-        AddUri(Zeroizing<String>),
+        /// A new URI, under the element id the host minted for it.
+        AddUri(ElementId, Zeroizing<String>),
 
-        /// A new custom field: label, kind, value.
-        AddCustom(Zeroizing<String>, CustomKind, Zeroizing<String>),
+        /// A new custom field, under the element id the host minted for it: label, kind, value.
+        AddCustom(ElementId, Zeroizing<String>, CustomKind,
+            Zeroizing<String>),
 
         /// An element removed: list, full element id.
         Remove(String, String),
+
+        /// An existing element moved: list, full element id, place.
+        Move(String, String, MovePlace),
+    }
+    /// Where [`Entry::Move`] puts an element, as the host names it (`"first"`, `"last"`,
+    /// `"before"`, `"after"`); `Debug` redacted as item data.
+    pub(crate) enum MovePlace {
+
+        /// First in the list.
+        First,
+
+        /// Last in the list.
+        Last,
+
+        /// Just before this element (its full hex id).
+        Before(String),
+
+        /// Just after this element (its full hex id).
+        After(String),
     }
     #[wasm_bindgen()]
     #[__wasm_bindgen_retried]
@@ -8353,18 +8219,35 @@ pub mod items {
                 };
             self.push(Entry::Untag(Zeroizing::new(name.to_owned())))
         }
-        #[doc = " Adds a URI, after the item\'s last one."]
+        #[doc =
+        " Adds a URI, after the item\'s last one, under `element_id` (32 lowercase hex digits):"]
+        #[doc =
+        " the host\'s choice of id, from [`generate_element_id`] — minted once per row and passed"]
+        #[doc =
+        " again on every retry, so that retrying a save after an unclear outcome writes the same"]
+        #[doc =
+        " element instead of a second one (module docs; `rizzy_client::sync::VaultSync::element_writes`)."]
         #[doc = ""]
         #[doc = " # Errors"]
-        #[doc = " As [`ItemDraft::set`]."]
-        pub fn add_uri(&mut self, uri: &str) -> Result<(), CoreError> {
+        #[doc =
+        " `invalid_input` for an `element_id` that is not 32 hex digits; as [`ItemDraft::set`]."]
+        pub fn add_uri(&mut self, element_id: &str, uri: &str)
+            -> Result<(), CoreError> {
             #[automatically_derived]
             const _: () =
                 {
-                    #[doc = " Adds a URI, after the item\'s last one."]
+                    #[doc =
+                    " Adds a URI, after the item\'s last one, under `element_id` (32 lowercase hex digits):"]
+                    #[doc =
+                    " the host\'s choice of id, from [`generate_element_id`] — minted once per row and passed"]
+                    #[doc =
+                    " again on every retry, so that retrying a save after an unclear outcome writes the same"]
+                    #[doc =
+                    " element instead of a second one (module docs; `rizzy_client::sync::VaultSync::element_writes`)."]
                     #[doc = ""]
                     #[doc = " # Errors"]
-                    #[doc = " As [`ItemDraft::set`]."]
+                    #[doc =
+                    " `invalid_input` for an `element_id` that is not 32 hex digits; as [`ItemDraft::set`]."]
                     #[export_name = "itemdraft_addUri_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_ItemDraft_addUri(me:
                             <ItemDraft as
@@ -8379,6 +8262,18 @@ pub mod items {
                             <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim3,
                         arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
                             <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4)
                         ->
@@ -8406,7 +8301,17 @@ pub mod items {
                                                             arg1_3, arg1_4))
                                                 };
                                             let arg1 = &*arg1;
-                                            let _ret = me.add_uri(arg1);
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let arg2 = &*arg2;
+                                            let _ret = me.add_uri(arg1, arg2);
                                             _ret
                                         }
                                     });
@@ -8417,10 +8322,18 @@ pub mod items {
             #[automatically_derived]
             const _: () =
                 {
-                    #[doc = " Adds a URI, after the item\'s last one."]
+                    #[doc =
+                    " Adds a URI, after the item\'s last one, under `element_id` (32 lowercase hex digits):"]
+                    #[doc =
+                    " the host\'s choice of id, from [`generate_element_id`] — minted once per row and passed"]
+                    #[doc =
+                    " again on every retry, so that retrying a save after an unclear outcome writes the same"]
+                    #[doc =
+                    " element instead of a second one (module docs; `rizzy_client::sync::VaultSync::element_writes`)."]
                     #[doc = ""]
                     #[doc = " # Errors"]
-                    #[doc = " As [`ItemDraft::set`]."]
+                    #[doc =
+                    " `invalid_input` for an `element_id` that is not 32 hex digits; as [`ItemDraft::set`]."]
                     #[no_mangle]
                     #[doc(hidden)]
                     pub extern "C-unwind" fn __wbindgen_describe_itemdraft_addUri_e09cc0eb35f8b583() {
@@ -8428,7 +8341,8 @@ pub mod items {
                         wasm_bindgen::__rt::link_mem_intrinsics();
                         inform(FUNCTION);
                         inform(0);
-                        inform(1u32);
+                        inform(2u32);
+                        <&str as WasmDescribe>::describe();
                         <&str as WasmDescribe>::describe();
                         <Result<(), CoreError> as WasmDescribe>::describe();
                         <Result<(), CoreError> as WasmDescribe>::describe();
@@ -8442,7 +8356,7 @@ pub mod items {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\tItemDraft\x04' Adds a URI, after the item's last one.\0\t # Errors\x17 As [`ItemDraft::set`].\0\x01\x03uri\0\0\0\0\0\x06addUri\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\tItemDraft\x07U Adds a URI, after the item's last one, under `element_id` (32 lowercase hex digits):Y the host's choice of id, from [`generate_element_id`] \xe2\x80\x94 minted once per row and passedW again on every retry, so that retrying a save after an unclear outcome writes the same` element instead of a second one (module docs; `rizzy_client::sync::VaultSync::element_writes`).\0\t # ErrorsV `invalid_input` for an `element_id` that is not 32 hex digits; as [`ItemDraft::set`].\0\x02\nelement_id\0\0\0\x03uri\0\0\0\0\0\x06addUri\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -8468,26 +8382,30 @@ pub mod items {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            self.push(Entry::AddUri(Zeroizing::new(uri.to_owned())))
+            let element = element_id_of(element_id)?;
+            self.push(Entry::AddUri(element, Zeroizing::new(uri.to_owned())))
         }
         #[doc =
-        " Adds a custom field after the item\'s last one. `kind` is `text`, `hidden` or"]
-        #[doc = " `boolean` (whose value is `true` or `false`)."]
+        " Adds a custom field after the item\'s last one, under `element_id` (as [`ItemDraft::add_uri`]"]
+        #[doc =
+        " takes it). `kind` is `text`, `hidden` or `boolean` (whose value is `true` or `false`)."]
         #[doc = ""]
         #[doc = " # Errors"]
-        #[doc = " `invalid_input` for another kind; as [`ItemDraft::set`]."]
-        pub fn add_custom_field(&mut self, label: &str, kind: &str,
-            value: &str) -> Result<(), CoreError> {
+        #[doc =
+        " `invalid_input` for another kind or a bad `element_id`; as [`ItemDraft::set`]."]
+        pub fn add_custom_field(&mut self, element_id: &str, label: &str,
+            kind: &str, value: &str) -> Result<(), CoreError> {
             #[automatically_derived]
             const _: () =
                 {
                     #[doc =
-                    " Adds a custom field after the item\'s last one. `kind` is `text`, `hidden` or"]
-                    #[doc = " `boolean` (whose value is `true` or `false`)."]
+                    " Adds a custom field after the item\'s last one, under `element_id` (as [`ItemDraft::add_uri`]"]
+                    #[doc =
+                    " takes it). `kind` is `text`, `hidden` or `boolean` (whose value is `true` or `false`)."]
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
-                    " `invalid_input` for another kind; as [`ItemDraft::set`]."]
+                    " `invalid_input` for another kind or a bad `element_id`; as [`ItemDraft::set`]."]
                     #[export_name = "itemdraft_addCustomField_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_ItemDraft_addCustomField(me:
                             <ItemDraft as
@@ -8526,6 +8444,18 @@ pub mod items {
                             <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim3,
                         arg3_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg4_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg4_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg4_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg4_4:
                             <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4)
                         ->
@@ -8573,7 +8503,17 @@ pub mod items {
                                                             arg3_3, arg3_4))
                                                 };
                                             let arg3 = &*arg3;
-                                            let _ret = me.add_custom_field(arg1, arg2, arg3);
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg4 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                            arg4_3, arg4_4))
+                                                };
+                                            let arg4 = &*arg4;
+                                            let _ret = me.add_custom_field(arg1, arg2, arg3, arg4);
                                             _ret
                                         }
                                     });
@@ -8585,12 +8525,13 @@ pub mod items {
             const _: () =
                 {
                     #[doc =
-                    " Adds a custom field after the item\'s last one. `kind` is `text`, `hidden` or"]
-                    #[doc = " `boolean` (whose value is `true` or `false`)."]
+                    " Adds a custom field after the item\'s last one, under `element_id` (as [`ItemDraft::add_uri`]"]
+                    #[doc =
+                    " takes it). `kind` is `text`, `hidden` or `boolean` (whose value is `true` or `false`)."]
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
-                    " `invalid_input` for another kind; as [`ItemDraft::set`]."]
+                    " `invalid_input` for another kind or a bad `element_id`; as [`ItemDraft::set`]."]
                     #[no_mangle]
                     #[doc(hidden)]
                     pub extern "C-unwind" fn __wbindgen_describe_itemdraft_addCustomField_e09cc0eb35f8b583() {
@@ -8598,7 +8539,8 @@ pub mod items {
                         wasm_bindgen::__rt::link_mem_intrinsics();
                         inform(FUNCTION);
                         inform(0);
-                        inform(3u32);
+                        inform(4u32);
+                        <&str as WasmDescribe>::describe();
                         <&str as WasmDescribe>::describe();
                         <&str as WasmDescribe>::describe();
                         <&str as WasmDescribe>::describe();
@@ -8614,7 +8556,7 @@ pub mod items {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\tItemDraft\x05M Adds a custom field after the item's last one. `kind` is `text`, `hidden` or. `boolean` (whose value is `true` or `false`).\0\t # Errors9 `invalid_input` for another kind; as [`ItemDraft::set`].\0\x03\x05label\0\0\0\x04kind\0\0\0\x05value\0\0\0\0\0\x0eaddCustomField\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\tItemDraft\x05] Adds a custom field after the item's last one, under `element_id` (as [`ItemDraft::add_uri`]W takes it). `kind` is `text`, `hidden` or `boolean` (whose value is `true` or `false`).\0\t # ErrorsO `invalid_input` for another kind or a bad `element_id`; as [`ItemDraft::set`].\0\x04\nelement_id\0\0\0\x05label\0\0\0\x04kind\0\0\0\x05value\0\0\0\0\0\x0eaddCustomField\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -8640,6 +8582,7 @@ pub mod items {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
+            let element = element_id_of(element_id)?;
             let kind =
                 match kind {
                     "text" => CustomKind::Text,
@@ -8647,8 +8590,235 @@ pub mod items {
                     "boolean" => CustomKind::Boolean,
                     _ => return Err(ClientError::InvalidInput.into()),
                 };
-            self.push(Entry::AddCustom(Zeroizing::new(label.to_owned()), kind,
+            self.push(Entry::AddCustom(element,
+                    Zeroizing::new(label.to_owned()), kind,
                     Zeroizing::new(value.to_owned())))
+        }
+        #[doc =
+        " Moves an existing element (as [`FieldView::element`] gives it) of `list`: `place` is"]
+        #[doc =
+        " `first`, `last`, `before` or `after`, and `relative` is the neighbouring element\'s full"]
+        #[doc =
+        " hex id, required for `before`/`after`. Applied only when the draft is written"]
+        #[doc =
+        " ([`crate::Session::edit_item`]): moving the same element to the same place twice writes"]
+        #[doc =
+        " the same `order` both times, so retrying this is as safe as retrying [`ItemDraft::add_uri`]."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " `invalid_input` for an unknown `place` or a missing `relative`; as [`ItemDraft::set`]."]
+        pub fn move_element(&mut self, list: &str, element: &str, place: &str,
+            relative: Option<String>) -> Result<(), CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Moves an existing element (as [`FieldView::element`] gives it) of `list`: `place` is"]
+                    #[doc =
+                    " `first`, `last`, `before` or `after`, and `relative` is the neighbouring element\'s full"]
+                    #[doc =
+                    " hex id, required for `before`/`after`. Applied only when the draft is written"]
+                    #[doc =
+                    " ([`crate::Session::edit_item`]): moving the same element to the same place twice writes"]
+                    #[doc =
+                    " the same `order` both times, so retrying this is as safe as retrying [`ItemDraft::add_uri`]."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `invalid_input` for an unknown `place` or a missing `relative`; as [`ItemDraft::set`]."]
+                    #[export_name = "itemdraft_moveElement_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_ItemDraft_moveElement(me:
+                            <ItemDraft as
+                            wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg3_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg3_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg3_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg3_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg4_1:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg4_2:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg4_3:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg4_4:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<ItemDraft>();
+                                            let mut me =
+                                                unsafe {
+                                                    <ItemDraft as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let arg2 = &*arg2;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg3 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
+                                                };
+                                            let arg3 = &*arg3;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<Option<String>>();
+                                            let arg4 =
+                                                unsafe {
+                                                    <Option<String> as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Option<String>
+                                                                as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                            arg4_3, arg4_4))
+                                                };
+                                            let _ret = me.move_element(arg1, arg2, arg3, arg4);
+                                            _ret
+                                        }
+                                    });
+                        <Result<(), CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Moves an existing element (as [`FieldView::element`] gives it) of `list`: `place` is"]
+                    #[doc =
+                    " `first`, `last`, `before` or `after`, and `relative` is the neighbouring element\'s full"]
+                    #[doc =
+                    " hex id, required for `before`/`after`. Applied only when the draft is written"]
+                    #[doc =
+                    " ([`crate::Session::edit_item`]): moving the same element to the same place twice writes"]
+                    #[doc =
+                    " the same `order` both times, so retrying this is as safe as retrying [`ItemDraft::add_uri`]."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `invalid_input` for an unknown `place` or a missing `relative`; as [`ItemDraft::set`]."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_itemdraft_moveElement_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(4u32);
+                        <&str as WasmDescribe>::describe();
+                        <&str as WasmDescribe>::describe();
+                        <&str as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                        <Result<(), CoreError> as WasmDescribe>::describe();
+                        <Result<(), CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\tItemDraft\x08U Moves an existing element (as [`FieldView::element`] gives it) of `list`: `place` isX `first`, `last`, `before` or `after`, and `relative` is the neighbouring element's fullN hex id, required for `before`/`after`. Applied only when the draft is writtenX ([`crate::Session::edit_item`]): moving the same element to the same place twice writes] the same `order` both times, so retrying this is as safe as retrying [`ItemDraft::add_uri`].\0\t # ErrorsW `invalid_input` for an unknown `place` or a missing `relative`; as [`ItemDraft::set`].\0\x04\x04list\0\0\0\x07element\0\0\0\x05place\0\0\0\x08relative\0\0\0\0\0\x0bmoveElement\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let to =
+                match place {
+                    "first" => MovePlace::First,
+                    "last" => MovePlace::Last,
+                    "before" =>
+                        MovePlace::Before(relative.ok_or(ClientError::InvalidInput)?),
+                    "after" =>
+                        MovePlace::After(relative.ok_or(ClientError::InvalidInput)?),
+                    _ => return Err(ClientError::InvalidInput.into()),
+                };
+            self.push(Entry::Move(list.to_owned(), element.to_owned(), to))
         }
         #[doc =
         " Removes an element (a URI, a custom field, …) of `list` by its full element id, as"]
@@ -8996,15 +9166,16 @@ pub mod items {
                 ClientError::InvalidEdit.into())
     }
     /// The writes of `draft` for a new item (`item` is `None`) or an existing one. The schema
-    /// checks run when they are written.
-    pub(crate) fn writes<R: CryptoRng +
-        ?Sized>(rng: &mut R, vault: &VaultSync, item: Option<ItemId>,
+    /// checks run when they are written. Every element id is the host's, carried on the entry
+    /// (module docs, "An edit"); nothing here draws randomness, so writing the same draft twice
+    /// produces the same writes.
+    pub(crate) fn writes(vault: &VaultSync, item: Option<ItemId>,
         draft: &ItemDraft) -> CoreResult<Vec<Write>> {
         let mut out = Vec::new();
         let uris =
             draft.entries.iter().filter(|e|
                         #[allow(non_exhaustive_omitted_patterns)] match e {
-                            Entry::AddUri(_) => true,
+                            Entry::AddUri(..) => true,
                             _ => false,
                         }).count();
         let customs =
@@ -9032,15 +9203,15 @@ pub mod items {
                 Entry::Untag(name) =>
                     out.push((tag_key(name).map_err(|_|
                                         ClientError::InvalidEdit)?, Value::cleared())),
-                Entry::AddUri(uri) => {
+                Entry::AddUri(element, uri) => {
                     let order = uri_orders.next().ok_or(ClientError::Internal)?;
-                    let (_, new) =
-                        VaultSync::new_element_writes(rng, LIST_URI,
+                    let new =
+                        VaultSync::element_writes(*element, LIST_URI,
                                 <[_]>::into_vec(::alloc::boxed::box_new([(ATTR_VALUE,
                                                     text(uri)?)])), Some(&order))?;
                     out.extend(new);
                 }
-                Entry::AddCustom(label, kind, value) => {
+                Entry::AddCustom(element, label, kind, value) => {
                     let order =
                         custom_orders.next().ok_or(ClientError::Internal)?;
                     let (kind_id, value) =
@@ -9050,8 +9221,8 @@ pub mod items {
                             CustomKind::Boolean =>
                                 (CUSTOM_KIND_BOOLEAN, boolean(value)?),
                         };
-                    let (_, new) =
-                        VaultSync::new_element_writes(rng, LIST_FIELD,
+                    let new =
+                        VaultSync::element_writes(*element, LIST_FIELD,
                                 <[_]>::into_vec(::alloc::boxed::box_new([(ATTR_LABEL,
                                                     text(label)?), (ATTR_KIND, Value::enumeration(kind_id)),
                                                 (ATTR_VALUE, value)])), Some(&order))?;
@@ -9061,6 +9232,26 @@ pub mod items {
                     let item = item.ok_or(ClientError::InvalidEdit)?;
                     out.extend(vault.element_removal_writes(item, list,
                                 element)?);
+                }
+                Entry::Move(list, element, place) => {
+                    let item = item.ok_or(ClientError::InvalidEdit)?;
+                    let to =
+                        match place {
+                            MovePlace::First => ListPlace::First,
+                            MovePlace::Last => ListPlace::Last,
+                            MovePlace::Before(id) =>
+                                ListPlace::Before(Zeroizing::new(id.clone())),
+                            MovePlace::After(id) =>
+                                ListPlace::After(Zeroizing::new(id.clone())),
+                        };
+                    let moves =
+                        [ListMove { element: Zeroizing::new(element.clone()), to }];
+                    let plan =
+                        vault.plan_list_order(Some(item), list, &[], 0, &moves)?;
+                    if plan.writes.len() > MAX_WRITES_PER_OP {
+                        return Err(ClientError::InvalidEdit.into());
+                    }
+                    out.extend(plan.writes);
                 }
             }
         }
@@ -13069,8 +13260,7 @@ pub mod session {
                 };
             let item_type = type_from_name(item_type)?;
             let inner = self.writable()?;
-            let writes =
-                items::writes(&mut inner.rng, &inner.vault, None, draft)?;
+            let writes = items::writes(&inner.vault, None, draft)?;
             let edits: Vec<FieldEdit<'_>> =
                 writes.iter().map(|(key, value)|
                             FieldEdit { key, value }).collect();
@@ -13252,9 +13442,7 @@ pub mod session {
             }
             let inner = self.writable()?;
             let item = items::item_id(id)?;
-            let writes =
-                items::writes(&mut inner.rng, &inner.vault, Some(item),
-                        draft)?;
+            let writes = items::writes(&inner.vault, Some(item), draft)?;
             let edits: Vec<FieldEdit<'_>> =
                 writes.iter().map(|(key, value)|
                             FieldEdit { key, value }).collect();
@@ -15225,7 +15413,8 @@ pub mod session {
         #[doc =
         " `format` is one of `bitwarden-json`, `1pux`, `keepass-xml`, `csv`, `chrome-csv`,"]
         #[doc =
-        " `firefox-csv`, `rizzy-json`. The report has counts only (INV-48)."]
+        " `firefox-csv`, `rizzy-json`, `aliasvault-csv`, `aliasvault-avux`. The report has counts"]
+        #[doc = " only (INV-48)."]
         #[doc = ""]
         #[doc = " # Errors"]
         #[doc =
@@ -15243,7 +15432,8 @@ pub mod session {
                     #[doc =
                     " `format` is one of `bitwarden-json`, `1pux`, `keepass-xml`, `csv`, `chrome-csv`,"]
                     #[doc =
-                    " `firefox-csv`, `rizzy-json`. The report has counts only (INV-48)."]
+                    " `firefox-csv`, `rizzy-json`, `aliasvault-csv`, `aliasvault-avux`. The report has counts"]
+                    #[doc = " only (INV-48)."]
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
@@ -15350,7 +15540,8 @@ pub mod session {
                     #[doc =
                     " `format` is one of `bitwarden-json`, `1pux`, `keepass-xml`, `csv`, `chrome-csv`,"]
                     #[doc =
-                    " `firefox-csv`, `rizzy-json`. The report has counts only (INV-48)."]
+                    " `firefox-csv`, `rizzy-json`, `aliasvault-csv`, `aliasvault-avux`. The report has counts"]
+                    #[doc = " only (INV-48)."]
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
@@ -15383,7 +15574,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\x08S Imports a file of another product, or our own plaintext JSON export, as new items.Q `format` is one of `bitwarden-json`, `1pux`, `keepass-xml`, `csv`, `chrome-csv`,B `firefox-csv`, `rizzy-json`. The report has counts only (INV-48).\0\t # ErrorsX `locked`; `wrong_state` while a sync runs; `unknown_format`; `invalid_input` for a fileS over [`MAX_IMPORT_FILE_LEN`]; `import_failed` when the file as a whole is refused;\r `read_only`.\0\x03\x06format\0\0\0\x04file\0\0\0\x06now_ms\0\0\0\0\0\nimportFile\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\tS Imports a file of another product, or our own plaintext JSON export, as new items.Q `format` is one of `bitwarden-json`, `1pux`, `keepass-xml`, `csv`, `chrome-csv`,X `firefox-csv`, `rizzy-json`, `aliasvault-csv`, `aliasvault-avux`. The report has counts\x0f only (INV-48).\0\t # ErrorsX `locked`; `wrong_state` while a sync runs; `unknown_format`; `invalid_input` for a fileS over [`MAX_IMPORT_FILE_LEN`]; `import_failed` when the file as a whole is refused;\r `read_only`.\0\x03\x06format\0\0\0\x04file\0\0\0\x06now_ms\0\0\0\0\0\nimportFile\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -15418,6 +15609,8 @@ pub mod session {
                     "chrome-csv" => Format::ChromeCsv,
                     "firefox-csv" => Format::FirefoxCsv,
                     "rizzy-json" => Format::RizzyPlaintextJson,
+                    "aliasvault-csv" => Format::AliasVaultCsv,
+                    "aliasvault-avux" => Format::AliasVaultAvux,
                     _ => return Err(CoreError::new(UNKNOWN_FORMAT)),
                 };
             if file.len() > MAX_IMPORT_FILE_LEN {
@@ -16605,6 +16798,8 @@ pub mod session {
                             Format::ChromeCsv => "chrome-csv",
                             Format::FirefoxCsv => "firefox-csv",
                             Format::RizzyPlaintextJson => "rizzy-json",
+                            Format::AliasVaultCsv => "aliasvault-csv",
+                            Format::AliasVaultAvux => "aliasvault-avux",
                             _ => "unknown",
                         },
                     _ => "unknown",
@@ -22647,13 +22842,12 @@ pub mod sync {
 }
 pub use error::CoreError;
 pub use generator::{
-    Generated, GeneratorLimits, generate_passphrase_js,
-    generate_passphrase_with_options, generate_password_js,
+    Generated, GeneratorLimits, generate_passphrase_with_options,
     generate_password_with_options, generator_limits, passphrase_entropy,
     password_entropy,
 };
 pub use http::{HttpRequest, check_meta, expect_no_content, meta_request};
-pub use items::{FieldView, ItemDraft, ItemSummary};
+pub use items::{FieldView, ItemDraft, ItemSummary, generate_element_id};
 pub use login::LoginFlow;
 pub use session::{
     DeviceView, EncryptedExport, ImportReport, Session, TotpCode,

@@ -19,9 +19,12 @@
 //! `untag`, `addUri`, `addCustomField` (text, hidden or boolean) and `removeElement`.
 
 use core::fmt;
+use std::collections::HashMap;
 
 use rizzy_client::ClientError;
 use rizzy_client::items::{FieldKey, ItemId, ItemLifecycle, ItemType, Value};
+use rizzy_client::lists::{ListMove, ListPlace, MAX_WRITES_PER_OP};
+use rizzy_client::rizzy_core::item::key::ElementId;
 use rizzy_client::rizzy_core::item::schema::{
     ATTR_KIND, ATTR_LABEL, ATTR_VALUE, CUSTOM_KIND_BOOLEAN, CUSTOM_KIND_HIDDEN, CUSTOM_KIND_TEXT,
     Concealment, CustomFieldKind, Expected, ITEM_FAVORITE, ITEM_NAME, KeyClass, LIST_FIELD,
@@ -29,12 +32,12 @@ use rizzy_client::rizzy_core::item::schema::{
 };
 use rizzy_client::rizzy_core::item::tag::{tag_key, tag_name};
 use rizzy_client::rizzy_core::item::value::ValueRef;
-use rizzy_client::rizzy_core::rng::CryptoRng;
 use rizzy_client::sync::VaultSync;
 use wasm_bindgen::prelude::wasm_bindgen;
 use zeroize::Zeroizing;
 
 use crate::error::{CoreError, CoreResult};
+use crate::rng::os_rng;
 
 /// The most entries one draft takes: the writes of one op (ADR 0018 §10: 1,024).
 pub const MAX_DRAFT_ENTRIES: usize = 1024;
@@ -113,6 +116,22 @@ pub fn parse_id(text: &str) -> CoreResult<[u8; 16]> {
 /// The item a hex id names.
 pub(crate) fn item_id(text: &str) -> CoreResult<ItemId> {
     Ok(ItemId::from_bytes(parse_id(text)?))
+}
+
+/// The element id a hex id names.
+fn element_id_of(text: &str) -> CoreResult<ElementId> {
+    Ok(ElementId::from_bytes(parse_id(text)?))
+}
+
+/// A fresh element id (32 lowercase hex digits), for the host to mint once per new list row —
+/// a website or a custom field the user is about to add — and pass to [`ItemDraft::add_uri`]
+/// or [`ItemDraft::add_custom_field`] on every attempt to save it, the first and any retry
+/// alike (module docs, "An edit"). No session is needed: the id carries no key material.
+#[wasm_bindgen(js_name = generateElementId)]
+#[must_use]
+pub fn generate_element_id() -> String {
+    let element = ElementId::generate(&mut os_rng());
+    hex(element.as_bytes())
 }
 
 /// The text of a field, if it holds one.
@@ -374,6 +393,11 @@ pub(crate) fn visible_item(vault: &VaultSync, id: &str) -> CoreResult<ItemId> {
 }
 
 /// The displayed fields of `item`, concealed values withheld (module docs).
+///
+/// `vault.field_keys` gives no guarantee about the order of two elements of the same list: the
+/// `order` attribute (ADR 0018 §6) is a value elements carry, not a property of the key's
+/// bytes. [`reorder_list_elements`] imposes it afterwards, so a host that (like `packages/core`
+/// `group`) assumes the elements of one list arrive in display order gets that.
 pub(crate) fn fields(vault: &VaultSync, item: ItemId) -> Vec<FieldView> {
     let mut out = Vec::new();
     for key in vault.field_keys(item) {
@@ -401,7 +425,45 @@ pub(crate) fn fields(vault: &VaultSync, item: ItemId) -> Vec<FieldView> {
             key,
         });
     }
+    reorder_list_elements(vault, item, &mut out);
     out
+}
+
+/// Moves the rows of `out` so that, within each list, an element's attributes come before a
+/// later element's, in [`VaultSync::list_elements`]'s order — the order ADR 0018 §6 defines,
+/// already used to show an item's websites and custom fields. A row of a fixed key or a tag
+/// (`list` is `None`) is not reordered against other such rows: [`Vec::sort_by_key`] is a
+/// stable sort, so giving every one of them the same key (`0`) leaves them in their original
+/// relative order, interleaved however they land among the ranked rows (`reorder_list_elements`
+/// changes which list's rows come first, never a fixed field's or tag's position among its
+/// own kind, and `packages/core`'s `group` only reads order within one list).
+fn reorder_list_elements(vault: &VaultSync, item: ItemId, out: &mut [FieldView]) {
+    let mut lists: Vec<&str> = Vec::new();
+    for field in out.iter() {
+        if let Some(list) = field.list.as_deref()
+            && !lists.contains(&list)
+        {
+            lists.push(list);
+        }
+    }
+    let mut rank: HashMap<(String, String), usize> = HashMap::new();
+    for list in lists {
+        for (index, element) in vault.list_elements(item, list).into_iter().enumerate() {
+            rank.insert(
+                (list.to_owned(), element.element.as_str().to_owned()),
+                index,
+            );
+        }
+    }
+    out.sort_by_key(
+        |field| match (field.list.as_deref(), field.element.as_deref()) {
+            (Some(list), Some(element)) => rank
+                .get(&(list.to_owned(), element.to_owned()))
+                .copied()
+                .unwrap_or(usize::MAX),
+            _ => 0,
+        },
+    );
 }
 
 /// The value of one field of `item` as text, concealed or not (ADR 0013 §3 rule 3: "A secret
@@ -437,12 +499,27 @@ enum Entry {
     Tag(Zeroizing<String>),
     /// A tag removed.
     Untag(Zeroizing<String>),
-    /// A new URI.
-    AddUri(Zeroizing<String>),
-    /// A new custom field: label, kind, value.
-    AddCustom(Zeroizing<String>, CustomKind, Zeroizing<String>),
+    /// A new URI, under the element id the host minted for it.
+    AddUri(ElementId, Zeroizing<String>),
+    /// A new custom field, under the element id the host minted for it: label, kind, value.
+    AddCustom(ElementId, Zeroizing<String>, CustomKind, Zeroizing<String>),
     /// An element removed: list, full element id.
     Remove(String, String),
+    /// An existing element moved: list, full element id, place.
+    Move(String, String, MovePlace),
+}
+
+/// Where [`Entry::Move`] puts an element, as the host names it (`"first"`, `"last"`,
+/// `"before"`, `"after"`); `Debug` redacted as item data.
+pub(crate) enum MovePlace {
+    /// First in the list.
+    First,
+    /// Last in the list.
+    Last,
+    /// Just before this element (its full hex id).
+    Before(String),
+    /// Just after this element (its full hex id).
+    After(String),
 }
 
 /// The changes of one create or edit (module docs). Values are wiped when the draft is freed
@@ -506,27 +583,33 @@ impl ItemDraft {
         self.push(Entry::Untag(Zeroizing::new(name.to_owned())))
     }
 
-    /// Adds a URI, after the item's last one.
+    /// Adds a URI, after the item's last one, under `element_id` (32 lowercase hex digits):
+    /// the host's choice of id, from [`generate_element_id`] — minted once per row and passed
+    /// again on every retry, so that retrying a save after an unclear outcome writes the same
+    /// element instead of a second one (module docs; `rizzy_client::sync::VaultSync::element_writes`).
     ///
     /// # Errors
-    /// As [`ItemDraft::set`].
+    /// `invalid_input` for an `element_id` that is not 32 hex digits; as [`ItemDraft::set`].
     #[wasm_bindgen(js_name = addUri)]
-    pub fn add_uri(&mut self, uri: &str) -> Result<(), CoreError> {
-        self.push(Entry::AddUri(Zeroizing::new(uri.to_owned())))
+    pub fn add_uri(&mut self, element_id: &str, uri: &str) -> Result<(), CoreError> {
+        let element = element_id_of(element_id)?;
+        self.push(Entry::AddUri(element, Zeroizing::new(uri.to_owned())))
     }
 
-    /// Adds a custom field after the item's last one. `kind` is `text`, `hidden` or
-    /// `boolean` (whose value is `true` or `false`).
+    /// Adds a custom field after the item's last one, under `element_id` (as [`ItemDraft::add_uri`]
+    /// takes it). `kind` is `text`, `hidden` or `boolean` (whose value is `true` or `false`).
     ///
     /// # Errors
-    /// `invalid_input` for another kind; as [`ItemDraft::set`].
+    /// `invalid_input` for another kind or a bad `element_id`; as [`ItemDraft::set`].
     #[wasm_bindgen(js_name = addCustomField)]
     pub fn add_custom_field(
         &mut self,
+        element_id: &str,
         label: &str,
         kind: &str,
         value: &str,
     ) -> Result<(), CoreError> {
+        let element = element_id_of(element_id)?;
         let kind = match kind {
             "text" => CustomKind::Text,
             "hidden" => CustomKind::Hidden,
@@ -534,10 +617,37 @@ impl ItemDraft {
             _ => return Err(ClientError::InvalidInput.into()),
         };
         self.push(Entry::AddCustom(
+            element,
             Zeroizing::new(label.to_owned()),
             kind,
             Zeroizing::new(value.to_owned()),
         ))
+    }
+
+    /// Moves an existing element (as [`FieldView::element`] gives it) of `list`: `place` is
+    /// `first`, `last`, `before` or `after`, and `relative` is the neighbouring element's full
+    /// hex id, required for `before`/`after`. Applied only when the draft is written
+    /// ([`crate::Session::edit_item`]): moving the same element to the same place twice writes
+    /// the same `order` both times, so retrying this is as safe as retrying [`ItemDraft::add_uri`].
+    ///
+    /// # Errors
+    /// `invalid_input` for an unknown `place` or a missing `relative`; as [`ItemDraft::set`].
+    #[wasm_bindgen(js_name = moveElement)]
+    pub fn move_element(
+        &mut self,
+        list: &str,
+        element: &str,
+        place: &str,
+        relative: Option<String>,
+    ) -> Result<(), CoreError> {
+        let to = match place {
+            "first" => MovePlace::First,
+            "last" => MovePlace::Last,
+            "before" => MovePlace::Before(relative.ok_or(ClientError::InvalidInput)?),
+            "after" => MovePlace::After(relative.ok_or(ClientError::InvalidInput)?),
+            _ => return Err(ClientError::InvalidInput.into()),
+        };
+        self.push(Entry::Move(list.to_owned(), element.to_owned(), to))
     }
 
     /// Removes an element (a URI, a custom field, …) of `list` by its full element id, as
@@ -641,9 +751,10 @@ fn parse_key(text: &str) -> CoreResult<FieldKey> {
 }
 
 /// The writes of `draft` for a new item (`item` is `None`) or an existing one. The schema
-/// checks run when they are written.
-pub(crate) fn writes<R: CryptoRng + ?Sized>(
-    rng: &mut R,
+/// checks run when they are written. Every element id is the host's, carried on the entry
+/// (module docs, "An edit"); nothing here draws randomness, so writing the same draft twice
+/// produces the same writes.
+pub(crate) fn writes(
     vault: &VaultSync,
     item: Option<ItemId>,
     draft: &ItemDraft,
@@ -652,7 +763,7 @@ pub(crate) fn writes<R: CryptoRng + ?Sized>(
     let uris = draft
         .entries
         .iter()
-        .filter(|e| matches!(e, Entry::AddUri(_)))
+        .filter(|e| matches!(e, Entry::AddUri(..)))
         .count();
     let customs = draft
         .entries
@@ -677,25 +788,25 @@ pub(crate) fn writes<R: CryptoRng + ?Sized>(
                 tag_key(name).map_err(|_| ClientError::InvalidEdit)?,
                 Value::cleared(),
             )),
-            Entry::AddUri(uri) => {
+            Entry::AddUri(element, uri) => {
                 let order = uri_orders.next().ok_or(ClientError::Internal)?;
-                let (_, new) = VaultSync::new_element_writes(
-                    rng,
+                let new = VaultSync::element_writes(
+                    *element,
                     LIST_URI,
                     vec![(ATTR_VALUE, text(uri)?)],
                     Some(&order),
                 )?;
                 out.extend(new);
             }
-            Entry::AddCustom(label, kind, value) => {
+            Entry::AddCustom(element, label, kind, value) => {
                 let order = custom_orders.next().ok_or(ClientError::Internal)?;
                 let (kind_id, value) = match kind {
                     CustomKind::Text => (CUSTOM_KIND_TEXT, text(value)?),
                     CustomKind::Hidden => (CUSTOM_KIND_HIDDEN, text(value)?),
                     CustomKind::Boolean => (CUSTOM_KIND_BOOLEAN, boolean(value)?),
                 };
-                let (_, new) = VaultSync::new_element_writes(
-                    rng,
+                let new = VaultSync::element_writes(
+                    *element,
                     LIST_FIELD,
                     vec![
                         (ATTR_LABEL, text(label)?),
@@ -709,6 +820,24 @@ pub(crate) fn writes<R: CryptoRng + ?Sized>(
             Entry::Remove(list, element) => {
                 let item = item.ok_or(ClientError::InvalidEdit)?;
                 out.extend(vault.element_removal_writes(item, list, element)?);
+            }
+            Entry::Move(list, element, place) => {
+                let item = item.ok_or(ClientError::InvalidEdit)?;
+                let to = match place {
+                    MovePlace::First => ListPlace::First,
+                    MovePlace::Last => ListPlace::Last,
+                    MovePlace::Before(id) => ListPlace::Before(Zeroizing::new(id.clone())),
+                    MovePlace::After(id) => ListPlace::After(Zeroizing::new(id.clone())),
+                };
+                let moves = [ListMove {
+                    element: Zeroizing::new(element.clone()),
+                    to,
+                }];
+                let plan = vault.plan_list_order(Some(item), list, &[], 0, &moves)?;
+                if plan.writes.len() > MAX_WRITES_PER_OP {
+                    return Err(ClientError::InvalidEdit.into());
+                }
+                out.extend(plan.writes);
             }
         }
     }
@@ -749,11 +878,25 @@ mod tests {
         }
         assert_eq!(draft.length(), MAX_DRAFT_ENTRIES);
         assert!(draft.set("item.name", "x").is_err());
+        let id = generate_element_id();
         assert!(
             ItemDraft::new()
-                .add_custom_field("l", "secret", "v")
+                .add_custom_field(&id, "l", "secret", "v")
                 .is_err()
         );
         assert!(!format!("{draft:?}").contains('x'));
+    }
+
+    #[test]
+    fn element_ids_are_generated_and_accepted() {
+        let a = generate_element_id();
+        let b = generate_element_id();
+        assert_eq!(a.len(), 32);
+        assert_ne!(a, b, "two draws should not collide");
+        let mut draft = ItemDraft::new();
+        assert!(draft.add_uri(&a, "https://example.test").is_ok());
+        assert!(draft.add_uri("not-hex", "https://example.test").is_err());
+        assert!(draft.move_element("uri", &a, "first", None).is_ok());
+        assert!(draft.move_element("uri", &a, "before", None).is_err());
     }
 }

@@ -27,6 +27,7 @@ import {
   fetchTransport,
   detectImportFormat,
   login,
+  newElementId,
   plaintextExportHoldMs,
   plaintextExportPhrase,
 } from "../src/index.js";
@@ -177,8 +178,14 @@ describe.skipIf(binary === undefined)("against a real server", () => {
       { op: "set", key: "item.name", value: "Example" },
       { op: "set", key: "login.username", value: "alice@example.com" },
       { op: "set", key: "login.password", value: "hunter2-but-longer" },
-      { op: "addUri", uri: "https://example.com/login" },
-      { op: "addCustomField", label: "PIN", kind: "hidden", value: "4321" },
+      { op: "addUri", element: newElementId(), uri: "https://example.com/login" },
+      {
+        op: "addCustomField",
+        element: newElementId(),
+        label: "PIN",
+        kind: "hidden",
+        value: "4321",
+      },
       { op: "tag", name: "work" },
     ]);
     expect(id).toMatch(/^[0-9a-f]{32}$/);
@@ -219,10 +226,22 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     expect(pin).toMatchObject({ concealed: true, value: undefined });
     expect(fields.some((f) => f.tag === "work")).toBe(true);
 
+    // A repeated add under the same minted element id — as a retried save would send after an
+    // unclear outcome — must not create a second element (module docs, "idempotent save").
+    const retryId = newElementId();
+    second.editItem(id, [{ op: "addUri", element: retryId, uri: "https://retry.example.test" }]);
+    second.editItem(id, [{ op: "addUri", element: retryId, uri: "https://retry.example.test" }]);
+    expect(
+      second
+        .fields(id)
+        .filter((f) => f.list === "uri" && f.attribute === "value" && f.value === "https://retry.example.test"),
+    ).toHaveLength(1);
+
     // An edit, then the first session follows it.
     second.editItem(id, [
       { op: "set", key: "login.password", value: "a-new-password" },
       { op: "removeElement", list: "uri", element: uri?.element ?? "" },
+      { op: "removeElement", list: "uri", element: retryId },
     ]);
     await second.sync();
     await first.sync();

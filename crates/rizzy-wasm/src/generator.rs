@@ -1,17 +1,15 @@
 //! The password generator (CRYPTO.md §12.1; ROADMAP §4.2 "generate"), as `rv generate` offers
 //! it: characters or words, drawn from the CSPRNG in Rust. No session is needed.
 //!
-//! Two sets of calls:
-//! - [`generate_password_with_options`] (`generatePasswordWithOptions`) and
-//!   [`generate_passphrase_with_options`] (`generatePassphraseWithOptions`) take every option
-//!   of `rizzy-core`'s generator; [`password_entropy`] (`passwordEntropy`) and
-//!   [`passphrase_entropy`] (`passphraseEntropy`) check the same options and give the entropy
-//!   without generating, for a live display; [`generator_limits`] (`generatorLimits`) gives the
-//!   bounds and the default character sets. Refused options throw a `generator_*` code
-//!   ([`generator_error`]), one per reason, so the UI can say what to change.
-//! - [`generate_password_js`] (`generatePassword`) and [`generate_passphrase_js`]
-//!   (`generatePassphrase`), the first, smaller calls, unchanged: refused options throw
-//!   `invalid_input`.
+//! [`generate_password_with_options`] (`generatePasswordWithOptions`) and
+//! [`generate_passphrase_with_options`] (`generatePassphraseWithOptions`) take every option of
+//! `rizzy-core`'s generator; [`password_entropy`] (`passwordEntropy`) and
+//! [`passphrase_entropy`] (`passphraseEntropy`) check the same options and give the entropy
+//! without generating, for a live display; [`generator_limits`] (`generatorLimits`) gives the
+//! bounds and the default character sets. Refused options throw a `generator_*` code
+//! ([`generator_error`]), one per reason, so the UI can say what to change. There is one set of
+//! calls, not two: the web vault's generator page and its in-editor generate slot both build
+//! their requests from the same options and read the same `generator_*` codes.
 //!
 //! Every option arrives from JavaScript and is untrusted (ADR 0013 §3 rule 8): character sets
 //! are parsed by [`CharSet::parse`], which reads at most [`MAX_SET_TEXT_LEN`] bytes, and the
@@ -19,7 +17,6 @@
 
 use core::fmt;
 
-use rizzy_client::ClientError;
 use rizzy_client::rizzy_core::generator::{
     AMBIGUOUS, CharClass, CharSet, CharacterOptions, ClassRule, GeneratorError, MAX_LENGTH,
     MAX_SET_TEXT_LEN, MAX_WORDS, MIN_LENGTH, MIN_WORDS, PassphraseOptions, SYMBOLS,
@@ -375,66 +372,9 @@ pub fn generator_limits() -> GeneratorLimits {
     GeneratorLimits
 }
 
-/// A password of `length` characters from lowercase, uppercase and digits (each required),
-/// with symbols required or left out, and ambiguous characters left out if asked.
-///
-/// # Errors
-/// `invalid_input` for options the generator refuses (such as a length below the number of
-/// required classes).
-#[wasm_bindgen(js_name = generatePassword)]
-pub fn generate_password_js(
-    length: usize,
-    symbols: bool,
-    exclude_ambiguous: bool,
-) -> Result<Generated, CoreError> {
-    let generated = generate_password(
-        &mut os_rng(),
-        &CharacterOptions {
-            length,
-            symbols: if symbols {
-                ClassRule::Required
-            } else {
-                ClassRule::Excluded
-            },
-            exclude_ambiguous,
-            ..CharacterOptions::default()
-        },
-    )
-    .map_err(|_| ClientError::InvalidInput)?;
-    Ok(generated.into())
-}
-
-/// A passphrase of `words` words from the generator's word list, separated by `.`.
-///
-/// # Errors
-/// `invalid_input` for a word count the generator refuses.
-#[wasm_bindgen(js_name = generatePassphrase)]
-pub fn generate_passphrase_js(words: usize) -> Result<Generated, CoreError> {
-    let generated = generate_passphrase(
-        &mut os_rng(),
-        &PassphraseOptions {
-            words,
-            ..PassphraseOptions::default()
-        },
-    )
-    .map_err(|_| ClientError::InvalidInput)?;
-    Ok(generated.into())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn passwords_and_passphrases_are_generated() {
-        let password = generate_password_js(24, true, true).unwrap();
-        assert_eq!(password.value().len(), 24);
-        assert!(password.entropy_bits() > 100.0);
-        let phrase = generate_passphrase_js(6).unwrap();
-        assert_eq!(phrase.value().split('.').count(), 6);
-        assert!(generate_password_js(0, true, false).is_err());
-        assert!(!format!("{password:?}").contains(&password.value()));
-    }
 
     #[test]
     fn every_option_reaches_the_generator() {

@@ -813,6 +813,8 @@ const fn format_name(format: Format) -> &'static str {
         Format::ChromeCsv => "a Chrome password CSV",
         Format::FirefoxCsv => "a Firefox password CSV",
         Format::RizzyPlaintextJson => "a rizzy-vault plaintext JSON export",
+        Format::AliasVaultCsv => "an AliasVault CSV export",
+        Format::AliasVaultAvux => "an AliasVault .avux export",
         _ => "a file of a known format",
     }
 }
@@ -858,6 +860,8 @@ fn import_as(
         ImportFormat::FirefoxCsv => ImportAs::Foreign(Format::FirefoxCsv),
         ImportFormat::RizzyJson => ImportAs::Foreign(Format::RizzyPlaintextJson),
         ImportFormat::RizzyEncrypted => ImportAs::Encrypted,
+        ImportFormat::AliasVaultCsv => ImportAs::Foreign(Format::AliasVaultCsv),
+        ImportFormat::AliasVaultAvux => ImportAs::Foreign(Format::AliasVaultAvux),
     })
 }
 

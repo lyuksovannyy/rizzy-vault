@@ -14,11 +14,16 @@
 //! | Test | Answer |
 //! |---|---|
 //! | Over [`MAX_DETECT_LEN`] | nothing |
-//! | Starts with a zip local-file header (`PK\x03\x04`) | 1Password 1PUX |
+//! | Starts with a zip local-file header (`PK\x03\x04`) | zip, below |
 //! | Starts with the KDBX signature | `KeePass` XML, whose reader refuses a KDBX database with its own message |
 //! | After an optional UTF-8 byte-order mark and whitespace, starts with `{` | JSON, below |
 //! | … starts with `<` and `<KeePassFile` occurs in the first 64 KiB | `KeePass` XML |
 //! | … anything else | CSV, below |
+//!
+//! **Zip.** Its central directory (never decompressed at this stage,
+//! [`rizzy_import::zip::contains`]) lists a member named exactly `manifest.json`: `AliasVault`'s
+//! `.avux` export. Otherwise: 1Password 1PUX, the same default a damaged or unsupported archive
+//! gets, since its own reader then explains what is wrong with it.
 //!
 //! **JSON.** The strict, allocation-free reader of our encrypted export
 //! ([`parse_export_json`]) first: if it reads the file and `format` is
@@ -26,15 +31,22 @@
 //! reads the root object: `format` = `rizzy-vault-export` is a damaged encrypted export
 //! (its reader then says so), `rizzy-vault-plaintext-export` our plaintext JSON, and a root
 //! with an `items` array Bitwarden's JSON export (whose reader refuses an encrypted one with
-//! its own message). Anything else is nothing.
+//! its own message). Anything else is nothing. (`AliasVault`'s `.avex` encrypted export also
+//! starts with `{`, a JSON header; it is not recognised here — no `Format` exists for it yet,
+//! see `rizzy_import::aliasvault` — and its binary payload after the header's delimiter makes
+//! every rule above answer nothing, same as any other unknown JSON-like file.)
 //!
 //! **CSV.** The header row, read with `rizzy-import`'s bounded CSV reader. Exactly the columns
-//! of our plaintext CSV export: that export. `url`, `username` and `password` with one of
-//! Firefox's own columns (`httpRealm`, `formActionOrigin`, `guid`): Firefox. `name`, `url`,
-//! `username` and `password`, and no column but those and `note`: Chrome. A header with one
-//! of the generic importer's main columns (`name`, `title`, `username`, `password`, `url`,
-//! `uri`, `notes`, or Bitwarden's `login_…` spellings), ASCII case ignored: generic CSV.
-//! Anything else is nothing.
+//! of our plaintext CSV export: that export. `ServiceName`, `CurrentPassword` and `AliasEmail`
+//! all present (exact spelling): `AliasVault`'s CSV export (web or mobile app). `url`,
+//! `username` and `password` with one of Firefox's own columns (`httpRealm`,
+//! `formActionOrigin`, `guid`): Firefox. `name`, `url`, `username` and `password`, and no
+//! column but those and `note`: Chrome. A header with one of the generic importer's main
+//! columns (`name`, `title`, `username`, `password`, `url`, `uri`, `notes`, or Bitwarden's
+//! `login_…` spellings), ASCII case ignored: generic CSV. Anything else is nothing.
+//!
+//! The `AliasVault` check runs before the generic one: its header's `Username` column would
+//! otherwise match generic CSV's own `username` spelling first.
 //!
 //! # Hostile input
 //!
@@ -47,7 +59,7 @@
 use rizzy_core::export::FORMAT;
 use rizzy_import::Format;
 use rizzy_import::limits::{MAX_ARCHIVE_LEN, MAX_CSV_LEN, MAX_JSON_LEN};
-use rizzy_import::{csv, json};
+use rizzy_import::{csv, json, zip};
 
 use super::parse_export_json;
 use super::plaintext::csv_columns;
@@ -59,8 +71,11 @@ pub const MAX_DETECT_LEN: usize = MAX_ARCHIVE_LEN;
 /// The `format` string of our plaintext JSON export (ADR 0027 §3).
 const PLAINTEXT_FORMAT: &str = "rizzy-vault-plaintext-export";
 
-/// A zip local-file header: the first bytes of a 1PUX archive.
+/// A zip local-file header: the first bytes of a 1PUX archive or an `.avux` one.
 const ZIP_SIGNATURE: &[u8] = b"PK\x03\x04";
+
+/// The member of an `.avux` archive that tells it apart from a 1PUX archive.
+const AVUX_MANIFEST: &str = "manifest.json";
 
 /// The first four bytes of a KDBX database (`KeePass` signature 1, little-endian `0x9AA2D903`).
 const KDBX_SIGNATURE: &[u8] = &[0x03, 0xD9, 0xA2, 0x9A];
@@ -107,7 +122,13 @@ pub fn detect_format(file: &[u8]) -> Option<DetectedFormat> {
         return None;
     }
     if file.starts_with(ZIP_SIGNATURE) {
-        return Some(DetectedFormat::Import(Format::OnePux));
+        return Some(DetectedFormat::Import(
+            if zip::contains(file, AVUX_MANIFEST) {
+                Format::AliasVaultAvux
+            } else {
+                Format::OnePux
+            },
+        ));
     }
     if file.starts_with(KDBX_SIGNATURE) {
         return Some(DetectedFormat::Import(Format::KeePassXml));
@@ -164,6 +185,9 @@ fn detect_csv(file: &[u8]) -> Option<DetectedFormat> {
         return Some(DetectedFormat::RizzyPlaintextCsv);
     }
     let has = |name: &str| names.contains(&name);
+    if has("ServiceName") && has("CurrentPassword") && has("AliasEmail") {
+        return Some(DetectedFormat::Import(Format::AliasVaultCsv));
+    }
     if has("url")
         && has("username")
         && has("password")
@@ -197,6 +221,51 @@ mod tests {
 
     fn detect(text: &str) -> Option<DetectedFormat> {
         detect_format(text.as_bytes())
+    }
+
+    /// A minimal, valid, stored (uncompressed, empty) zip archive with one member named
+    /// `name`: enough for [`zip::contains`] to find it, without decompressing anything (its
+    /// CRC-32 is left as 0, which `contains` never checks).
+    fn zip_with(name: &str) -> Vec<u8> {
+        let name = name.as_bytes();
+        let name_len = u16::try_from(name.len()).unwrap().to_le_bytes();
+        let mut out = Vec::new();
+        // Local file header: signature, version/flags/method/modtime/moddate (10 bytes),
+        // crc (4), compressed and uncompressed size (4 each, both 0), name length, extra
+        // length (0), then the name itself. No data follows: the member is empty.
+        out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[0; 10]);
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&name_len);
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(name);
+        let cd_offset = u32::try_from(out.len()).unwrap();
+        // Central directory header: signature, version made/needed, flags, method, modtime,
+        // moddate (12 bytes), crc (4), sizes (4 each), name length, extra/comment lengths,
+        // start disk, internal attributes (12 bytes), external attributes (4), local header
+        // offset (4), then the name.
+        out.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[0; 12]);
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&name_len);
+        out.extend_from_slice(&[0; 12]);
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(name);
+        let cd_size = u32::try_from(out.len()).unwrap() - cd_offset;
+        // End of central directory: signature, disk numbers (4), entry counts (4), central
+        // directory size and offset, comment length (0).
+        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&cd_size.to_le_bytes());
+        out.extend_from_slice(&cd_offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
     }
 
     #[test]
@@ -266,6 +335,21 @@ mod tests {
         assert_eq!(
             detect(&format!("{ours}\r\n")),
             Some(DetectedFormat::RizzyPlaintextCsv)
+        );
+        assert_eq!(
+            detect(
+                "ServiceName,FolderPath,ServiceUrl,Username,CurrentPassword,AliasEmail,\
+                 TwoFactorSecret,Notes,CreatedAt,UpdatedAt\n"
+            ),
+            Some(DetectedFormat::Import(Format::AliasVaultCsv))
+        );
+        assert_eq!(
+            detect_format(&zip_with("manifest.json")),
+            Some(DetectedFormat::Import(Format::AliasVaultAvux))
+        );
+        assert_eq!(
+            detect_format(&zip_with("export.data")),
+            Some(DetectedFormat::Import(Format::OnePux))
         );
     }
 

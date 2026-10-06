@@ -2,8 +2,9 @@
 //! `pwhist/<id>/ms` (ADR 0018 §7). Nothing here reads a clock (ADR 0016 R1).
 //!
 //! Accepted: RFC 3339 date-times (`2024-01-31T12:34:56Z`, with an optional fraction and a
-//! `Z` or `±hh:mm` offset), as Bitwarden and `KeePass` write them, and integer Unix seconds or
-//! milliseconds, as 1Password and Firefox write them. Only times from 1970-01-01 to
+//! `Z` or `±hh:mm` offset), as Bitwarden, `KeePass` and `AliasVault`'s `.avux` manifest write
+//! them, integer Unix seconds or milliseconds, as 1Password and Firefox write them, and
+//! `AliasVault`'s CSV export's own "MM/dd/yyyy HH:mm:ss" (UTC). Only times from 1970-01-01 to
 //! 9999-12-31 are kept; anything else is "unreadable", and the item's creation time then
 //! comes from its first write (ADR 0018 §9).
 
@@ -140,6 +141,40 @@ pub(crate) fn millis(ms: u64) -> Option<u64> {
     Some(ms).filter(|ms| *ms <= MAX_TIME_MS)
 }
 
+/// A "MM/dd/yyyy HH:mm:ss" date-time, as `AliasVault`'s CSV export writes `CreatedAt` and
+/// `UpdatedAt` (UTC, zero-padded, exactly two digits per field; [`crate::aliasvault`]). Unix
+/// milliseconds, if the fields denote a real calendar date and time and the result is in
+/// range.
+pub(crate) fn us_datetime_ms(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (month, s) = digits(s, 2)?;
+    let s = lit(s, '/')?;
+    let (day, s) = digits(s, 2)?;
+    let s = lit(s, '/')?;
+    let (year, s) = digits(s, 4)?;
+    let s = lit(s, ' ')?;
+    let (hour, s) = digits(s, 2)?;
+    let s = lit(s, ':')?;
+    let (minute, s) = digits(s, 2)?;
+    let s = lit(s, ':')?;
+    let (second, s) = digits(s, 2)?;
+    if !s.is_empty()
+        || !(1..=12).contains(&month)
+        || day < 1
+        || day > days_in_month(year, month)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    let seconds = days * 86_400 + hour * 3_600 + minute * 60 + second;
+    u64::try_from(seconds.checked_mul(1_000)?)
+        .ok()
+        .filter(|ms| *ms <= MAX_TIME_MS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +227,30 @@ mod tests {
         assert_eq!(seconds_ms(1_700_000_000), Some(1_700_000_000_000));
         assert_eq!(seconds_ms(u64::MAX), None);
         assert_eq!(millis(MAX_TIME_MS + 1), None);
+    }
+
+    #[test]
+    fn us_datetime() {
+        assert_eq!(us_datetime_ms("01/01/1970 00:00:00"), Some(0));
+        assert_eq!(
+            us_datetime_ms("09/12/2025 17:28:39"),
+            Some(1_757_698_119_000)
+        );
+        assert_eq!(
+            us_datetime_ms(" 02/29/2024 00:00:00 "),
+            Some(1_709_164_800_000)
+        );
+        for bad in [
+            "",
+            "2025-09-12 17:28:39",
+            "13/01/2025 00:00:00",
+            "02/30/2024 00:00:00",
+            "09/12/2025 24:00:00",
+            "09/12/2025T17:28:39",
+            "9/12/2025 17:28:39",
+            "09/12/2025 17:28:39 extra",
+        ] {
+            assert_eq!(us_datetime_ms(bad), None, "{bad:?}");
+        }
     }
 }

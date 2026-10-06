@@ -398,7 +398,7 @@ impl Session {
     ) -> Result<String, CoreError> {
         let item_type = type_from_name(item_type)?;
         let inner = self.writable()?;
-        let writes = items::writes(&mut inner.rng, &inner.vault, None, draft)?;
+        let writes = items::writes(&inner.vault, None, draft)?;
         let edits: Vec<FieldEdit<'_>> = writes
             .iter()
             .map(|(key, value)| FieldEdit { key, value })
@@ -422,7 +422,7 @@ impl Session {
         }
         let inner = self.writable()?;
         let item = items::item_id(id)?;
-        let writes = items::writes(&mut inner.rng, &inner.vault, Some(item), draft)?;
+        let writes = items::writes(&inner.vault, Some(item), draft)?;
         let edits: Vec<FieldEdit<'_>> = writes
             .iter()
             .map(|(key, value)| FieldEdit { key, value })
@@ -675,7 +675,8 @@ impl Session {
 
     /// Imports a file of another product, or our own plaintext JSON export, as new items.
     /// `format` is one of `bitwarden-json`, `1pux`, `keepass-xml`, `csv`, `chrome-csv`,
-    /// `firefox-csv`, `rizzy-json`. The report has counts only (INV-48).
+    /// `firefox-csv`, `rizzy-json`, `aliasvault-csv`, `aliasvault-avux`. The report has counts
+    /// only (INV-48).
     ///
     /// # Errors
     /// `locked`; `wrong_state` while a sync runs; `unknown_format`; `invalid_input` for a file
@@ -696,6 +697,8 @@ impl Session {
             "chrome-csv" => Format::ChromeCsv,
             "firefox-csv" => Format::FirefoxCsv,
             "rizzy-json" => Format::RizzyPlaintextJson,
+            "aliasvault-csv" => Format::AliasVaultCsv,
+            "aliasvault-avux" => Format::AliasVaultAvux,
             _ => return Err(CoreError::new(UNKNOWN_FORMAT)),
         };
         if file.len() > MAX_IMPORT_FILE_LEN {
@@ -897,6 +900,8 @@ pub fn detect_import_format(file: &[u8]) -> String {
                 Format::ChromeCsv => "chrome-csv",
                 Format::FirefoxCsv => "firefox-csv",
                 Format::RizzyPlaintextJson => "rizzy-json",
+                Format::AliasVaultCsv => "aliasvault-csv",
+                Format::AliasVaultAvux => "aliasvault-avux",
                 _ => "unknown",
             },
             _ => "unknown",

@@ -1,6 +1,12 @@
 // User-facing text for the stable error codes (ADR 0013 §3 rule 4: errors are codes; the host
 // words them). A code without an entry is shown as a generic failure with the code itself, so
 // that a report names it. No message ever includes a value the user typed (INV-48).
+//
+// Generator refusals (`generator_*`) use the core's own wording, copied into
+// `generator-constants.ts` rather than imported at runtime (that module's docs: the UI thread
+// imports only types from `@rizzy-vault/core`, ADR 0013 §4), so every `ErrorText` in the app,
+// not just the generator views, shows the same sentence for the same code.
+import { generatorErrorMessage } from "./generator-constants.ts";
 import { CORE_CRASHED, TOTP_CANCELLED } from "./protocol.ts";
 
 /** The text for each code this web vault words. */
@@ -58,5 +64,11 @@ const MESSAGES: Readonly<Record<string, string>> = {
 
 /** The text for `code`. */
 export function messageFor(code: string): string {
-  return MESSAGES[code] ?? `Something went wrong (${code}).`;
+  if (code in MESSAGES) {
+    return MESSAGES[code] ?? `Something went wrong (${code}).`;
+  }
+  if (code.startsWith("generator_")) {
+    return generatorErrorMessage(code);
+  }
+  return `Something went wrong (${code}).`;
 }

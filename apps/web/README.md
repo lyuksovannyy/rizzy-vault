@@ -32,6 +32,42 @@ TypeScript ([ADR 0014](../../docs/adr/0014-ui-stack.md)), served by the `web` ro
 - **Fixed output names** (`assets.ts`): the server embeds exactly these files; the build fails
   on any other.
 
+## The item editor
+
+`src/views/ItemEditor.tsx` creates and edits every M1 item type, with a full editor of its
+websites (URIs), custom fields (text, hidden, boolean) and tags, not only its fixed fields.
+
+- **Idempotent save.** Adding a website or custom field mints its element id on the client
+  (`newElementId` of `@rizzy-vault/core`) the moment the row is added to the form, not when
+  Save is pressed, and sends that same id on every attempt to save the row. Writing the same
+  element id's attributes a second time changes nothing (ADR 0018 §6), so retrying a save
+  after an unclear outcome — the same pending rows, submitted again — cannot create a second
+  website or field. See `packages/core/test/e2e.test.ts`'s "idempotent save" case and
+  `crates/rizzy-wasm/src/items.rs`'s module docs.
+- **Reorder.** A row not yet saved is reordered with plain array moves in the form (no network
+  call). A row that is already part of the item is reordered with one small `editItem` call
+  per move (`op: "move"`), applied immediately so the list the user sees always matches what
+  the move was computed against.
+- **Concealed fields never prefetch.** A concealed fixed field or custom field's input starts
+  empty on edit; an empty input keeps the stored value, and a "Clear" checkbox is the only way
+  to remove it. The value is read from the input element on save, never kept in React state.
+- **The generator** (`GeneratorPane`, and `<PasswordGenerateSlot>` next to the login password
+  and every hidden custom field, `@rizzy-vault/ui`) takes every option of `rizzy-core`'s own
+  generator — length, each character class as Off/Allowed/Required, "avoid look-alike
+  characters", an exclude list, a custom symbol set for passwords; word count, separator,
+  capitalisation and a number for passphrases — and generates and checks entropy through
+  `generatePasswordWithOptions`/`generatePassphraseWithOptions`/`passwordEntropy`/
+  `passphraseEntropy` only; no generation or entropy arithmetic runs in this app. The options
+  and the generator page's short history of values live only in `generator-memory.ts`'s React
+  state, shared by every slot in the session and thrown away when the vault locks
+  (`VaultView` unmounts on lock; never written to storage or synced). `generator-constants.ts`
+  mirrors `rizzy-core`'s bounds, defaults and `generator_*` wording so this UI-thread code never
+  imports a runtime value from `@rizzy-vault/core` (ADR 0013 §4); `generator-constants.test.ts`
+  is the check that the mirror has not drifted. `generator-flow.ts` holds the plain calls to
+  the core (`export-flow.ts`'s pattern), tested in `generator-flow.test.ts` against the real
+  core: a normal option reaches the right call, an impossible combination is refused with
+  exactly the core's own message, and the editor's fill is a pure DOM write.
+
 ## Export and import
 
 `src/views/TransferPane.tsx`, with its steps in `src/export-flow.ts` and the countdown in

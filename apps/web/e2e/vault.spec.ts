@@ -151,7 +151,8 @@ test("signup, item, reload, login, lock, unlock", async ({ page }) => {
   await page.getByLabel("Username", { exact: true }).fill("alice@example.com");
   await checkSecretField(secretField(page, "Password"));
   await page.getByLabel("Password", { exact: true }).fill(ITEM_PASSWORD);
-  await page.getByLabel("Add a website").fill("https://example.com/login");
+  await page.getByRole("button", { name: "Add a website" }).click();
+  await page.getByLabel("New website 1", { exact: true }).fill("https://example.com/login");
   await page.getByRole("button", { name: "Save" }).click();
   await expect(page.getByRole("heading", { name: "Example" })).toBeVisible();
   await expect(page.getByText("Synced", { exact: true })).toBeVisible();
@@ -215,6 +216,114 @@ test("signup, item, reload, login, lock, unlock", async ({ page }) => {
   await expect(page.getByText("No enrolled devices.")).toBeVisible();
 
   expect(await violations(page)).toEqual([]);
+  expect(problems).toEqual([]);
+});
+
+test("the editor's generate popover: custom options, save, reload, password present", async ({ page }) => {
+  const { problems } = watch(page);
+  const secretKey = await signUp(page, "generatoruser");
+
+  await page.getByRole("button", { name: "New login" }).click();
+  await page.getByLabel("Title").fill("Generated Co");
+  await page.getByLabel("Username", { exact: true }).fill("gen@example.com");
+
+  // The password field's generate slot: open the settings popover, turn symbols off and avoid
+  // ambiguous characters, then generate from inside the popover (it fills the field and closes).
+  // `.secret-edit` is the editor's whole row (SecretField plus its generate slot); `[data-field]`
+  // is the item *view*'s own row attribute (ItemView.tsx) and does not apply here.
+  const passwordRow = page
+    .locator(".secret-edit")
+    .filter({ has: page.getByLabel("Password", { exact: true }) });
+  await passwordRow.getByRole("button", { name: "Generator settings" }).click();
+  const popover = passwordRow.locator(".generator-popover");
+  await expect(popover).toBeVisible();
+  await popover.getByLabel("Symbols").selectOption("excluded");
+  await popover.getByLabel("Avoid look-alike characters").check();
+  await popover.getByRole("button", { name: "Generate" }).click();
+  await expect(popover).toBeHidden();
+
+  const input = passwordRow.locator("input[data-secret-field]");
+  await expect(input).not.toHaveValue("");
+  const value = await input.inputValue();
+  expect(value).toHaveLength(20);
+  expect(value).not.toMatch(/[!-/:-@[-`{-~]/);
+
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("heading", { name: "Generated Co" })).toBeVisible();
+  await expect(page.getByText("Synced", { exact: true })).toBeVisible();
+
+  // Reload: a new login, and the generated password survived the save.
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Log in to rizzy-vault" })).toBeVisible();
+  await logIn(page, "generatoruser", secretKey);
+  await page.getByRole("button", { name: /Generated Co/ }).click();
+  const again = page.locator('[data-field="login.password"]');
+  await again.getByRole("button", { name: "Reveal" }).click();
+  await expect(again.locator("input[data-secret-field]")).toHaveValue(value);
+
+  expect(problems).toEqual([]);
+});
+
+test("a login with two websites, a hidden field and a tag: reorder, edit, reload", async ({ page }) => {
+  const { problems } = watch(page);
+  const secretKey = await signUp(page, "riordan");
+
+  // Create: two websites (added, then swapped before the first save), a hidden custom field
+  // and a tag.
+  await page.getByRole("button", { name: "New login" }).click();
+  await page.getByLabel("Title").fill("Reorder Co");
+  await page.getByLabel("Username", { exact: true }).fill("riordan@example.com");
+  await page.getByLabel("Password", { exact: true }).fill(ITEM_PASSWORD);
+
+  await page.getByRole("button", { name: "Add a website" }).click();
+  await page.getByLabel("New website 1", { exact: true }).fill("https://first.example.test");
+  await page.getByRole("button", { name: "Add a website" }).click();
+  await page.getByLabel("New website 2", { exact: true }).fill("https://second.example.test");
+  await page.getByRole("button", { name: "Move new website 1 down" }).click();
+  await expect(page.getByLabel("New website 1", { exact: true })).toHaveValue("https://second.example.test");
+  await expect(page.getByLabel("New website 2", { exact: true })).toHaveValue("https://first.example.test");
+
+  await page.getByRole("button", { name: "Add a custom field" }).click();
+  await page.getByLabel("New custom field 1 label", { exact: true }).fill("PIN");
+  await page.getByLabel("New custom field 1 kind", { exact: true }).selectOption("hidden");
+  await secretField(page, "Value").locator("input[data-secret-field]").fill("13-37");
+
+  await page.getByLabel("Add tags (comma-separated)").fill("important");
+
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("heading", { name: "Reorder Co" })).toBeVisible();
+  await expect(page.getByText("Synced", { exact: true })).toBeVisible();
+
+  // The item shows the swapped order, the masked field and the tag.
+  const links = page.getByRole("link", { name: /example\.test/ });
+  await expect(links).toHaveCount(2);
+  await expect(links.nth(0)).toHaveText("https://second.example.test");
+  await expect(links.nth(1)).toHaveText("https://first.example.test");
+  await expect(page.getByText("important", { exact: true })).toBeVisible();
+
+  // Edit: move the first website back down (an immediate write, no Save needed) and rename
+  // the custom field's label.
+  await page.getByRole("button", { name: "Edit" }).click();
+  await expect(page.getByLabel("Website 1", { exact: true })).toHaveValue("https://second.example.test");
+  await page.getByRole("button", { name: "Move website 1 down" }).click();
+  await expect(page.getByLabel("Website 1", { exact: true })).toHaveValue("https://first.example.test");
+  await expect(page.getByLabel("Website 2", { exact: true })).toHaveValue("https://second.example.test");
+  await page.getByLabel("Custom field 1 label", { exact: true }).fill("PIN (renamed)");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("heading", { name: "Reorder Co" })).toBeVisible();
+
+  // Reload: a new login, and every change — the reorder, the rename, the tag — survived.
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Log in to rizzy-vault" })).toBeVisible();
+  await logIn(page, "riordan", secretKey);
+  await page.getByRole("button", { name: /Reorder Co/ }).click();
+  await expect(page.getByRole("heading", { name: "Reorder Co" })).toBeVisible();
+  const linksAfter = page.getByRole("link", { name: /example\.test/ });
+  await expect(linksAfter.nth(0)).toHaveText("https://first.example.test");
+  await expect(linksAfter.nth(1)).toHaveText("https://second.example.test");
+  await expect(page.getByText("PIN (renamed)")).toBeVisible();
+  await expect(page.getByText("important", { exact: true })).toBeVisible();
+
   expect(problems).toEqual([]);
 });
 

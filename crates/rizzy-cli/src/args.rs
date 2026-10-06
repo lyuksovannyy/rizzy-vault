@@ -71,7 +71,8 @@ login.username, login.password, login.totp, card.number, …).
 Every export first asks for the master password again and checks it with the server. An
 encrypted export then asks for a new password for that file, needed to import it.
 Import recognises the file's format; --format overrides it. Import formats: bitwarden-json,
-1pux, keepass-xml, csv, chrome-csv, firefox-csv, rizzy-json, rizzy-encrypted.
+1pux, keepass-xml, csv, chrome-csv, firefox-csv, rizzy-json, rizzy-encrypted, aliasvault-csv,
+aliasvault-avux.
 After the server was restored from a backup, `recovery repair` makes the recovery code work
 again: a new code and Emergency Kit by default, or with --retype the current code, which the
 server takes only when the code did not change since the backup.
@@ -116,6 +117,10 @@ pub enum ImportFormat {
     RizzyJson,
     /// Our own encrypted export.
     RizzyEncrypted,
+    /// `AliasVault`'s CSV export (web or mobile app).
+    AliasVaultCsv,
+    /// `AliasVault`'s `.avux` (unencrypted) export archive.
+    AliasVaultAvux,
 }
 
 /// The field changes of `item create` and `item edit`.
@@ -835,6 +840,8 @@ fn import(args: &mut Args) -> Result<Command, CliError> {
                     "firefox-csv" => ImportFormat::FirefoxCsv,
                     "rizzy-json" => ImportFormat::RizzyJson,
                     "rizzy-encrypted" => ImportFormat::RizzyEncrypted,
+                    "aliasvault-csv" => ImportFormat::AliasVaultCsv,
+                    "aliasvault-avux" => ImportFormat::AliasVaultAvux,
                     _ => return Err(usage("unknown import format")),
                 });
             }

@@ -50,8 +50,9 @@ fuzz_target!(|data: &[u8]| {
             let _ = draft.clear(s);
             let _ = draft.tag(s);
             let _ = draft.untag(s);
-            let _ = draft.add_uri(s);
-            let _ = draft.add_custom_field(a, s, c);
+            let _ = draft.add_uri(s, d);
+            let _ = draft.add_custom_field(s, a, c, d);
+            let _ = draft.move_element(s, a, c, Some(d.to_owned()));
             let _ = draft.remove_element(s, d);
         }
     }

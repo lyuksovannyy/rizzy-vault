@@ -33,9 +33,8 @@ import initWasm, {
   coreVersion,
   detectImportFormat as wasmDetectImportFormat,
   expectNoContent,
-  generatePassphrase as wasmGeneratePassphrase,
+  generateElementId,
   generatePassphraseWithOptions as wasmGeneratePassphraseWithOptions,
-  generatePassword as wasmGeneratePassword,
   generatePasswordWithOptions as wasmGeneratePasswordWithOptions,
   generatorLimits as wasmGeneratorLimits,
   initSync,
@@ -507,20 +506,49 @@ export class Signup {
 // ---------------------------------------------------------------------------------------------
 // Items
 
-/** One change of an item edit; a list of them is written as one op. */
+/**
+ * A fresh element id (32 lowercase hex digits) for a new website or custom field row. Mint it
+ * once, immediately when the row is added to the editor, and reuse it in the `addUri` or
+ * `addCustomField` change sent on every attempt to save that row.
+ */
+export function newElementId(): string {
+  ensureReady();
+  return call(() => generateElementId());
+}
+
+/** Where {@link ItemChange} `op: "move"` puts an element. */
+export type ListPlace =
+  | { readonly at: "first" | "last" }
+  | { readonly at: "before" | "after"; readonly element: string };
+
+/**
+ * One change of an item edit; a list of them is written as one op.
+ *
+ * `addUri` and `addCustomField` carry `element`: the id {@link generateElementId} minted for
+ * this row. Mint it once, when the row is added to the form, and send the same id on every
+ * attempt to save the row — the first and any retry — so a retry after an unclear outcome
+ * writes the same element again instead of creating a second one.
+ */
 export type ItemChange =
   | { readonly op: "set"; readonly key: string; readonly value: string }
   | { readonly op: "clear"; readonly key: string }
   | { readonly op: "tag"; readonly name: string }
   | { readonly op: "untag"; readonly name: string }
-  | { readonly op: "addUri"; readonly uri: string }
+  | { readonly op: "addUri"; readonly element: string; readonly uri: string }
   | {
       readonly op: "addCustomField";
+      readonly element: string;
       readonly label: string;
       readonly kind: "text" | "hidden" | "boolean";
       readonly value: string;
     }
-  | { readonly op: "removeElement"; readonly list: string; readonly element: string };
+  | { readonly op: "removeElement"; readonly list: string; readonly element: string }
+  | {
+      readonly op: "move";
+      readonly list: string;
+      readonly element: string;
+      readonly place: ListPlace;
+    };
 
 /** The item types the core names. */
 export type ItemType =
@@ -591,7 +619,9 @@ export type ImportFormat =
   | "csv"
   | "chrome-csv"
   | "firefox-csv"
-  | "rizzy-json";
+  | "rizzy-json"
+  | "aliasvault-csv"
+  | "aliasvault-avux";
 
 /**
  * What {@link detectImportFormat} recognised: an {@link ImportFormat}, our encrypted export
@@ -634,14 +664,23 @@ function draftOf(changes: readonly ItemChange[]): ItemDraft {
             draft.untag(change.name);
             break;
           case "addUri":
-            draft.addUri(change.uri);
+            draft.addUri(change.element, change.uri);
             break;
           case "addCustomField":
-            draft.addCustomField(change.label, change.kind, change.value);
+            draft.addCustomField(change.element, change.label, change.kind, change.value);
             break;
           case "removeElement":
             draft.removeElement(change.list, change.element);
             break;
+          case "move": {
+            const { place } = change;
+            if (place.at === "before" || place.at === "after") {
+              draft.moveElement(change.list, change.element, place.at, place.element);
+            } else {
+              draft.moveElement(change.list, change.element, place.at);
+            }
+            break;
+          }
         }
       });
     }
@@ -1020,39 +1059,20 @@ function report(r: {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The generator and the frozen texts
-
+// The generator with every option (CRYPTO.md §12.1)
+//
+// There is one generator API, not two: every caller (the generator page, the editor's generate
+// slot, `rv generate`) builds a `PasswordOptions` or `PassphraseOptions` and calls
+// `generate*WithOptions`. `DEFAULT_PASSWORD_OPTIONS` / `DEFAULT_PASSPHRASE_OPTIONS` give the
+// historic plain defaults (20 required-everything characters; six `.`-separated words) for a
+// caller that wants no options UI at all.
+//
 /** A generated password or passphrase. */
 export interface Generated {
   readonly value: string;
   readonly entropyBits: number;
 }
 
-/** A password: lowercase, uppercase and digits required; symbols required or left out. */
-export function generatePassword(
-  length: number,
-  symbols = true,
-  excludeAmbiguous = false,
-): Generated {
-  ensureReady();
-  return mapOne(
-    call(() => wasmGeneratePassword(length, symbols, excludeAmbiguous)),
-    (g) => ({ value: g.value, entropyBits: g.entropyBits }),
-  );
-}
-
-/** A passphrase of `words` words. */
-export function generatePassphrase(words: number): Generated {
-  ensureReady();
-  return mapOne(
-    call(() => wasmGeneratePassphrase(words)),
-    (g) => ({ value: g.value, entropyBits: g.entropyBits }),
-  );
-}
-
-// ---------------------------------------------------------------------------------------------
-// The generator with every option (CRYPTO.md §12.1)
-//
 // The options below are those of `rizzy-core`'s generator. Rust checks them and computes the
 // entropy; this module only translates names and refuses values Rust could not even receive
 // (a non-integer length, an unknown rule name), with the same `generator_*` codes. Options are
@@ -1356,6 +1376,8 @@ export function detectImportFormat(file: Uint8Array): DetectedImportFormat {
     case "chrome-csv":
     case "firefox-csv":
     case "rizzy-json":
+    case "aliasvault-csv":
+    case "aliasvault-avux":
     case "rizzy-encrypted":
     case "rizzy-csv":
       return found;

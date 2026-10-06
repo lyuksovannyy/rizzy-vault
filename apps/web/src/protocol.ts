@@ -14,11 +14,14 @@ import type {
   EncryptedExport,
   FieldView,
   Generated,
+  GeneratorLimits,
   ImportFormat,
   ImportReport,
   ItemChange,
   ItemSummary,
   ItemType,
+  PassphraseOptions,
+  PasswordOptions,
   TotpCode,
   TwoFactorSetup,
 } from "@rizzy-vault/core";
@@ -90,10 +93,15 @@ export interface CoreApi {
   enableTwoFactor(): TwoFactorSetup;
   confirmTwoFactor(code: string): void;
   disableTwoFactor(code: string): void;
-  generatePassword(length: number, symbols: boolean, excludeAmbiguous: boolean): Generated;
-  generatePassphrase(words: number): Generated;
+  generatePasswordWithOptions(options: Partial<PasswordOptions>): Generated;
+  generatePassphraseWithOptions(options: Partial<PassphraseOptions>): Generated;
+  passwordEntropy(options: Partial<PasswordOptions>): number;
+  passphraseEntropy(options: Partial<PassphraseOptions>): number;
+  generatorLimits(): GeneratorLimits;
   plaintextExportWarning(): string;
   plaintextExportPhrase(): string;
+  /** A fresh element id for a new website or custom-field row (`@rizzy-vault/core`'s `newElementId`). */
+  newElementId(): string;
 }
 
 /** A method name of {@link CoreApi}. */
@@ -136,10 +144,14 @@ export const METHODS: readonly Method[] = [
   "enableTwoFactor",
   "confirmTwoFactor",
   "disableTwoFactor",
-  "generatePassword",
-  "generatePassphrase",
+  "generatePasswordWithOptions",
+  "generatePassphraseWithOptions",
+  "passwordEntropy",
+  "passphraseEntropy",
+  "generatorLimits",
   "plaintextExportWarning",
   "plaintextExportPhrase",
+  "newElementId",
 ];
 
 /** UI → Worker: a call. */

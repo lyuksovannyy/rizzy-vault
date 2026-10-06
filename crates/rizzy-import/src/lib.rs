@@ -18,12 +18,16 @@
 //! | [`Format::ChromeCsv`] | Chrome's (Chromium's) password CSV | [`csv_import`] |
 //! | [`Format::FirefoxCsv`] | Firefox's password CSV | [`csv_import`] |
 //! | [`Format::RizzyPlaintextJson`] | rizzy-vault's own plaintext JSON export (ADR 0027 §3) | [`rizzy_json`] |
+//! | [`Format::AliasVaultCsv`] | `AliasVault`'s CSV export (web and mobile app) | [`aliasvault`] |
+//! | [`Format::AliasVaultAvux`] | `AliasVault`'s `.avux` (unencrypted) export archive | [`aliasvault`] |
 //!
 //! Each module's documentation holds its mapping table. **Not imported in M1:** `KeePass` KDBX
-//! databases and Bitwarden's encrypted exports, which need the other product's cryptography
-//! (ADR 0002 point 2 and owner decision 1: legacy primitives would live here, after ADR 0009's
-//! approval procedure, which has not run); they are refused with
-//! [`ImportError::KdbxNotSupported`] and [`ImportError::EncryptedExport`]. rizzy-vault's own
+//! databases, Bitwarden's encrypted exports and `AliasVault`'s `.avex` (encrypted) export, which
+//! each need the other product's cryptography (ADR 0002 point 2 and owner decision 1: legacy
+//! primitives would live here, after ADR 0009's approval procedure, which has not run); the
+//! first two are refused with [`ImportError::KdbxNotSupported`] and
+//! [`ImportError::EncryptedExport`]. `.avex` has no `Format` variant at all: nothing here
+//! recognises or reads it (see [`aliasvault`] for its reported crypto). rizzy-vault's own
 //! *encrypted* export is read by `rizzy-client` (`export`), which holds its cryptography, and
 //! its plaintext CSV export has no reader (ADR 0027 §6).
 //!
@@ -46,7 +50,8 @@
 //!   adds `clippy::indexing_slicing` and `clippy::unreachable`, and `cargo lint` makes every
 //!   warning an error. One fuzz target per format lives under `fuzz/` (`import_bitwarden`,
 //!   `import_1pux`, `import_keepass_xml`, `import_csv`, `import_chrome_csv`,
-//!   `import_firefox_csv`, `import_rizzy_json`).
+//!   `import_firefox_csv`, `import_rizzy_json`, `import_aliasvault_csv`,
+//!   `import_aliasvault_avux`).
 //! - **Secrets** (CRYPTO.md §12.2). An import file is plaintext passwords. Every string the
 //!   readers produce (JSON strings, numbers and names, CSV fields, XML names, attributes and
 //!   text, the decompressed archive member, decoded base64url) is a zeroizing buffer allocated
@@ -78,6 +83,7 @@
 #![warn(clippy::indexing_slicing, clippy::unreachable)]
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
+pub mod aliasvault;
 pub mod bitwarden;
 pub mod csv;
 pub mod csv_import;
@@ -125,6 +131,10 @@ pub enum Format {
     FirefoxCsv,
     /// rizzy-vault's own plaintext JSON export (ADR 0027 §3, §6; see [`rizzy_json`]).
     RizzyPlaintextJson,
+    /// `AliasVault`'s CSV export, web or mobile app (see [`aliasvault`]).
+    AliasVaultCsv,
+    /// `AliasVault`'s `.avux` (unencrypted) export archive (see [`aliasvault`]).
+    AliasVaultAvux,
 }
 
 /// Totals of what an import of our own plaintext JSON export did not take as it stood
@@ -183,6 +193,8 @@ pub fn import<R: CryptoRng + ?Sized>(
         Format::ChromeCsv => csv_import::chrome(input, rng, &mut warnings)?,
         Format::FirefoxCsv => csv_import::firefox(input, rng, &mut warnings)?,
         Format::RizzyPlaintextJson => rizzy_json::import(input, rng, &mut warnings, &mut counts)?,
+        Format::AliasVaultCsv => aliasvault::import_csv(input, rng, &mut warnings)?,
+        Format::AliasVaultAvux => aliasvault::import_avux(input, rng, &mut warnings)?,
     };
     Ok(Import {
         items,
@@ -203,6 +215,26 @@ pub fn import_1pux_data<R: CryptoRng + ?Sized>(
 ) -> Result<Import, ImportError> {
     let mut warnings = error::Warnings::default();
     let items = onepux::import_data(data, rng, &mut warnings)?;
+    Ok(Import {
+        items,
+        warnings: warnings.into_vec(),
+        counts: Counts::default(),
+    })
+}
+
+/// Imports the `manifest.json` document of an `.avux` archive, already taken out of the
+/// archive: for the `import_aliasvault_avux` fuzz target, which reaches the item mapping
+/// without building a zip first. Applications import the archive with [`import`] and
+/// [`Format::AliasVaultAvux`].
+///
+/// # Errors
+/// As [`import`].
+pub fn import_aliasvault_manifest_data<R: CryptoRng + ?Sized>(
+    data: &[u8],
+    rng: &mut R,
+) -> Result<Import, ImportError> {
+    let mut warnings = error::Warnings::default();
+    let items = aliasvault::import_manifest(data, rng, &mut warnings)?;
     Ok(Import {
         items,
         warnings: warnings.into_vec(),

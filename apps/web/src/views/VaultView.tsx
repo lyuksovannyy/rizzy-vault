@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { watchIdle } from "../autolock.ts";
 import { ClipboardGuard, browserClipboard } from "../clipboard.ts";
 import { type CoreClient, codeOf } from "../core-client.ts";
+import { type GeneratorMemory, useGeneratorMemory } from "../generator-memory.ts";
 import type { SessionInfo } from "../protocol.ts";
 import { DevicesPane } from "./DevicesPane.tsx";
 import { GeneratorPane } from "./GeneratorPane.tsx";
@@ -52,6 +53,8 @@ export interface VaultContext {
   readonly afterWrite: () => Promise<void>;
   /** Bumped after every sync, so lists reload. */
   readonly revision: number;
+  /** The generator's in-memory, session-only state (generator-memory.ts module docs). */
+  readonly generator: GeneratorMemory;
 }
 
 /** The vault (module docs). */
@@ -68,6 +71,7 @@ export function VaultView(props: {
   const [syncError, setSyncError] = useState<string | undefined>();
   const [revision, setRevision] = useState(0);
   const clipboard = useMemo(() => new ClipboardGuard(browserClipboard), []);
+  const generator = useGeneratorMemory();
   const lockedRef = useRef(false);
   /** The latest session state, for the auto-lock (which runs outside a render). */
   const sessionRef = useRef(props.initialSession);
@@ -163,7 +167,7 @@ export function VaultView(props: {
     lock();
   };
 
-  const ctx: VaultContext = { client, clipboard, session, afterWrite: sync, revision };
+  const ctx: VaultContext = { client, clipboard, session, afterWrite: sync, revision, generator };
 
   return (
     <div className="vault">

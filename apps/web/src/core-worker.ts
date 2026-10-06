@@ -20,10 +20,14 @@ import {
   checkServer,
   detectImportFormat,
   fetchTransport,
-  generatePassphrase,
-  generatePassword,
+  generatePassphraseWithOptions,
+  generatePasswordWithOptions,
+  generatorLimits,
   init,
   login,
+  newElementId,
+  passphraseEntropy,
+  passwordEntropy,
   plaintextExportPhrase,
   plaintextExportWarning,
   version,
@@ -151,14 +155,6 @@ function bool(v: unknown): boolean {
   return v;
 }
 
-/** An integer argument, or `invalid_input`. */
-function int(v: unknown): number {
-  if (typeof v !== "number" || !Number.isSafeInteger(v)) {
-    throw new CoreError("invalid_input");
-  }
-  return v;
-}
-
 /** Zeroes every byte array among `args`, whatever the call did with them. */
 function wipe(args: readonly unknown[]): void {
   for (const a of args) {
@@ -265,8 +261,12 @@ async function run(m: CallMessage): Promise<unknown> {
     enableTwoFactor: () => current().enableTwoFactor(),
     confirmTwoFactor: () => current().confirmTwoFactor(str(a[0])),
     disableTwoFactor: () => current().disableTwoFactor(str(a[0])),
-    generatePassword: () => generatePassword(int(a[0]), bool(a[1]), bool(a[2])),
-    generatePassphrase: () => generatePassphrase(int(a[0])),
+    generatePasswordWithOptions: () => generatePasswordWithOptions(a[0] as never),
+    generatePassphraseWithOptions: () => generatePassphraseWithOptions(a[0] as never),
+    passwordEntropy: () => passwordEntropy(a[0] as never),
+    passphraseEntropy: () => passphraseEntropy(a[0] as never),
+    generatorLimits: () => generatorLimits(),
+    newElementId: () => newElementId(),
     plaintextExportWarning: () => plaintextExportWarning(),
     plaintextExportPhrase: () => plaintextExportPhrase(),
   } satisfies { [K in keyof CoreApi]: () => unknown };

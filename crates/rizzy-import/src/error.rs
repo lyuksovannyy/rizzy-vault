@@ -94,7 +94,8 @@ pub enum WarningKind {
     EmptyEntry,
     /// The entry is not in the expected shape; skipped.
     MalformedEntry,
-    /// An attachment or document file; not imported (attachments are M3).
+    /// An attachment, document file, or `AliasVault` logo image; not imported (attachments are
+    /// M3).
     AttachmentSkipped,
     /// A passkey; not imported (passkeys are M7).
     PasskeySkipped,

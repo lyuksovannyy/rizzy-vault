@@ -16,7 +16,10 @@ use rizzy_core::item::types::ItemType;
 use rizzy_core::item::value::ValueRef;
 
 use crate::zip::tests::{TestMember, archive};
-use crate::{Format, Import, ImportError, ImportedItem, WarningKind, import, import_1pux_data};
+use crate::{
+    Format, Import, ImportError, ImportedItem, WarningKind, import, import_1pux_data,
+    import_aliasvault_manifest_data,
+};
 
 /// A decoded value, for comparisons.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1529,4 +1532,315 @@ fn rizzy_json_item_size_limits() {
     let import = run(Format::RizzyPlaintextJson, rizzy_doc(&fat).as_bytes()).unwrap();
     assert!(import.items.is_empty());
     assert_eq!(warns(&import), vec![(Some(0), WarningKind::OversizeEntry)]);
+}
+
+#[test]
+fn aliasvault_csv_web() {
+    let csv = "ServiceName,FolderPath,ServiceUrl,Username,CurrentPassword,AliasEmail,TwoFactorSecret,AliasGender,AliasFirstName,AliasLastName,AliasBirthDate,CardholderName,CardNumber,CardExpiryMonth,CardExpiryYear,CardCvv,CardPin,Notes,CreatedAt,UpdatedAt\r\n\
+                Example,Work/Sites,https://example.com,alice,secretpw,alias@example.com,JBSWY3DP,female,Alice,Example,1990-01-02,,,,,,,My notes,09/12/2025 17:28:39,09/12/2025 17:28:39\r\n\
+                Card,,,bob,,,,,,,,John Doe,4111111111111111,12,2030,123,9999,,,\r\n\
+                ,,,,,,,,,,,,,,,,,,,\r\n\
+                Extra,,,carl,pw,,,,,,,,,,,,,,,,oops\r\n";
+    let import = run(Format::AliasVaultCsv, csv.as_bytes()).unwrap();
+    assert_eq!(import.items.len(), 3);
+    assert_eq!(import.items[2].entry(), 3);
+
+    let a = view(&import.items[0]);
+    assert_eq!(a.fixed["item.name"], t("Example"));
+    assert_eq!(a.fixed["login.username"], t("alice"));
+    assert_eq!(a.fixed["login.password"], t("secretpw"));
+    assert_eq!(a.fixed["login.totp"], t("JBSWY3DP"));
+    assert_eq!(a.fixed["item.notes"], t("My notes"));
+    assert_eq!(a.fixed["import.created_ms"], V::U(1_757_698_119_000));
+    assert_eq!(a.uris, vec!["https://example.com"]);
+    assert_eq!(a.tags, vec!["Work/Sites"]);
+    assert_eq!(
+        a.fields,
+        vec![
+            (Some("Alias Email".into()), 1, Some(t("alias@example.com"))),
+            (Some("Gender".into()), 1, Some(t("female"))),
+            (Some("First Name".into()), 1, Some(t("Alice"))),
+            (Some("Last Name".into()), 1, Some(t("Example"))),
+            (Some("Birth Date".into()), 1, Some(t("1990-01-02"))),
+        ]
+    );
+
+    let b = view(&import.items[1]);
+    assert_eq!(import.items[1].item_type(), ItemType::CARD);
+    assert_eq!(b.fixed["item.name"], t("Card"));
+    assert_eq!(b.fixed["card.holder"], t("John Doe"));
+    assert_eq!(b.fixed["card.number"], t("4111111111111111"));
+    assert_eq!(b.fixed["card.exp_month"], t("12"));
+    assert_eq!(b.fixed["card.exp_year"], t("2030"));
+    assert_eq!(b.fixed["card.code"], t("123"));
+    assert_eq!(b.fixed["card.pin"], t("9999"));
+    assert_eq!(b.fields, vec![(Some("Username".into()), 1, Some(t("bob")))]);
+
+    assert_eq!(warns(&import), vec![(Some(3), WarningKind::ExtraColumns)]);
+
+    assert_eq!(
+        run(Format::AliasVaultCsv, b"a,b,c\n1,2,3\n").unwrap_err(),
+        ImportError::UnexpectedShape
+    );
+    assert_eq!(
+        run(Format::AliasVaultCsv, b"").unwrap_err(),
+        ImportError::UnexpectedShape
+    );
+}
+
+#[test]
+fn aliasvault_csv_mobile() {
+    // The mobile app's export has no card columns but one more alias column than the web
+    // export's.
+    let csv = "ServiceName,FolderPath,ServiceUrl,Username,CurrentPassword,AliasEmail,TwoFactorSecret,AliasGender,AliasFirstName,AliasLastName,AliasNickName,AliasBirthDate,Notes,CreatedAt,UpdatedAt\r\n\
+                credential3,,,username3,,,test,,,,,,without password,09/12/2025 17:28:39,09/12/2025 17:28:39\r\n\
+                service2,,https://service2.com,username2,password2,service2@example.tld,,gender2,firstname2,lastname2,nickname2,,,09/12/2025 17:28:39,09/12/2025 17:28:39\r\n";
+    let import = run(Format::AliasVaultCsv, csv.as_bytes()).unwrap();
+    assert_eq!(import.items.len(), 2);
+    assert!(warns(&import).is_empty());
+
+    let a = view(&import.items[0]);
+    assert_eq!(import.items[0].item_type(), ItemType::LOGIN);
+    assert_eq!(a.fixed["item.name"], t("credential3"));
+    assert_eq!(a.fixed["login.username"], t("username3"));
+    assert!(!a.fixed.contains_key("login.password"));
+    assert_eq!(a.fixed["login.totp"], t("test"));
+    assert_eq!(a.fixed["item.notes"], t("without password"));
+
+    let b = view(&import.items[1]);
+    assert_eq!(b.fixed["login.username"], t("username2"));
+    assert_eq!(b.fixed["login.password"], t("password2"));
+    assert_eq!(b.uris, vec!["https://service2.com"]);
+    assert_eq!(
+        b.fields,
+        vec![
+            (
+                Some("Alias Email".into()),
+                1,
+                Some(t("service2@example.tld"))
+            ),
+            (Some("Gender".into()), 1, Some(t("gender2"))),
+            (Some("First Name".into()), 1, Some(t("firstname2"))),
+            (Some("Last Name".into()), 1, Some(t("lastname2"))),
+            (Some("Nickname".into()), 1, Some(t("nickname2"))),
+        ]
+    );
+}
+
+/// A hand-written `.avux` manifest (no real data), covering every `fieldKey`, a folder chain,
+/// item tags, custom field definitions, multiple TOTP codes, and the four item types plus one
+/// this reader does not know.
+const ALIASVAULT_AVUX_MANIFEST: &str = r#"{
+  "version": "1.0.0",
+  "exportedAt": "2024-06-01T00:00:00Z",
+  "folders": [
+    {"id": "f1", "name": "Work", "parentFolderId": null},
+    {"id": "f2", "name": "Sites", "parentFolderId": "f1"}
+  ],
+  "tags": [
+    {"id": "t1", "name": "Important"},
+    {"id": "t2", "name": ""}
+  ],
+  "itemTags": [
+    {"id": "it1", "itemId": "i1", "tagId": "t1"},
+    {"id": "it2", "itemId": "i1", "tagId": "t2"}
+  ],
+  "fieldDefinitions": [
+    {"id": "d1", "label": "Security Question", "isHidden": false, "fieldType": "Text"},
+    {"id": "d2", "label": "Recovery Code", "isHidden": true, "fieldType": "Text"}
+  ],
+  "logos": [],
+  "items": [
+    {
+      "id": "i1", "name": "Example", "itemType": "Login", "createdAt": "2024-02-29T12:34:56Z",
+      "updatedAt": "2024-02-29T12:34:56Z", "folderId": "f2", "logoId": null, "archivedAt": null,
+      "fieldValues": [
+        {"id": "fv1", "fieldKey": "login.username", "fieldDefinitionId": null, "value": "alice", "weight": 1},
+        {"id": "fv1b", "fieldKey": "login.username", "fieldDefinitionId": null, "value": "alice2", "weight": 0},
+        {"id": "fv2", "fieldKey": "login.password", "fieldDefinitionId": null, "value": "secretpw", "weight": 2},
+        {"id": "fv3", "fieldKey": "login.url", "fieldDefinitionId": null, "value": "https://b.example", "weight": 4},
+        {"id": "fv4", "fieldKey": "login.url", "fieldDefinitionId": null, "value": "https://a.example", "weight": 3},
+        {"id": "fv5", "fieldKey": "login.email", "fieldDefinitionId": null, "value": "alice@example.com", "weight": 5},
+        {"id": "fv6", "fieldKey": null, "fieldDefinitionId": "d1", "value": "blue", "weight": 6},
+        {"id": "fv7", "fieldKey": null, "fieldDefinitionId": "d2", "value": "xyz", "weight": 7},
+        {"id": "fv8", "fieldKey": "", "fieldDefinitionId": null, "value": "", "weight": 8}
+      ],
+      "fieldHistories": [], "attachments": [],
+      "totpCodes": [
+        {"id": "c1", "name": "", "secretKey": "JBSWY3DP", "algorithm": "SHA1", "digits": 6, "period": 30},
+        {"id": "c2", "name": "Backup", "secretKey": "OTHERSECRET", "algorithm": "SHA256", "digits": 8, "period": 60}
+      ],
+      "passkeys": []
+    },
+    {
+      "id": "i2", "name": "Alias Identity", "itemType": "Alias", "createdAt": "2024-01-01T00:00:00Z",
+      "updatedAt": "2024-01-01T00:00:00Z", "folderId": null, "logoId": null, "archivedAt": null,
+      "fieldValues": [
+        {"id": "fv9", "fieldKey": "alias.first_name", "fieldDefinitionId": null, "value": "Jane", "weight": 1},
+        {"id": "fv10", "fieldKey": "alias.last_name", "fieldDefinitionId": null, "value": "Doe", "weight": 2},
+        {"id": "fv11", "fieldKey": "alias.gender", "fieldDefinitionId": null, "value": "female", "weight": 3},
+        {"id": "fv12", "fieldKey": "alias.birthdate", "fieldDefinitionId": null, "value": "1990-05-06", "weight": 4},
+        {"id": "fv13", "fieldKey": "notes.content", "fieldDefinitionId": null, "value": "Alias notes", "weight": 5}
+      ],
+      "fieldHistories": [], "attachments": [], "totpCodes": [], "passkeys": []
+    },
+    {
+      "id": "i3", "name": "My Card", "itemType": "CreditCard", "createdAt": "2024-03-01T00:00:00Z",
+      "updatedAt": "2024-03-01T00:00:00Z", "folderId": null, "logoId": null, "archivedAt": null,
+      "fieldValues": [
+        {"id": "fv14", "fieldKey": "card.cardholder_name", "fieldDefinitionId": null, "value": "John Doe", "weight": 1},
+        {"id": "fv15", "fieldKey": "card.number", "fieldDefinitionId": null, "value": "4111111111111111", "weight": 2},
+        {"id": "fv16", "fieldKey": "card.expiry_month", "fieldDefinitionId": null, "value": "12", "weight": 3},
+        {"id": "fv17", "fieldKey": "card.expiry_year", "fieldDefinitionId": null, "value": "2030", "weight": 4},
+        {"id": "fv18", "fieldKey": "card.cvv", "fieldDefinitionId": null, "value": "123", "weight": 5},
+        {"id": "fv19", "fieldKey": "card.pin", "fieldDefinitionId": null, "value": "9999", "weight": 6}
+      ],
+      "fieldHistories": [], "attachments": [], "totpCodes": [], "passkeys": []
+    },
+    {
+      "id": "i4", "name": "Secret Note", "itemType": "Note", "createdAt": "2024-04-01T00:00:00Z",
+      "updatedAt": "2024-04-01T00:00:00Z", "folderId": null, "logoId": "logo1", "archivedAt": null,
+      "fieldValues": [
+        {"id": "fv20", "fieldKey": "notes.content", "fieldDefinitionId": null, "value": "body text", "weight": 1}
+      ],
+      "fieldHistories": [],
+      "attachments": [{"id": "a1", "filename": "x.txt", "relativePath": "attachments/i4_a1_x.txt"}],
+      "totpCodes": [],
+      "passkeys": [{"id": "pk1", "credentialId": null, "rpId": "example.com", "userHandle": null, "publicKey": "", "privateKey": "", "prfKey": null, "displayName": "", "additionalData": null}]
+    },
+    {
+      "id": "i5", "name": "Mystery", "itemType": "SomethingNew", "createdAt": "2024-05-01T00:00:00Z",
+      "updatedAt": "2024-05-01T00:00:00Z", "folderId": null, "logoId": null, "archivedAt": "2024-05-02T00:00:00Z",
+      "fieldValues": [
+        {"id": "fv21", "fieldKey": "notes.content", "fieldDefinitionId": null, "value": "unknown type body", "weight": 1}
+      ],
+      "fieldHistories": [], "attachments": [], "totpCodes": [], "passkeys": []
+    }
+  ]
+}"#;
+
+#[test]
+fn aliasvault_avux() {
+    let zip = archive(
+        &[TestMember {
+            name: "manifest.json",
+            data: ALIASVAULT_AVUX_MANIFEST.as_bytes(),
+            deflate: true,
+        }],
+        b"",
+    );
+    let import = run(Format::AliasVaultAvux, &zip).unwrap();
+    assert_eq!(import.items.len(), 5);
+
+    let i1 = view(&import.items[0]);
+    assert_eq!(import.items[0].item_type(), ItemType::LOGIN);
+    assert_eq!(i1.fixed["item.name"], t("Example"));
+    // `fv1b` repeats `login.username` after `fv1` in array order with a *lower* `weight` (0
+    // vs 1): the last array entry wins regardless of weight (module docs).
+    assert_eq!(i1.fixed["login.username"], t("alice2"));
+    assert_eq!(i1.fixed["login.password"], t("secretpw"));
+    assert_eq!(i1.fixed["login.totp"], t("JBSWY3DP"));
+    assert_eq!(i1.fixed["import.created_ms"], V::U(1_709_210_096_000));
+    // `fv3` (b.example, weight 4) precedes `fv4` (a.example, weight 3) in array order: URIs
+    // are kept in array order, not `weight` order (module docs; the real `AvuxImportService`
+    // never sorts by `weight`).
+    assert_eq!(i1.uris, vec!["https://b.example", "https://a.example"]);
+    assert_eq!(i1.tags, vec!["Important", "Work/Sites"]);
+    assert_eq!(
+        i1.fields,
+        vec![
+            (Some("Email".into()), 1, Some(t("alice@example.com"))),
+            (Some("Security Question".into()), 1, Some(t("blue"))),
+            (Some("Recovery Code".into()), 2, Some(t("xyz"))),
+            (Some("Backup".into()), 2, Some(t("OTHERSECRET"))),
+        ]
+    );
+
+    let i2 = view(&import.items[1]);
+    assert_eq!(import.items[1].item_type(), ItemType::IDENTITY);
+    assert_eq!(i2.fixed["identity.first_name"], t("Jane"));
+    assert_eq!(i2.fixed["identity.last_name"], t("Doe"));
+    assert_eq!(i2.fixed["item.notes"], t("Alias notes"));
+    assert_eq!(
+        i2.fields,
+        vec![
+            (Some("Gender".into()), 1, Some(t("female"))),
+            (Some("Birth Date".into()), 1, Some(t("1990-05-06"))),
+        ]
+    );
+
+    let i3 = view(&import.items[2]);
+    assert_eq!(import.items[2].item_type(), ItemType::CARD);
+    assert_eq!(i3.fixed["card.holder"], t("John Doe"));
+    assert_eq!(i3.fixed["card.number"], t("4111111111111111"));
+    assert_eq!(i3.fixed["card.exp_month"], t("12"));
+    assert_eq!(i3.fixed["card.exp_year"], t("2030"));
+    assert_eq!(i3.fixed["card.code"], t("123"));
+    assert_eq!(i3.fixed["card.pin"], t("9999"));
+
+    let i4 = view(&import.items[3]);
+    assert_eq!(import.items[3].item_type(), ItemType::SECURE_NOTE);
+    assert_eq!(i4.fixed["item.notes"], t("body text"));
+
+    let i5 = view(&import.items[4]);
+    assert_eq!(import.items[4].item_type(), ItemType::SECURE_NOTE);
+    assert_eq!(i5.fixed["item.notes"], t("unknown type body"));
+    assert_eq!(
+        i5.fields,
+        vec![(Some("Archived".into()), 3, Some(V::B(true)))]
+    );
+
+    assert_eq!(
+        warns(&import),
+        vec![
+            (Some(0), WarningKind::TotpNotConverted),
+            (Some(3), WarningKind::AttachmentSkipped),
+            (Some(3), WarningKind::PasskeySkipped),
+            (Some(3), WarningKind::AttachmentSkipped),
+            (Some(4), WarningKind::ConvertedToSecureNote),
+        ]
+    );
+
+    // The same manifest, read directly without a zip (the fuzz target's own path).
+    let direct = import_aliasvault_manifest_data(
+        ALIASVAULT_AVUX_MANIFEST.as_bytes(),
+        &mut ChaCha20Rng::seed_from_u64(7),
+    )
+    .unwrap();
+    assert_eq!(direct.items.len(), 5);
+}
+
+#[test]
+fn aliasvault_avux_refusals() {
+    let bad_version = ALIASVAULT_AVUX_MANIFEST.replacen("1.0.0", "2.0.0", 1);
+    let zip = archive(
+        &[TestMember {
+            name: "manifest.json",
+            data: bad_version.as_bytes(),
+            deflate: false,
+        }],
+        b"",
+    );
+    assert_eq!(
+        run(Format::AliasVaultAvux, &zip).unwrap_err(),
+        ImportError::UnexpectedShape
+    );
+
+    let no_manifest = archive(
+        &[TestMember {
+            name: "export.data",
+            data: b"{}",
+            deflate: false,
+        }],
+        b"",
+    );
+    assert_eq!(
+        run(Format::AliasVaultAvux, &no_manifest).unwrap_err(),
+        ImportError::UnexpectedShape
+    );
+
+    assert_eq!(
+        run(Format::AliasVaultAvux, b"not a zip").unwrap_err(),
+        ImportError::Malformed
+    );
 }
