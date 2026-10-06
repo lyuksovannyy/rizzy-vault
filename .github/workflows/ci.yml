@@ -23,7 +23,7 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Install toolchain from rust-toolchain.toml
@@ -34,7 +34,7 @@ jobs:
     name: clippy (deny warnings)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Install toolchain from rust-toolchain.toml
@@ -56,7 +56,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Install toolchain from rust-toolchain.toml
@@ -68,7 +68,7 @@ jobs:
     name: fuzz targets build (stable)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Install toolchain from rust-toolchain.toml
@@ -86,7 +86,7 @@ jobs:
     name: no-I/O crates and rizzy-wasm build for wasm32
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Install toolchain from rust-toolchain.toml
@@ -100,7 +100,7 @@ jobs:
     env:
       RUSTDOCFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Install toolchain from rust-toolchain.toml
@@ -112,7 +112,7 @@ jobs:
     name: cargo-deny (advisories, licenses, bans, sources)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -138,7 +138,7 @@ jobs:
       # packages/core's end-to-end test fails instead of skipping when no server binary exists.
       CI: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Install toolchain from rust-toolchain.toml
@@ -180,7 +180,7 @@ jobs:
     # counts.txt). Only this job sets it; no build artefact of it is used anywhere else.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Install toolchain from rust-toolchain.toml
@@ -200,7 +200,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Full history, so that both ends of the range are present.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -244,7 +244,7 @@ jobs:
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Build deploy/Containerfile
@@ -282,7 +282,7 @@ jobs:
     env:
       IMAGE: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}-${{ matrix.arch }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Build deploy/Containerfile
