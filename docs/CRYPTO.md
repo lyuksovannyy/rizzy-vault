@@ -1043,7 +1043,7 @@ The server stores `kdf_id` and `password_epoch` from that state with the OPAQUE 
 - **Signing ops.** The web vault generates an **ephemeral device** key pair in memory, with a certificate signed by the identity key, `device_kind = 4`, and `expires_at` = now + 12 h, so that its ops are signed.
   - The certificate is uploaded, but it is **not** part of the signed device set and publishes no new `account-state`. Peers verify it by the identity-key chain and its expiry against the op's HLC ([§10.2](#102-ed25519-signatures-and-signed-statements)).
   - A web login does not trigger the "new device enrolled" alarm of [§11.2](#112-login-on-a-new-device-server-mode) step 8. The server sends enrolled devices an informational "web vault session started" notice instead. It is not signed, so a malicious server can suppress it (threat model AR-9).
-- **Storage.** Nothing is persisted, except the SK if the user opted in.
+- **Storage.** No secret is persisted, except the SK if the user opted in. The one other value kept in browser storage is the non-secret theme choice (`system`, `light` or `dark`; owner decision of 2026-10-07), so that it survives a reload. It reveals nothing about the vault.
 
 ### 11.5 Master password or Secret Key change
 

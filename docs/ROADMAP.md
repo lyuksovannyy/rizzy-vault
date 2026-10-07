@@ -29,13 +29,13 @@ Target users by phase: **Personal → Enthusiasts/Families → Small & medium bu
 | # | Milestone | Goal / exit criteria | Audience |
 |---|---|---|---|
 | **M0** | Foundations | Threat model, crypto design ADRs, architecture decisions, repo layout, CI, contribution rules. No product code beyond spikes. | Dev |
-| **M1** | Core vault (MVP) | Register/login, E2EE vault CRUD, sync, web vault, CLI, import/export, generator, TOTP. Author uses it daily. | Personal (dogfood) |
-| **M2** | Browser extension & URL matching | Autofill in Chromium + Firefox, save-on-submit, domain equivalence (youtube.com ≡ youtu.be), match modes. | Personal |
-| **M3** | 1Password-grade UX & desktop | Design system (shared tokens; React components for web), native desktop app for macOS (Windows and Linux: §4.5), quick-access search, Watchtower-style health report, tags/favorites. | Personal |
+| **M1** | Core vault (MVP) | Register/login, E2EE vault CRUD, sync, web vault, CLI, import/export, generator, TOTP. Usable as a vault: everything can be stored, edited, synced, imported, exported and backed up, and the author has tested it with real-shaped data (owner decision of 2026-10-07: daily use moved to M3). | Personal (dogfood) |
+| **M2** | Browser extension & URL matching | Autofill in Chromium + Firefox, save-on-submit, domain equivalence (youtube.com ≡ youtu.be), match modes, passkeys in desktop browsers through the extension (moved from M7 on 2026-10-07). | Personal |
+| **M3** | 1Password-grade UX & desktop | Design system (shared tokens; React components for web), native desktop app for macOS (Windows and Linux: §4.5), quick-access search, Watchtower-style health report, tags/favorites. Author uses it daily (moved from M1 on 2026-10-07). | Personal |
 | **M4** | *Removed* | Removed on 2026-09-27: On-device sync is parked as a post-1.0 idea (§4.6; ADR 0022). The number is kept, so M5–M10 keep theirs. Its conflict UI and transparency page moved to M3, scheduled encrypted backups to M8. | — |
 | **M5** | Public sharing | Share an item by link with fragment-held key, expiry, view limits, optional recipient verification. | Personal |
 | **M6** | Aliases & email receiving | Generate alias identities, receive-only mailbox in UI, ingress encryption, autofill integration. | Personal / enthusiasts |
-| **M7** | Mobile & passkeys | Native iOS (SwiftUI) and Android (Kotlin) apps in their own repositories, over the Rust core through UniFFI, with OS autofill, passkey (WebAuthn) storage and use. | Personal |
+| **M7** | Mobile & passkeys | Native iOS (SwiftUI) and Android (Kotlin) apps in their own repositories, over the Rust core through UniFFI, with OS autofill and passkey (WebAuthn) use through the OS (passkey storage and browser use arrive in M2). | Personal |
 | **M8** | Hardening → **v1.0** | External security audit, bug bounty, backup/restore drills, docs. Public 1.0 for personal use. | Public |
 | **M9** | Families & enthusiasts | Shared vaults, family org, emergency access, multiple mail domains, admin panel. | Enthusiasts |
 | **M10** | Business | Org policies, roles, SSO (OIDC/SAML), SCIM, audit logs, admin console, billing hooks. | SMB |
@@ -240,7 +240,7 @@ This is the most operationally expensive feature in the whole plan. Read the ris
 | M | iOS app with AutoFill Credential Provider | M7 |
 | M | Shared Rust core via **UniFFI** bindings (no crypto re-implemented in Kotlin/Swift) | M7 |
 | M | Biometric unlock, auto-lock timeout, screenshot blocking | M7 |
-| M | Passkey storage (store WebAuthn credentials in vault) and use in extension | M7 |
+| M | Passkey storage (store WebAuthn credentials in vault) and use in the browser extension (owner decision of 2026-10-07: moved from M7 to M2; the native apps use them in M7) | M2 |
 | S | Passkey provider on Android 14+/iOS 17+ | M7 |
 | S | macOS AutoFill credential provider, with iOS; passkeys in it only once the [INV-64](THREAT_MODEL.md#8-security-invariants) amendment covers OS credential providers ([ADR 0019](adr/0019-native-clients.md)) | M7 |
 | S | Passkey import/export via FIDO Credential Exchange Protocol (CXP/CXF) when stable | M8 |

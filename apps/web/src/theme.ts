@@ -1,11 +1,10 @@
 // The Appearance theme choice (redesign slice 2, item 5 / item 7 of the first slice's "Not yet
 // done" list): "system" (the default), "light" or "dark".
 //
-// CRYPTO.md §11.4 says the web vault persists nothing; the owner has not yet said whether that
-// line covers a non-secret UI preference like this one (apps/web/README.md "Not yet done",
-// item 7). Until that is answered, this choice lives in memory only, for the current session —
-// no `localStorage`, no `sessionStorage`, no `IndexedDB` — and resets to "system" on reload,
-// exactly like every other piece of session state in this vault.
+// It is remembered in `localStorage` under {@link THEME_STORAGE_KEY}: CRYPTO.md §11.4 allows this
+// one non-secret value (owner decision of 2026-10-07). Reads and writes are wrapped, so a storage
+// that throws or is missing (private windows, blocked site data, tests) leaves the choice in
+// memory only, and anything stored that is not a known theme reads as "system".
 //
 // It is applied by setting (or clearing) `data-theme` on `document.documentElement`; the token
 // CSS (`packages/ui/src/tokens.css`) reads that attribute. "System" clears the attribute, so the
@@ -48,6 +47,48 @@ export function applyTheme(
   }
 }
 
+/** The `localStorage` key of the theme choice (module docs). */
+export const THEME_STORAGE_KEY = "rizzy-vault.theme";
+
+/** The part of `Storage` the theme uses, so tests can pass a fake. */
+export interface ThemeStore {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
+/** The browser's `localStorage`, or `undefined` where reading it throws or it does not exist. */
+function browserStore(): ThemeStore | undefined {
+  try {
+    return typeof localStorage === "undefined" ? undefined : localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The stored theme choice; "system" when nothing usable is stored or `store` throws. */
+export function loadTheme(store: ThemeStore | undefined): Theme {
+  try {
+    const value = store?.getItem(THEME_STORAGE_KEY) ?? null;
+    return value !== null && isTheme(value) ? value : "system";
+  } catch {
+    return "system";
+  }
+}
+
+/** Stores `theme`; "system" removes the entry. A throwing `store` is ignored (module docs). */
+export function saveTheme(theme: Theme, store: ThemeStore | undefined): void {
+  try {
+    if (theme === "system") {
+      store?.removeItem(THEME_STORAGE_KEY);
+    } else {
+      store?.setItem(THEME_STORAGE_KEY, theme);
+    }
+  } catch {
+    // Storage unavailable: the choice stays in memory for this session.
+  }
+}
+
 interface ThemeContextValue {
   readonly theme: Theme;
   readonly setTheme: (next: Theme) => void;
@@ -57,10 +98,11 @@ const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
 
 /** Wraps the app once near its root, beside `ToastProvider`. */
 export function ThemeProvider(props: { readonly children: ReactNode }) {
-  const [theme, setTheme] = useState<Theme>("system");
+  const [theme, setTheme] = useState<Theme>(() => loadTheme(browserStore()));
 
   useEffect(() => {
     applyTheme(theme, document.documentElement);
+    saveTheme(theme, browserStore());
   }, [theme]);
 
   const value = useMemo(() => ({ theme, setTheme }), [theme]);

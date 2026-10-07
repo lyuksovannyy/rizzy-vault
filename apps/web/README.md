@@ -178,13 +178,14 @@ detail side by side, unchanged. Covered by `e2e/phone.spec.ts` at 375×812.
 - **Settings** (`SettingsView.tsx`): one sidebar entry grouping Two-factor (`TwoFactorPane.tsx`,
   unchanged), Devices (`DevicesPane.tsx`, unchanged) and a new Appearance group (below).
 
-### Appearance (theme), memory-only
+### Appearance (theme)
 
 `src/theme.ts`'s `ThemeProvider`/`useThemeContext`: "system" (default), "light" or "dark",
 applied as `data-theme` on `document.documentElement` (`packages/ui/src/tokens.css` reads it).
-Kept in memory only for the session — **no** `localStorage`, `sessionStorage` or `IndexedDB` —
-pending the owner's answer on whether CRYPTO.md §11.4's "nothing is persisted" covers a
-non-secret UI preference like this one (see "Not yet done" below, carried over from slice 1).
+Remembered in `localStorage` under `rizzy-vault.theme`, as allowed by CRYPTO.md §11.4
+(owner decision of 2026-10-07): besides the opted-in Secret Key, the only value the web vault keeps in
+browser storage, and not a secret. A missing, unreadable or unknown stored value means "system"; a storage that throws
+(private windows, blocked site data) leaves the choice in memory only.
 
 ### Tags (`rizzy-wasm` → `@rizzy-vault/core` → `src/fields.ts`, `ItemsPane.tsx`, `VaultView.tsx`)
 
@@ -258,10 +259,6 @@ change:
 
 - **Item 6 (remainder).** The Emergency Kit screen was not restyled into a numbered-steps
   layout.
-- **Item 7 (persistence).** The owner has not yet said whether CRYPTO.md §11.4's "nothing is
-  persisted" covers a non-secret UI preference like the theme choice; until that is answered it
-  stays in memory only, per the task's own fallback (`src/theme.ts` module docs), so it resets
-  to "system" on every reload or lock.
 
 ## Build and test
 
