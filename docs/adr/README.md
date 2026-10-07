@@ -92,10 +92,10 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0033 | [Protocol Buffers encoding for client–server messages](0033-protobuf-api-encoding.md) | Proposed | M1 (JSON only) / M3 (trigger re-checked) |
 | 0034 | [Re-authentication before every export and a hold before plaintext export](0034-export-reauth-and-plaintext-hold.md) | Accepted | M1 |
 | 0035 | [A private CA file holds CA certificates only](0035-ca-file-ca-certificates-only.md) | Accepted | M1 |
-| 0036 | [Browser extension: architecture and key custody](0036-browser-extension-architecture-and-key-custody.md) | Proposed | M2 |
-| 0037 | [URL matching and autofill rules](0037-url-matching-and-autofill-rules.md) | Proposed | M2 |
-| 0038 | [Equivalent-domain list: format, signing and governance](0038-equivalent-domain-list.md) | Proposed | M2 |
-| 0039 | [Passkeys in the vault and in the browser extension](0039-passkeys-vault-and-extension.md) | Proposed | M2 |
+| 0036 | [Browser extension: architecture and key custody](0036-browser-extension-architecture-and-key-custody.md) | Accepted | M2 |
+| 0037 | [URL matching and autofill rules](0037-url-matching-and-autofill-rules.md) | Accepted | M2 |
+| 0038 | [Equivalent-domain list: format, signing and governance](0038-equivalent-domain-list.md) | Accepted | M2 |
+| 0039 | [Passkeys in the vault and in the browser extension](0039-passkeys-vault-and-extension.md) | Accepted | M2 |
 
 ## Gates
 

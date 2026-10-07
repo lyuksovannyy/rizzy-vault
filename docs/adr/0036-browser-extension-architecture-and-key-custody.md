@@ -1,13 +1,13 @@
 # ADR 0036: Browser extension: architecture and key custody
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-07
 - Deciders: project owner
 - Milestone: M2
 
 ## Context
 
-The owner moved the browser extension, URL matching and passkey storage/use in the browser from M7 to M2 on 2026-10-07 ([ROADMAP §3](../ROADMAP.md#3-milestones) M2 row; [§4.4](../ROADMAP.md#44-url-matching--autofill-m2), [§4.10](../ROADMAP.md#410-mobile--passkeys-m7)). ROADMAP §4.4, Must, M2: "Browser extension: Chromium (MV3) + Firefox — inline menu, fill, save/update on submit, generator in field." This ADR is the key-custody and architecture decision that [ADR 0014](0014-ui-stack.md) (UI stack) deliberately left open for the extension ("the content script is framework-free TypeScript whatever we pick") and that [ADR 0013](0013-shared-client-core.md) §4 already partly answers but did not freeze as a binding decision ("Lifetimes are confirmed in M2 (U)").
+The owner moved the browser extension, URL matching and passkey storage/use in the browser from M7 to M2 on 2026-10-07 ([ROADMAP §3](../ROADMAP.md#3-milestones) M2 row; [§4.4](../ROADMAP.md#44-url-matching--autofill-m2), [§4.10](../ROADMAP.md#410-mobile--passkeys-m7)). ROADMAP §4.4, Must, M2: "Browser extension: Chromium (MV3) + Firefox — inline menu, fill, save/update on submit, generator in field." This ADR is the key-custody and architecture decision that [ADR 0014](0014-ui-stack.md) (UI stack) deliberately left open for the extension ("the content script is plain TypeScript whatever we pick") and that [ADR 0013](0013-shared-client-core.md) §4 already partly answers but did not freeze as a binding decision ("Lifetimes are confirmed in M2 (U)").
 
 **What already binds.**
 - [ADR 0013](0013-shared-client-core.md) (Accepted) §2, §3, §4: the core is `rizzy-client` through `rizzy-wasm`, the same backend as the web vault. Rule 1 ("keys stay in Rust") holds only if every handle and the KDF output stay in **one wasm instance**; the core is never split across contexts. §4 names the candidates: "one long-lived context holds the instance: an offscreen document on Chromium, the background page on Firefox," never the MV3 service worker, which Chromium terminates when idle (about 30 s, general knowledge, U). If neither context survives, the fallback is the one *named exception* in §3 rule 2: unlocked key state goes out as opaque bytes into `storage.session`, restored when the long-lived context restarts, never into `storage.local` or IndexedDB ([INV-63](../THREAT_MODEL.md#8-security-invariants)).
@@ -35,7 +35,7 @@ Consequences of this choice:
 - It runs one Argon2id evaluation per unlock ([CRYPTO.md §5.6](../CRYPTO.md#56-offline-unlock)), not an OPAQUE login on every session like the web vault.
 - Its ops are signed by its own device key and show up in the signed device set and the "new device enrolled" notification ([CRYPTO.md §11.2](../CRYPTO.md#112-login-on-a-new-device-server-mode) step 8), unlike a kind-4 web-vault certificate.
 
-**Device kind value.** [ADR 0026](0026-client-device-state-and-cache.md) §2 parses `device_kind` only in `1–3`. No ADR enumerates what 1, 2 and 3 currently mean (grep of the repository at the time of writing found no assignment table; **U**). This ADR assumes they are reserved for `rv` (M1), native desktop (M3) and mobile (M7) in that rough order, and that the extension needs a **new** value. See "What this ADR supersedes" and the open question below.
+**Device kind value.** The extension uses `device_kind` **2**, which [CRYPTO.md §10.2](../CRYPTO.md#102-ed25519-signatures-and-signed-statements) (`device-certificate`) and `rizzy-core` (`DeviceKind::Extension = 2`) already assign to the browser extension (1 desktop/CLI, 2 extension, 3 mobile, 4 web-ephemeral). [ADR 0026](0026-client-device-state-and-cache.md) §2 already parses `device_kind` in `1–3`, so the extension's `device_state` needs no new value. Kind 4 is never used: it is left out of the signed device set ([CRYPTO.md §10.2](../CRYPTO.md#102-ed25519-signatures-and-signed-statements)), which is exactly what a durable device must not be.
 
 ### 2. Which context holds the core
 
@@ -75,6 +75,10 @@ Consequences of this choice:
 - **`apps/extension`** (already named in [ADR 0016](0016-workspace-layout.md) §7 and [ADR 0014](0014-ui-stack.md) Context) holds: the MV3 manifest(s) for Chromium and Firefox, the service worker, the offscreen-document/background-page script, the popup and options-page React apps, the inline-menu iframe app, and the framework-free content script. None of it joins the Cargo workspace.
 - **IndexedDB adapter.** A small TypeScript module inside `apps/extension` (not `packages/core`, which stays platform-neutral) that implements the host-provided storage capability [ADR 0013](0013-shared-client-core.md) §2 names for the extension row, calling `rizzy-wasm`'s `store` bindings with raw bytes it never interprets.
 
+### Owner answers at acceptance (2026-10-07)
+
+The owner accepted this ADR with the recommendations of "Open questions for the owner": the device kind is 2 (§1); auto-lock defaults to 15 minutes idle, user-configurable; the Chromium offscreen document uses reason `WORKERS`, and the justification string the Chrome Web Store accepts is recorded with the M2 code.
+
 ## Consequences
 
 ### Positive
@@ -102,19 +106,13 @@ Consequences of this choice:
 
 ## Open questions for the owner
 
-1. **Device kind value for the extension.** [ADR 0026](0026-client-device-state-and-cache.md) §2 allows `device_kind` 1–3 only, and no ADR records what those three values mean today. *Recommendation:* the owner (or whoever wrote the M1 `rizzy-client` code) confirms the existing mapping, and this ADR (or a follow-up note) assigns the extension a fourth value, with ADR 0026 §2's parsing rule superseded to `1–4` (see below). Needed before M2 code lands.
+1. *Resolved before acceptance:* the device kind is 2 (§1, "Device kind value").
 2. **Auto-lock default timeout.** *Recommendation:* 15 minutes idle, user-configurable, consistent across the extension and the future desktop/mobile clients (an M3/M7 decision to align, not re-decide, per client).
 3. **Chromium offscreen-document justification.** `chrome.offscreen` requires a `reason` from a fixed enum; none of them is written for "hold a wasm instance". *Recommendation:* use `WORKERS` (closest fit: "the extension needs to use a worker") and record the exact justification string actually accepted in the M2 spike notes; revisit if the Chrome Web Store review rejects it.
 
 ## What this ADR supersedes
 
-Under [ADR 0020](0020-partial-supersession.md) point 9:
-
-| Part, quoted | Replaced by |
-|---|---|
-| [ADR 0026](0026-client-device-state-and-cache.md) §2, "Parsing": "`device_kind` 1–3" | "`device_kind` 1–4, where 4 identifies the browser extension (this ADR, §1)." Everything else in ADR 0026 §2 and §3 stays binding; the extension's IndexedDB cache is exactly §3's "IndexedDB (M2)" row, unchanged. |
-
-No other Accepted ADR needs superseding: [ADR 0013](0013-shared-client-core.md) §2 and §4 already describe the extension's storage and context rules in a way this ADR narrows (picks the offscreen document / background page option, confirms the `storage.session` fallback) rather than contradicts, and [ADR 0014](0014-ui-stack.md)'s extension rows (§2 content-script rules, §5 component sharing) are unchanged.
+Nothing. [ADR 0026](0026-client-device-state-and-cache.md) stays binding as written: the extension uses `device_kind` 2, inside §2's `1–3`, and its IndexedDB cache is exactly §3's "IndexedDB (M2)" row. No Accepted ADR needs superseding: [ADR 0013](0013-shared-client-core.md) §2 and §4 already describe the extension's storage and context rules in a way this ADR narrows (picks the offscreen document / background page option, confirms the `storage.session` fallback) rather than contradicts, and [ADR 0014](0014-ui-stack.md)'s extension rows (§2 content-script rules, §5 component sharing) are unchanged.
 
 ## References
 

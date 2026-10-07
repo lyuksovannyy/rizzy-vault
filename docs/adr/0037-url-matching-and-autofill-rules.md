@@ -1,6 +1,6 @@
 # ADR 0037: URL matching and autofill rules
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-07
 - Deciders: project owner
 - Milestone: M2
@@ -80,6 +80,10 @@ Per [CRYPTO.md §8.4](../CRYPTO.md#84-aad-and-purposes) and [INV-14](../THREAT_M
 ### 7. User-defined equivalence groups and disabling a global group
 
 User-defined groups and per-group disable flags are account settings ([§6](#6-account-level-settings)); their storage format and the global list's own format, signing and governance are [ADR 0038](0038-equivalent-domain-list.md)'s. `rizzy-match`'s matching function takes the merged view (global list minus disabled groups, plus user groups) as a plain input and has no opinion on where it came from.
+
+### Owner answers at acceptance (2026-10-07)
+
+The owner accepted this ADR with the recommendations of "Open questions for the owner": the URL parser is the `url` crate, subject to the usual dependency review in the change that adds it; an unanchored regex gets a warning in the editor but can be saved; the PSL snapshot is bumped on every release and whenever upstream moves.
 
 ## Consequences
 

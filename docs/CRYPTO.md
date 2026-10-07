@@ -41,7 +41,8 @@ This document holds the full constructions. The ADRs record each decision and li
    7. reserved (parked, [ADR 0022](adr/0022-server-mode-only.md)): device pairing ([§11.7](#117-new-device-in-on-device-mode));
    8. the recovery token plus waiting period ([§11.9](#119-recovery-with-the-emergency-kit));
    9. the share link token, access token and passphrase scheme ([§11.10](#1110-public-share-link-creation-m5), [§11.11](#1111-public-share-link-opening-m5));
-   10. server-side sealing ([§5.11](#511-server-side-encryption-not-zero-knowledge)).
+   10. server-side sealing ([§5.11](#511-server-side-encryption-not-zero-knowledge));
+   11. the signed equivalence list ([ADR 0038](adr/0038-equivalent-domain-list.md)): a detached Ed25519 signature over the canonical list bytes under `LABEL("sig/equivalence-list")`, with a strictly increasing `list_version` ([§10.2](#102-ed25519-signatures-and-signed-statements)).
 
    Nothing else may be invented. A new construction needs an ADR first, and joins this list. [ADR 0009](adr/0009-crypto-dependency-policy.md) sizes the audit scope from it.
 3. **"Audited" is weaker than it sounds.** Almost none of the crate versions we will ship have been audited in that exact version ([§3](#3-primitives)). The rule we enforce is: standard algorithm, established crate with a public audit history or a well-reviewed codebase, pinned version, and our own external audit of the integration in M8 ([ADR 0009](adr/0009-crypto-dependency-policy.md)).
@@ -847,6 +848,7 @@ None of this changes the symmetric envelopes. They are already fine against quan
 | `key-grant` | see [§10.1](#101-hpke-key-wrapping) | Device key (`ACCOUNT_KEY_DEVICE_GRANT`, `PASSWORD_VERIFIER_GRANT`) or identity key (`VAULT_KEY_MEMBER_GRANT`, M9; an `ACCOUNT_KEY_DEVICE_GRANT` from a kind-4 client). Writer and verifier reject any other pairing of purpose and signer role |
 | `device-auth` | see [§5.10](#510-sessions-after-authentication) | Device key |
 | `device-request` (M1, decided 2026-09-25, [§16](#16-open-questions-for-the-owner) question 15) | str(server_origin) ‖ account_id ‖ device_id ‖ session_id (16) ‖ u64 request_counter ‖ str(method) ‖ str(path_and_query) ‖ SHA-256(request body) ([§5.10](#510-sessions-after-authentication)). An empty method is rejected: the signer refuses it and the verifier fails | Device key |
+| `equivalence-list` (M2, [ADR 0038](adr/0038-equivalent-domain-list.md) §1) | u32 list_version ‖ u64 published_at_ms ‖ u16 n ‖ n × (group_id (16) ‖ u16 m ‖ m × str(domain) ‖ u8 flag_third_party_hostable), groups sorted by `group_id` and domains bytewise; `statement_version` is the list's `format_version` (1) | The offline equivalence-list signing key ([ADR 0038](adr/0038-equivalent-domain-list.md) §3), whose public key is compiled into clients |
 
 **Release manifest (Windows, not yet specified).** Before its builds are signed, the Windows client checks for updates against a version manifest, signed with ed25519 and verified against a compiled-in key ([ADR 0019](adr/0019-native-clients.md) §12). Its statement is added to the table above, in this message format ([ADR 0007](adr/0007-ciphertext-envelope.md) point 8), before the Windows client ships.
 

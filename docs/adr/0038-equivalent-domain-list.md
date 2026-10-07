@@ -1,6 +1,6 @@
 # ADR 0038: Equivalent-domain list: format, signing and governance
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-07
 - Deciders: project owner
 - Milestone: M2
@@ -73,6 +73,10 @@ Reused, formalised, from [THREAT_MODEL](../THREAT_MODEL.md) A6 "Equivalence list
 - **Disabling a global group.** `ACCOUNT_SETTINGS` carries a set of disabled `group_id`s. `rizzy-match`'s merged view ([ADR 0037](0037-url-matching-and-autofill-rules.md) §7) is: every global group not in that set, plus every user-defined group, with no further widening between them (a user group cannot re-enable a disabled global group by duplicating its domains under a new `group_id` — that is allowed, because it is the user's own explicit choice, which is exactly what "user-defined" means, but it is visible to the user as their own data, not silently inherited).
 - **No community review for user-defined groups.** They are the account owner's own risk; [§4](#4-review-rules) applies only to the shipped global list.
 
+### Owner answers at acceptance (2026-10-07)
+
+The owner accepted this ADR with the recommendations of "Open questions for the owner": every group is re-verified at least once per release cycle; the list-signing key gets at least the protection of the tag-signing key ([AST-16](../THREAT_MODEL.md#2-assets)); the community PR process is set up with the M2 code under §4's rules.
+
 ## Consequences
 
 ### Positive
@@ -110,7 +114,7 @@ Reused, formalised, from [THREAT_MODEL](../THREAT_MODEL.md) A6 "Equivalence list
 
 This ADR makes none of these edits. The owner makes them in the change that accepts it, following the pattern of ADRs 0018, 0019 and 0022:
 - **[CRYPTO.md §1](../CRYPTO.md#1-goals-non-goals-and-rules) Rule 2** gains a new composition line: "the signed equivalence list ([ADR 0038](0038-equivalent-domain-list.md)): a detached Ed25519 signature over the canonical list bytes under `LABEL("sig/equivalence-list")`."
-- **[CRYPTO.md §4.3](../CRYPTO.md#43-derivations)** gains the signature-message label `sig/equivalence-list` in the label registry, next to the other `sig/<type>` entries.
+- **[CRYPTO.md §10.2](../CRYPTO.md#102-ed25519-signatures-and-signed-statements)** gains `equivalence-list` in its table of signed statement types, next to the other `sig/<type>` labels ([§4.3](../CRYPTO.md#43-derivations) keeps its generic "`LABEL("sig/<type>")`" line).
 - No Accepted ADR is superseded, in whole or in part: this is new ground ([ADR 0016](0016-workspace-layout.md) §3 already named "signed equivalence lists" as `rizzy-match`'s job without specifying the format, so this ADR fills a gap rather than changing a decision).
 
 ## References

@@ -1,13 +1,13 @@
 # ADR 0039: Passkeys in the vault and in the browser extension
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-07
 - Deciders: project owner
 - Milestone: M2
 
 ## Context
 
-The owner moved "Passkey storage (store WebAuthn credentials in vault) and use in the browser extension" from M7 to M2 on 2026-10-07 ([ROADMAP §4.10](../ROADMAP.md#410-mobile--passkeys-m7); native-app passkey use via the OS stays M7). This is the ADR [ADR 0018](0018-item-record-encoding.md) owner decision 6 already anticipated: "Reserve both a standalone type (`0x000A`) and a `passkey/` list on Login? **Yes.** The M7 passkey ADR uses one and releases the other." Moving the milestone does not change that delegation; this ADR exercises it now.
+The owner moved "Passkey storage (store WebAuthn credentials in vault) and use in the browser extension" from M7 to M2 on 2026-10-07 ([ROADMAP §4.10](../ROADMAP.md#410-mobile--passkeys-m7); native-app passkey use via the OS stays M7). This is the ADR [ADR 0018](0018-item-record-encoding.md) owner decision 6 already anticipated: "both are reserved: the standalone type `0x000A` and the `passkey/` list on Login. The M7 passkey ADR uses one and releases the other." Moving the milestone does not change that delegation; this ADR exercises it now.
 
 **What already binds.**
 - [ADR 0018](0018-item-record-encoding.md) (Accepted) §7 reserves the prefixes `passkey.` and `passkey/` for the item that ships this; §8 reserves item type `0x000A` "Passkey, standalone" and notes both reservations are live until this ADR picks one.
@@ -87,6 +87,10 @@ The WebAuthn spec requires `attestationObject` to be a CBOR map and `authenticat
 
 - **PRF extension.** Not implemented in M2. Deriving an unlock key from a passkey ([ROADMAP §4.3](../ROADMAP.md#43-cryptography--authentication-m0m1-audited-in-m8), Could, post-1.0) is a different feature (using a passkey *to unlock the vault*) from storing and presenting passkeys *for other sites*, which is all ROADMAP §4.10's M2 row asks for. Revisit with that post-1.0 item.
 - **CXF import/export.** Not implemented in M2 ([ROADMAP §4.10](../ROADMAP.md#410-mobile--passkeys-m7), Should, M8). The field-key design above does not foreclose it: a future CXF importer, in `rizzy-import` ([ADR 0016](0016-workspace-layout.md) §3), would build the same `passkey/<id>/…` fields from a parsed CXF payload.
+
+### Owner answers at acceptance (2026-10-07)
+
+The owner accepted this ADR with the recommendations of "Open questions for the owner" 2 and 3: attestation is `"none"` only in M2, and the data model allows several passkeys per Login while the UI may start with one. Question 1, approving a P-256 (ES256) crate, is **not** answered by this acceptance: it needs the completed [ADR 0009](0009-crypto-dependency-policy.md) checklist in its own change, and passkey code waits for it.
 
 ## Consequences
 
