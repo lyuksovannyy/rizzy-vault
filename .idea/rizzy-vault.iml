@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module type="EMPTY_MODULE" version="4">
+  <component name="NewModuleRootManager">
+    <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$/crates/rizzy-bus/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/rizzy-cli/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/rizzy-cli/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/rizzy-client/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/rizzy-core/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/rizzy-core/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/rizzy-domain-auth/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/rizzy-domain-auth/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/rizzy-domain-vault/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/rizzy-domain-vault/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/rizzy-import/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/rizzy-proto/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/rizzy-server/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/rizzy-server/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/rizzy-storage/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/rizzy-storage/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/rizzy-sync/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/rizzy-wasm/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/xtask/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/xtask/tests" isTestSource="true" />
+      <excludeFolder url="file://$MODULE_DIR$/target" />
+    </content>
+    <orderEntry type="inheritedJdk" />
+    <orderEntry type="sourceFolder" forTests="false" />
+  </component>
+</module>
