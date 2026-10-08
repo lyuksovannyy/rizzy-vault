@@ -1,6 +1,6 @@
 # ADR 0041: Approving the `p256` crate for ES256 (ECDSA P-256) in passkeys
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-08
 - Deciders: project owner
 - Milestone: M2
@@ -57,6 +57,10 @@ p256 = { version = "=0.14.0", default-features = false, features = ["ecdsa", "al
    - **Project Wycheproof.** Google's Wycheproof suite publishes `ecdsa_secp256r1_sha256_test.json`, which exercises malformed/edge-case signatures (wrong-curve points, zero/negative `r`/`s`, truncated DER) beyond the positive KATs above, the same category of suite ADR 0009 already names for `sha1`/HMAC.
    - **WebAuthn-shaped vectors.** Per [ADR 0039 §4](0039-passkeys-vault-and-extension.md#4-webauthn-message-assembly-no-new-cbor-dependency)'s own note, the hand-written CBOR (`attestationObject`, the COSE `EC2` key map) needs vectors checked against real browser output, not just against our own encoder/decoder round-trip; those vectors should sign with this same `p256` build so the two concerns (CBOR correctness and ES256 correctness) are exercised together, not just independently.
    - These join [CRYPTO.md §15](../CRYPTO.md#15-testing) item 2's upstream-vector list and get their own committed fixture files under `crates/rizzy-core/tests/vectors/`, matching tier (A)'s existing convention.
+
+### Owner answers at acceptance (2026-10-08)
+
+The owner approved `p256` `=0.14.0` with `default-features = false, features = ["ecdsa", "alloc"]` (question 1), and the implementation change runs the mechanical checks (`cargo check-wasm`, `cargo deny check`, `cargo xtask check-deps`, the `unsafe` count) and resolves the remaining **U** items before the crate lands (question 2). If any check fails, the crate does not land and the owner is asked again.
 
 ## Consequences
 
