@@ -33,6 +33,8 @@ import {
   FIXED_FIELDS,
   fixedChanges,
   group,
+  MATCH_MODE_OPTIONS,
+  MATCH_MODE_REGEX,
 } from "../fields.ts";
 import { GENERATOR_LIMITS } from "../generator-constants.ts";
 import { fillGenerated, generateValue } from "../generator-flow.ts";
@@ -55,6 +57,9 @@ function fieldsOf(type: ItemType | "unknown"): readonly FixedField[] {
 interface PendingUri {
   readonly id: string;
   uri: string;
+  /** `uri/<id>/match`'s wire value, as a decimal string; `"0"` (account default) is never
+   * written (module docs; `fields.ts` `MATCH_MODE_OPTIONS`). */
+  match: string;
 }
 
 /** A custom field the user is adding, not yet saved. */
@@ -91,6 +96,10 @@ export function ItemEditor(props: {
   const [summary, setSummary] = useState<ItemSummary | undefined>();
   const [current, setCurrent] = useState<Grouped | undefined>();
   const [texts, setTexts] = useState<Record<string, string>>({});
+  // `uri/<id>/match`'s selected decimal value, keyed by the URI's element id — a separate map
+  // from `texts` because an existing URI may hold no `match` register at all (ADR 0018 §7:
+  // absent means the account default, `"0"`), unlike `value`/`order` which every saved URI has.
+  const [matchModes, setMatchModes] = useState<Record<string, string>>({});
   const [clearSecret, setClearSecret] = useState<Record<string, boolean>>({});
   const [favorite, setFavorite] = useState(false);
   const [removed, setRemoved] = useState<Record<string, boolean>>({});
@@ -137,6 +146,11 @@ export function ItemEditor(props: {
         }
       }
       setTexts(initial);
+      const initialMatch: Record<string, string> = {};
+      for (const u of g.uris) {
+        initialMatch[u.element] = u.attributes.get("match")?.value ?? "0";
+      }
+      setMatchModes(initialMatch);
     } catch (e: unknown) {
       setError(codeOf(e));
     }
@@ -234,7 +248,7 @@ export function ItemEditor(props: {
   const addPendingUri = () =>
     void run(async () => {
       const id = await ctx.client.call("newElementId");
-      setPendingUris((rows) => [...rows, { id, uri: "" }]);
+      setPendingUris((rows) => [...rows, { id, uri: "", match: "0" }]);
     });
 
   const addPendingCustom = () =>
@@ -290,7 +304,10 @@ export function ItemEditor(props: {
         continue;
       }
       for (const attr of el.attributes.values()) {
-        if (attr.attribute === "order" || attr.attribute === "kind") {
+        // `order` and `kind` are layout attributes written elsewhere (reordering, the custom
+        // field's own kind control); `match` is handled below, where the "absent" case (no
+        // register at all) can be represented, which this generic loop cannot (module docs).
+        if (attr.attribute === "order" || attr.attribute === "kind" || attr.attribute === "match") {
           continue;
         }
         if (attr.concealed) {
@@ -308,6 +325,25 @@ export function ItemEditor(props: {
         }
       }
     }
+    // `uri/<id>/match` of existing websites (module docs: a separate pass, since a URI may
+    // hold no `match` register at all). A removed row is already covered by `removeElement`
+    // above, which clears every register of the element (ADR 0018 §6), `match` included.
+    for (const u of current.uris) {
+      if (removed[`${u.list}/${u.element}`] === true) {
+        continue;
+      }
+      const matchKey = `uri/${u.element}/match`;
+      const held = u.attributes.get("match")?.value ?? "0";
+      const selected = matchModes[u.element] ?? held;
+      if (selected === held) {
+        continue;
+      }
+      if (selected === "0") {
+        changes.push({ op: "clear", key: matchKey });
+      } else {
+        changes.push({ op: "set", key: matchKey, value: selected });
+      }
+    }
     for (const t of current.tags) {
       if (removed[`tag:${t}`] === true) {
         changes.push({ op: "untag", name: t });
@@ -316,6 +352,9 @@ export function ItemEditor(props: {
     for (const row of pendingUris) {
       if (row.uri.trim() !== "") {
         changes.push({ op: "addUri", element: row.id, uri: row.uri.trim() });
+        if (row.match !== "0") {
+          changes.push({ op: "set", key: `uri/${row.id}/match`, value: row.match });
+        }
       }
     }
     for (const row of pendingCustom) {
@@ -420,6 +459,7 @@ export function ItemEditor(props: {
           {current.uris.map((u, index) => {
             const k = `${u.list}/${u.element}`;
             const valueKey = u.attributes.get("value")?.key ?? "";
+            const matchValue = matchModes[u.element] ?? u.attributes.get("match")?.value ?? "0";
             return (
               <div key={k} className="list-row">
                 <input
@@ -430,6 +470,26 @@ export function ItemEditor(props: {
                   disabled={removed[k] === true}
                   onChange={(e) => setTexts({ ...texts, [valueKey]: e.currentTarget.value })}
                 />
+                <select
+                  aria-label={`Website ${index + 1} match mode`}
+                  value={matchValue}
+                  disabled={removed[k] === true}
+                  onChange={(e) =>
+                    setMatchModes({ ...matchModes, [u.element]: e.currentTarget.value })
+                  }
+                >
+                  {MATCH_MODE_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+                {Number.parseInt(matchValue, 10) === MATCH_MODE_REGEX && (
+                  <p className="muted small">
+                    Regex matching is not evaluated by this build yet: this website will never
+                    be offered for autofill until that lands.
+                  </p>
+                )}
                 <div className="row-actions">
                   <button
                     type="button"
@@ -474,6 +534,26 @@ export function ItemEditor(props: {
                   setPendingUris((rows) => rows.map((r) => (r.id === row.id ? { ...r, uri } : r)));
                 }}
               />
+              <select
+                aria-label={`New website ${index + 1} match mode`}
+                value={row.match}
+                onChange={(e) => {
+                  const match = e.currentTarget.value;
+                  setPendingUris((rows) => rows.map((r) => (r.id === row.id ? { ...r, match } : r)));
+                }}
+              >
+                {MATCH_MODE_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              {Number.parseInt(row.match, 10) === MATCH_MODE_REGEX && (
+                <p className="muted small">
+                  Regex matching is not evaluated by this build yet: this website will never be
+                  offered for autofill until that lands.
+                </p>
+              )}
               <div className="row-actions">
                 <button
                   type="button"

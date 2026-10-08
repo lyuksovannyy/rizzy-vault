@@ -68,8 +68,9 @@
 //! # Readings (conservative, where ADR 0027 §6 leaves a detail open)
 //!
 //! - **A write the op may not make.** `check_carried` refuses a known key that belongs to
-//!   another item type and a key an M1 client never writes (`uri/<id>/match`,
-//!   `share/<id>/secret`). Such a field is left out, counted
+//!   another item type and a key this client never writes (`share/<id>/secret`, M5's;
+//!   `uri/<id>/match` was the same in M1, owner decision 2, and carries from M2 once ADR 0037,
+//!   Accepted, assigned its enum values). Such a field is left out, counted
 //!   ([`Counts::dropped_fields`](crate::Counts)) and warned about
 //!   ([`WarningKind::FieldSkipped`]); the item's other fields are imported. This is how
 //!   `rizzy-core` already treats those keys in a restore or duplicate as a new item.

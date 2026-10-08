@@ -127,7 +127,12 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return;
     }
     await ensureOffscreenDocument(ext);
-    const forward: ContentScriptForward = { type: "cs_request", message: validated, trustedOrigin };
+    const forward: ContentScriptForward = {
+      type: "cs_request",
+      message: validated,
+      trustedOrigin,
+      trustedTabId: sender.tab?.id,
+    };
     const response = await ext.runtime.sendMessage(forward);
     sendResponse(response);
   })();

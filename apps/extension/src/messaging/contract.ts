@@ -66,10 +66,29 @@ export interface SavePromptResolvedMessage {
   readonly action: "save" | "update" | "dismiss";
 }
 
+/**
+ * Sent once, unconditionally, on every content-script load (`content-script.ts`'s
+ * `installContentScript`) — never gated on whether this page has any detected login fields,
+ * because the page a form's submit navigates *to* (a dashboard, say) often has none. Asks the
+ * long-lived context whether a save/update offer from a form submitted on an earlier page of
+ * this same tab and registrable domain is still pending: the fix for the save-prompt race
+ * (`apps/extension/README.md`'s residual note) where a page that navigates away right after
+ * submit tears down the document before the immediate {@link CredentialsSubmittedMessage}
+ * response's `.then` callback ever runs, losing the offer with it. `pageUrl` is this (new)
+ * page's own URL; the background derives the tab id from `sender.tab.id`, never the message
+ * body (ADR 0036 §4, INV-40), and the registrable domain from this `pageUrl` only once it has
+ * passed the same `pageUrlMatchesSender` check every other content-script message does.
+ */
+export interface CheckSavePromptMessage {
+  readonly type: "check_save_prompt";
+  readonly pageUrl: string;
+}
+
 export type FromContentScript =
   | FieldsDetectedMessage
   | CredentialsSubmittedMessage
-  | SavePromptResolvedMessage;
+  | SavePromptResolvedMessage
+  | CheckSavePromptMessage;
 
 /**
  * The user picked a candidate in the extension-origin inline menu, on a trusted gesture
@@ -180,10 +199,20 @@ export interface SavePromptDoneMessage {
   readonly type: "save_prompt_done";
 }
 
+/** The answer to a {@link CheckSavePromptMessage} when nothing is pending for this tab and
+ * registrable domain — distinct from {@link ContentErrorMessage} (this is the ordinary,
+ * expected case on most page loads, never a failure) and distinct from `undefined` (so a test,
+ * or a future caller, can tell "answered: nothing pending" apart from "no listener answered at
+ * all"). */
+export interface NoPendingSavePromptMessage {
+  readonly type: "no_pending_save_prompt";
+}
+
 export type ToContentScript =
   | CandidatesMessage
   | SavePromptOfferedMessage
   | SavePromptDoneMessage
+  | NoPendingSavePromptMessage
   | ContentErrorMessage;
 
 /** `core-host/listener.ts`'s answer to an {@link InlineMenuFillRequestMessage} — never a
@@ -251,6 +280,12 @@ export interface ContentScriptForward {
   readonly type: "cs_request";
   readonly message: FromContentScript;
   readonly trustedOrigin: string;
+  /** `sender.tab.id` (`background/service-worker.ts`'s own `sender`, never the message body):
+   * the save-prompt-by-location lookup's tab half (`core-host/content-handler.ts`'s
+   * `check_save_prompt`/`credentials_submitted` handling). `undefined` on the rare sender that
+   * validated as a content script but carries no tab id; callers that need it degrade to "no
+   * location-keyed offer" rather than failing the whole request. */
+  readonly trustedTabId: number | undefined;
 }
 
 /** Popup/options → long-lived context: coarse, one call per action (ADR 0036 §4). `enrol`
@@ -320,6 +355,7 @@ export const MESSAGE_TYPES = [
   "fields_detected",
   "credentials_submitted",
   "save_prompt_resolved",
+  "check_save_prompt",
   "inline_menu_fill_chosen",
   "inline_menu_fill_dispatched",
   "apply_fill",
@@ -327,6 +363,7 @@ export const MESSAGE_TYPES = [
   "candidates",
   "save_prompt",
   "save_prompt_done",
+  "no_pending_save_prompt",
   "enrol",
   "unlock",
   "lock",

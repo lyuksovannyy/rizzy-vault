@@ -17,6 +17,7 @@ import {
   MAX_FIELDS_PER_REPORT,
   isApplyFillMessage,
   type CandidatesMessage,
+  type CheckSavePromptMessage,
   type CredentialsSubmittedMessage,
   type FieldDescriptor,
   type FromContentScript,
@@ -82,6 +83,21 @@ function installContentScript(): void {
 
   let savePrompt: SavePromptBanner | undefined;
 
+  // Shows `answer` as the save/update banner when the background actually offered one,
+  // replacing whatever banner (if any) is already showing. Shared by the immediate response to
+  // a submit, below, and by the save-prompt-race recovery path (`checkForPendingSavePrompt`):
+  // both are "the background just told this page about an offer," the only difference being
+  // which page load the offer was originally made on.
+  const showSavePromptIfOffered = (answer: ToContentScript | undefined): void => {
+    if (answer?.type !== "save_prompt") {
+      return;
+    }
+    savePrompt?.destroy();
+    savePrompt = new SavePromptBanner(answer, () => {
+      savePrompt = undefined;
+    });
+  };
+
   // ROADMAP §4.4 "save/update on submit": a capturing listener so a page's own `stopPropagation`
   // on the bubbling phase cannot hide the submit from this script. Reads the current value of
   // whichever fields detection already tagged `username`/`password` (never a guess at the
@@ -100,17 +116,23 @@ function installContentScript(): void {
         pageUrl: location.href,
         ...(usernameField !== null && usernameField.value !== "" ? { usernameValue: usernameField.value } : {}),
         passwordValue: passwordField.value,
-      } satisfies CredentialsSubmittedMessage).then((answer) => {
-        if (answer?.type === "save_prompt") {
-          savePrompt?.destroy();
-          savePrompt = new SavePromptBanner(answer, () => {
-            savePrompt = undefined;
-          });
-        }
-      });
+      } satisfies CredentialsSubmittedMessage).then(showSavePromptIfOffered);
     },
     true,
   );
+
+  // The save-prompt race fix (module docs; `apps/extension/README.md`'s residual note,
+  // `core-host/core-context.ts`'s `pendingOffersByLocation`): sent once, unconditionally, on
+  // every content-script load — not only when this page itself has login fields, since the page
+  // a submit navigates *to* (a dashboard, say) usually has none — so a save offer whose
+  // originating page navigated away before it could show the immediate response above is still
+  // delivered here, on whichever page of the same tab and registrable domain loads next. A plain
+  // "no_pending_save_prompt" answer, or no answer at all (the device is locked, or this is a
+  // fresh profile with no long-lived context to ask yet), is the ordinary, silent case.
+  void sendToBackground({
+    type: "check_save_prompt",
+    pageUrl: location.href,
+  } satisfies CheckSavePromptMessage).then(showSavePromptIfOffered);
 
   // Detection reruns on load and on DOM mutation (dynamically rendered login forms), debounced
   // by `requestIdleCallback`-style batching via a simple timer so a busy page cannot cause a

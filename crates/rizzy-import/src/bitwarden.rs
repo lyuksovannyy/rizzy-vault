@@ -16,7 +16,7 @@
 //! | `creationDate` | `import.created_ms` |
 //! | `folderId`, `collectionIds` | tags named after the folder and collections |
 //! | `login.username`, `.password`, `.totp` | `login.username`, `.password`, `.totp` |
-//! | `login.uris[].uri` | `uri/<id>/value` (the `match` setting is not imported: M1 never writes `match`, owner decision 2) |
+//! | `login.uris[].uri` | `uri/<id>/value` (`login.uris[].match` is not imported: Bitwarden's own enum differs from ADR 0037 §4's and mapping it is out of this importer's current scope, not a schema restriction — `uri/<id>/match` itself is writable from M2) |
 //! | `login.fido2Credentials` | not imported (passkeys are M7), warning |
 //! | `passwordHistory[]` (`password`, `lastUsedDate`) | `pwhist/<id>/value`, `/ms` |
 //! | `card.cardholderName`, `.brand`, `.number`, `.expMonth`, `.expYear`, `.code` | `card.holder`, `.brand`, `.number`, `.exp_month`, `.exp_year`, `.code` |

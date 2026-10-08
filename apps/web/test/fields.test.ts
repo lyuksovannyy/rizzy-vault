@@ -3,7 +3,17 @@
 import type { FieldView } from "@rizzy-vault/core";
 import { describe, expect, it } from "vitest";
 
-import { FIXED_FIELDS, fixedChanges, group, labelOf, matches, tagCounts } from "../src/fields.ts";
+import {
+  FIXED_FIELDS,
+  fixedChanges,
+  group,
+  labelOf,
+  MATCH_MODE_OPTIONS,
+  MATCH_MODE_REGEX,
+  matchModeLabel,
+  matches,
+  tagCounts,
+} from "../src/fields.ts";
 
 /** A field view with defaults. */
 function f(key: string, more: Partial<FieldView> = {}): FieldView {
@@ -128,5 +138,35 @@ describe("tagCounts", () => {
 
   it("is empty when no item has a tag", () => {
     expect(tagCounts([{ tags: [] }])).toEqual([]);
+  });
+});
+
+// `uri/<id>/match`'s wire values (ADR 0037 §4, Accepted M2): the editor's select options and
+// the item detail view's label, for every assigned value and the absent/account-default case.
+describe("MATCH_MODE_OPTIONS / matchModeLabel", () => {
+  it("has exactly one option per assigned wire value, 0x0000 through 0x0006", () => {
+    expect(MATCH_MODE_OPTIONS.map((o) => o.value)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+  });
+
+  it("labels the absent case as the account default, not a specific mode", () => {
+    expect(matchModeLabel(undefined)).toBe("Account default");
+    expect(matchModeLabel("0")).toBe("Account default");
+  });
+
+  it("labels every assigned value", () => {
+    expect(matchModeLabel("1")).toBe("Base domain");
+    expect(matchModeLabel("2")).toBe("Host");
+    expect(matchModeLabel("3")).toBe("Starts with");
+    expect(matchModeLabel("4")).toBe("Exact");
+    expect(matchModeLabel("6")).toBe("Never");
+  });
+
+  it("flags Regex as not evaluated by this build, never as a working mode", () => {
+    expect(matchModeLabel(String(MATCH_MODE_REGEX))).toMatch(/advanced/i);
+  });
+
+  it("never throws on an unassigned or malformed value — shows as unknown instead (ADR 0018 §6: invalid values never reject anything)", () => {
+    expect(matchModeLabel("7")).toBe("Unknown (7)");
+    expect(matchModeLabel("not a number")).toContain("Unknown");
   });
 });

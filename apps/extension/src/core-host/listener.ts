@@ -103,7 +103,7 @@ export function installCoreContextListener(ext: WebExtNamespace, options: Instal
       try {
         const trustedOrigin = trustedOriginOf(sender, ext.runtime.id);
         const validated = parseFromContentScript(message);
-        void handleContentScriptRequest(validated, trustedOrigin).then(sendResponse);
+        void handleContentScriptRequest(validated, trustedOrigin, sender.tab?.id).then(sendResponse);
       } catch (e) {
         const code = e instanceof SenderRejected || e instanceof MessageRejected ? e.message : "rejected";
         sendResponse({ type: "content_error", code } satisfies ToContentScript);
@@ -139,7 +139,7 @@ export function installCoreContextListener(ext: WebExtNamespace, options: Instal
       return undefined;
     }
     if (isContentScriptForward(message)) {
-      void handleContentScriptRequest(message.message, message.trustedOrigin).then(
+      void handleContentScriptRequest(message.message, message.trustedOrigin, message.trustedTabId).then(
         (response: ToContentScript) => sendResponse(response),
       );
       return true;

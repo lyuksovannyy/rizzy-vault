@@ -57,10 +57,12 @@
 //!   the item under the element's prefix, layout attributes (`order`, `kind`) included, so a
 //!   concurrent edit of the order cannot keep a removed element in place. Clearing a layout
 //!   attribute changes no existence; it is the literal reading.
-//! - **Keys an M1 client never writes** are left out of a removal: `uri/<id>/match` ("M1
-//!   clients carry it and never write it", ADR 0018 §7 owner decision 2) and
-//!   `share/<id>/secret` (M5). Neither is a content attribute of its element (`match` is
-//!   layout; a share is not a list this client edits), so the element still stops existing.
+//! - **Keys this client never writes** are left out of a removal: `share/<id>/secret` (M5's to
+//!   write and clear) today. `uri/<id>/match` was the same in M1 (ADR 0018 §7 owner decision 2,
+//!   "carry it and never write it") and is cleared like any other register from M2, once
+//!   ADR 0037 (Accepted) assigned its enum values and moved it to `Writers::Any`. Neither is a
+//!   *content* attribute of its element (`match` is layout; a share is not a list this client
+//!   edits), so clearing it, alone, never keeps the element existing.
 //! - **Tags** have no attributes: a tag is added with Bool `0x01` and removed with Cleared on
 //!   its own key (`rizzy_core::item::tag::tag_key`); the generic removal does the same.
 //! - **The rewrite covers the elements the item displays,** in the order after the edit. The

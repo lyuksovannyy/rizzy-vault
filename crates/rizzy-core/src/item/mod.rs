@@ -70,13 +70,14 @@
 //!   one, and it is still carried like any unknown key;
 //! - in an edit, Cleared may be written to keys this client does not know, unknown and reserved
 //!   alike, since removing a list element clears every attribute of it that the writer holds
-//!   (§6); `uri/<id>/match` is still never written, under owner decision 2
-//!   ([`schema::check_write`]);
+//!   (§6); `uri/<id>/match` is one of them from M2 (ADR 0037, Accepted, superseding owner
+//!   decision 2's M1 restriction) ([`schema::check_write`]);
 //! - a restore or duplicate as a new item (§3 "Surfacing", §10 "The way out") copies unknown and
-//!   reserved keys and unsupported values byte for byte, but not `uri/<id>/match`,
-//!   `share/<id>/secret` or `import.created_ms`, which that op may not write
-//!   ([`schema::check_carried`]); the import of our own exports carries displayed values the
-//!   same way, and may also write `import.created_ms` (ADR 0027 §2, §6);
+//!   reserved keys and unsupported values byte for byte, but not `share/<id>/secret` or
+//!   `import.created_ms`, which that op may not write ([`schema::check_carried`]);
+//!   `uri/<id>/match` may be carried from M2 like any other known key; the import of our own
+//!   exports carries displayed values the same way, and may also write `import.created_ms`
+//!   (ADR 0027 §2, §6);
 //! - an `order` attribute whose displayed value is not a valid `SortKey` sorts as "without order"
 //!   ([`order::compare_list_entries`]);
 //! - a list element id may have any length the grammar allows; only writers are bound to the

@@ -70,6 +70,35 @@ export const FIXED_FIELDS: Readonly<Partial<Record<ItemType, readonly FixedField
   ],
 };
 
+/** `uri/<id>/match`'s wire values (ADR 0037 §4, Accepted M2), for the editor's select and the
+ * item detail view. `0x0000` ("absent") falls back to the account-level match default
+ * (ADR 0037 §6); this web vault has no UI for that account setting yet (see ROADMAP §4.4 and
+ * the M2 report), so it is shown as "Account default" without naming which mode that resolves
+ * to. `0x0005` (Regex) is a value `rizzy-match` accepts and stores, but its own matching
+ * decision reports `NotSupported` for it today (`crates/rizzy-match/src/modes.rs`): the editor
+ * must not claim it works. */
+export const MATCH_MODE_OPTIONS: readonly { readonly value: number; readonly label: string }[] = [
+  { value: 0x0000, label: "Account default" },
+  { value: 0x0001, label: "Base domain" },
+  { value: 0x0002, label: "Host" },
+  { value: 0x0003, label: "Starts with" },
+  { value: 0x0004, label: "Exact" },
+  { value: 0x0005, label: "Regex (advanced)" },
+  { value: 0x0006, label: "Never" },
+];
+
+/** The wire value of `uri/<id>/match` this build does not yet evaluate for matching
+ * (`crates/rizzy-match/src/modes.rs`'s `MatchOutcome::NotSupported`). */
+export const MATCH_MODE_REGEX = 0x0005;
+
+/** The label for a `uri/<id>/match` displayed value (`undefined` or out of range shows as
+ * "Account default" and "Unknown" respectively, never a thrown error: ADR 0018 §6, "invalid
+ * values never reject anything", applies to display too). */
+export function matchModeLabel(value: string | undefined): string {
+  const n = value === undefined ? 0 : Number.parseInt(value, 10);
+  return MATCH_MODE_OPTIONS.find((o) => o.value === n)?.label ?? `Unknown (${value ?? ""})`;
+}
+
 /** The label of a fixed key, or the key itself. */
 export function labelOf(key: string): string {
   for (const fields of Object.values(FIXED_FIELDS)) {

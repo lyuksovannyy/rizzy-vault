@@ -137,6 +137,27 @@ pub fn normalize_page_url(url: &str) -> Result<String, CoreError> {
         .map_err(|_| CoreError::from(ClientError::InvalidInput))
 }
 
+/// The page's registrable domain (eTLD+1, ADR 0037 §2 rule 7), for a host that needs to key
+/// state by "the same site" across a same-tab navigation without re-implementing PSL lookup
+/// outside `rizzy-match` — for example the extension's save-prompt continuity
+/// (`apps/extension/src/core-host/core-context.ts`): a login form's submit often navigates to a
+/// different host of the same site (`login.example.com` → `example.com`), and the pending offer
+/// must survive that, but never follow the tab on to an unrelated site reached later. `None`
+/// only for a bare public suffix (`co.uk`, `com`), which has no registrable domain beneath it
+/// (`NormalizedUrl::registrable_domain`'s own doc) — the caller treats that as "nothing to key
+/// the offer by," not an error, same as a saved URI that fails to normalise elsewhere in this
+/// module. An IP-literal host is `Some` of itself (never run through the PSL, which has no
+/// concept of one), so a self-hosted/intranet login reached by IP literal still keys correctly.
+///
+/// # Errors
+/// `invalid_input` if `url` does not parse as an absolute `http`/`https` URL.
+#[wasm_bindgen(js_name = registrableDomainOf)]
+pub fn registrable_domain_of(url: &str) -> Result<Option<String>, CoreError> {
+    matching::NormalizedUrl::parse(url)
+        .map(|u| u.registrable_domain().map(str::to_owned))
+        .map_err(|_| CoreError::from(ClientError::InvalidInput))
+}
+
 /// Decides which of `uris` are autofill candidates for `page_url`, requested by the frame at
 /// `frame_origin` (module docs; `rizzy_client::matching::decide_candidates`).
 ///
@@ -212,6 +233,25 @@ mod tests {
         );
         assert_eq!(
             normalize_page_url("not a url").unwrap_err().as_str(),
+            "invalid_input"
+        );
+    }
+
+    #[test]
+    fn registrable_domain_of_a_page_url() {
+        assert_eq!(
+            registrable_domain_of("https://login.example.com/path").unwrap(),
+            Some("example.com".to_owned())
+        );
+        // An IP literal is its own registrable domain (never a PSL lookup, this fn's own doc).
+        assert_eq!(
+            registrable_domain_of("http://127.0.0.1:8080/").unwrap(),
+            Some("127.0.0.1".to_owned())
+        );
+        // A bare public suffix has no registrable domain beneath it.
+        assert_eq!(registrable_domain_of("https://co.uk/").unwrap(), None);
+        assert_eq!(
+            registrable_domain_of("not a url").unwrap_err().as_str(),
             "invalid_input"
         );
     }

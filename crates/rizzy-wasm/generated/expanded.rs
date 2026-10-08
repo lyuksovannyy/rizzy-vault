@@ -19669,6 +19669,183 @@ pub mod matching {
         };
     #[allow(dead_code)]
     #[doc =
+    " The page\'s registrable domain (eTLD+1, ADR 0037 §2 rule 7), for a host that needs to key"]
+    #[doc =
+    " state by \"the same site\" across a same-tab navigation without re-implementing PSL lookup"]
+    #[doc =
+    " outside `rizzy-match` — for example the extension\'s save-prompt continuity"]
+    #[doc =
+    " (`apps/extension/src/core-host/core-context.ts`): a login form\'s submit often navigates to a"]
+    #[doc =
+    " different host of the same site (`login.example.com` → `example.com`), and the pending offer"]
+    #[doc =
+    " must survive that, but never follow the tab on to an unrelated site reached later. `None`"]
+    #[doc =
+    " only for a bare public suffix (`co.uk`, `com`), which has no registrable domain beneath it"]
+    #[doc =
+    " (`NormalizedUrl::registrable_domain`\'s own doc) — the caller treats that as \"nothing to key"]
+    #[doc =
+    " the offer by,\" not an error, same as a saved URI that fails to normalise elsewhere in this"]
+    #[doc =
+    " module. An IP-literal host is `Some` of itself (never run through the PSL, which has no"]
+    #[doc =
+    " concept of one), so a self-hosted/intranet login reached by IP literal still keys correctly."]
+    #[doc = ""]
+    #[doc = " # Errors"]
+    #[doc =
+    " `invalid_input` if `url` does not parse as an absolute `http`/`https` URL."]
+    pub fn registrable_domain_of(url: &str)
+        -> Result<Option<String>, CoreError> {
+        matching::NormalizedUrl::parse(url).map(|u|
+                    u.registrable_domain().map(str::to_owned)).map_err(|_|
+                CoreError::from(ClientError::InvalidInput))
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " The page\'s registrable domain (eTLD+1, ADR 0037 §2 rule 7), for a host that needs to key"]
+            #[doc =
+            " state by \"the same site\" across a same-tab navigation without re-implementing PSL lookup"]
+            #[doc =
+            " outside `rizzy-match` — for example the extension\'s save-prompt continuity"]
+            #[doc =
+            " (`apps/extension/src/core-host/core-context.ts`): a login form\'s submit often navigates to a"]
+            #[doc =
+            " different host of the same site (`login.example.com` → `example.com`), and the pending offer"]
+            #[doc =
+            " must survive that, but never follow the tab on to an unrelated site reached later. `None`"]
+            #[doc =
+            " only for a bare public suffix (`co.uk`, `com`), which has no registrable domain beneath it"]
+            #[doc =
+            " (`NormalizedUrl::registrable_domain`\'s own doc) — the caller treats that as \"nothing to key"]
+            #[doc =
+            " the offer by,\" not an error, same as a saved URI that fails to normalise elsewhere in this"]
+            #[doc =
+            " module. An IP-literal host is `Some` of itself (never run through the PSL, which has no"]
+            #[doc =
+            " concept of one), so a self-hosted/intranet login reached by IP literal still keys correctly."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `invalid_input` if `url` does not parse as an absolute `http`/`https` URL."]
+            #[export_name = "registrableDomainOf_e09cc0eb35f8b583"]
+            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_registrableDomainOf(arg0_1:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg0_2:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg0_3:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg0_4:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4)
+                ->
+                    wasm_bindgen::convert::WasmRet<<Result<Option<String>,
+                    CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                const _: () = {};
+                let _ret =
+                    wasm_bindgen::__rt::maybe_catch_unwind(||
+                            {
+                                {
+                                    wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                    let arg0 =
+                                        unsafe {
+                                            <str as
+                                                    wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                        as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg0_1, arg0_2,
+                                                    arg0_3, arg0_4))
+                                        };
+                                    let arg0 = &*arg0;
+                                    let _ret = registrable_domain_of(arg0);
+                                    _ret
+                                }
+                            });
+                <Result<Option<String>, CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " The page\'s registrable domain (eTLD+1, ADR 0037 §2 rule 7), for a host that needs to key"]
+            #[doc =
+            " state by \"the same site\" across a same-tab navigation without re-implementing PSL lookup"]
+            #[doc =
+            " outside `rizzy-match` — for example the extension\'s save-prompt continuity"]
+            #[doc =
+            " (`apps/extension/src/core-host/core-context.ts`): a login form\'s submit often navigates to a"]
+            #[doc =
+            " different host of the same site (`login.example.com` → `example.com`), and the pending offer"]
+            #[doc =
+            " must survive that, but never follow the tab on to an unrelated site reached later. `None`"]
+            #[doc =
+            " only for a bare public suffix (`co.uk`, `com`), which has no registrable domain beneath it"]
+            #[doc =
+            " (`NormalizedUrl::registrable_domain`\'s own doc) — the caller treats that as \"nothing to key"]
+            #[doc =
+            " the offer by,\" not an error, same as a saved URI that fails to normalise elsewhere in this"]
+            #[doc =
+            " module. An IP-literal host is `Some` of itself (never run through the PSL, which has no"]
+            #[doc =
+            " concept of one), so a self-hosted/intranet login reached by IP literal still keys correctly."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `invalid_input` if `url` does not parse as an absolute `http`/`https` URL."]
+            #[no_mangle]
+            #[doc(hidden)]
+            pub extern "C-unwind" fn __wbindgen_describe_registrableDomainOf_e09cc0eb35f8b583() {
+                use wasm_bindgen::describe::*;
+                wasm_bindgen::__rt::link_mem_intrinsics();
+                inform(FUNCTION);
+                inform(0);
+                inform(1u32);
+                <&str as WasmDescribe>::describe();
+                <Result<Option<String>, CoreError> as
+                        WasmDescribe>::describe();
+                <Result<Option<String>, CoreError> as
+                        WasmDescribe>::describe();
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\x01\0\x0eZ The page's registrable domain (eTLD+1, ADR 0037 \xc2\xa72 rule 7), for a host that needs to keyY state by \"the same site\" across a same-tab navigation without re-implementing PSL lookupM outside `rizzy-match` \xe2\x80\x94 for example the extension's save-prompt continuity] (`apps/extension/src/core-host/core-context.ts`): a login form's submit often navigates to a_ different host of the same site (`login.example.com` \xe2\x86\x92 `example.com`), and the pending offerZ must survive that, but never follow the tab on to an unrelated site reached later. `None`[ only for a bare public suffix (`co.uk`, `com`), which has no registrable domain beneath it^ (`NormalizedUrl::registrable_domain`'s own doc) \xe2\x80\x94 the caller treats that as \"nothing to key[ the offer by,\" not an error, same as a saved URI that fails to normalise elsewhere in thisX module. An IP-literal host is `Some` of itself (never run through the PSL, which has no] concept of one), so a self-hosted/intranet login reached by IP literal still keys correctly.\0\t # ErrorsK `invalid_input` if `url` does not parse as an absolute `http`/`https` URL.\0\x01\x03url\0\0\0\0\0\x13registrableDomainOf\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    #[allow(dead_code)]
+    #[doc =
     " Decides which of `uris` are autofill candidates for `page_url`, requested by the frame at"]
     #[doc =
     " `frame_origin` (module docs; `rizzy_client::matching::decide_candidates`)."]

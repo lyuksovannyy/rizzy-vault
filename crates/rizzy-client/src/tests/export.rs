@@ -1124,7 +1124,8 @@ fn payload_import_flattens_conflicts_and_reports_what_it_left() {
             skipped_items: 3,
             collapsed_fields: 1,
             history_not_carried: 2,
-            fields_not_carried: 2,
+            // `card.number` on a Login; `uri/<id>/match` now carries (ADR 0037, Accepted, M2).
+            fields_not_carried: 1,
         }
     );
 
@@ -1141,8 +1142,8 @@ fn payload_import_flattens_conflicts_and_reports_what_it_left() {
             collapsed_fields: 1,
             // The history of `item.name`, and the cleared password entry.
             history_not_carried: 2,
-            // `card.number` on a Login, and `uri/<id>/match`.
-            fields_not_carried: 2,
+            // `card.number` on a Login; `uri/<id>/match` now carries (ADR 0037, Accepted, M2).
+            fields_not_carried: 1,
         }
     );
     assert_eq!(report.imported.len(), 2);
@@ -1153,7 +1154,13 @@ fn payload_import_flattens_conflicts_and_reports_what_it_left() {
     assert_eq!(*lifecycle, ItemLifecycle::Active);
     assert_eq!(
         without_import_keys(fields).keys().collect::<Vec<_>>(),
-        ["item.name", "item.type", "login.password", "newer.key"]
+        [
+            "item.name",
+            "item.type",
+            "login.password",
+            "newer.key",
+            "uri/00112233445566778899aabbccddeeff/match",
+        ]
     );
     assert_eq!(fields["newer.key"], [0x7f, 0x09]);
     assert_eq!(fields[LOGIN_PASSWORD], new);

@@ -1459,15 +1459,22 @@ fn rizzy_json_unknown_members_and_unwritable_fields() {
     let import = run(Format::RizzyPlaintextJson, doc.as_bytes()).unwrap();
     assert_eq!(import.items.len(), 3);
     let w = carried(&import.items[0]);
-    // The first `type` counts (the JSON reader's rule); the unwritable fields are left out.
+    // The first `type` counts (the JSON reader's rule); the unwritable fields (`share/<id>/secret`,
+    // M5's, and `card.number` on a Login) are left out. `uri/<id>/match` now carries (ADR 0037,
+    // Accepted, M2).
     assert_eq!(import.items[0].item_type(), ItemType::LOGIN);
     assert_eq!(
         w.keys()
             .filter(|k| !k.starts_with("pwhist/"))
             .collect::<Vec<_>>(),
-        ["item.name", "item.type", "login.password"]
+        [
+            "item.name",
+            "item.type",
+            "login.password",
+            "uri/00112233445566778899aabbccddeeff/match",
+        ]
     );
-    assert_eq!(w.len(), 5);
+    assert_eq!(w.len(), 6);
     // An item with no field is an item: only its type is written.
     assert_eq!(
         carried(&import.items[1]).keys().collect::<Vec<_>>(),
@@ -1485,7 +1492,8 @@ fn rizzy_json_unknown_members_and_unwritable_fields() {
             ignored_members: 7,
             collapsed_conflicts: 0,
             dropped_history: 0,
-            dropped_fields: 3,
+            // `share/<id>/secret` and `card.number` on a Login.
+            dropped_fields: 2,
         }
     );
     assert_eq!(

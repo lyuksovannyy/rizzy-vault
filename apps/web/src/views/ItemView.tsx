@@ -8,7 +8,7 @@ import { ConfirmDialog, IconStarFilled, IconStarOutline, SecretField, TypeIcon, 
 import { useEffect, useId, useState } from "react";
 
 import { codeOf } from "../core-client.ts";
-import { type Grouped, group, labelOf } from "../fields.ts";
+import { type Grouped, group, labelOf, matchModeLabel } from "../fields.ts";
 import { SafeLink, SafeOpenButton } from "../SafeLink.tsx";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText, useAction } from "./common.tsx";
@@ -249,8 +249,16 @@ export function ItemView(props: {
       {summary.hasTotp && !summary.trashed && <TotpLine ctx={ctx} id={id} />}
       {grouped.uris.map((u) => {
         const v = u.attributes.get("value");
-        return v === undefined ? null : (
-          <FieldValue key={v.key} ctx={ctx} id={id} field={v} label="Website" link />
+        if (v === undefined) {
+          return null;
+        }
+        return (
+          <div key={v.key}>
+            <FieldValue ctx={ctx} id={id} field={v} label="Website" link />
+            <p className="muted small" data-field={`${v.key.replace(/\/value$/, "/match")}`}>
+              Match: {matchModeLabel(u.attributes.get("match")?.value)}
+            </p>
+          </div>
         );
       })}
       {grouped.custom.map((c) => {

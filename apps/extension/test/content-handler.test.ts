@@ -4,11 +4,15 @@
 import { describe, expect, it } from "vitest";
 
 import { handleContentScriptRequest, handleInlineMenuFillRequest, selectFillCandidate } from "../src/core-host/content-handler.ts";
-import type { FieldsDetectedMessage } from "../src/messaging/contract.ts";
+import type { CheckSavePromptMessage, FieldsDetectedMessage } from "../src/messaging/contract.ts";
 import type { MatchCandidate } from "../src/core-host/bindings.ts";
 
 function fieldsDetected(pageUrl: string): FieldsDetectedMessage {
   return { type: "fields_detected", pageUrl, isTopFrame: true, fields: [] };
+}
+
+function checkSavePrompt(pageUrl: string): CheckSavePromptMessage {
+  return { type: "check_save_prompt", pageUrl };
 }
 
 describe("handleContentScriptRequest: fields_detected origin check", () => {
@@ -31,6 +35,27 @@ describe("handleContentScriptRequest: fields_detected origin check", () => {
   it("refuses a pageUrl that does not even parse as a URL", async () => {
     const response = await handleContentScriptRequest(fieldsDetected("not-a-url"), "https://example.com");
     expect(response.type).toBe("content_error");
+  });
+});
+
+// The save-prompt race fix's wire-up (`core-host/save-prompt-location.ts` holds the actual
+// index logic, tested directly there): nothing was ever `credentials_submitted` in this test
+// file (no session, no offer), so every one of these must answer "nothing pending", never an
+// error — a plain cache-miss is the ordinary case on most page loads, not a failure.
+describe("handleContentScriptRequest: check_save_prompt", () => {
+  it("answers no_pending_save_prompt when nothing was ever offered for this tab", async () => {
+    const response = await handleContentScriptRequest(checkSavePrompt("https://example.com/dashboard"), "https://example.com", 1);
+    expect(response).toEqual({ type: "no_pending_save_prompt" });
+  });
+
+  it("answers no_pending_save_prompt when no trusted tab id is available at all", async () => {
+    const response = await handleContentScriptRequest(checkSavePrompt("https://example.com/dashboard"), "https://example.com");
+    expect(response).toEqual({ type: "no_pending_save_prompt" });
+  });
+
+  it("never refuses check_save_prompt for an origin mismatch (module docs: there is no trusted value to compare pageUrl against here)", async () => {
+    const response = await handleContentScriptRequest(checkSavePrompt("https://attacker.example/"), "https://example.com", 1);
+    expect(response).toEqual({ type: "no_pending_save_prompt" });
   });
 });
 

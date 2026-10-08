@@ -53,6 +53,7 @@ import initWasm, {
   plaintextExportHoldMs as wasmPlaintextExportHoldMs,
   plaintextExportPhrase as wasmPlaintextExportPhrase,
   plaintextExportWarning as wasmPlaintextExportWarning,
+  registrableDomainOf as wasmRegistrableDomainOf,
 } from "../generated/rizzy_core.js";
 
 // ---------------------------------------------------------------------------------------------
@@ -1938,6 +1939,17 @@ export interface MatchDecisionResult {
 export function normalizePageUrl(url: string): string {
   ensureReady();
   return call(() => wasmNormalizePageUrl(url));
+}
+
+/** `url`'s registrable domain (eTLD+1, ADR 0037 §2 rule 7), for a host that needs to key state
+ * by "the same site" across a same-tab navigation (the extension's save-prompt continuity) —
+ * never computed outside `rizzy-match` (ADR 0037 §1), so a phishing-relevant PSL bug is fixed
+ * once. `undefined` only for a bare public suffix (`co.uk`, `com`), which has no registrable
+ * domain beneath it, not an error; an IP-literal host is its own registrable domain (never run
+ * through the PSL, which has no concept of one). */
+export function registrableDomainOf(url: string): string | undefined {
+  ensureReady();
+  return call(() => wasmRegistrableDomainOf(url));
 }
 
 /**

@@ -13,6 +13,7 @@ import {
   decideMatchCandidates,
   enrolDevice,
   normalizePageUrl,
+  registrableDomainOf,
   unlockDurableDevice,
 } from "../src/index.js";
 import { loadCore } from "./load.js";
@@ -119,6 +120,30 @@ describe("normalizePageUrl", () => {
 
   it("refuses a non-URL", () => {
     expect(() => normalizePageUrl("not a url")).toThrowError(
+      expect.objectContaining({ code: "invalid_input" }),
+    );
+  });
+});
+
+// The extension's save-prompt-by-location index (ADR 0037 §2 rule 7) keys state by this.
+describe("registrableDomainOf", () => {
+  it("is the eTLD+1 of a host with a registrable domain", () => {
+    expect(registrableDomainOf("https://login.example.com/path")).toBe("example.com");
+  });
+
+  // `rizzy-match`'s own `normalize.rs` doc: an IP literal is its own "registrable domain" (never
+  // passed to the PSL, which has no concept of one) so the save-prompt-location index still
+  // keys correctly for a self-hosted/intranet login reached by IP literal.
+  it("is the IP literal itself for an IP-literal host, never a PSL lookup", () => {
+    expect(registrableDomainOf("http://127.0.0.1:8080/")).toBe("127.0.0.1");
+  });
+
+  it("is undefined only for a bare public suffix, which has no registrable domain beneath it", () => {
+    expect(registrableDomainOf("https://co.uk/")).toBeUndefined();
+  });
+
+  it("refuses a non-URL", () => {
+    expect(() => registrableDomainOf("not a url")).toThrowError(
       expect.objectContaining({ code: "invalid_input" }),
     );
   });

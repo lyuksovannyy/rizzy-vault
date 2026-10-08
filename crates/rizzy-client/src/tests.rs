@@ -2082,7 +2082,8 @@ mod store;
 
 /// ADR 0018 §6 "List elements", "List order": URIs and custom fields of an existing item are
 /// added after the last element, edited by key, and removed by clearing every attribute the
-/// item holds, `uri/<id>/match` (never written by M1) left out; tags by their own key.
+/// item holds, `share/<id>/secret` (M5's) left out; `uri/<id>/match` is cleared too from M2
+/// (ADR 0037, Accepted, `Writers::Any`); tags by their own key.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -2191,8 +2192,8 @@ fn list_elements_are_added_edited_and_removed() {
         ClientError::UnknownItem
     );
 
-    // A `match` written by a newer client is carried, never written by this one: the removal
-    // leaves it out and the element still goes.
+    // A `match` value (written directly, M2, ADR 0037 Accepted) is cleared like any other
+    // register when the element is removed.
     let third_hex = hex_of(third.as_bytes());
     let match_key = format!("{LIST_URI}/{third_hex}/{ATTR_MATCH}");
     let match_value = Value::enumeration(1);
@@ -2211,7 +2212,11 @@ fn list_elements_are_added_edited_and_removed() {
     let removal = vault
         .element_removal_writes(item, LIST_URI, &third_hex)
         .unwrap();
-    assert!(removal.iter().all(|(k, _)| k.as_str() != match_key));
+    assert!(
+        removal
+            .iter()
+            .any(|(k, v)| k.as_str() == match_key && v.is_cleared())
+    );
     write(&mut vault, &mut rng, &removal).unwrap();
     assert_eq!(uris(&vault), ["https://a2.example"]);
 

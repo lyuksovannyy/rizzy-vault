@@ -15,7 +15,7 @@
 //! | `tag/<hex>` | Bool `0x01` | all | any | no |
 //! | `share/<share_id>/secret` | Bytes, 32 | all | not in M1 (M5) | yes |
 //! | `login.username`, `login.password`, `login.totp` | Text | Login | any | password, TOTP |
-//! | `uri/<id>/value` · `/match` · `/order` | Text · Enum · `SortKey` | Login | any; `match` not in M1 (owner decision 2) | no |
+//! | `uri/<id>/value` · `/match` · `/order` | Text · Enum · `SortKey` | Login | any; `match`'s values are [ADR 0037] §4 (Accepted, M2) | no |
 //! | `pwhist/<id>/value` · `/ms` | Text · U64 | Login | any | no (see below) |
 //! | `card.holder`, `.number`, `.brand`, `.exp_month`, `.exp_year`, `.code`, `.pin` | Text | Card | any | number, code, PIN |
 //! | `identity.` + 18 names | Text | Identity | any | `ssn`, `passport_number` |
@@ -48,8 +48,10 @@
 //! final key, the 64 KiB value limit, no field edit of an unsupported type, no blank field in a
 //! create op, keys of the item's type only, `item.type` only in the create op and naming the
 //! item's own type, `import.created_ms` only from an importer, and no write at all of
-//! `uri/<id>/match` or `share/<id>/secret`. The record-level limits (writes per op, op size)
-//! are the record layer's. The two sources of a write differ in what else is checked:
+//! `share/<id>/secret` (M5's to write and clear). `uri/<id>/match` was the same until
+//! [ADR 0037] (Accepted, M2) assigned its enum values, as ADR 0018 §7 anticipated ("the M2 ADR
+//! assigns its values"); it is `Writers::Any` from M2. The record-level limits (writes per op,
+//! op size) are the record layer's. The two sources of a write differ in what else is checked:
 //!
 //! - **Entered** ([`check_write`]): a value the user typed, or this client built for the user.
 //!   It must be a well-formed value of the type the key expects, never an empty Text, and its
@@ -75,8 +77,9 @@
 //!   JSON export, with [`WriteMode::Import`]: each displayed value of the exported item is a
 //!   carried write of the new item, "any key of the grammar and any value bytes within §10 are
 //!   kept verbatim and show as unsupported where unknown". With that mode a carried
-//!   `import.created_ms` is writable, as it is for every importer; `uri/<id>/match` and
-//!   `share/<id>/secret` still are not. An import file is hostile input, and this check is what
+//!   `import.created_ms` is writable, as it is for every importer; `share/<id>/secret` still is
+//!   not (M5's). `uri/<id>/match` may be carried from M2 like any other known key. An import
+//!   file is hostile input, and this check is what
 //!   keeps a carried write harmless: the key is of the grammar, the value is within the size
 //!   limit and never interpreted here, and a known key stays inside its item type.
 //!
@@ -84,11 +87,16 @@
 //! read; the carried reading above is this module's, and so is the one below.
 //!
 //! [ADR 0027]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0027-export-payload.md
+//! [ADR 0037]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0037-url-matching-and-autofill-rules.md
 //!
-//! **`uri/<id>/match` is never written**, not even as Cleared when its URI is removed: owner
-//! decision 2 ("M1 clients carry it and never write it") is taken over the general §6 removal
-//! rule. `match` is a layout attribute, so the removed URI stops existing either way; the stale
-//! `match` register stays, as every register does (ADR 0018 §4).
+//! **`uri/<id>/match` is writable from M2** (ADR 0037, Accepted, assigns its enum values
+//! `0x0000`–`0x0006`; unassigned values above that are still accepted here, as any other Enum
+//! key's out-of-range value is, and read back as unsupported by the matching layer). Owner
+//! decision 2's M1 restriction ("carry it and never write it") no longer applies: removing its
+//! URI now clears it too, under the general §6 removal rule, same as `order`; `match` is still a
+//! layout attribute for the §6 *existence* rule ([`super::order::element_exists`]), so a removed
+//! URI's stale `match` alone never keeps the element "existing" if `value` and `label` are both
+//! cleared.
 
 use core::fmt;
 
@@ -189,7 +197,8 @@ pub const ATTR_KIND: &str = "kind";
 pub const ATTR_VALUE: &str = "value";
 /// Attribute `order` of a custom field or a URI: `SortKey`. A layout attribute.
 pub const ATTR_ORDER: &str = "order";
-/// Attribute `match` of a URI: Enum, reserved for M2. A layout attribute.
+/// Attribute `match` of a URI: Enum, values `0x0000`–`0x0006` per ADR 0037 §4 (Accepted, M2). A
+/// layout attribute.
 pub const ATTR_MATCH: &str = "match";
 /// Attribute `secret` of a share: Bytes, 32, the owner's copy of the share secret (M5).
 pub const ATTR_SECRET: &str = "secret";
@@ -279,8 +288,9 @@ pub enum Writers {
     /// Only an importer's create op: `import.created_ms`.
     ImportOnly,
     /// An M1 client carries the key and never writes it, not even as Cleared or copied into a
-    /// new item: `uri/<id>/match`, reserved for M2 (owner decision 2), and
-    /// `share/<id>/secret`, which M5 writes and clears.
+    /// new item: `share/<id>/secret`, which M5 writes and clears. `uri/<id>/match` was the same
+    /// in M1 (owner decision 2) and moved to [`Writers::Any`] once ADR 0037 (Accepted, M2)
+    /// assigned its enum values.
     NotInM1,
 }
 
@@ -538,7 +548,7 @@ fn classify_element(key: FieldKeyRef<'_>) -> KeyClass {
             known(Expected::Text, LOGIN, Writers::Any, Concealment::Shown)
         }
         (LIST_URI, Some(ATTR_MATCH)) => {
-            known(Expected::Enum, LOGIN, Writers::NotInM1, Concealment::Shown)
+            known(Expected::Enum, LOGIN, Writers::Any, Concealment::Shown)
         }
         (LIST_PWHIST, Some(ATTR_MS)) => {
             known(Expected::U64, LOGIN, Writers::Any, Concealment::Shown)

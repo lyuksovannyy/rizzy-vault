@@ -7,7 +7,14 @@
 // `decideMatchCandidates` (via `core-context.ts`'s `matchCandidatesFor`) — never the content
 // script itself, and never the service worker (ADR 0037 §1 puts matching in `rizzy-match`,
 // reached only from here).
-import { itemSummaryFor, matchCandidatesFor, offerSavePrompt, resolveSavePrompt, revealCredentialsForFill } from "./core-context.ts";
+import {
+  checkPendingSavePromptByLocation,
+  itemSummaryFor,
+  matchCandidatesFor,
+  offerSavePrompt,
+  resolveSavePrompt,
+  revealCredentialsForFill,
+} from "./core-context.ts";
 import type {
   ApplyFillMessage,
   ContentErrorMessage,
@@ -60,7 +67,11 @@ function pageUrlMatchesSender(pageUrl: string, trustedOrigin: string): boolean {
  * `pageUrl` — not just the origin — is still what reaches matching once it passes that check,
  * because ADR 0037 §4's *Starts with* and *Regex* match modes need the path, not only the host.
  */
-export async function handleContentScriptRequest(message: FromContentScript, trustedOrigin: string): Promise<ToContentScript> {
+export async function handleContentScriptRequest(
+  message: FromContentScript,
+  trustedOrigin: string,
+  trustedTabId?: number,
+): Promise<ToContentScript> {
   switch (message.type) {
     case "fields_detected": {
       if (!pageUrlMatchesSender(message.pageUrl, trustedOrigin)) {
@@ -84,7 +95,7 @@ export async function handleContentScriptRequest(message: FromContentScript, tru
       if (!pageUrlMatchesSender(message.pageUrl, trustedOrigin)) {
         return { type: "content_error", code: "credentials_submitted: pageUrl does not match the sender's own origin" };
       }
-      const offer = offerSavePrompt(message.pageUrl, message.usernameValue, message.passwordValue);
+      const offer = offerSavePrompt(message.pageUrl, message.usernameValue, message.passwordValue, trustedTabId);
       if (offer === undefined) {
         return refused("credentials_submitted: the device is locked, or nothing worth saving was captured");
       }
@@ -96,6 +107,19 @@ export async function handleContentScriptRequest(message: FromContentScript, tru
         return { type: "content_error", code: "save_prompt_resolved: unknown or already-resolved token" };
       }
       return { type: "save_prompt_done" };
+    }
+    case "check_save_prompt": {
+      // No `pageUrlMatchesSender` check here, deliberately: this message's only input is the
+      // page to check, and `checkPendingSavePromptByLocation` itself derives the registrable
+      // domain from exactly this `pageUrl` — there is no *other*, trusted value to compare it
+      // against the way `trustedOrigin` lets every other handler catch a lying content script.
+      // The worst a compromised content script gains by claiming a different `pageUrl` here is
+      // asking for a pending offer keyed to a domain it is not actually on, which the location
+      // index (keyed by the browser-vouched `trustedTabId` too) would not have put there for
+      // this tab in the first place unless a real submit on a page of that same domain, in this
+      // same tab, already happened.
+      const offer = checkPendingSavePromptByLocation(trustedTabId, message.pageUrl);
+      return offer === undefined ? { type: "no_pending_save_prompt" } : { type: "save_prompt", ...offer };
     }
   }
 }

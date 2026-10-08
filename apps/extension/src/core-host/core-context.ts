@@ -5,9 +5,10 @@
 // restriction in `eslint.config.mjs`, which actually allows every file under `core-host/`). The
 // MV3 service worker (`background/service-worker.ts`) never imports this module: it only relays
 // messages to whichever entry point is running.
-import { generatePassphraseWithOptions, generatePasswordWithOptions } from "@rizzy-vault/core";
+import { generatePassphraseWithOptions, generatePasswordWithOptions, registrableDomainOf } from "@rizzy-vault/core";
 
 import { readAccountConfig, saveAccountConfig } from "./account-config.ts";
+import { createSavePromptLocationIndex } from "./save-prompt-location.ts";
 import {
   type DurableSession,
   type MatchCandidate,
@@ -72,6 +73,13 @@ async function lock(ext: WebExtNamespace): Promise<void> {
   session?.lock();
   session = undefined;
   autoLock?.stop();
+  // Every submitted credential this context still holds for an unanswered save/update prompt,
+  // and the location index pointing at it (`save-prompt-location.ts`'s own module docs), stop
+  // existing on lock: "credentials in the pending offer stay in the long-lived context only"
+  // means they do not outlive it either, once the master key that would let anyone use them is
+  // gone anyway.
+  pendingSavePrompts.clear();
+  savePromptLocations.clear();
   if (hasSessionStorage(ext)) {
     await clearUnlockedSnapshot(ext);
   }
@@ -96,11 +104,19 @@ interface PendingSavePrompt {
   readonly usernameValue: string;
   readonly passwordValue: string;
   readonly updateItemId?: string;
+  /** The matching item's title, stored once at submit time so the save-prompt-race path
+   * (`checkPendingSavePromptByLocation`) can answer with it later without re-matching against
+   * whatever the vault's state happens to be by then. Set only when `action` is `"update"`,
+   * same as the immediate response `offerSavePrompt` already returns. */
+  readonly itemTitle?: string;
 }
 
 /** Submitted-credential reports awaiting a save/update decision (ADR 0036 §4: zeroized once the
  * prompt is answered or dismissed, never written to `storage.local`/IndexedDB). In-memory only,
- * keyed by a one-time token handed to the content script — never the item/field data itself. */
+ * keyed by a one-time token handed to the content script — never the item/field data itself.
+ * The one source of truth for a pending offer's credentials: `savePromptLocations`
+ * (`save-prompt-location.ts`) is only ever a token reference into this map, never a second
+ * copy of the values. */
 const pendingSavePrompts = new Map<string, PendingSavePrompt>();
 
 function takePendingSavePrompt(token: string): PendingSavePrompt | undefined {
@@ -113,6 +129,71 @@ function addPendingSavePrompt(pending: PendingSavePrompt): string {
   const token = crypto.randomUUID();
   pendingSavePrompts.set(token, pending);
   return token;
+}
+
+/** How long a save-prompt offer stays reachable by tab and registrable domain after the form
+ * that produced it was submitted (ROADMAP §4.4 "save/update on submit"; `README.md`'s residual
+ * note on the save-prompt race this fixes). Deliberately short: a stale offer reachable for too
+ * long after the user has moved on is the wrong default for a security prompt. */
+const SAVE_PROMPT_LOCATION_TTL_MS = 2 * 60 * 1000;
+
+/** The save-prompt offer's *location* index (`save-prompt-location.ts`'s own module docs) —
+ * never its credentials, which stay solely in {@link pendingSavePrompts} above. Cleared on lock
+ * (`lock`, above) along with the credentials it only ever points at. */
+const savePromptLocations = createSavePromptLocationIndex(SAVE_PROMPT_LOCATION_TTL_MS);
+
+/** `registrableDomainOf`'s own doc: `undefined` for a bare public suffix or a URL that fails to
+ * parse at all — never thrown onward; a location-keyed offer simply does not exist for such a
+ * page. An IP-literal host still gets one (itself), so a self-hosted/intranet login keys fine. */
+function registrableDomainOrUndefined(pageUrl: string): string | undefined {
+  try {
+    return registrableDomainOf(pageUrl);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Indexes `token`'s offer by `tabId`/`pageUrl`'s registrable domain, in addition to the token
+ * itself (`offerSavePrompt`'s own immediate-response path, unchanged). A no-op when `tabId` is
+ * unavailable (`messaging/contract.ts`'s `ContentScriptForward.trustedTabId` doc: some senders
+ * genuinely carry none) or `pageUrl` has no registrable domain — the immediate, same-page path
+ * still works either way; only the race-recovery path is unavailable for that one offer. */
+function rememberPendingOfferByLocation(tabId: number | undefined, pageUrl: string, token: string): void {
+  savePromptLocations.remember(tabId, registrableDomainOrUndefined(pageUrl), token, Date.now());
+}
+
+/**
+ * `content-handler.ts`'s `check_save_prompt` handling: the still-pending offer, if any, for
+ * `tabId`'s current page at `pageUrl` — the save-prompt race's recovery path
+ * (`save-prompt-location.ts`'s own module docs). The location index is single-use regardless of
+ * outcome, so a later page load of the same tab and domain within the TTL never replays an
+ * already-delivered offer a second time; its expiry check runs on read, not only via a timer
+ * this context's own host (an MV3 service worker's offscreen document, or Firefox's background
+ * page) may suspend before a `setTimeout` ever fires.
+ */
+export function checkPendingSavePromptByLocation(
+  tabId: number | undefined,
+  pageUrl: string,
+): { readonly token: string; readonly suggestion: "save" | "update"; readonly itemTitle?: string } | undefined {
+  const token = savePromptLocations.take(tabId, registrableDomainOrUndefined(pageUrl), Date.now());
+  if (token === undefined) {
+    return undefined;
+  }
+  // The credentials live only in `pendingSavePrompts`, looked up but not consumed here (module
+  // docs): the user still answers through the ordinary `save_prompt_resolved` → `resolveSavePrompt`
+  // path, from whichever page is now showing the banner, exactly as the immediate-response path
+  // already works. A token the direct path already resolved (a narrow timing window: the
+  // original page did show and resolve the banner just before navigating) is simply gone from
+  // that map by now, and this returns `undefined` rather than resurrect it.
+  const pending = pendingSavePrompts.get(token);
+  if (pending === undefined) {
+    return undefined;
+  }
+  return {
+    token,
+    suggestion: pending.action,
+    ...(pending.itemTitle !== undefined ? { itemTitle: pending.itemTitle } : {}),
+  };
 }
 
 /** Runs the save or update a resolved save-prompt token named (`content-handler.ts`'s
@@ -189,6 +270,7 @@ export function offerSavePrompt(
   pageUrl: string,
   usernameValue: string | undefined,
   passwordValue: string | undefined,
+  tabId: number | undefined,
 ): { readonly token: string; readonly suggestion: "save" | "update"; readonly itemTitle?: string } | undefined {
   if (session === undefined || passwordValue === undefined || passwordValue === "") {
     return undefined;
@@ -197,6 +279,7 @@ export function offerSavePrompt(
   const existing = findItemForUpdate(session, pageUrl);
   if (existing === undefined) {
     const token = addPendingSavePrompt({ action: "save", pageUrl, usernameValue: username, passwordValue });
+    rememberPendingOfferByLocation(tabId, pageUrl, token);
     return { token, suggestion: "save" };
   }
   const token = addPendingSavePrompt({
@@ -205,7 +288,9 @@ export function offerSavePrompt(
     usernameValue: username,
     passwordValue,
     updateItemId: existing.id,
+    itemTitle: existing.title,
   });
+  rememberPendingOfferByLocation(tabId, pageUrl, token);
   return { token, suggestion: "update", itemTitle: existing.title };
 }
 

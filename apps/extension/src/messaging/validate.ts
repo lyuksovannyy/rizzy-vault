@@ -10,6 +10,7 @@
 // type and fit its own length budget. A message that fails any check is refused whole: this
 // module never repairs or truncates a bad message.
 import {
+  type CheckSavePromptMessage,
   type CredentialsSubmittedMessage,
   type FieldDescriptor,
   type FieldsDetectedMessage,
@@ -125,6 +126,13 @@ function parseCredentialsSubmitted(body: Record<string, unknown>): CredentialsSu
   };
 }
 
+function parseCheckSavePrompt(body: Record<string, unknown>): CheckSavePromptMessage {
+  if (!isBoundedUrl(body["pageUrl"])) {
+    throw new MessageRejected("check_save_prompt: pageUrl");
+  }
+  return { type: "check_save_prompt", pageUrl: body["pageUrl"] };
+}
+
 /**
  * Validates and narrows a raw message claimed to come from a content script. Throws
  * {@link MessageRejected} for anything that does not exactly match one known shape within its
@@ -145,6 +153,8 @@ export function parseFromContentScript(raw: unknown): FromContentScript {
       return parseCredentialsSubmitted(raw);
     case "save_prompt_resolved":
       return parseSavePromptResolved(raw);
+    case "check_save_prompt":
+      return parseCheckSavePrompt(raw);
     default:
       throw new MessageRejected(`unknown type: ${String(raw["type"])}`);
   }

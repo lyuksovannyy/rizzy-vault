@@ -930,7 +930,8 @@ fn list_keys_are_classified() {
         ),
         ("field", "order", Expected::SortKey, all, Any, Shown),
         ("uri", "value", Expected::Text, login, Any, Shown),
-        ("uri", "match", Expected::Enum, login, NotInM1, Shown),
+        // Writable from M2 (ADR 0037 §4, Accepted): `0x0000`-`0x0006`, unlike `share/secret`.
+        ("uri", "match", Expected::Enum, login, Any, Shown),
         ("uri", "order", Expected::SortKey, login, Any, Shown),
         ("pwhist", "value", Expected::Text, login, Any, Shown),
         ("pwhist", "ms", Expected::U64, login, Any, Shown),
@@ -1170,7 +1171,11 @@ fn check_cases(cases: &[WriteCase<'_>]) {
 fn writers_may_write_the_m1_schema() {
     use WriteMode::{Create, Edit, Import};
     let (login, vault) = (ItemType::LOGIN, ItemType::VAULT_SETTINGS);
-    let (uri_value, uri_order) = (element_key("uri", "value"), element_key("uri", "order"));
+    let (uri_value, uri_order, uri_match) = (
+        element_key("uri", "value"),
+        element_key("uri", "order"),
+        element_key("uri", "match"),
+    );
     let (field_value, field_kind) = (element_key("field", "value"), element_key("field", "kind"));
     let pwhist_ms = element_key("pwhist", "ms");
     check_cases(&[
@@ -1183,6 +1188,10 @@ fn writers_may_write_the_m1_schema() {
         (login, Edit, schema::ITEM_FAVORITE, FALSE, Ok(())),
         (login, Create, &uri_value, TEXT, Ok(())),
         (login, Edit, &uri_order, SORT, Ok(())),
+        // `uri/<id>/match` from M2 (ADR 0037 §4, Accepted): writable like any other Enum key.
+        (login, Create, &uri_match, ENUM_TWO, Ok(())),
+        (login, Edit, &uri_match, ENUM_TWO, Ok(())),
+        (login, Edit, &uri_match, CLEARED, Ok(())),
         (login, Edit, &pwhist_ms, U64_ONE, Ok(())),
         (login, Create, "tag/61", TRUE, Ok(())),
         (login, Edit, "tag/61", CLEARED, Ok(())),
@@ -1202,6 +1211,30 @@ fn writers_may_write_the_m1_schema() {
         (ItemType::CARD, Edit, schema::CARD_PIN, TEXT, Ok(())),
         (ItemType::IDENTITY, Edit, schema::IDENTITY_SSN, TEXT, Ok(())),
     ]);
+}
+
+/// ADR 0037 §4: `uri/<id>/match`'s assigned values are `0x0000`-`0x0006`; `0x0007`-`0xFFFF` are
+/// "unassigned... a new mode needs a line in this table via an ADR update, like any other
+/// ADR 0018 enum extension" — not a write-time rejection here. This module only checks the wire
+/// *type* (Enum), same as every other Enum key (`field/<id>/kind`, `item.type`'s own value
+/// aside): an unassigned mode is written like any other out-of-range enum and is this build's
+/// job (`rizzy-match`'s `MatchMode::from_wire`) to treat as unsupported when read, never this
+/// layer's to reject.
+#[test]
+fn uri_match_accepts_every_enum_value_including_unassigned_ones() {
+    use WriteMode::Edit;
+    let login = ItemType::LOGIN;
+    let uri_match = element_key("uri", "match");
+    for value in [
+        0x0000_u16, 0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007, 0xffff,
+    ] {
+        let encoded = [&[0x05u8][..], &value.to_be_bytes()].concat();
+        assert_eq!(
+            check_write(login, Edit, uri_match.as_bytes(), &encoded),
+            Ok(()),
+            "{value:#06x}"
+        );
+    }
 }
 
 #[test]
@@ -1423,8 +1456,8 @@ fn list_keys_belong_to_their_types() {
 /// ADR 0018 §6: "Removing a list element writes [Cleared] to each attribute of the element that
 /// the writer holds", including an attribute a newer client added, or the element would keep
 /// existing. So in an edit, Cleared may go to any grammar key, known, unknown or reserved; a
-/// value may not, and a create op writes no Cleared at all. `uri/<id>/match` stays unwritten
-/// (owner decision 2).
+/// value may not, and a create op writes no Cleared at all. `uri/<id>/match` is one of them from
+/// M2 (ADR 0037, Accepted); `share/<id>/secret` stays unwritten (M5's).
 #[test]
 fn removing_an_element_clears_attributes_this_client_does_not_know() {
     use WriteMode::{Create, Edit};
@@ -1460,14 +1493,9 @@ fn removing_an_element_clears_attributes_this_client_does_not_know() {
             CLEARED,
             Err(WriteError::UnsupportedItemType),
         ),
-        // Owner decision 2 over the §6 removal rule; `share/<id>/secret` is M5's to clear.
-        (
-            login,
-            Edit,
-            &element_key("uri", "match"),
-            CLEARED,
-            Err(WriteError::NotWritable),
-        ),
+        // `uri/<id>/match` follows the general §6 removal rule from M2 (ADR 0037, Accepted);
+        // `share/<id>/secret` is M5's to clear, so it stays `NotWritable` here.
+        (login, Edit, &element_key("uri", "match"), CLEARED, Ok(())),
         (
             login,
             Edit,
@@ -1546,13 +1574,15 @@ fn restore_and_duplicate_carry_keys_and_values_verbatim() {
             carried(login, mode, schema::CARD_NUMBER, TEXT),
             Err(WriteError::WrongItemType)
         );
-        for never in [element_key("uri", "match"), element_key("share", "secret")] {
-            assert_eq!(
-                carried(login, mode, &never, ENUM_TWO),
-                Err(WriteError::NotWritable),
-                "{never}"
-            );
-        }
+        // `share/<id>/secret` stays `NotInM1`; `uri/<id>/match` moved to `Any` in M2.
+        assert_eq!(
+            carried(login, mode, &element_key("share", "secret"), ENUM_TWO),
+            Err(WriteError::NotWritable)
+        );
+        assert_eq!(
+            carried(login, mode, &element_key("uri", "match"), ENUM_TWO),
+            Ok(())
+        );
         assert_eq!(
             carried(login, mode, schema::IMPORT_CREATED_MS, U64_ONE),
             Err(WriteError::NotWritable)
@@ -1598,7 +1628,7 @@ fn restore_and_duplicate_carry_keys_and_values_verbatim() {
 fn writers_are_refused_keys_they_do_not_write() {
     use WriteMode::{Create, Edit};
     let login = ItemType::LOGIN;
-    let (uri_match, share_secret) = (element_key("uri", "match"), element_key("share", "secret"));
+    let share_secret = element_key("share", "secret");
     let secret = [&[2u8][..], &[0; 32]].concat();
     check_cases(&[
         (
@@ -1613,13 +1643,6 @@ fn writers_are_refused_keys_they_do_not_write() {
             Create,
             schema::IMPORT_CREATED_MS,
             U64_ONE,
-            Err(WriteError::NotWritable),
-        ),
-        (
-            login,
-            Edit,
-            &uri_match,
-            ENUM_TWO,
             Err(WriteError::NotWritable),
         ),
         (
@@ -1718,7 +1741,7 @@ fn a_create_op_writes_its_type() {
         ),
         Err(WriteError::UnknownKey)
     );
-    // A carried `uri/<id>/match` is refused (owner decision 2): the caller leaves it out.
+    // A carried `uri/<id>/match` is accepted from M2 (ADR 0037, Accepted): it is `Writers::Any`.
     let uri_match = element_key("uri", "match");
     assert_eq!(
         check_create(
@@ -1729,7 +1752,7 @@ fn a_create_op_writes_its_type() {
                 (Carried, uri_match.as_bytes(), ENUM_TWO),
             ]
         ),
-        Err(WriteError::NotWritable)
+        Ok(())
     );
 }
 

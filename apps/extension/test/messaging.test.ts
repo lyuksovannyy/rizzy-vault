@@ -40,6 +40,11 @@ describe("parseFromContentScript: accepts well-formed messages", () => {
     };
     expect(parseFromContentScript(message)).toEqual(message);
   });
+
+  it("check_save_prompt", () => {
+    const message = { type: "check_save_prompt", pageUrl: "https://example.com/dashboard" };
+    expect(parseFromContentScript(message)).toEqual(message);
+  });
 });
 
 describe("parseFromContentScript: refuses bad input", () => {
@@ -106,6 +111,15 @@ describe("parseFromContentScript: refuses bad input", () => {
 
   it("missing required fields", () => {
     expect(() => parseFromContentScript({ type: "fields_detected" })).toThrow(MessageRejected);
+  });
+
+  it("check_save_prompt missing pageUrl", () => {
+    expect(() => parseFromContentScript({ type: "check_save_prompt" })).toThrow(MessageRejected);
+  });
+
+  it("check_save_prompt with a pageUrl over MAX_URL_LEN", () => {
+    const message = { type: "check_save_prompt", pageUrl: `https://example.com/${"a".repeat(MAX_URL_LEN)}` };
+    expect(() => parseFromContentScript(message)).toThrow(MessageRejected);
   });
 
   // ADR 0040, defence in depth: `inline_menu_fill_chosen` is not one of
