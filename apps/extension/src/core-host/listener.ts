@@ -14,10 +14,25 @@
 //
 // Popup/options messages (`sender.tab` undefined, `sender.id` equal to this extension's own id,
 // `isOwnExtensionPage`) are answered the same way on both browsers.
-import { isContentScriptSender, isOwnExtensionPage, SenderRejected, trustedOriginOf } from "../messaging/sender.ts";
+//
+// The inline-menu iframe (`src/inline-menu/main.ts`) is a fourth, separate sender (ADR 0040):
+// `sender.tab` IS set (it is embedded inside a real page), but `sender.origin` is
+// this extension's own, not that page's — `isInlineMenuSender` (`messaging/sender.ts`) is what
+// tells it apart from a real content script, which a compromised content script cannot ever
+// satisfy (the browser sets `sender.origin`, not any script). This is the one sender allowed to
+// request a decrypted item's credentials directly, and the one place that check runs.
+import {
+  extensionOriginOf,
+  isContentScriptSender,
+  isInlineMenuSender,
+  isOwnExtensionPage,
+  SenderRejected,
+  trustedOriginOf,
+} from "../messaging/sender.ts";
 import { MessageRejected, parseFromContentScript } from "../messaging/validate.ts";
+import { isInlineMenuFillRequestMessage } from "../messaging/contract.ts";
 import type { ContentScriptForward, PopupRequest, PopupResponse, ToContentScript } from "../messaging/contract.ts";
-import { handleContentScriptRequest } from "./content-handler.ts";
+import { handleContentScriptRequest, handleInlineMenuFillRequest } from "./content-handler.ts";
 import { handlePopupRequest, lockFromIdleState, startCoreContext } from "./core-context.ts";
 import { DEFAULT_AUTO_LOCK_MS } from "./lifecycle.ts";
 
@@ -27,9 +42,12 @@ function isPopupRequest(value: unknown): value is PopupRequest {
   }
   const type = (value as { type: unknown }).type;
   return (
+    type === "enrol" ||
     type === "unlock" ||
     type === "lock" ||
+    type === "sync" ||
     type === "list_items" ||
+    type === "item_fields" ||
     type === "reveal_field" ||
     type === "generate_password" ||
     type === "get_status"
@@ -70,6 +88,7 @@ export interface InstallCoreContextListenerOptions {
  * `storage.session` fallback; the options page's auto-lock minutes read as the default) rather
  * than assume either exists, while the core messaging contract above never depends on either. */
 export function installCoreContextListener(ext: WebExtNamespace, options: InstallCoreContextListenerOptions): void {
+  const extensionOrigin = extensionOriginOf(ext);
   ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (isContentScriptSender(sender, ext.runtime.id)) {
       // A real content script (ADR 0036 §4, INV-40: never trusted by shape alone) — not merely
@@ -84,19 +103,45 @@ export function installCoreContextListener(ext: WebExtNamespace, options: Instal
       try {
         const trustedOrigin = trustedOriginOf(sender, ext.runtime.id);
         const validated = parseFromContentScript(message);
-        sendResponse(handleContentScriptRequest(validated, trustedOrigin));
+        void handleContentScriptRequest(validated, trustedOrigin).then(sendResponse);
       } catch (e) {
         const code = e instanceof SenderRejected || e instanceof MessageRejected ? e.message : "rejected";
         sendResponse({ type: "content_error", code } satisfies ToContentScript);
       }
-      return true; // keeps the channel open even though the responses above are synchronous.
+      return true; // keeps the channel open for the async `sendResponse` above.
+    }
+    if (isInlineMenuSender(sender, ext.runtime.id, extensionOrigin)) {
+      // ADR 0040: the inline-menu iframe, not the content script, asks for a
+      // fill directly — the one sender this grants a decrypted credential to. `sender.tab.id`/
+      // `.url` are the browser's own, for the real tab hosting the iframe; never anything the
+      // message itself could claim (it carries no URL at all — see
+      // `InlineMenuFillRequestMessage`'s own doc for why).
+      const tabId = sender.tab?.id;
+      const tabUrl = sender.tab?.url;
+      if (tabId === undefined || tabUrl === undefined || !isInlineMenuFillRequestMessage(message)) {
+        sendResponse({ type: "content_error", code: "inline_menu_fill_chosen: malformed request" } satisfies ToContentScript);
+        return true;
+      }
+      // `.catch` here, not left to an unhandled rejection: unlike the content-script branch
+      // above, `handleInlineMenuFillRequest` has no internal `try`/`catch` of its own around
+      // `pushApplyFill`'s tab push, which can reject (e.g. the tab navigated away or closed
+      // between the click and this response). Without this, `sendResponse` would simply never
+      // be called on that path, and the iframe's own `sendMessage` call would hang forever
+      // rather than settle with a refusal — found exactly this way fixing this change, when an
+      // earlier, unrelated bug (ADR 0040: `chrome.tabs` is unavailable inside a
+      // `chrome.offscreen` document, see `types/webext.d.ts`) produced the identical symptom.
+      void handleInlineMenuFillRequest(ext, tabId, tabUrl, message)
+        .then(sendResponse)
+        .catch(() => sendResponse({ type: "content_error", code: "inline_menu_fill_chosen: failed" } satisfies ToContentScript));
+      return true; // keeps the channel open for the async `sendResponse` above.
     }
     if (!isOwnExtensionPage(sender, ext.runtime.id)) {
       return undefined;
     }
     if (isContentScriptForward(message)) {
-      const response: ToContentScript = handleContentScriptRequest(message.message, message.trustedOrigin);
-      sendResponse(response);
+      void handleContentScriptRequest(message.message, message.trustedOrigin).then(
+        (response: ToContentScript) => sendResponse(response),
+      );
       return true;
     }
     if (isPopupRequest(message)) {

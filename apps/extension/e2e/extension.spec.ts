@@ -1,11 +1,17 @@
-// What is real today, per `core/bindings.ts`'s gap: the extension loads, its offscreen document
-// starts, the popup opens and shows the locked state, and the `storage.session` fallback
-// survives the long-lived context being torn down and recreated. "Enrol, unlock, fill a test
-// login page, lock" (the task's original E2E description) cannot pass without the
-// durable-device bindings and is reported in `not_done`, not faked here with a mocked backend.
+// Structural/offline coverage that needs no server and no enrolled account: the extension
+// loads, its offscreen document starts, the popup opens and shows the right view for its
+// status, the `storage.session` fallback survives the long-lived context being torn down and
+// recreated, field detection respects visibility/topmost, and the inline menu's trusted-click
+// requirement holds. The full "enrol, unlock, match, fill, save, lock" flow against a real
+// server is `autofill-and-save.spec.ts`.
 //
 // This spec doubles as the offscreen/background-page survival spike ADR 0036 §2 assigns to the
 // implementation PR: `offscreen document reachable after a short wait` is the measurement.
+//
+// Headless (`headless: true, channel: "chromium"`): the default headless *shell* Playwright
+// otherwise launches cannot load extensions at all; the installed full Chromium's headless mode
+// can (`launchPersistentContext` is required either way — extensions only load into a
+// persistent context).
 import { type BrowserContext, chromium, test as base, expect } from "@playwright/test";
 import { mkdtempSync } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -28,7 +34,8 @@ const test = base.extend<{ context: BrowserContext; extensionId: string; loginPa
   context: async ({}, use) => {
     const userDataDir = mkdtempSync(join(tmpdir(), "rizzy-ext-e2e-"));
     const context = await chromium.launchPersistentContext(userDataDir, {
-      headless: false,
+      headless: true,
+      channel: "chromium",
       args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
     });
     await use(context);
@@ -85,13 +92,17 @@ test("the offscreen document is reachable after the content script reports field
   expect(hasDocument).toBe(true);
 });
 
-test("the popup opens and shows the locked state", async ({ context, extensionId }) => {
+test("the popup opens and shows the enrol form on a fresh profile", async ({ context, extensionId }) => {
   const page = await context.newPage();
   await page.goto(`chrome-extension://${extensionId}/src/popup/index.html`);
   await expect(page.getByRole("heading", { name: "rizzy-vault" })).toBeVisible();
-  await expect(page.getByLabel("Master password")).toBeVisible();
-  // `App.tsx` renders the same "locked" view whether `client.status()` resolved `{ locked:
-  // true }` or rejected (e.g. "Could not establish connection", the exact failure a missing
+  // A fresh profile has nothing enrolled (`account-config.ts` has no saved server origin), so
+  // `App.tsx` shows the enrol form, not the unlock form — `EnrolView`'s own "Secret Key" field
+  // distinguishes it from `LockedView`'s "Master password"-only form.
+  await expect(page.getByLabel("Server URL")).toBeVisible();
+  await expect(page.getByLabel("Secret Key")).toBeVisible();
+  // `App.tsx` renders the same "enrol" view whether `client.status()` resolved `{ enrolled:
+  // false }` or rejected (e.g. "Could not establish connection", the exact failure a missing
   // offscreen document used to cause on a fresh profile) — only the `role="alert"` error banner
   // distinguishes the two. Without this assertion, a regression that breaks every popup status
   // call would leave this test green.
@@ -177,7 +188,10 @@ async function openInlineMenuWithOneCandidate(context: BrowserContext, extension
           (window as unknown as { __picked: string | undefined }).__picked = data.itemId as string;
         }
       });
-      window.postMessage({ type: showType, pageOrigin: location.origin, candidates: [{ itemId, title: "Example", username: "alice" }] }, location.origin);
+      window.postMessage(
+        { type: showType, pageOrigin: location.origin, candidates: [{ itemId, title: "Example", username: "alice", needsWarning: false }] },
+        location.origin,
+      );
     },
     { showType: INLINE_MENU_SHOW, itemId: "item-1" },
   );

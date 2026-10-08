@@ -10,7 +10,7 @@
     }
   },
   "permissions": ["storage", "idle"],
-  "host_permissions": [],
+  "host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "scripts": ["src/core-host/background-page.js"],
     "type": "module"

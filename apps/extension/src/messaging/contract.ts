@@ -44,16 +44,6 @@ export interface FieldsDetectedMessage {
   readonly fields: readonly FieldDescriptor[];
 }
 
-/** The user picked a candidate in the inline menu or popup, on a trusted gesture (INV-36). The
- * content script never decides this on its own; it only reports the user's click. */
-export interface FillChosenMessage {
-  readonly type: "fill_chosen";
-  readonly pageUrl: string;
-  readonly isTopFrame: boolean;
-  readonly itemId: string;
-  readonly fieldIds: readonly string[];
-}
-
 /** A form the page submitted, offered for a save/update prompt. These are the user's own
  * freshly typed values, not vault secrets, but still sensitive: the background forwards this to
  * the long-lived context only, zeroizes it once the prompt is answered or dismissed, and it is
@@ -65,23 +55,92 @@ export interface CredentialsSubmittedMessage {
   readonly passwordValue?: string;
 }
 
-export type FromContentScript = FieldsDetectedMessage | FillChosenMessage | CredentialsSubmittedMessage;
+/** The content script's answer to a {@link SavePromptOfferedMessage} it showed the user: the
+ * `token` ties it back to the exact submission the long-lived context still holds in memory
+ * (ADR 0036 §4's "credentials_submitted... zeroizes it once the prompt is answered or
+ * dismissed"). Never carries the credential values themselves — those never leave the
+ * long-lived context a second time. */
+export interface SavePromptResolvedMessage {
+  readonly type: "save_prompt_resolved";
+  readonly token: string;
+  readonly action: "save" | "update" | "dismiss";
+}
 
-/** The long-lived context's answer to {@link FillChosenMessage}: only the chosen fields' values,
- * at fill time, never a list (ADR 0036 §4). */
-export interface FillValuesMessage {
-  readonly type: "fill_values";
-  readonly values: Readonly<Record<string, string>>;
+export type FromContentScript =
+  | FieldsDetectedMessage
+  | CredentialsSubmittedMessage
+  | SavePromptResolvedMessage;
+
+/**
+ * The user picked a candidate in the extension-origin inline menu, on a trusted gesture
+ * (INV-36). Sent by `src/inline-menu/main.ts` **directly** to the long-lived context — never by
+ * the content script, and never part of {@link FromContentScript} (ADR 0040 on
+ * this): a compromised content script can echo back whatever a real pick produced, but it
+ * cannot itself produce `sender.origin` equal to this extension's own origin inside an
+ * http(s)-hosted tab — only a genuine extension-origin document, loaded from this extension's
+ * own bundle, running inside that tab, can (`sender.ts`'s `isInlineMenuSender`). `itemId` is
+ * re-checked against a freshly recomputed candidate list for the sender's own tab (never
+ * trusted outright): this message carries no `pageUrl` at all, precisely so there is nothing
+ * for it to claim that the sender's own `sender.tab.url` does not already settle.
+ * `confirmedEquivalence` must be `true` whenever the recomputed candidate's own `needsWarning`
+ * is `true` (ADR 0037 §5's second explicit confirmation) — checked again here, server-side,
+ * not only in `main.ts`'s own UI, in case that UI is ever bypassed.
+ */
+export interface InlineMenuFillRequestMessage {
+  readonly type: "inline_menu_fill_chosen";
+  readonly itemId: string;
+  readonly confirmedEquivalence: boolean;
+}
+
+/** Acknowledges a successful {@link InlineMenuFillRequestMessage}: never carries the revealed
+ * values themselves (ADR 0040) — those go straight to the content script's own
+ * tab as {@link ApplyFillMessage}, never back through the iframe that asked for them. */
+export interface InlineMenuFillDispatchedMessage {
+  readonly type: "inline_menu_fill_dispatched";
+}
+
+/**
+ * The long-lived context pushes this to the one content script tab that hosted the inline-menu
+ * iframe whose {@link InlineMenuFillRequestMessage} it just approved (`ext.tabs.sendMessage`,
+ * never a reply to anything the content script itself sent) — only the chosen item's own
+ * values, never a list, matching ADR 0036 §4. The content script maps `username`/`password` by
+ * kind onto whichever fields it currently has tagged that way (`content-script.ts`'s own
+ * tracked targets from the same detection pass the inline menu was shown for), re-checking
+ * visibility at fill time (THREAT_MODEL.md row T, "re-check ... at fill time").
+ */
+export interface ApplyFillMessage {
+  readonly type: "apply_fill";
+  readonly values: { readonly username?: string; readonly password: string };
+}
+
+/**
+ * Chromium-only internal relay (ADR 0036 §2, ADR 0040): a `chrome.offscreen` document has
+ * no `chrome.tabs` access at all (Chrome's own "Offscreen documents" guide lists it among the
+ * APIs withheld there; confirmed empirically fixing this change — a `TypeError` the instant
+ * `content-handler.ts` first tried `ext.tabs.sendMessage`). `pushApplyFill` sends this to the MV3
+ * service worker instead, which does have `tabs` like every other extension page, and which
+ * performs the real {@link ApplyFillMessage} push on the long-lived context's behalf.
+ * `background/service-worker.ts` is the only thing that ever accepts it, and only from this
+ * extension's own non-tab sender (the offscreen document itself) — never from a content script
+ * or the inline-menu iframe, neither of which this type is ever exposed to. Firefox's
+ * `background-page.ts` has `tabs` directly and never sends this at all.
+ */
+export interface RelayApplyFillMessage {
+  readonly type: "relay_apply_fill";
+  readonly tabId: number;
+  readonly values: { readonly username?: string; readonly password: string };
 }
 
 /** A match candidate as shown to the content script/inline menu: title/username/icon only,
- * never the password (ADR 0013 §3 rule 3). `matchedVia` carries ADR 0037 §5's equivalence-only
- * warning flag. */
+ * never the password (ADR 0013 §3 rule 3). `needsWarning` is exactly
+ * `@rizzy-vault/core`'s `MatchCandidate.needsWarning` (ADR 0037 §5's equivalence-only warning
+ * flag) — the core gives no richer "matched via" tag than that boolean, so this contract never
+ * invents one. */
 export interface MatchCandidateSummary {
   readonly itemId: string;
   readonly title: string;
   readonly username: string;
-  readonly matchedVia: "exact" | "registrable_domain" | "host" | { readonly equivalence: string };
+  readonly needsWarning: boolean;
 }
 
 export interface CandidatesMessage {
@@ -90,15 +149,99 @@ export interface CandidatesMessage {
   readonly warnings: readonly string[];
 }
 
-/** An explicit failure answer to the content script (e.g. the device is locked, or the save
- * prompt is not implemented yet): distinct from {@link FillValuesMessage} so "nothing to fill"
- * is never confused with "here are zero values to fill." */
+/** Offered after a {@link CredentialsSubmittedMessage}: the long-lived context decided (by
+ * matching the submitted page against the user's saved items, the same way candidates are
+ * decided) whether this looks like a new login to save or an existing one to update. The content
+ * script shows this as a small save/update/dismiss prompt; it is never auto-applied (ROADMAP
+ * §4.4: "save/update on submit" means *offering*, not writing without the user's choice). */
+export interface SavePromptOfferedMessage {
+  readonly type: "save_prompt";
+  readonly token: string;
+  readonly suggestion: "save" | "update";
+  /** The matching item's title, only set when `suggestion` is `"update"`. */
+  readonly itemTitle?: string;
+}
+
+/** An explicit failure answer (e.g. the device is locked, or — for
+ * {@link InlineMenuFillRequestMessage} — the claimed `itemId` is not a current candidate, or an
+ * equivalence-only candidate without `confirmedEquivalence`): distinct from a success message so
+ * "nothing to fill" is never confused with "here are zero values to fill." Reused for both the
+ * content script's and the inline-menu iframe's error answers — the shape is identical and
+ * neither ever carries a secret, so one type serves both. */
 export interface ContentErrorMessage {
   readonly type: "content_error";
   readonly code: string;
 }
 
-export type ToContentScript = FillValuesMessage | CandidatesMessage | ContentErrorMessage;
+/** Acknowledges a {@link SavePromptResolvedMessage} whose action actually wrote or dismissed
+ * something (as opposed to failing outright, which still answers with {@link ContentErrorMessage}
+ * so the content script can tell "saved" apart from "the device is locked"). */
+export interface SavePromptDoneMessage {
+  readonly type: "save_prompt_done";
+}
+
+export type ToContentScript =
+  | CandidatesMessage
+  | SavePromptOfferedMessage
+  | SavePromptDoneMessage
+  | ContentErrorMessage;
+
+/** `core-host/listener.ts`'s answer to an {@link InlineMenuFillRequestMessage} — never a
+ * success-plus-values shape; see {@link InlineMenuFillDispatchedMessage}'s own doc for why. */
+export type InlineMenuFillResponse = InlineMenuFillDispatchedMessage | ContentErrorMessage;
+
+function isBoundedString(value: unknown, maxLen: number): value is string {
+  return typeof value === "string" && value.length <= maxLen;
+}
+
+/** Validates a raw message claimed to be an {@link InlineMenuFillRequestMessage}. Only
+ * `core-host/listener.ts` calls this, and only once `sender.ts`'s `isInlineMenuSender` has
+ * already vouched for the sender — this still bounds the shape before it is interpreted
+ * (CLAUDE.md "untrusted input is size-limited and parsed without panics" applies to every
+ * message boundary, even a privileged sender's). */
+export function isInlineMenuFillRequestMessage(value: unknown): value is InlineMenuFillRequestMessage {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  return v["type"] === "inline_menu_fill_chosen" && isBoundedString(v["itemId"], 256) && typeof v["confirmedEquivalence"] === "boolean";
+}
+
+/** Shared by {@link isApplyFillMessage} and {@link isRelayApplyFillMessage}: both carry the
+ * exact same `values` shape (username/password by kind, never by field id). */
+function isFillValues(value: unknown): value is { readonly username?: string; readonly password: string } {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  if (!isBoundedString(v["password"], MAX_FIELD_VALUE_LEN)) {
+    return false;
+  }
+  return v["username"] === undefined || isBoundedString(v["username"], MAX_FIELD_VALUE_LEN);
+}
+
+/** Validates a raw message claimed to be an {@link ApplyFillMessage} — checked by
+ * `content-script.ts` before use, even though only this extension's own background ever sends
+ * it (the content script's `onMessage` listener cannot otherwise tell that apart from a bug). */
+export function isApplyFillMessage(value: unknown): value is ApplyFillMessage {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  return v["type"] === "apply_fill" && isFillValues(v["values"]);
+}
+
+/** Validates a raw message claimed to be a {@link RelayApplyFillMessage} — checked by
+ * `background/service-worker.ts` before use, alongside its own sender check (this type is never
+ * exposed to a content script or the inline-menu iframe, but the shape is still bounded here,
+ * same as every other message boundary). */
+export function isRelayApplyFillMessage(value: unknown): value is RelayApplyFillMessage {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  return v["type"] === "relay_apply_fill" && typeof v["tabId"] === "number" && isFillValues(v["values"]);
+}
 
 /** The service worker's internal forward of a validated content-script message to the
  * long-lived context (ADR 0036 §2, §4): never sent by a content script itself (it has no way
@@ -110,11 +253,23 @@ export interface ContentScriptForward {
   readonly trustedOrigin: string;
 }
 
-/** Popup/options → long-lived context: coarse, one call per action (ADR 0036 §4). */
+/** Popup/options → long-lived context: coarse, one call per action (ADR 0036 §4). `enrol`
+ * carries the Secret Key and master password (CRYPTO.md §11.2; ADR 0036 §3) — it crosses this
+ * one message boundary and no other, exactly like `unlock`'s master password already does. */
 export type PopupRequest =
+  | {
+      readonly type: "enrol";
+      readonly serverOrigin: string;
+      readonly loginName: string;
+      readonly secretKey: string;
+      readonly masterPassword: string;
+      readonly totp?: string;
+    }
   | { readonly type: "unlock"; readonly masterPassword: string }
   | { readonly type: "lock" }
+  | { readonly type: "sync" }
   | { readonly type: "list_items" }
+  | { readonly type: "item_fields"; readonly itemId: string }
   | { readonly type: "reveal_field"; readonly itemId: string; readonly fieldId: string }
   | { readonly type: "generate_password"; readonly options: GeneratorOptions }
   | { readonly type: "get_status" };
@@ -130,11 +285,31 @@ export interface ItemSummary {
   readonly username: string;
 }
 
+/** One displayed field of an item, popup-facing (`item_fields`): a trimmed `FieldView` — never
+ * carries a concealed value (`reveal_field` is the only way to get one, on the user's own
+ * request, ADR 0013 §3 rule 3). */
+export interface ItemFieldSummary {
+  readonly key: string;
+  readonly kind: "text" | "bool" | "number" | "enum" | "bytes" | "sort_key" | "unknown";
+  readonly concealed: boolean;
+  readonly value: string | undefined;
+}
+
 export type PopupResponse =
-  | { readonly type: "status"; readonly locked: boolean }
+  | {
+      readonly type: "status";
+      readonly locked: boolean;
+      readonly enrolled: boolean;
+      /** The saved server origin (not secret), only once enrolled — so the popup can offer
+       * "open web vault" without a separate round trip. */
+      readonly serverOrigin?: string;
+    }
+  | { readonly type: "enrolled" }
   | { readonly type: "unlocked" }
   | { readonly type: "locked" }
+  | { readonly type: "synced" }
   | { readonly type: "items"; readonly items: readonly ItemSummary[] }
+  | { readonly type: "fields"; readonly fields: readonly ItemFieldSummary[] }
   | { readonly type: "revealed"; readonly value: string }
   | { readonly type: "generated"; readonly value: string }
   | { readonly type: "error"; readonly code: string };
@@ -143,20 +318,31 @@ export type PopupResponse =
  * dispatch and by tests to assert the vocabulary stays in sync with this file. */
 export const MESSAGE_TYPES = [
   "fields_detected",
-  "fill_chosen",
   "credentials_submitted",
-  "fill_values",
+  "save_prompt_resolved",
+  "inline_menu_fill_chosen",
+  "inline_menu_fill_dispatched",
+  "apply_fill",
+  "relay_apply_fill",
   "candidates",
+  "save_prompt",
+  "save_prompt_done",
+  "enrol",
   "unlock",
   "lock",
+  "sync",
   "list_items",
+  "item_fields",
   "reveal_field",
   "generate_password",
   "get_status",
   "status",
+  "enrolled",
   "unlocked",
   "locked",
+  "synced",
   "items",
+  "fields",
   "revealed",
   "generated",
   "error",

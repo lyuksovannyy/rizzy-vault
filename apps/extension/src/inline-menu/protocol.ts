@@ -6,10 +6,27 @@
 // `messaging/contract.ts`'s background-messaging boundary, and is validated on both ends all
 // the same, because `postMessage` delivers to any listener regardless of claimed source.
 //
+// {@link InlineMenuPickMessage} is UI teardown only: it tells the content script "destroy the
+// overlay, a pick happened" (only the content script, having created the `<iframe>` element in
+// the page's own DOM, can remove it). It is NOT what triggers the actual fill — that is a
+// second, independent message, `inline_menu_fill_chosen`, which `src/inline-menu/main.ts` sends
+// straight to the long-lived context over the real extension-messaging boundary
+// (`chrome.runtime.sendMessage`), never through this `postMessage` channel and never relayed by
+// the content script at all (ADR 0040; `messaging/contract.ts`'s
+// `InlineMenuFillRequestMessage` doc, `messaging/sender.ts`'s `isInlineMenuSender`). That split
+// is deliberate, found while fixing a real vulnerability: a compromised content script can
+// forge or skip this `postMessage` pick entirely (it already runs in the page's shared
+// `window`), so if the content script itself were the one asking the background to reveal a
+// credential, "some claimed itemId came from a pick" would mean nothing — the background would
+// have no way to tell a real trusted click from the content script simply deciding to ask. The
+// background only grants that request to the sender it can verify is the inline-menu document
+// itself (`sender.origin`, browser-set, unforgeable), never to whatever the content script
+// claims happened.
+//
 // Security note, documented per CLAUDE.md "where a spec is ambiguous, pick the most
-// conservative reading": the two directions are NOT equally trustworthy, because the content
-// script's `window` is the same object as the page's own `window` (isolated worlds share the
-// DOM/BOM) —
+// conservative reading": the two `postMessage` directions are NOT equally trustworthy, because
+// the content script's `window` is the same object as the page's own `window` (isolated worlds
+// share the DOM/BOM) —
 //   - content script -> iframe ({@link InlineMenuShowMessage}): forgeable. A hostile page's own
 //     script can call `frame.contentWindow.postMessage(...)` just as validly as the content
 //     script can; the iframe cannot tell which script in the shared window actually made the
@@ -20,16 +37,12 @@
 //   - iframe -> content script ({@link InlineMenuPickMessage}): NOT forgeable. The receiving
 //     side checks `event.source === frame.contentWindow && event.origin === <this extension's
 //     origin>`, both of which the browser sets from the true sending window/document and which
-//     no page script can fake without actually executing code as that other origin.
-// So the one thing that matters for INV-36 — a fill only ever follows a real click inside the
-// iframe, never an automated one the page scripted — holds regardless. The one thing a forged
-// show message can do is make the menu *display* fabricated entries; picking one leads nowhere,
-// because `fill_chosen` still resolves `itemId` against the user's real vault items in the long
-// -lived context, which a page-invented id never matches. This is a real, accepted residual
-// (reported, not hidden): a hostile page can still make the dropdown show bogus-looking
-// options, though it cannot make anything fill without the user's own trusted click, and cannot
-// make a real item's title/username appear mislabelled, since it cannot observe real ones to
-// relabel in the first place.
+//     no page script can fake without actually executing code as that other origin. It no
+//     longer matters for INV-36 either way, now that this message only tears down UI: picking a
+//     fabricated `itemId` from a forged show message fills nothing, because the *separate*
+//     `inline_menu_fill_chosen` message that would have to follow only ever carries the real
+//     `itemId` the real iframe's own click handler holds — a forged show message cannot make
+//     the iframe send that for an id it never really rendered a trusted click for.
 import { MAX_CANDIDATES, MAX_FIELD_VALUE_LEN, MAX_TITLE_LEN } from "../messaging/contract.ts";
 
 export const INLINE_MENU_SHOW = "rizzy-inline-menu-show";
@@ -39,6 +52,11 @@ export interface InlineMenuCandidate {
   readonly itemId: string;
   readonly title: string;
   readonly username: string;
+  /** ADR 0037 §5: this candidate matched only through the equivalence list, a different
+   * registrable domain treated as the same site (`rizzy-match`'s own decision, never this
+   * module's) — the menu must show a warning and ask for a second, explicit confirmation before
+   * filling it. */
+  readonly needsWarning: boolean;
 }
 
 export interface InlineMenuShowMessage {
@@ -63,7 +81,12 @@ function isCandidate(value: unknown): value is InlineMenuCandidate {
     return false;
   }
   const v = value as Record<string, unknown>;
-  return isBoundedString(v["itemId"], 256) && isBoundedString(v["title"], MAX_TITLE_LEN) && isBoundedString(v["username"], MAX_FIELD_VALUE_LEN);
+  return (
+    isBoundedString(v["itemId"], 256) &&
+    isBoundedString(v["title"], MAX_TITLE_LEN) &&
+    isBoundedString(v["username"], MAX_FIELD_VALUE_LEN) &&
+    typeof v["needsWarning"] === "boolean"
+  );
 }
 
 export function isInlineMenuShowMessage(value: unknown): value is InlineMenuShowMessage {

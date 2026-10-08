@@ -5,43 +5,155 @@ Chromium (MV3) and Firefox, per [ADR 0036](../../docs/adr/0036-browser-extension
 [ADR 0038](../../docs/adr/0038-equivalent-domain-list.md). ROADMAP
 [§4.4](../../docs/ROADMAP.md#44-url-matching--autofill-m2).
 
-## Status (M2, in progress)
+## Status (M2)
 
-**The one load-bearing gap: `rizzy-wasm` has no durable-device enrolment/unlock or `store`-module
-bindings.** `crates/rizzy-wasm` today exports only the web vault's ephemeral flow (CRYPTO.md
-§11.4). Porting `rv`'s reference implementation of §11.2/§11.3 and the IndexedDB-facing side of
-[ADR 0026](../../docs/adr/0026-client-device-state-and-cache.md) (`crates/rizzy-cli/src/enrol.rs` +
-`device.rs` + `db.rs`, ~3,700 lines) to wasm bindings is a bounded task of its own, not something
-this change attempted — see [`src/core/bindings.ts`](src/core/bindings.ts) for the exact
-TypeScript surface that port fills in. Until then:
+**End to end, against a real server: enrol, unlock, autofill a matching page (never a
+look-alike one), save a newly submitted login, see it from a second, independent web-vault
+session, sync, lock.** `rizzy-wasm` now exports the durable-device enrolment/unlock and
+`store`-module bindings this file used to describe as the one load-bearing gap
+(`cacheStoreNames`, `CacheStore`, `enrolDevice`, `unlockDurableDevice`, `DurableSession`, landed
+in `packages/core/src/index.ts`); `src/core-host/bindings.ts` wraps them (host glue only — every
+crypto and store decision still happens inside `DurableSession`/`rizzy-wasm`).
 
-- **Works today:** both manifests build; the messaging contract, its validator and sender
-  checks (now including a validating listener on the Firefox background page itself, not only
-  the Chromium service worker — see "Firefox has no service worker" below); the MV3 service
-  worker as a message-routing-only relay that also creates the offscreen document eagerly
-  (`onInstalled`/`onStartup`), race-safely (concurrent callers share one in-flight
-  `createDocument` attempt — see "The offscreen document creation race" below), and on the
-  popup/options transport's first call, not only on first content-script contact; the
-  long-lived context's lifecycle (auto-lock timer, whose timeout is the options page's saved,
-  validated and bounded value, not a hard-coded default; `chrome.idle`/`browser.idle` lock where
-  that API exists; `storage.session` fallback save/restore/clear where that API exists — see
-  "Offscreen documents have no `idle` or `storage`" below); the IndexedDB object-store layout
-  (bytes-only, matching ADR 0026 §3 exactly); the content script's field detection (visibility
-  *and* topmost checks, ADR 0037 §5) and gesture-only fill plumbing, now through the
-  extension-origin inline-menu iframe described below; the popup's locked state and the
-  password/passphrase generator (no device state needed).
-- **Blocked on the gap above:** unlock, item list/detail/reveal/save, autofill with a real
-  candidate (the matcher stub always returns none), the save/update-on-submit prompt, "open web
-  vault" (needs the account's `server_origin`).
-- **Separately delivered:** URL matching (`rizzy-match`). The content script and background
-  call a documented stub ([`src/match/stub.ts`](src/match/stub.ts)) that always returns no
-  candidates; wiring in the real crate is the integration step's job. The background validates
-  that a `fields_detected` message's claimed `pageUrl` actually shares the sender's own,
-  browser-vouched-for origin before it ever reaches `decide()`
-  ([`src/core-host/content-handler.ts`](src/core-host/content-handler.ts)).
-- **Not attempted:** Firefox Playwright coverage (no automatable unpacked-extension flow);
-  clipboard-copy of a *vault item's* secret (the generator's copy works; an item's does not
-  exist yet, since items cannot be listed).
+- **Works today:** both manifests build; enrolment and unlock through the popup's own form,
+  never a mocked backend; the IndexedDB `CacheStore` adapter (`src/cache/idb.ts`) — flat
+  (store, key, value) records, bytes only, one object store per `cacheStoreNames()` entry,
+  matching ADR 0026 §3 exactly; `rizzy-match`-backed autofill candidates, scoped to the sender's
+  own browser-vouched-for URL (`src/core-host/content-handler.ts` validates a `fields_detected`
+  message's claimed `pageUrl` against `sender.tab.url` before it ever reaches the matcher); the
+  gesture-only fill through the extension-origin inline-menu iframe, which sends the chosen-fill
+  request directly to the long-lived context on its own trusted click rather than through the
+  content script, re-validated there against a freshly recomputed candidate list (bug 8 below);
+  save/update-on-submit
+  (offered, never auto-saved) **for a login form whose document survives long enough for the
+  extension to answer** (see the residual immediately below); the password/passphrase
+  generator; the item list with search, detail, reveal-and-copy with clipboard clearing; "open
+  web vault"; lock, and the messaging/sender/lifecycle plumbing the "found empirically" sections
+  below cover.
+- **A known residual, not fixed here:** a login form whose submit commits a real top-level
+  navigation *before* the extension's `save_prompt` answer comes back gets no save/update offer
+  at all — found directly while writing `e2e/autofill-and-save.spec.ts` (see bug 7 below). The
+  pending offer itself survives in the long-lived context (`addPendingSavePrompt`'s token), but
+  nothing re-shows it on whatever page loads next. Real login forms almost always take a visible
+  round-trip before navigating, so this is a tight-timing edge case rather than the common case,
+  but it is not nothing: a slow enough network, or a form that resolves synchronously, can hit
+  it. A full fix is an on-load "is there a pending offer for my origin?" check the content
+  script runs on every page, which this change does not add.
+- **Not attempted:** Firefox Playwright coverage (no automatable unpacked-extension flow, same
+  as before — this also means `pushApplyFill`'s direct-`ext.tabs` branch, the one Firefox's
+  `background-page.ts` actually takes, has no e2e coverage of its own; only the Chromium relay
+  branch is exercised, by the autofill-and-save spec); a longer-running soak test of whether the
+  offscreen document/Firefox background page survive a real session (see "The ADR 0036 §2
+  survival spike" below); regex, per-URI match
+  mode and user-defined equivalence-group settings UI (the matcher and core support them; no
+  options-page surface edits them yet; every item matches via the account default, Base domain).
+
+### Bugs found only by the end-to-end Playwright spec (`e2e/autofill-and-save.spec.ts`)
+
+None of these showed up in the unit tests, the scaffold-only E2E spec, or a casual manual check
+— each one needed the real enrol → sync → match → fill → save → sync → verify chain running
+against a real server and a real Chromium build before it was visible at all. Fixed here, kept
+documented because the next change through this code should know why the fix looks the way it
+does:
+
+1. **`account-config.ts` used `chrome.storage.local`, which does not exist in a Chromium
+   `chrome.offscreen` document.** `saveAccountConfig` silently no-op'd there, so `get_status`
+   reported `enrolled: false` forever — even immediately after a successful `enrol` (the popup's
+   "Set up" form never left itself). Rewritten to use IndexedDB, in a small database of its own
+   (not the durable-device cache's), the same API `cache/idb.ts` already depends on working
+   inside that context.
+2. **`enrolDevice`'s wrapper never called `DurableSession.authenticate()`.** `unlockDevice`
+   already did, right after its own offline part; `enrolDevice` returned a session that could
+   enrol and cache but not sign a request, so the first `sync()` after enrolling failed with
+   `wrong_state` (`DeviceSession::syncStart`'s `AuthStage::Done` check). Device-cert upload
+   during enrolment authenticates the *upload* over the login's OPAQUE session (CRYPTO.md §11.2
+   step 7) — a separate thing from the device signing its own later requests.
+3. **A freshly enrolled device's cache starts empty.** Enrolment (CRYPTO.md §11.2) carries
+   device certificates and account state, never an initial items pull, so without something
+   calling `sync()`, matching had nothing to match against. Fixed the same way the web vault's
+   own `VaultView` does it (`apps/web/src/views/VaultView.tsx`'s "one sync on mount"): `App.tsx`
+   fires one `sync()` the instant the popup transitions into "unlocked."
+4. **The inline-menu iframe's `src` was assigned after `appendChild`.** Queues *two*
+   navigations — the default `about:blank` first, then the real one — so `"load"` (registered
+   `{ once: true }`) fired for the wrong one, and `postMessage`'s target-origin check silently
+   dropped the candidate list (`chrome-extension://…` targeted at a window still carrying the
+   *page's* own origin). Fixed by setting `src` before the element is attached: a detached
+   iframe queues no navigation at all, so insertion starts exactly one.
+5. **The content script's own `MutationObserver` reacted to its own DOM writes.** Showing or
+   hiding the inline-menu iframe (or the save-prompt banner) is itself a `childList` mutation
+   under `document.documentElement`, so without a filter, showing the menu re-triggered
+   detection, which could recreate the menu, mutating the DOM again — an unbounded loop that
+   could tear the menu out from under a click already in flight. `isOwnOverlayMutation` now
+   ignores a mutation batch that adds or removes only the extension's own marked elements.
+   `report()` itself is otherwise a plain re-run. `report()` still runs on *content* mutations.
+6. **`ItemsView` fetched the item list exactly once, on mount.** A device that stays on the
+   Items view the whole time a sync completes (never switching to Generator and back, which
+   remounts it) kept showing "No items." forever, even right after the popup's own "Synced."
+   message. `App.tsx` now bumps an `itemsRevision` counter after every sync that completes;
+   `ItemsView` takes it as a prop and refetches when it changes.
+7. **A login form whose submit navigates before the extension answers gets no save prompt.**
+   `content-script.ts`'s capturing `"submit"` listener reads the fields and sends
+   `credentials_submitted` correctly, but if the browser's default form submission commits a
+   real navigation first, the document (and the pending `.then()`) is torn down before the
+   `save_prompt` answer arrives — confirmed by comparing against a form with
+   `onsubmit="return false"` (the save prompt appears every run) versus one without it (it
+   never does). Not a production bug *for this exact case*: it is the test fixture that changed
+   (see `e2e/autofill-and-save.spec.ts`'s `loginPageHtml` comment), because the production path
+   is sound once the document survives. It is still a real residual for an unusually fast
+   real-world form — see the Status section's "known residual" above.
+8. **A real vulnerability, found by security review of this change, not by the Playwright
+   spec: `fill_chosen` revealed a decrypted item's credentials for any `itemId` the content
+   script named, with the only check being that the claimed `pageUrl`'s origin matched the
+   sender's own — no check that the item was ever a match for that origin, and no gesture
+   evidence crossing from the iframe's trusted click to the long-lived context at all.** A
+   compromised content script (THREAT_MODEL A7) could have requested a fill with zero clicks.
+   Fixed by removing `fill_chosen`/`fill_values` from the content-script contract entirely: the
+   extension-origin inline-menu iframe now sends the chosen-fill request (`inline_menu_fill_chosen`)
+   **directly** to the long-lived context on the same trusted click, identified as that
+   privileged sender by `sender.origin` (the extension's own, set by the browser, never
+   forgeable by the content script) rather than by anything the message claims
+   (`messaging/sender.ts`'s `isInlineMenuSender`; a content script sending the exact same
+   message type is routed through the ordinary, unprivileged content-script path instead and
+   refused as an unknown message). Before revealing anything, the background re-runs the
+   matcher for that sender's own tab URL and requires the claimed item to be among the result
+   (`core-host/content-handler.ts`'s `selectFillCandidate`), re-checking the equivalence-only
+   second confirmation there too rather than trusting the iframe's UI alone. The revealed values
+   are pushed to the content script as `apply_fill`, never back to the iframe. See
+   [ADR 0036](../../docs/adr/0036-browser-extension-architecture-and-key-custody.md) §4's
+   "chosen-fill request" bullet (added the same day) for the full rationale, and
+   `test/sender.test.ts`/`test/content-handler.test.ts`/`test/listener-routing.test.ts` for the
+   regression coverage (content-script sender refused; non-candidate `itemId` refused;
+   equivalence-only candidate without confirmation refused).
+9. **A second real bug, found while implementing bug 8's fix, by running it against a real
+   Chromium build rather than trusting the type signatures: a `chrome.offscreen` document has no
+   `chrome.tabs` access at all.** The fixed design pushes the revealed values to the content
+   script with `ext.tabs.sendMessage(tabId, ...)` from the long-lived context — but on Chromium
+   that context *is* the offscreen document, and calling `ext.tabs.sendMessage` there threw
+   `TypeError: Cannot read properties of undefined (reading 'sendMessage')`: the inline-menu
+   iframe's own `chrome.runtime.sendMessage` call then hung forever, because the offscreen
+   document's listener let the exception escape as an unhandled rejection instead of ever calling
+   `sendResponse`. The same class of gap as the already-documented `idle`/`storage` restriction
+   (bug under "Offscreen documents have no `idle` or `storage`" below), just never hit before
+   because nothing in this codebase had called `ext.tabs` from inside the long-lived context
+   until this fix needed to. Fixed two ways together: `types/webext.d.ts` types `tabs` optional
+   on `WebExtNamespace`, same as `idle`/`storage`; and `core-host/content-handler.ts`'s
+   `pushApplyFill` feature-detects it, relaying through the MV3 service worker (which does have
+   `tabs`, like every other extension page) via a new internal-only message,
+   `relay_apply_fill`, when it is missing. `background/service-worker.ts` is the only thing that
+   accepts that relay, and only from this extension's own non-tab sender (the offscreen document
+   itself) — it is never exposed to a content script or the inline-menu iframe. Also fixed
+   `core-host/listener.ts`'s dispatch to the privileged handler to `.catch` a rejection into a
+   `content_error` response rather than let it become another unhandled-rejection hang, since
+   that was the proximate symptom that made this bug reproducible at all (without it, the same
+   silent hang can recur for any other future exception on this path, not only this one).
+
+One non-bug worth recording so the next reader does not re-litigate it: the "look-alike host"
+half of the E2E spec uses `127.0.0.1` vs. `localhost` (different host strings) to prove no
+match, not two different ports on the same host — a different-port page on `127.0.0.1` *does*
+get offered the other `127.0.0.1` item's autofill candidate, correctly, per ADR 0037 point 5/
+point 33 ("any other port ... is never part of the registrable-domain computation"): Base
+domain mode excludes port everywhere, including the exact-host fallback an IP literal uses.
+Confirmed against `crates/rizzy-match/src/modes.rs` directly; no code change follows from it.
 
 ### The inline-menu iframe (ADR 0036 §4/§5, §75)
 
@@ -54,17 +166,24 @@ cannot call `.click()` on a candidate itself — closing a critical gap in the p
 where it could (INV-36, INV-40).
 
 The content script and the iframe talk over `window.postMessage`
-([`src/inline-menu/protocol.ts`](src/inline-menu/protocol.ts)), not through the background's own
-messaging contract. One documented, accepted residual: because the content script's `window` is
-the same object the page's own script runs in (isolated worlds share the DOM/BOM), the *iframe
-cannot tell the content script's `show` message apart from a forged one the page's own script
-sent the same way* — only the reverse direction (the iframe's `pick` reply) is unforgeable,
-because it alone depends on `event.source`/`event.origin`, which the browser sets from the real
-sending document and no page script can fake. A forged `show` message can only ever display
-fabricated `itemId`s the attacker invented (real ones are never otherwise observable from the
-page); picking one leads nowhere, since `fill_chosen` still resolves `itemId` against the user's
-real vault items in the long-lived context. Nothing can be filled without a real click inside
-the iframe. `protocol.ts`'s own comment covers this in full.
+([`src/inline-menu/protocol.ts`](src/inline-menu/protocol.ts)) for exactly two things: showing
+the candidate list, and tearing the menu down again once a pick is made. The actual fill request
+no longer travels that path at all (bug 8 above): the iframe's own `click` handler, after
+checking `event.isTrusted`, sends `inline_menu_fill_chosen` **directly** to the long-lived
+context (`ext.runtime.sendMessage`, identified by `sender.origin`, never relayed by the content
+script), and only afterwards tells the content script to tear the menu down via the same
+`postMessage` channel as before. One documented, accepted residual, narrower now than it used to
+be: because the content script's `window` is the same object the page's own script runs in
+(isolated worlds share the DOM/BOM), the *iframe cannot tell the content script's `show` message
+apart from a forged one the page's own script sent the same way* — only the reverse direction
+(the iframe's teardown message) is unforgeable, because it alone depends on
+`event.source`/`event.origin`, which the browser sets from the real sending document and no page
+script can fake. A forged `show` message can only ever display fabricated `itemId`s the attacker
+invented (real ones are never otherwise observable from the page), and picking one leads
+nowhere: the fill request's own `itemId` is re-checked against the user's real vault items in
+the long-lived context, never resolved from anything the content script forwarded. Nothing can
+be filled without a real click inside the iframe, and the iframe is now the only thing that can
+ever ask for a fill at all. `protocol.ts`'s own comment covers this in full.
 
 `web_accessible_resources` (both manifests) lists exactly `src/inline-menu/index.html`, matched
 to `http://*/*`/`https://*/*` — the one new manifest surface this adds, and the minimum: once
@@ -156,16 +275,18 @@ inline-menu iframe  <--postMessage (show)--  content script (page)  --validated 
   (`src/background/ensure-core.ts`). Never imports `@rizzy-vault/core`; holds no keys.
 - **`src/core-host/`** — the long-lived context. `offscreen.ts` (Chromium) and
   `background-page.ts` (Firefox) are thin, browser-specific bootstraps over shared logic
-  (`listener.ts`, `core-context.ts`, `content-handler.ts`); `lifecycle.ts` is the
-  injectable-clock auto-lock timer; `session-store.ts` is the `storage.session` fallback
-  (ADR 0013 §3 rule 2). This is the one directory allowed to import `@rizzy-vault/core` for
-  value (enforced by `eslint.config.mjs`). `listener.ts` validates a raw content-script message
-  itself on Firefox (`acceptContentScripts: true`) since there is no service worker there.
-- **`src/core/`** — `bindings.ts` (the missing-bindings contract, see Status) and `client.ts`
-  (the popup/options messaging-backed client; placement note inside the file).
-- **`src/cache/`** — the IndexedDB adapter (`idb.ts`) and the ADR 0026 §3 store/key-path
+  (`listener.ts`, `core-context.ts`, `content-handler.ts`); `bindings.ts` wraps
+  `@rizzy-vault/core`'s durable-device surface (host glue only); `account-config.ts` persists
+  the enrolled server origin/login name in its own small IndexedDB database (see "Bugs found"
+  above for why not `chrome.storage`); `lifecycle.ts` is the injectable-clock auto-lock timer;
+  `session-store.ts` is the `storage.session` fallback (ADR 0013 §3 rule 2). This is the one
+  directory allowed to import `@rizzy-vault/core` for value (enforced by `eslint.config.mjs`).
+  `listener.ts` validates a raw content-script message itself on Firefox
+  (`acceptContentScripts: true`) since there is no service worker there.
+- **`src/core/client.ts`** — the popup/options messaging-backed client (placement note inside
+  the file).
+- **`src/cache/`** — the IndexedDB `CacheStore` adapter (`idb.ts`) and the ADR 0026 §3 store-name
   constants (`stores.ts`), moving bytes only.
-- **`src/match/stub.ts`** — the unwired matcher interface, ADR 0037's vocabulary.
 - **`src/content/content-script.ts`** — framework-free TypeScript, no wasm, no React
   (ADR 0014 §2). Top frame only. Creates the inline-menu iframe; never fills without a trusted
   click reported back from it.
@@ -220,13 +341,33 @@ vault's INV-49 CSP allows it for the core Worker). No remote code, no `'unsafe-i
 ```sh
 pnpm --filter @rizzy-vault/extension run build:chromium   # dist/chromium (unpacked, loadable)
 pnpm --filter @rizzy-vault/extension run build:firefox    # dist/firefox
-pnpm --filter @rizzy-vault/extension run test             # Vitest: messaging, sender, auto-lock, cache mapping
-pnpm --filter @rizzy-vault/extension run e2e              # Playwright, Chromium only; build:chromium first
+pnpm --filter @rizzy-vault/extension run test             # Vitest: messaging, sender, auto-lock, cache, account-config
+pnpm --filter @rizzy-vault/extension run e2e              # Playwright, Chromium only; see below
 ```
 
 `build-wasm` (`cargo xtask build-wasm`, run from the repository root) must have produced
 `packages/core/generated/` before `@rizzy-vault/core` — and so this package — can type-check or
 build; the root `pnpm run build` and the project gate already order this correctly.
+
+### Running the Playwright suite
+
+`e2e/autofill-and-save.spec.ts` drives the real stack end to end: `rizzy-vault` itself (`e2e/
+server.ts`), a real account created through the web vault's own signup UI (`e2e/account.ts`),
+and this extension's own popup/content-script/inline-menu, with `chromium.launchPersistentContext`
+(`headless: true, channel: "chromium"` — the default headless *shell* Playwright otherwise
+launches cannot load an unpacked extension at all; the installed full Chromium's headless mode
+can). Before running it:
+
+```sh
+pnpm run build:wasm && pnpm run build                                        # from the repo root
+cargo build -p rizzy-server --bin rizzy-vault --features embed-web           # the web vault signup UI
+pnpm --filter @rizzy-vault/extension run build:chromium
+pnpm --filter @rizzy-vault/extension run e2e
+```
+
+`RIZZY_VAULT_BIN` overrides the binary path (`e2e/server.ts`); a binary built without
+`embed-web` fails the test outright (its web vault page has no signup form) rather than being
+skipped. `e2e/extension.spec.ts`'s other seven specs need no server at all.
 
 ## Icons
 

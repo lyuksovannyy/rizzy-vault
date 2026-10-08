@@ -17,9 +17,18 @@ describe("isInlineMenuShowMessage", () => {
     const message = {
       type: INLINE_MENU_SHOW,
       pageOrigin: "https://example.com",
-      candidates: [{ itemId: "item-1", title: "Example", username: "alice" }],
+      candidates: [{ itemId: "item-1", title: "Example", username: "alice", needsWarning: false }],
     };
     expect(isInlineMenuShowMessage(message)).toBe(true);
+  });
+
+  it("refuses a candidate missing needsWarning", () => {
+    const message = {
+      type: INLINE_MENU_SHOW,
+      pageOrigin: "https://example.com",
+      candidates: [{ itemId: "item-1", title: "Example", username: "alice" }],
+    };
+    expect(isInlineMenuShowMessage(message)).toBe(false);
   });
 
   it("accepts zero candidates", () => {

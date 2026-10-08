@@ -34,12 +34,29 @@ export class ExtensionClient {
     this.#transport = transport;
   }
 
-  async status(): Promise<{ locked: boolean }> {
+  async status(): Promise<{ locked: boolean; enrolled: boolean; serverOrigin?: string }> {
     const response = await this.#transport({ type: "get_status" });
     if (response.type !== "status") {
       throw this.#unexpected(response);
     }
-    return { locked: response.locked };
+    return {
+      locked: response.locked,
+      enrolled: response.enrolled,
+      ...(response.serverOrigin !== undefined ? { serverOrigin: response.serverOrigin } : {}),
+    };
+  }
+
+  async enrol(input: {
+    readonly serverOrigin: string;
+    readonly loginName: string;
+    readonly secretKey: string;
+    readonly masterPassword: string;
+    readonly totp?: string;
+  }): Promise<void> {
+    const response = await this.#transport({ type: "enrol", ...input });
+    if (response.type !== "enrolled") {
+      throw this.#unexpected(response);
+    }
   }
 
   async unlock(masterPassword: string): Promise<void> {
@@ -56,12 +73,29 @@ export class ExtensionClient {
     }
   }
 
+  async sync(): Promise<void> {
+    const response = await this.#transport({ type: "sync" });
+    if (response.type !== "synced") {
+      throw this.#unexpected(response);
+    }
+  }
+
   async listItems(): Promise<ReadonlyArray<{ itemId: string; title: string; username: string }>> {
     const response = await this.#transport({ type: "list_items" });
     if (response.type !== "items") {
       throw this.#unexpected(response);
     }
     return response.items;
+  }
+
+  async itemFields(
+    itemId: string,
+  ): Promise<ReadonlyArray<{ key: string; kind: string; concealed: boolean; value: string | undefined }>> {
+    const response = await this.#transport({ type: "item_fields", itemId });
+    if (response.type !== "fields") {
+      throw this.#unexpected(response);
+    }
+    return response.fields;
   }
 
   async revealField(itemId: string, fieldId: string): Promise<string> {

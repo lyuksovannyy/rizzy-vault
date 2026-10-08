@@ -2,7 +2,14 @@
 // only this extension's own content scripts and pages are accepted.
 import { describe, expect, it } from "vitest";
 
-import { SenderRejected, isContentScriptSender, isOwnExtensionPage, trustedOriginOf } from "../src/messaging/sender.ts";
+import {
+  SenderRejected,
+  extensionOriginOf,
+  isContentScriptSender,
+  isInlineMenuSender,
+  isOwnExtensionPage,
+  trustedOriginOf,
+} from "../src/messaging/sender.ts";
 
 const EXT_ID = "abcdefabcdefabcdefabcdefabcdefab";
 
@@ -85,5 +92,68 @@ describe("isContentScriptSender", () => {
 
   it("rejects a different extension's content script", () => {
     expect(isContentScriptSender({ id: "other", tab: { url: "https://example.com" } }, EXT_ID)).toBe(false);
+  });
+
+  // The fix for the real vulnerability this suite exists for: before this check tightened,
+  // `sender.tab.url` being http(s) was the whole test, so the inline-menu iframe (genuinely
+  // embedded in an http(s) tab, but sending from this extension's own origin) was
+  // indistinguishable here from the content script actually running in that same page —
+  // letting a compromised content script masquerade as the privileged sender simply by also
+  // satisfying "has a tab, tab is http(s)". `sender.origin` is the one field only the browser
+  // sets, from the document that truly called `sendMessage`.
+  it("rejects a sender whose origin does not match its own tab's origin (the inline-menu iframe's shape)", () => {
+    const sender: WebExtMessageSender = {
+      id: EXT_ID,
+      origin: `chrome-extension://${EXT_ID}`,
+      tab: { url: "https://example.com/login" },
+    };
+    expect(isContentScriptSender(sender, EXT_ID)).toBe(false);
+  });
+
+  it("still accepts a real content script whose origin matches its own tab's origin", () => {
+    const sender: WebExtMessageSender = { id: EXT_ID, origin: "https://example.com", tab: { url: "https://example.com/login" } };
+    expect(isContentScriptSender(sender, EXT_ID)).toBe(true);
+  });
+});
+
+describe("extensionOriginOf", () => {
+  it("derives this extension's own origin from runtime.getURL", () => {
+    const ext = { runtime: { getURL: (path: string) => `chrome-extension://${EXT_ID}/${path}` } } as WebExtNamespace;
+    expect(extensionOriginOf(ext)).toBe(`chrome-extension://${EXT_ID}`);
+  });
+});
+
+describe("isInlineMenuSender", () => {
+  const EXT_ORIGIN = `chrome-extension://${EXT_ID}`;
+
+  it("accepts the inline-menu iframe: this extension's own origin, embedded in a real http(s) tab", () => {
+    const sender: WebExtMessageSender = { id: EXT_ID, origin: EXT_ORIGIN, tab: { url: "https://example.com/login" } };
+    expect(isInlineMenuSender(sender, EXT_ID, EXT_ORIGIN)).toBe(true);
+  });
+
+  // The defect this whole change fixes: a content script's sender has the page's own origin,
+  // never this extension's — so it can never satisfy this check, however it shapes its message.
+  it("rejects a real content script (its origin is the page's own, not the extension's)", () => {
+    const sender: WebExtMessageSender = { id: EXT_ID, origin: "https://example.com", tab: { url: "https://example.com/login" } };
+    expect(isInlineMenuSender(sender, EXT_ID, EXT_ORIGIN)).toBe(false);
+  });
+
+  it("rejects a sender with no tab at all (one of this extension's own top-level pages)", () => {
+    expect(isInlineMenuSender({ id: EXT_ID, origin: EXT_ORIGIN }, EXT_ID, EXT_ORIGIN)).toBe(false);
+  });
+
+  it("rejects a missing sender.origin: unlike isContentScriptSender, this never falls back", () => {
+    const sender: WebExtMessageSender = { id: EXT_ID, tab: { url: "https://example.com/login" } };
+    expect(isInlineMenuSender(sender, EXT_ID, EXT_ORIGIN)).toBe(false);
+  });
+
+  it("rejects a different extension's origin", () => {
+    const sender: WebExtMessageSender = { id: EXT_ID, origin: "chrome-extension://some-other-id", tab: { url: "https://example.com" } };
+    expect(isInlineMenuSender(sender, EXT_ID, EXT_ORIGIN)).toBe(false);
+  });
+
+  it("rejects a non-http(s) tab (not a real embedding page)", () => {
+    const sender: WebExtMessageSender = { id: EXT_ID, origin: EXT_ORIGIN, tab: { url: `chrome-extension://${EXT_ID}/popup.html` } };
+    expect(isInlineMenuSender(sender, EXT_ID, EXT_ORIGIN)).toBe(false);
   });
 });

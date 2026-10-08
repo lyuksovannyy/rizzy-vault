@@ -2,9 +2,19 @@
 // `false` (Chromium: the service worker owns content-script validation) must ignore a raw
 // content-script sender outright; `true` (Firefox: no service worker exists) must validate and
 // handle it directly. Pure logic against a fake `WebExtNamespace` — no real browser APIs.
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { installCoreContextListener } from "../src/core-host/listener.ts";
+import { FakeIndexedDBFactory } from "./support/fake-idb.ts";
+
+// `get_status` now reads `account-config.ts`'s own IndexedDB database directly (never
+// `ext.storage` — see that module's doc comment for why), so every test below that reaches
+// `handlePopupRequest` needs a `globalThis.indexedDB`, same as a real extension page has. This
+// environment (`vite.config.ts`'s `environment: "node"`) has none by default; a fresh fake per
+// test keeps one test's "enrolled" state from leaking into the next.
+beforeEach(() => {
+  (globalThis as { indexedDB: IDBFactory }).indexedDB = new FakeIndexedDBFactory() as unknown as IDBFactory;
+});
 
 type MessageListener = (message: unknown, sender: WebExtMessageSender, sendResponse: (response?: unknown) => void) => boolean | void;
 
@@ -77,9 +87,11 @@ function fakeExt(): WebExtNamespace {
       queryState: async () => "active",
       onStateChanged: fakeEvent(),
     },
-    tabs: { query: async () => [], create: async () => undefined },
+    tabs: { query: async () => [], create: async () => undefined, sendMessage: async () => undefined },
   };
 }
+
+const EXT_ORIGIN = `chrome-extension://${EXT_ID}`;
 
 function installedListener(ext: WebExtNamespace): MessageListener {
   const onMessage = ext.runtime.onMessage as WebExtEvent<MessageListener> & { listeners: MessageListener[] };
@@ -102,13 +114,17 @@ describe("installCoreContextListener: acceptContentScripts routing", () => {
     expect(sendResponse).not.toHaveBeenCalled();
   });
 
-  it("validates and handles a real content-script sender when acceptContentScripts is true (Firefox)", () => {
+  it("validates and handles a real content-script sender when acceptContentScripts is true (Firefox)", async () => {
     const ext = fakeExt();
     installCoreContextListener(ext, { acceptContentScripts: true });
     const sendResponse = vi.fn();
     const result = installedListener(ext)(fieldsDetected, { id: EXT_ID, tab: { url: "https://example.com" } }, sendResponse);
     expect(result).toBe(true);
-    expect(sendResponse).toHaveBeenCalledWith(expect.objectContaining({ type: "candidates" }));
+    // Locked (nothing enrolled/unlocked in this test's fake extension), so a locked
+    // `content_error`, not `candidates` — `handleContentScriptRequest` is async now
+    // (`core-context.ts`'s `save_prompt_resolved` handling needs to await a core call), so the
+    // response arrives on a later microtask.
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith(expect.objectContaining({ type: "content_error" })));
   });
 
   it("ignores a sender from a different extension even when accepting content scripts", () => {
@@ -131,7 +147,7 @@ describe("installCoreContextListener: acceptContentScripts routing", () => {
     const sendResponse = vi.fn();
     const result = installedListener(ext)({ type: "get_status" }, { id: EXT_ID }, sendResponse);
     expect(result).toBe(true);
-    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ type: "status", locked: true }));
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ type: "status", locked: true, enrolled: false }));
   });
 
   // Regression test for a real bug found while writing this change's E2E coverage: measured
@@ -158,6 +174,64 @@ describe("installCoreContextListener: acceptContentScripts routing", () => {
     const sendResponse = vi.fn();
     const result = installedListener(ext)({ type: "get_status" }, { id: EXT_ID }, sendResponse);
     expect(result).toBe(true);
-    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ type: "status", locked: true }));
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ type: "status", locked: true, enrolled: false }));
+  });
+});
+
+const inlineMenuFillChosen = { type: "inline_menu_fill_chosen", itemId: "item-1", confirmedEquivalence: false };
+
+// The security fix this suite now also covers: `inline_menu_fill_chosen` must only ever be
+// honoured from the one sender `isInlineMenuSender` vouches for (the extension-origin
+// inline-menu iframe), never from a real content script sending the exact same message shape.
+describe("installCoreContextListener: inline_menu_fill_chosen routing (ADR 0040)", () => {
+  it("refuses a real content-script sender's inline_menu_fill_chosen, even when acceptContentScripts is true", async () => {
+    // A content script's `sender.origin` is the page's own (or absent) — never this
+    // extension's — so `isInlineMenuSender` never matches it; `isContentScriptSender` does, and
+    // routes it through ordinary content-script validation instead, where
+    // `parseFromContentScript` refuses the unknown type. The one message type this extension
+    // grants a decrypted credential for is never reachable by a content script's own message,
+    // however it shapes it.
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: true });
+    const sendResponse = vi.fn();
+    const result = installedListener(ext)(inlineMenuFillChosen, { id: EXT_ID, tab: { url: "https://example.com/login" } }, sendResponse);
+    expect(result).toBe(true);
+    await vi.waitFor(() =>
+      expect(sendResponse).toHaveBeenCalledWith(expect.objectContaining({ type: "content_error" })),
+    );
+  });
+
+  it("ignores a content-script sender's inline_menu_fill_chosen when acceptContentScripts is false (Chromium)", () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: false });
+    const sendResponse = vi.fn();
+    const result = installedListener(ext)(inlineMenuFillChosen, { id: EXT_ID, tab: { url: "https://example.com/login" } }, sendResponse);
+    expect(result).toBeUndefined();
+    expect(sendResponse).not.toHaveBeenCalled();
+  });
+
+  it("routes a genuine inline-menu-iframe sender to the privileged handler regardless of acceptContentScripts", async () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: false });
+    const sendResponse = vi.fn();
+    const sender: WebExtMessageSender = { id: EXT_ID, origin: EXT_ORIGIN, tab: { url: "https://example.com/login" } };
+    const result = installedListener(ext)(inlineMenuFillChosen, sender, sendResponse);
+    expect(result).toBe(true);
+    // Locked (nothing enrolled/unlocked in this test's fake extension), so a locked
+    // `content_error` — proof this reached `handleInlineMenuFillRequest` at all (a sender this
+    // listener did not recognise would get no response, as the two tests above show).
+    await vi.waitFor(() =>
+      expect(sendResponse).toHaveBeenCalledWith(expect.objectContaining({ type: "content_error" })),
+    );
+  });
+
+  it("refuses a malformed inline-menu-iframe request (missing confirmedEquivalence)", async () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: false });
+    const sendResponse = vi.fn();
+    const sender: WebExtMessageSender = { id: EXT_ID, origin: EXT_ORIGIN, tab: { url: "https://example.com/login" } };
+    const result = installedListener(ext)({ type: "inline_menu_fill_chosen", itemId: "item-1" }, sender, sendResponse);
+    expect(result).toBe(true);
+    expect(sendResponse).toHaveBeenCalledWith(expect.objectContaining({ type: "content_error" }));
   });
 });

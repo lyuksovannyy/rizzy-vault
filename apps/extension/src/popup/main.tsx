@@ -7,12 +7,13 @@ import { createRuntimeTransport, ExtensionClient } from "../core/client.ts";
 import { webext } from "../types/runtime-api.ts";
 import { App } from "./App.tsx";
 
-const client = new ExtensionClient(createRuntimeTransport(webext()));
+const ext = webext();
+const client = new ExtensionClient(createRuntimeTransport(ext));
 const root = document.getElementById("root");
 if (root !== null) {
   createRoot(root).render(
     <StrictMode>
-      <App client={client} />
+      <App client={client} openTab={(url) => void ext.tabs?.create({ url })} />
     </StrictMode>,
   );
 }

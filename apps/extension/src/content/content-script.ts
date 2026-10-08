@@ -4,19 +4,28 @@
 // tracked in `not_done`). It never imports `@rizzy-vault/core` (enforced by
 // `eslint.config.mjs`'s `no-restricted-imports` for this file) and never fills without a
 // trusted user gesture (INV-36): detection and the inline-menu offer happen passively, but the
-// actual DOM write only ever runs inside the extension-origin inline-menu iframe's own `click`
-// handler (`InlineMenu`, `inline-menu/main.ts`) — the menu the user opened, in a document the
-// page's own JS cannot reach at all (not merely one it is asked nicely not to script).
+// fill request itself is only ever triggered by the extension-origin inline-menu iframe's own
+// `click` handler (`inline-menu/main.ts`) — the menu the user opened, in a document the page's
+// own JS cannot reach at all (not merely one it is asked nicely not to script). That iframe asks
+// the background directly (ADR 0040; `messaging/sender.ts`'s
+// `isInlineMenuSender`), which re-validates the request and pushes the values back to this
+// script as `apply_fill` — this content script never relays `fill_chosen` itself and never
+// receives any credential except through that one push, so it alone cannot pull one for an
+// `itemId` it names of its own accord. The actual DOM write (`applyFill`, below) still runs
+// here, since this is the only context with the real `HTMLInputElement`s.
 import {
   MAX_FIELDS_PER_REPORT,
+  isApplyFillMessage,
   type CandidatesMessage,
+  type CredentialsSubmittedMessage,
   type FieldDescriptor,
-  type FillChosenMessage,
-  type FillValuesMessage,
   type FromContentScript,
+  type SavePromptOfferedMessage,
+  type SavePromptResolvedMessage,
   type ToContentScript,
 } from "../messaging/contract.ts";
 import { INLINE_MENU_SHOW, isInlineMenuPickMessage } from "../inline-menu/protocol.ts";
+import { isOwnOverlayMutation } from "./own-overlay-mutation.ts";
 
 if (window.top === window) {
   installContentScript();
@@ -24,6 +33,15 @@ if (window.top === window) {
 
 function installContentScript(): void {
   let menu: InlineMenu | undefined;
+
+  // The one pair of fields the inline menu currently showing (if any) is offering to fill —
+  // set by `wireInlineMenu` from the same detection pass the menu itself is for, and read only
+  // by the `apply_fill` listener below (ADR 0040: the background never names a
+  // field, only `username`/`password` by kind — this is what maps that kind back onto a real
+  // `HTMLInputElement` in *this* tab). Cleared whenever the menu is destroyed or replaced, so an
+  // `apply_fill` arriving after the user closed or changed the menu (e.g. a stale, delayed
+  // response racing a later report) lands on nothing rather than an unrelated field.
+  let activeFillTargets: { readonly usernameField: HTMLInputElement | null; readonly passwordField: HTMLInputElement } | undefined;
 
   const report = () => {
     const fields = detectFields();
@@ -37,38 +55,62 @@ function installContentScript(): void {
       fields,
     }).then((answer) => {
       if (answer?.type === "candidates") {
-        wireInlineMenu(answer, fields);
+        wireInlineMenu(answer);
       }
     });
   };
 
-  function wireInlineMenu(answer: CandidatesMessage, fields: readonly FieldDescriptor[]): void {
+  function wireInlineMenu(answer: CandidatesMessage): void {
     const usernameField = document.querySelector<HTMLInputElement>('input[data-rizzy-field="username"]');
     const passwordField = document.querySelector<HTMLInputElement>('input[data-rizzy-field="password"]');
     menu?.destroy();
+    activeFillTargets = undefined;
     if (answer.candidates.length === 0 || passwordField === null) {
       menu = undefined;
       return;
     }
-    menu = new InlineMenu(passwordField, answer.candidates, (itemId) => {
-      // The gesture: `InlineMenu` only calls this once its own iframe reports a trusted click.
-      // `menu` is already destroyed by this point (`InlineMenu`'s own message handler destroys
-      // itself before calling `onPick`), so nothing of ours covers `target` when `applyFill`'s
-      // own visibility recheck runs.
-      const fieldIds = fields.filter((f) => f.kind === "username" || f.kind === "password").map((f) => f.fieldId);
+    activeFillTargets = { usernameField, passwordField };
+    // `InlineMenu` no longer tells this script which candidate was picked (ADR 0036 §4's new
+    // bullet): the iframe itself sends the fill request straight to the background
+    // (`inline-menu/main.ts`), as the one sender the background grants a decrypted credential to
+    // (`messaging/sender.ts`'s `isInlineMenuSender`). This script only ever hears about it
+    // indirectly, as an `apply_fill` push the background sends back to *this* tab once it has
+    // validated that request — never as anything the iframe tells this content script directly,
+    // which a compromised content script could otherwise have spoofed by itself.
+    menu = new InlineMenu(passwordField, answer.candidates);
+  }
+
+  let savePrompt: SavePromptBanner | undefined;
+
+  // ROADMAP §4.4 "save/update on submit": a capturing listener so a page's own `stopPropagation`
+  // on the bubbling phase cannot hide the submit from this script. Reads the current value of
+  // whichever fields detection already tagged `username`/`password` (never a guess at the
+  // field's identity at submit time) and only ever *offers* save/update — `offerSavePrompt`'s
+  // own doc says this never auto-writes anything.
+  document.addEventListener(
+    "submit",
+    () => {
+      const usernameField = document.querySelector<HTMLInputElement>('input[data-rizzy-field="username"]');
+      const passwordField = document.querySelector<HTMLInputElement>('input[data-rizzy-field="password"]');
+      if (passwordField === null || passwordField.value === "") {
+        return;
+      }
       void sendToBackground({
-        type: "fill_chosen",
+        type: "credentials_submitted",
         pageUrl: location.href,
-        isTopFrame: true,
-        itemId,
-        fieldIds,
-      } satisfies FillChosenMessage).then((result) => {
-        if (result?.type === "fill_values") {
-          applyFill(result, usernameField, passwordField);
+        ...(usernameField !== null && usernameField.value !== "" ? { usernameValue: usernameField.value } : {}),
+        passwordValue: passwordField.value,
+      } satisfies CredentialsSubmittedMessage).then((answer) => {
+        if (answer?.type === "save_prompt") {
+          savePrompt?.destroy();
+          savePrompt = new SavePromptBanner(answer, () => {
+            savePrompt = undefined;
+          });
         }
       });
-    });
-  }
+    },
+    true,
+  );
 
   // Detection reruns on load and on DOM mutation (dynamically rendered login forms), debounced
   // by `requestIdleCallback`-style batching via a simple timer so a busy page cannot cause a
@@ -84,7 +126,38 @@ function installContentScript(): void {
       report();
     }, 250);
   };
-  new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true });
+  // The one message this script ever receives rather than sends (ADR 0040): the
+  // background pushes this only after it has (1) re-run the matcher for *this tab's own*,
+  // browser-vouched URL and confirmed `itemId` was among the result, and (2) confirmed the
+  // request came from the extension-origin inline-menu iframe, not this content script
+  // (`core-host/listener.ts`, `core-host/content-handler.ts`). This listener does not and cannot
+  // re-check either of those — it has no way to — so it trusts the push exactly as much as it
+  // already trusts every other extension-internal message delivered to a content script, and
+  // relies entirely on `activeFillTargets` plus a fresh visibility recheck for the rest.
+  const ext = typeof chrome !== "undefined" ? chrome : browser;
+  ext?.runtime.onMessage.addListener((message) => {
+    if (!isApplyFillMessage(message) || activeFillTargets === undefined) {
+      return undefined;
+    }
+    applyFill(message.values, activeFillTargets.usernameField, activeFillTargets.passwordField);
+    return undefined;
+  });
+
+  new MutationObserver((records) => {
+    // A real bug, found empirically running this change's E2E coverage against a real
+    // Chromium build: `InlineMenu`'s own `appendChild`/`remove` of its iframe (and
+    // `SavePromptBanner`'s of its banner) are themselves `childList` mutations under
+    // `document.documentElement`, so without this filter every inline-menu show/hide
+    // re-triggered `report()`, which could `wireInlineMenu` a *new* menu, mutating the DOM
+    // again — an unbounded destroy/recreate loop that starved the page's own event loop and,
+    // observed directly, could tear the menu out from under a click already in flight. Only
+    // mutations that add or remove something other than our own marked elements count as "the
+    // page changed" and deserve a re-detection.
+    if (isOwnOverlayMutation(records)) {
+      return;
+    }
+    schedule();
+  }).observe(document.documentElement, { childList: true, subtree: true });
   schedule();
 }
 
@@ -180,23 +253,26 @@ function stableFieldId(el: HTMLInputElement): string {
 }
 
 function applyFill(
-  values: FillValuesMessage,
+  values: { readonly username?: string; readonly password: string },
   usernameField: HTMLInputElement | null,
   passwordField: HTMLInputElement,
 ): void {
-  for (const [fieldId, value] of Object.entries(values.values)) {
-    const target =
-      usernameField?.dataset["rizzyFieldId"] === fieldId
-        ? usernameField
-        : passwordField.dataset["rizzyFieldId"] === fieldId
-          ? passwordField
-          : undefined;
-    if (target === undefined) {
+  // Mapped by kind, not by `fieldId` (ADR 0040: the background never sees or
+  // names a `fieldId`, only `username`/`password`) — `usernameField`/`passwordField` are exactly
+  // the two fields `wireInlineMenu` tagged when the inline menu was shown for them, so there is
+  // nothing left to look up by id.
+  const targets: ReadonlyArray<readonly [HTMLInputElement | null, string | undefined]> = [
+    [usernameField, values.username],
+    [passwordField, values.password],
+  ];
+  for (const [target, value] of targets) {
+    if (target === null || value === undefined) {
       continue;
     }
     // THREAT_MODEL.md row "T" (page scripts rearrange forms between click and fill): "re-check
     // origin, frame and visibility at fill time," not only when the field was first detected.
-    // The inline menu is destroyed before this runs (`wireInlineMenu`'s `onPick`), so it is
+    // The inline menu is destroyed well before this runs (the user's click tears it down
+    // immediately, and the round trip through the background takes longer still), so it is
     // never the thing covering `target` here.
     if (!isVisible(target)) {
       continue;
@@ -223,14 +299,15 @@ function sendToBackground(message: FromContentScript): Promise<ToContentScript |
  * convention the prior same-DOM-element version relied on — so it cannot call `.click()` on a
  * candidate itself; `protocol.ts` documents exactly what the `postMessage` channel to and from
  * it does and does not let a hostile page do. Destroyed on blur or a new report, and by itself
- * the instant it reports a pick (before telling `onPick`, so nothing of this menu's own is ever
- * what a later visibility recheck sees covering the field). */
+ * the instant it reports a pick — by then the iframe has already sent the actual fill request
+ * straight to the background on its own (ADR 0040), so nothing of this menu's
+ * own is ever what a later visibility recheck sees covering the field. */
 class InlineMenu {
   readonly #frame: HTMLIFrameElement;
   readonly #onMessage: (event: MessageEvent) => void;
   readonly #onBlur: () => void;
 
-  constructor(anchor: HTMLInputElement, candidates: CandidatesMessage["candidates"], onPick: (itemId: string) => void) {
+  constructor(anchor: HTMLInputElement, candidates: CandidatesMessage["candidates"]) {
     const frame = document.createElement("iframe");
     frame.setAttribute("data-rizzy-inline-menu", "");
     const rect = anchor.getBoundingClientRect();
@@ -251,7 +328,12 @@ class InlineMenu {
           {
             type: INLINE_MENU_SHOW,
             pageOrigin,
-            candidates: candidates.map((c) => ({ itemId: c.itemId, title: c.title, username: c.username })),
+            candidates: candidates.map((c) => ({
+              itemId: c.itemId,
+              title: c.title,
+              username: c.username,
+              needsWarning: c.needsWarning,
+            })),
           },
           menuOrigin,
         );
@@ -270,16 +352,29 @@ class InlineMenu {
       if (!isInlineMenuPickMessage(event.data)) {
         return;
       }
-      const itemId = event.data.itemId;
+      // Teardown only (ADR 0040): the iframe already sent the actual fill
+      // request straight to the background itself, on the same trusted click, before it ever
+      // posted this message (`inline-menu/main.ts`). This script never learns `itemId` and never
+      // acts on it — it only tears the menu down, exactly as it would on blur.
       this.destroy();
-      onPick(itemId);
     };
     window.addEventListener("message", this.#onMessage);
 
-    // Appended before `src` is set, as elsewhere in this file's DOM handling: assigning `src`
-    // on a not-yet-attached iframe does not reliably start the load in every engine.
-    document.body.appendChild(frame);
+    // `src` set *before* the element is attached to the document — the opposite of this file's
+    // other DOM-insertion comment, and deliberately so: a real bug, found empirically running
+    // this change's E2E coverage against a real Chromium build. Appending an `src`-less iframe
+    // first (the previous order here) queues a navigation to `about:blank` immediately; setting
+    // `src` afterwards queues a *second* navigation, so `"load"` fires twice — once for the
+    // blank document (same-origin as this page, `window.location.origin`), once for the real
+    // one. The `{ once: true }` listener below caught only the first, so it tried to
+    // `postMessage` the candidate list to `menuOrigin` while the iframe's actual window still
+    // had this page's own origin — exactly the "target origin ... does not match the recipient
+    // window's origin" warning Chromium logs for that mismatch, and the inline menu never
+    // received its candidates. Setting `src` on a still-detached iframe queues no navigation at
+    // all (there is nothing to navigate yet); appending it then starts exactly one navigation,
+    // straight to `inlineMenuUrl()`, so `"load"` fires exactly once, for the right origin.
     frame.src = inlineMenuUrl();
+    document.body.appendChild(frame);
 
     this.#frame = frame;
     this.#onBlur = () => this.destroy();
@@ -289,6 +384,66 @@ class InlineMenu {
   destroy(): void {
     window.removeEventListener("message", this.#onMessage);
     this.#frame.remove();
+  }
+}
+
+/**
+ * The save/update/dismiss prompt after a form submission (ROADMAP §4.4). Unlike {@link
+ * InlineMenu}, this renders directly in the page's own DOM rather than a cross-origin iframe:
+ * a known, documented residual (`apps/extension/README.md`'s "Known gaps") — the page's own
+ * script could technically call `.click()` on one of these buttons, where it cannot on the
+ * fill menu's. The impact is bounded either way: the values involved are the page's *own* form
+ * values the page's script already had, "save" or "update" only ever writes what the user just
+ * typed into that page's own form, and dismissing or forging a click here can never read or
+ * exfiltrate an existing vault secret. `event.isTrusted` is still checked, as defence in depth.
+ */
+class SavePromptBanner {
+  readonly #el: HTMLElement;
+
+  constructor(offer: SavePromptOfferedMessage, onDone: () => void) {
+    const el = document.createElement("div");
+    el.setAttribute("data-rizzy-save-prompt", "");
+    el.style.position = "fixed";
+    el.style.right = "16px";
+    el.style.bottom = "16px";
+    el.style.zIndex = "2147483647";
+    el.style.background = "#fff";
+    el.style.color = "#000";
+    el.style.border = "1px solid #888";
+    el.style.padding = "8px";
+
+    const label = document.createElement("span");
+    label.textContent =
+      offer.suggestion === "save" ? "Save this login in rizzy-vault?" : `Update "${offer.itemTitle ?? ""}" in rizzy-vault?`;
+    el.appendChild(label);
+
+    const resolve = (action: "save" | "update" | "dismiss") => (event: MouseEvent) => {
+      if (!event.isTrusted) {
+        return;
+      }
+      void sendToBackground({ type: "save_prompt_resolved", token: offer.token, action } satisfies SavePromptResolvedMessage);
+      this.destroy();
+      onDone();
+    };
+
+    const actionButton = document.createElement("button");
+    actionButton.type = "button";
+    actionButton.textContent = offer.suggestion === "save" ? "Save" : "Update";
+    actionButton.addEventListener("click", resolve(offer.suggestion));
+    el.appendChild(actionButton);
+
+    const dismissButton = document.createElement("button");
+    dismissButton.type = "button";
+    dismissButton.textContent = "Dismiss";
+    dismissButton.addEventListener("click", resolve("dismiss"));
+    el.appendChild(dismissButton);
+
+    document.body.appendChild(el);
+    this.#el = el;
+  }
+
+  destroy(): void {
+    this.#el.remove();
   }
 }
 

@@ -3,7 +3,14 @@
 // any shape-specific logic runs.
 import { describe, expect, it } from "vitest";
 
-import { MAX_FIELDS_PER_REPORT, MAX_MESSAGE_BYTES, MAX_URL_LEN } from "../src/messaging/contract.ts";
+import {
+  MAX_FIELDS_PER_REPORT,
+  MAX_MESSAGE_BYTES,
+  MAX_URL_LEN,
+  isApplyFillMessage,
+  isInlineMenuFillRequestMessage,
+  isRelayApplyFillMessage,
+} from "../src/messaging/contract.ts";
 import { MessageRejected, parseFromContentScript } from "../src/messaging/validate.ts";
 
 describe("parseFromContentScript: accepts well-formed messages", () => {
@@ -20,14 +27,8 @@ describe("parseFromContentScript: accepts well-formed messages", () => {
     expect(parseFromContentScript(message)).toEqual(message);
   });
 
-  it("fill_chosen", () => {
-    const message = {
-      type: "fill_chosen",
-      pageUrl: "https://example.com/login",
-      isTopFrame: true,
-      itemId: "item-1",
-      fieldIds: ["f1", "f2"],
-    };
+  it("save_prompt_resolved", () => {
+    const message = { type: "save_prompt_resolved", token: "abc", action: "save" };
     expect(parseFromContentScript(message)).toEqual(message);
   });
 
@@ -97,18 +98,95 @@ describe("parseFromContentScript: refuses bad input", () => {
     expect(() => parseFromContentScript(message)).toThrow(MessageRejected);
   });
 
-  it("fill_chosen with an empty fieldIds array", () => {
-    const message = {
-      type: "fill_chosen",
-      pageUrl: "https://example.com",
-      isTopFrame: true,
-      itemId: "item-1",
-      fieldIds: [],
-    };
-    expect(() => parseFromContentScript(message)).toThrow(MessageRejected);
+  it("save_prompt_resolved with an invalid action", () => {
+    expect(() => parseFromContentScript({ type: "save_prompt_resolved", token: "abc", action: "nope" })).toThrow(
+      MessageRejected,
+    );
   });
 
   it("missing required fields", () => {
-    expect(() => parseFromContentScript({ type: "fill_chosen" })).toThrow(MessageRejected);
+    expect(() => parseFromContentScript({ type: "fields_detected" })).toThrow(MessageRejected);
+  });
+
+  // ADR 0040, defence in depth: `inline_menu_fill_chosen` is not one of
+  // `FromContentScript`'s own variants at all (deliberately — see `contract.ts`'s doc on it), so
+  // even a content script that sends this type's exact shape gets the same "unknown type"
+  // refusal as any other impersonation attempt. The privileged path
+  // (`isInlineMenuFillRequestMessage`, exercised in `content-handler.test.ts`) is a completely
+  // separate validator this function never calls.
+  it("inline_menu_fill_chosen is not a content-script message at all", () => {
+    const message = { type: "inline_menu_fill_chosen", itemId: "item-1", confirmedEquivalence: true };
+    expect(() => parseFromContentScript(message)).toThrow(MessageRejected);
+  });
+});
+
+describe("isInlineMenuFillRequestMessage", () => {
+  it("accepts a well-formed request", () => {
+    expect(isInlineMenuFillRequestMessage({ type: "inline_menu_fill_chosen", itemId: "item-1", confirmedEquivalence: false })).toBe(
+      true,
+    );
+  });
+
+  it("rejects a missing confirmedEquivalence", () => {
+    expect(isInlineMenuFillRequestMessage({ type: "inline_menu_fill_chosen", itemId: "item-1" })).toBe(false);
+  });
+
+  it("rejects an itemId over its own length budget", () => {
+    expect(
+      isInlineMenuFillRequestMessage({ type: "inline_menu_fill_chosen", itemId: "a".repeat(257), confirmedEquivalence: true }),
+    ).toBe(false);
+  });
+
+  it("rejects a non-object", () => {
+    expect(isInlineMenuFillRequestMessage(null)).toBe(false);
+    expect(isInlineMenuFillRequestMessage("inline_menu_fill_chosen")).toBe(false);
+  });
+});
+
+describe("isApplyFillMessage", () => {
+  it("accepts a password-only fill", () => {
+    expect(isApplyFillMessage({ type: "apply_fill", values: { password: "s3cret" } })).toBe(true);
+  });
+
+  it("accepts a username+password fill", () => {
+    expect(isApplyFillMessage({ type: "apply_fill", values: { username: "alice", password: "s3cret" } })).toBe(true);
+  });
+
+  it("rejects a missing password", () => {
+    expect(isApplyFillMessage({ type: "apply_fill", values: { username: "alice" } })).toBe(false);
+  });
+
+  it("rejects a missing values object", () => {
+    expect(isApplyFillMessage({ type: "apply_fill" })).toBe(false);
+  });
+});
+
+// `relay_apply_fill` (ADR 0040): the Chromium-only internal relay
+// `core-host/content-handler.ts`'s `pushApplyFill` sends when `ext.tabs` is unavailable inside
+// the offscreen document (a real, previously-shipping `TypeError` otherwise — see
+// `README.md`'s "bugs found" list). `background/service-worker.ts` is the only thing that
+// accepts it, and only from this extension's own non-tab sender; this validator only bounds the
+// shape, same as every other message boundary.
+describe("isRelayApplyFillMessage", () => {
+  it("accepts a well-formed relay", () => {
+    expect(isRelayApplyFillMessage({ type: "relay_apply_fill", tabId: 7, values: { password: "s3cret" } })).toBe(true);
+  });
+
+  it("accepts a username+password relay", () => {
+    expect(
+      isRelayApplyFillMessage({ type: "relay_apply_fill", tabId: 7, values: { username: "alice", password: "s3cret" } }),
+    ).toBe(true);
+  });
+
+  it("rejects a non-numeric tabId", () => {
+    expect(isRelayApplyFillMessage({ type: "relay_apply_fill", tabId: "7", values: { password: "s3cret" } })).toBe(false);
+  });
+
+  it("rejects a missing password", () => {
+    expect(isRelayApplyFillMessage({ type: "relay_apply_fill", tabId: 7, values: { username: "alice" } })).toBe(false);
+  });
+
+  it("rejects a different message type (e.g. the public apply_fill shape)", () => {
+    expect(isRelayApplyFillMessage({ type: "apply_fill", tabId: 7, values: { password: "s3cret" } })).toBe(false);
   });
 });

@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "description": "Self-hostable, end-to-end encrypted, zero-knowledge password manager.",
   "permissions": ["storage", "offscreen", "idle"],
-  "host_permissions": [],
+  "host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "service_worker": "src/background/service-worker.js",
     "type": "module"

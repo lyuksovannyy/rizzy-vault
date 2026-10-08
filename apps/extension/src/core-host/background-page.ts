@@ -10,6 +10,6 @@ import { webext } from "../types/runtime-api.ts";
 
 // `acceptContentScripts: true`: Firefox has no separate service worker, so this is the only
 // context a real content-script message ever reaches — it must validate and handle it directly
-// (fixes the content script's `fields_detected`/`fill_chosen`/`credentials_submitted` messages
-// previously resolving to `undefined` forever on this browser build).
+// (fixes the content script's `fields_detected`/`credentials_submitted` messages previously
+// resolving to `undefined` forever on this browser build).
 installCoreContextListener(webext(), { acceptContentScripts: true });

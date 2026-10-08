@@ -34,7 +34,7 @@ function minimalGlobalStub(): WebExtNamespace {
       local: { get: async () => ({}), set: async () => undefined, remove: async () => undefined, clear: async () => undefined },
     },
     idle: { setDetectionInterval: () => undefined, queryState: async () => "active", onStateChanged: fakeEvent() },
-    tabs: { query: async () => [], create: async () => undefined },
+    tabs: { query: async () => [], create: async () => undefined, sendMessage: async () => undefined },
   };
 }
 

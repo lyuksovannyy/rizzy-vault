@@ -13,8 +13,8 @@ import {
   type CredentialsSubmittedMessage,
   type FieldDescriptor,
   type FieldsDetectedMessage,
-  type FillChosenMessage,
   type FromContentScript,
+  type SavePromptResolvedMessage,
   MAX_FIELDS_PER_REPORT,
   MAX_FIELD_VALUE_LEN,
   MAX_MESSAGE_BYTES,
@@ -97,31 +97,14 @@ function parseFieldsDetected(body: Record<string, unknown>): FieldsDetectedMessa
   };
 }
 
-function parseFillChosen(body: Record<string, unknown>): FillChosenMessage {
-  if (!isBoundedUrl(body["pageUrl"])) {
-    throw new MessageRejected("fill_chosen: pageUrl");
+function parseSavePromptResolved(body: Record<string, unknown>): SavePromptResolvedMessage {
+  if (!isBoundedString(body["token"], 256)) {
+    throw new MessageRejected("save_prompt_resolved: token");
   }
-  if (typeof body["isTopFrame"] !== "boolean") {
-    throw new MessageRejected("fill_chosen: isTopFrame");
+  if (body["action"] !== "save" && body["action"] !== "update" && body["action"] !== "dismiss") {
+    throw new MessageRejected("save_prompt_resolved: action");
   }
-  if (!isBoundedString(body["itemId"], 256)) {
-    throw new MessageRejected("fill_chosen: itemId");
-  }
-  if (
-    !Array.isArray(body["fieldIds"]) ||
-    body["fieldIds"].length === 0 ||
-    body["fieldIds"].length > MAX_FIELDS_PER_REPORT ||
-    !body["fieldIds"].every((v) => isBoundedString(v, 256))
-  ) {
-    throw new MessageRejected("fill_chosen: fieldIds");
-  }
-  return {
-    type: "fill_chosen",
-    pageUrl: body["pageUrl"],
-    isTopFrame: body["isTopFrame"],
-    itemId: body["itemId"],
-    fieldIds: body["fieldIds"] as string[],
-  };
+  return { type: "save_prompt_resolved", token: body["token"], action: body["action"] };
 }
 
 function parseCredentialsSubmitted(body: Record<string, unknown>): CredentialsSubmittedMessage {
@@ -158,10 +141,10 @@ export function parseFromContentScript(raw: unknown): FromContentScript {
   switch (raw["type"]) {
     case "fields_detected":
       return parseFieldsDetected(raw);
-    case "fill_chosen":
-      return parseFillChosen(raw);
     case "credentials_submitted":
       return parseCredentialsSubmitted(raw);
+    case "save_prompt_resolved":
+      return parseSavePromptResolved(raw);
     default:
       throw new MessageRejected(`unknown type: ${String(raw["type"])}`);
   }

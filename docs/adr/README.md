@@ -96,6 +96,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0037 | [URL matching and autofill rules](0037-url-matching-and-autofill-rules.md) | Accepted | M2 |
 | 0038 | [Equivalent-domain list: format, signing and governance](0038-equivalent-domain-list.md) | Accepted | M2 |
 | 0039 | [Passkeys in the vault and in the browser extension](0039-passkeys-vault-and-extension.md) | Accepted | M2 |
+| 0040 | [The extension's fill request comes from the inline menu, not the content script](0040-extension-fill-request-from-inline-menu.md) | Proposed | M2 |
 
 ## Gates
 

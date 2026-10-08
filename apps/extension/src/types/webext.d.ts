@@ -73,6 +73,12 @@ interface WebExtIdle {
 interface WebExtTabs {
   query(queryInfo: { active?: boolean; currentWindow?: boolean }): Promise<Array<{ id?: number; url?: string }>>;
   create(createProperties: { url: string }): Promise<unknown>;
+  /** Pushes `message` to `tabId`'s own content script (`core-host/content-handler.ts`'s
+   * `handleInlineMenuFillRequest`, ADR 0040): needs no `tabs` permission beyond
+   * the id the browser already handed this extension in `sender.tab.id` — unlike
+   * `tabs.query`'s arbitrary-tab lookup, this never asks the browser for a tab this extension
+   * was not already given. */
+  sendMessage(tabId: number, message: unknown): Promise<unknown>;
 }
 
 interface WebExtNamespace {
@@ -86,7 +92,17 @@ interface WebExtNamespace {
   // code that assumes either exists can throw and abort registration.
   readonly storage?: WebExtStorage;
   readonly idle?: WebExtIdle;
-  readonly tabs: WebExtTabs;
+  // `tabs` is typed optional for the same reason, found the same way (measured empirically
+  // against a real Chromium build while fixing ADR 0040, not merely inferred
+  // from docs): a `chrome.offscreen` document's own `chrome.tabs` is `undefined`, confirmed by a
+  // `TypeError: Cannot read properties of undefined (reading 'sendMessage')` once the inline-menu
+  // iframe's fill request reached that far. Chrome's own "Offscreen documents" guide does list
+  // `tabs` among the APIs an offscreen document cannot use, which this project's earlier
+  // `idle`/`storage` finding did not have the benefit of citing. `core-host/content-handler.ts`'s
+  // `pushApplyFill` is the one place this matters: it relays through the MV3 service worker
+  // (which does have `tabs`, like every other extension page) rather than assuming `tabs` is
+  // there. The popup and options page, and Firefox's `background-page.ts`, always have it.
+  readonly tabs?: WebExtTabs;
   readonly offscreen?: WebExtOffscreen;
 }
 

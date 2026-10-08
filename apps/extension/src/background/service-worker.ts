@@ -5,12 +5,20 @@
 // answers those directly, because both browsers keep the long-lived context reachable by
 // `chrome.runtime.sendMessage` the whole time a popup can be open.
 //
+// It also relays the one message the offscreen document cannot send itself: a `chrome.offscreen`
+// document has no `chrome.tabs` access at all (found empirically fixing ADR 0036 §4's new
+// bullet — a real `TypeError`, not merely inferred), so `core-host/content-handler.ts`'s
+// `pushApplyFill` asks this file, which does have `tabs` like every other extension page, to
+// perform the real push on its behalf ({@link RelayApplyFillMessage}, below).
+//
 // On Firefox there is no separate service worker (its manifest's `background.scripts` points at
-// `background-page.ts` instead, ADR 0036 §2); this file is Chromium-only.
+// `background-page.ts` instead, ADR 0036 §2); this file is Chromium-only. `background-page.ts`
+// has `tabs` itself and never needs this relay.
 import { webext } from "../types/runtime-api.ts";
 import { MessageRejected, parseFromContentScript } from "../messaging/validate.ts";
 import { SenderRejected, isContentScriptSender, trustedOriginOf } from "../messaging/sender.ts";
-import type { ContentScriptForward, ToContentScript } from "../messaging/contract.ts";
+import { isRelayApplyFillMessage } from "../messaging/contract.ts";
+import type { ApplyFillMessage, ContentScriptForward, ToContentScript } from "../messaging/contract.ts";
 import { isEnsureCoreMessage } from "./ensure-core.ts";
 
 // Relative to the extension root (`dist/<target>/`), matching `vite.config.ts`'s output
@@ -82,7 +90,29 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
       void ensureOffscreenDocument(ext).then(() => sendResponse({ type: "core_ready" }));
       return true;
     }
-    // Not `ensure_core` either: nothing for the router to do.
+    // `pushApplyFill`'s relay (this file's own doc comment above): `sender.tab === undefined`
+    // admits the offscreen document (this relay's one real caller) and, incidentally, the popup
+    // and options page too — both already-trusted extension pages that could ask for a
+    // decrypted field directly via the ordinary `reveal_field` popup request, so accepting this
+    // relay from them as well is not a new escalation, just an unused extra. Never a content
+    // script (handled in the branch below, which this falls through to otherwise) and never the
+    // inline-menu iframe, which has no reason to send this type and would be refused by
+    // `isRelayApplyFillMessage` even if it tried, since nothing here hands it a `tabId` to claim.
+    if (isRelayApplyFillMessage(message) && sender.id === ext.runtime.id && sender.tab === undefined) {
+      const tabs = ext.tabs;
+      if (tabs === undefined) {
+        // Never actually missing on the service worker (unlike the offscreen document this
+        // relay exists for); checked anyway, since the type is optional, rather than asserting.
+        sendResponse({ ok: false });
+        return true;
+      }
+      void tabs
+        .sendMessage(message.tabId, { type: "apply_fill", values: message.values } satisfies ApplyFillMessage)
+        .then(() => sendResponse({ ok: true }))
+        .catch(() => sendResponse({ ok: false }));
+      return true;
+    }
+    // Not `ensure_core` or the relay either: nothing for the router to do.
     return undefined;
   }
   void (async () => {
