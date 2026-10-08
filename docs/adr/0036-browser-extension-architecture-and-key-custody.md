@@ -1,6 +1,6 @@
 # ADR 0036: Browser extension: architecture and key custody
 
-- Status: Accepted
+- Status: Partially superseded by [ADR 0040](0040-extension-fill-request-from-inline-menu.md) (§4, first bullet, in part)
 - Date: 2026-10-07
 - Deciders: project owner
 - Milestone: M2

@@ -1,6 +1,6 @@
 # ADR 0040: The extension's fill request comes from the inline menu, not the content script
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-08
 - Deciders: project owner
 - Milestone: M2
