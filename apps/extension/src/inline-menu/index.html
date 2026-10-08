@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>rizzy-vault</title>
+  </head>
+  <body>
+    <!-- The extension-origin inline-menu surface (ADR 0036 §4/§5, INV-36, INV-40): loaded by
+         `content-script.ts` into an iframe it injects into the page. The embedding page has no
+         same-origin access to this document — it cannot read or script its contents, only
+         `postMessage` into it (`protocol.ts` covers what that does and does not let it do) —
+         so a page script can never synthesize a trusted click on a candidate here the way it
+         could when the menu was a plain element in the page's own DOM. -->
+    <div id="list"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

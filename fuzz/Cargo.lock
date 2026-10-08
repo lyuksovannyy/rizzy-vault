@@ -1344,6 +1344,7 @@ dependencies = [
  "rand_core 0.10.1",
  "rizzy-core",
  "rizzy-import",
+ "rizzy-match",
  "rizzy-proto",
  "rizzy-sync",
  "subtle",

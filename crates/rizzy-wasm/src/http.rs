@@ -36,11 +36,13 @@
 use core::fmt;
 
 use rizzy_client::ClientError;
+use rizzy_client::device::UnlockedDevice;
 use rizzy_client::rizzy_proto::error::{ErrorCode, ErrorResponse};
 use rizzy_client::rizzy_proto::http::BEARER_SCHEME;
 use rizzy_client::rizzy_proto::limits::MAX_UPLOAD_BODY_LEN;
 use rizzy_client::rizzy_proto::meta::{API_V1, CLIENT_HEADER, META_PATH, MetaResponse};
 use rizzy_client::rizzy_proto::wire::SessionToken;
+use rizzy_client::session::DeviceSession as ClientDeviceSession;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -70,6 +72,11 @@ pub struct HttpRequest {
     body: Option<Zeroizing<Vec<u8>>>,
     /// The `Authorization` header value, if the request needs a session.
     authorization: Option<Zeroizing<String>>,
+    /// The `Rizzy-Request-Counter` header value, for a device-authenticated session's signed
+    /// request (ADR 0028 item 5). `Some` exactly when [`HttpRequest::request_signature`] is.
+    request_counter: Option<u64>,
+    /// The `Rizzy-Request-Signature` header value, base64url (ADR 0028 item 5).
+    request_signature: Option<Zeroizing<String>>,
 }
 
 impl fmt::Debug for HttpRequest {
@@ -120,6 +127,25 @@ impl HttpRequest {
         self.authorization.as_ref().map(|a| a.as_str().to_owned())
     }
 
+    /// The `Rizzy-Request-Counter` header value, or `undefined` for a request that is not
+    /// signed with a device key (ADR 0028 item 5; CRYPTO.md §5.10). Present exactly when
+    /// [`HttpRequest::request_signature`] is.
+    #[wasm_bindgen(getter, js_name = requestCounter)]
+    #[must_use]
+    pub fn request_counter(&self) -> Option<u64> {
+        self.request_counter
+    }
+
+    /// The `Rizzy-Request-Signature` header value, base64url, or `undefined` (module docs,
+    /// [`HttpRequest::request_counter`]).
+    #[wasm_bindgen(getter, js_name = requestSignature)]
+    #[must_use]
+    pub fn request_signature(&self) -> Option<String> {
+        self.request_signature
+            .as_ref()
+            .map(|s| s.as_str().to_owned())
+    }
+
     /// The `Rizzy-Client` header value.
     #[wasm_bindgen(getter)]
     #[must_use]
@@ -151,6 +177,8 @@ impl HttpRequest {
             path,
             body: Some(Zeroizing::new(json)),
             authorization: session.map(bearer),
+            request_counter: None,
+            request_signature: None,
         })
     }
 
@@ -161,11 +189,44 @@ impl HttpRequest {
             path,
             body: None,
             authorization: session.map(bearer),
+            request_counter: None,
+            request_signature: None,
         }
     }
 
+    /// A `POST` of `body` as JSON to `path`, signed with `session`'s device key (CRYPTO.md
+    /// §5.10 "Request signing"; ADR 0028 item 5): the bearer token and both signature headers,
+    /// never a bearer-only request. The path signed is `path` itself, byte for byte, as sent
+    /// (as [`crate::device::DeviceSession::sign_request`]'s module docs and `rv`'s
+    /// `Auth::Device` already do for a native device).
+    ///
+    /// # Errors
+    /// `internal` if the body does not serialise; as
+    /// [`rizzy_client::session::DeviceSession::sign_request`].
+    pub(crate) fn post_signed<T: Serialize>(
+        path: &'static str,
+        body: &T,
+        session: &mut ClientDeviceSession,
+        unlocked: &UnlockedDevice,
+    ) -> CoreResult<Self> {
+        let json = serde_json::to_vec(body).map_err(|_| CoreError::from(ClientError::Internal))?;
+        let signature = session
+            .sign_request(unlocked, "POST", path, &json)
+            .map_err(CoreError::from)?;
+        Ok(Self {
+            method: "POST",
+            path,
+            body: Some(Zeroizing::new(json)),
+            authorization: Some(bearer(session.bearer_token())),
+            request_counter: Some(signature.request_counter),
+            request_signature: Some(Zeroizing::new(signature.signature.to_b64url())),
+        })
+    }
+
     /// A copy, for a host that sends the same request again after an unknown outcome (ADR 0028
-    /// "Retry after an unknown outcome").
+    /// "Retry after an unknown outcome"). A signed request is never re-signed: the same
+    /// counter and signature go out again, exactly as sent, since the device key would
+    /// otherwise have to sign the same method, path and body twice under two counters.
     pub(crate) fn duplicate(&self) -> Self {
         Self {
             method: self.method,
@@ -175,6 +236,11 @@ impl HttpRequest {
                 .authorization
                 .as_ref()
                 .map(|a| Zeroizing::new(a.as_str().to_owned())),
+            request_counter: self.request_counter,
+            request_signature: self
+                .request_signature
+                .as_ref()
+                .map(|s| Zeroizing::new(s.as_str().to_owned())),
         }
     }
 
@@ -258,6 +324,8 @@ pub fn meta_request() -> HttpRequest {
         path: META_PATH,
         body: None,
         authorization: None,
+        request_counter: None,
+        request_signature: None,
     }
 }
 

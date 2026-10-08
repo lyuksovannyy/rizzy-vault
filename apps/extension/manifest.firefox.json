@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "rizzy-vault",
+  "version": "0.0.0",
+  "description": "Self-hostable, end-to-end encrypted, zero-knowledge password manager.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "extension@rizzy-vault.example.invalid",
+      "strict_min_version": "115.0"
+    }
+  },
+  "permissions": ["storage", "idle"],
+  "host_permissions": [],
+  "background": {
+    "scripts": ["src/core-host/background-page.js"],
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "src/popup/index.html",
+    "default_title": "rizzy-vault"
+  },
+  "options_ui": {
+    "page": "src/options/index.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["src/content/content-script.js"],
+      "all_frames": false,
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/inline-menu/index.html"],
+      "matches": ["http://*/*", "https://*/*"]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; base-uri 'none'"
+  }
+}

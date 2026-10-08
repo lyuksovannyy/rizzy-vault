@@ -22,15 +22,23 @@
 // garbage-collected, as do revealed values and plaintext exports.
 
 import initWasm, {
+  CacheDelta,
+  CacheKey,
   CoreError as WasmCoreError,
+  DeviceSession as WasmDeviceSession,
+  EnrolFlow,
   HttpRequest,
   ItemDraft,
+  KvRow,
   LoginFlow,
   Session,
   SignupFlow,
   TwoFactorEnrolment,
+  UriInput,
   checkMeta,
   coreVersion,
+  cacheStoreNames as wasmCacheStoreNames,
+  decideMatchCandidates as wasmDecideMatchCandidates,
   detectImportFormat as wasmDetectImportFormat,
   expectNoContent,
   generateElementId,
@@ -39,6 +47,7 @@ import initWasm, {
   generatorLimits as wasmGeneratorLimits,
   initSync,
   metaRequest,
+  normalizePageUrl as wasmNormalizePageUrl,
   passphraseEntropy as wasmPassphraseEntropy,
   passwordEntropy as wasmPasswordEntropy,
   plaintextExportHoldMs as wasmPlaintextExportHoldMs,
@@ -190,6 +199,12 @@ export type Transport = (request: CoreRequest) => Promise<CoreResponse>;
  */
 export const MAX_RESPONSE_BYTES = 256 * 1024 * 1024;
 
+/** The request headers of a signed request (ADR 0028 item 5; CRYPTO.md §5.10): the `u64`
+ * counter in decimal and the signature container's base64url form, the client's own request
+ * builder names them identically on every platform (`rizzy_proto::http`'s own constants). */
+const REQUEST_COUNTER_HEADER = "Rizzy-Request-Counter";
+const REQUEST_SIGNATURE_HEADER = "Rizzy-Request-Signature";
+
 /** Copies a generated request into a plain object and frees it. */
 function takeRequest(request: HttpRequest): CoreRequest {
   try {
@@ -203,6 +218,12 @@ function takeRequest(request: HttpRequest): CoreRequest {
     const contentType = request.contentType;
     if (contentType !== undefined) {
       headers["Content-Type"] = contentType;
+    }
+    const requestCounter = request.requestCounter;
+    const requestSignature = request.requestSignature;
+    if (requestCounter !== undefined && requestSignature !== undefined) {
+      headers[REQUEST_COUNTER_HEADER] = requestCounter.toString();
+      headers[REQUEST_SIGNATURE_HEADER] = requestSignature;
     }
     return { method: request.method, path: request.path, headers, body: request.body };
   } finally {
@@ -314,9 +335,22 @@ export interface LoginInput {
 /** Asks the user for the second factor when the server wants one. */
 export type AskTotp = () => Promise<string>;
 
-/** Drives a login flow to `"done"` or `"needs_totp"`. */
+/**
+ * The shape every request/response flow of the core shares (module docs, "The shape of every
+ * flow"): `LoginFlow` and `EnrolFlow` both satisfy this structurally, so {@link drive} drives
+ * either without the core needing to export a common base class (`wasm-bindgen` classes cannot
+ * share one anyway).
+ */
+interface RequestResponseFlow {
+  readonly state: string;
+  request(): HttpRequest;
+  respond(status: number, body: Uint8Array, now_ms: bigint): void;
+  provideTotp(code: string): void;
+}
+
+/** Drives a login or enrolment flow to `"done"` or `"needs_totp"`. */
 async function drive(
-  flow: LoginFlow,
+  flow: RequestResponseFlow,
   transport: Transport,
   clock: Clock,
   askTotp: AskTotp | undefined,
@@ -1391,5 +1425,549 @@ export function detectImportFormat(file: Uint8Array): DetectedImportFormat {
       return found;
     default:
       return "unknown";
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Durable device (the browser extension, M2; ADR 0036). Not wired into `apps/web` (that app
+// uses `VaultSession`/`login` above, the ephemeral kind-4 device of CRYPTO.md §11.4) and not
+// the same type as `VaultSession`: a durable device additionally persists a device-state
+// record and a cache (ADR 0026), which this section's `CacheRow` carries as opaque bytes, and
+// separates the local unlock from the online device authentication (§5.10), which
+// {@link DurableSession.authStart}/{@link DurableSession.authRespond} drive as their own
+// request/response loop. Items and sync are exposed through the same `rizzy_client::sync`/
+// `items` calls `VaultSession` above uses, over a cache-backed `VaultSync` (not new Rust
+// logic); every mutating call here is `async`, unlike `VaultSession`'s, because it persists
+// through {@link CacheStore} before it resolves (ADR 0026 §4's write order), where
+// `VaultSession`'s ephemeral device persists nothing.
+
+/**
+ * One row of the byte-blob cache (ADR 0026 §3; `crates/rizzy-wasm/src/store.rs`'s module
+ * docs): an `IndexedDB` object store's name, key and value, every one opaque bytes. A host
+ * creates one `IndexedDB` object store per name in {@link cacheStoreNames}, once, and this
+ * module never parses a row's `value` (ADR 0036 §6: the adapter "parses nothing").
+ */
+export interface CacheRow {
+  readonly store: string;
+  readonly key: Uint8Array;
+  readonly value: Uint8Array;
+}
+
+/** [ADR 0026] §3's eight logical stores, verbatim: the `IndexedDB` object stores a host
+ * creates once, before any {@link enrolDevice} or {@link unlockDurableDevice} call. */
+export function cacheStoreNames(): readonly string[] {
+  ensureReady();
+  return wasmCacheStoreNames();
+}
+
+/**
+ * The host-provided byte-blob cache store (ADR 0026 §3; ADR 0036 §6 "parses nothing"): get,
+ * put and delete of one row, and list of a whole store, keyed exactly as {@link cacheStoreNames}
+ * names them. An `IndexedDB` adapter (`cache/idb.ts`-shaped) maps onto this one call per method,
+ * since every value here is already the opaque bytes a `put`/`get` needs — this module never
+ * decides what belongs in which `IndexedDB` key path, only moves the bytes `rizzy-wasm`'s
+ * `store` bindings already encoded.
+ */
+export interface CacheStore {
+  get(store: string, key: Uint8Array): Promise<Uint8Array | undefined>;
+  put(store: string, key: Uint8Array, value: Uint8Array): Promise<void>;
+  delete(store: string, key: Uint8Array): Promise<void>;
+  list(store: string): Promise<readonly CacheRow[]>;
+}
+
+/** Every row of every store, for the one-time full load {@link unlockDurableDevice} needs. */
+async function readCacheStore(store: CacheStore): Promise<CacheRow[]> {
+  const rows: CacheRow[] = [];
+  for (const name of cacheStoreNames()) {
+    rows.push(...(await store.list(name)));
+  }
+  return rows;
+}
+
+/** Persists every row of `rows` into `store` (ADR 0026 §4's one-transaction write order; a
+ * host's `IndexedDB` adapter runs these in one transaction across their stores). */
+async function writeCacheRows(store: CacheStore, rows: readonly CacheRow[]): Promise<void> {
+  for (const row of rows) {
+    await store.put(row.store, row.key, row.value);
+  }
+}
+
+/** Persists one drain's `puts` then `deletes` into `store` (module docs, {@link CacheDelta}'s
+ * generated docs: "never one without the other"). */
+async function writeCacheDelta(
+  store: CacheStore,
+  puts: readonly CacheRow[],
+  deletes: readonly { store: string; key: Uint8Array }[],
+): Promise<void> {
+  for (const row of puts) {
+    await store.put(row.store, row.key, row.value);
+  }
+  for (const key of deletes) {
+    await store.delete(key.store, key.key);
+  }
+}
+
+/** Copies a generated `KvRow` into a plain object and frees it. */
+function takeCacheRow(row: KvRow): CacheRow {
+  try {
+    return { store: row.store, key: row.key, value: row.value };
+  } finally {
+    row.free();
+  }
+}
+
+/** Copies every row of a generated `KvRow[]` and frees each one, even if one throws. */
+function takeCacheRows(rows: KvRow[]): CacheRow[] {
+  try {
+    return rows.map((row) => takeCacheRow(row));
+  } finally {
+    for (const row of rows) {
+      // `takeCacheRow` already freed every row up to a thrown one; freeing an already-freed
+      // handle is a no-op in the generated glue, so a second pass here is safe and simple.
+      try {
+        row.free();
+      } catch {
+        // Already freed.
+      }
+    }
+  }
+}
+
+/** What the user types to enrol this device (CRYPTO.md §11.2). `device_kind` is always
+ * `Extension` (ADR 0036 §1); this call never takes one in. */
+export interface EnrolInput {
+  readonly origin: string;
+  readonly loginName: string;
+  readonly secretKey: SecretInput;
+  readonly password: SecretInput;
+  readonly totp?: string;
+}
+
+/**
+ * Enrols this device as a durable device (CRYPTO.md §11.2; ADR 0036 §1). `askTotp` is called
+ * if the account has 2FA and `input.totp` is missing. The cache rows the enrolment produces
+ * are persisted into `cacheStore` before this resolves (ADR 0026 §4 step 1, "secrets before
+ * commit"): the returned {@link DurableSession} is never usable before its own cache row is on
+ * disk.
+ */
+export async function enrolDevice(
+  transport: Transport,
+  input: EnrolInput,
+  cacheStore: CacheStore,
+  askTotp?: AskTotp,
+  clock: Clock = Date.now,
+): Promise<DurableSession> {
+  const flow = withSecrets([input.secretKey, input.password], (b) => {
+    ensureReady();
+    return call(() =>
+      EnrolFlow.start(input.origin, input.loginName, at(b, 0), at(b, 1), input.totp),
+    );
+  });
+  try {
+    await drive(flow, transport, clock, askTotp);
+  } catch (e) {
+    flow.free();
+    throw e;
+  }
+  const result = call(() => flow.finish());
+  let session: WasmDeviceSession;
+  try {
+    const rows = takeCacheRows(result.cacheRows);
+    await writeCacheRows(cacheStore, rows);
+    session = call(() => result.session());
+  } finally {
+    result.free();
+  }
+  return new DurableSession(session, transport, cacheStore, clock);
+}
+
+/**
+ * Unlocks a persisted durable device by reading every row of `cacheStore` back (ADR 0026 §4
+ * step 5): the offline unlock, then the local verify against the cache's own account objects.
+ * No network beyond `cacheStore`'s own reads. The session returned is not yet
+ * device-authenticated ({@link DurableSession.isAuthenticated} is `false`); call
+ * {@link DurableSession.authStart}/`authRespond` before signing a request.
+ */
+export async function unlockDurableDevice(
+  transport: Transport,
+  cacheStore: CacheStore,
+  password: SecretInput,
+  clock: Clock = Date.now,
+): Promise<DurableSession> {
+  const cacheRows = await readCacheStore(cacheStore);
+  const inner = withSecrets([password], (b) => {
+    ensureReady();
+    const rows = cacheRows.map((r) => new KvRow(r.store, r.key, r.value));
+    return call(() => WasmDeviceSession.unlock(rows, at(b, 0), nowOf(clock)));
+  });
+  return new DurableSession(inner, transport, cacheStore, clock);
+}
+
+/**
+ * The values of one signed request (CRYPTO.md §5.10 "Request signing"): the `Authorization`
+ * header value and the `device-request` counter and signature (ADR 0028 item 5's
+ * `Rizzy-Request-Counter`/`Rizzy-Request-Signature`). {@link DurableSession.sync} already
+ * attaches these to every request it sends; a host only needs this directly for a signed call
+ * {@link DurableSession.sync} does not make.
+ */
+export interface SignedRequestValues {
+  readonly bearer: string;
+  readonly requestCounter: bigint;
+  readonly signature: string;
+}
+
+/** Copies a generated `CacheKey` into a plain object and frees it. */
+function takeCacheKey(key: CacheKey): { store: string; key: Uint8Array } {
+  try {
+    return { store: key.store, key: key.key };
+  } finally {
+    key.free();
+  }
+}
+
+/** Copies a generated `CacheDelta` into plain `puts`/`deletes` and frees it and every row and
+ * key it held. */
+function takeCacheDelta(delta: CacheDelta): {
+  puts: CacheRow[];
+  deletes: { store: string; key: Uint8Array }[];
+} {
+  try {
+    return { puts: takeCacheRows(delta.puts), deletes: mapFree(delta.deletes, takeCacheKey) };
+  } finally {
+    delta.free();
+  }
+}
+
+/**
+ * A durable device, unlocked. Returned by {@link enrolDevice} and {@link unlockDurableDevice};
+ * {@link DurableSession.lock} drops every handle it holds (ADR 0013 §3 rule 1), as does letting
+ * it be garbage-collected after `lock`, though a host should not rely on GC timing for a
+ * secret handle.
+ *
+ * Every mutating call ({@link DurableSession.sync}, {@link DurableSession.createItem}, …) is
+ * `async`: it drains the core's cache writes (`drainCacheWrites`) and persists them through the
+ * {@link CacheStore} given at construction before it resolves, so a caller that `await`s the
+ * call already has its result on disk (ADR 0026 §4's write order; `VaultSession`'s matching
+ * calls need no such wait, since the ephemeral web vault persists nothing).
+ */
+export class DurableSession {
+  readonly #inner: WasmDeviceSession;
+  readonly #transport: Transport;
+  readonly #cacheStore: CacheStore;
+  readonly #clock: Clock;
+  #locked = false;
+
+  /** @internal use {@link enrolDevice} or {@link unlockDurableDevice}. */
+  constructor(inner: WasmDeviceSession, transport: Transport, cacheStore: CacheStore, clock: Clock) {
+    this.#inner = inner;
+    this.#transport = transport;
+    this.#cacheStore = cacheStore;
+    this.#clock = clock;
+  }
+
+  /** The clock as the core takes it. */
+  #now(): bigint {
+    return nowOf(this.#clock);
+  }
+
+  /** Drains the core's cache writes since the last drain and persists them (class docs). */
+  async #drain(): Promise<void> {
+    const delta = takeCacheDelta(call(() => this.#inner.drainCacheWrites()));
+    await writeCacheDelta(this.#cacheStore, delta.puts, delta.deletes);
+  }
+
+  /** The account, hex. */
+  get accountId(): string {
+    return call(() => this.#inner.accountId);
+  }
+
+  /** This device, hex. */
+  get deviceId(): string {
+    return call(() => this.#inner.deviceId);
+  }
+
+  /** Whether {@link signRequest} would succeed right now. */
+  isAuthenticated(): boolean {
+    return call(() => this.#inner.isAuthenticated());
+  }
+
+  /**
+   * Runs device authentication (§5.10) to `"done"`, so {@link signRequest} can be called.
+   * Idempotent: a call while already authenticated does nothing.
+   */
+  async authenticate(): Promise<void> {
+    if (this.isAuthenticated()) {
+      return;
+    }
+    call(() => this.#inner.authStart());
+    for (;;) {
+      const state = call(() => this.#inner.authState);
+      if (state !== "request") {
+        break;
+      }
+      const request = takeRequest(call(() => this.#inner.authRequest()));
+      const answer = await this.#transport(request);
+      call(() => this.#inner.authRespond(answer.status, answer.body));
+    }
+  }
+
+  /** Signs one request with the device key, after {@link authenticate}. */
+  signRequest(method: string, pathAndQuery: string, body: Uint8Array): SignedRequestValues {
+    const signed = call(() => this.#inner.signRequest(method, pathAndQuery, body));
+    try {
+      return {
+        bearer: signed.bearer,
+        requestCounter: signed.requestCounter,
+        signature: signed.signature,
+      };
+    } finally {
+      signed.free();
+    }
+  }
+
+  /** Whether writes are refused. */
+  get readOnly(): boolean {
+    return call(() => this.#inner.readOnly);
+  }
+
+  /** Own changes the server has not acknowledged: what a lock now would lose (the cache keeps
+   * them, unlike {@link VaultSession}'s ephemeral device; a later unlock resends them). */
+  get unsentChanges(): number {
+    return call(() => this.#inner.unsentChanges);
+  }
+
+  /** Whether a sync is running. */
+  get syncing(): boolean {
+    return this.#inner.syncing;
+  }
+
+  /**
+   * Fetches, heals if needed, uploads, and fetches again (as {@link VaultSession.sync}), every
+   * request signed with this device's key ({@link authenticate} first). After each answer,
+   * drains and persists the step's cache writes (class docs) before the next request is
+   * released (ADR 0026 §4's write order) — the durable device's own addition over the
+   * ephemeral web vault's sync.
+   */
+  async sync(): Promise<void> {
+    const s = this.#inner;
+    call(() => s.syncStart());
+    for (;;) {
+      const request = call(() => s.syncRequest());
+      if (request === undefined) {
+        await this.#drain();
+        return;
+      }
+      let answer: CoreResponse;
+      try {
+        answer = await this.#transport(takeRequest(request));
+      } catch (e) {
+        if (this.#inner === s) {
+          call(() => s.syncAbort());
+        }
+        throw e;
+      }
+      if (this.#inner !== s) {
+        throw new CoreError("locked");
+      }
+      call(() => s.syncRespond(answer.status, answer.body, this.#now()));
+      await this.#drain();
+    }
+  }
+
+  /** The active items, or the trashed ones. */
+  items(trash = false): ItemSummary[] {
+    return mapFree(
+      call(() => this.#inner.items(trash)),
+      (i) => ({
+        id: i.id,
+        itemType: i.itemType as ItemType | "unknown",
+        title: i.title,
+        username: i.username,
+        favorite: i.favorite,
+        hasTotp: i.hasTotp,
+        trashed: i.trashed,
+        tags: i.tags,
+        websiteHost: i.websiteHost,
+      }),
+    );
+  }
+
+  /** One item's summary. */
+  item(id: string): ItemSummary {
+    return mapOne(
+      call(() => this.#inner.item(id)),
+      (i) => ({
+        id: i.id,
+        itemType: i.itemType as ItemType | "unknown",
+        title: i.title,
+        username: i.username,
+        favorite: i.favorite,
+        hasTotp: i.hasTotp,
+        trashed: i.trashed,
+        tags: i.tags,
+        websiteHost: i.websiteHost,
+      }),
+    );
+  }
+
+  /** One item's fields; concealed values are absent. */
+  fields(id: string): FieldView[] {
+    return mapFree(
+      call(() => this.#inner.itemFields(id)),
+      (f) => ({
+        key: f.key,
+        list: f.list,
+        element: f.element,
+        attribute: f.attribute,
+        tag: f.tag,
+        kind: f.kind as FieldView["kind"],
+        concealed: f.concealed,
+        value: f.value,
+        conflict: f.conflict,
+      }),
+    );
+  }
+
+  /** One field's value, on the user's request only. */
+  reveal(id: string, key: string): string {
+    return call(() => this.#inner.revealField(id, key));
+  }
+
+  /** Creates an item; returns its id. Persisted before this resolves (class docs). */
+  async createItem(itemType: ItemType, changes: readonly ItemChange[]): Promise<string> {
+    const draft = draftOf(changes);
+    let id: string;
+    try {
+      id = call(() => this.#inner.createItem(itemType, draft, this.#now()));
+    } finally {
+      draft.free();
+    }
+    await this.#drain();
+    return id;
+  }
+
+  /** Edits an active item as one op. Persisted before this resolves (class docs). */
+  async editItem(id: string, changes: readonly ItemChange[]): Promise<void> {
+    const draft = draftOf(changes);
+    try {
+      call(() => this.#inner.editItem(id, draft, this.#now()));
+    } finally {
+      draft.free();
+    }
+    await this.#drain();
+  }
+
+  /** Moves an item to the trash. Persisted before this resolves (class docs). */
+  async trashItem(id: string): Promise<void> {
+    call(() => this.#inner.trashItem(id, this.#now()));
+    await this.#drain();
+  }
+
+  /** Restores a trashed item. Persisted before this resolves (class docs). */
+  async restoreItem(id: string): Promise<void> {
+    call(() => this.#inner.restoreItem(id, this.#now()));
+    await this.#drain();
+  }
+
+  /** Purges a trashed item for good. Persisted before this resolves (class docs). */
+  async purgeItem(id: string): Promise<void> {
+    call(() => this.#inner.purgeItem(id, this.#now()));
+    await this.#drain();
+  }
+
+  /** Zeroizes every handle this session holds. Safe to call more than once. */
+  lock(): void {
+    if (this.#locked) {
+      return;
+    }
+    this.#locked = true;
+    this.#inner.lock();
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// URL matching for autofill (ADR 0037, ADR 0038; M2). Over `rizzy-match` through
+// `rizzy_client::matching` (that crate's module docs explain the split): every check and every
+// narrowing rule is decided in Rust, never reimplemented here.
+
+/** `uri/<id>/match`'s wire values (ADR 0037 §4). `0x0000` ("account default") is never passed
+ * as a URI's own mode to {@link decideMatchCandidates}; resolve it to the account's own
+ * default before building {@link MatchUriInput}. */
+export const MatchMode = {
+  BaseDomain: 0x0001,
+  Host: 0x0002,
+  StartsWith: 0x0003,
+  Exact: 0x0004,
+  Regex: 0x0005,
+  Never: 0x0006,
+} as const;
+
+/** One of {@link MatchMode}'s values. */
+export type MatchModeValue = (typeof MatchMode)[keyof typeof MatchMode];
+
+/** One saved URI to match against (ADR 0037 §2, §4). */
+export interface MatchUriInput {
+  readonly itemId: string;
+  readonly uriId: string;
+  readonly value: string;
+  readonly mode: MatchModeValue;
+}
+
+/** What the content script reports about the frame asking for candidates (ADR 0037 §5). */
+export interface MatchFrameInfo {
+  readonly isTopFrame: boolean;
+  readonly frameOrigin: string;
+}
+
+/** One candidate offered for autofill. */
+export interface MatchCandidate {
+  readonly itemId: string;
+  readonly uriId: string;
+  /** Whether the fill UI must show the equivalence-only warning (ADR 0037 §5) before the
+   * fill. */
+  readonly needsWarning: boolean;
+}
+
+/** The result of one {@link decideMatchCandidates} call. */
+export interface MatchDecisionResult {
+  readonly candidates: readonly MatchCandidate[];
+  readonly warnings: readonly string[];
+}
+
+/** The page's own normalised URL (ADR 0037 §2), in the same canonical form matching uses. */
+export function normalizePageUrl(url: string): string {
+  ensureReady();
+  return call(() => wasmNormalizePageUrl(url));
+}
+
+/**
+ * Decides which of `itemUris` are autofill candidates for `pageUrl`, requested by `frame`
+ * (ADR 0037 §4, §5). `accountDefaultMode` resolves any URI whose own mode is `0x0000`; this
+ * call never threads the account's equivalence settings through yet (`not_done`:
+ * `crates/rizzy-wasm/src/matching.rs`'s module docs), so matching narrows to plain
+ * registrable-domain equality.
+ */
+export function decideMatchCandidates(
+  pageUrl: string,
+  frame: MatchFrameInfo,
+  accountDefaultMode: MatchModeValue,
+  itemUris: readonly MatchUriInput[],
+): MatchDecisionResult {
+  ensureReady();
+  const inputs = itemUris.map((u) => new UriInput(u.itemId, u.uriId, u.value, u.mode));
+  const decision = call(() =>
+    wasmDecideMatchCandidates(pageUrl, frame.isTopFrame, frame.frameOrigin, accountDefaultMode, inputs),
+  );
+  try {
+    const candidates = decision.candidates.map((c) => {
+      try {
+        return { itemId: c.itemId, uriId: c.uriId, needsWarning: c.needsWarning };
+      } finally {
+        c.free();
+      }
+    });
+    return { candidates, warnings: [...decision.warnings] };
+  } finally {
+    decision.free();
   }
 }

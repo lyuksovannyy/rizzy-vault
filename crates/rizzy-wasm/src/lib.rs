@@ -83,17 +83,21 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
+pub mod device;
 pub mod error;
 pub mod generator;
 pub mod http;
 pub mod items;
 mod login;
+pub mod matching;
 mod rng;
 pub mod secret;
 pub mod session;
 mod signup;
+pub mod store;
 pub mod sync;
 
+pub use device::{DeviceSession, EnrolFlow};
 pub use error::CoreError;
 pub use generator::{
     Generated, GeneratorLimits, generate_passphrase_with_options, generate_password_with_options,
@@ -102,12 +106,14 @@ pub use generator::{
 pub use http::{HttpRequest, check_meta, expect_no_content, meta_request};
 pub use items::{FieldView, ItemDraft, ItemSummary, generate_element_id};
 pub use login::LoginFlow;
+pub use matching::{MatchDecision, decide_match_candidates, normalize_page_url};
 pub use session::{
     DeviceView, EncryptedExport, ImportReport, Session, TotpCode, TwoFactorEnrolment,
     detect_import_format, plaintext_export_hold_ms, plaintext_export_phrase,
     plaintext_export_warning,
 };
 pub use signup::{EmergencyKit, SignupFlow};
+pub use store::{KvRow, cache_store_names};
 
 use wasm_bindgen::prelude::wasm_bindgen;
 

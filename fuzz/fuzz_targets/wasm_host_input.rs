@@ -14,11 +14,21 @@
 //!   Key and password: a flow that starts has its first request outstanding, to the right path,
 //!   with a JSON body. No answer is passed in, so no Argon2id runs. The Secret Key and password
 //!   arrays hold zeroes after the call, whatever its outcome.
+//! - `EnrolFlow::start` on the same four strings: as `LoginFlow::start` above.
+//! - `DeviceSession::unlock` on a `KvRow` built from the four strings and the body (the
+//!   byte-blob cache dump a host's `IndexedDB` adapter hands in, ADR 0026 §3; `d` as the
+//!   password): never a panic, whatever the store name, key or value.
+//! - `decideMatchCandidates`/`normalizePageUrl` on the same strings as a page URL, a frame
+//!   origin and one saved URI's value: never a panic for any `MatchMode` wire value.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
 use rizzy_wasm::items::{MAX_DRAFT_ENTRIES, hex, parse_id};
-use rizzy_wasm::{ItemDraft, LoginFlow, SignupFlow, check_meta, expect_no_content};
+use rizzy_wasm::matching::{UriInput, decide_match_candidates, normalize_page_url};
+use rizzy_wasm::store::KvRow;
+use rizzy_wasm::{
+    DeviceSession, EnrolFlow, ItemDraft, LoginFlow, SignupFlow, check_meta, expect_no_content,
+};
 
 fuzz_target!(|data: &[u8]| {
     let (head, body) = data.split_at(data.len().min(2));
@@ -78,4 +88,31 @@ fuzz_target!(|data: &[u8]| {
         let request = flow.request().expect("a started signup has a request");
         assert_eq!(request.path(), "/api/v1/register/start");
     }
+
+    let mut secret_key = c.as_bytes().to_vec();
+    let mut password = d.as_bytes().to_vec();
+    let enrol = EnrolFlow::start(a, b, &mut secret_key, &mut password, None);
+    assert!(secret_key.iter().chain(&password).all(|&byte| byte == 0));
+    if let Ok(flow) = enrol {
+        assert_eq!(flow.state(), "request");
+        let request = flow.request().expect("a started enrolment has a request");
+        assert_eq!(request.path(), "/api/v1/login/start");
+    }
+
+    // The byte-blob cache dump a host's IndexedDB adapter hands in (ADR 0026 §3): never a
+    // panic for any store name, key or value, and never a success from a single arbitrary row
+    // (a complete, consistent cache needs every row cache format 1 defines).
+    let rows = vec![KvRow::from_js(a.to_owned(), c.as_bytes().to_vec(), body.to_vec())];
+    let mut password = d.as_bytes().to_vec();
+    let unlocked = DeviceSession::unlock(rows, &mut password, 0);
+    assert!(password.iter().all(|&byte| byte == 0));
+    assert!(unlocked.is_err());
+
+    // The matcher (ADR 0037): never a panic for any page URL, frame origin, saved URI or wire
+    // mode value, including one `decide_match_candidates` does not recognise.
+    let _ = normalize_page_url(a);
+    let mode = u16::from(data.first().copied().unwrap_or(0));
+    let uris = vec![UriInput::new(a.to_owned(), b.to_owned(), c.to_owned(), mode)];
+    let _ = decide_match_candidates(a, true, b, mode, uris.clone());
+    let _ = decide_match_candidates(a, false, b, mode, uris);
 });

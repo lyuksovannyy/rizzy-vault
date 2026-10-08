@@ -38,6 +38,7 @@ use rizzy_client::rizzy_proto::limits::{
 };
 use rizzy_client::rizzy_proto::objects::VaultSelfGrant;
 use rizzy_client::store::record::MAX_DEVICE_STATE_LEN;
+use rizzy_client::store::rows::limits::{MAX_KEY_COLUMN_LEN, MAX_SELF_GRANT_JSON_LEN};
 use rizzy_client::store::rows::{
     CacheRows, Changeset, ObjectRow, OpRow, PRAGMAS, SCHEMA, SnapshotRow, VaultRow, WrapRow, Write,
     kind, meta, own,
@@ -54,13 +55,6 @@ use crate::paths::create_private_file;
 
 /// `busy_timeout` (ADR 0026 §3): how long `BEGIN IMMEDIATE` waits for the write lock.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// The most bytes of the stored self-grant JSON: four short members around a base64url key
-/// envelope of at most 256 bytes.
-const MAX_SELF_GRANT_JSON_LEN: usize = 1024;
-
-/// The most bytes of an id or counter column.
-const MAX_KEY_COLUMN_LEN: usize = 64;
 
 /// The start of every write transaction (ADR 0026 §3).
 const BEGIN_IMMEDIATE: &str = "BEGIN IMMEDIATE";
@@ -137,6 +131,10 @@ const DELETE_SNAPSHOT: &str =
     "DELETE FROM snapshots WHERE vault_id = ?1 AND snapshot_id = ?2 AND own IN (1, 3)";
 
 /// The rows of `cache_meta`, bounded.
+// The caps here must equal `MAX_CACHE_META_KEY_LEN`/`MAX_CACHE_META_VALUE_LEN` (checked by
+// `cache_meta_caps_match_the_sql_literal` below): a `const` cap cannot be interpolated into a
+// `const` SQL string without a build-time format macro this build does not add for two
+// numbers.
 const SELECT_META: &str = "SELECT k, v FROM cache_meta WHERE length(k) <= 64 AND length(v) <= 1024";
 /// How many `cache_meta` rows there are.
 const COUNT_META: &str = "SELECT COUNT(*) FROM cache_meta";
@@ -792,6 +790,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use rizzy_client::rizzy_proto::wire::{Bytes, Id};
+    use rizzy_client::store::rows::limits::{MAX_CACHE_META_KEY_LEN, MAX_CACHE_META_VALUE_LEN};
     use rizzy_client::store::rows::{Alarm, CACHE_FORMAT};
 
     use super::*;
@@ -799,6 +798,17 @@ mod tests {
     const VAULT: [u8; 16] = [0x0a; 16];
     const DEVICE: [u8; 16] = [0x0d; 16];
     const OTHER: [u8; 16] = [0x0e; 16];
+
+    /// `SELECT_META`'s literal caps must equal the shared constants (module docs on
+    /// `SELECT_META`): nothing re-derives the SQL text from the `const`s, so a change to one
+    /// without the other would silently reopen the gap this cap closes.
+    #[test]
+    fn cache_meta_caps_match_the_sql_literal() {
+        assert_eq!(MAX_CACHE_META_KEY_LEN, 64);
+        assert_eq!(MAX_CACHE_META_VALUE_LEN, 1024);
+        assert!(SELECT_META.contains(&format!("length(k) <= {MAX_CACHE_META_KEY_LEN}")));
+        assert!(SELECT_META.contains(&format!("length(v) <= {MAX_CACHE_META_VALUE_LEN}")));
+    }
 
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()

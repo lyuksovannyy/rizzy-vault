@@ -1,0 +1,32 @@
+{
+  "name": "@rizzy-vault/extension",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The browser extension (ADR 0036; ROADMAP §4.4): Chromium (MV3) and Firefox, React over packages/core in one long-lived context (offscreen document / background page), a framework-free content script, and an IndexedDB cache in ADR 0026 §3's form.",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit && pnpm run build:chromium && pnpm run build:firefox",
+    "build:chromium": "vite build --mode chromium && vite build --mode chromium --config vite.content.config.ts",
+    "build:firefox": "vite build --mode firefox && vite build --mode firefox --config vite.content.config.ts",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "test": "vitest run",
+    "e2e": "playwright test"
+  },
+  "dependencies": {
+    "@rizzy-vault/core": "workspace:*",
+    "@rizzy-vault/ui": "workspace:*",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.60.0",
+    "@types/node": "24.19.0",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "eslint": "10.11.0",
+    "typescript": "6.0.3",
+    "vite": "8.3.1",
+    "vitest": "4.1.11"
+  }
+}

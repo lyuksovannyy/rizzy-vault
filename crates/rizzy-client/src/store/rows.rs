@@ -136,6 +136,33 @@ pub mod own {
     pub const SENT: i64 = 3;
 }
 
+/// The length caps of cache format 1's own columns (ADR 0026 §3: "Each blob is
+/// length-checked against its rizzy-proto limit before it is parsed"). Every leaf that reads
+/// the cache back — `rv`'s `db.rs` (`SQLite`, bound as a query parameter) and `rizzy-wasm`'s
+/// `store.rs` (an `IndexedDB` byte blob, checked before any parse) — uses these same values,
+/// so the two hosts can never silently drift onto different caps for the same column. A
+/// column this crate already gives its own `rizzy-proto` limit (an op or snapshot statement,
+/// an envelope, a key envelope, the device-state record, the pending commit) is not repeated
+/// here; this module is only the columns that had none yet.
+pub mod limits {
+    /// The most bytes of an id, counter or generation column: `vault_id`, `item_id`,
+    /// `item_key_id`, `device_id`, `device_seq`, `snapshot_id`, `sent_generation`,
+    /// `account_objects.key` and `vaults.vault_id`/`restore_generation` are all 16 bytes or a
+    /// fixed-width counter, far under this.
+    pub const MAX_KEY_COLUMN_LEN: usize = 64;
+
+    /// The most bytes of `vaults.self_grant`'s served JSON object (module docs, "Encodings
+    /// the schema leaves to the columns"): four short members around a base64url key envelope
+    /// of at most 256 bytes.
+    pub const MAX_SELF_GRANT_JSON_LEN: usize = 1024;
+
+    /// The most bytes of one `cache_meta.k`.
+    pub const MAX_CACHE_META_KEY_LEN: usize = 64;
+
+    /// The most bytes of one `cache_meta.v`.
+    pub const MAX_CACHE_META_VALUE_LEN: usize = 1024;
+}
+
 /// An alarm that keeps the device read-only until the flow that resolves it (ADR 0026 §3 kind
 /// 7, §4 step 4; kind 4 by the owner's decision on open question 5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

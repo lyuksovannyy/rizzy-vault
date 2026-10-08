@@ -2073,6 +2073,7 @@ fn fake_server_refuses_forged_snapshots_and_serves_covers() {
 }
 
 mod credentials;
+mod durable_device;
 mod export;
 mod healing;
 mod lists;

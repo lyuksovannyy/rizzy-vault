@@ -19,6 +19,8 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
+  type CacheRow,
+  type CacheStore,
   CoreError,
   Signup,
   type Transport,
@@ -26,12 +28,47 @@ import {
   checkServer,
   fetchTransport,
   detectImportFormat,
+  enrolDevice,
   login,
   newElementId,
   plaintextExportHoldMs,
   plaintextExportPhrase,
+  unlockDurableDevice,
 } from "../src/index.js";
 import { loadCore } from "./load.js";
+
+/** Whether two byte arrays hold the same bytes. */
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
+/** An in-memory {@link CacheStore} standing in for the extension's `IndexedDB` adapter: every
+ * value through it is still the opaque bytes `rizzy-wasm`'s `store` bindings encoded. */
+function memoryCacheStore(seed: readonly CacheRow[] = []): CacheStore {
+  const rows: CacheRow[] = [...seed];
+  return {
+    async get(store, key) {
+      return rows.find((r) => r.store === store && sameBytes(r.key, key))?.value;
+    },
+    async put(store, key, value) {
+      const i = rows.findIndex((r) => r.store === store && sameBytes(r.key, key));
+      if (i >= 0) {
+        rows[i] = { store, key, value };
+      } else {
+        rows.push({ store, key, value });
+      }
+    },
+    async delete(store, key) {
+      const i = rows.findIndex((r) => r.store === store && sameBytes(r.key, key));
+      if (i >= 0) {
+        rows.splice(i, 1);
+      }
+    },
+    async list(store) {
+      return rows.filter((r) => r.store === store);
+    },
+  };
+}
 
 const PASSWORD = "correct horse battery staple";
 
@@ -410,6 +447,79 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     // Lock wipes the session; every call is refused after it.
     lockAll(first, second);
     expect(() => first.items()).toThrowError(expect.objectContaining({ code: "locked" }));
+  });
+
+  // The durable device (ADR 0036 §1, `device_kind` `Extension`): enrol against the real
+  // server, persist the cache rows through a `CacheStore`, device-authenticate, write and sync
+  // an item, then reopen from that same store as a fresh browser session would and read the
+  // item back — the full cycle `DeviceSession`'s module docs describe, against the real
+  // protocol rather than the fake test server.
+  it("enrols a durable device (kind 2), writes and syncs an item, and reopens from its cache store", async () => {
+    const transport = fetchTransport(origin);
+    const signup = await Signup.start(
+      transport,
+      { origin, loginName: "Bob", password: PASSWORD, issueRecoveryCode: false },
+      Date.now,
+    );
+    const kit = signup.emergencyKit();
+    const secretKey = new TextDecoder().decode(kit.secretKey);
+    kit.secretKey.fill(0);
+    const lastGroup = secretKey.split("-").at(-1) ?? "";
+    await signup.confirm(lastGroup);
+    const owner = await signup.login();
+    const ownerAccountId = owner.accountId;
+    owner.lock();
+
+    const store = memoryCacheStore();
+    const session = await enrolDevice(
+      transport,
+      { origin, loginName: "bob", secretKey, password: PASSWORD },
+      store,
+    );
+    expect((await store.list("device_state")).length).toBe(1);
+    expect(session.accountId).toBe(ownerAccountId);
+    expect(session.isAuthenticated()).toBe(false);
+
+    await session.authenticate();
+    expect(session.isAuthenticated()).toBe(true);
+    const signed = session.signRequest("POST", "/api/v1/vault/upload", new Uint8Array());
+    expect(signed.requestCounter).toBe(1n);
+    expect(signed.bearer.startsWith("Bearer ")).toBe(true);
+    const deviceId = session.deviceId;
+
+    // Sync pulls the owner's personal vault (empty so far), then this device writes and
+    // syncs an item of its own: persisted through `store` before each call resolves.
+    await session.sync();
+    expect(session.items()).toEqual([]);
+    const id = await session.createItem("login", [
+      { op: "set", key: "item.name", value: "Extension item" },
+      { op: "set", key: "login.username", value: "extension-user" },
+    ]);
+    expect(session.unsentChanges).toBe(1);
+    await session.sync();
+    expect(session.unsentChanges).toBe(0);
+    expect(session.readOnly).toBe(false);
+    expect((await store.list("ops")).length).toBeGreaterThan(0);
+    session.lock();
+
+    // A fresh browser session: only the persisted store, reopened and re-authenticated.
+    await expect(unlockDurableDevice(transport, store, "not the password")).rejects.toMatchObject({
+      code: "wrong_password_or_secret_key",
+    });
+
+    const reopened = await unlockDurableDevice(transport, store, PASSWORD);
+    expect(reopened.accountId).toBe(ownerAccountId);
+    expect(reopened.deviceId).toBe(deviceId);
+    expect(reopened.isAuthenticated()).toBe(false);
+    await reopened.authenticate();
+    expect(reopened.isAuthenticated()).toBe(true);
+
+    // The item this device wrote and synced is there without any further sync: `load::load`
+    // already rebuilt the vault from the store's own `vaults`/`ops`/`wraps` rows.
+    const [summary] = reopened.items();
+    expect(summary).toMatchObject({ id, itemType: "login", title: "Extension item" });
+    expect(reopened.reveal(id, "login.username")).toBe("extension-user");
+    reopened.lock();
   });
 });
 

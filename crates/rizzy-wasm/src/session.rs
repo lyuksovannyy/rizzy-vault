@@ -77,7 +77,7 @@ use crate::items::{self, FieldView, ItemDraft, ItemSummary, hex, type_from_name,
 use crate::login::{Credentials, LoginFlow, Purpose};
 use crate::rng::{Rng, os_rng};
 use crate::secret::take_secret;
-use crate::sync::{Ctx, SyncDriver};
+use crate::sync::{Ctx, Signer, SyncDriver};
 
 /// How long a re-authentication allows one export: 5 minutes (module docs;
 /// `rizzy_client::export::gate::REAUTH_WINDOW_MS`).
@@ -289,15 +289,15 @@ impl Session {
     #[wasm_bindgen(js_name = syncStart)]
     pub fn sync_start(&mut self) -> Result<(), CoreError> {
         let inner = self.inner_mut()?;
-        let ctx = Ctx {
+        let mut ctx = Ctx {
             vault: &mut inner.vault,
             account: &mut inner.account,
             authors: &mut inner.authors,
             unlocked: &inner.unlocked,
-            token: &inner.token,
+            signer: Signer::Bearer(&inner.token),
             rng: &mut inner.rng,
         };
-        inner.sync.start(&ctx)
+        inner.sync.start(&mut ctx)
     }
 
     /// The sync's outstanding request, or `undefined` when the sync is done.
@@ -322,7 +322,7 @@ impl Session {
             account: &mut inner.account,
             authors: &mut inner.authors,
             unlocked: &inner.unlocked,
-            token: &inner.token,
+            signer: Signer::Bearer(&inner.token),
             rng: &mut inner.rng,
         };
         inner.sync.respond(ctx, status, body, now_ms)

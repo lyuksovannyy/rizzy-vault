@@ -11,13 +11,16 @@ publish.workspace = true
 # ADR 0016 §3 row `rizzy-client`: internal dependencies core, sync, proto, import, match.
 # `rizzy-import` is a dependency since the import path and the plaintext export landed
 # (ADR 0027): its items reach the vault through `items`, and the plaintext JSON writer shares
-# its format constants and caps. `rizzy-match` is M2. No external crate is added: `rand_core`,
-# `subtle` and `zeroize` are the versions rizzy-core pins (ADR 0009), and they are already on
-# the R1 allow-list this crate inherits from rizzy-core (`cargo xtask check-deps`).
+# its format constants and caps. `rizzy-match` lands with M2 (ADR 0037 "Every client ... calls
+# the same `rizzy-match` functions through `rizzy-client`"; `cargo xtask check-deps` already
+# allow-lists this edge). No external crate is added: `rand_core`, `subtle` and `zeroize` are
+# the versions rizzy-core pins (ADR 0009), and they are already on the R1 allow-list this crate
+# inherits from rizzy-core (`cargo xtask check-deps`).
 [dependencies]
 rand_core.workspace = true
 rizzy-core.workspace = true
 rizzy-import.workspace = true
+rizzy-match.workspace = true
 rizzy-proto.workspace = true
 rizzy-sync.workspace = true
 subtle.workspace = true

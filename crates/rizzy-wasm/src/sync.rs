@@ -46,11 +46,45 @@ use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::rizzy_proto::http::paths;
 use rizzy_client::rizzy_proto::vault::{FetchResponse, HealingResponse, UploadResponse};
 use rizzy_client::rizzy_proto::wire::SessionToken;
+use rizzy_client::session::DeviceSession as ClientDeviceSession;
 use rizzy_client::sync::{Authors, VaultSync};
+use serde::Serialize;
 
 use crate::error::{CoreError, CoreResult, VAULT_KEY_ROTATED, WRONG_STATE};
 use crate::http::{self, HttpRequest};
 use crate::rng::Rng;
+
+/// How a step signs the request it builds (module docs; `crate::device`'s module docs, "Sync
+/// and items"): a bearer-only OPAQUE session (the web vault) or a device-authenticated one,
+/// which additionally signs every request with the device key (CRYPTO.md §5.10; ADR 0028 item
+/// 5). The same [`VaultSync`]/[`Authors`] steps run either way; only how the outgoing
+/// [`HttpRequest`] is authorised differs, so this lives beside [`Ctx`] rather than in
+/// `rizzy-client`, which decides none of it (`rizzy_proto::http`'s header constants do).
+pub(crate) enum Signer<'a> {
+    /// The web vault's OPAQUE session.
+    Bearer(&'a SessionToken),
+    /// A durable device's authenticated session.
+    Device(&'a mut ClientDeviceSession),
+}
+
+impl Signer<'_> {
+    /// Builds and, for [`Signer::Device`], signs one `POST` to `path`.
+    ///
+    /// # Errors
+    /// `internal` if `body` does not serialise; as
+    /// [`rizzy_client::session::DeviceSession::sign_request`].
+    fn build<T: Serialize>(
+        &mut self,
+        path: &'static str,
+        body: &T,
+        unlocked: &UnlockedDevice,
+    ) -> CoreResult<HttpRequest> {
+        match self {
+            Self::Bearer(token) => HttpRequest::post(path, body, Some(token)),
+            Self::Device(session) => HttpRequest::post_signed(path, body, session, unlocked),
+        }
+    }
+}
 
 /// What follows a complete Fetch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,10 +120,10 @@ pub(crate) struct Ctx<'a> {
     pub(crate) account: &'a mut VerifiedAccount,
     /// The account's authors.
     pub(crate) authors: &'a mut Authors,
-    /// The ephemeral device's keys.
+    /// This device's keys.
     pub(crate) unlocked: &'a UnlockedDevice,
-    /// The bearer session.
-    pub(crate) token: &'a SessionToken,
+    /// How a request is authorised (module docs).
+    pub(crate) signer: Signer<'a>,
     /// The RNG.
     pub(crate) rng: &'a mut Rng,
 }
@@ -125,17 +159,16 @@ impl SyncDriver {
     ///
     /// # Errors
     /// `wrong_state` while a sync is running.
-    pub(crate) fn start(&mut self, ctx: &Ctx<'_>) -> CoreResult<()> {
+    pub(crate) fn start(&mut self, ctx: &mut Ctx<'_>) -> CoreResult<()> {
         if self.running() {
             return Err(CoreError::new(WRONG_STATE));
         }
         self.healed = false;
         let query = web_account_query(ctx.account);
-        self.pending = Some(HttpRequest::post(
-            paths::ACCOUNT_STATE,
-            &query,
-            Some(ctx.token),
-        )?);
+        self.pending = Some(
+            ctx.signer
+                .build(paths::ACCOUNT_STATE, &query, ctx.unlocked)?,
+        );
         self.phase = Phase::Account;
         Ok(())
     }
@@ -264,13 +297,12 @@ impl SyncDriver {
     }
 
     /// Sends a Fetch page; `then` follows the complete Fetch.
-    fn fetch(&mut self, ctx: &Ctx<'_>, then: AfterFetch) -> CoreResult<()> {
+    fn fetch(&mut self, ctx: &mut Ctx<'_>, then: AfterFetch) -> CoreResult<()> {
         let request = ctx.vault.fetch_request()?;
-        self.pending = Some(HttpRequest::post(
-            paths::VAULT_FETCH,
-            &request,
-            Some(ctx.token),
-        )?);
+        self.pending = Some(
+            ctx.signer
+                .build(paths::VAULT_FETCH, &request, ctx.unlocked)?,
+        );
         self.phase = Phase::Fetch(then);
         Ok(())
     }
@@ -287,11 +319,10 @@ impl SyncDriver {
         match ctx.vault.healing_request()? {
             Some(request) => {
                 self.healed = true;
-                self.pending = Some(HttpRequest::post(
-                    paths::VAULT_HEAL,
-                    &request,
-                    Some(ctx.token),
-                )?);
+                self.pending = Some(
+                    ctx.signer
+                        .build(paths::VAULT_HEAL, &request, ctx.unlocked)?,
+                );
                 self.phase = Phase::Heal;
                 Ok(())
             }
@@ -303,10 +334,10 @@ impl SyncDriver {
     fn upload_next(&mut self, ctx: &mut Ctx<'_>) -> CoreResult<()> {
         match ctx.vault.upload_request(ctx.rng, ctx.unlocked) {
             Ok(Some(request)) => {
-                self.pending = Some(HttpRequest::post(
+                self.pending = Some(ctx.signer.build(
                     paths::VAULT_UPLOAD,
                     &request,
-                    Some(ctx.token),
+                    ctx.unlocked,
                 )?);
                 self.phase = Phase::Upload;
                 Ok(())

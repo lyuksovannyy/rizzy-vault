@@ -185,6 +185,29 @@ export default tseslint.config(
     },
   },
   {
+    // The extension's UI, content script and background/service-worker surfaces: types only
+    // from @rizzy-vault/core (ADR 0036 §4, "no primitive crypto call is ever exposed across a
+    // message boundary"; the content script additionally never imports it at all, ADR 0014
+    // §2). `core-host/` is the one long-lived context allowed a value import (ADR 0036 §2).
+    files: ["apps/extension/src/**"],
+    ignores: ["apps/extension/src/core-host/**"],
+    rules: {
+      "@typescript-eslint/no-restricted-imports": [
+        "error",
+        {
+          patterns: IMPORT_PATTERNS,
+          paths: [
+            {
+              name: "@rizzy-vault/core",
+              allowTypeImports: true,
+              message: "Only the long-lived context (core-host/) loads the wasm core (ADR 0036 §4).",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     // Tests and build configuration run in Node, not in the vault page.
     files: ["**/test/**", "**/e2e/**", "**/*.config.{ts,mjs}"],
     rules: {

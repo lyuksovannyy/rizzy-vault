@@ -1,0 +1,4 @@
+# Built by `vite build` (both targets) and the Playwright run outputs. Never committed.
+/dist/
+/test-results/
+/playwright-report/

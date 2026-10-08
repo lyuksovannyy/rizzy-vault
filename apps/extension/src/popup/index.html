@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>rizzy-vault</title>
+    <!-- @rizzy-vault/ui's tokens.css is not imported yet (not_done): the popup renders
+         unstyled. Wiring it needs the same `assetFileNames`/CSP care apps/web's vite.config.ts
+         gives its one CSS file, which this change did not attempt to duplicate correctly
+         without a real build to verify it against. -->
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>
