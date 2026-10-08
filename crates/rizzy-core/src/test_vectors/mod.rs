@@ -432,7 +432,7 @@ fn listed_exactly(file: &VectorFile, vectors: &[Vector]) -> Result<(), String> {
 /// Registered labels no vector uses yet (CRYPTO.md §15 item 1): those of constructions that ship
 /// after M1 get vectors in the milestone that ships them, and those reserved, On-device parked
 /// (ADR 0022) with the ADR that revives them.
-const LABELS_WITHOUT_VECTORS: [Label; 11] = [
+const LABELS_WITHOUT_VECTORS: [Label; 12] = [
     labels::RELAY_KEY,
     labels::LOCAL_INDEX_KEY,
     labels::SHARE_KEY,
@@ -444,6 +444,13 @@ const LABELS_WITHOUT_VECTORS: [Label; 11] = [
     labels::PAIRING_KEY,
     labels::PAIRING_COMMIT,
     labels::PAIRING_SAS,
+    // `equivalence-list` (M2, ADR 0038 §1): a detached signature outside the role-and-
+    // container `Statement`/`sign_single`/`verify_single` machinery this generator and
+    // `statements.json` cover (`sign::verify_detached`/`sign_detached` have their own
+    // independent known-answer tests in `sign::tests`, computed with Python `cryptography`,
+    // not this harness). Threading a bare-signature construction through this generator is a
+    // reasonable follow-up, not done in the change that adds the construction itself.
+    labels::SIG_EQUIVALENCE_LIST,
 ];
 
 /// Labels whose vectors are not named after them: the file and the vector name that use them.

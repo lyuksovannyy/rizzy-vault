@@ -258,6 +258,64 @@ pub(crate) const PROTO_EXTERNAL_ALLOW: &[&str] = &[
     "zeroize_derive@1",
 ];
 
+/// The R1 allow-list of `rizzy-match` (ADR 0016 §3 row, §5; ADR 0037 §2–§3), generated from
+/// `Cargo.lock` when `url`, `idna` and `psl` were added: the `url` crate's own closure
+/// (`form_urlencoded`, `percent-encoding`), `idna`'s ICU4X backend through `idna_adapter`
+/// (`icu_normalizer`, `icu_properties`, their `_data` crates, `icu_provider`, `icu_locale_core`,
+/// `icu_collections`, `zerovec`, `zerotrie`, `yoke`, `zerofrom`, `litemap`, `tinystr`,
+/// `writeable`, `potential_utf`, `stable_deref_trait`, `smallvec`, `utf8_iter`, `displaydoc`,
+/// and their proc-macro derives, `synstructure`), and `psl`'s own `psl-types`. None of these
+/// pulls `getrandom` or `rand` (confirmed by `cargo tree -p rizzy-match --target
+/// wasm32-unknown-unknown -e normal,build`); several entries duplicate
+/// [`CORE_EXTERNAL_ALLOW`] (`proc-macro2`, `quote`, `syn@3`, `unicode-ident`), kept here anyway
+/// because this list is generated directly from `rizzy-match`'s own closure, like
+/// [`PROTO_EXTERNAL_ALLOW`]'s overlap with `CORE_EXTERNAL_ALLOW`.
+///
+/// `serde`, `serde_core` and `serde_derive` are here only because `cargo metadata` is read with
+/// every feature of every workspace member switched on (this module's docs, "U, confirm in
+/// M1"), which turns on `url`'s optional `serde` feature; `rizzy-match`'s own `Cargo.toml` never
+/// enables it (`default-features = false`, `features = ["std"]` only), so these three never
+/// actually build into `rizzy-match`.
+pub(crate) const MATCH_EXTERNAL_ALLOW: &[&str] = &[
+    "displaydoc@0.2",
+    "form_urlencoded@1",
+    "icu_collections@2",
+    "icu_locale_core@2",
+    "icu_normalizer@2",
+    "icu_normalizer_data@2",
+    "icu_properties@2",
+    "icu_properties_data@2",
+    "icu_provider@2",
+    "idna@1",
+    "idna_adapter@1",
+    "litemap@0.8",
+    "percent-encoding@2",
+    "potential_utf@0.1",
+    "proc-macro2@1",
+    "psl@2",
+    "psl-types@2",
+    "quote@1",
+    "serde@1",
+    "serde_core@1",
+    "serde_derive@1",
+    "smallvec@1",
+    "stable_deref_trait@1",
+    "syn@3",
+    "synstructure@0.14",
+    "tinystr@0.8",
+    "unicode-ident@1",
+    "url@2",
+    "utf8_iter@1",
+    "writeable@0.6",
+    "yoke@0.8",
+    "yoke-derive@0.8",
+    "zerofrom@0.1",
+    "zerofrom-derive@0.1",
+    "zerotrie@0.2",
+    "zerovec@0.11",
+    "zerovec-derive@0.11",
+];
+
 /// The domain crates (ADR 0016 §3). R4: none depends on another.
 pub(crate) const DOMAIN_PREFIX: &str = "rizzy-domain-";
 
@@ -296,7 +354,7 @@ pub(crate) const CRATES: &[CrateRule] = &[
     // that enables `rizzy-proto`'s `openapi` feature, which needs that edge.
     CrateRule::new("xtask", "crates/xtask", Side::Tool)
         .leaf()
-        .internal(&["rizzy-proto"]),
+        .internal(&["rizzy-proto", "rizzy-core", "rizzy-match"]),
     // §3, planned crates. Their R1 allow-lists start empty: the PR that creates a no-I/O crate
     // adds its list, generated from `Cargo.lock` (§5). `rizzy-proto` exists since M1 step 3.
     CrateRule::new("rizzy-proto", "crates/rizzy-proto", Side::Shared).no_io(PROTO_EXTERNAL_ALLOW),
@@ -344,7 +402,7 @@ pub(crate) const CRATES: &[CrateRule] = &[
     ])
     .sqlx(Sqlx::Server),
     CrateRule::new("rizzy-match", "crates/rizzy-match", Side::Client)
-        .no_io(&[])
+        .no_io(MATCH_EXTERNAL_ALLOW)
         .internal(&["rizzy-core"]),
     CrateRule::new("rizzy-icon-proxy", "crates/rizzy-icon-proxy", Side::Server)
         .internal(&["rizzy-proto"]),

@@ -1782,6 +1782,108 @@ fn a_chain_is_walked_in_order() {
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// `verify_detached` / `sign_detached` (ADR 0038 §1, §3; CRYPTO.md §10.2 "equivalence-list"):
+// the one bare-signature, pinned-key statement path, used by `rizzy-match` to verify the
+// signed equivalence list and by the `cargo xtask equivalence-list` tool to sign one.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn sign_detached_round_trips_with_verify_detached() {
+    let seed = [0x22u8; 32];
+    let ctx = b"a list body, or any other context bytes".to_vec();
+    let signature = sign_detached(labels::SIG_EQUIVALENCE_LIST, &ctx, &seed).unwrap();
+    let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let public_key = key.verifying_key().to_bytes();
+    assert_eq!(
+        verify_detached(labels::SIG_EQUIVALENCE_LIST, &ctx, &public_key, &signature),
+        Ok(())
+    );
+}
+
+/// Independent known answer: seed `0x33` repeated 32 times, `ctx` a short fixed string plus
+/// `0..20`, computed with Python `cryptography` 50.0.2's `Ed25519PrivateKey`, not this code.
+#[test]
+fn verify_detached_known_answer() {
+    let public_key: [u8; 32] =
+        *hex("17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce")
+            .first_chunk()
+            .unwrap();
+    let ctx = hex("68656c6c6f2063747820000102030405060708090a0b0c0d0e0f10111213");
+    let signature: [u8; 64] = *hex(
+        "7011c6ee387de89f1138d25d8b395d42d6d4e47d8a1160b9950fc9604195688\
+         a346f4ce94c47572a564e15d44243e7eede2185fd2716c22c88274103e065c709",
+    )
+    .first_chunk()
+    .unwrap();
+    assert_eq!(
+        verify_detached(labels::SIG_EQUIVALENCE_LIST, &ctx, &public_key, &signature),
+        Ok(())
+    );
+}
+
+#[test]
+fn verify_detached_rejects_tampering() {
+    let seed = [0x33u8; 32];
+    let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let public_key = key.verifying_key().to_bytes();
+    let ctx = b"some equivalence-list body bytes".to_vec();
+    let message = labels::SIG_EQUIVALENCE_LIST.info(&ctx);
+    let signature = key.sign(&message).to_bytes();
+
+    // The right key, label and context verify.
+    assert_eq!(
+        verify_detached(labels::SIG_EQUIVALENCE_LIST, &ctx, &public_key, &signature),
+        Ok(())
+    );
+
+    // A different label changes the message (domain separation): the same signature over the
+    // `device-auth` label must not verify.
+    assert!(verify_detached(labels::SIG_DEVICE_AUTH, &ctx, &public_key, &signature).is_err());
+
+    // A flipped body byte.
+    let mut bad_ctx = ctx.clone();
+    bad_ctx[0] ^= 0x01;
+    assert!(
+        verify_detached(
+            labels::SIG_EQUIVALENCE_LIST,
+            &bad_ctx,
+            &public_key,
+            &signature
+        )
+        .is_err()
+    );
+
+    // A flipped signature byte.
+    let mut bad_sig = signature;
+    bad_sig[0] ^= 0x01;
+    assert!(verify_detached(labels::SIG_EQUIVALENCE_LIST, &ctx, &public_key, &bad_sig).is_err());
+
+    // Another key's signature does not verify against this public key.
+    let other = ed25519_dalek::SigningKey::from_bytes(&[0x44u8; 32]);
+    let other_sig = other.sign(&message).to_bytes();
+    assert!(verify_detached(labels::SIG_EQUIVALENCE_LIST, &ctx, &public_key, &other_sig).is_err());
+}
+
+/// `verify_strict` rejects a small-order public key before the signature is ever checked
+/// (the same property [`strict_verification_and_strict_keys`] checks for the role-typed path).
+#[test]
+fn verify_detached_rejects_small_order_key() {
+    // An all-zero compressed point: not a canonical encoding `verify_strict` would accept for
+    // any signature.
+    let weak_key = [0u8; 32];
+    let signature = [0u8; 64];
+    assert!(
+        verify_detached(
+            labels::SIG_EQUIVALENCE_LIST,
+            b"anything",
+            &weak_key,
+            &signature
+        )
+        .is_err()
+    );
+}
+
 proptest::proptest! {
     #[test]
     fn statement_parsers_never_panic(bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..400)) {

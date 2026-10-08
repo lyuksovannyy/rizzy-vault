@@ -702,6 +702,76 @@ pub(crate) fn verify_single<S: Statement, R: SignerRole>(
     Ok(Verified::new(statement, &message))
 }
 
+/// Verifies a detached Ed25519 signature over `LABEL(label) ‖ 0x00 ‖ ctx`, for a signed
+/// artifact whose public key the caller pins itself rather than looks up by key id.
+///
+/// This is the one statement shape outside the role-and-container machinery above
+/// ([`SignerRole`], [`SignatureContainer`]): the equivalence list (ADR 0038 §1; CRYPTO.md
+/// §10.2) is signed by a dedicated offline keypair that is not an identity or device key, has
+/// no [`PublicKeyId`], and travels as a bare 64-byte signature appended to the list bytes, not
+/// an 82-byte [`SignatureContainer`]. Every other statement in this crate keeps using
+/// `sign_single`/`verify_single` with a role-typed [`VerifyingKey`]; this function exists
+/// so that a second, equally narrow signed-artifact type does not need its own `ed25519-dalek`
+/// dependency outside `rizzy-core` (ADR 0037 §1: "an Ed25519 verify through `rizzy-core`'s
+/// existing API").
+///
+/// `ctx` is the caller's framed body, exactly as it will be hashed and compared again on every
+/// future verification: for the equivalence list, `u16(format_version) ‖ list_version ‖
+/// published_at_ms ‖ n ‖ groups` (CRYPTO.md §10.2 row "equivalence-list": "`statement_version`
+/// is the list's `format_version` (1)", which is this same framing, since [`Label::info`]
+/// inserts no version field of its own — the caller provides it as the first bytes of `ctx`).
+///
+/// `public_key` is checked exactly as [`VerifyingKey::from_bytes`] checks one: it must
+/// decompress, be canonically encoded, and not be small-order, so this function never runs
+/// `verify_strict` against a key `verify_strict` would reject for every signature.
+///
+/// # Errors
+/// [`VerifyError::Malformed`] if `public_key` is not a canonical, non-weak Ed25519 point;
+/// [`VerifyError::BadSignature`] if `verify_strict` rejects the signature.
+pub fn verify_detached(
+    label: Label,
+    ctx: &[u8],
+    public_key: &[u8; 32],
+    signature: &[u8; 64],
+) -> Result<(), VerifyError> {
+    let key = ed25519_dalek::VerifyingKey::from_bytes(public_key)
+        .map_err(|_| VerifyError::Malformed(ParseError::InvalidValue))?;
+    let canonical = key.to_edwards().compress().to_bytes() == *public_key;
+    if !canonical || key.is_weak() {
+        return Err(VerifyError::Malformed(ParseError::InvalidValue));
+    }
+    let message = label.info(ctx);
+    let signature = ed25519_dalek::Signature::from_bytes(signature);
+    key.verify_strict(&message, &signature)
+        .map_err(|_| VerifyError::BadSignature)
+}
+
+/// Signs `LABEL(label) ‖ 0x00 ‖ ctx` with a detached Ed25519 signature, from a raw 32-byte
+/// seed rather than a role-typed [`SigningKey`].
+///
+/// The counterpart of [`verify_detached`], for the same narrow, pinned-key signed-artifact
+/// shape (ADR 0038 §1, §3: the equivalence list, signed offline by a dedicated keypair that is
+/// not an identity or device key). Used by the `cargo xtask equivalence-list` signing tool,
+/// never by a client: a client only ever verifies.
+///
+/// The seed is the caller's; this function neither generates nor stores one. The offline
+/// signing key lives outside this repository's runtime entirely (ADR 0038 §3), so there is no
+/// `E_id`/`E_dev`-style storage for it here.
+///
+/// # Errors
+/// [`SignError::Internal`] if `ed25519-dalek` reports a failure, which it does not for a
+/// 32-byte seed.
+pub fn sign_detached(
+    label: Label,
+    ctx: &[u8],
+    seed: &[u8; SEED_LEN],
+) -> Result<[u8; SIGNATURE_LEN], SignError> {
+    let key = ed25519_dalek::SigningKey::from_bytes(seed);
+    let message = label.info(ctx);
+    let signature = key.try_sign(&message).map_err(|_| SignError::Internal)?;
+    Ok(signature.to_bytes())
+}
+
 /// Reads a 32-byte public key encoded as `bytes(public_key)` (a bundle entry).
 ///
 /// Every M1 key type is 32 bytes (§10.2), so any other length is refused rather than skipped.

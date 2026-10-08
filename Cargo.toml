@@ -23,6 +23,7 @@ rizzy-storage = { path = "crates/rizzy-storage" }
 rizzy-domain-auth = { path = "crates/rizzy-domain-auth" }
 rizzy-domain-vault = { path = "crates/rizzy-domain-vault" }
 rizzy-import = { path = "crates/rizzy-import" }
+rizzy-match = { path = "crates/rizzy-match" }
 
 # Cryptography. Exact pins and feature sets from ADR 0009 ("Allowed crate families" and
 # "Required feature sets"); docs/CRYPTO.md §3. Bumps are reviewed like crypto changes and are
@@ -49,6 +50,31 @@ sha2_010 = { package = "sha2", version = "=0.10.9", default-features = false }
 subtle = { version = "=2.6.1", default-features = false }
 unicode-normalization = { version = "=0.1.25", default-features = false }
 zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
+
+# URL parsing and matching for `rizzy-match` (ADR 0037, ADR 0038). Not cryptography: ordinary
+# `cargo deny` review, not ADR 0009's checklist (ADR 0037 §2 point 1).
+# - url: the WHATWG URL parser (ADR 0037 §2 point 1, "Open questions" recommendation accepted at
+#   acceptance). `std` only (its own default); no `serde` (nothing here goes through serde,
+#   CRYPTO.md §2). Pulls in `idna` (pinned below, matching feature set), `form_urlencoded` and
+#   `percent-encoding`, both `alloc`-only, no further dependencies, no build script.
+url = { version = "2.5.8", default-features = false, features = ["std"] }
+# - idna: IDNA/punycode A-label processing (ADR 0037 §2 point 3). Exact pin: the ADR requires
+#   "1.0 or later" for RUSTSEC-2024-0421, and a reviewed exact version keeps that floor from
+#   drifting under caret resolution. `alloc` and `compiled_data` only (no build script; the
+#   Unicode tables are compiled in through `idna_adapter`'s ICU4X backend, `icu_normalizer` and
+#   `icu_properties` with their `_data` crates — Unicode-3.0, already allowed in `deny.toml`).
+#   No `std`: `rizzy-match` is a no-I/O crate (ADR 0016 R1) and never needs it.
+idna = { version = "=1.1.0", default-features = false, features = ["alloc", "compiled_data"] }
+# - psl: the compiled-in Mozilla Public Suffix List snapshot (ADR 0037 §3; ADR 0016 §3's own
+#   naming of this crate for `rizzy-match`). Exact pin, as ADR 0037 §3 requires: the crate ships
+#   its PSL snapshot as Rust source compiled from `data/rules.txt` at publish time (no build
+#   script, no runtime fetch), so the exact version pin here *is* the snapshot pin (ADR 0037 §3
+#   assumes a separately hashed data file; `psl` has none to hash, see `rizzy-match`'s crate
+#   docs for this reading). Version 2.1.240, fetched 2026-10-07 from crates.io
+#   (https://github.com/addr-rs/psl), `MIT OR Apache-2.0`. `helpers` only, for `domain_str`/
+#   `suffix_str`; depends only on `psl-types` (no further dependencies, `#![no_std]`,
+#   `forbid(unsafe_code)`).
+psl = { version = "=2.1.240", default-features = false, features = ["helpers"] }
 
 # Wire types. Not cryptography.
 # serde: the `/api/v1` request and response types of `rizzy-proto` (ADR 0002 point 3; ADR 0016

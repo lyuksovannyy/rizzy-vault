@@ -1,0 +1,49 @@
+# Human-editable source for the global equivalence list (ADR 0038 §1, §4).
+#
+# NOT TOML, despite the filename ADR 0038 §1 suggests ("data/equivalence/groups.toml"): no
+# TOML (or other structured-text) crate is in [workspace.dependencies], and adding one is out
+# of scope for this change (CLAUDE.md "Dependencies": a new crate is justified and reviewed on
+# its own). ADR 0038 §1's own fallback applies instead: "a minimal hand-written line format
+# documented in the file." This is that format, kept deliberately small.
+#
+# FORMAT. One group per line:
+#
+#   group_id (32 hex characters, 16 bytes) | third_party_hostable (0 or 1) | domain,domain,...
+#
+# - group_id: random, generated with a CSPRNG (e.g. `python3 -c "import secrets;
+#   print(secrets.token_hex(16))"`), assigned once and never reused or reassigned (ADR 0038
+#   §1). Changing a group's domains or its flag on an existing line never changes its id.
+# - third_party_hostable: 1 only for a domain the Public Suffix List already splits by
+#   registrant (ADR 0037 §3; ADR 0038 §1, §4 point 3); 0 for everything else. None of the
+#   starter groups below need it.
+# - domains: two or more, comma-separated, no spaces required (surrounding whitespace is
+#   trimmed), each a registrable domain. `cargo xtask equivalence-list` normalises each to its
+#   IDNA A-label form and rejects the line if a domain does not normalise, there are fewer
+#   than two domains, or two domains normalise to the same value.
+# - Blank lines and lines starting with `#` are ignored.
+# - Line order does not matter: `cargo xtask equivalence-list` sorts groups by id itself.
+#   Append a new group anywhere; do not renumber or reorder existing lines.
+#
+# REVIEW RULES (ADR 0038 §4, restated — every group below still needs this before it is ever
+# signed into a real list):
+#   1. Proof of common ownership for every entry (shared WHOIS registrant/organisation, or a
+#      cross-referencing public statement on both domains). "Looks plausible" is not proof.
+#   2. Two-maintainer review once a second maintainer exists; until then, the sole maintainer's
+#      review is recorded in the PR with the ownership evidence cited.
+#   3. No domain a third party can host content on, unless flagged `third_party_hostable = 1`.
+#   4. ccTLD variants proven per variant, not assumed from the base brand.
+#   5. Scheduled re-verification at least once per release cycle; a lapsed domain is removed.
+#   6. Small list, high bar: well-known multi-domain brands with clear public evidence, not a
+#      crowd-sourced long tail.
+#
+# STATUS OF THE GROUPS BELOW: starter examples named in ROADMAP §4.4 and ADR 0038's own
+# Context, added here unsigned, with ownership evidence NOT independently re-verified as part
+# of this change (the owner's review, rule 2 above, is still outstanding for all three). They
+# exist so `cargo xtask equivalence-list` has something to compile and sign once the owner has
+# an offline key (docs/equivalence-list.md) — not as a claim that review is already done.
+# `google.co.uk` and `google.de` in particular need their own ccTLD ownership proof (rule 4)
+# before any real signing; they are common knowledge, not independently verified here (U).
+
+8ce962df007bc44d8d1bb3817570df24 | 0 | youtube.com,youtu.be,youtube-nocookie.com
+ad39c37cee45d28736adc53bcafa8db2 | 0 | google.com,google.co.uk,google.de
+1e683ea6d91b48d95a602cf7e6b71747 | 0 | apple.com,icloud.com

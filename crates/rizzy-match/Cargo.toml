@@ -1,0 +1,24 @@
+[package]
+name = "rizzy-match"
+description = "URL normalisation, registrable-domain and match-mode decisions, and the signed equivalence list (ADR 0037, ADR 0038). No I/O; portable to wasm32."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rizzy-core.workspace = true
+url.workspace = true
+idna.workspace = true
+psl.workspace = true
+
+[dev-dependencies]
+# Property tests: normalisation idempotence, and that every parser never panics on arbitrary
+# bytes (ADR 0016 §4 "Dev-dependencies": R1's allow-list covers normal and build dependencies
+# only, so tests may use proptest).
+proptest.workspace = true
+
+[lints]
+workspace = true

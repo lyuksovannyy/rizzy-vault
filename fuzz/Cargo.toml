@@ -87,6 +87,10 @@
 #                      generation (CRYPTO.md §12.1)
 #   ca_pem             rv's private CA file reader (ADR 0030 Decision 4): the 64 KiB and
 #                      16-certificate limits, PEM sections, trust-anchor parsing of arbitrary DER
+#   url_normalize      rizzy-match's URL and bare-domain normalisers (ADR 0037 §2): never panic,
+#                      idempotent on what they accept
+#   equivalence_list   rizzy-match's signed equivalence-list parser (ADR 0038 §1): never panic
+#                      on arbitrary bytes; a self-signed list round-trips through `verify`
 #
 # The `import_*` targets share `fuzz_targets/import_common/mod.rs` (the checks on an import
 # result and a counting RNG), included with `#[path]`; it is not a target.
@@ -146,6 +150,10 @@ rizzy-wasm = { path = "../crates/rizzy-wasm" }
 # (tokio-rustls, rustls, webpki-roots, hyper, sqlx with the SQLite driver, rustix) are the ones
 # the main workspace already locks and `cargo deny` already checks.
 rizzy-cli = { path = "../crates/rizzy-cli" }
+# URL normalisation and the equivalence list (`url_normalize`, `equivalence_list`). A path
+# crate over rizzy-core; its external crates (url, idna and the ICU4X stack, psl) are the ones
+# the main workspace already locks and `cargo deny` already checks.
+rizzy-match = { path = "../crates/rizzy-match" }
 
 # One [[bin]] per target. `test`, `doc` and `bench` are off because a libFuzzer entry point
 # (`#![no_main]` with `fuzz_target!`) is not a test, has no API to document and is not a benchmark.
@@ -439,6 +447,20 @@ bench = false
 [[bin]]
 name = "generator_options"
 path = "fuzz_targets/generator_options.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "url_normalize"
+path = "fuzz_targets/url_normalize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "equivalence_list"
+path = "fuzz_targets/equivalence_list.rs"
 test = false
 doc = false
 bench = false

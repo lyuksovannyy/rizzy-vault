@@ -241,6 +241,12 @@ registry! {
     SIG_DEVICE_AUTH = "sig/device-auth";
     /// `device-request` request signature.
     SIG_DEVICE_REQUEST = "sig/device-request";
+    /// `equivalence-list` statement (M2, ADR 0038 §1; CRYPTO.md §10.2): the signed, versioned
+    /// global equivalent-domain list, compiled into `rizzy-match`. Verified with
+    /// [`crate::sign::verify_detached`] against the pinned offline list-signing key, never a
+    /// key looked up by id: this statement carries a bare 64-byte signature, no
+    /// [`crate::sign::SignatureContainer`] (ADR 0038 §1, "not a container").
+    SIG_EQUIVALENCE_LIST = "sig/equivalence-list";
 }
 
 #[cfg(test)]
@@ -362,6 +368,7 @@ mod tests {
             "sig/key-grant",
             "sig/device-auth",
             "sig/device-request",
+            "sig/equivalence-list",
         ];
         let registered: HashSet<&str> = ALL.iter().map(|l| l.name()).collect();
         let expected: HashSet<&str> = expected.into_iter().collect();

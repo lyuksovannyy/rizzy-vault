@@ -107,6 +107,7 @@
 
 mod bindings;
 mod check;
+mod equivalence_list;
 mod js;
 mod manifest;
 mod metadata;
@@ -152,6 +153,11 @@ COMMANDS:
     check-js        Check the JavaScript dependency policy: exact versions, pinned pnpm,
                     empty install-script allow-list, deny.toml licences, pnpm audit
                     (ADR 0014 §3)
+    equivalence-list <source> <key-file> <list-version> <published-at-ms>
+                    Compile data/equivalence/groups.txt-style source into the signed
+                    equivalence list (ADR 0038 §3) and write its wire bytes to stdout.
+                    <key-file> is the raw 32-byte Ed25519 seed; redirect stdout to a .bin
+                    file, e.g. > data/equivalence/list.bin
 ";
 
 /// The second target the getrandom rule is checked on, besides the host (ADR 0016 R1).
@@ -182,6 +188,13 @@ fn main() -> ExitCode {
         }
         [Some("build-wasm")] => report(bindings::build_wasm(&workspace_root())),
         [Some("check-js")] => report(js::check_js(&workspace_root())),
+        [
+            Some("equivalence-list"),
+            Some(source),
+            Some(key),
+            Some(list_version),
+            Some(published_at_ms),
+        ] => equivalence_list_command(source, key, list_version, published_at_ms),
         [Some("-h" | "--help")] => {
             let _ = write!(io::stdout().lock(), "{USAGE}");
             ExitCode::SUCCESS
@@ -203,6 +216,51 @@ fn report(result: Result<String, String>) -> ExitCode {
         }
         Err(text) => {
             let _ = writeln!(io::stderr().lock(), "{text}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `cargo xtask equivalence-list`: parses its four positional arguments, runs
+/// [`equivalence_list::run`] and writes the signed list's raw wire bytes to stdout (ADR 0038
+/// §3), or a usage/build error to stderr.
+///
+/// Exit code `2` for a malformed `<list-version>`/`<published-at-ms>` (a usage error, like an
+/// unknown command), `1` for every other failure ([`report`]'s convention), `0` on success.
+fn equivalence_list_command(
+    source: &str,
+    key: &str,
+    list_version: &str,
+    published_at_ms: &str,
+) -> ExitCode {
+    let Ok(list_version) = list_version.parse::<u32>() else {
+        let _ = writeln!(
+            io::stderr().lock(),
+            "equivalence-list: <list-version> must be a u32, found {list_version:?}"
+        );
+        return ExitCode::from(2);
+    };
+    let Ok(published_at_ms) = published_at_ms.parse::<u64>() else {
+        let _ = writeln!(
+            io::stderr().lock(),
+            "equivalence-list: <published-at-ms> must be a u64, found {published_at_ms:?}"
+        );
+        return ExitCode::from(2);
+    };
+    match equivalence_list::run(
+        Path::new(source),
+        Path::new(key),
+        list_version,
+        published_at_ms,
+    ) {
+        Ok(wire) => {
+            if io::stdout().lock().write_all(&wire).is_err() {
+                return ExitCode::FAILURE;
+            }
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            let _ = writeln!(io::stderr().lock(), "equivalence-list: {message}");
             ExitCode::FAILURE
         }
     }
