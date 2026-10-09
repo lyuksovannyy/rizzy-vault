@@ -54,13 +54,6 @@ pub(crate) enum Step {
 /// Core dumps could not be disabled, or are not disabled on read-back. The process must not
 /// start (module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(unix),
-    expect(
-        dead_code,
-        reason = "nothing can fail where core dumps are not handled (module docs)"
-    )
-)]
 pub(crate) struct CoreDumpError {
     /// The failing step.
     pub(crate) step: Step,
