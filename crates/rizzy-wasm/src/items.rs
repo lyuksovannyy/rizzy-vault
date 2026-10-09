@@ -455,7 +455,7 @@ impl FieldView {
 }
 
 /// The kind and text of a value. Bytes and order keys have no text.
-fn kind_and_text(value: &Value) -> (&'static str, Option<Zeroizing<String>>) {
+pub(crate) fn kind_and_text(value: &Value) -> (&'static str, Option<Zeroizing<String>>) {
     match value.decode() {
         Ok(ValueRef::Text(text)) => ("text", Some(Zeroizing::new(text.to_owned()))),
         Ok(ValueRef::Bool(flag)) => ("bool", Some(Zeroizing::new(flag.to_string()))),

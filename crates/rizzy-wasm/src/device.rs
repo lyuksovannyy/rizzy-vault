@@ -94,6 +94,7 @@ use crate::rng::{Rng, os_rng};
 use crate::secret::take_secret;
 use crate::store::{CacheDelta, KvRow, decode_rows, encode_rows};
 use crate::sync::{Ctx, Signer, SyncDriver};
+use crate::trash;
 
 /// A copy of a bearer token (as `rv`'s `copy_token` does): the only way to keep using one after
 /// the value that owns it (here, [`LoggedIn`]) is consumed by the next step.
@@ -1050,6 +1051,114 @@ impl DeviceSession {
     #[wasm_bindgen(js_name = purgeItem)]
     pub fn purge_item(&mut self, id: &str, now_ms: u64) -> Result<(), CoreError> {
         self.lifecycle(id, VaultSync::purge_item::<Rng>, now_ms)
+    }
+
+    /// The automatic purge after a sync that completed, as [`crate::Session::purge_expired`].
+    /// `DeviceSession::drain_cache_writes` after this call returns the rows to persist.
+    ///
+    /// # Errors
+    /// `wrong_state` while a sync runs; as `DeviceSession::vault_ref`.
+    #[wasm_bindgen(js_name = purgeExpired)]
+    pub fn purge_expired(&mut self, now_ms: u64) -> Result<usize, CoreError> {
+        if self.sync.running() {
+            return Err(CoreError::new(WRONG_STATE));
+        }
+        let vault = self
+            .vaults
+            .first_mut()
+            .ok_or_else(|| CoreError::from(ClientError::Internal))?;
+        Ok(vault
+            .purge_expired(
+                &mut self.rng,
+                &self.unlocked,
+                now_ms,
+                trash::DEFAULT_TRASH_RETENTION_MS,
+            )?
+            .len())
+    }
+
+    /// The item's password history, as [`crate::Session::password_history`].
+    ///
+    /// # Errors
+    /// As [`DeviceSession::item`].
+    #[wasm_bindgen(js_name = passwordHistory)]
+    pub fn password_history(
+        &self,
+        id: &str,
+    ) -> Result<Vec<trash::PasswordHistoryEntry>, CoreError> {
+        trash::password_history(self.vault_ref()?, id)
+    }
+
+    /// One password-history value, on the user's request only, as
+    /// [`crate::Session::reveal_password_history`].
+    ///
+    /// # Errors
+    /// As [`DeviceSession::item`]; `unknown_item` for an index past the last entry.
+    #[wasm_bindgen(js_name = revealPasswordHistory)]
+    pub fn reveal_password_history(&self, id: &str, index: usize) -> Result<String, CoreError> {
+        Ok(
+            trash::reveal_password_history(self.vault_ref()?, id, index)?
+                .as_str()
+                .to_owned(),
+        )
+    }
+
+    /// The late edits to surface, as [`crate::Session::late_edits`].
+    ///
+    /// # Errors
+    /// As `DeviceSession::vault_ref`.
+    #[wasm_bindgen(js_name = lateEdits)]
+    pub fn late_edits(&self) -> Result<Vec<trash::LateEditView>, CoreError> {
+        Ok(trash::late_edits(self.vault_ref()?))
+    }
+
+    /// Dismisses a late-edit notice, as [`crate::Session::dismiss_late_edit`] (in memory only:
+    /// nothing to persist).
+    ///
+    /// # Errors
+    /// As `DeviceSession::vault_ref`; `invalid_input`; `unknown_item`.
+    #[wasm_bindgen(js_name = dismissLateEdit)]
+    pub fn dismiss_late_edit(&mut self, id: &str) -> Result<(), CoreError> {
+        let vault = self
+            .vaults
+            .first_mut()
+            .ok_or_else(|| CoreError::from(ClientError::Internal))?;
+        trash::dismiss_late_edit(vault, id)
+    }
+
+    /// "Restore it as a new item", as [`crate::Session::restore_late_edit`].
+    /// `DeviceSession::drain_cache_writes` after this call returns the rows to persist.
+    ///
+    /// # Errors
+    /// `wrong_state` while a sync runs; as [`crate::Session::restore_late_edit`].
+    #[wasm_bindgen(js_name = restoreLateEdit)]
+    pub fn restore_late_edit(
+        &mut self,
+        id: &str,
+        item_type: &str,
+        now_ms: u64,
+    ) -> Result<String, CoreError> {
+        if self.sync.running() {
+            return Err(CoreError::new(WRONG_STATE));
+        }
+        let item_type = type_from_name(item_type)?;
+        let item = items::item_id(id)?;
+        let vault = self
+            .vaults
+            .first_mut()
+            .ok_or_else(|| CoreError::from(ClientError::Internal))?;
+        let new_item =
+            vault.restore_late_edit(&mut self.rng, &self.unlocked, item, item_type, now_ms)?;
+        Ok(hex(new_item.as_bytes()))
+    }
+
+    /// "Deleted on X while it was being edited on Y", as [`crate::Session::trash_conflict`].
+    ///
+    /// # Errors
+    /// As [`DeviceSession::item`].
+    #[wasm_bindgen(js_name = trashConflict)]
+    pub fn trash_conflict(&self, id: &str) -> Result<Option<trash::TrashConflictView>, CoreError> {
+        trash::trash_conflict(self.vault_ref()?, id)
     }
 
     /// Zeroizes every handle this session holds (ADR 0013 §3 rule 1). Consumes the session;

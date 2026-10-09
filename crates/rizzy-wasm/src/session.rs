@@ -16,6 +16,9 @@
 //! | List, view, reveal | [`Session::items`], [`Session::item`], [`Session::item_fields`], [`Session::reveal_field`] |
 //! | Save | [`Session::create_item`], [`Session::edit_item`] with an [`ItemDraft`] |
 //! | Trash, restore, purge | [`Session::trash_item`], [`Session::restore_item`], [`Session::purge_item`] |
+//! | Automatic purge, after a sync that completed | [`Session::purge_expired`] |
+//! | Password history | [`Session::password_history`], [`Session::reveal_password_history`] |
+//! | Trash notices | [`Session::late_edits`], [`Session::dismiss_late_edit`], [`Session::restore_late_edit`], [`Session::trash_conflict`] |
 //! | TOTP code | [`Session::totp`] |
 //! | Passkey assertion | [`Session::passkey_assertion`] ([`create_passkey`](crate::passkey::create_passkey) is stateless, module docs) |
 //! | Export | [`Session::reauth`] + [`Session::confirm_reauth`], then [`Session::export_encrypted`], or [`Session::plaintext_warning_shown`] + [`Session::export_plaintext`] after the hold |
@@ -85,6 +88,9 @@ use crate::passkey::PasskeyAssertion;
 use crate::rng::{Rng, os_rng};
 use crate::secret::take_secret;
 use crate::sync::{Ctx, Signer, SyncDriver};
+use crate::trash::{
+    self, DEFAULT_TRASH_RETENTION_MS, LateEditView, PasswordHistoryEntry, TrashConflictView,
+};
 
 /// How long a re-authentication allows one export: 5 minutes (module docs;
 /// `rizzy_client::export::gate::REAUTH_WINDOW_MS`).
@@ -465,6 +471,110 @@ impl Session {
     #[wasm_bindgen(js_name = purgeItem)]
     pub fn purge_item(&mut self, id: &str, now_ms: u64) -> Result<(), CoreError> {
         self.lifecycle(id, VaultSync::purge_item::<Rng>, now_ms)
+    }
+
+    /// The automatic purge (`rizzy_client::trash`): purges every trashed item whose 30-day
+    /// retention ([`DEFAULT_TRASH_RETENTION_MS`]) has passed at `now_ms`, measured from its
+    /// trash. The host calls it after a sync that completed; the next sync uploads the purges.
+    /// Returns how many items it purged: none on a read-only vault, or while a record of the
+    /// item waits unapplied.
+    ///
+    /// # Errors
+    /// `locked`; `wrong_state` while a sync runs.
+    #[wasm_bindgen(js_name = purgeExpired)]
+    pub fn purge_expired(&mut self, now_ms: u64) -> Result<usize, CoreError> {
+        let inner = self.writable()?;
+        Ok(inner
+            .vault
+            .purge_expired(
+                &mut inner.rng,
+                &inner.unlocked,
+                now_ms,
+                DEFAULT_TRASH_RETENTION_MS,
+            )?
+            .len())
+    }
+
+    /// The item's password history, newest first: the source and time of each entry, never
+    /// its value ([`crate::trash`]).
+    ///
+    /// # Errors
+    /// As [`Session::item`].
+    #[wasm_bindgen(js_name = passwordHistory)]
+    pub fn password_history(&self, id: &str) -> Result<Vec<PasswordHistoryEntry>, CoreError> {
+        trash::password_history(&self.inner()?.vault, id)
+    }
+
+    /// The value of the `index`th entry of [`Session::password_history`]: call it only on the
+    /// user's request.
+    ///
+    /// # Errors
+    /// As [`Session::item`]; `unknown_item` for an index past the last entry.
+    #[wasm_bindgen(js_name = revealPasswordHistory)]
+    pub fn reveal_password_history(&self, id: &str, index: usize) -> Result<String, CoreError> {
+        Ok(
+            trash::reveal_password_history(&self.inner()?.vault, id, index)?
+                .as_str()
+                .to_owned(),
+        )
+    }
+
+    /// The purged items with edits that arrived after the purge, not yet surfaced: "An edit from
+    /// `<device>` arrived for an item you deleted permanently. Restore it as a new item?"
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(js_name = lateEdits)]
+    pub fn late_edits(&self) -> Result<Vec<LateEditView>, CoreError> {
+        Ok(trash::late_edits(&self.inner()?.vault))
+    }
+
+    /// Dismisses a late-edit notice: not shown again in this session for the edits it named.
+    ///
+    /// # Errors
+    /// `locked`; `invalid_input` for an id that is not 32 hex digits; `unknown_item` for an item
+    /// that is not purged.
+    #[wasm_bindgen(js_name = dismissLateEdit)]
+    pub fn dismiss_late_edit(&mut self, id: &str) -> Result<(), CoreError> {
+        trash::dismiss_late_edit(&mut self.inner_mut()?.vault, id)
+    }
+
+    /// "Restore it as a new item": a new item of `item_type` (a name of
+    /// [`crate::items::TYPES`], the type the user confirmed) from the purged item's late edits.
+    /// Returns the new item's id.
+    ///
+    /// # Errors
+    /// `locked`; `wrong_state` while a sync runs; `invalid_input` for an unknown type;
+    /// `unknown_item` for an item that is not purged or has no late edit; `invalid_edit` for a
+    /// late edit that does not fit the type; `read_only`.
+    #[wasm_bindgen(js_name = restoreLateEdit)]
+    pub fn restore_late_edit(
+        &mut self,
+        id: &str,
+        item_type: &str,
+        now_ms: u64,
+    ) -> Result<String, CoreError> {
+        let item_type = type_from_name(item_type)?;
+        let inner = self.writable()?;
+        let item = items::item_id(id)?;
+        let new_item = inner.vault.restore_late_edit(
+            &mut inner.rng,
+            &inner.unlocked,
+            item,
+            item_type,
+            now_ms,
+        )?;
+        Ok(hex(new_item.as_bytes()))
+    }
+
+    /// "Deleted on X while it was being edited on Y": `undefined` unless an edit won over a
+    /// concurrent trash of the item.
+    ///
+    /// # Errors
+    /// As [`Session::item`].
+    #[wasm_bindgen(js_name = trashConflict)]
+    pub fn trash_conflict(&self, id: &str) -> Result<Option<TrashConflictView>, CoreError> {
+        trash::trash_conflict(&self.inner()?.vault, id)
     }
 
     /// The current TOTP code of an item's `login.totp`, which holds an `otpauth://` URI or a

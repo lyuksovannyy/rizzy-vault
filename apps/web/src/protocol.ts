@@ -20,9 +20,12 @@ import type {
   ItemChange,
   ItemSummary,
   ItemType,
+  LateEdit,
   PassphraseOptions,
+  PasswordHistoryEntry,
   PasswordOptions,
   TotpCode,
+  TrashConflict,
   TwoFactorSetup,
 } from "@rizzy-vault/core";
 
@@ -78,6 +81,17 @@ export interface CoreApi {
   trashItem(id: string): void;
   restoreItem(id: string): void;
   purgeItem(id: string): void;
+  /** The item's password history, newest first, without values. */
+  passwordHistory(id: string): PasswordHistoryEntry[];
+  /** One password-history value (by its index), on the user's request only. */
+  revealPasswordHistory(id: string, index: number): string;
+  /** Purged items with edits that arrived after the purge, not yet surfaced. */
+  lateEdits(): LateEdit[];
+  dismissLateEdit(id: string): void;
+  /** Restores a purged item's late edits as a new item of `itemType`; returns its id. */
+  restoreLateEdit(id: string, itemType: ItemType): string;
+  /** Whether an edit won over a concurrent trash of the item. */
+  trashConflict(id: string): TrashConflict | undefined;
   totp(id: string): TotpCode;
   exportEncrypted(password: Uint8Array): EncryptedExport;
   exportBlockers(): string[];
@@ -129,6 +143,12 @@ export const METHODS: readonly Method[] = [
   "trashItem",
   "restoreItem",
   "purgeItem",
+  "passwordHistory",
+  "revealPasswordHistory",
+  "lateEdits",
+  "dismissLateEdit",
+  "restoreLateEdit",
+  "trashConflict",
   "totp",
   "exportEncrypted",
   "exportBlockers",

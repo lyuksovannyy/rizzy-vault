@@ -147,6 +147,14 @@ function bytes(v: unknown): Uint8Array {
   return v;
 }
 
+/** A non-negative integer argument, or `invalid_input`. */
+function index(v: unknown): number {
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) {
+    throw new CoreError("invalid_input");
+  }
+  return v;
+}
+
 /** A boolean argument, or `invalid_input`. */
 function bool(v: unknown): boolean {
   if (typeof v !== "boolean") {
@@ -239,6 +247,12 @@ async function run(m: CallMessage): Promise<unknown> {
     trashItem: () => current().trashItem(str(a[0])),
     restoreItem: () => current().restoreItem(str(a[0])),
     purgeItem: () => current().purgeItem(str(a[0])),
+    passwordHistory: () => current().passwordHistory(str(a[0])),
+    revealPasswordHistory: () => current().revealPasswordHistory(str(a[0]), index(a[1])),
+    lateEdits: () => current().lateEdits(),
+    dismissLateEdit: () => current().dismissLateEdit(str(a[0])),
+    restoreLateEdit: () => current().restoreLateEdit(str(a[0]), str(a[1]) as never),
+    trashConflict: () => current().trashConflict(str(a[0])),
     totp: () => current().totp(str(a[0])),
     exportEncrypted: () => current().exportEncrypted(bytes(a[0])),
     exportBlockers: () => current().exportBlockers(),

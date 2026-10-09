@@ -70,7 +70,10 @@ describe("group", () => {
     expect(g.uris[0]?.attributes.get("value")?.value).toBe("https://x");
     expect(g.custom[0]?.attributes.get("label")?.value).toBe("PIN");
     expect(g.tags).toEqual(["work"]);
-    expect(g.other.map((x) => x.key)).toEqual(["pwhist/c/value"]);
+    // Imported password history is grouped for the history view, never shown as raw fields.
+    expect(g.pwhist).toHaveLength(1);
+    expect(g.pwhist[0]?.attributes.get("value")?.value).toBe("old");
+    expect(g.other).toEqual([]);
   });
 
   // ADR 0039 §1's `passkey/<id>/…` list: grouped the same way as `uri`/`field`, by element id —

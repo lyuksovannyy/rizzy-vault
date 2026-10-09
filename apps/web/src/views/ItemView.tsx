@@ -1,13 +1,16 @@
 // One item: its fields, masked where the core conceals them, with reveal and copy; its URIs as
-// safe links (INV-42); its TOTP code; edit, trash, restore and purge.
+// safe links (INV-42); its TOTP code; its password history (ADR 0018 §7), masked like any
+// password; the "deleted on X while it was being edited on Y" notice (ADR 0012 §5); edit,
+// trash, restore and purge.
 //
 // A concealed value crosses from the Worker only when the user asks (reveal or copy; ADR 0013
 // §3 rule 3), and a revealed value is shown in the secret-field component (INV-68).
-import type { FieldView, ItemSummary, TotpCode } from "@rizzy-vault/core";
+import type { DeviceView, FieldView, ItemSummary, PasswordHistoryEntry, TotpCode, TrashConflict } from "@rizzy-vault/core";
 import { ConfirmDialog, IconStarFilled, IconStarOutline, SecretField, TypeIcon, useToast } from "@rizzy-vault/ui";
 import { useEffect, useId, useState } from "react";
 
 import { codeOf } from "../core-client.ts";
+import { deviceName } from "../device-names.ts";
 import { type Element, type Grouped, group, labelOf, matchModeLabel } from "../fields.ts";
 import { SafeLink, SafeOpenButton } from "../SafeLink.tsx";
 import type { VaultContext } from "./VaultView.tsx";
@@ -158,6 +161,161 @@ function TotpLine(props: { readonly ctx: VaultContext; readonly id: string }) {
   );
 }
 
+/** When a past password was written: its date and time, or that an imported one has none. */
+function historyLabel(entry: PasswordHistoryEntry): string {
+  const when = entry.atMs === undefined ? "date unknown" : new Date(entry.atMs).toLocaleString();
+  return entry.source === "imported" ? `Imported, ${when}` : when;
+}
+
+/** One past password: masked, revealed or copied only on the user's request (ADR 0013 §3
+ * rule 3), through the core's `revealPasswordHistory` by the entry's index. */
+function HistoryLine(props: {
+  readonly ctx: VaultContext;
+  readonly id: string;
+  readonly index: number;
+  readonly entry: PasswordHistoryEntry;
+}) {
+  const { ctx, id, index, entry } = props;
+  const [revealed, setRevealed] = useState<string | undefined>();
+  const [copied, setCopied] = useState(false);
+  const { error, run } = useAction();
+  const label = historyLabel(entry);
+  const value = () => ctx.client.call("revealPasswordHistory", id, index);
+
+  return (
+    <div className="field" data-history-entry={index}>
+      {revealed !== undefined ? (
+        <SecretField label={label} name={`history-${index}`} value={revealed} initiallyRevealed />
+      ) : (
+        <>
+          <span className="field-label">{label}</span>
+          <span className="masked" aria-label={`Password from ${label}, hidden`}>
+            ••••••••
+          </span>
+        </>
+      )}
+      <span className="field-actions">
+        <button
+          type="button"
+          className="secondary small"
+          onClick={() =>
+            revealed !== undefined ? setRevealed(undefined) : void run(async () => setRevealed(await value()))
+          }
+        >
+          {revealed !== undefined ? "Hide" : "Reveal"}
+        </button>
+        <button
+          type="button"
+          className="secondary small"
+          onClick={() =>
+            void run(async () => {
+              await ctx.clipboard.copy(await value());
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1500);
+            })
+          }
+        >
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </span>
+      <ErrorText code={error} />
+    </div>
+  );
+}
+
+/** The item's password history (ADR 0018 §7: the history of `login.password`, with history
+ * imported from another manager), newest first, folded until the user opens it. Nothing shows
+ * for an item without one. */
+function PasswordHistory(props: { readonly ctx: VaultContext; readonly id: string }) {
+  const { ctx, id } = props;
+  const [entries, setEntries] = useState<PasswordHistoryEntry[] | undefined>();
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState<string | undefined>();
+  const headingId = useId();
+
+  useEffect(() => {
+    let live = true;
+    ctx.client.call("passwordHistory", id).then(
+      (h) => live && setEntries(h),
+      (e: unknown) => live && setError(codeOf(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [ctx.client, ctx.revision, id]);
+
+  if (error !== undefined) {
+    return <ErrorText code={error} />;
+  }
+  if (entries === undefined || entries.length === 0) {
+    return null;
+  }
+  return (
+    <section className="password-history" aria-labelledby={headingId} data-testid="password-history">
+      <div className="field">
+        <h3 id={headingId} className="field-label">
+          Password history
+        </h3>
+        <span className="field-value muted">{entries.length === 1 ? "1 earlier password" : `${entries.length} earlier passwords`}</span>
+        <span className="field-actions">
+          <button type="button" className="secondary small" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+            {open ? "Hide history" : "Show history"}
+          </button>
+        </span>
+      </div>
+      {open &&
+        entries.map((entry, index) => (
+          // The index is the entry's identity for the core's reveal call; the list is reloaded
+          // whole after every sync.
+          <HistoryLine key={`${ctx.revision}-${index}`} ctx={ctx} id={id} index={index} entry={entry} />
+        ))}
+    </section>
+  );
+}
+
+/** "Deleted on X while it was being edited on Y" (ADR 0012 §5): an edit kept the item that
+ * another device had moved to the trash at the same time. Nothing shows otherwise. */
+function TrashConflictNotice(props: { readonly ctx: VaultContext; readonly id: string }) {
+  const { ctx, id } = props;
+  const [conflict, setConflict] = useState<{ conflict: TrashConflict; devices: DeviceView[] } | undefined>();
+
+  useEffect(() => {
+    let live = true;
+    ctx.client.call("trashConflict", id).then(
+      async (c) => {
+        if (c === undefined) {
+          if (live) {
+            setConflict(undefined);
+          }
+          return;
+        }
+        // The device list only names the devices; the notice shows without it.
+        const devices = await ctx.client.call("devices").catch(() => []);
+        if (live) {
+          setConflict({ conflict: c, devices });
+        }
+      },
+      () => live && setConflict(undefined),
+    );
+    return () => {
+      live = false;
+    };
+  }, [ctx.client, ctx.revision, id]);
+
+  if (conflict === undefined) {
+    return null;
+  }
+  const own = ctx.session.deviceId;
+  const { trashedBy, editedBy, trashedAtMs } = conflict.conflict;
+  return (
+    <p className="notice" role="status" data-testid="trash-conflict">
+      Deleted on {deviceName(trashedBy, conflict.devices, own)} while it was being edited on{" "}
+      {deviceName(editedBy, conflict.devices, own)}. The edit kept the item.{" "}
+      <span className="muted">Moved to trash {new Date(trashedAtMs).toLocaleString()}.</span>
+    </p>
+  );
+}
+
 /** One stored passkey's display row (ADR 0039 §1; task: "rp, user name, created; no private
  * key reveal"): `rp_id` and `created_ms` come straight off `rp_id`'s/`created_ms`'s own
  * `FieldView.value` (both have a text form, unlike the Bytes fields this item also carries —
@@ -275,12 +433,14 @@ export function ItemView(props: {
         )}
       </div>
       <p className="muted">{summary.itemType}</p>
+      {!summary.trashed && <TrashConflictNotice ctx={ctx} id={id} />}
       {grouped.fixed
         .filter((f) => f.key !== "item.name")
         .map((f) => (
           <FieldValue key={f.key} ctx={ctx} id={id} field={f} label={labelOf(f.key)} />
         ))}
       {summary.hasTotp && !summary.trashed && <TotpLine ctx={ctx} id={id} />}
+      {(summary.itemType === "login" || grouped.pwhist.length > 0) && <PasswordHistory ctx={ctx} id={id} />}
       {grouped.uris.map((u) => {
         const v = u.attributes.get("value");
         if (v === undefined) {

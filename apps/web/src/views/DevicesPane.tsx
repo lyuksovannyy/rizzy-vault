@@ -5,15 +5,9 @@ import type { DeviceView } from "@rizzy-vault/core";
 import { useEffect, useState } from "react";
 
 import { codeOf } from "../core-client.ts";
+import { DEVICE_KINDS as KINDS } from "../device-names.ts";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText } from "./common.tsx";
-
-/** Human names of the device kinds. */
-const KINDS: Readonly<Record<string, string>> = {
-  "desktop-cli": "Desktop or command line",
-  extension: "Browser extension",
-  mobile: "Mobile",
-};
 
 /** The device list (module docs). */
 export function DevicesPane(props: { readonly ctx: VaultContext }) {

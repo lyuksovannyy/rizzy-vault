@@ -34,6 +34,7 @@
 //! | [`generate_password_with_options`] (`generatePasswordWithOptions`), [`generate_passphrase_with_options`] (`generatePassphraseWithOptions`), [`password_entropy`] (`passwordEntropy`), [`passphrase_entropy`] (`passphraseEntropy`), [`generator_limits`] (`generatorLimits`), [`GeneratorLimits`], [`Generated`] | the generator, every option ([`generator`]) |
 //! | [`TotpCode`], [`EncryptedExport`], [`ImportReport`], [`DeviceView`], [`TwoFactorEnrolment`] | results |
 //! | [`create_passkey`] (`createPasskey`), [`CreatedPasskey`], [`Session::passkey_assertion`] (`passkeyAssertion`), [`PasskeyAssertion`] | `WebAuthn` passkey registration and assertion ([`passkey`]; ADR 0039) |
+//! | [`PasswordHistoryEntry`], [`LateEditView`], [`TrashConflictView`] | the password history, the late-edit and concurrent-trash notices ([`trash`]) |
 //! | [`plaintext_export_warning`], [`plaintext_export_phrase`] | the frozen texts of ADR 0027 §5 |
 //! | [`plaintext_export_hold_ms`], [`detect_import_format`] | the hold after the plaintext warning; recognising an import file (owner decision 2026-10-05) |
 //! | [`CoreError`] | the one thrown error: a stable code ([`error`]) |
@@ -103,6 +104,7 @@ pub mod session;
 mod signup;
 pub mod store;
 pub mod sync;
+pub mod trash;
 
 pub use device::{DeviceSession, EnrolFlow};
 pub use error::CoreError;
@@ -122,6 +124,7 @@ pub use session::{
 };
 pub use signup::{EmergencyKit, SignupFlow};
 pub use store::{KvRow, cache_store_names};
+pub use trash::{LateEditView, PasswordHistoryEntry, TrashConflictView};
 
 use wasm_bindgen::prelude::wasm_bindgen;
 

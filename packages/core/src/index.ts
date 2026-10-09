@@ -30,10 +30,13 @@ import initWasm, {
   HttpRequest,
   ItemDraft,
   KvRow,
+  LateEditView as WasmLateEditView,
   LoginFlow,
   PasskeyAssertion as WasmPasskeyAssertion,
+  PasswordHistoryEntry as WasmPasswordHistoryEntry,
   Session,
   SignupFlow,
+  TrashConflictView as WasmTrashConflictView,
   TwoFactorEnrolment,
   UriInput,
   checkMeta,
@@ -699,6 +702,63 @@ export interface DeviceView {
 }
 
 /** A started 2FA enrolment, to show once. */
+/**
+ * One past password of an item (ADR 0018 §7: the history of `login.password`, and history
+ * imported from another manager). Never the value: {@link VaultSession.revealPasswordHistory}
+ * reveals one on the user's request.
+ */
+export interface PasswordHistoryEntry {
+  /** `edited`: a value an edit replaced; `imported`: from another manager's history. */
+  readonly source: "edited" | "imported";
+  /** When it was written or recorded, ms since the Unix epoch; absent when not known. */
+  readonly atMs: number | undefined;
+}
+
+/**
+ * A purged item for which edits arrived after the purge (ADR 0018 §3 "Surfacing"): "An edit
+ * from <device> arrived for an item you deleted permanently. Restore it as a new item?"
+ */
+export interface LateEdit {
+  /** The purged item's id. */
+  readonly id: string;
+  /** The ids of the devices whose edits arrived late. */
+  readonly devices: readonly string[];
+}
+
+/** An edit that won over a concurrent trash (ADR 0012 §5): "deleted on X while it was being edited on Y". */
+export interface TrashConflict {
+  /** The device that trashed the item. */
+  readonly trashedBy: string;
+  /** The device whose edit kept it. */
+  readonly editedBy: string;
+  /** When the trash was written, ms since the Unix epoch. */
+  readonly trashedAtMs: number;
+}
+
+/** Maps the core's history entries and frees them. */
+function historyOf(entries: WasmPasswordHistoryEntry[]): PasswordHistoryEntry[] {
+  return mapFree(entries, (e) => ({
+    source: e.source as PasswordHistoryEntry["source"],
+    atMs: e.atMs === undefined ? undefined : Number(e.atMs),
+  }));
+}
+
+/** Maps the core's late edits and frees them. */
+function lateEditsOf(edits: WasmLateEditView[]): LateEdit[] {
+  return mapFree(edits, (e) => ({ id: e.id, devices: e.devices }));
+}
+
+/** Maps the core's trash conflict, if any, and frees it. */
+function trashConflictOf(conflict: WasmTrashConflictView | undefined): TrashConflict | undefined {
+  return conflict === undefined
+    ? undefined
+    : mapOne(conflict, (c) => ({
+        trashedBy: c.trashedBy,
+        editedBy: c.editedBy,
+        trashedAtMs: Number(c.trashedAtMs),
+      }));
+}
+
 export interface TwoFactorSetup {
   readonly otpauthUri: string;
   readonly secret: string;
@@ -939,6 +999,16 @@ export class VaultSession {
    */
   async sync(): Promise<void> {
     const s = this.#s();
+    await this.#syncOnce(s);
+    // The automatic purge (ADR 0012 §5): only clients purge, after a sync that completed;
+    // a second round uploads the purges at once.
+    if (call(() => s.purgeExpired(this.#now())) > 0) {
+      await this.#syncOnce(s);
+    }
+  }
+
+  /** One run of the core's sync driver (see {@link sync}). */
+  async #syncOnce(s: Session): Promise<void> {
     call(() => s.syncStart());
     for (;;) {
       const request = call(() => s.syncRequest());
@@ -1054,6 +1124,45 @@ export class VaultSession {
   /** Purges a trashed item for good. */
   purgeItem(id: string): void {
     call(() => this.#s().purgeItem(id, this.#now()));
+  }
+
+  /**
+   * Purges every trashed item whose 30-day retention has passed (ADR 0012 §5); {@link sync}
+   * runs it after every sync that completed, and uploads the purges. Returns how many items it
+   * purged: none on a read-only vault, or for an item a record of which waits unapplied.
+   */
+  purgeExpired(): number {
+    return call(() => this.#s().purgeExpired(this.#now()));
+  }
+
+  /** The item's password history, newest first, without values. */
+  passwordHistory(id: string): PasswordHistoryEntry[] {
+    return historyOf(call(() => this.#s().passwordHistory(id)));
+  }
+
+  /** The value of one password-history entry (by its index), on the user's request only. */
+  revealPasswordHistory(id: string, index: number): string {
+    return call(() => this.#s().revealPasswordHistory(id, index));
+  }
+
+  /** The purged items with edits that arrived after the purge, not yet surfaced. */
+  lateEdits(): LateEdit[] {
+    return lateEditsOf(call(() => this.#s().lateEdits()));
+  }
+
+  /** Dismisses a late-edit notice for the edits it named, for this session. */
+  dismissLateEdit(id: string): void {
+    call(() => this.#s().dismissLateEdit(id));
+  }
+
+  /** "Restore it as a new item": a new item of the type the user confirmed; returns its id. */
+  restoreLateEdit(id: string, itemType: ItemType): string {
+    return call(() => this.#s().restoreLateEdit(id, itemType, this.#now()));
+  }
+
+  /** Whether an edit won over a concurrent trash of the item, and whose. */
+  trashConflict(id: string): TrashConflict | undefined {
+    return trashConflictOf(call(() => this.#s().trashConflict(id)));
   }
 
   /** The item's current TOTP code. */
@@ -1869,6 +1978,16 @@ export class DurableSession {
    * ephemeral web vault's sync.
    */
   async sync(): Promise<void> {
+    await this.#syncOnce();
+    // The automatic purge, as {@link VaultSession.sync}; persisted before the second round.
+    if (call(() => this.#inner.purgeExpired(this.#now())) > 0) {
+      await this.#drain();
+      await this.#syncOnce();
+    }
+  }
+
+  /** One run of the core's sync driver (see {@link sync}). */
+  async #syncOnce(): Promise<void> {
     const s = this.#inner;
     call(() => s.syncStart());
     for (;;) {
@@ -2001,6 +2120,45 @@ export class DurableSession {
   async purgeItem(id: string): Promise<void> {
     call(() => this.#inner.purgeItem(id, this.#now()));
     await this.#drain();
+  }
+
+  /** As {@link VaultSession.purgeExpired}. Persisted before this resolves (class docs). */
+  async purgeExpired(): Promise<number> {
+    const purged = call(() => this.#inner.purgeExpired(this.#now()));
+    await this.#drain();
+    return purged;
+  }
+
+  /** As {@link VaultSession.passwordHistory}. */
+  passwordHistory(id: string): PasswordHistoryEntry[] {
+    return historyOf(call(() => this.#inner.passwordHistory(id)));
+  }
+
+  /** As {@link VaultSession.revealPasswordHistory}. */
+  revealPasswordHistory(id: string, index: number): string {
+    return call(() => this.#inner.revealPasswordHistory(id, index));
+  }
+
+  /** As {@link VaultSession.lateEdits}. */
+  lateEdits(): LateEdit[] {
+    return lateEditsOf(call(() => this.#inner.lateEdits()));
+  }
+
+  /** As {@link VaultSession.dismissLateEdit}. */
+  dismissLateEdit(id: string): void {
+    call(() => this.#inner.dismissLateEdit(id));
+  }
+
+  /** As {@link VaultSession.restoreLateEdit}. Persisted before this resolves (class docs). */
+  async restoreLateEdit(id: string, itemType: ItemType): Promise<string> {
+    const created = call(() => this.#inner.restoreLateEdit(id, itemType, this.#now()));
+    await this.#drain();
+    return created;
+  }
+
+  /** As {@link VaultSession.trashConflict}. */
+  trashConflict(id: string): TrashConflict | undefined {
+    return trashConflictOf(call(() => this.#inner.trashConflict(id)));
   }
 
   /** Zeroizes every handle this session holds. Safe to call more than once. */

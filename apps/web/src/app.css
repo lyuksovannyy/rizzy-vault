@@ -569,6 +569,31 @@ button.row.selected {
   gap: var(--space-1);
 }
 
+/* The password history's heading sits in a field row, as a field label does. */
+.password-history h3 {
+  margin: 0;
+  font-size: inherit;
+}
+
+/* The late-edit notices above the vault body (LateEditNotices.tsx). */
+.late-edits {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-3) 0;
+}
+
+.late-edit p {
+  margin: 0;
+}
+
+.late-edit .actions {
+  margin-top: var(--space-2);
+}
+
+.late-edit select.late-edit-type {
+  width: auto;
+}
+
 .tags {
   display: flex;
   flex-wrap: wrap;

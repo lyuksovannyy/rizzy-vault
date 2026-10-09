@@ -19,7 +19,8 @@
 //!
 //! - **In:** never from the command line. `--field` refuses a key the schema conceals;
 //!   `--secret <key>` asks for the value.
-//! - **Out:** `item show` prints a concealed field as `********` unless `--reveal` is given.
+//! - **Out:** `item show` prints a concealed field as `********` unless `--reveal` is given,
+//!   and every past password of its password history (ADR 0018 §7) the same way.
 //!   `generate` and `totp` print what they were asked for. `signup`, `secret-key` and
 //!   `recovery complete` print the Emergency Kit once, `2fa enable` the 2FA secret once.
 //!   Nothing else prints a secret, and no error or note ever does.
@@ -46,6 +47,7 @@ use rizzy_client::export::gate::{ExportGate, PLAINTEXT_EXPORT_HOLD_MS, check_exp
 use rizzy_client::export::plaintext::{
     PLAINTEXT_EXPORT_PHRASE, PLAINTEXT_EXPORT_WARNING, PlaintextExportAck, csv_export_warning,
 };
+use rizzy_client::history::HistorySource;
 use rizzy_client::items::{FieldEdit, FieldKey, ItemId, ItemLifecycle, ItemType, Value};
 use rizzy_client::lists::split_order_ops;
 use rizzy_client::rizzy_import::{self, Format};
@@ -59,7 +61,8 @@ use rizzy_core::generator::{
 };
 use rizzy_core::ids::DeviceId;
 use rizzy_core::item::schema::{
-    Concealment, Expected, ITEM_NAME, KeyClass, LIST_FIELD, LIST_URI, LOGIN_TOTP, classify,
+    Concealment, Expected, ITEM_NAME, KeyClass, LIST_FIELD, LIST_PWHIST, LIST_URI, LOGIN_TOTP,
+    classify,
 };
 use rizzy_core::item::tag::{tag_key, tag_name};
 use rizzy_core::item::value::ValueRef;
@@ -374,6 +377,33 @@ fn item_list(device: &Device, ui: &mut dyn Ui, trash: bool) -> Result<(), CliErr
     Ok(())
 }
 
+/// A Unix time in milliseconds as `YYYY-MM-DD HH:MM UTC` (the proleptic Gregorian calendar;
+/// Howard Hinnant's `civil_from_days`).
+fn utc_time(ms: u64) -> String {
+    let secs = ms / 1000;
+    let days = secs / 86_400;
+    let (hour, minute) = ((secs % 86_400) / 3600, (secs % 3600) / 60);
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z % 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + u64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
+}
+
+/// The device a notice names: `this device`, or its id.
+fn device_label(device: &Device, id: DeviceId) -> String {
+    if id == device.state().device_id() {
+        "this device".to_owned()
+    } else {
+        format!("device {}", hex(id.as_bytes()))
+    }
+}
+
 /// `item show`.
 fn item_show(device: &Device, ui: &mut dyn Ui, item: &str, reveal: bool) -> Result<(), CliError> {
     let vault = device.vault();
@@ -383,10 +413,23 @@ fn item_show(device: &Device, ui: &mut dyn Ui, item: &str, reveal: bool) -> Resu
     if vault.item_lifecycle(item) == ItemLifecycle::Trashed {
         ui.print("state: in the trash")?;
     }
+    // "Deleted on X while it was being edited on Y" (ADR 0012 §5).
+    if let Some(conflict) = vault.trash_conflict(item) {
+        ui.print(&format!(
+            "note:  deleted on {} ({}) while it was being edited on {}; the edit kept the item",
+            device_label(device, conflict.trashed_by),
+            utc_time(conflict.trashed_at_ms),
+            device_label(device, conflict.edited_by),
+        ))?;
+    }
     for key in vault.field_keys(item) {
         let Ok(parsed) = FieldKey::parse(key.as_bytes()) else {
             continue;
         };
+        // Imported password history is printed with the password history below.
+        if parsed.as_key().list() == Some(LIST_PWHIST) {
+            continue;
+        }
         let Some(value) = vault.field_value(item, &key) else {
             continue;
         };
@@ -420,6 +463,27 @@ fn item_show(device: &Device, ui: &mut dyn Ui, item: &str, reveal: bool) -> Resu
         }
         let ids: Vec<&str> = elements.iter().map(|e| e.element.as_str()).collect();
         let line = Zeroizing::new(format!("order of {list}: {}", ids.join(" ")));
+        ui.print(&line)?;
+    }
+    // The password history (ADR 0018 §7), newest first, concealed as the password is.
+    let history = vault.password_history(item);
+    if !history.is_empty() {
+        ui.print("password history (newest first):")?;
+    }
+    for entry in &history {
+        let when = entry
+            .at_ms
+            .map_or_else(|| "date unknown".to_owned(), utc_time);
+        let source = match entry.source {
+            HistorySource::Edited => "",
+            HistorySource::Imported => ", imported",
+        };
+        let shown = if reveal {
+            show_value(&entry.value)
+        } else {
+            Zeroizing::new(CONCEALED.to_owned())
+        };
+        let line = Zeroizing::new(format!("  {when}{source}: {}", shown.as_str()));
         ui.print(&line)?;
     }
     Ok(())
@@ -1148,4 +1212,21 @@ async fn device_forget(env: &mut Env<'_>) -> Result<(), CliError> {
     delete_account_files(env, &account, lock)?;
     env.ui.note("Removed.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::utc_time;
+
+    #[test]
+    fn utc_time_is_the_gregorian_date() {
+        for (ms, text) in [
+            (0, "1970-01-01 00:00 UTC"),
+            (951_782_400_000, "2000-02-29 00:00 UTC"),
+            (1_790_000_000_000, "2026-09-21 14:13 UTC"),
+            (4_102_444_740_000, "2099-12-31 23:59 UTC"),
+        ] {
+            assert_eq!(utc_time(ms), text);
+        }
+    }
 }

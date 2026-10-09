@@ -51,6 +51,8 @@
 //! | [`passkey`] | ADR 0039 §2; `THREAT_MODEL.md` INV-64 | Checking a `WebAuthn` `rpId` against the browser-verified origin, over `rizzy-match`'s PSL |
 //! | [`sync`] | ADR 0012 §4, §7; ADR 0018 §3, §10; ADR 0021 §2, §4, §9 | The sync driver of one vault |
 //! | [`items`] | ADR 0018 §2, §6–§9; ADR 0012 §5; ADR 0027 §2 steps 3–5 | Item create, edit, trash, restore, purge and reads; the import path, which splits an item over a create op and the ops that follow |
+//! | [`trash`] | ADR 0012 §5; ADR 0018 §3 "Surfacing", §9, §11; ADR 0022 | The automatic purge after the retention period; the late-edit and concurrent-trash notices; restoring late values as a new item |
+//! | [`history`] | ADR 0012 §5; ADR 0018 §3 "History", §7 | An item's password history: the history of `login.password` and the imported `pwhist` list |
 //! | [`lists`] | ADR 0018 §6 "List elements", "List order" | The writes that add, edit and remove URIs, custom fields, password-history entries and tags of an item |
 //! | [`export`] | CRYPTO.md §11.14 | The encrypted export file writer and bounded reader |
 //! | [`export::payload`] | ADR 0027 §1–§2 | The export payload: encoding, bounded reader, import of our own export as new items |
@@ -103,6 +105,7 @@ pub mod device;
 pub mod error;
 pub mod export;
 pub mod healing;
+pub mod history;
 pub mod items;
 pub mod lists;
 pub mod login;
@@ -115,6 +118,7 @@ pub mod session;
 pub mod signup;
 pub mod store;
 pub mod sync;
+pub mod trash;
 pub mod two_factor;
 pub mod unlock;
 mod wire;

@@ -1365,7 +1365,7 @@ pub(crate) struct OwnChange<'a> {
 
 impl VaultSync {
     /// Whether the client holds an unapplied record of `item` (ADR 0018 §11: no purge then).
-    fn holds_unapplied(&self, item: ItemId) -> bool {
+    pub(crate) fn holds_unapplied(&self, item: ItemId) -> bool {
         self.log.waiting().iter().any(|w| w.item_id == item)
     }
 
@@ -1994,6 +1994,16 @@ impl VaultSync {
     /// The merge of `item`, if any op reached it.
     pub(crate) fn merge(&self, item: ItemId) -> Option<&ItemMerge> {
         self.items.get(&item)
+    }
+
+    /// Marks the late values of `item`'s tombstone as surfaced ([`ItemMerge::mark_surfaced`]):
+    /// local presentation, in memory only (ADR 0018 §3 "Surfacing"). `false` when no op
+    /// reached the item.
+    pub(crate) fn mark_surfaced(&mut self, item: ItemId) -> bool {
+        self.items.get_mut(&item).is_some_and(|merge| {
+            merge.mark_surfaced();
+            true
+        })
     }
 
     /// Every item's merge, ascending by item id (the order of an export payload, ADR 0027 §1).

@@ -1005,6 +1005,26 @@ fn rv_end_to_end() {
     b.ok(&["sync"], &[]);
     assert_eq!(b.field(&mail, "login.password"), "settled");
 
+    // The password history (ADR 0018 §7): every replaced password, newest first, concealed
+    // unless `--reveal` is given.
+    let history = |s: &Script| -> Vec<String> {
+        s.out
+            .iter()
+            .skip_while(|l| !l.starts_with("password history"))
+            .skip(1)
+            .map(|l| l.rsplit_once(": ").unwrap().1.to_owned())
+            .collect()
+    };
+    let concealed = b.ok(&["item", "show", &mail], &[]);
+    let shown = history(&concealed);
+    assert_eq!(shown.len(), 3, "{:?}", concealed.out);
+    assert!(shown.iter().all(|v| v == "********"));
+    let revealed = history(&b.ok(&["item", "show", &mail, "--reveal"], &[]));
+    for old in ["hunter2", "from-a", "from-b"] {
+        assert!(revealed.iter().any(|v| v == old), "{revealed:?}");
+    }
+    assert!(!revealed.iter().any(|v| v == "settled"));
+
     // Trash, restore, purge.
     a.ok(&["item", "trash", &plan], &[]);
     assert_eq!(a.items().len(), 1);

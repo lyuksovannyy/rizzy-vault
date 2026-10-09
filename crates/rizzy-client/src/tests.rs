@@ -2079,6 +2079,7 @@ mod healing;
 mod lists;
 mod rotation;
 mod store;
+mod trash;
 
 /// ADR 0018 §6 "List elements", "List order": URIs and custom fields of an existing item are
 /// added after the last element, edited by key, and removed by clearing every attribute the

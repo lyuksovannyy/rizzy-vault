@@ -147,6 +147,7 @@ use rizzy_client::store::record::{DeviceRecord, Stage};
 use rizzy_client::store::rows::{Alarm, Changeset, Write};
 use rizzy_client::store::{self};
 use rizzy_client::sync::{Authors, VaultSync};
+use rizzy_client::trash::DEFAULT_TRASH_RETENTION_MS;
 use rizzy_client::unlock::{
     account_state_query, apply_device_grants, identity_change_fingerprint, verify_unlock,
 };
@@ -1175,7 +1176,7 @@ impl Device {
 
     /// Online, then Fetch, restore healing when the server is behind (`heal`), upload, Fetch:
     /// the device holds what the server holds and the server holds what the device wrote
-    /// (ADR 0025 §2 step 1; ADR 0021 §9).
+    /// (ADR 0025 §2 step 1; ADR 0021 §9). Then the automatic purge ([`Device::purge_expired`]).
     ///
     /// # Errors
     /// As [`Device::online`], [`Device::fetch`] and [`Device::upload`].
@@ -1183,6 +1184,34 @@ impl Device {
         self.online(ui).await?;
         self.fetch().await?;
         self.heal(ui).await?;
+        self.upload(ui).await?;
+        self.fetch().await?;
+        self.purge_expired(ui).await
+    }
+
+    /// The automatic purge after a sync that completed (ADR 0012 §5: "only clients purge",
+    /// once an item has been in the trash for the retention period; `rizzy_client::trash`):
+    /// purges every item trashed more than 30 days ago, commits the purges, and uploads them.
+    /// Nothing on a read-only device.
+    ///
+    /// # Errors
+    /// As [`Device::edit`], [`Device::fetch`] and [`Device::upload`].
+    async fn purge_expired(&mut self, ui: &mut dyn Ui) -> Result<(), CliError> {
+        if self.vault.is_read_only() || self.check_writable().is_err() {
+            return Ok(());
+        }
+        let purged = self
+            .edit(|vault, rng, unlocked, now| {
+                vault.purge_expired(rng, unlocked, now, DEFAULT_TRASH_RETENTION_MS)
+            })
+            .await?;
+        if purged.is_empty() {
+            return Ok(());
+        }
+        ui.note(&format!(
+            "Deleted {} item(s) for good that had been in the trash for 30 days.",
+            purged.len()
+        ));
         self.upload(ui).await?;
         self.fetch().await
     }

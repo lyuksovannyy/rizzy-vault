@@ -1,6 +1,7 @@
 // How the web vault lays out items: the fixed fields of each writable M1 item type (ADR 0018
 // §7), their labels, and the grouping of a field list into fixed fields, URIs, custom fields
-// and tags. Which fields are concealed is the core's answer (`FieldView.concealed`), never
+// and tags (imported password history, `pwhist`, is grouped apart for the history view).
+// Which fields are concealed is the core's answer (`FieldView.concealed`), never
 // this module's; `secret` below only picks the input used to *type* a new value.
 import type { FieldView, ItemChange, ItemType } from "@rizzy-vault/core";
 
@@ -132,6 +133,10 @@ export interface Grouped {
    * for those, `apps/extension/src/core-host/bindings.ts`'s `StoredPasskey` doc has the same
    * note): only `rp_id`/`created_ms`/`alg`/`discoverable` ever carry a displayable value. */
   readonly passkeys: readonly Element[];
+  /** `pwhist/<id>/…` elements, password history imported from another manager (ADR 0018 §7).
+   * The item view shows them in its password history, through the core's `passwordHistory`
+   * (with the history of `login.password`), never as raw fields. */
+  readonly pwhist: readonly Element[];
   readonly tags: readonly string[];
   /** Fields of other lists or unknown keys, shown as they are. */
   readonly other: readonly FieldView[];
@@ -148,7 +153,7 @@ export function group(fields: readonly FieldView[]): Grouped {
     if (f.tag !== undefined) {
       tags.push(f.tag);
     } else if (f.list !== undefined && f.element !== undefined && f.attribute !== undefined) {
-      if (f.list === "uri" || f.list === "field" || f.list === "passkey") {
+      if (f.list === "uri" || f.list === "field" || f.list === "passkey" || f.list === "pwhist") {
         const id = `${f.list}/${f.element}`;
         let e = elements.get(id);
         if (e === undefined) {
@@ -172,6 +177,7 @@ export function group(fields: readonly FieldView[]): Grouped {
     uris: all.filter((e) => e.list === "uri"),
     custom: all.filter((e) => e.list === "field"),
     passkeys: all.filter((e) => e.list === "passkey"),
+    pwhist: all.filter((e) => e.list === "pwhist"),
     tags,
     other,
   };

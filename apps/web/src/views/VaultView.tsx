@@ -41,6 +41,7 @@ import type { SessionInfo } from "../protocol.ts";
 import { shortcutFor } from "../shortcuts.ts";
 import { GeneratorPane } from "./GeneratorPane.tsx";
 import { ItemsPane, type Scope } from "./ItemsPane.tsx";
+import { LateEditNotices } from "./LateEditNotices.tsx";
 import { SettingsView } from "./SettingsView.tsx";
 import { ShortcutsHelp } from "./ShortcutsHelp.tsx";
 import { TransferPane } from "./TransferPane.tsx";
@@ -450,6 +451,7 @@ export function VaultView(props: {
           </div>
         </header>
         <ErrorText code={syncError} />
+        <LateEditNotices ctx={ctx} />
         <section className="vault-body">
           {section === "items" && (
             <ItemsPane ctx={ctx} trash={false} scope={scope} newItemSignal={newItemSignal} />
