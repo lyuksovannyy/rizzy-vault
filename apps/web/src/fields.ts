@@ -127,6 +127,11 @@ export interface Grouped {
   readonly favorite: boolean;
   readonly uris: readonly Element[];
   readonly custom: readonly Element[];
+  /** `passkey/<id>/…` elements (ADR 0039 §1) — never exposes `user_handle`/`credential_id`/
+   * `public_key_cose` as text (they are `kind: "bytes"`, `FieldView.value` always `undefined`
+   * for those, `apps/extension/src/core-host/bindings.ts`'s `StoredPasskey` doc has the same
+   * note): only `rp_id`/`created_ms`/`alg`/`discoverable` ever carry a displayable value. */
+  readonly passkeys: readonly Element[];
   readonly tags: readonly string[];
   /** Fields of other lists or unknown keys, shown as they are. */
   readonly other: readonly FieldView[];
@@ -143,7 +148,7 @@ export function group(fields: readonly FieldView[]): Grouped {
     if (f.tag !== undefined) {
       tags.push(f.tag);
     } else if (f.list !== undefined && f.element !== undefined && f.attribute !== undefined) {
-      if (f.list === "uri" || f.list === "field") {
+      if (f.list === "uri" || f.list === "field" || f.list === "passkey") {
         const id = `${f.list}/${f.element}`;
         let e = elements.get(id);
         if (e === undefined) {
@@ -166,6 +171,7 @@ export function group(fields: readonly FieldView[]): Grouped {
     favorite,
     uris: all.filter((e) => e.list === "uri"),
     custom: all.filter((e) => e.list === "field"),
+    passkeys: all.filter((e) => e.list === "passkey"),
     tags,
     other,
   };

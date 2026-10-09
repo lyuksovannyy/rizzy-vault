@@ -72,6 +72,24 @@ describe("group", () => {
     expect(g.tags).toEqual(["work"]);
     expect(g.other.map((x) => x.key)).toEqual(["pwhist/c/value"]);
   });
+
+  // ADR 0039 §1's `passkey/<id>/…` list: grouped the same way as `uri`/`field`, by element id —
+  // never left to fall into `other` (`fields.ts`'s own `Grouped.passkeys` doc). The Bytes
+  // attributes (`user_handle`, `credential_id`, `public_key_cose`) carry no text value at all
+  // (`FieldView.value` is always `undefined` for `kind: "bytes"`, `crates/rizzy-wasm/src/
+  // items.rs`'s own "Bytes and order keys have no text"), so this test's bytes attribute uses
+  // `value: undefined` to match what the real core actually returns.
+  it("groups passkey/<id>/… fields by element, never into other", () => {
+    const g = group([
+      f("passkey/d/rp_id", { list: "passkey", element: "d", attribute: "rp_id", value: "example.com" }),
+      f("passkey/d/created_ms", { list: "passkey", element: "d", attribute: "created_ms", kind: "number", value: "1000" }),
+      f("passkey/d/credential_id", { list: "passkey", element: "d", attribute: "credential_id", kind: "bytes", value: undefined }),
+    ]);
+    expect(g.passkeys).toHaveLength(1);
+    expect(g.passkeys[0]?.attributes.get("rp_id")?.value).toBe("example.com");
+    expect(g.passkeys[0]?.attributes.get("created_ms")?.value).toBe("1000");
+    expect(g.other).toEqual([]);
+  });
 });
 
 describe("layout", () => {

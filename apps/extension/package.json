@@ -7,8 +7,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit && pnpm run build:chromium && pnpm run build:firefox",
-    "build:chromium": "vite build --mode chromium && vite build --mode chromium --config vite.content.config.ts",
-    "build:firefox": "vite build --mode firefox && vite build --mode firefox --config vite.content.config.ts",
+    "build:chromium": "vite build --mode chromium && RIZZY_CONTENT_ENTRY=content-script vite build --mode chromium --config vite.content.config.ts && RIZZY_CONTENT_ENTRY=passkey-relay vite build --mode chromium --config vite.content.config.ts && RIZZY_CONTENT_ENTRY=passkey-page-shim vite build --mode chromium --config vite.content.config.ts",
+    "build:firefox": "vite build --mode firefox && RIZZY_CONTENT_ENTRY=content-script vite build --mode firefox --config vite.content.config.ts && RIZZY_CONTENT_ENTRY=passkey-relay vite build --mode firefox --config vite.content.config.ts && RIZZY_CONTENT_ENTRY=passkey-page-shim vite build --mode firefox --config vite.content.config.ts",
     "typecheck": "tsc -p tsconfig.test.json --noEmit",
     "test": "vitest run",
     "e2e": "playwright test"

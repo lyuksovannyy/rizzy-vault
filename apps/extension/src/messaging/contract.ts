@@ -27,6 +27,22 @@ export const MAX_FIELDS_PER_REPORT = 64;
 export const MAX_CANDIDATES = 32;
 export const MAX_TITLE_LEN = 256;
 
+// --- Passkeys (ADR 0039 §2, ADR 0040's pattern applied to a passkey ceremony instead of a
+// fill) -------------------------------------------------------------------------------------
+/** Generous bound for a base64-encoded byte string crossing this boundary (challenge, user id,
+ * credential id): large enough for anything a real `WebAuthn` ceremony uses (a credential id is
+ * typically well under 1 KiB; this project's own are 32 bytes), small enough that a hostile page
+ * cannot use this field to smuggle an oversized payload through the one message type it can
+ * reach (`passkey_create_request`/`passkey_get_request`) before `validate.ts`'s own per-field
+ * check rejects it. Not independently verified against the `WebAuthn` spec's own limits ("U");
+ * this implementation's own, deliberately generous choice. */
+export const MAX_PASSKEY_BYTES_B64 = 2730; // base64 of 2048 raw bytes, rounded up to a multiple of 4
+export const MAX_RP_NAME_LEN = 256;
+export const MAX_USER_NAME_LEN = 256;
+export const MAX_RP_ID_LEN = 256;
+export const MAX_ALGS = 16;
+export const MAX_ALLOW_CREDENTIALS = 16;
+
 /** A field the content script found on the page (never includes the field's current value for
  * a password field; only for username-shaped fields, and only up to {@link MAX_FIELD_VALUE_LEN}). */
 export interface FieldDescriptor {
@@ -84,11 +100,53 @@ export interface CheckSavePromptMessage {
   readonly pageUrl: string;
 }
 
+/**
+ * The page's own `navigator.credentials.create({publicKey})` call, relayed by
+ * `content/passkey-relay.ts` (ADR 0039 §2) — never trusted for `origin`/`rpId` (those come only
+ * from `sender.tab.url` at the background, INV-64), but every *other* field here is legitimately
+ * page/RP-supplied data the ceremony needs regardless (the relying party's own `rp.name`,
+ * `user.id`/`user.name`/`user.displayName`, and its random `challenge`): there is nothing to
+ * "trust" about them beyond passing them through unmodified, the same way `fieldId`s or a saved
+ * URI's path are page data this project already forwards without needing a second source of
+ * truth for them. `rpIdHint` is the page's own optional `rp.id`; `core-host/content-handler.ts`
+ * defaults it to the verified origin's host when absent, exactly as a real browser's WebAuthn
+ * implementation does, before anything is handed to `createPasskey` (which itself enforces
+ * INV-64 in Rust). `algs` are the COSE algorithm ids out of `pubKeyCredParams`; a request with no
+ * `-7` (ES256) is never forwarded here at all — `passkey-relay.ts` resolves straight to the
+ * native fallback itself (this project supports no other algorithm yet, ADR 0039 §3).
+ */
+export interface PasskeyCreateRequestMessage {
+  readonly type: "passkey_create_request";
+  readonly pageUrl: string;
+  readonly rpIdHint?: string;
+  readonly rpName: string;
+  readonly userIdB64: string;
+  readonly userName: string;
+  readonly userDisplayName: string;
+  readonly challengeB64: string;
+  readonly algs: readonly number[];
+}
+
+/** The page's own `navigator.credentials.get({publicKey})` call, relayed the same way
+ * (`PasskeyCreateRequestMessage`'s own doc). `allowCredentialIdsB64` is the page's optional
+ * `allowCredentials` list (base64 credential ids); empty means "any discoverable credential for
+ * this `rpId`," which is how this project's own always-discoverable credentials (ADR 0039 §1,
+ * `discoverable` always `true`) are meant to be requested in the first place. */
+export interface PasskeyGetRequestMessage {
+  readonly type: "passkey_get_request";
+  readonly pageUrl: string;
+  readonly rpIdHint?: string;
+  readonly challengeB64: string;
+  readonly allowCredentialIdsB64: readonly string[];
+}
+
 export type FromContentScript =
   | FieldsDetectedMessage
   | CredentialsSubmittedMessage
   | SavePromptResolvedMessage
-  | CheckSavePromptMessage;
+  | CheckSavePromptMessage
+  | PasskeyCreateRequestMessage
+  | PasskeyGetRequestMessage;
 
 /**
  * The user picked a candidate in the extension-origin inline menu, on a trusted gesture
@@ -119,6 +177,42 @@ export interface InlineMenuFillDispatchedMessage {
 }
 
 /**
+ * The user approved a pending passkey ceremony in the extension-origin consent UI
+ * (`passkey-consent/main.ts`), on a trusted gesture (INV-36) — sent **directly** to the
+ * long-lived context, never relayed by the content script, exactly mirroring
+ * {@link InlineMenuFillRequestMessage}'s own rationale (ADR 0040): a compromised content script
+ * cannot produce `sender.origin` equal to this extension's own, so `messaging/sender.ts`'s
+ * `isInlineMenuSender` check — reused as-is for this message too, since the sender class it
+ * tests for ("an extension-origin document embedded in a real http(s) tab") is identical for
+ * the inline-menu iframe and the passkey consent iframe — is what the background trusts, never
+ * this message's own claims. `ceremonyToken` is the one the background itself minted and handed
+ * back in the earlier `passkey_offer` answer (`core-host/passkey-ceremony.ts`'s own store);
+ * `chosenPasskeyRef` selects which offered candidate for a `get` ceremony (ignored, and
+ * irrelevant, for a `create`) — re-checked against that ceremony's own candidate list
+ * server-side (`isOfferedCandidate`), never trusted outright from this UI.
+ */
+export interface PasskeyCeremonyApprovedMessage {
+  readonly type: "passkey_ceremony_approved";
+  readonly ceremonyToken: string;
+  readonly chosenPasskeyRef?: string;
+}
+
+/** The user declined, in the same consent UI, on the same trusted-gesture requirement. */
+export interface PasskeyCeremonyDeclinedMessage {
+  readonly type: "passkey_ceremony_declined";
+  readonly ceremonyToken: string;
+}
+
+export type PasskeyCeremonyMessage = PasskeyCeremonyApprovedMessage | PasskeyCeremonyDeclinedMessage;
+
+/** Acknowledges a {@link PasskeyCeremonyMessage}: never carries the credential itself (same
+ * rule as {@link InlineMenuFillDispatchedMessage}) — the real result, or the fallback signal,
+ * goes straight to the content script's tab as {@link ApplyPasskeyResultMessage}. */
+export interface PasskeyCeremonyDispatchedMessage {
+  readonly type: "passkey_ceremony_dispatched";
+}
+
+/**
  * The long-lived context pushes this to the one content script tab that hosted the inline-menu
  * iframe whose {@link InlineMenuFillRequestMessage} it just approved (`ext.tabs.sendMessage`,
  * never a reply to anything the content script itself sent) — only the chosen item's own
@@ -130,6 +224,49 @@ export interface InlineMenuFillDispatchedMessage {
 export interface ApplyFillMessage {
   readonly type: "apply_fill";
   readonly values: { readonly username?: string; readonly password: string };
+}
+
+/**
+ * Everything one WebAuthn ceremony's successful result hands back to the page (ADR 0039 §2),
+ * every byte field base64-encoded for this message boundary (`messaging/bytes.ts`'s own doc on
+ * why). `attestationObjectB64` is set only for a `create`; `authenticatorDataB64`/`signatureB64`/
+ * `userHandleB64` only for a `get` — mirroring `rizzy-wasm`'s own `CreatedPasskey`/
+ * `PasskeyAssertion` split, never merged into one looser shape that could carry the wrong half.
+ */
+export interface PasskeyResultPayload {
+  readonly credentialIdB64: string;
+  readonly clientDataJsonB64: string;
+  readonly attestationObjectB64?: string;
+  readonly authenticatorDataB64?: string;
+  readonly signatureB64?: string;
+  readonly userHandleB64?: string;
+}
+
+/**
+ * Pushed to the one tab that hosted the consent UI for `ceremonyToken` (`core-host/
+ * content-handler.ts`'s `handlePasskeyCeremonyApproval`/decline/expiry paths — never a reply to
+ * anything the content script itself sent, same shape as {@link ApplyFillMessage}): `"ok"` with
+ * `result` for an approved ceremony; `"fallback"` with no `result` for a decline, a timeout, an
+ * expired/unknown/mismatched-binding token, or any failure along the way. `passkey-relay.ts`
+ * maps `ceremonyToken` back to the page-world shim's own pending promise and either resolves it
+ * with `result` or calls the browser's native `navigator.credentials` method with the original
+ * options (ADR 0039 §2's "Decline, timeout or no match" rule) — never anything in between.
+ */
+export interface ApplyPasskeyResultMessage {
+  readonly type: "apply_passkey_result";
+  readonly ceremonyToken: string;
+  readonly outcome: "ok" | "fallback";
+  readonly result?: PasskeyResultPayload;
+}
+
+/** Chromium-only internal relay for {@link ApplyPasskeyResultMessage}, exactly mirroring
+ * {@link RelayApplyFillMessage}'s own doc (a `chrome.offscreen` document has no `chrome.tabs`). */
+export interface RelayPasskeyResultMessage {
+  readonly type: "relay_passkey_result";
+  readonly tabId: number;
+  readonly ceremonyToken: string;
+  readonly outcome: "ok" | "fallback";
+  readonly result?: PasskeyResultPayload;
 }
 
 /**
@@ -181,6 +318,40 @@ export interface SavePromptOfferedMessage {
   readonly itemTitle?: string;
 }
 
+/** One stored passkey offered as a `get`-ceremony candidate: title/username only, never a
+ * credential id or any other secret-adjacent byte string (ADR 0013 §3 rule 3's "list views
+ * never carry more than title/username," applied to passkeys). `passkeyRef` is opaque
+ * (`core-host/passkey-ceremony.ts`'s own doc); the consent UI never does anything with it but
+ * echo it back in {@link PasskeyCeremonyApprovedMessage}. */
+export interface PasskeyCandidateSummary {
+  readonly passkeyRef: string;
+  readonly itemTitle: string;
+  readonly userName: string;
+}
+
+/**
+ * Answers a {@link PasskeyCreateRequestMessage}/{@link PasskeyGetRequestMessage} that passed
+ * every check content-handler.ts runs before a consent prompt is even shown (HTTPS origin, top
+ * frame, ES256 requested, device unlocked, and — for `get` — at least one candidate). Carries no
+ * secret: just enough to render "Save a passkey for `rpName` as `userName`?" or "Sign in to
+ * `rpId` — pick an account" (ADR 0039 §2's consent requirement). The content script relays this
+ * to the consent iframe (`passkey-consent/protocol.ts`), never acts on it itself — there is
+ * nothing in here for it to act on besides display.
+ */
+export interface PasskeyOfferMessage {
+  readonly type: "passkey_offer";
+  readonly ceremonyToken: string;
+  readonly kind: "create" | "get";
+  readonly rpId: string;
+  /** Set for `create` only. */
+  readonly rpName?: string;
+  /** Set for `create` only. */
+  readonly userName?: string;
+  /** Set for `get` only; always at least one entry (content-handler.ts refuses the request with
+   * {@link ContentErrorMessage} rather than ever offering an empty list). */
+  readonly candidates?: readonly PasskeyCandidateSummary[];
+}
+
 /** An explicit failure answer (e.g. the device is locked, or — for
  * {@link InlineMenuFillRequestMessage} — the claimed `itemId` is not a current candidate, or an
  * equivalence-only candidate without `confirmedEquivalence`): distinct from a success message so
@@ -213,11 +384,16 @@ export type ToContentScript =
   | SavePromptOfferedMessage
   | SavePromptDoneMessage
   | NoPendingSavePromptMessage
+  | PasskeyOfferMessage
   | ContentErrorMessage;
 
 /** `core-host/listener.ts`'s answer to an {@link InlineMenuFillRequestMessage} — never a
  * success-plus-values shape; see {@link InlineMenuFillDispatchedMessage}'s own doc for why. */
 export type InlineMenuFillResponse = InlineMenuFillDispatchedMessage | ContentErrorMessage;
+
+/** `core-host/listener.ts`'s answer to a {@link PasskeyCeremonyMessage} — same
+ * never-the-secret-itself rule, see {@link PasskeyCeremonyDispatchedMessage}'s own doc. */
+export type PasskeyCeremonyResponse = PasskeyCeremonyDispatchedMessage | ContentErrorMessage;
 
 function isBoundedString(value: unknown, maxLen: number): value is string {
   return typeof value === "string" && value.length <= maxLen;
@@ -234,6 +410,23 @@ export function isInlineMenuFillRequestMessage(value: unknown): value is InlineM
   }
   const v = value as Record<string, unknown>;
   return v["type"] === "inline_menu_fill_chosen" && isBoundedString(v["itemId"], 256) && typeof v["confirmedEquivalence"] === "boolean";
+}
+
+/** Validates a raw message claimed to be a {@link PasskeyCeremonyMessage} — only
+ * `core-host/listener.ts` calls this, and only once `isInlineMenuSender` has already vouched for
+ * the sender (same gate as {@link isInlineMenuFillRequestMessage}'s own doc explains). */
+export function isPasskeyCeremonyMessage(value: unknown): value is PasskeyCeremonyMessage {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  if (!isBoundedString(v["ceremonyToken"], 256)) {
+    return false;
+  }
+  if (v["type"] === "passkey_ceremony_declined") {
+    return true;
+  }
+  return v["type"] === "passkey_ceremony_approved" && (v["chosenPasskeyRef"] === undefined || isBoundedString(v["chosenPasskeyRef"], 256));
 }
 
 /** Shared by {@link isApplyFillMessage} and {@link isRelayApplyFillMessage}: both carry the
@@ -270,6 +463,52 @@ export function isRelayApplyFillMessage(value: unknown): value is RelayApplyFill
   }
   const v = value as Record<string, unknown>;
   return v["type"] === "relay_apply_fill" && typeof v["tabId"] === "number" && isFillValues(v["values"]);
+}
+
+function isPasskeyResultPayload(value: unknown): value is PasskeyResultPayload {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  if (!isBoundedString(v["credentialIdB64"], MAX_PASSKEY_BYTES_B64) || !isBoundedString(v["clientDataJsonB64"], MAX_PASSKEY_BYTES_B64)) {
+    return false;
+  }
+  for (const key of ["attestationObjectB64", "authenticatorDataB64", "signatureB64", "userHandleB64"] as const) {
+    if (v[key] !== undefined && !isBoundedString(v[key], MAX_PASSKEY_BYTES_B64)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isPasskeyOutcomeShape(v: Record<string, unknown>): boolean {
+  if (!isBoundedString(v["ceremonyToken"], 256)) {
+    return false;
+  }
+  if (v["outcome"] === "fallback") {
+    return v["result"] === undefined;
+  }
+  return v["outcome"] === "ok" && isPasskeyResultPayload(v["result"]);
+}
+
+/** Validates a raw message claimed to be an {@link ApplyPasskeyResultMessage} — checked by
+ * `passkey-relay.ts` before use, same reasoning as {@link isApplyFillMessage}'s own doc. */
+export function isApplyPasskeyResultMessage(value: unknown): value is ApplyPasskeyResultMessage {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  return v["type"] === "apply_passkey_result" && isPasskeyOutcomeShape(v);
+}
+
+/** Validates a raw message claimed to be a {@link RelayPasskeyResultMessage} — checked by
+ * `background/service-worker.ts`, mirroring {@link isRelayApplyFillMessage}. */
+export function isRelayPasskeyResultMessage(value: unknown): value is RelayPasskeyResultMessage {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  return v["type"] === "relay_passkey_result" && typeof v["tabId"] === "number" && isPasskeyOutcomeShape(v);
 }
 
 /** The service worker's internal forward of a validated content-script message to the
@@ -360,6 +599,14 @@ export const MESSAGE_TYPES = [
   "inline_menu_fill_dispatched",
   "apply_fill",
   "relay_apply_fill",
+  "passkey_create_request",
+  "passkey_get_request",
+  "passkey_offer",
+  "passkey_ceremony_approved",
+  "passkey_ceremony_declined",
+  "passkey_ceremony_dispatched",
+  "apply_passkey_result",
+  "relay_passkey_result",
   "candidates",
   "save_prompt",
   "save_prompt_done",

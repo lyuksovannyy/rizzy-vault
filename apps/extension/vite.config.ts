@@ -40,6 +40,7 @@ export default defineConfig(({ mode }) => {
     "src/popup/index": entry("./src/popup/index.html"),
     "src/options/index": entry("./src/options/index.html"),
     "src/inline-menu/index": entry("./src/inline-menu/index.html"),
+    "src/passkey-consent/index": entry("./src/passkey-consent/index.html"),
   };
   if (target === "chromium") {
     input["src/background/service-worker"] = entry("./src/background/service-worker.ts");

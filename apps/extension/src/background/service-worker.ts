@@ -17,8 +17,8 @@
 import { webext } from "../types/runtime-api.ts";
 import { MessageRejected, parseFromContentScript } from "../messaging/validate.ts";
 import { SenderRejected, isContentScriptSender, trustedOriginOf } from "../messaging/sender.ts";
-import { isRelayApplyFillMessage } from "../messaging/contract.ts";
-import type { ApplyFillMessage, ContentScriptForward, ToContentScript } from "../messaging/contract.ts";
+import { isRelayApplyFillMessage, isRelayPasskeyResultMessage } from "../messaging/contract.ts";
+import type { ApplyFillMessage, ApplyPasskeyResultMessage, ContentScriptForward, ToContentScript } from "../messaging/contract.ts";
 import { isEnsureCoreMessage } from "./ensure-core.ts";
 
 // Relative to the extension root (`dist/<target>/`), matching `vite.config.ts`'s output
@@ -112,7 +112,26 @@ ext.runtime.onMessage.addListener((message, sender, sendResponse) => {
         .catch(() => sendResponse({ ok: false }));
       return true;
     }
-    // Not `ensure_core` or the relay either: nothing for the router to do.
+    // {@link pushApplyPasskeyResult}'s relay (`content-handler.ts`'s own doc), the exact same
+    // shape and sender check as the `relay_apply_fill` branch above.
+    if (isRelayPasskeyResultMessage(message) && sender.id === ext.runtime.id && sender.tab === undefined) {
+      const tabs = ext.tabs;
+      if (tabs === undefined) {
+        sendResponse({ ok: false });
+        return true;
+      }
+      void tabs
+        .sendMessage(message.tabId, {
+          type: "apply_passkey_result",
+          ceremonyToken: message.ceremonyToken,
+          outcome: message.outcome,
+          ...(message.result !== undefined ? { result: message.result } : {}),
+        } satisfies ApplyPasskeyResultMessage)
+        .then(() => sendResponse({ ok: true }))
+        .catch(() => sendResponse({ ok: false }));
+      return true;
+    }
+    // Not `ensure_core` or either relay: nothing for the router to do.
     return undefined;
   }
   void (async () => {

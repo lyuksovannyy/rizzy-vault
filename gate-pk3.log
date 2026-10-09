@@ -1,0 +1,19 @@
+EXIT 0 :: env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps --locked
+EXIT 0 :: cargo xtask build-wasm
+EXIT 0 :: pnpm install --frozen-lockfile
+EXIT 0 :: cargo xtask check-js
+EXIT 0 :: pnpm run lint
+EXIT 0 :: pnpm run build
+EXIT 0 :: cargo build --locked -p rizzy-server --bin rizzy-vault
+EXIT 0 :: pnpm run test
+packages/ui test:  Test Files  3 passed (3)
+packages/ui test:       Tests  17 passed (17)
+packages/core test:  Test Files  4 passed (4)
+packages/core test:       Tests  39 passed (39)
+apps/extension test:  Test Files  18 passed (18)
+apps/extension test:       Tests  225 passed (225)
+apps/web test:  Test Files  17 passed (17)
+apps/web test:       Tests  108 passed (108)
+EXIT 0 :: pnpm run e2e
+  11 passed (30.4s)
+GATE-DONE

@@ -10,24 +10,42 @@ import { generatePassphraseWithOptions, generatePasswordWithOptions, registrable
 import { readAccountConfig, saveAccountConfig } from "./account-config.ts";
 import { createSavePromptLocationIndex } from "./save-prompt-location.ts";
 import {
+  type AddPasskeyInput,
   type DurableSession,
   type MatchCandidate,
   type MatchFrameInfo,
+  addPasskeyChange,
   cacheStoreNames,
+  createPasskey,
   decideCandidates,
   enrolDevice,
   findItemForUpdate,
   initCore,
   itemCredentials,
+  newElementId,
   newLoginChangeset,
+  newLoginWithPasskeyChangeset,
+  sessionPasskeyCandidatesForRpId,
   toContractItemSummary,
   unlockDevice,
   updateLoginChangeset,
 } from "./bindings.ts";
 import { ExtensionCache } from "../cache/idb.ts";
 import { AutoLockTimer, readAutoLockMs } from "./lifecycle.ts";
+import {
+  type PasskeyCeremonyRequest,
+  createPasskeyCeremonyStore,
+  isOfferedCandidate,
+} from "./passkey-ceremony.ts";
+import { base64ToBytes, bytesToBase64 } from "../messaging/bytes.ts";
 import { clearUnlockedSnapshot, hasSessionStorage, restoreUnlockedSnapshot } from "./session-store.ts";
-import type { ItemFieldSummary, PopupRequest, PopupResponse } from "../messaging/contract.ts";
+import type {
+  ItemFieldSummary,
+  PasskeyCandidateSummary,
+  PasskeyResultPayload,
+  PopupRequest,
+  PopupResponse,
+} from "../messaging/contract.ts";
 
 let session: DurableSession | undefined;
 let cache: ExtensionCache | undefined;
@@ -80,6 +98,7 @@ async function lock(ext: WebExtNamespace): Promise<void> {
   // gone anyway.
   pendingSavePrompts.clear();
   savePromptLocations.clear();
+  passkeyCeremonies.clear();
   if (hasSessionStorage(ext)) {
     await clearUnlockedSnapshot(ext);
   }
@@ -261,6 +280,219 @@ export function revealCredentialsForFill(itemId: string): { username?: string; p
   }
   const { username, password } = itemCredentials(session, itemId);
   return { ...(username !== "" ? { username } : {}), password };
+}
+
+/** The passkey consent ceremony's pending-request store (`core-host/passkey-ceremony.ts`'s own
+ * module docs) — cleared on lock, alongside every other in-memory secret-adjacent state this
+ * long-lived context holds (`lock`, above). */
+const passkeyCeremonies = createPasskeyCeremonyStore();
+
+/** `content-handler.ts`'s `passkey_create_request` handling (ADR 0039 §2): registers a pending
+ * "save a passkey" ceremony and returns what the consent UI needs to display, or `undefined`
+ * while locked — never calls {@link createPasskey} itself (module docs: that only happens once
+ * the user approves, `approvePasskeyCeremony`). `rpId` defaults to the verified origin's own
+ * host when the page supplied none (`rpIdHint`), matching how a real browser's own WebAuthn
+ * implementation resolves an absent `rp.id` — `createPasskey`'s own INV-64 check (Rust) is still
+ * what actually decides whether this `rpId` is allowed for `origin`, not this default.
+ */
+export function offerPasskeyCreate(
+  origin: string,
+  tabId: number,
+  rpIdHint: string | undefined,
+  rpName: string,
+  userIdB64: string,
+  userName: string,
+  userDisplayName: string,
+  challengeB64: string,
+): { readonly ceremonyToken: string; readonly rpId: string; readonly rpName: string; readonly userName: string } | undefined {
+  if (session === undefined) {
+    return undefined;
+  }
+  const rpId = rpIdHint ?? hostOf(origin);
+  if (rpId === undefined) {
+    return undefined;
+  }
+  const request: PasskeyCeremonyRequest = {
+    kind: "create",
+    origin,
+    rpId,
+    rpName,
+    userIdB64,
+    userName,
+    userDisplayName,
+    challengeB64,
+  };
+  const ceremonyToken = passkeyCeremonies.create(request, tabId, origin, Date.now());
+  return { ceremonyToken, rpId, rpName, userName };
+}
+
+/** `content-handler.ts`'s `passkey_get_request` handling: registers a pending "sign in with a
+ * passkey" ceremony with every candidate whose stored `rp_id` matches, or `undefined` while
+ * locked or when nothing matches (ADR 0039 §2's consent prompt needs at least one real choice —
+ * an empty list falls straight back to the native authenticator, `content-handler.ts`'s own
+ * decision, not this function's). */
+export function offerPasskeyGet(
+  origin: string,
+  tabId: number,
+  rpIdHint: string | undefined,
+  challengeB64: string,
+): { readonly ceremonyToken: string; readonly rpId: string; readonly candidates: readonly PasskeyCandidateSummary[] } | undefined {
+  if (session === undefined) {
+    return undefined;
+  }
+  const rpId = rpIdHint ?? hostOf(origin);
+  if (rpId === undefined) {
+    return undefined;
+  }
+  const matches = sessionPasskeyCandidatesForRpId(session, rpId);
+  if (matches.length === 0) {
+    return undefined;
+  }
+  const candidates: PasskeyCandidateSummary[] = matches.map((m) => ({
+    passkeyRef: `${m.itemId}:${m.elementId}`,
+    itemTitle: m.itemTitle,
+    userName: m.userName,
+  }));
+  const request: PasskeyCeremonyRequest = { kind: "get", origin, rpId, challengeB64, candidates };
+  const ceremonyToken = passkeyCeremonies.create(request, tabId, origin, Date.now());
+  return { ceremonyToken, rpId, candidates };
+}
+
+/** `origin`'s host, port excluded (`URL.hostname`, never `URL.host`, which includes a non-default
+ * port) — `rp_id` is never port-qualified (ADR 0037's "port is never part of the
+ * registrable-domain computation," which `rizzy_client::passkey::verify_rp_id`'s own `origin.
+ * host()` comparison relies on too): a mismatch here would make every default-`rpId` ceremony on
+ * a non-default port (every one of this project's own E2E tests, and most real sites on a
+ * dev/staging port) fail Rust's exact-host-match with a `rp_id` this function minted *with* a
+ * port — found while writing `e2e/passkey.spec.ts` against a real `https://localhost:<port>`
+ * test RP, not merely inferred. */
+function hostOf(origin: string): string | undefined {
+  try {
+    return new URL(origin).hostname;
+  } catch {
+    return undefined;
+  }
+}
+
+function splitPasskeyRef(passkeyRef: string): { readonly itemId: string; readonly elementId: string } | undefined {
+  const i = passkeyRef.indexOf(":");
+  if (i < 0) {
+    return undefined;
+  }
+  return { itemId: passkeyRef.slice(0, i), elementId: passkeyRef.slice(i + 1) };
+}
+
+/**
+ * `content-handler.ts`'s `passkey_ceremony_approved` handling: looks up and consumes
+ * `ceremonyToken` (single-use, and bound to `liveTabId`/`liveOrigin` — `passkey-ceremony.ts`'s
+ * own doc on why a navigation invalidates it), then runs the real ceremony — `createPasskey` +
+ * an immediate `createItem`/`editItem` for a `create`, or `DurableSession.passkeyAssertion` for
+ * a `get` — and returns the page-facing result. `undefined` means "fall back to the native
+ * authenticator": an unknown/expired/mismatched token, a locked device, or any failure along the
+ * way, never distinguished further to the caller (`core-host/content-handler.ts` always answers
+ * the content script with `apply_passkey_result`'s `outcome: "fallback"` either way — ADR 0039
+ * §2's "Decline, timeout or no match" rule treats every one of these the same).
+ */
+export async function approvePasskeyCeremony(
+  ceremonyToken: string,
+  liveTabId: number,
+  liveOrigin: string,
+  chosenPasskeyRef: string | undefined,
+): Promise<PasskeyResultPayload | undefined> {
+  const request = passkeyCeremonies.take(ceremonyToken, liveTabId, liveOrigin, Date.now());
+  if (request === undefined || session === undefined) {
+    return undefined;
+  }
+  try {
+    if (request.kind === "create") {
+      return await runCreatePasskey(session, request);
+    }
+    return runGetPasskey(session, request, chosenPasskeyRef);
+  } catch {
+    // Any failure (a Rust `rp_id_rejected`/`invalid_input`, a write error, a bad `passkeyRef`):
+    // fall back, never surface the raw error to the page (ADR 0039 §2 names no error channel
+    // back to the page at all — only "fallback to the native authenticator").
+    return undefined;
+  }
+}
+
+/** `content-handler.ts`'s `passkey_ceremony_declined` handling: single-use consume, same
+ * binding check, no further action — the caller still pushes `apply_passkey_result`'s
+ * `outcome: "fallback"` to the tab either way. */
+export function declinePasskeyCeremony(ceremonyToken: string, liveTabId: number, liveOrigin: string): void {
+  passkeyCeremonies.take(ceremonyToken, liveTabId, liveOrigin, Date.now());
+}
+
+async function runCreatePasskey(
+  s: DurableSession,
+  request: Extract<PasskeyCeremonyRequest, { kind: "create" }>,
+): Promise<PasskeyResultPayload> {
+  const created = createPasskey(request.origin, request.rpId, base64ToBytes(request.challengeB64));
+  const passkeyInput: AddPasskeyInput = {
+    elementId: newElementId(),
+    rpId: request.rpId,
+    userHandle: base64ToBytes(request.userIdB64),
+    credentialId: created.credentialId,
+    privateKey: created.privateKey,
+    publicKeyCose: created.publicKeyCose,
+    createdMs: Date.now(),
+  };
+  // ADR 0039 §1: attach to an existing Login for this `rpId` if the user already has one
+  // (`sessionPasskeyCandidatesForRpId`'s own exact-`rp_id` equality — the same relation a second
+  // passkey on that Login would need), otherwise save a brand-new Login, title defaulted from
+  // the RP's own display name, exactly as `newLoginChangeset` already defaults a saved-from-
+  // submit Login's title from the page's own host.
+  const existing = sessionPasskeyCandidatesForRpId(s, request.rpId)[0];
+  if (existing !== undefined) {
+    await s.editItem(existing.itemId, [addPasskeyChange(passkeyInput)]);
+  } else {
+    await s.createItem("login", newLoginWithPasskeyChangeset(request.rpName, request.userName, passkeyInput));
+  }
+  try {
+    // Pushes the new/updated Login to the server right away, rather than waiting for the popup
+    // to next open (the only other place this long-lived context syncs today) or for the next
+    // device's own pull: a passkey is only useful for signing in once it has actually left this
+    // one device. Best-effort: the local write above already succeeded (the credential this
+    // ceremony returns to the page is real and usable locally either way), so a sync failure
+    // here — offline, a server error — is swallowed, not surfaced as a ceremony failure the page
+    // would see as "fallback to the native authenticator," which would be misleading (the
+    // passkey *was* created).
+    await s.sync();
+  } catch {
+    // Not fatal (module doc above) — never logged with any item/credential detail (CLAUDE.md:
+    // never log secrets), and this catch intentionally has nothing else to do.
+  }
+  return {
+    credentialIdB64: bytesToBase64(created.credentialId),
+    clientDataJsonB64: bytesToBase64(created.clientDataJson),
+    attestationObjectB64: bytesToBase64(created.attestationObject),
+  };
+}
+
+function runGetPasskey(
+  s: DurableSession,
+  request: Extract<PasskeyCeremonyRequest, { kind: "get" }>,
+  chosenPasskeyRef: string | undefined,
+): PasskeyResultPayload | undefined {
+  if (chosenPasskeyRef === undefined || !isOfferedCandidate(request, chosenPasskeyRef)) {
+    return undefined;
+  }
+  const ref = splitPasskeyRef(chosenPasskeyRef);
+  if (ref === undefined) {
+    return undefined;
+  }
+  const assertion = s.passkeyAssertion(ref.itemId, ref.elementId, request.origin, request.rpId, base64ToBytes(request.challengeB64));
+  return {
+    credentialIdB64: bytesToBase64(assertion.credentialId),
+    clientDataJsonB64: bytesToBase64(assertion.clientDataJson),
+    authenticatorDataB64: bytesToBase64(assertion.authenticatorData),
+    signatureB64: bytesToBase64(assertion.signatureDer),
+    // `userHandle` is deliberately absent (`StoredPasskey`'s own doc, `bindings.ts`): no
+    // `@rizzy-vault/core` call returns it back once stored, only at creation time. Legal per the
+    // WebAuthn spec (`AuthenticatorAssertionResponse.userHandle` is nullable), but an RP that
+    // requires it for a fully "typeless" discoverable sign-in will not accept this response —
+    // `not_done`, reported honestly rather than worked around.
+  };
 }
 
 /** `content-handler.ts`'s `credentials_submitted` handling: offers "save" when no saved item

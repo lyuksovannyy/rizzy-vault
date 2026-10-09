@@ -14,15 +14,19 @@
 import {
   type CacheStore,
   type Clock,
+  type CreatedPasskey,
   type FieldView,
   type ItemChange,
   type ItemSummary,
   type MatchCandidate,
   type MatchFrameInfo,
   type MatchUriInput,
+  type PasskeyAssertionResult,
   DurableSession,
   MatchMode,
+  PASSKEY_ALG_ES256,
   cacheStoreNames,
+  createPasskey as coreCreatePasskey,
   decideMatchCandidates,
   enrolDevice as coreEnrolDevice,
   fetchTransport,
@@ -32,8 +36,128 @@ import {
   unlockDurableDevice,
 } from "@rizzy-vault/core";
 
-export type { CacheStore, Clock, DurableSession, FieldView, ItemChange, ItemSummary, MatchCandidate, MatchFrameInfo };
-export { MatchMode, cacheStoreNames, decideMatchCandidates, normalizePageUrl };
+export type { CacheStore, Clock, CreatedPasskey, DurableSession, FieldView, ItemChange, ItemSummary, MatchCandidate, MatchFrameInfo, PasskeyAssertionResult };
+export { MatchMode, PASSKEY_ALG_ES256, cacheStoreNames, decideMatchCandidates, newElementId, normalizePageUrl };
+
+/** `passkey/<id>/*` field-key parts (`crates/rizzy-core/src/item/schema.rs`'s `LIST_PASSKEY`/
+ * `ATTR_*` constants, mirrored here the same way `LOGIN_USERNAME_KEY` etc. already are — see
+ * this module's own module doc for why: `@rizzy-vault/core` exposes them only as string keys). */
+export const PASSKEY_LIST = "passkey";
+export const PASSKEY_ATTR_RP_ID = "rp_id";
+export const PASSKEY_ATTR_CREATED_MS = "created_ms";
+
+/** Runs `createPasskey` (ADR 0039 §2) — a pure, stateless core-host wrapper, so
+ * `content-handler.ts` never imports `@rizzy-vault/core` directly either (this module's own
+ * "host glue only" rule, top doc comment). */
+export function createPasskey(origin: string, rpId: string, challenge: Uint8Array): CreatedPasskey {
+  return coreCreatePasskey(origin, rpId, challenge);
+}
+
+/** One stored passkey's non-secret, re-derivable-from-`fields()` metadata — everything
+ * {@link sessionPasskeyCandidatesForRpId} and the web vault's own listing need, and nothing a
+ * `FieldView` of kind `"bytes"` could give anyway (`FieldView.value` is always `undefined` for a
+ * Bytes field — `crates/rizzy-wasm/src/items.rs`'s own "Bytes and order keys have no text" —
+ * which is also why this shape carries no `userHandle`/`credentialId`/`publicKeyCose`: there is
+ * no `@rizzy-vault/core` call today that returns those back out once stored, only at creation
+ * time, `not_done`, reported honestly rather than worked around by reaching past this package's
+ * API into wasm internals). */
+export interface StoredPasskey {
+  readonly elementId: string;
+  readonly rpId: string;
+  readonly createdMs: number;
+}
+
+/** Every `passkey/<id>/…` element of one item's `fields()` call, grouped by element id — the
+ * `uri`/`field` analogue is `itemUriFields`, just below. */
+export function itemPasskeyFields(fields: readonly FieldView[]): readonly StoredPasskey[] {
+  const byElement = new Map<string, { rpId?: string; createdMs?: number }>();
+  for (const field of fields) {
+    if (field.list !== PASSKEY_LIST || field.element === undefined || field.value === undefined) {
+      continue;
+    }
+    const entry = byElement.get(field.element) ?? {};
+    if (field.attribute === PASSKEY_ATTR_RP_ID) {
+      entry.rpId = field.value;
+    } else if (field.attribute === PASSKEY_ATTR_CREATED_MS) {
+      entry.createdMs = Number(field.value);
+    }
+    byElement.set(field.element, entry);
+  }
+  const out: StoredPasskey[] = [];
+  for (const [elementId, entry] of byElement) {
+    if (entry.rpId !== undefined) {
+      out.push({ elementId, rpId: entry.rpId, createdMs: entry.createdMs ?? 0 });
+    }
+  }
+  return out;
+}
+
+/** Every stored passkey, across every active item, whose `rp_id` exactly equals `rpId` (ADR
+ * 0039 §2: a `get` ceremony's candidate list for a `navigator.credentials.get()` call with no
+ * `allowCredentials`, or one this project's own API has no way to narrow further by credential
+ * id — `StoredPasskey`'s own doc on why). Exact string equality, not a PSL/suffix comparison:
+ * `rp_id` is already the resolved value `verify_rp_id` accepted at creation time (INV-64), so
+ * there is nothing left to re-derive here — the actual authority for "is this `rpId` allowed for
+ * the calling origin" stays in Rust, re-checked again on the assertion call itself
+ * (`DurableSession.passkeyAssertion`), never trusted from this list alone. */
+export function sessionPasskeyCandidatesForRpId(
+  session: DurableSession,
+  rpId: string,
+): ReadonlyArray<{ readonly itemId: string; readonly elementId: string; readonly itemTitle: string; readonly userName: string }> {
+  const out: Array<{ itemId: string; elementId: string; itemTitle: string; userName: string }> = [];
+  for (const item of session.items()) {
+    for (const passkey of itemPasskeyFields(session.fields(item.id))) {
+      if (passkey.rpId === rpId) {
+        out.push({ itemId: item.id, elementId: passkey.elementId, itemTitle: item.title, userName: item.username ?? "" });
+      }
+    }
+  }
+  return out;
+}
+
+export interface AddPasskeyInput {
+  readonly elementId: string;
+  readonly rpId: string;
+  readonly userHandle: Uint8Array;
+  readonly credentialId: Uint8Array;
+  readonly privateKey: Uint8Array;
+  readonly publicKeyCose: Uint8Array;
+  readonly createdMs: number;
+}
+
+/** The `createItem`/`editItem` changeset for ADR 0039 §1's `addPasskey` op — one place building
+ * it, so a future second passkey-writing caller (e.g. the web vault, if it ever creates one
+ * itself) cannot drift from this one's field choices. Always ES256 (`alg: PASSKEY_ALG_ES256`)
+ * and always discoverable (ADR 0039 §1: "every credential we create is... resident"), since
+ * `createPasskey` only ever produces that combination today. */
+export function addPasskeyChange(input: AddPasskeyInput): ItemChange {
+  return {
+    op: "addPasskey",
+    element: input.elementId,
+    rpId: input.rpId,
+    userHandle: input.userHandle,
+    credentialId: input.credentialId,
+    privateKey: input.privateKey,
+    publicKeyCose: input.publicKeyCose,
+    alg: PASSKEY_ALG_ES256,
+    discoverable: true,
+    createdMs: input.createdMs,
+  };
+}
+
+/** A new, title-defaulted Login changeset carrying one fresh passkey (ADR 0039 §1's "a passkey
+ * is... an alternative or additional credential for a site a user already has, or is creating, a
+ * Login item for" — the "creating" half: no existing Login matched this `rpId`, so
+ * `core-context.ts` saves a new one, title and username set from the ceremony's own RP/user data,
+ * exactly as {@link newLoginChangeset} defaults a saved-from-submit Login's title to the page's
+ * host). */
+export function newLoginWithPasskeyChangeset(title: string, username: string, passkey: AddPasskeyInput): readonly ItemChange[] {
+  return [
+    { op: "set", key: ITEM_NAME_KEY, value: title },
+    { op: "set", key: LOGIN_USERNAME_KEY, value: username },
+    addPasskeyChange(passkey),
+  ];
+}
 
 /** Fixed field keys (`crates/rizzy-core/src/item/schema.rs`), mirrored here because
  * `@rizzy-vault/core` exposes them only as string keys, never as named constants: `login.username`

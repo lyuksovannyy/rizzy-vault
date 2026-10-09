@@ -235,3 +235,45 @@ describe("installCoreContextListener: inline_menu_fill_chosen routing (ADR 0040)
     expect(sendResponse).toHaveBeenCalledWith(expect.objectContaining({ type: "content_error" }));
   });
 });
+
+// `passkey_ceremony_approved`/`passkey_ceremony_declined` (ADR 0039 §2) reuse the exact same
+// `isInlineMenuSender` gate as `inline_menu_fill_chosen` (`messaging/contract.ts`'s own doc on
+// why): a real content script can never reach `handlePasskeyCeremonyApproval` either, only the
+// extension-origin consent iframe can.
+describe("installCoreContextListener: passkey_ceremony routing (ADR 0039 §2, ADR 0040's pattern)", () => {
+  const approved = { type: "passkey_ceremony_approved", ceremonyToken: "tok-1" };
+
+  it("refuses a real content-script sender's passkey_ceremony_approved, even when acceptContentScripts is true", async () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: true });
+    const sendResponse = vi.fn();
+    const result = installedListener(ext)(approved, { id: EXT_ID, tab: { url: "https://example.com/login" } }, sendResponse);
+    expect(result).toBe(true);
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith(expect.objectContaining({ type: "content_error" })));
+  });
+
+  it("routes a genuine passkey-consent-iframe sender to the privileged handler", async () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: false });
+    const sendResponse = vi.fn();
+    const sender: WebExtMessageSender = { id: EXT_ID, origin: EXT_ORIGIN, tab: { id: 1, url: "https://example.com/login" } };
+    const result = installedListener(ext)(approved, sender, sendResponse);
+    expect(result).toBe(true);
+    // No pending ceremony exists in this test's fake extension, so `handlePasskeyCeremonyApproval`
+    // still answers an acknowledgement (never a secret) — proof this reached the privileged
+    // handler at all, same reasoning as the inline-menu-fill-request test above.
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ type: "passkey_ceremony_dispatched" }));
+  });
+
+  it("ignores a passkey-consent-iframe sender's ceremony message when acceptContentScripts is false and sender.tab is unset", () => {
+    // `sender.tab` unset means `isInlineMenuSender` cannot match (module docs: it needs a real
+    // http(s) tab to be embedded in) — falls through to `isOwnExtensionPage`, which also
+    // mishandles an unrecognised message shape as "nothing to do" (returns `undefined`).
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: false });
+    const sendResponse = vi.fn();
+    const result = installedListener(ext)(approved, { id: EXT_ID, origin: EXT_ORIGIN }, sendResponse);
+    expect(result).toBeUndefined();
+    expect(sendResponse).not.toHaveBeenCalled();
+  });
+});

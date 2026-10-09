@@ -23,11 +23,17 @@
       "js": ["src/content/content-script.js"],
       "all_frames": false,
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://*/*"],
+      "js": ["src/content/passkey-relay.js"],
+      "all_frames": false,
+      "run_at": "document_start"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["src/inline-menu/index.html"],
+      "resources": ["src/inline-menu/index.html", "src/passkey-consent/index.html", "src/content/passkey-page-shim.js"],
       "matches": ["http://*/*", "https://*/*"]
     }
   ],

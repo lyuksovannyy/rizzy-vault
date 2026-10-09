@@ -30,9 +30,9 @@ import {
   trustedOriginOf,
 } from "../messaging/sender.ts";
 import { MessageRejected, parseFromContentScript } from "../messaging/validate.ts";
-import { isInlineMenuFillRequestMessage } from "../messaging/contract.ts";
+import { isInlineMenuFillRequestMessage, isPasskeyCeremonyMessage } from "../messaging/contract.ts";
 import type { ContentScriptForward, PopupRequest, PopupResponse, ToContentScript } from "../messaging/contract.ts";
-import { handleContentScriptRequest, handleInlineMenuFillRequest } from "./content-handler.ts";
+import { handleContentScriptRequest, handleInlineMenuFillRequest, handlePasskeyCeremonyApproval } from "./content-handler.ts";
 import { handlePopupRequest, lockFromIdleState, startCoreContext } from "./core-context.ts";
 import { DEFAULT_AUTO_LOCK_MS } from "./lifecycle.ts";
 
@@ -115,10 +115,23 @@ export function installCoreContextListener(ext: WebExtNamespace, options: Instal
       // fill directly — the one sender this grants a decrypted credential to. `sender.tab.id`/
       // `.url` are the browser's own, for the real tab hosting the iframe; never anything the
       // message itself could claim (it carries no URL at all — see
-      // `InlineMenuFillRequestMessage`'s own doc for why).
+      // `InlineMenuFillRequestMessage`'s own doc for why). The passkey consent iframe
+      // (`passkey-consent/main.ts`) is a second, separate extension-origin iframe that reaches
+      // this exact same sender class — `messaging/contract.ts`'s `PasskeyCeremonyApprovedMessage`
+      // doc explains why `isInlineMenuSender` is reused as-is rather than duplicated.
       const tabId = sender.tab?.id;
       const tabUrl = sender.tab?.url;
-      if (tabId === undefined || tabUrl === undefined || !isInlineMenuFillRequestMessage(message)) {
+      if (tabId === undefined || tabUrl === undefined) {
+        sendResponse({ type: "content_error", code: "inline_menu_sender: no tab" } satisfies ToContentScript);
+        return true;
+      }
+      if (isPasskeyCeremonyMessage(message)) {
+        void handlePasskeyCeremonyApproval(ext, tabId, tabUrl, message)
+          .then(sendResponse)
+          .catch(() => sendResponse({ type: "content_error", code: "passkey_ceremony: failed" } satisfies ToContentScript));
+        return true;
+      }
+      if (!isInlineMenuFillRequestMessage(message)) {
         sendResponse({ type: "content_error", code: "inline_menu_fill_chosen: malformed request" } satisfies ToContentScript);
         return true;
       }

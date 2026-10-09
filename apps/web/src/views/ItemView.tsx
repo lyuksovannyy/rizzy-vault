@@ -8,7 +8,7 @@ import { ConfirmDialog, IconStarFilled, IconStarOutline, SecretField, TypeIcon, 
 import { useEffect, useId, useState } from "react";
 
 import { codeOf } from "../core-client.ts";
-import { type Grouped, group, labelOf, matchModeLabel } from "../fields.ts";
+import { type Element, type Grouped, group, labelOf, matchModeLabel } from "../fields.ts";
 import { SafeLink, SafeOpenButton } from "../SafeLink.tsx";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText, useAction } from "./common.tsx";
@@ -158,6 +158,39 @@ function TotpLine(props: { readonly ctx: VaultContext; readonly id: string }) {
   );
 }
 
+/** One stored passkey's display row (ADR 0039 §1; task: "rp, user name, created; no private
+ * key reveal"): `rp_id` and `created_ms` come straight off `rp_id`'s/`created_ms`'s own
+ * `FieldView.value` (both have a text form, unlike the Bytes fields this item also carries —
+ * `fields.ts`'s `Grouped.passkeys` doc); the "user name" shown alongside is this Login's own
+ * `summary.username` (the ADR's field table has no separate per-passkey display name, module
+ * doc in `apps/extension/src/core-host/bindings.ts`'s `StoredPasskey`). */
+function PasskeyLine(props: {
+  readonly element: Element;
+  readonly username: string | undefined;
+  readonly onDelete: () => void;
+  readonly disabled: boolean;
+}) {
+  const { element, username } = props;
+  const rpId = element.attributes.get("rp_id")?.value ?? "";
+  const createdMsText = element.attributes.get("created_ms")?.value;
+  const created = createdMsText !== undefined && createdMsText !== "" ? new Date(Number(createdMsText)) : undefined;
+  return (
+    <div className="field" data-passkey={element.element}>
+      <span className="field-label">Passkey</span>
+      <span className="field-value">
+        {rpId}
+        {username !== undefined && username !== "" ? ` (${username})` : ""}
+      </span>
+      {created !== undefined && <span className="muted small">Created {created.toLocaleDateString()}</span>}
+      <span className="field-actions">
+        <button type="button" className="secondary small" disabled={props.disabled} onClick={props.onDelete}>
+          Delete
+        </button>
+      </span>
+    </div>
+  );
+}
+
 /** The item view (module docs). `onWritten(gone)` after a write; `gone` if it left this list. */
 export function ItemView(props: {
   readonly ctx: VaultContext;
@@ -173,8 +206,9 @@ export function ItemView(props: {
   const titleId = useId();
   /** Which confirm dialog, if any, is open (module docs, item 2 of the redesign follow-up:
    * trash and purge both confirm, now through the accessible dialog rather than
-   * `window.confirm`). */
-  const [confirming, setConfirming] = useState<"trash" | "purge" | undefined>();
+   * `window.confirm`). `{ kind: "deletePasskey", element }` names which `passkey/<element>/…`
+   * row a "Delete" click targets (ADR 0039's own write path has no other way to identify one). */
+  const [confirming, setConfirming] = useState<{ readonly kind: "trash" | "purge" } | { readonly kind: "deletePasskey"; readonly element: string } | undefined>();
 
   useEffect(() => {
     let live = true;
@@ -266,6 +300,15 @@ export function ItemView(props: {
         const label = c.attributes.get("label")?.value ?? "Field";
         return v === undefined ? null : <FieldValue key={v.key} ctx={ctx} id={id} field={v} label={label} />;
       })}
+      {grouped.passkeys.map((p) => (
+        <PasskeyLine
+          key={p.element}
+          element={p}
+          username={summary.username}
+          disabled={busy}
+          onDelete={() => setConfirming({ kind: "deletePasskey", element: p.element })}
+        />
+      ))}
       {grouped.other.map((f) => (
         <FieldValue key={f.key} ctx={ctx} id={id} field={f} label={f.key} />
       ))}
@@ -290,7 +333,7 @@ export function ItemView(props: {
               >
                 Restore
               </button>
-              <button type="button" className="danger" disabled={busy} onClick={() => setConfirming("purge")}>
+              <button type="button" className="danger" disabled={busy} onClick={() => setConfirming({ kind: "purge" })}>
                 Delete for good
               </button>
             </>
@@ -299,7 +342,7 @@ export function ItemView(props: {
               <button type="button" disabled={busy} onClick={props.onEdit}>
                 Edit
               </button>
-              <button type="button" className="secondary" disabled={busy} onClick={() => setConfirming("trash")}>
+              <button type="button" className="secondary" disabled={busy} onClick={() => setConfirming({ kind: "trash" })}>
                 Move to trash
               </button>
             </>
@@ -307,7 +350,7 @@ export function ItemView(props: {
         </div>
       )}
       <ConfirmDialog
-        open={confirming === "trash"}
+        open={confirming?.kind === "trash"}
         titleId={`${titleId}-trash-title`}
         title="Move this item to trash?"
         description="You can restore it from the trash later, or delete it for good from there."
@@ -319,7 +362,7 @@ export function ItemView(props: {
         onCancel={() => setConfirming(undefined)}
       />
       <ConfirmDialog
-        open={confirming === "purge"}
+        open={confirming?.kind === "purge"}
         titleId={`${titleId}-purge-title`}
         title="Delete this item for good?"
         description="This cannot be undone."
@@ -328,6 +371,27 @@ export function ItemView(props: {
         onConfirm={() => {
           setConfirming(undefined);
           act(() => ctx.client.call("purgeItem", id), true, "Item deleted for good.");
+        }}
+        onCancel={() => setConfirming(undefined)}
+      />
+      <ConfirmDialog
+        open={confirming?.kind === "deletePasskey"}
+        titleId={`${titleId}-delete-passkey-title`}
+        title="Delete this passkey?"
+        description="Signing in to this site with this passkey will no longer be possible. This cannot be undone."
+        confirmLabel="Delete passkey"
+        danger
+        onConfirm={() => {
+          const target = confirming;
+          setConfirming(undefined);
+          if (target?.kind !== "deletePasskey") {
+            return;
+          }
+          act(
+            () => ctx.client.call("editItem", id, [{ op: "removeElement", list: "passkey", element: target.element }]),
+            false,
+            "Passkey deleted.",
+          );
         }}
         onCancel={() => setConfirming(undefined)}
       />

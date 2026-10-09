@@ -15,11 +15,19 @@ import {
   type FieldDescriptor,
   type FieldsDetectedMessage,
   type FromContentScript,
+  type PasskeyCreateRequestMessage,
+  type PasskeyGetRequestMessage,
   type SavePromptResolvedMessage,
+  MAX_ALGS,
+  MAX_ALLOW_CREDENTIALS,
   MAX_FIELDS_PER_REPORT,
   MAX_FIELD_VALUE_LEN,
   MAX_MESSAGE_BYTES,
+  MAX_PASSKEY_BYTES_B64,
+  MAX_RP_ID_LEN,
+  MAX_RP_NAME_LEN,
   MAX_URL_LEN,
+  MAX_USER_NAME_LEN,
 } from "./contract.ts";
 
 export class MessageRejected extends Error {
@@ -133,6 +141,72 @@ function parseCheckSavePrompt(body: Record<string, unknown>): CheckSavePromptMes
   return { type: "check_save_prompt", pageUrl: body["pageUrl"] };
 }
 
+function parsePasskeyCreateRequest(body: Record<string, unknown>): PasskeyCreateRequestMessage {
+  if (!isBoundedUrl(body["pageUrl"])) {
+    throw new MessageRejected("passkey_create_request: pageUrl");
+  }
+  if (body["rpIdHint"] !== undefined && !isBoundedString(body["rpIdHint"], MAX_RP_ID_LEN)) {
+    throw new MessageRejected("passkey_create_request: rpIdHint");
+  }
+  if (!isBoundedString(body["rpName"], MAX_RP_NAME_LEN)) {
+    throw new MessageRejected("passkey_create_request: rpName");
+  }
+  if (!isBoundedString(body["userIdB64"], MAX_PASSKEY_BYTES_B64)) {
+    throw new MessageRejected("passkey_create_request: userIdB64");
+  }
+  if (!isBoundedString(body["userName"], MAX_USER_NAME_LEN)) {
+    throw new MessageRejected("passkey_create_request: userName");
+  }
+  if (!isBoundedString(body["userDisplayName"], MAX_USER_NAME_LEN)) {
+    throw new MessageRejected("passkey_create_request: userDisplayName");
+  }
+  if (!isBoundedString(body["challengeB64"], MAX_PASSKEY_BYTES_B64)) {
+    throw new MessageRejected("passkey_create_request: challengeB64");
+  }
+  const algs = body["algs"];
+  if (!Array.isArray(algs) || algs.length > MAX_ALGS || !algs.every((a) => typeof a === "number" && Number.isInteger(a))) {
+    throw new MessageRejected("passkey_create_request: algs");
+  }
+  return {
+    type: "passkey_create_request",
+    pageUrl: body["pageUrl"],
+    ...(body["rpIdHint"] !== undefined ? { rpIdHint: body["rpIdHint"] as string } : {}),
+    rpName: body["rpName"],
+    userIdB64: body["userIdB64"],
+    userName: body["userName"],
+    userDisplayName: body["userDisplayName"],
+    challengeB64: body["challengeB64"],
+    algs: algs as readonly number[],
+  };
+}
+
+function parsePasskeyGetRequest(body: Record<string, unknown>): PasskeyGetRequestMessage {
+  if (!isBoundedUrl(body["pageUrl"])) {
+    throw new MessageRejected("passkey_get_request: pageUrl");
+  }
+  if (body["rpIdHint"] !== undefined && !isBoundedString(body["rpIdHint"], MAX_RP_ID_LEN)) {
+    throw new MessageRejected("passkey_get_request: rpIdHint");
+  }
+  if (!isBoundedString(body["challengeB64"], MAX_PASSKEY_BYTES_B64)) {
+    throw new MessageRejected("passkey_get_request: challengeB64");
+  }
+  const allow = body["allowCredentialIdsB64"];
+  if (
+    !Array.isArray(allow) ||
+    allow.length > MAX_ALLOW_CREDENTIALS ||
+    !allow.every((id) => isBoundedString(id, MAX_PASSKEY_BYTES_B64))
+  ) {
+    throw new MessageRejected("passkey_get_request: allowCredentialIdsB64");
+  }
+  return {
+    type: "passkey_get_request",
+    pageUrl: body["pageUrl"],
+    ...(body["rpIdHint"] !== undefined ? { rpIdHint: body["rpIdHint"] as string } : {}),
+    challengeB64: body["challengeB64"],
+    allowCredentialIdsB64: allow as readonly string[],
+  };
+}
+
 /**
  * Validates and narrows a raw message claimed to come from a content script. Throws
  * {@link MessageRejected} for anything that does not exactly match one known shape within its
@@ -155,6 +229,10 @@ export function parseFromContentScript(raw: unknown): FromContentScript {
       return parseSavePromptResolved(raw);
     case "check_save_prompt":
       return parseCheckSavePrompt(raw);
+    case "passkey_create_request":
+      return parsePasskeyCreateRequest(raw);
+    case "passkey_get_request":
+      return parsePasskeyGetRequest(raw);
     default:
       throw new MessageRejected(`unknown type: ${String(raw["type"])}`);
   }

@@ -9,7 +9,8 @@ Chromium (MV3) and Firefox, per [ADR 0036](../../docs/adr/0036-browser-extension
 
 **End to end, against a real server: enrol, unlock, autofill a matching page (never a
 look-alike one), save a newly submitted login, see it from a second, independent web-vault
-session, sync, lock.** `rizzy-wasm` now exports the durable-device enrolment/unlock and
+session, sync, lock. Also end to end: register and sign in with a passkey through a consent UI,
+falling back to the native authenticator on decline — see "M2 passkeys" below.** `rizzy-wasm` now exports the durable-device enrolment/unlock and
 `store`-module bindings this file used to describe as the one load-bearing gap
 (`cacheStoreNames`, `CacheStore`, `enrolDevice`, `unlockDurableDevice`, `DurableSession`, landed
 in `packages/core/src/index.ts`); `src/core-host/bindings.ts` wraps them (host glue only — every
@@ -243,11 +244,78 @@ the first content-script message, and `chrome.offscreen.hasDocument()` reports `
 immediately after — **offscreen-document creation itself works as designed.** One Playwright
 quirk found along the way: `context.pages()`/`backgroundPages()` never list the offscreen
 document, so the spec asks the service worker itself (`chrome.offscreen.hasDocument()`) rather
-than scanning Playwright's page list. **Not measured** (needs a longer-running, manual or CI
-soak test, not a single Playwright spec): whether the offscreen document or the Firefox
-background page stay alive for the length of a real session, or get torn down under memory
-pressure — the open question ADR 0036 §2 actually cares about. The `storage.session` fallback
-this change ships is exactly the mitigation for that case either way.
+than scanning Playwright's page list.
+
+**Now measured** (`e2e/lifetime.spec.ts`, Chromium): a real unlocked session, left idle for 6
+minutes (comfortably past several service-worker suspend/wake cycles, and short of
+`DEFAULT_AUTO_LOCK_MS`'s 15-minute default so the result is not just "auto-lock hadn't fired
+yet") — `chrome.offscreen.hasDocument()` still reports `true`, fetched from a *freshly looked
+up* service worker handle (the worker itself may have been suspended and restarted any number
+of times during the wait), and the popup still shows the unlocked view with no error. **Passed.**
+Still not measured: longer soaks (hours), real memory pressure, and Firefox (its background
+page is the long-lived context directly, with no separate service worker and no Playwright flow
+to load/introspect it — `not_done`, same residual as the rest of this file's Firefox gaps).
+
+### M2 passkeys (ADR 0039)
+
+**End to end, against a real server and a real self-signed-HTTPS test relying party
+(`e2e/passkey.spec.ts`, Chromium): register an ES256 passkey through the consent UI, verify the
+attestation's public key independently (hand-rolled CBOR, `e2e/webauthn-verify.ts`), sign in
+with it and verify that assertion's signature against the same key, decline falls back to the
+real native `navigator.credentials` call, and the stored passkey shows up in the web vault
+(rp id, the item's username, a created date, no private-key reveal) and can be deleted through
+the confirm dialog.**
+
+- **Page-world shim** (`src/content/passkey-page-shim.ts`), injected by a `document_start`
+  relay content script (`src/content/passkey-relay.ts`) as a `<script src>` web-accessible
+  resource (not a manifest `MAIN`-world entry — this project's Firefox floor does not reliably
+  support that key): overrides `navigator.credentials.create`/`.get`, forwards to the relay over
+  `window.postMessage`, and falls back to the browser's own original (saved-before-override)
+  implementation on decline, timeout, or no match — never a rizzy-vault-specific error the page
+  did not ask for.
+- **Consent UI** (`src/passkey-consent/`), an extension-origin iframe reusing the exact sender
+  class `isInlineMenuSender` already vouches for the inline-menu fill iframe (ADR 0040): a
+  trusted click (`event.isTrusted`) is the only thing that can approve or pick a candidate; the
+  ceremony is bound to the tab/origin at offer time and re-checked at approval time
+  (`passkey-ceremony.ts`'s `take()`), so a navigation invalidates it (unlike the save prompt,
+  which survives one).
+- **Long-lived context** (`core-context.ts`'s `offerPasskeyCreate`/`offerPasskeyGet`/
+  `approvePasskeyCeremony`): calls `createPasskey` + `addPasskey`/`editItem` + `sync()` for a
+  create, or `DurableSession.passkeyAssertion` for a sign-in. Any failure (a Rust
+  `rp_id_rejected`, a locked device, an unknown/expired/mismatched ceremony token) answers
+  `apply_passkey_result`'s `outcome: "fallback"` — the page's shim then calls the real native
+  method, never surfaced to the page as an error of its own.
+- **Known limitation, reported honestly:** a sign-in assertion's `userHandle` is always omitted
+  (`null`) in the response `navigator.credentials.get()` resolves with. `@rizzy-vault/core` has
+  no call that reads a stored passkey's `user_handle` back out once written (only at creation
+  time) — `not_done`. Legal under the WebAuthn spec (`userHandle` is nullable), but a relying
+  party that requires it for a fully "typeless" discoverable sign-in (no `allowCredentials`,
+  identifying the account purely from the response) will not accept this response.
+
+**Bugs found only by the real E2E chain**, the same way the autofill bugs above were — each one
+invisible to the unit tests or a casual manual check:
+
+1. **A created passkey never reached the server.** `runCreatePasskey` wrote the new/updated
+   Login through `DurableSession.createItem`/`editItem` (a local, durable write) but never
+   called `session.sync()` afterwards — and nothing else in this long-lived context syncs on its
+   own; sync only happens when the popup opens/unlocks or its own "Sync" button is clicked. A
+   passkey created silently through the ceremony (no popup involved at all) could sit unsynced
+   indefinitely. Fixed by syncing right after the write, best-effort (a sync failure — offline, a
+   server error — is swallowed, not surfaced as a ceremony failure: the credential this ceremony
+   returns to the page is real and usable locally either way, and sync will catch up later).
+2. **The web vault's own E2E server binary served a stale embedded build.** `target/debug/
+   rizzy-vault --features embed-web` bundles whatever `apps/web/dist` existed at `cargo build`
+   time; rebuilding `apps/web/src` alone (the passkey `PasskeyLine`/`fields.ts` grouping) does
+   nothing until `npm run build` (web) and the `cargo build ... --features embed-web` step both
+   re-run. Running against the stale binary showed every `passkey/<id>/<attribute>` as its own
+   raw, ungrouped field row — including a masked-but-"Reveal"-button `private_key` row, which
+   would have been a real violation of "no private key reveal" had it been a code bug rather
+   than a stale build. `e2e/server.ts`'s own module doc already named the two-step rebuild; this
+   is a reminder to actually run both after a web-side change, not a code fix.
+
+Firefox: not automated, same reason as the rest of this file (no Playwright-automatable
+unpacked-extension flow) — the create/get interception and the consent UI are plain
+`postMessage`/DOM code with nothing Chromium-specific in it, but that is untested, not proven.
 
 ## Architecture
 
@@ -368,6 +436,17 @@ pnpm --filter @rizzy-vault/extension run e2e
 `RIZZY_VAULT_BIN` overrides the binary path (`e2e/server.ts`); a binary built without
 `embed-web` fails the test outright (its web vault page has no signup form) rather than being
 skipped. `e2e/extension.spec.ts`'s other seven specs need no server at all.
+
+`e2e/passkey.spec.ts` needs the same `embed-web` server plus `openssl` on `PATH` (it generates
+its own throwaway self-signed cert, `e2e/https-server.ts` — INV-64 and `rizzy_client::passkey::
+verify_rp_id` both require `https:` literally, no loopback exception). Rebuilding
+`apps/web/src` without re-running *both* `npm run build` (web) and the `cargo build ...
+--features embed-web` step leaves the server binary serving a stale embedded build — see "M2
+passkeys," bug 2.
+
+`e2e/lifetime.spec.ts` idles for 6 real minutes by design (`test.setTimeout(8 * 60 * 1000)`);
+run it on its own (`npx playwright test lifetime.spec.ts`) rather than as part of a quick local
+loop.
 
 ## Icons
 
