@@ -144,7 +144,7 @@ jobs:
       - name: Install toolchain from rust-toolchain.toml
         run: rustup toolchain install || rustup show
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "24"
       # pnpm at exactly the version in package.json's `packageManager` field, through Node's
