@@ -158,7 +158,7 @@ pub mod device {
     use rizzy_client::ClientError;
     use rizzy_client::account::VerifiedAccount;
     use rizzy_client::device::{DeviceState, UnlockedDevice};
-    use rizzy_client::items::{FieldEdit, ItemId};
+    use rizzy_client::items::{FieldEdit, ItemId, TRASH_RETENTION_MS};
     use rizzy_client::login::{
         Enrolled, LoggedIn, LoginAwaitingSession, LoginInput, LoginStarted,
         start_login,
@@ -6260,6 +6260,166 @@ pub mod device {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             self.lifecycle(id, VaultSync::purge_item::<Rng>, now_ms)
+        }
+        #[doc =
+        " Purges every trashed item of the personal vault whose retention period has elapsed"]
+        #[doc = " (gap 00; ADR 0012 §5, ADR 0018 §9, §11; module docs of"]
+        #[doc =
+        " `rizzy_client::items::VaultSync::auto_purge_due`). The host calls this once after a"]
+        #[doc =
+        " successful sync, while the session is unlocked, so it runs only when this device is"]
+        #[doc =
+        " online. `DeviceSession::drain_cache_writes` after this call returns the rows to"]
+        #[doc =
+        " persist. Returns the purged items\' ids, ascending; empty when nothing was due."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `wrong_state` while a sync runs."]
+        pub fn auto_purge(&mut self, now_ms: u64)
+            -> Result<Vec<String>, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Purges every trashed item of the personal vault whose retention period has elapsed"]
+                    #[doc =
+                    " (gap 00; ADR 0012 §5, ADR 0018 §9, §11; module docs of"]
+                    #[doc =
+                    " `rizzy_client::items::VaultSync::auto_purge_due`). The host calls this once after a"]
+                    #[doc =
+                    " successful sync, while the session is unlocked, so it runs only when this device is"]
+                    #[doc =
+                    " online. `DeviceSession::drain_cache_writes` after this call returns the rows to"]
+                    #[doc =
+                    " persist. Returns the purged items\' ids, ascending; empty when nothing was due."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `wrong_state` while a sync runs."]
+                    #[export_name = "devicesession_autoPurge_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_autoPurge(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<Vec<String>,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let mut me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <u64 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let _ret = me.auto_purge(arg1);
+                                            _ret
+                                        }
+                                    });
+                        <Result<Vec<String>, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Purges every trashed item of the personal vault whose retention period has elapsed"]
+                    #[doc =
+                    " (gap 00; ADR 0012 §5, ADR 0018 §9, §11; module docs of"]
+                    #[doc =
+                    " `rizzy_client::items::VaultSync::auto_purge_due`). The host calls this once after a"]
+                    #[doc =
+                    " successful sync, while the session is unlocked, so it runs only when this device is"]
+                    #[doc =
+                    " online. `DeviceSession::drain_cache_writes` after this call returns the rows to"]
+                    #[doc =
+                    " persist. Returns the purged items\' ids, ascending; empty when nothing was due."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `wrong_state` while a sync runs."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_autoPurge_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(1u32);
+                        <u64 as WasmDescribe>::describe();
+                        <Result<Vec<String>, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<Vec<String>, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\tS Purges every trashed item of the personal vault whose retention period has elapsed: (gap 00; ADR 0012 \xc2\xa75, ADR 0018 \xc2\xa79, \xc2\xa711; module docs ofT `rizzy_client::items::VaultSync::auto_purge_due`). The host calls this once after aT successful sync, while the session is unlocked, so it runs only when this device isP online. `DeviceSession::drain_cache_writes` after this call returns the rows toO persist. Returns the purged items' ids, ascending; empty when nothing was due.\0\t # Errors! `wrong_state` while a sync runs.\0\x01\x06now_ms\0\0\0\0\0\tautoPurge\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            if self.sync.running() {
+                return Err(CoreError::new(WRONG_STATE));
+            }
+            let vault =
+                self.vaults.first_mut().ok_or_else(||
+                            CoreError::from(ClientError::Internal))?;
+            let purged =
+                vault.auto_purge_due(&mut self.rng, &self.unlocked, now_ms,
+                        TRASH_RETENTION_MS)?;
+            Ok(purged.into_iter().map(|id| hex(id.as_bytes())).collect())
         }
         #[doc =
         " Zeroizes every handle this session holds (ADR 0013 §3 rule 1). Consumes the session;"]
@@ -22815,7 +22975,7 @@ pub mod session {
         PLAINTEXT_EXPORT_PHRASE, PLAINTEXT_EXPORT_WARNING, PlaintextExportAck,
         csv_export_warning,
     };
-    use rizzy_client::items::{FieldEdit, ItemId};
+    use rizzy_client::items::{FieldEdit, ItemId, TRASH_RETENTION_MS};
     use rizzy_client::login::WebSession;
     use rizzy_client::passkey::get_assertion;
     use rizzy_client::rizzy_core::ids::AccountId;
@@ -25789,6 +25949,152 @@ pub mod session {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             self.lifecycle(id, VaultSync::purge_item::<Rng>, now_ms)
+        }
+        #[doc =
+        " Purges every trashed item whose retention period has elapsed (gap 00; ADR 0012 §5,"]
+        #[doc =
+        " ADR 0018 §9, §11). The host calls this once after a successful sync (module docs of"]
+        #[doc =
+        " `rizzy_client::items::VaultSync::auto_purge_due`), while the session is unlocked, so it"]
+        #[doc =
+        " runs only when this device is online. Returns the purged items\' ids, ascending; empty"]
+        #[doc = " when nothing was due."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `locked`; `wrong_state` while a sync runs."]
+        pub fn auto_purge(&mut self, now_ms: u64)
+            -> Result<Vec<String>, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Purges every trashed item whose retention period has elapsed (gap 00; ADR 0012 §5,"]
+                    #[doc =
+                    " ADR 0018 §9, §11). The host calls this once after a successful sync (module docs of"]
+                    #[doc =
+                    " `rizzy_client::items::VaultSync::auto_purge_due`), while the session is unlocked, so it"]
+                    #[doc =
+                    " runs only when this device is online. Returns the purged items\' ids, ascending; empty"]
+                    #[doc = " when nothing was due."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`; `wrong_state` while a sync runs."]
+                    #[export_name = "session_autoPurge_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_autoPurge(me:
+                            <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<Vec<String>,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let mut me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <u64 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let _ret = me.auto_purge(arg1);
+                                            _ret
+                                        }
+                                    });
+                        <Result<Vec<String>, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Purges every trashed item whose retention period has elapsed (gap 00; ADR 0012 §5,"]
+                    #[doc =
+                    " ADR 0018 §9, §11). The host calls this once after a successful sync (module docs of"]
+                    #[doc =
+                    " `rizzy_client::items::VaultSync::auto_purge_due`), while the session is unlocked, so it"]
+                    #[doc =
+                    " runs only when this device is online. Returns the purged items\' ids, ascending; empty"]
+                    #[doc = " when nothing was due."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`; `wrong_state` while a sync runs."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_autoPurge_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(1u32);
+                        <u64 as WasmDescribe>::describe();
+                        <Result<Vec<String>, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<Vec<String>, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x08T Purges every trashed item whose retention period has elapsed (gap 00; ADR 0012 \xc2\xa75,V ADR 0018 \xc2\xa79, \xc2\xa711). The host calls this once after a successful sync (module docs ofX `rizzy_client::items::VaultSync::auto_purge_due`), while the session is unlocked, so itV runs only when this device is online. Returns the purged items' ids, ascending; empty\x16 when nothing was due.\0\t # Errors+ `locked`; `wrong_state` while a sync runs.\0\x01\x06now_ms\0\0\0\0\0\tautoPurge\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let inner = self.writable()?;
+            let purged =
+                inner.vault.auto_purge_due(&mut inner.rng, &inner.unlocked,
+                        now_ms, TRASH_RETENTION_MS)?;
+            Ok(purged.into_iter().map(|id| hex(id.as_bytes())).collect())
         }
         #[doc =
         " The current TOTP code of an item\'s `login.totp`, which holds an `otpauth://` URI or a"]

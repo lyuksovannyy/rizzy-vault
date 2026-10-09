@@ -89,6 +89,8 @@ URIs and custom fields are list elements: `item show` prints each with its eleme
 
 `--move-uri <id>=<place>` and `--move-custom <id>=<place>` reorder them; a place is `first`, `last`, `before:<id>` or `after:<id>`, and `item show` prints each list's ids in order (`order of uri: …`). Moves run in the order given, after the same command's removals and additions. A move writes only the moved element's position; when two devices placed elements at the same spot and nothing fits between them any more, the whole list's positions are rewritten evenly, which is invisible apart from the new `order` values. Tags and password history have no order of their own and cannot be moved.
 
+`item show` lists `login.password`'s history (up to 50 older values) in its own section, newest first, each concealed as `********` unless `--reveal` is given, same as every other secret. A password imported from another manager (`pwhist/<id>/value` · `/ms`) gets a second, separate section: the ADR defines no order across the two, so they are never interleaved.
+
 Item types: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`, `software-license`, `wifi`, `bank-account`, `passkey`. Field keys are those of the item schema ([ADR 0018](adr/0018-item-record-encoding.md)), for example `item.name`, `item.notes`, `login.username`, `login.password`, `login.totp`, `card.number`.
 
 ## Export and import

@@ -1365,7 +1365,7 @@ pub(crate) struct OwnChange<'a> {
 
 impl VaultSync {
     /// Whether the client holds an unapplied record of `item` (ADR 0018 §11: no purge then).
-    fn holds_unapplied(&self, item: ItemId) -> bool {
+    pub(crate) fn holds_unapplied(&self, item: ItemId) -> bool {
         self.log.waiting().iter().any(|w| w.item_id == item)
     }
 
@@ -1994,6 +1994,13 @@ impl VaultSync {
     /// The merge of `item`, if any op reached it.
     pub(crate) fn merge(&self, item: ItemId) -> Option<&ItemMerge> {
         self.items.get(&item)
+    }
+
+    /// The merge of `item`, mutably, if any op reached it. Unlike [`VaultSync::merge_mut`]
+    /// (the static helper own writes use), this never creates one: a presentation-only call
+    /// (ADR 0018 §3 "Surfacing") has nothing to mark on an item this replica never saw.
+    pub(crate) fn existing_merge_mut(&mut self, item: ItemId) -> Option<&mut ItemMerge> {
+        self.items.get_mut(&item)
     }
 
     /// Every item's merge, ascending by item id (the order of an export payload, ADR 0027 §1).
