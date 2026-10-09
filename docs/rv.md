@@ -178,4 +178,4 @@ rv recovery repair --name alice --retype   # or: type the current recovery code 
 
 ## Not in this build
 
-Certificate pinning, revocation checking, the operating system's trust store and TLS 1.2 ([ADR 0030](adr/0030-client-tls-rv.md)); a full key rotation together with a Secret Key change, reordering list elements, and no-echo input on platforms without `stty` (there, pipe the secrets in).
+Certificate pinning, revocation checking, the operating system's trust store, TLS 1.2 and HTTP proxies ([ADR 0030](adr/0030-client-tls-rv.md)); and no-echo input on platforms without `stty` (there, pipe the secrets in).
