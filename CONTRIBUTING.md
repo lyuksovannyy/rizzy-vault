@@ -1,6 +1,6 @@
 # Contributing to rizzy-vault
 
-rizzy-vault is at **M0 done, M1 in progress**. M1 step 1, the `rizzy-core` cryptography, is implemented. Steps 2 and 3 (the item schema and sync engine, the server) are in progress; step 4 (the client core and the `rv` CLI) is in progress; step 5 (the wasm bindings and web vault) is not started. The [README](README.md#status) has the details.
+rizzy-vault is at **M0 done, M1 in progress**, with M2 (browser extension and matching) under way too. M1 step 1, the `rizzy-core` cryptography, is implemented. Steps 2–5 (item schema and sync engine, server, client core and `rv` CLI, wasm bindings and web vault) all have code landed; none is formally closed. The [README](README.md#status) has the details.
 
 - **Most useful now:** review of [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), [docs/CRYPTO.md](docs/CRYPTO.md) and the [ADRs](docs/adr/README.md).
 - **Code PRs** in the ADR-first areas (see [ADR first](#adr-first)) are accepted only when an **Accepted** ADR covers them. ADRs [0020](docs/adr/0020-partial-supersession.md) (which carries ADR 0001 forward), [0016](docs/adr/0016-workspace-layout.md) and [0017](docs/adr/0017-licensing.md) (licensing and contribution terms) are Accepted. Until ADR 0017's App Store permission (Decision 3) is committed, only documentation PRs from outside contributors are merged.
@@ -26,17 +26,23 @@ Scope is defined in [docs/ROADMAP.md](docs/ROADMAP.md). A feature that is not th
    cargo install cargo-deny --locked
    ```
 
-Nothing else is needed today. The JavaScript toolchain for the web vault and extension arrives with [ADR 0014](docs/adr/0014-ui-stack.md).
+4. **Node.js 24 or later and pnpm**, for the web vault, its packages and the browser extension ([ADR 0014](docs/adr/0014-ui-stack.md)). Node's own corepack picks up the pinned pnpm version from `package.json`'s `packageManager` field:
+
+   ```sh
+   corepack enable
+   ```
+
+   `cargo xtask build-wasm` also needs `wasm-bindgen-cli` installed at the exact version `Cargo.lock` pins for `wasm-bindgen` (see the `web` job in [ci.yml](.github/workflows/ci.yml) for the install command).
 
 ## Checks to run before every push
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs exactly these, and a PR is not reviewed until they pass:
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs each of these as its own job, and a PR is not reviewed until they pass. This is also the list CLAUDE.md gives AI coding agents as "Before any push":
 
 ```sh
 cargo fmt --all -- --check
 cargo lint                          # alias: clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked     # CI runs this on Linux, macOS and Windows
-cargo check-wasm                    # alias: check -p rizzy-core -p rizzy-sync -p rizzy-proto -p rizzy-client -p rizzy-import --target wasm32-unknown-unknown --locked
+cargo check-wasm                    # alias: check -p rizzy-core -p rizzy-sync -p rizzy-proto -p rizzy-client -p rizzy-import -p rizzy-wasm -p rizzy-match --target wasm32-unknown-unknown --locked
 cargo deny check                    # advisories, licenses, bans, sources (deny.toml)
 cargo xtask check-deps              # crate-boundary and dependency rules (ADR 0016 §5, R1–R8; ADR 0009 feature sets, crypto crates with default-features = false); no unsafe keyword in first-party .rs files (ADR 0019 §4.1)
 cargo xtask check-clippy            # clippy.toml entries clippy ignores ("found a module", ADR 0016 §5)
@@ -44,6 +50,20 @@ cargo check --manifest-path fuzz/Cargo.toml --locked --bins               # fuzz
 cargo deny --manifest-path fuzz/Cargo.toml check                          # fuzz/Cargo.lock
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 cargo xtask check-signoff origin/main..HEAD                                # every commit signed off by its author (ADR 0017 §4)
+```
+
+CI also runs two more jobs that the list above does not cover, for the web vault and browser-extension-facing code (ADR 0013 §4, ADR 0014; ci.yml jobs `web` and `bindings-baseline`):
+
+```sh
+cargo xtask build-wasm                                     # needs wasm-bindgen-cli at the exact version Cargo.lock pins
+pnpm install --frozen-lockfile
+cargo xtask check-js                                        # exact versions, pinned pnpm, empty install-script allow-list, deny.toml licences, pnpm audit
+pnpm run lint
+pnpm run build
+cargo build --locked -p rizzy-server --bin rizzy-vault     # so the end-to-end test below has a server binary
+pnpm run test
+pnpm run e2e                                                 # Playwright against rizzy-vault built with embed-web
+cargo xtask expand-bindings                                 # regenerates crates/rizzy-wasm/generated/; CI fails on any diff from the committed baseline (ADR 0019 §4.1)
 ```
 
 CI also builds the server image, [`deploy/Containerfile`](deploy/Containerfile), for `linux/amd64` and `linux/arm64` on every PR, each natively on its own runner. It pushes nothing. Locally: `docker build -f deploy/Containerfile .` (or `podman build`).
