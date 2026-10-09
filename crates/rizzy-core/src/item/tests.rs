@@ -717,7 +717,7 @@ fn item_type_registry() {
         (0x0004, ItemTypeClass::Supported(SupportedType::Identity)),
         (0x0005, ItemTypeClass::ReservedM3),
         (0x0009, ItemTypeClass::ReservedM3),
-        (0x000A, ItemTypeClass::ReservedM7),
+        (0x000A, ItemTypeClass::Unassigned),
         (0x000B, ItemTypeClass::Unassigned),
         (0xEFFF, ItemTypeClass::Unassigned),
         (0xF000, ItemTypeClass::ReservedSystem),
@@ -749,7 +749,9 @@ fn item_type_registry() {
         ItemType::SOFTWARE_LICENSE,
         ItemType::WIFI,
         ItemType::BANK_ACCOUNT,
-        ItemType::PASSKEY,
+        // `0x000A`, released to unassigned by ADR 0039 §1 (it was the standalone-passkey
+        // candidate ADR 0018 reserved).
+        ItemType::from_id(0x000A),
         ItemType::from_id(0x1234),
     ] {
         assert_eq!(t.supported(), None, "{:#06x}", t.id());
@@ -943,6 +945,51 @@ fn list_keys_are_classified() {
             NotInM1,
             Concealed,
         ),
+        // ADR 0039 §1: the `passkey/<id>/…` list on Login.
+        ("passkey", "rp_id", Expected::Text, login, Any, Shown),
+        (
+            "passkey",
+            "user_handle",
+            Expected::BytesMax {
+                len: schema::PASSKEY_USER_HANDLE_MAX_LEN,
+            },
+            login,
+            Any,
+            Shown,
+        ),
+        (
+            "passkey",
+            "credential_id",
+            Expected::BytesMax {
+                len: schema::PASSKEY_CREDENTIAL_ID_MAX_LEN,
+            },
+            login,
+            Any,
+            Shown,
+        ),
+        (
+            "passkey",
+            "private_key",
+            Expected::Bytes {
+                len: schema::PASSKEY_PRIVATE_KEY_LEN,
+            },
+            login,
+            Any,
+            Concealed,
+        ),
+        (
+            "passkey",
+            "public_key_cose",
+            Expected::BytesMax {
+                len: schema::PASSKEY_PUBLIC_KEY_COSE_MAX_LEN,
+            },
+            login,
+            Any,
+            Shown,
+        ),
+        ("passkey", "alg", Expected::Enum, login, Any, Shown),
+        ("passkey", "discoverable", Expected::Bool, login, Any, Shown),
+        ("passkey", "created_ms", Expected::U64, login, Any, Shown),
     ] {
         assert_eq!(
             classify(key(&element_key(list, attribute))),
@@ -982,12 +1029,17 @@ fn keys_outside_the_m1_schema_are_classified() {
             KeyClass::Reserved(ReservedFor::M5Share),
         ),
         (
+            // `passkey/<id>/credential` is not one of ADR 0039 §1's eight attribute names
+            // (`rp_id`, `user_handle`, `credential_id`, `private_key`, `public_key_cose`,
+            // `alg`, `discoverable`, `created_ms`): unlike the reserved prefixes below, the
+            // `passkey/` list is now assigned (ADR 0039 §1), so an attribute outside its table
+            // is simply unknown, not "a later milestone defines it".
             element_key("passkey", "credential"),
-            KeyClass::Reserved(ReservedFor::M7Passkeys),
+            KeyClass::Unknown,
         ),
         (
             "passkey.rp_id".to_owned(),
-            KeyClass::Reserved(ReservedFor::M7Passkeys),
+            KeyClass::Reserved(ReservedFor::PasskeyDotKeys),
         ),
         (
             element_key("attachment", "name"),
@@ -1134,6 +1186,12 @@ const CLEARED: &[u8] = b"";
 const TRUE: &[u8] = b"\x03\x01";
 /// Bool `0x00`.
 const FALSE: &[u8] = b"\x03\x00";
+/// Bytes, 32 zero bytes: a passkey private key's length (ES256 and `EdDSA` both).
+const BYTES_32: &[u8] = b"\x02\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+/// Bytes, one byte of payload: short enough for every `BytesMax` passkey attribute.
+const BYTES_SHORT: &[u8] = b"\x02\xab";
+/// Enum 1, a passkey's ES256 alg id ([`schema::PASSKEY_ALG_ES256`]).
+const PASSKEY_ALG_ES256: &[u8] = b"\x05\x00\x01";
 /// Enum 1, the Login type.
 const LOGIN_TYPE: &[u8] = b"\x05\x00\x01";
 /// Enum 3, the Card type.
@@ -1403,6 +1461,14 @@ fn list_keys_belong_to_their_types() {
         (element_key("uri", "order"), SORT),
         (element_key("pwhist", "value"), TEXT),
         (element_key("pwhist", "ms"), U64_ONE),
+        (element_key("passkey", "rp_id"), TEXT),
+        (element_key("passkey", "user_handle"), BYTES_SHORT),
+        (element_key("passkey", "credential_id"), BYTES_SHORT),
+        (element_key("passkey", "private_key"), BYTES_32),
+        (element_key("passkey", "public_key_cose"), BYTES_SHORT),
+        (element_key("passkey", "alg"), PASSKEY_ALG_ES256),
+        (element_key("passkey", "discoverable"), TRUE),
+        (element_key("passkey", "created_ms"), U64_ONE),
     ];
     let everywhere = [
         (element_key("field", "label"), TEXT),

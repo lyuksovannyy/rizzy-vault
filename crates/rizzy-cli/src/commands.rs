@@ -284,7 +284,11 @@ fn type_name(item_type: Option<ItemType>) -> &'static str {
 }
 
 /// The item types `--type` names.
-const TYPES: [(&str, ItemType); 10] = [
+///
+/// No `"passkey"` entry: `0x000A` (the standalone-passkey candidate ADR 0018 reserved) was
+/// released back to unassigned by ADR 0039 §1, which puts passkeys on the `passkey/<id>/…` list
+/// of an existing Login item instead (`rizzy-core`'s `item::schema::LIST_PASSKEY`).
+const TYPES: [(&str, ItemType); 9] = [
     ("login", ItemType::LOGIN),
     ("note", ItemType::SECURE_NOTE),
     ("card", ItemType::CARD),
@@ -294,7 +298,6 @@ const TYPES: [(&str, ItemType); 10] = [
     ("software-license", ItemType::SOFTWARE_LICENSE),
     ("wifi", ItemType::WIFI),
     ("bank-account", ItemType::BANK_ACCOUNT),
-    ("passkey", ItemType::PASSKEY),
 ];
 
 /// A displayed value as text for the terminal. Bytes and sort keys are described, not dumped.

@@ -27,9 +27,11 @@ use rizzy_client::items::{FieldKey, ItemId, ItemLifecycle, ItemType, Value};
 use rizzy_client::lists::{ListMove, ListPlace, MAX_WRITES_PER_OP};
 use rizzy_client::rizzy_core::item::key::ElementId;
 use rizzy_client::rizzy_core::item::schema::{
-    ATTR_KIND, ATTR_LABEL, ATTR_VALUE, CUSTOM_KIND_BOOLEAN, CUSTOM_KIND_HIDDEN, CUSTOM_KIND_TEXT,
-    Concealment, CustomFieldKind, Expected, ITEM_FAVORITE, ITEM_NAME, KeyClass, LIST_FIELD,
-    LIST_TAG, LIST_URI, LOGIN_TOTP, LOGIN_USERNAME, classify,
+    ATTR_ALG, ATTR_CREATED_MS, ATTR_CREDENTIAL_ID, ATTR_DISCOVERABLE, ATTR_KIND, ATTR_LABEL,
+    ATTR_PRIVATE_KEY, ATTR_PUBLIC_KEY_COSE, ATTR_RP_ID, ATTR_USER_HANDLE, ATTR_VALUE,
+    CUSTOM_KIND_BOOLEAN, CUSTOM_KIND_HIDDEN, CUSTOM_KIND_TEXT, Concealment, CustomFieldKind,
+    Expected, ITEM_FAVORITE, ITEM_NAME, KeyClass, LIST_FIELD, LIST_PASSKEY, LIST_TAG, LIST_URI,
+    LOGIN_TOTP, LOGIN_USERNAME, classify,
 };
 use rizzy_client::rizzy_core::item::tag::{tag_key, tag_name};
 use rizzy_client::rizzy_core::item::value::ValueRef;
@@ -44,7 +46,11 @@ use crate::rng::os_rng;
 pub const MAX_DRAFT_ENTRIES: usize = 1024;
 
 /// The item types the web vault names, as `rv --type` names them.
-pub const TYPES: [(&str, ItemType); 10] = [
+///
+/// No `"passkey"` entry: `0x000A` (the standalone-passkey candidate ADR 0018 reserved) was
+/// released back to unassigned by ADR 0039 §1, which puts passkeys on the `passkey/<id>/…` list
+/// of an existing Login item instead (`rizzy-core`'s `item::schema::LIST_PASSKEY`).
+pub const TYPES: [(&str, ItemType); 9] = [
     ("login", ItemType::LOGIN),
     ("note", ItemType::SECURE_NOTE),
     ("card", ItemType::CARD),
@@ -54,7 +60,6 @@ pub const TYPES: [(&str, ItemType); 10] = [
     ("software-license", ItemType::SOFTWARE_LICENSE),
     ("wifi", ItemType::WIFI),
     ("bank-account", ItemType::BANK_ACCOUNT),
-    ("passkey", ItemType::PASSKEY),
 ];
 
 /// The name of an item type; `unknown` for one this build does not name.
@@ -568,6 +573,32 @@ enum CustomKind {
     Boolean,
 }
 
+/// A new passkey's fields (ADR 0039 §1), as `createPasskey`'s result hands them straight to
+/// [`ItemDraft::add_passkey`]. `user_handle` and `private_key` are zeroizing: the private key
+/// in particular must never outlive this one write (`crate::passkey`'s own module docs, "the
+/// caller's one job is to encrypt this straight into a new field... and then drop every copy
+/// of it"). `credential_id` and `public_key_cose` are not secret — the relying party already
+/// has both.
+struct NewPasskey {
+    /// `passkey/<id>/rp_id`.
+    rp_id: Zeroizing<String>,
+    /// `passkey/<id>/user_handle`.
+    user_handle: Zeroizing<Vec<u8>>,
+    /// `passkey/<id>/credential_id`.
+    credential_id: Vec<u8>,
+    /// `passkey/<id>/private_key`.
+    private_key: Zeroizing<Vec<u8>>,
+    /// `passkey/<id>/public_key_cose`.
+    public_key_cose: Vec<u8>,
+    /// `passkey/<id>/alg`: this schema's own small-positive-integer convention (`1` = ES256,
+    /// `2` = `EdDSA`), not the real negative COSE id.
+    alg: u16,
+    /// `passkey/<id>/discoverable`.
+    discoverable: bool,
+    /// `passkey/<id>/created_ms`.
+    created_ms: u64,
+}
+
 /// One entry of a draft.
 enum Entry {
     /// A field by its final key, with the typed text.
@@ -582,6 +613,8 @@ enum Entry {
     AddUri(ElementId, Zeroizing<String>),
     /// A new custom field, under the element id the host minted for it: label, kind, value.
     AddCustom(ElementId, Zeroizing<String>, CustomKind, Zeroizing<String>),
+    /// A new passkey, under the element id the host minted for it (ADR 0039 §1).
+    AddPasskey(ElementId, Box<NewPasskey>),
     /// An element removed: list, full element id.
     Remove(String, String),
     /// An existing element moved: list, full element id, place.
@@ -703,6 +736,48 @@ impl ItemDraft {
         ))
     }
 
+    /// Adds a new passkey to this item's `passkey/` list (ADR 0039 §1), under `element_id` (as
+    /// [`ItemDraft::add_uri`] takes it): the write path for `createPasskey`'s result. The host
+    /// must call this immediately with the created private key and never retain a second copy
+    /// of it (`NewPasskey`'s own doc comment, not linkable here: it is private). `alg` is `1`
+    /// for ES256 or `2` for `EdDSA` (ADR 0039 §1); any other value is refused by the schema
+    /// check when the draft is written, not here.
+    ///
+    /// # Errors
+    /// `invalid_input` for a bad `element_id`; as [`ItemDraft::set`].
+    #[wasm_bindgen(js_name = addPasskey)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors the fixed field set ADR 0039 §1 defines for one passkey; splitting it into a second builder call would only let a caller forget a field, not simplify anything"
+    )]
+    pub fn add_passkey(
+        &mut self,
+        element_id: &str,
+        rp_id: &str,
+        user_handle: &[u8],
+        credential_id: &[u8],
+        private_key: &[u8],
+        public_key_cose: &[u8],
+        alg: u16,
+        discoverable: bool,
+        created_ms: u64,
+    ) -> Result<(), CoreError> {
+        let element = element_id_of(element_id)?;
+        self.push(Entry::AddPasskey(
+            element,
+            Box::new(NewPasskey {
+                rp_id: Zeroizing::new(rp_id.to_owned()),
+                user_handle: Zeroizing::new(user_handle.to_vec()),
+                credential_id: credential_id.to_vec(),
+                private_key: Zeroizing::new(private_key.to_vec()),
+                public_key_cose: public_key_cose.to_vec(),
+                alg,
+                discoverable,
+                created_ms,
+            }),
+        ))
+    }
+
     /// Moves an existing element (as [`FieldView::element`] gives it) of `list`: `place` is
     /// `first`, `last`, `before` or `after`, and `relative` is the neighbouring element's full
     /// hex id, required for `before`/`after`. Applied only when the draft is written
@@ -778,6 +853,39 @@ fn boolean(input: &str) -> CoreResult<Value> {
         "false" | "no" => Ok(Value::bool(false)),
         _ => Err(ClientError::InvalidEdit.into()),
     }
+}
+
+/// The Bytes value of raw bytes (ADR 0039 §1's passkey fields: never user-typed text, so
+/// `encode`'s string path is not used for these attributes).
+fn bytes(input: &[u8]) -> CoreResult<Value> {
+    Value::bytes(input).map_err(|_| ClientError::InvalidEdit.into())
+}
+
+/// [`Entry::AddPasskey`]'s writes, under `element`: every fixed field ADR 0039 §1's table
+/// lists for one passkey, and no `order` — unlike `uri`/`field`, that table has no
+/// `passkey/<id>/order` row, so this list carries no layout order (ADR 0039 §1 is the
+/// exhaustive field list, not a starting point to extend; what order a client displays
+/// multiple passkeys in is unspecified and left to the owner to decide in a future ADR, not
+/// invented here). Split out of [`writes`] only to keep that function's own line count under
+/// the workspace lint's cap — the logic is exactly what `writes`' `AddUri`/`AddCustom` arms
+/// already do inline, at this one entry's larger, fixed field count.
+fn passkey_writes(element: ElementId, passkey: &NewPasskey) -> CoreResult<Vec<Write>> {
+    VaultSync::element_writes(
+        element,
+        LIST_PASSKEY,
+        vec![
+            (ATTR_RP_ID, text(&passkey.rp_id)?),
+            (ATTR_USER_HANDLE, bytes(&passkey.user_handle)?),
+            (ATTR_CREDENTIAL_ID, bytes(&passkey.credential_id)?),
+            (ATTR_PRIVATE_KEY, bytes(&passkey.private_key)?),
+            (ATTR_PUBLIC_KEY_COSE, bytes(&passkey.public_key_cose)?),
+            (ATTR_ALG, Value::enumeration(passkey.alg)),
+            (ATTR_DISCOVERABLE, Value::bool(passkey.discoverable)),
+            (ATTR_CREATED_MS, Value::u64(passkey.created_ms)),
+        ],
+        None,
+    )
+    .map_err(Into::into)
 }
 
 /// The kind a custom field displays.
@@ -896,6 +1004,9 @@ pub(crate) fn writes(
                 )?;
                 out.extend(new);
             }
+            Entry::AddPasskey(element, passkey) => {
+                out.extend(passkey_writes(*element, passkey)?);
+            }
             Entry::Remove(list, element) => {
                 let item = item.ok_or(ClientError::InvalidEdit)?;
                 out.extend(vault.element_removal_writes(item, list, element)?);
@@ -999,5 +1110,48 @@ mod tests {
         assert!(draft.add_uri("not-hex", "https://example.test").is_err());
         assert!(draft.move_element("uri", &a, "first", None).is_ok());
         assert!(draft.move_element("uri", &a, "before", None).is_err());
+    }
+
+    #[test]
+    fn add_passkey_accepts_a_valid_element_id_and_rejects_a_bad_one() {
+        let id = generate_element_id();
+        let private_key = [0xab_u8; 32];
+        let mut draft = ItemDraft::new();
+        assert!(
+            draft
+                .add_passkey(
+                    &id,
+                    "example.com",
+                    &[1, 2, 3],
+                    &[4, 5, 6],
+                    &private_key,
+                    &[7, 8, 9],
+                    1,
+                    true,
+                    0
+                )
+                .is_ok()
+        );
+        assert_eq!(draft.length(), 1);
+        assert!(
+            ItemDraft::new()
+                .add_passkey(
+                    "not-hex",
+                    "example.com",
+                    &[],
+                    &[],
+                    &private_key,
+                    &[],
+                    1,
+                    true,
+                    0
+                )
+                .is_err()
+        );
+        // `ItemDraft`'s own `Debug` impl prints only the entry count, never a field (checked
+        // directly here, not only inferred from `drafts_are_bounded`'s unrelated literal): the
+        // private key passed in above must never show up in it (module docs on `NewPasskey`,
+        // "must never outlive this one write").
+        assert_eq!(format!("{draft:?}"), "ItemDraft { entries: 1 }");
     }
 }

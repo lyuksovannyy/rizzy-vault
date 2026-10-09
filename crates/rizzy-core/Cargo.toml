@@ -31,6 +31,10 @@ hpke.workspace = true
 # OPAQUE (CRYPTO.md §5): `ristretto255` only, never `argon2` or `std` (ADR 0009). Every call
 # goes through the `opaque` wrapper module; the rand_core 0.6 adapter lives in `rng`.
 opaque-ke.workspace = true
+# ES256 (ECDSA P-256 / SHA-256) for WebAuthn passkey credentials (ADR 0039 §3, §5; ADR 0041):
+# `ecdsa` and `alloc` only, never `getrandom` or `std` (ADR 0016 R1). Keys are generated only
+# with `SigningKey::random(&mut rng)` through the injected `rand_core::CryptoRng`.
+p256.workspace = true
 # Not used in code. Declared only so that feature unification turns on poly1305's `zeroize`,
 # which chacha20poly1305 0.11 does not forward: the Poly1305 state (its r and s key halves) then
 # wipes on drop (CRYPTO.md §12.2; ADR 0009, amendment of 2026-09-26).

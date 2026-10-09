@@ -10,6 +10,7 @@
 // the suite is skipped and says so, unless `CI` is set: there a missing binary fails the run,
 // so that a CI job that forgot to build the server cannot pass without this suite.
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { createHash, createPublicKey, verify as verifySignature } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -26,6 +27,8 @@ import {
   type Transport,
   type VaultSession,
   checkServer,
+  createPasskey,
+  PASSKEY_ALG_ES256,
   fetchTransport,
   detectImportFormat,
   enrolDevice,
@@ -40,6 +43,16 @@ import { loadCore } from "./load.js";
 /** Whether two byte arrays hold the same bytes. */
 function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
   return a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
+/** A `createPasskey`/`addPasskey` COSE `EC2` ES256 public key (`rizzy-client`'s
+ * `cbor::cose_key_es256`: a fixed-layout map, `kty`/`alg`/`crv` then 32-byte `x` at offset 10
+ * and 32-byte `y` at offset 45) as a Node `KeyObject`, so the test can verify a signature
+ * against it without pulling in a CBOR library for one fixed shape. */
+function publicKeyFromCose(cose: Uint8Array): ReturnType<typeof createPublicKey> {
+  const x = Buffer.from(cose.slice(10, 42)).toString("base64url");
+  const y = Buffer.from(cose.slice(45, 77)).toString("base64url");
+  return createPublicKey({ key: { kty: "EC", crv: "P-256", x, y }, format: "jwk" });
 }
 
 /** An in-memory {@link CacheStore} standing in for the extension's `IndexedDB` adapter: every
@@ -304,6 +317,91 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     expect(code.periodSeconds).toBe(30);
     await first.sync();
 
+    // A passkey (ADR 0039): created client-side, stored as `passkey/<id>/*` fields on a Login,
+    // and later signed over without the private key ever leaving the wasm boundary.
+    const passkeyOrigin = "https://example.com";
+    const passkeyRpId = "example.com";
+    const created = createPasskey(passkeyOrigin, passkeyRpId, new Uint8Array([1, 2, 3, 4]));
+    expect(created.credentialId).toHaveLength(32);
+    const passkeyElement = newElementId();
+    const passkeyItem = first.createItem("login", [
+      { op: "set", key: "item.name", value: "Has a passkey" },
+      {
+        op: "addPasskey",
+        element: passkeyElement,
+        rpId: passkeyRpId,
+        userHandle: new Uint8Array([9, 9, 9]),
+        credentialId: created.credentialId,
+        privateKey: created.privateKey,
+        publicKeyCose: created.publicKeyCose,
+        alg: PASSKEY_ALG_ES256,
+        discoverable: true,
+        createdMs: Date.now(),
+      },
+    ]);
+    await first.sync();
+    // The second session, after its own sync, can sign an assertion too — the private key
+    // travelled only as part of the normal encrypted sync, never in cleartext off this process.
+    await second.sync();
+    const assertionChallenge = new Uint8Array([5, 6, 7, 8]);
+    const assertion = second.passkeyAssertion(
+      passkeyItem,
+      passkeyElement,
+      passkeyOrigin,
+      passkeyRpId,
+      assertionChallenge,
+    );
+    expect(assertion.credentialId).toEqual(created.credentialId);
+    const clientDataJson = JSON.parse(new TextDecoder().decode(assertion.clientDataJson)) as {
+      type: string;
+      origin: string;
+    };
+    expect(clientDataJson.type).toBe("webauthn.get");
+    expect(clientDataJson.origin).toBe(passkeyOrigin);
+    const message = Buffer.concat([
+      assertion.authenticatorData,
+      createHash("sha256").update(assertion.clientDataJson).digest(),
+    ]);
+    expect(
+      verifySignature(
+        "sha256",
+        message,
+        { key: publicKeyFromCose(created.publicKeyCose), dsaEncoding: "der" },
+        assertion.signatureDer,
+      ),
+    ).toBe(true);
+    // A wrong rpId is INV-64's job to refuse, not this test's — `rizzy-client::passkey`'s own
+    // unit tests already cover that table; here only the happy path through two full wasm
+    // sessions and a real sync matters.
+
+    // The assertion verifying only proves `credential_id`/`private_key` round-tripped; check
+    // the other written fields too, so a corrupted `alg`/`discoverable`/`rp_id`/`created_ms`
+    // (the earlier wrong `alg: -7` would have been stored silently: `Expected::Enum` accepts
+    // any `u16`) would fail a test rather than pass one that happens not to look.
+    const passkeyFields = second.fields(passkeyItem).filter((f) => f.list === "passkey" && f.element === passkeyElement);
+    expect(passkeyFields.find((f) => f.attribute === "rp_id")).toMatchObject({
+      kind: "text",
+      value: passkeyRpId,
+      concealed: false,
+    });
+    expect(passkeyFields.find((f) => f.attribute === "alg")).toMatchObject({
+      kind: "enum",
+      value: String(PASSKEY_ALG_ES256),
+      concealed: false,
+    });
+    expect(passkeyFields.find((f) => f.attribute === "discoverable")).toMatchObject({
+      kind: "bool",
+      value: "true",
+      concealed: false,
+    });
+    // ADR 0039 §1: concealed by default like `login.password` — the private key is never in
+    // `fields()`'s output, only reachable through `passkeyAssertion`'s own internal read.
+    expect(passkeyFields.find((f) => f.attribute === "private_key")).toMatchObject({
+      kind: "bytes",
+      value: undefined,
+      concealed: true,
+    });
+
     // Encrypted export (behind a re-authentication: a wrong password is refused and allows
     // nothing), imported back as new items; the file is recognised from its bytes.
     expect(() => first.exportEncrypted("export password 1")).toThrowError(
@@ -325,14 +423,14 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     const exported = first.exportEncrypted("export password 1");
     expect(first.reauthFresh()).toBe(false);
     expect(detectImportFormat(exported.file)).toBe("rizzy-encrypted");
-    expect(exported.items).toBe(2);
+    expect(exported.items).toBe(3);
     expect(exported.file.byteLength).toBeGreaterThan(0);
     await expect(
       Promise.resolve().then(() => first.importEncrypted(exported.file, "wrong")),
     ).rejects.toMatchObject({ code: "export_decryption_failed" });
     const imported = first.importEncrypted(exported.file, "export password 1");
-    expect(imported.imported).toBe(2);
-    expect(first.items()).toHaveLength(4);
+    expect(imported.imported).toBe(3);
+    expect(first.items()).toHaveLength(6);
     await first.sync();
 
     // A plaintext export needs a re-authentication first.

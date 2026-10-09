@@ -33,6 +33,7 @@
 //! | [`HttpRequest`], [`meta_request`], [`check_meta`], [`expect_no_content`] | the requests JavaScript sends and the answers it hands back |
 //! | [`generate_password_with_options`] (`generatePasswordWithOptions`), [`generate_passphrase_with_options`] (`generatePassphraseWithOptions`), [`password_entropy`] (`passwordEntropy`), [`passphrase_entropy`] (`passphraseEntropy`), [`generator_limits`] (`generatorLimits`), [`GeneratorLimits`], [`Generated`] | the generator, every option ([`generator`]) |
 //! | [`TotpCode`], [`EncryptedExport`], [`ImportReport`], [`DeviceView`], [`TwoFactorEnrolment`] | results |
+//! | [`create_passkey`] (`createPasskey`), [`CreatedPasskey`], [`Session::passkey_assertion`] (`passkeyAssertion`), [`PasskeyAssertion`] | `WebAuthn` passkey registration and assertion ([`passkey`]; ADR 0039) |
 //! | [`plaintext_export_warning`], [`plaintext_export_phrase`] | the frozen texts of ADR 0027 §5 |
 //! | [`plaintext_export_hold_ms`], [`detect_import_format`] | the hold after the plaintext warning; recognising an import file (owner decision 2026-10-05) |
 //! | [`CoreError`] | the one thrown error: a stable code ([`error`]) |
@@ -45,7 +46,12 @@
 //!   Emergency Kit goes out once ([`SignupFlow::emergency_kit`]); a plaintext export goes out
 //!   after a re-authentication, the warning and its hold ([`Session::export_plaintext`]). The OPAQUE session's bearer
 //!   token goes out in the `Authorization` value of each request (it is the transport's
-//!   credential, ADR 0028 item 4, not a key of rule 1).
+//!   credential, ADR 0028 item 4, not a key of rule 1). A freshly generated passkey's private
+//!   key goes out once, from [`create_passkey`], for the caller to encrypt straight into the
+//!   new item ([`passkey`]'s module docs) — the same shape as a freshly generated password
+//!   crossing out so the host can save it; a *stored* passkey's private key never crosses at
+//!   all ([`Session::passkey_assertion`] reads and uses it internally, like
+//!   [`Session::totp`] does for a different concealed field).
 //! - **Plaintext crosses at the smallest useful size** (rule 3): summaries for lists,
 //!   concealed values only on reveal ([`items`]).
 //! - **Errors** are [`CoreError`] codes with no secret in them (rule 4).
@@ -90,6 +96,7 @@ pub mod http;
 pub mod items;
 mod login;
 pub mod matching;
+pub mod passkey;
 mod rng;
 pub mod secret;
 pub mod session;
@@ -107,6 +114,7 @@ pub use http::{HttpRequest, check_meta, expect_no_content, meta_request};
 pub use items::{FieldView, ItemDraft, ItemSummary, generate_element_id};
 pub use login::LoginFlow;
 pub use matching::{MatchDecision, decide_match_candidates, normalize_page_url};
+pub use passkey::{CreatedPasskey, PasskeyAssertion, create_passkey};
 pub use session::{
     DeviceView, EncryptedExport, ImportReport, Session, TotpCode, TwoFactorEnrolment,
     detect_import_format, plaintext_export_hold_ms, plaintext_export_phrase,

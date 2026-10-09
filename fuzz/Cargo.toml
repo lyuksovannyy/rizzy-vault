@@ -91,6 +91,9 @@
 #                      idempotent on what they accept
 #   equivalence_list   rizzy-match's signed equivalence-list parser (ADR 0038 §1): never panic
 #                      on arbitrary bytes; a self-signed list round-trips through `verify`
+#   passkey_ceremony   rizzy-client's WebAuthn passkey ceremonies (ADR 0039 §1, §2, §4): never
+#                      panic on an attacker/relying-party-controlled origin, rpId or challenge;
+#                      a created credential's assertion signature verifies under its own key
 #
 # The `import_*` targets share `fuzz_targets/import_common/mod.rs` (the checks on an import
 # result and a counting RNG), included with `#[path]`; it is not a target.
@@ -136,8 +139,9 @@ rizzy-server = { path = "../crates/rizzy-server" }
 # crate already in this graph through the two above; its external crates (sqlx, sha2) are the
 # ones the main workspace already locks.
 rizzy-storage = { path = "../crates/rizzy-storage" }
-# The client flows' export readers (`client_export`, `client_export_payload`). A path crate over
-# rizzy-core, rizzy-sync, rizzy-proto and rizzy-import, all already here; no new external crate.
+# The client flows' export readers (`client_export`, `client_export_payload`) and the WebAuthn
+# passkey ceremonies (`passkey_ceremony`, ADR 0039). A path crate over rizzy-core, rizzy-sync,
+# rizzy-proto, rizzy-import and rizzy-match, all already here; no new external crate.
 rizzy-client = { path = "../crates/rizzy-client" }
 # The importers (the `import_*` targets). A path crate whose only dependencies are rizzy-core
 # and zeroize, so no new crate in this graph.
@@ -461,6 +465,13 @@ bench = false
 [[bin]]
 name = "equivalence_list"
 path = "fuzz_targets/equivalence_list.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "passkey_ceremony"
+path = "fuzz_targets/passkey_ceremony.rs"
 test = false
 doc = false
 bench = false

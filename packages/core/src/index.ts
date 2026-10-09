@@ -31,6 +31,7 @@ import initWasm, {
   ItemDraft,
   KvRow,
   LoginFlow,
+  PasskeyAssertion as WasmPasskeyAssertion,
   Session,
   SignupFlow,
   TwoFactorEnrolment,
@@ -38,6 +39,7 @@ import initWasm, {
   checkMeta,
   coreVersion,
   cacheStoreNames as wasmCacheStoreNames,
+  createPasskey as wasmCreatePasskey,
   decideMatchCandidates as wasmDecideMatchCandidates,
   detectImportFormat as wasmDetectImportFormat,
   expectNoContent,
@@ -583,6 +585,25 @@ export type ItemChange =
       readonly list: string;
       readonly element: string;
       readonly place: ListPlace;
+    }
+  | {
+      /** Adds a new passkey (ADR 0039 §1): the write path for {@link createPasskey}'s result.
+       * `element` is {@link newElementId}'s id, minted once, same convention as `addUri`.
+       * `privateKey` and `userHandle` are the host's own copy of
+       * {@link CreatedPasskey.privateKey}/the relying party's user handle — this module zeroes
+       * neither after the call (unlike {@link SecretInput}'s bytes, class docs): the caller
+       * must drop its own reference once this resolves. `alg` is `1` for ES256, `2` for
+       * `EdDSA` (ADR 0039 §1). */
+      readonly op: "addPasskey";
+      readonly element: string;
+      readonly rpId: string;
+      readonly userHandle: Uint8Array;
+      readonly credentialId: Uint8Array;
+      readonly privateKey: Uint8Array;
+      readonly publicKeyCose: Uint8Array;
+      readonly alg: number;
+      readonly discoverable: boolean;
+      readonly createdMs: number;
     };
 
 /** The item types the core names. */
@@ -683,6 +704,83 @@ export interface TwoFactorSetup {
   readonly secret: string;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Passkeys (ADR 0039)
+
+/**
+ * One `navigator.credentials.create()` ceremony's result (ADR 0039 §1, §2, §4). `privateKey`
+ * is the fresh credential's raw 32-byte scalar — the one place besides the master
+ * password/Secret Key/export password/2FA code/Emergency Kit that a key crosses this boundary
+ * (`Session`/`DurableSession` class docs' own "Keys stay in Rust" exceptions list). The host's
+ * one job with it is an immediate {@link ItemChange} `op: "addPasskey"` through
+ * {@link VaultSession.createItem}/{@link DurableSession.createItem} (or `editItem`, for a second
+ * passkey on an existing Login) — never log it, never store it outside that one encrypted
+ * field, never hold it longer than that one call needs.
+ */
+export interface CreatedPasskey {
+  readonly privateKey: Uint8Array;
+  readonly credentialId: Uint8Array;
+  readonly publicKeyCose: Uint8Array;
+  readonly clientDataJson: Uint8Array;
+  readonly attestationObject: Uint8Array;
+}
+
+/**
+ * The `addPasskey` `alg` value for an ES256 credential, in this item schema's own small-enum
+ * convention (`1`, never the real COSE id `-7`) — `rizzy-core::item::schema::PASSKEY_ALG_ES256`.
+ * {@link createPasskey} only ever produces ES256 credentials today, so this is the only value
+ * an `addPasskey` change needs until `EdDSA` support lands.
+ */
+export const PASSKEY_ALG_ES256 = 1;
+
+/** One `navigator.credentials.get()` ceremony's result (ADR 0039 §2): everything the page's
+ * `PublicKeyCredential` response needs, never the private key that signed it. */
+export interface PasskeyAssertionResult {
+  readonly credentialId: Uint8Array;
+  readonly clientDataJson: Uint8Array;
+  readonly authenticatorData: Uint8Array;
+  readonly signatureDer: Uint8Array;
+}
+
+/**
+ * Runs a `WebAuthn` registration ceremony for one new ES256 passkey (ADR 0039 §1, §2, §4):
+ * checks INV-64, generates a fresh key, and assembles every byte structure the page's
+ * `create()` promise resolves with. No session needed — a pure, stateless call
+ * (`crates/rizzy-wasm/src/passkey.rs`'s own module docs) — so it works before enrolment/unlock
+ * too, though the result is only useful once there is a session to {@link CreatedPasskey}
+ * write it through.
+ *
+ * `origin` must be the browser-verified origin, never a page-supplied value: the extension's
+ * background takes it from the browser's own sender information (ADR 0039 §2), never from an
+ * intercepted call's relayed payload.
+ *
+ * Throws a {@link CoreError} with code `rp_id_rejected` (INV-64) or `invalid_input`.
+ */
+export function createPasskey(origin: string, rpId: string, challenge: Uint8Array): CreatedPasskey {
+  ensureReady();
+  return mapOne(
+    call(() => wasmCreatePasskey(origin, rpId, challenge)),
+    (c) => ({
+      privateKey: c.privateKey,
+      credentialId: c.credentialId,
+      publicKeyCose: c.publicKeyCose,
+      clientDataJson: c.clientDataJson,
+      attestationObject: c.attestationObject,
+    }),
+  );
+}
+
+/** Maps a generated {@link WasmPasskeyAssertion} and frees it — shared by
+ * {@link VaultSession.passkeyAssertion} and {@link DurableSession.passkeyAssertion}. */
+function mapPasskeyAssertion(assertion: WasmPasskeyAssertion): PasskeyAssertionResult {
+  return mapOne(assertion, (a) => ({
+    credentialId: a.credentialId,
+    clientDataJson: a.clientDataJson,
+    authenticatorData: a.authenticatorData,
+    signatureDer: a.signatureDer,
+  }));
+}
+
 /** Builds the core's draft from a change list. */
 function draftOf(changes: readonly ItemChange[]): ItemDraft {
   const draft = new ItemDraft();
@@ -707,6 +805,19 @@ function draftOf(changes: readonly ItemChange[]): ItemDraft {
             break;
           case "addCustomField":
             draft.addCustomField(change.element, change.label, change.kind, change.value);
+            break;
+          case "addPasskey":
+            draft.addPasskey(
+              change.element,
+              change.rpId,
+              change.userHandle,
+              change.credentialId,
+              change.privateKey,
+              change.publicKeyCose,
+              change.alg,
+              change.discoverable,
+              BigInt(change.createdMs),
+            );
             break;
           case "removeElement":
             draft.removeElement(change.list, change.element);
@@ -951,6 +1062,14 @@ export class VaultSession {
       call(() => this.#s().totp(id, this.#now())),
       (t) => ({ code: t.code, validForSeconds: t.validForSeconds, periodSeconds: t.periodSeconds }),
     );
+  }
+
+  /**
+   * Signs a WebAuthn assertion with a passkey already stored on this item (ADR 0039 §2). The
+   * private key never leaves the wasm boundary; only the signed assertion comes back.
+   */
+  passkeyAssertion(id: string, passkeyId: string, origin: string, rpId: string, challenge: Uint8Array): PasskeyAssertionResult {
+    return mapPasskeyAssertion(call(() => this.#s().passkeyAssertion(id, passkeyId, origin, rpId, challenge)));
   }
 
   /**
@@ -1832,6 +1951,14 @@ export class DurableSession {
   /** One field's value, on the user's request only. */
   reveal(id: string, key: string): string {
     return call(() => this.#inner.revealField(id, key));
+  }
+
+  /**
+   * Signs a WebAuthn assertion with a passkey already stored on this item (ADR 0039 §2). The
+   * private key never leaves the wasm boundary; only the signed assertion comes back.
+   */
+  passkeyAssertion(id: string, passkeyId: string, origin: string, rpId: string, challenge: Uint8Array): PasskeyAssertionResult {
+    return mapPasskeyAssertion(call(() => this.#inner.passkeyAssertion(id, passkeyId, origin, rpId, challenge)));
   }
 
   /** Creates an item; returns its id. Persisted before this resolves (class docs). */

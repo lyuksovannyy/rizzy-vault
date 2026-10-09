@@ -34,6 +34,7 @@
 //! | [`HttpRequest`], [`meta_request`], [`check_meta`], [`expect_no_content`] | the requests JavaScript sends and the answers it hands back |
 //! | [`generate_password_with_options`] (`generatePasswordWithOptions`), [`generate_passphrase_with_options`] (`generatePassphraseWithOptions`), [`password_entropy`] (`passwordEntropy`), [`passphrase_entropy`] (`passphraseEntropy`), [`generator_limits`] (`generatorLimits`), [`GeneratorLimits`], [`Generated`] | the generator, every option ([`generator`]) |
 //! | [`TotpCode`], [`EncryptedExport`], [`ImportReport`], [`DeviceView`], [`TwoFactorEnrolment`] | results |
+//! | [`create_passkey`] (`createPasskey`), [`CreatedPasskey`], [`Session::passkey_assertion`] (`passkeyAssertion`), [`PasskeyAssertion`] | `WebAuthn` passkey registration and assertion ([`passkey`]; ADR 0039) |
 //! | [`plaintext_export_warning`], [`plaintext_export_phrase`] | the frozen texts of ADR 0027 §5 |
 //! | [`plaintext_export_hold_ms`], [`detect_import_format`] | the hold after the plaintext warning; recognising an import file (owner decision 2026-10-05) |
 //! | [`CoreError`] | the one thrown error: a stable code ([`error`]) |
@@ -46,7 +47,12 @@
 //!   Emergency Kit goes out once ([`SignupFlow::emergency_kit`]); a plaintext export goes out
 //!   after a re-authentication, the warning and its hold ([`Session::export_plaintext`]). The OPAQUE session's bearer
 //!   token goes out in the `Authorization` value of each request (it is the transport's
-//!   credential, ADR 0028 item 4, not a key of rule 1).
+//!   credential, ADR 0028 item 4, not a key of rule 1). A freshly generated passkey's private
+//!   key goes out once, from [`create_passkey`], for the caller to encrypt straight into the
+//!   new item ([`passkey`]'s module docs) — the same shape as a freshly generated password
+//!   crossing out so the host can save it; a *stored* passkey's private key never crosses at
+//!   all ([`Session::passkey_assertion`] reads and uses it internally, like
+//!   [`Session::totp`] does for a different concealed field).
 //! - **Plaintext crosses at the smallest useful size** (rule 3): summaries for lists,
 //!   concealed values only on reveal ([`items`]).
 //! - **Errors** are [`CoreError`] codes with no secret in them (rule 4).
@@ -157,6 +163,13 @@ pub mod device {
         Enrolled, LoggedIn, LoginAwaitingSession, LoginInput, LoginStarted,
         start_login,
     };
+    use rizzy_client::passkey::get_assertion;
+    use rizzy_client::rizzy_core::item::key::ElementId;
+    use rizzy_client::rizzy_core::item::schema::{
+        ATTR_CREDENTIAL_ID, ATTR_PRIVATE_KEY, LIST_PASSKEY,
+    };
+    use rizzy_client::rizzy_core::item::value::ValueRef;
+    use rizzy_client::rizzy_core::passkey::Es256SigningKey;
     use rizzy_client::rizzy_core::sign::DeviceKind;
     use rizzy_client::rizzy_proto::auth::{
         DeviceAuthFinishResponse, DeviceAuthStartResponse,
@@ -181,6 +194,7 @@ pub mod device {
         self, FieldView, ItemDraft, ItemSummary, hex, type_from_name,
         visible_item,
     };
+    use crate::passkey::PasskeyAssertion;
     use crate::rng::{Rng, os_rng};
     use crate::secret::take_secret;
     use crate::store::{CacheDelta, KvRow, decode_rows, encode_rows};
@@ -5085,6 +5099,343 @@ pub mod device {
             let vault = self.vault_ref()?;
             let item = visible_item(vault, id)?;
             Ok(items::reveal(vault, item, key)?.as_str().to_owned())
+        }
+        #[doc =
+        " Produces a `WebAuthn` assertion for one stored passkey (`passkey/<passkey_id>/…` on"]
+        #[doc =
+        " item `id`, ADR 0039 §1, §2; [`crate::passkey`] module docs — the extension\'s own"]
+        #[doc =
+        " durable-device path there: this crate\'s other passkey call, [`crate::passkey::create_passkey`],"]
+        #[doc =
+        " needs no session at all). The stored private key is read and used here, never"]
+        #[doc =
+        " returned: only the resulting [`PasskeyAssertion`] crosses to JavaScript, the same"]
+        #[doc =
+        " pattern [`DeviceSession::reveal_field`] uses for a different concealed field (text"]
+        #[doc =
+        " there; this one is never text-revealable at all, module docs)."]
+        #[doc = ""]
+        #[doc =
+        " `origin` must be the browser-verified origin — the extension\'s background script reads"]
+        #[doc =
+        " it from the browser\'s own sender information, never from the intercepted"]
+        #[doc =
+        " `navigator.credentials.get()` call\'s relayed payload ([ADR 0036] §4; [`crate::passkey`]"]
+        #[doc =
+        " module docs, \"What this does not decide\"); `rp_id` is the page\'s requested `rpId`,"]
+        #[doc =
+        " already defaulted by the caller to `origin`\'s host if the page omitted it."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " As [`DeviceSession::item`]; `invalid_input` when `passkey_id` is not a valid element"]
+        #[doc =
+        " id, the item has no such passkey, or its stored key is not a valid 32-byte scalar;"]
+        #[doc =
+        " otherwise whatever `get_assertion` returns (`rp_id_rejected` for INV-64)."]
+        #[doc = ""]
+        #[doc =
+        " [ADR 0036]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0036-browser-extension-architecture-and-key-custody.md"]
+        pub fn passkey_assertion(&self, id: &str, passkey_id: &str,
+            origin: &str, rp_id: &str, challenge: &[u8])
+            -> Result<PasskeyAssertion, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Produces a `WebAuthn` assertion for one stored passkey (`passkey/<passkey_id>/…` on"]
+                    #[doc =
+                    " item `id`, ADR 0039 §1, §2; [`crate::passkey`] module docs — the extension\'s own"]
+                    #[doc =
+                    " durable-device path there: this crate\'s other passkey call, [`crate::passkey::create_passkey`],"]
+                    #[doc =
+                    " needs no session at all). The stored private key is read and used here, never"]
+                    #[doc =
+                    " returned: only the resulting [`PasskeyAssertion`] crosses to JavaScript, the same"]
+                    #[doc =
+                    " pattern [`DeviceSession::reveal_field`] uses for a different concealed field (text"]
+                    #[doc =
+                    " there; this one is never text-revealable at all, module docs)."]
+                    #[doc = ""]
+                    #[doc =
+                    " `origin` must be the browser-verified origin — the extension\'s background script reads"]
+                    #[doc =
+                    " it from the browser\'s own sender information, never from the intercepted"]
+                    #[doc =
+                    " `navigator.credentials.get()` call\'s relayed payload ([ADR 0036] §4; [`crate::passkey`]"]
+                    #[doc =
+                    " module docs, \"What this does not decide\"); `rp_id` is the page\'s requested `rpId`,"]
+                    #[doc =
+                    " already defaulted by the caller to `origin`\'s host if the page omitted it."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " As [`DeviceSession::item`]; `invalid_input` when `passkey_id` is not a valid element"]
+                    #[doc =
+                    " id, the item has no such passkey, or its stored key is not a valid 32-byte scalar;"]
+                    #[doc =
+                    " otherwise whatever `get_assertion` returns (`rp_id_rejected` for INV-64)."]
+                    #[doc = ""]
+                    #[doc =
+                    " [ADR 0036]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0036-browser-extension-architecture-and-key-custody.md"]
+                    #[export_name =
+                    "devicesession_passkeyAssertion_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_passkeyAssertion(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg3_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg3_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg3_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg3_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg4_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg4_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg4_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg4_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg5_1:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg5_2:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg5_3:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg5_4:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<PasskeyAssertion,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let arg2 = &*arg2;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg3 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
+                                                };
+                                            let arg3 = &*arg3;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg4 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                            arg4_3, arg4_4))
+                                                };
+                                            let arg4 = &*arg4;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            let arg5 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg5_1, arg5_2,
+                                                            arg5_3, arg5_4))
+                                                };
+                                            let arg5 = &*arg5;
+                                            let _ret =
+                                                me.passkey_assertion(arg1, arg2, arg3, arg4, arg5);
+                                            _ret
+                                        }
+                                    });
+                        <Result<PasskeyAssertion, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Produces a `WebAuthn` assertion for one stored passkey (`passkey/<passkey_id>/…` on"]
+                    #[doc =
+                    " item `id`, ADR 0039 §1, §2; [`crate::passkey`] module docs — the extension\'s own"]
+                    #[doc =
+                    " durable-device path there: this crate\'s other passkey call, [`crate::passkey::create_passkey`],"]
+                    #[doc =
+                    " needs no session at all). The stored private key is read and used here, never"]
+                    #[doc =
+                    " returned: only the resulting [`PasskeyAssertion`] crosses to JavaScript, the same"]
+                    #[doc =
+                    " pattern [`DeviceSession::reveal_field`] uses for a different concealed field (text"]
+                    #[doc =
+                    " there; this one is never text-revealable at all, module docs)."]
+                    #[doc = ""]
+                    #[doc =
+                    " `origin` must be the browser-verified origin — the extension\'s background script reads"]
+                    #[doc =
+                    " it from the browser\'s own sender information, never from the intercepted"]
+                    #[doc =
+                    " `navigator.credentials.get()` call\'s relayed payload ([ADR 0036] §4; [`crate::passkey`]"]
+                    #[doc =
+                    " module docs, \"What this does not decide\"); `rp_id` is the page\'s requested `rpId`,"]
+                    #[doc =
+                    " already defaulted by the caller to `origin`\'s host if the page omitted it."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " As [`DeviceSession::item`]; `invalid_input` when `passkey_id` is not a valid element"]
+                    #[doc =
+                    " id, the item has no such passkey, or its stored key is not a valid 32-byte scalar;"]
+                    #[doc =
+                    " otherwise whatever `get_assertion` returns (`rp_id_rejected` for INV-64)."]
+                    #[doc = ""]
+                    #[doc =
+                    " [ADR 0036]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0036-browser-extension-architecture-and-key-custody.md"]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_passkeyAssertion_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(5u32);
+                        <&str as WasmDescribe>::describe();
+                        <&str as WasmDescribe>::describe();
+                        <&str as WasmDescribe>::describe();
+                        <&str as WasmDescribe>::describe();
+                        <&[u8] as WasmDescribe>::describe();
+                        <Result<PasskeyAssertion, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<PasskeyAssertion, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x14V Produces a `WebAuthn` assertion for one stored passkey (`passkey/<passkey_id>/\xe2\x80\xa6` onU item `id`, ADR 0039 \xc2\xa71, \xc2\xa72; [`crate::passkey`] module docs \xe2\x80\x94 the extension's own` durable-device path there: this crate's other passkey call, [`crate::passkey::create_passkey`],N needs no session at all). The stored private key is read and used here, neverR returned: only the resulting [`PasskeyAssertion`] crosses to JavaScript, the sameS pattern [`DeviceSession::reveal_field`] uses for a different concealed field (text? there; this one is never text-revealable at all, module docs).\0Y `origin` must be the browser-verified origin \xe2\x80\x94 the extension's background script readsI it from the browser's own sender information, never from the interceptedY `navigator.credentials.get()` call's relayed payload ([ADR 0036] \xc2\xa74; [`crate::passkey`]S module docs, \"What this does not decide\"); `rp_id` is the page's requested `rpId`,K already defaulted by the caller to `origin`'s host if the page omitted it.\0\t # ErrorsU As [`DeviceSession::item`]; `invalid_input` when `passkey_id` is not a valid elementS id, the item has no such passkey, or its stored key is not a valid 32-byte scalar;J otherwise whatever `get_assertion` returns (`rp_id_rejected` for INV-64).\0\x82\x01 [ADR 0036]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0036-browser-extension-architecture-and-key-custody.md\0\x05\x02id\0\0\0\npasskey_id\0\0\0\x06origin\0\0\0\x05rp_id\0\0\0\tchallenge\0\0\0\0\0\x10passkeyAssertion\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let vault = self.vault_ref()?;
+            let item = visible_item(vault, id)?;
+            let bad = || CoreError::from(ClientError::InvalidInput);
+            let element = ElementId::from_bytes(items::parse_id(passkey_id)?);
+            let credential_id_key =
+                element.key(LIST_PASSKEY,
+                            ATTR_CREDENTIAL_ID).map_err(|_| bad())?;
+            let credential_id =
+                match vault.field_value(item,
+                                    credential_id_key.as_str()).ok_or_else(bad)?.decode() {
+                    Ok(ValueRef::Bytes(bytes)) => bytes.to_vec(),
+                    _ => return Err(bad()),
+                };
+            let private_key_key =
+                element.key(LIST_PASSKEY,
+                            ATTR_PRIVATE_KEY).map_err(|_| bad())?;
+            let signing_key =
+                match vault.field_value(item,
+                                    private_key_key.as_str()).ok_or_else(bad)?.decode() {
+                    Ok(ValueRef::Bytes(bytes)) =>
+                        Es256SigningKey::from_bytes(bytes).map_err(|_| bad())?,
+                    _ => return Err(bad()),
+                };
+            let assertion =
+                get_assertion(&signing_key, &credential_id, origin, rp_id,
+                        challenge)?;
+            Ok(assertion.into())
         }
         #[doc =
         " Creates an item of `item_type` (a name of [`crate::items::TYPES`]) with the draft\'s"]
@@ -11614,10 +11965,12 @@ pub mod items {
     use rizzy_client::lists::{ListMove, ListPlace, MAX_WRITES_PER_OP};
     use rizzy_client::rizzy_core::item::key::ElementId;
     use rizzy_client::rizzy_core::item::schema::{
-        ATTR_KIND, ATTR_LABEL, ATTR_VALUE, CUSTOM_KIND_BOOLEAN,
+        ATTR_ALG, ATTR_CREATED_MS, ATTR_CREDENTIAL_ID, ATTR_DISCOVERABLE,
+        ATTR_KIND, ATTR_LABEL, ATTR_PRIVATE_KEY, ATTR_PUBLIC_KEY_COSE,
+        ATTR_RP_ID, ATTR_USER_HANDLE, ATTR_VALUE, CUSTOM_KIND_BOOLEAN,
         CUSTOM_KIND_HIDDEN, CUSTOM_KIND_TEXT, Concealment, CustomFieldKind,
-        Expected, ITEM_FAVORITE, ITEM_NAME, KeyClass, LIST_FIELD, LIST_TAG,
-        LIST_URI, LOGIN_TOTP, LOGIN_USERNAME, classify,
+        Expected, ITEM_FAVORITE, ITEM_NAME, KeyClass, LIST_FIELD,
+        LIST_PASSKEY, LIST_TAG, LIST_URI, LOGIN_TOTP, LOGIN_USERNAME, classify,
     };
     use rizzy_client::rizzy_core::item::tag::{tag_key, tag_name};
     use rizzy_client::rizzy_core::item::value::ValueRef;
@@ -11629,15 +11982,18 @@ pub mod items {
     /// The most entries one draft takes: the writes of one op (ADR 0018 §10: 1,024).
     pub const MAX_DRAFT_ENTRIES: usize = 1024;
     /// The item types the web vault names, as `rv --type` names them.
-    pub const TYPES: [(&str, ItemType); 10] =
+    ///
+    /// No `"passkey"` entry: `0x000A` (the standalone-passkey candidate ADR 0018 reserved) was
+    /// released back to unassigned by ADR 0039 §1, which puts passkeys on the `passkey/<id>/…` list
+    /// of an existing Login item instead (`rizzy-core`'s `item::schema::LIST_PASSKEY`).
+    pub const TYPES: [(&str, ItemType); 9] =
         [("login", ItemType::LOGIN), ("note", ItemType::SECURE_NOTE),
                 ("card", ItemType::CARD), ("identity", ItemType::IDENTITY),
                 ("ssh-key", ItemType::SSH_KEY),
                 ("api-credential", ItemType::API_CREDENTIAL),
                 ("software-license", ItemType::SOFTWARE_LICENSE),
                 ("wifi", ItemType::WIFI),
-                ("bank-account", ItemType::BANK_ACCOUNT),
-                ("passkey", ItemType::PASSKEY)];
+                ("bank-account", ItemType::BANK_ACCOUNT)];
     /// The name of an item type; `unknown` for one this build does not name.
     pub(crate) fn type_name(item_type: Option<ItemType>) -> &'static str {
         TYPES.iter().find(|(_, t)|
@@ -14400,6 +14756,31 @@ pub mod items {
         #[coverage(off)]
         fn assert_receiver_is_total_eq(&self) -> () {}
     }
+    /// A new passkey's fields (ADR 0039 §1), as `createPasskey`'s result hands them straight to
+    /// [`ItemDraft::add_passkey`]. `user_handle` and `private_key` are zeroizing: the private key
+    /// in particular must never outlive this one write (`crate::passkey`'s own module docs, "the
+    /// caller's one job is to encrypt this straight into a new field... and then drop every copy
+    /// of it"). `credential_id` and `public_key_cose` are not secret — the relying party already
+    /// has both.
+    struct NewPasskey {
+        /// `passkey/<id>/rp_id`.
+        rp_id: Zeroizing<String>,
+        /// `passkey/<id>/user_handle`.
+        user_handle: Zeroizing<Vec<u8>>,
+        /// `passkey/<id>/credential_id`.
+        credential_id: Vec<u8>,
+        /// `passkey/<id>/private_key`.
+        private_key: Zeroizing<Vec<u8>>,
+        /// `passkey/<id>/public_key_cose`.
+        public_key_cose: Vec<u8>,
+        /// `passkey/<id>/alg`: this schema's own small-positive-integer convention (`1` = ES256,
+        /// `2` = `EdDSA`), not the real negative COSE id.
+        alg: u16,
+        /// `passkey/<id>/discoverable`.
+        discoverable: bool,
+        /// `passkey/<id>/created_ms`.
+        created_ms: u64,
+    }
     /// One entry of a draft.
     enum Entry {
 
@@ -14421,6 +14802,9 @@ pub mod items {
         /// A new custom field, under the element id the host minted for it: label, kind, value.
         AddCustom(ElementId, Zeroizing<String>, CustomKind,
             Zeroizing<String>),
+
+        /// A new passkey, under the element id the host minted for it (ADR 0039 §1).
+        AddPasskey(ElementId, Box<NewPasskey>),
 
         /// An element removed: list, full element id.
         Remove(String, String),
@@ -15692,6 +16076,359 @@ pub mod items {
                     Zeroizing::new(value.to_owned())))
         }
         #[doc =
+        " Adds a new passkey to this item\'s `passkey/` list (ADR 0039 §1), under `element_id` (as"]
+        #[doc =
+        " [`ItemDraft::add_uri`] takes it): the write path for `createPasskey`\'s result. The host"]
+        #[doc =
+        " must call this immediately with the created private key and never retain a second copy"]
+        #[doc =
+        " of it (`NewPasskey`\'s own doc comment, not linkable here: it is private). `alg` is `1`"]
+        #[doc =
+        " for ES256 or `2` for `EdDSA` (ADR 0039 §1); any other value is refused by the schema"]
+        #[doc = " check when the draft is written, not here."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " `invalid_input` for a bad `element_id`; as [`ItemDraft::set`]."]
+        #[expect(clippy::too_many_arguments, reason =
+        "mirrors the fixed field set ADR 0039 §1 defines for one passkey; splitting it into a second builder call would only let a caller forget a field, not simplify anything")]
+        pub fn add_passkey(&mut self, element_id: &str, rp_id: &str,
+            user_handle: &[u8], credential_id: &[u8], private_key: &[u8],
+            public_key_cose: &[u8], alg: u16, discoverable: bool,
+            created_ms: u64) -> Result<(), CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Adds a new passkey to this item\'s `passkey/` list (ADR 0039 §1), under `element_id` (as"]
+                    #[doc =
+                    " [`ItemDraft::add_uri`] takes it): the write path for `createPasskey`\'s result. The host"]
+                    #[doc =
+                    " must call this immediately with the created private key and never retain a second copy"]
+                    #[doc =
+                    " of it (`NewPasskey`\'s own doc comment, not linkable here: it is private). `alg` is `1`"]
+                    #[doc =
+                    " for ES256 or `2` for `EdDSA` (ADR 0039 §1); any other value is refused by the schema"]
+                    #[doc = " check when the draft is written, not here."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `invalid_input` for a bad `element_id`; as [`ItemDraft::set`]."]
+                    #[allow(clippy::too_many_arguments, reason =
+                    "mirrors the fixed field set ADR 0039 §1 defines for one passkey; splitting it into a second builder call would only let a caller forget a field, not simplify anything")]
+                    #[export_name = "itemdraft_addPasskey_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_ItemDraft_addPasskey(me:
+                            <ItemDraft as
+                            wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg3_1:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg3_2:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg3_3:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg3_4:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg4_1:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg4_2:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg4_3:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg4_4:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg5_1:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg5_2:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg5_3:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg5_4:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg6_1:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg6_2:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg6_3:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg6_4:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg7_1:
+                            <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg7_2:
+                            <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg7_3:
+                            <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg7_4:
+                            <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg8_1:
+                            <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg8_2:
+                            <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg8_3:
+                            <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg8_4:
+                            <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg9_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg9_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg9_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg9_4:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<ItemDraft>();
+                                            let mut me =
+                                                unsafe {
+                                                    <ItemDraft as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let arg2 = &*arg2;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            let arg3 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
+                                                };
+                                            let arg3 = &*arg3;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            let arg4 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                            arg4_3, arg4_4))
+                                                };
+                                            let arg4 = &*arg4;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            let arg5 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg5_1, arg5_2,
+                                                            arg5_3, arg5_4))
+                                                };
+                                            let arg5 = &*arg5;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            let arg6 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg6_1, arg6_2,
+                                                            arg6_3, arg6_4))
+                                                };
+                                            let arg6 = &*arg6;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u16>();
+                                            let arg7 =
+                                                unsafe {
+                                                    <u16 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u16 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg7_1, arg7_2,
+                                                            arg7_3, arg7_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<bool>();
+                                            let arg8 =
+                                                unsafe {
+                                                    <bool as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<bool as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg8_1, arg8_2,
+                                                            arg8_3, arg8_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg9 =
+                                                unsafe {
+                                                    <u64 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg9_1, arg9_2,
+                                                            arg9_3, arg9_4))
+                                                };
+                                            let _ret =
+                                                me.add_passkey(arg1, arg2, arg3, arg4, arg5, arg6, arg7,
+                                                    arg8, arg9);
+                                            _ret
+                                        }
+                                    });
+                        <Result<(), CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Adds a new passkey to this item\'s `passkey/` list (ADR 0039 §1), under `element_id` (as"]
+                    #[doc =
+                    " [`ItemDraft::add_uri`] takes it): the write path for `createPasskey`\'s result. The host"]
+                    #[doc =
+                    " must call this immediately with the created private key and never retain a second copy"]
+                    #[doc =
+                    " of it (`NewPasskey`\'s own doc comment, not linkable here: it is private). `alg` is `1`"]
+                    #[doc =
+                    " for ES256 or `2` for `EdDSA` (ADR 0039 §1); any other value is refused by the schema"]
+                    #[doc = " check when the draft is written, not here."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `invalid_input` for a bad `element_id`; as [`ItemDraft::set`]."]
+                    #[allow(clippy::too_many_arguments, reason =
+                    "mirrors the fixed field set ADR 0039 §1 defines for one passkey; splitting it into a second builder call would only let a caller forget a field, not simplify anything")]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_itemdraft_addPasskey_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(9u32);
+                        <&str as WasmDescribe>::describe();
+                        <&str as WasmDescribe>::describe();
+                        <&[u8] as WasmDescribe>::describe();
+                        <&[u8] as WasmDescribe>::describe();
+                        <&[u8] as WasmDescribe>::describe();
+                        <&[u8] as WasmDescribe>::describe();
+                        <u16 as WasmDescribe>::describe();
+                        <bool as WasmDescribe>::describe();
+                        <u64 as WasmDescribe>::describe();
+                        <Result<(), CoreError> as WasmDescribe>::describe();
+                        <Result<(), CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\tItemDraft\tY Adds a new passkey to this item's `passkey/` list (ADR 0039 \xc2\xa71), under `element_id` (asX [`ItemDraft::add_uri`] takes it): the write path for `createPasskey`'s result. The hostW must call this immediately with the created private key and never retain a second copyW of it (`NewPasskey`'s own doc comment, not linkable here: it is private). `alg` is `1`V for ES256 or `2` for `EdDSA` (ADR 0039 \xc2\xa71); any other value is refused by the schema+ check when the draft is written, not here.\0\t # Errors? `invalid_input` for a bad `element_id`; as [`ItemDraft::set`].\0\t\nelement_id\0\0\0\x05rp_id\0\0\0\x0buser_handle\0\0\0\rcredential_id\0\0\0\x0bprivate_key\0\0\0\x0fpublic_key_cose\0\0\0\x03alg\0\0\0\x0cdiscoverable\0\0\0\ncreated_ms\0\0\0\0\0\naddPasskey\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let element = element_id_of(element_id)?;
+            self.push(Entry::AddPasskey(element,
+                    Box::new(NewPasskey {
+                            rp_id: Zeroizing::new(rp_id.to_owned()),
+                            user_handle: Zeroizing::new(user_handle.to_vec()),
+                            credential_id: credential_id.to_vec(),
+                            private_key: Zeroizing::new(private_key.to_vec()),
+                            public_key_cose: public_key_cose.to_vec(),
+                            alg,
+                            discoverable,
+                            created_ms,
+                        })))
+        }
+        #[doc =
         " Moves an existing element (as [`FieldView::element`] gives it) of `list`: `place` is"]
         #[doc =
         " `first`, `last`, `before` or `after`, and `relative` is the neighbouring element\'s full"]
@@ -16214,6 +16951,33 @@ pub mod items {
             _ => Err(ClientError::InvalidEdit.into()),
         }
     }
+    /// The Bytes value of raw bytes (ADR 0039 §1's passkey fields: never user-typed text, so
+    /// `encode`'s string path is not used for these attributes).
+    fn bytes(input: &[u8]) -> CoreResult<Value> {
+        Value::bytes(input).map_err(|_| ClientError::InvalidEdit.into())
+    }
+    /// [`Entry::AddPasskey`]'s writes, under `element`: every fixed field ADR 0039 §1's table
+    /// lists for one passkey, and no `order` — unlike `uri`/`field`, that table has no
+    /// `passkey/<id>/order` row, so this list carries no layout order (ADR 0039 §1 is the
+    /// exhaustive field list, not a starting point to extend; what order a client displays
+    /// multiple passkeys in is unspecified and left to the owner to decide in a future ADR, not
+    /// invented here). Split out of [`writes`] only to keep that function's own line count under
+    /// the workspace lint's cap — the logic is exactly what `writes`' `AddUri`/`AddCustom` arms
+    /// already do inline, at this one entry's larger, fixed field count.
+    fn passkey_writes(element: ElementId, passkey: &NewPasskey)
+        -> CoreResult<Vec<Write>> {
+        VaultSync::element_writes(element, LIST_PASSKEY,
+                <[_]>::into_vec(::alloc::boxed::box_new([(ATTR_RP_ID,
+                                    text(&passkey.rp_id)?),
+                                (ATTR_USER_HANDLE, bytes(&passkey.user_handle)?),
+                                (ATTR_CREDENTIAL_ID, bytes(&passkey.credential_id)?),
+                                (ATTR_PRIVATE_KEY, bytes(&passkey.private_key)?),
+                                (ATTR_PUBLIC_KEY_COSE, bytes(&passkey.public_key_cose)?),
+                                (ATTR_ALG, Value::enumeration(passkey.alg)),
+                                (ATTR_DISCOVERABLE, Value::bool(passkey.discoverable)),
+                                (ATTR_CREATED_MS, Value::u64(passkey.created_ms))])),
+                None).map_err(Into::into)
+    }
     /// The kind a custom field displays.
     fn custom_kind(vault: &VaultSync, item: ItemId, element: &str)
         -> CustomFieldKind {
@@ -16324,6 +17088,9 @@ pub mod items {
                                                     text(label)?), (ATTR_KIND, Value::enumeration(kind_id)),
                                                 (ATTR_VALUE, value)])), Some(&order))?;
                     out.extend(new);
+                }
+                Entry::AddPasskey(element, passkey) => {
+                    out.extend(passkey_writes(*element, passkey)?);
                 }
                 Entry::Remove(list, element) => {
                     let item = item.ok_or(ClientError::InvalidEdit)?;
@@ -20123,6 +20890,1810 @@ pub mod matching {
                 flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
         };
 }
+pub mod passkey {
+    //! `WebAuthn` passkey ceremonies at the wasm boundary ([ADR 0039] §5: "`rizzy-wasm` exposes the
+    //! coarse calls... that `rizzy-client`'s state machine implements"), over
+    //! [`rizzy_client::passkey`].
+    //!
+    //! # What crosses, and why
+    //!
+    //! [`create_passkey`] is the one place in this crate, besides the master password, Secret Key,
+    //! export password and Emergency Kit (`lib.rs`'s "Rules of the boundary" rule 1), where key
+    //! material crosses to JavaScript: [`CreatedPasskey::private_key`] is the fresh credential's
+    //! raw 32-byte scalar. There is no way around it here — the caller (the extension's
+    //! background script, or the web vault) must hand that value straight to the existing,
+    //! generic encrypted item-write call (`Session::create_item`/`edit_item` with an
+    //! [`crate::items::ItemDraft`] adding a `passkey/<id>/private_key` field) to persist it, the
+    //! same way a freshly generated login password already crosses so the host can save it into a
+    //! new item. [`crate::secret`]'s own module docs name the reason this is unavoidable in a
+    //! shared-heap wasm boundary; the caller must not log it, store it outside the item's
+    //! encrypted field, or hold it longer than the one save call needs.
+    //!
+    //! [`Session::passkey_assertion`](crate::session::Session::passkey_assertion) is the opposite
+    //! shape: the stored private key never leaves Rust. It is read back from the already-decrypted
+    //! vault internally (the same pattern [`crate::session::Session::totp`] already uses for a
+    //! different concealed field) and only the resulting [`PasskeyAssertion`] — never the key —
+    //! crosses out.
+    //!
+    //! # What this does not decide
+    //!
+    //! Neither call establishes `origin`: both take it as a caller-supplied `&str` and immediately
+    //! hand it to `rizzy_client::passkey`'s `verify_rp_id` (INV-64, a `pub(crate)` function there,
+    //! not linkable from here), which can only ever check the relationship between two strings it
+    //! is given (that function's own scope-boundary docs).
+    //! Reading `origin` from the browser's own sender information, never from a page-relayed
+    //! message, and refusing a cross-origin iframe before calling this far at all, are the
+    //! extension's job ([ADR 0039] §2; [ADR 0036] §4), not this crate's.
+    //!
+    //! [ADR 0036]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0036-browser-extension-architecture-and-key-custody.md
+    //! [ADR 0039]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0039-passkeys-vault-and-extension.md
+    use rizzy_client::passkey::create_credential;
+    use wasm_bindgen::prelude::wasm_bindgen;
+    use crate::error::CoreError;
+    use crate::rng::os_rng;
+    #[wasm_bindgen()]
+    #[__wasm_bindgen_retried]
+    #[doc =
+    " Everything one `navigator.credentials.create()` ceremony resolves with (ADR 0039 §1), as"]
+    #[doc = " JavaScript receives it."]
+    pub struct CreatedPasskey {
+        #[doc =
+        " The fresh ES256 private key, 32 bytes: the caller\'s one job is to encrypt this straight"]
+        #[doc =
+        " into a new `passkey/<id>/private_key` field (module docs) and then drop every copy of"]
+        #[doc =
+        " it; this crate holds no reference after this struct returns."]
+        private_key: Vec<u8>,
+        #[doc = " `passkey/<id>/credential_id`."]
+        credential_id: Vec<u8>,
+        #[doc =
+        " `passkey/<id>/public_key_cose`: the hand-written COSE `EC2` map."]
+        public_key_cose: Vec<u8>,
+        #[doc =
+        " `clientDataJSON`, for the caller to hand back to the page verbatim."]
+        client_data_json: Vec<u8>,
+        #[doc =
+        " The CBOR `attestationObject`, `\"none\"` format, for the caller to hand back to the page."]
+        attestation_object: Vec<u8>,
+    }
+    #[automatically_derived]
+    impl ::core::clone::Clone for CreatedPasskey {
+        #[inline]
+        fn clone(&self) -> CreatedPasskey {
+            CreatedPasskey {
+                private_key: ::core::clone::Clone::clone(&self.private_key),
+                credential_id: ::core::clone::Clone::clone(&self.credential_id),
+                public_key_cose: ::core::clone::Clone::clone(&self.public_key_cose),
+                client_data_json: ::core::clone::Clone::clone(&self.client_data_json),
+                attestation_object: ::core::clone::Clone::clone(&self.attestation_object),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsConstructor for CreatedPasskey {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for
+        CreatedPasskey {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsStaticProperty for CreatedPasskey
+        {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribe for CreatedPasskey {
+        fn describe() {
+            use wasm_bindgen::describe::*;
+            inform(RUST_STRUCT);
+            inform(14u32);
+            inform(67u32);
+            inform(114u32);
+            inform(101u32);
+            inform(97u32);
+            inform(116u32);
+            inform(101u32);
+            inform(100u32);
+            inform(80u32);
+            inform(97u32);
+            inform(115u32);
+            inform(115u32);
+            inform(107u32);
+            inform(101u32);
+            inform(121u32);
+            inform(27u32);
+            inform(114u32);
+            inform(105u32);
+            inform(122u32);
+            inform(122u32);
+            inform(121u32);
+            inform(45u32);
+            inform(119u32);
+            inform(97u32);
+            inform(115u32);
+            inform(109u32);
+            inform(45u32);
+            inform(101u32);
+            inform(48u32);
+            inform(57u32);
+            inform(99u32);
+            inform(99u32);
+            inform(48u32);
+            inform(101u32);
+            inform(98u32);
+            inform(51u32);
+            inform(53u32);
+            inform(102u32);
+            inform(56u32);
+            inform(98u32);
+            inform(53u32);
+            inform(56u32);
+            inform(51u32);
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::IntoWasmAbi for CreatedPasskey {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CreatedPasskey>>;
+        fn into_abi(self) -> Self::Abi {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+            WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self))) as
+                    *mut WasmRefCell<CreatedPasskey>)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::FromWasmAbi for CreatedPasskey {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CreatedPasskey>>;
+        unsafe fn from_abi(js: Self::Abi) -> Self {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+            use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+            let ptr = js.into_ptr();
+            assert_not_null(ptr);
+            let rc = Rc::from_raw(ptr);
+            match Rc::try_unwrap(rc) {
+                Ok(cell) => cell.into_inner(),
+                Err(_) =>
+                    wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::core::convert::From<CreatedPasskey> for
+        wasm_bindgen::JsValue {
+        fn from(value: CreatedPasskey) -> Self {
+            let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_createdpasskey_new_e09cc0eb35f8b583"]
+                fn __wbg_createdpasskey_new(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CreatedPasskey>>)
+                -> u32;
+            }
+            unsafe {
+                <wasm_bindgen::JsValue as
+                        wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_createdpasskey_new(ptr))
+            }
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[export_name = "__wbg_createdpasskey_free_e09cc0eb35f8b583"]
+            #[doc(hidden)]
+            pub unsafe extern "C-unwind" fn __wbg_createdpasskey_free(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CreatedPasskey>>,
+                allow_delayed: u32) {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                if allow_delayed != 0 {
+                    let ptr = ptr.into_ptr();
+                    wasm_bindgen::__rt::assert_not_null(ptr);
+                    drop(Rc::from_raw(ptr));
+                } else {
+                    let _ =
+                        <CreatedPasskey as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                }
+            }
+        };
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefFromWasmAbi for CreatedPasskey {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CreatedPasskey>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<CreatedPasskey>;
+        unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRef::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefMutFromWasmAbi for CreatedPasskey {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CreatedPasskey>>;
+        type Anchor = wasm_bindgen::__rt::RcRefMut<CreatedPasskey>;
+        unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRefMut::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::LongRefFromWasmAbi for CreatedPasskey {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CreatedPasskey>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<CreatedPasskey>;
+        unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            <Self as wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionIntoWasmAbi for CreatedPasskey {
+        #[inline]
+        fn none() -> Self::Abi {
+            <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CreatedPasskey>>>::null()
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionFromWasmAbi for CreatedPasskey {
+        #[inline]
+        fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::TryFromJsValue for CreatedPasskey {
+        fn try_from_js_value(value: wasm_bindgen::JsValue)
+            ->
+                wasm_bindgen::__rt::core::result::Result<Self,
+                wasm_bindgen::JsValue> {
+            Self::try_from_js_value_ref(&value).ok_or(value)
+        }
+        fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+            -> wasm_bindgen::__rt::core::option::Option<Self> {
+            let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_createdpasskey_unwrap_e09cc0eb35f8b583"]
+                fn __wbg_createdpasskey_unwrap(ptr: u32)
+                ->
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CreatedPasskey>>;
+            }
+            let ptr = unsafe { __wbg_createdpasskey_unwrap(idx) };
+            if ptr.is_null() {
+                wasm_bindgen::__rt::core::option::Option::None
+            } else {
+                unsafe {
+                    wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                }
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribeVector for CreatedPasskey {
+        fn describe_vector() {
+            use wasm_bindgen::describe::*;
+            inform(VECTOR);
+            <CreatedPasskey as
+                    wasm_bindgen::describe::WasmDescribe>::describe();
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorIntoWasmAbi for CreatedPasskey {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::IntoWasmAbi>::Abi;
+        fn vector_into_abi(vector:
+                wasm_bindgen::__rt::alloc::boxed::Box<[CreatedPasskey]>)
+            -> Self::Abi {
+            wasm_bindgen::convert::js_value_vector_into_abi(vector)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorFromWasmAbi for CreatedPasskey {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::FromWasmAbi>::Abi;
+        unsafe fn vector_from_abi(js: Self::Abi)
+            -> wasm_bindgen::__rt::alloc::boxed::Box<[CreatedPasskey]> {
+            wasm_bindgen::convert::js_value_vector_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\x01\x0eCreatedPasskey\0\x02Z Everything one `navigator.credentials.create()` ceremony resolves with (ADR 0039 \xc2\xa71), as\x18 JavaScript receives it.\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    impl core::fmt::Debug for CreatedPasskey {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("CreatedPasskey").field("private_key",
+                        &"[REDACTED]").field("credential_id_len",
+                    &self.credential_id.len()).finish_non_exhaustive()
+        }
+    }
+    impl CreatedPasskey {
+        #[doc =
+        " The fresh private key, 32 bytes (module docs: encrypt immediately, never log)."]
+        #[must_use]
+        pub fn private_key(&self) -> Vec<u8> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The fresh private key, 32 bytes (module docs: encrypt immediately, never log)."]
+                    #[must_use]
+                    #[export_name =
+                    "createdpasskey_privateKey_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_CreatedPasskey_privateKey(me:
+                            <CreatedPasskey as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Vec<u8> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<CreatedPasskey>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<CreatedPasskey>();
+                                            let me =
+                                                unsafe {
+                                                    <CreatedPasskey as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.private_key();
+                                            _ret
+                                        }
+                                    });
+                        <Vec<u8> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The fresh private key, 32 bytes (module docs: encrypt immediately, never log)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_createdpasskey_privateKey_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Vec<u8> as WasmDescribe>::describe();
+                        <Vec<u8> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0eCreatedPasskey\x01O The fresh private key, 32 bytes (module docs: encrypt immediately, never log).\0\0\0\0\nprivateKey\x01\x01\0\0\0\0\x01\0\x02\nprivateKey\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.private_key.clone()
+        }
+        #[doc = " `passkey/<id>/credential_id`."]
+        #[must_use]
+        pub fn credential_id(&self) -> Vec<u8> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " `passkey/<id>/credential_id`."]
+                    #[must_use]
+                    #[export_name =
+                    "createdpasskey_credentialId_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_CreatedPasskey_credentialId(me:
+                            <CreatedPasskey as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Vec<u8> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<CreatedPasskey>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<CreatedPasskey>();
+                                            let me =
+                                                unsafe {
+                                                    <CreatedPasskey as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.credential_id();
+                                            _ret
+                                        }
+                                    });
+                        <Vec<u8> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " `passkey/<id>/credential_id`."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_createdpasskey_credentialId_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Vec<u8> as WasmDescribe>::describe();
+                        <Vec<u8> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0eCreatedPasskey\x01\x1e `passkey/<id>/credential_id`.\0\0\0\0\x0ccredentialId\x01\x01\0\0\0\0\x01\0\x02\x0ccredentialId\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.credential_id.clone()
+        }
+        #[doc = " `passkey/<id>/public_key_cose`."]
+        #[must_use]
+        pub fn public_key_cose(&self) -> Vec<u8> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " `passkey/<id>/public_key_cose`."]
+                    #[must_use]
+                    #[export_name =
+                    "createdpasskey_publicKeyCose_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_CreatedPasskey_publicKeyCose(me:
+                            <CreatedPasskey as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Vec<u8> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<CreatedPasskey>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<CreatedPasskey>();
+                                            let me =
+                                                unsafe {
+                                                    <CreatedPasskey as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.public_key_cose();
+                                            _ret
+                                        }
+                                    });
+                        <Vec<u8> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " `passkey/<id>/public_key_cose`."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_createdpasskey_publicKeyCose_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Vec<u8> as WasmDescribe>::describe();
+                        <Vec<u8> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0eCreatedPasskey\x01  `passkey/<id>/public_key_cose`.\0\0\0\0\rpublicKeyCose\x01\x01\0\0\0\0\x01\0\x02\rpublicKeyCose\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.public_key_cose.clone()
+        }
+        #[doc = " `clientDataJSON`."]
+        #[must_use]
+        pub fn client_data_json(&self) -> Vec<u8> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " `clientDataJSON`."]
+                    #[must_use]
+                    #[export_name =
+                    "createdpasskey_clientDataJson_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_CreatedPasskey_clientDataJson(me:
+                            <CreatedPasskey as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Vec<u8> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<CreatedPasskey>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<CreatedPasskey>();
+                                            let me =
+                                                unsafe {
+                                                    <CreatedPasskey as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.client_data_json();
+                                            _ret
+                                        }
+                                    });
+                        <Vec<u8> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " `clientDataJSON`."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_createdpasskey_clientDataJson_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Vec<u8> as WasmDescribe>::describe();
+                        <Vec<u8> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0eCreatedPasskey\x01\x12 `clientDataJSON`.\0\0\0\0\x0eclientDataJson\x01\x01\0\0\0\0\x01\0\x02\x0eclientDataJson\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.client_data_json.clone()
+        }
+        #[doc = " The CBOR `attestationObject`."]
+        #[must_use]
+        pub fn attestation_object(&self) -> Vec<u8> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The CBOR `attestationObject`."]
+                    #[must_use]
+                    #[export_name =
+                    "createdpasskey_attestationObject_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_CreatedPasskey_attestationObject(me:
+                            <CreatedPasskey as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Vec<u8> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<CreatedPasskey>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<CreatedPasskey>();
+                                            let me =
+                                                unsafe {
+                                                    <CreatedPasskey as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.attestation_object();
+                                            _ret
+                                        }
+                                    });
+                        <Vec<u8> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The CBOR `attestationObject`."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_createdpasskey_attestationObject_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Vec<u8> as WasmDescribe>::describe();
+                        <Vec<u8> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0eCreatedPasskey\x01\x1e The CBOR `attestationObject`.\0\0\0\0\x11attestationObject\x01\x01\0\0\0\0\x01\0\x02\x11attestationObject\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.attestation_object.clone()
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    #[wasm_bindgen()]
+    #[__wasm_bindgen_retried]
+    #[doc =
+    " Everything one `navigator.credentials.get()` ceremony resolves with (ADR 0039 §2)."]
+    pub struct PasskeyAssertion {
+        #[doc =
+        " Echoed back unchanged from the caller\'s own already-stored `credential_id` (ADR 0039"]
+        #[doc =
+        " §5, \"the API is coarse\": the caller does not thread it through a second path)."]
+        credential_id: Vec<u8>,
+        #[doc =
+        " `clientDataJSON`, for the caller to hand back to the page verbatim."]
+        client_data_json: Vec<u8>,
+        #[doc =
+        " `authenticatorData`, for the caller to hand back to the page verbatim."]
+        authenticator_data: Vec<u8>,
+        #[doc = " The DER-encoded ECDSA signature."]
+        signature_der: Vec<u8>,
+    }
+    #[automatically_derived]
+    impl ::core::clone::Clone for PasskeyAssertion {
+        #[inline]
+        fn clone(&self) -> PasskeyAssertion {
+            PasskeyAssertion {
+                credential_id: ::core::clone::Clone::clone(&self.credential_id),
+                client_data_json: ::core::clone::Clone::clone(&self.client_data_json),
+                authenticator_data: ::core::clone::Clone::clone(&self.authenticator_data),
+                signature_der: ::core::clone::Clone::clone(&self.signature_der),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl ::core::fmt::Debug for PasskeyAssertion {
+        #[inline]
+        fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+            ::core::fmt::Formatter::debug_struct_field4_finish(f,
+                "PasskeyAssertion", "credential_id", &self.credential_id,
+                "client_data_json", &self.client_data_json,
+                "authenticator_data", &self.authenticator_data,
+                "signature_der", &&self.signature_der)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsConstructor for PasskeyAssertion
+        {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for
+        PasskeyAssertion {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsStaticProperty for
+        PasskeyAssertion {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribe for PasskeyAssertion {
+        fn describe() {
+            use wasm_bindgen::describe::*;
+            inform(RUST_STRUCT);
+            inform(16u32);
+            inform(80u32);
+            inform(97u32);
+            inform(115u32);
+            inform(115u32);
+            inform(107u32);
+            inform(101u32);
+            inform(121u32);
+            inform(65u32);
+            inform(115u32);
+            inform(115u32);
+            inform(101u32);
+            inform(114u32);
+            inform(116u32);
+            inform(105u32);
+            inform(111u32);
+            inform(110u32);
+            inform(27u32);
+            inform(114u32);
+            inform(105u32);
+            inform(122u32);
+            inform(122u32);
+            inform(121u32);
+            inform(45u32);
+            inform(119u32);
+            inform(97u32);
+            inform(115u32);
+            inform(109u32);
+            inform(45u32);
+            inform(101u32);
+            inform(48u32);
+            inform(57u32);
+            inform(99u32);
+            inform(99u32);
+            inform(48u32);
+            inform(101u32);
+            inform(98u32);
+            inform(51u32);
+            inform(53u32);
+            inform(102u32);
+            inform(56u32);
+            inform(98u32);
+            inform(53u32);
+            inform(56u32);
+            inform(51u32);
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::IntoWasmAbi for PasskeyAssertion {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<PasskeyAssertion>>;
+        fn into_abi(self) -> Self::Abi {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+            WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self))) as
+                    *mut WasmRefCell<PasskeyAssertion>)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::FromWasmAbi for PasskeyAssertion {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<PasskeyAssertion>>;
+        unsafe fn from_abi(js: Self::Abi) -> Self {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+            use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+            let ptr = js.into_ptr();
+            assert_not_null(ptr);
+            let rc = Rc::from_raw(ptr);
+            match Rc::try_unwrap(rc) {
+                Ok(cell) => cell.into_inner(),
+                Err(_) =>
+                    wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::core::convert::From<PasskeyAssertion> for
+        wasm_bindgen::JsValue {
+        fn from(value: PasskeyAssertion) -> Self {
+            let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_passkeyassertion_new_e09cc0eb35f8b583"]
+                fn __wbg_passkeyassertion_new(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<PasskeyAssertion>>)
+                -> u32;
+            }
+            unsafe {
+                <wasm_bindgen::JsValue as
+                        wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_passkeyassertion_new(ptr))
+            }
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[export_name = "__wbg_passkeyassertion_free_e09cc0eb35f8b583"]
+            #[doc(hidden)]
+            pub unsafe extern "C-unwind" fn __wbg_passkeyassertion_free(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<PasskeyAssertion>>,
+                allow_delayed: u32) {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                if allow_delayed != 0 {
+                    let ptr = ptr.into_ptr();
+                    wasm_bindgen::__rt::assert_not_null(ptr);
+                    drop(Rc::from_raw(ptr));
+                } else {
+                    let _ =
+                        <PasskeyAssertion as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                }
+            }
+        };
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefFromWasmAbi for PasskeyAssertion {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<PasskeyAssertion>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<PasskeyAssertion>;
+        unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRef::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefMutFromWasmAbi for PasskeyAssertion {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<PasskeyAssertion>>;
+        type Anchor = wasm_bindgen::__rt::RcRefMut<PasskeyAssertion>;
+        unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRefMut::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::LongRefFromWasmAbi for PasskeyAssertion {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<PasskeyAssertion>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<PasskeyAssertion>;
+        unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            <Self as wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionIntoWasmAbi for PasskeyAssertion {
+        #[inline]
+        fn none() -> Self::Abi {
+            <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<PasskeyAssertion>>>::null()
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionFromWasmAbi for PasskeyAssertion {
+        #[inline]
+        fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::TryFromJsValue for PasskeyAssertion {
+        fn try_from_js_value(value: wasm_bindgen::JsValue)
+            ->
+                wasm_bindgen::__rt::core::result::Result<Self,
+                wasm_bindgen::JsValue> {
+            Self::try_from_js_value_ref(&value).ok_or(value)
+        }
+        fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+            -> wasm_bindgen::__rt::core::option::Option<Self> {
+            let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name =
+                "__wbg_passkeyassertion_unwrap_e09cc0eb35f8b583"]
+                fn __wbg_passkeyassertion_unwrap(ptr: u32)
+                ->
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<PasskeyAssertion>>;
+            }
+            let ptr = unsafe { __wbg_passkeyassertion_unwrap(idx) };
+            if ptr.is_null() {
+                wasm_bindgen::__rt::core::option::Option::None
+            } else {
+                unsafe {
+                    wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                }
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribeVector for PasskeyAssertion {
+        fn describe_vector() {
+            use wasm_bindgen::describe::*;
+            inform(VECTOR);
+            <PasskeyAssertion as
+                    wasm_bindgen::describe::WasmDescribe>::describe();
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorIntoWasmAbi for PasskeyAssertion {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::IntoWasmAbi>::Abi;
+        fn vector_into_abi(vector:
+                wasm_bindgen::__rt::alloc::boxed::Box<[PasskeyAssertion]>)
+            -> Self::Abi {
+            wasm_bindgen::convert::js_value_vector_into_abi(vector)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorFromWasmAbi for PasskeyAssertion {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::FromWasmAbi>::Abi;
+        unsafe fn vector_from_abi(js: Self::Abi)
+            -> wasm_bindgen::__rt::alloc::boxed::Box<[PasskeyAssertion]> {
+            wasm_bindgen::convert::js_value_vector_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\x01\x10PasskeyAssertion\0\x01T Everything one `navigator.credentials.get()` ceremony resolves with (ADR 0039 \xc2\xa72).\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    impl PasskeyAssertion {
+        #[doc = " The credential id, echoed back unchanged."]
+        #[must_use]
+        pub fn credential_id(&self) -> Vec<u8> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The credential id, echoed back unchanged."]
+                    #[must_use]
+                    #[export_name =
+                    "passkeyassertion_credentialId_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_PasskeyAssertion_credentialId(me:
+                            <PasskeyAssertion as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Vec<u8> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<PasskeyAssertion>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<PasskeyAssertion>();
+                                            let me =
+                                                unsafe {
+                                                    <PasskeyAssertion as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.credential_id();
+                                            _ret
+                                        }
+                                    });
+                        <Vec<u8> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The credential id, echoed back unchanged."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_passkeyassertion_credentialId_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Vec<u8> as WasmDescribe>::describe();
+                        <Vec<u8> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x10PasskeyAssertion\x01* The credential id, echoed back unchanged.\0\0\0\0\x0ccredentialId\x01\x01\0\0\0\0\x01\0\x02\x0ccredentialId\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.credential_id.clone()
+        }
+        #[doc = " `clientDataJSON`."]
+        #[must_use]
+        pub fn client_data_json(&self) -> Vec<u8> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " `clientDataJSON`."]
+                    #[must_use]
+                    #[export_name =
+                    "passkeyassertion_clientDataJson_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_PasskeyAssertion_clientDataJson(me:
+                            <PasskeyAssertion as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Vec<u8> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<PasskeyAssertion>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<PasskeyAssertion>();
+                                            let me =
+                                                unsafe {
+                                                    <PasskeyAssertion as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.client_data_json();
+                                            _ret
+                                        }
+                                    });
+                        <Vec<u8> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " `clientDataJSON`."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_passkeyassertion_clientDataJson_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Vec<u8> as WasmDescribe>::describe();
+                        <Vec<u8> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x10PasskeyAssertion\x01\x12 `clientDataJSON`.\0\0\0\0\x0eclientDataJson\x01\x01\0\0\0\0\x01\0\x02\x0eclientDataJson\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.client_data_json.clone()
+        }
+        #[doc = " `authenticatorData`."]
+        #[must_use]
+        pub fn authenticator_data(&self) -> Vec<u8> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " `authenticatorData`."]
+                    #[must_use]
+                    #[export_name =
+                    "passkeyassertion_authenticatorData_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_PasskeyAssertion_authenticatorData(me:
+                            <PasskeyAssertion as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Vec<u8> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<PasskeyAssertion>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<PasskeyAssertion>();
+                                            let me =
+                                                unsafe {
+                                                    <PasskeyAssertion as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.authenticator_data();
+                                            _ret
+                                        }
+                                    });
+                        <Vec<u8> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " `authenticatorData`."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_passkeyassertion_authenticatorData_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Vec<u8> as WasmDescribe>::describe();
+                        <Vec<u8> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x10PasskeyAssertion\x01\x15 `authenticatorData`.\0\0\0\0\x11authenticatorData\x01\x01\0\0\0\0\x01\0\x02\x11authenticatorData\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.authenticator_data.clone()
+        }
+        #[doc = " The DER-encoded ECDSA signature."]
+        #[must_use]
+        pub fn signature_der(&self) -> Vec<u8> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The DER-encoded ECDSA signature."]
+                    #[must_use]
+                    #[export_name =
+                    "passkeyassertion_signatureDer_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_PasskeyAssertion_signatureDer(me:
+                            <PasskeyAssertion as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Vec<u8> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<PasskeyAssertion>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<PasskeyAssertion>();
+                                            let me =
+                                                unsafe {
+                                                    <PasskeyAssertion as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.signature_der();
+                                            _ret
+                                        }
+                                    });
+                        <Vec<u8> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The DER-encoded ECDSA signature."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_passkeyassertion_signatureDer_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Vec<u8> as WasmDescribe>::describe();
+                        <Vec<u8> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x10PasskeyAssertion\x01! The DER-encoded ECDSA signature.\0\0\0\0\x0csignatureDer\x01\x01\0\0\0\0\x01\0\x02\x0csignatureDer\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.signature_der.clone()
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    impl From<rizzy_client::passkey::Assertion> for PasskeyAssertion {
+        fn from(assertion: rizzy_client::passkey::Assertion) -> Self {
+            Self {
+                credential_id: assertion.credential_id,
+                client_data_json: assertion.client_data_json,
+                authenticator_data: assertion.authenticator_data,
+                signature_der: assertion.signature_der,
+            }
+        }
+    }
+    #[allow(dead_code)]
+    #[doc =
+    " Runs a `WebAuthn` registration ceremony for one new ES256 passkey (ADR 0039 §1, §2, §4;"]
+    #[doc =
+    " module docs): checks INV-64, generates a fresh key from this crate\'s CSPRNG (`os_rng`, a"]
+    #[doc =
+    " `pub(crate)` item not linkable from here), and assembles every byte structure the page\'s"]
+    #[doc =
+    " `create()` promise resolves with. No vault is touched; the caller persists"]
+    #[doc =
+    " [`CreatedPasskey::private_key`] and the other stored fields through the existing item-write"]
+    #[doc = " call."]
+    #[doc = ""]
+    #[doc =
+    " `origin` must be the browser-verified origin (module docs, \"What this does not decide\");"]
+    #[doc =
+    " `rp_id` is the `rpId` the page asked for, already defaulted by the caller to the origin\'s"]
+    #[doc =
+    " host if the page omitted it; `challenge` is the relying party\'s own randomness."]
+    #[doc = ""]
+    #[doc = " # Errors"]
+    #[doc =
+    " `rp_id_rejected` (INV-64), `invalid_input` for a malformed `origin`/`rp_id`."]
+    pub fn create_passkey(origin: &str, rp_id: &str, challenge: &[u8])
+        -> Result<CreatedPasskey, CoreError> {
+        let created =
+            create_credential(&mut os_rng(), origin, rp_id, challenge)?;
+        Ok(CreatedPasskey {
+                private_key: created.signing_key.to_bytes().expose_secret().to_vec(),
+                credential_id: created.credential_id,
+                public_key_cose: created.public_key_cose,
+                client_data_json: created.client_data_json,
+                attestation_object: created.attestation_object,
+            })
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " Runs a `WebAuthn` registration ceremony for one new ES256 passkey (ADR 0039 §1, §2, §4;"]
+            #[doc =
+            " module docs): checks INV-64, generates a fresh key from this crate\'s CSPRNG (`os_rng`, a"]
+            #[doc =
+            " `pub(crate)` item not linkable from here), and assembles every byte structure the page\'s"]
+            #[doc =
+            " `create()` promise resolves with. No vault is touched; the caller persists"]
+            #[doc =
+            " [`CreatedPasskey::private_key`] and the other stored fields through the existing item-write"]
+            #[doc = " call."]
+            #[doc = ""]
+            #[doc =
+            " `origin` must be the browser-verified origin (module docs, \"What this does not decide\");"]
+            #[doc =
+            " `rp_id` is the `rpId` the page asked for, already defaulted by the caller to the origin\'s"]
+            #[doc =
+            " host if the page omitted it; `challenge` is the relying party\'s own randomness."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `rp_id_rejected` (INV-64), `invalid_input` for a malformed `origin`/`rp_id`."]
+            #[export_name = "createPasskey_e09cc0eb35f8b583"]
+            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_createPasskey(arg0_1:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg0_2:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg0_3:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg0_4:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg1_1:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg1_2:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg1_3:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg1_4:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg2_1:
+                    <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg2_2:
+                    <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg2_3:
+                    <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg2_4:
+                    <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4)
+                ->
+                    wasm_bindgen::convert::WasmRet<<Result<CreatedPasskey,
+                    CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                const _: () = {};
+                let _ret =
+                    wasm_bindgen::__rt::maybe_catch_unwind(||
+                            {
+                                {
+                                    wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                    let arg0 =
+                                        unsafe {
+                                            <str as
+                                                    wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                        as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg0_1, arg0_2,
+                                                    arg0_3, arg0_4))
+                                        };
+                                    let arg0 = &*arg0;
+                                    wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                    let arg1 =
+                                        unsafe {
+                                            <str as
+                                                    wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                        as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                    arg1_3, arg1_4))
+                                        };
+                                    let arg1 = &*arg1;
+                                    wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                    let arg2 =
+                                        unsafe {
+                                            <[u8] as
+                                                    wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                        as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                    arg2_3, arg2_4))
+                                        };
+                                    let arg2 = &*arg2;
+                                    let _ret = create_passkey(arg0, arg1, arg2);
+                                    _ret
+                                }
+                            });
+                <Result<CreatedPasskey, CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " Runs a `WebAuthn` registration ceremony for one new ES256 passkey (ADR 0039 §1, §2, §4;"]
+            #[doc =
+            " module docs): checks INV-64, generates a fresh key from this crate\'s CSPRNG (`os_rng`, a"]
+            #[doc =
+            " `pub(crate)` item not linkable from here), and assembles every byte structure the page\'s"]
+            #[doc =
+            " `create()` promise resolves with. No vault is touched; the caller persists"]
+            #[doc =
+            " [`CreatedPasskey::private_key`] and the other stored fields through the existing item-write"]
+            #[doc = " call."]
+            #[doc = ""]
+            #[doc =
+            " `origin` must be the browser-verified origin (module docs, \"What this does not decide\");"]
+            #[doc =
+            " `rp_id` is the `rpId` the page asked for, already defaulted by the caller to the origin\'s"]
+            #[doc =
+            " host if the page omitted it; `challenge` is the relying party\'s own randomness."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `rp_id_rejected` (INV-64), `invalid_input` for a malformed `origin`/`rp_id`."]
+            #[no_mangle]
+            #[doc(hidden)]
+            pub extern "C-unwind" fn __wbindgen_describe_createPasskey_e09cc0eb35f8b583() {
+                use wasm_bindgen::describe::*;
+                wasm_bindgen::__rt::link_mem_intrinsics();
+                inform(FUNCTION);
+                inform(0);
+                inform(3u32);
+                <&str as WasmDescribe>::describe();
+                <&str as WasmDescribe>::describe();
+                <&[u8] as WasmDescribe>::describe();
+                <Result<CreatedPasskey, CoreError> as
+                        WasmDescribe>::describe();
+                <Result<CreatedPasskey, CoreError> as
+                        WasmDescribe>::describe();
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\x01\0\r[ Runs a `WebAuthn` registration ceremony for one new ES256 passkey (ADR 0039 \xc2\xa71, \xc2\xa72, \xc2\xa74;Y module docs): checks INV-64, generates a fresh key from this crate's CSPRNG (`os_rng`, aY `pub(crate)` item not linkable from here), and assembles every byte structure the page'sK `create()` promise resolves with. No vault is touched; the caller persists\\ [`CreatedPasskey::private_key`] and the other stored fields through the existing item-write\x06 call.\0Y `origin` must be the browser-verified origin (module docs, \"What this does not decide\");Z `rp_id` is the `rpId` the page asked for, already defaulted by the caller to the origin'sP host if the page omitted it; `challenge` is the relying party's own randomness.\0\t # ErrorsM `rp_id_rejected` (INV-64), `invalid_input` for a malformed `origin`/`rp_id`.\0\x03\x06origin\0\0\0\x05rp_id\0\0\0\tchallenge\0\0\0\0\0\rcreatePasskey\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+}
 mod rng {
     //! The randomness the libraries never draw themselves (ADR 0016 R2; ADR 0009 "RNG rules", as
     //! ADR 0019 §1.3 restates its third bullet; CRYPTO.md §12.1). This leaf crate supplies it to
@@ -20206,6 +22777,7 @@ pub mod session {
     //! | Save | [`Session::create_item`], [`Session::edit_item`] with an [`ItemDraft`] |
     //! | Trash, restore, purge | [`Session::trash_item`], [`Session::restore_item`], [`Session::purge_item`] |
     //! | TOTP code | [`Session::totp`] |
+    //! | Passkey assertion | [`Session::passkey_assertion`] ([`create_passkey`](crate::passkey::create_passkey) is stateless, module docs) |
     //! | Export | [`Session::reauth`] + [`Session::confirm_reauth`], then [`Session::export_encrypted`], or [`Session::plaintext_warning_shown`] + [`Session::export_plaintext`] after the hold |
     //! | Import | [`detect_import_format`], then [`Session::import_file`] or [`Session::import_encrypted`] |
     //! | Devices | [`Session::devices`] |
@@ -20245,9 +22817,14 @@ pub mod session {
     };
     use rizzy_client::items::{FieldEdit, ItemId};
     use rizzy_client::login::WebSession;
+    use rizzy_client::passkey::get_assertion;
     use rizzy_client::rizzy_core::ids::AccountId;
-    use rizzy_client::rizzy_core::item::schema::LOGIN_TOTP;
+    use rizzy_client::rizzy_core::item::key::ElementId;
+    use rizzy_client::rizzy_core::item::schema::{
+        ATTR_CREDENTIAL_ID, ATTR_PRIVATE_KEY, LIST_PASSKEY, LOGIN_TOTP,
+    };
     use rizzy_client::rizzy_core::item::value::ValueRef;
+    use rizzy_client::rizzy_core::passkey::Es256SigningKey;
     use rizzy_client::rizzy_core::sign::DeviceKind;
     use rizzy_client::rizzy_core::totp::{OtpAuthUri, TotpParams, TotpSecret};
     use rizzy_client::rizzy_import::{self, Format};
@@ -20268,6 +22845,7 @@ pub mod session {
         visible_item,
     };
     use crate::login::{Credentials, LoginFlow, Purpose};
+    use crate::passkey::PasskeyAssertion;
     use crate::rng::{Rng, os_rng};
     use crate::secret::take_secret;
     use crate::sync::{Ctx, Signer, SyncDriver};
@@ -23391,6 +25969,305 @@ pub mod session {
                     valid_for_s: period - seconds % period,
                     period_s: period,
                 })
+        }
+        #[doc =
+        " Produces a `WebAuthn` assertion for one stored passkey (`passkey/<passkey_id>/…` on"]
+        #[doc =
+        " item `id`, ADR 0039 §1, §2; [`crate::passkey`] module docs). The stored private key is"]
+        #[doc =
+        " read and used here, never returned: only the resulting [`PasskeyAssertion`] crosses to"]
+        #[doc =
+        " JavaScript, the same pattern [`Session::totp`] uses for a different concealed field."]
+        #[doc = ""]
+        #[doc = " `origin` must be the browser-verified origin"]
+        #[doc =
+        " ([`rizzy_client::passkey`]\'s `verify_rp_id` scope-boundary docs — this call cannot"]
+        #[doc =
+        " establish that itself, [`crate::passkey`] module docs); `rp_id` is the page\'s requested"]
+        #[doc =
+        " `rpId`, already defaulted by the caller to `origin`\'s host if the page omitted it."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " As [`Session::item`]; `invalid_input` when `passkey_id` is not a valid element id, the"]
+        #[doc =
+        " item has no such passkey, or its stored key is not a valid 32-byte scalar; otherwise"]
+        #[doc =
+        " whatever `get_assertion` returns (`rp_id_rejected` for INV-64)."]
+        pub fn passkey_assertion(&self, id: &str, passkey_id: &str,
+            origin: &str, rp_id: &str, challenge: &[u8])
+            -> Result<PasskeyAssertion, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Produces a `WebAuthn` assertion for one stored passkey (`passkey/<passkey_id>/…` on"]
+                    #[doc =
+                    " item `id`, ADR 0039 §1, §2; [`crate::passkey`] module docs). The stored private key is"]
+                    #[doc =
+                    " read and used here, never returned: only the resulting [`PasskeyAssertion`] crosses to"]
+                    #[doc =
+                    " JavaScript, the same pattern [`Session::totp`] uses for a different concealed field."]
+                    #[doc = ""]
+                    #[doc = " `origin` must be the browser-verified origin"]
+                    #[doc =
+                    " ([`rizzy_client::passkey`]\'s `verify_rp_id` scope-boundary docs — this call cannot"]
+                    #[doc =
+                    " establish that itself, [`crate::passkey`] module docs); `rp_id` is the page\'s requested"]
+                    #[doc =
+                    " `rpId`, already defaulted by the caller to `origin`\'s host if the page omitted it."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " As [`Session::item`]; `invalid_input` when `passkey_id` is not a valid element id, the"]
+                    #[doc =
+                    " item has no such passkey, or its stored key is not a valid 32-byte scalar; otherwise"]
+                    #[doc =
+                    " whatever `get_assertion` returns (`rp_id_rejected` for INV-64)."]
+                    #[export_name = "session_passkeyAssertion_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_passkeyAssertion(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg3_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg3_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg3_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg3_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg4_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg4_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg4_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg4_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg5_1:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg5_2:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg5_3:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg5_4:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<PasskeyAssertion,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let arg2 = &*arg2;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg3 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
+                                                };
+                                            let arg3 = &*arg3;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg4 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                            arg4_3, arg4_4))
+                                                };
+                                            let arg4 = &*arg4;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            let arg5 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg5_1, arg5_2,
+                                                            arg5_3, arg5_4))
+                                                };
+                                            let arg5 = &*arg5;
+                                            let _ret =
+                                                me.passkey_assertion(arg1, arg2, arg3, arg4, arg5);
+                                            _ret
+                                        }
+                                    });
+                        <Result<PasskeyAssertion, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Produces a `WebAuthn` assertion for one stored passkey (`passkey/<passkey_id>/…` on"]
+                    #[doc =
+                    " item `id`, ADR 0039 §1, §2; [`crate::passkey`] module docs). The stored private key is"]
+                    #[doc =
+                    " read and used here, never returned: only the resulting [`PasskeyAssertion`] crosses to"]
+                    #[doc =
+                    " JavaScript, the same pattern [`Session::totp`] uses for a different concealed field."]
+                    #[doc = ""]
+                    #[doc = " `origin` must be the browser-verified origin"]
+                    #[doc =
+                    " ([`rizzy_client::passkey`]\'s `verify_rp_id` scope-boundary docs — this call cannot"]
+                    #[doc =
+                    " establish that itself, [`crate::passkey`] module docs); `rp_id` is the page\'s requested"]
+                    #[doc =
+                    " `rpId`, already defaulted by the caller to `origin`\'s host if the page omitted it."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " As [`Session::item`]; `invalid_input` when `passkey_id` is not a valid element id, the"]
+                    #[doc =
+                    " item has no such passkey, or its stored key is not a valid 32-byte scalar; otherwise"]
+                    #[doc =
+                    " whatever `get_assertion` returns (`rp_id_rejected` for INV-64)."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_passkeyAssertion_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(5u32);
+                        <&str as WasmDescribe>::describe();
+                        <&str as WasmDescribe>::describe();
+                        <&str as WasmDescribe>::describe();
+                        <&str as WasmDescribe>::describe();
+                        <&[u8] as WasmDescribe>::describe();
+                        <Result<PasskeyAssertion, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<PasskeyAssertion, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x0eV Produces a `WebAuthn` assertion for one stored passkey (`passkey/<passkey_id>/\xe2\x80\xa6` onY item `id`, ADR 0039 \xc2\xa71, \xc2\xa72; [`crate::passkey`] module docs). The stored private key isW read and used here, never returned: only the resulting [`PasskeyAssertion`] crosses toU JavaScript, the same pattern [`Session::totp`] uses for a different concealed field.\0- `origin` must be the browser-verified originU ([`rizzy_client::passkey`]'s `verify_rp_id` scope-boundary docs \xe2\x80\x94 this call cannotX establish that itself, [`crate::passkey`] module docs); `rp_id` is the page's requestedS `rpId`, already defaulted by the caller to `origin`'s host if the page omitted it.\0\t # ErrorsW As [`Session::item`]; `invalid_input` when `passkey_id` is not a valid element id, theU item has no such passkey, or its stored key is not a valid 32-byte scalar; otherwise@ whatever `get_assertion` returns (`rp_id_rejected` for INV-64).\0\x05\x02id\0\0\0\npasskey_id\0\0\0\x06origin\0\0\0\x05rp_id\0\0\0\tchallenge\0\0\0\0\0\x10passkeyAssertion\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let vault = &self.inner()?.vault;
+            let item = visible_item(vault, id)?;
+            let bad = || CoreError::from(ClientError::InvalidInput);
+            let element = ElementId::from_bytes(items::parse_id(passkey_id)?);
+            let credential_id_key =
+                element.key(LIST_PASSKEY,
+                            ATTR_CREDENTIAL_ID).map_err(|_| bad())?;
+            let credential_id =
+                match vault.field_value(item,
+                                    credential_id_key.as_str()).ok_or_else(bad)?.decode() {
+                    Ok(ValueRef::Bytes(bytes)) => bytes.to_vec(),
+                    _ => return Err(bad()),
+                };
+            let private_key_key =
+                element.key(LIST_PASSKEY,
+                            ATTR_PRIVATE_KEY).map_err(|_| bad())?;
+            let signing_key =
+                match vault.field_value(item,
+                                    private_key_key.as_str()).ok_or_else(bad)?.decode() {
+                    Ok(ValueRef::Bytes(bytes)) =>
+                        Es256SigningKey::from_bytes(bytes).map_err(|_| bad())?,
+                    _ => return Err(bad()),
+                };
+            let assertion =
+                get_assertion(&signing_key, &credential_id, origin, rp_id,
+                        challenge)?;
+            Ok(assertion.into())
         }
         #[doc =
         " The vault as an encrypted export file (CRYPTO.md §11.14; ADR 0027), under a new"]
@@ -34720,6 +37597,7 @@ pub use login::LoginFlow;
 pub use matching::{
     MatchDecision, decide_match_candidates, normalize_page_url,
 };
+pub use passkey::{CreatedPasskey, PasskeyAssertion, create_passkey};
 pub use session::{
     DeviceView, EncryptedExport, ImportReport, Session, TotpCode,
     TwoFactorEnrolment, detect_import_format, plaintext_export_hold_ms,

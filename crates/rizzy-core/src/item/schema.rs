@@ -188,6 +188,10 @@ pub const LIST_SHARE: &str = "share";
 pub const LIST_URI: &str = "uri";
 /// List `pwhist` (Login): password history imported from another manager.
 pub const LIST_PWHIST: &str = "pwhist";
+/// List `passkey` (Login): `WebAuthn` passkey credentials for the login's site (ADR 0039 §1,
+/// which uses this list on the existing Login type rather than the standalone item type
+/// `0x000A`, released to unassigned).
+pub const LIST_PASSKEY: &str = "passkey";
 
 /// Attribute `label` of a custom field: Text.
 pub const ATTR_LABEL: &str = "label";
@@ -204,6 +208,51 @@ pub const ATTR_MATCH: &str = "match";
 pub const ATTR_SECRET: &str = "secret";
 /// Attribute `ms` of a password-history entry: U64, Unix milliseconds.
 pub const ATTR_MS: &str = "ms";
+/// Attribute `rp_id` of a passkey: Text, the registrable-domain-or-suffix the credential was
+/// created for. Never written from page-supplied data at use time; only at creation, after the
+/// `rizzy-client`/extension INV-64 check (ADR 0039 §1, §2).
+pub const ATTR_RP_ID: &str = "rp_id";
+/// Attribute `user_handle` of a passkey: Bytes, at most 64 (ADR 0039 §1).
+pub const ATTR_USER_HANDLE: &str = "user_handle";
+/// Attribute `credential_id` of a passkey: Bytes, the opaque id the RP references on every
+/// assertion (ADR 0039 §1).
+pub const ATTR_CREDENTIAL_ID: &str = "credential_id";
+/// Attribute `private_key` of a passkey: Bytes, 32 (ES256 and `EdDSA` both), concealed by default
+/// like `login.password` (ADR 0039 §1).
+pub const ATTR_PRIVATE_KEY: &str = "private_key";
+/// Attribute `public_key_cose` of a passkey: Bytes, the hand-written COSE encoding of the
+/// public key (ADR 0039 §1, §4; built in `rizzy-client`, ADR 0039 §5).
+pub const ATTR_PUBLIC_KEY_COSE: &str = "public_key_cose";
+/// Attribute `alg` of a passkey: Enum, `1` = ES256 (COSE `-7`), `2` = `EdDSA`/Ed25519 (COSE `-8`)
+/// (ADR 0039 §1).
+pub const ATTR_ALG: &str = "alg";
+/// Attribute `discoverable` of a passkey: Bool, always `0x01` for M2: every credential this
+/// client creates is discoverable (resident) (ADR 0039 §1).
+pub const ATTR_DISCOVERABLE: &str = "discoverable";
+/// Attribute `created_ms` of a passkey: U64, local display time, the same convention as
+/// `import.created_ms` (ADR 0039 §1).
+pub const ATTR_CREATED_MS: &str = "created_ms";
+
+/// COSE alg id `1` in this item schema's small-positive-integer convention: ES256 (the real COSE
+/// id `-7`), mapped only at the `WebAuthn` boundary (ADR 0039 §1).
+pub const PASSKEY_ALG_ES256: u16 = 1;
+/// COSE alg id `2` in this schema's convention: `EdDSA`/Ed25519 (the real COSE id `-8`).
+pub const PASSKEY_ALG_EDDSA: u16 = 2;
+
+/// Length of a passkey private key: 32 bytes, ES256's raw scalar and `EdDSA`'s seed both
+/// ([`crate::passkey::COORDINATE_LEN`], [`crate::sign::SEED_LEN`]; ADR 0039 §1).
+pub const PASSKEY_PRIVATE_KEY_LEN: usize = 32;
+/// Maximum length of a passkey's `user_handle` (ADR 0039 §1, **L**: the 64-byte bound is the
+/// `WebAuthn` spec's, not independently re-verified against spec text for this implementation).
+pub const PASSKEY_USER_HANDLE_MAX_LEN: usize = 64;
+/// Maximum length of a passkey's `credential_id`. No spec fixes one; this is this
+/// implementation's own bound, generous enough for every RP-issued id observed in practice,
+/// kept so an untrusted credential id is still bounded before it is read (CLAUDE.md,
+/// "untrusted input is bounded").
+pub const PASSKEY_CREDENTIAL_ID_MAX_LEN: usize = 1024;
+/// Maximum length of a passkey's `public_key_cose`: comfortably covers a hand-written COSE
+/// `EC2` (ES256) or `OKP` (`EdDSA`) key map with room to spare.
+pub const PASSKEY_PUBLIC_KEY_COSE_MAX_LEN: usize = 256;
 
 /// Length of the owner's copy of a share secret (ADR 0018 §7; CRYPTO.md §11.10).
 pub const SHARE_SECRET_LEN: usize = 32;
@@ -221,9 +270,20 @@ pub enum Expected {
     Enum,
     /// `SortKey`.
     SortKey,
-    /// Bytes of exactly this length (the share secret: 32).
+    /// Bytes of exactly this length (the share secret: 32; a passkey private key: 32, ES256
+    /// and `EdDSA` both, ADR 0039 §1).
     Bytes {
         /// The required payload length.
+        len: usize,
+    },
+    /// Bytes of at most this length: a passkey's `user_handle` (≤ 64 per the `WebAuthn` spec,
+    /// ADR 0039 §1, **L**, not independently re-verified against spec text for this
+    /// implementation), `credential_id` (no spec-fixed bound; 1024 is this implementation's own
+    /// generous ceiling, matching "untrusted input is bounded") and `public_key_cose` (256
+    /// bytes comfortably covers a COSE `EC2` ES256 or `OKP` `EdDSA` key map, CBOR overhead
+    /// included).
+    BytesMax {
+        /// The maximum payload length.
         len: usize,
     },
     /// Text or Bool, as the custom field's kind says (`field/<id>/value`): Bool for a boolean
@@ -251,6 +311,7 @@ impl Expected {
             | (Self::SortKey, ValueRef::SortKey(_))
             | (Self::TagMarker, ValueRef::Bool(true)) => true,
             (Self::Bytes { len }, ValueRef::Bytes(bytes)) => bytes.len() == len,
+            (Self::BytesMax { len }, ValueRef::Bytes(bytes)) => bytes.len() <= len,
             _ => false,
         }
     }
@@ -448,8 +509,11 @@ pub enum ReservedFor {
     M3Attachments,
     /// `share/` attributes other than `secret`, and `share/<id>` itself: the M5 ADR.
     M5Share,
-    /// `passkey.` and `passkey/`: the M7 passkey ADR.
-    M7Passkeys,
+    /// `passkey.`, the fixed-key half of ADR 0018 §7's reservation. ADR 0039 §1 picks the
+    /// other half (the `passkey/<id>/…` list, [`LIST_PASSKEY`], now [`KeyClass::Known`]) and
+    /// leaves this one reserved: M2 defines no fixed `passkey.xxx` key, and ADR 0018 is Accepted
+    /// and immutable, so this reservation stands until a future ADR actually uses it.
+    PasskeyDotKeys,
 }
 
 /// What an M1 client knows about a grammar key.
@@ -484,7 +548,7 @@ pub fn classify(key: FieldKeyRef<'_>) -> KeyClass {
             if M3_TYPE_NAMESPACES.contains(&namespace) {
                 KeyClass::Reserved(ReservedFor::M3Types)
             } else if namespace == "passkey" {
-                KeyClass::Reserved(ReservedFor::M7Passkeys)
+                KeyClass::Reserved(ReservedFor::PasskeyDotKeys)
             } else {
                 KeyClass::Unknown
             }
@@ -553,8 +617,54 @@ fn classify_element(key: FieldKeyRef<'_>) -> KeyClass {
         (LIST_PWHIST, Some(ATTR_MS)) => {
             known(Expected::U64, LOGIN, Writers::Any, Concealment::Shown)
         }
-        ("passkey", _) => KeyClass::Reserved(ReservedFor::M7Passkeys),
+        (LIST_PASSKEY, attribute) => classify_passkey(attribute),
         ("attachment", _) => KeyClass::Reserved(ReservedFor::M3Attachments),
+        _ => KeyClass::Unknown,
+    }
+}
+
+/// [`classify_element`] for the `passkey` list (ADR 0039 §1), split out so the match above
+/// stays under `clippy::too_many_lines` and so an attribute this list happens to share with
+/// `uri`/`pwhist` (`Text`/`Shown`, `Enum`/`Shown`, `U64`/`Shown`) is not flagged as a duplicate
+/// arm of an unrelated list's match: the two lists are classified for different, independent
+/// reasons, even where their `KeySpec` values coincide.
+fn classify_passkey(attribute: Option<&str>) -> KeyClass {
+    let known = |expected, writers, concealment| {
+        KeyClass::Known(spec(expected, LOGIN, writers, concealment))
+    };
+    match attribute {
+        Some(ATTR_RP_ID) => known(Expected::Text, Writers::Any, Concealment::Shown),
+        Some(ATTR_USER_HANDLE) => known(
+            Expected::BytesMax {
+                len: PASSKEY_USER_HANDLE_MAX_LEN,
+            },
+            Writers::Any,
+            Concealment::Shown,
+        ),
+        Some(ATTR_CREDENTIAL_ID) => known(
+            Expected::BytesMax {
+                len: PASSKEY_CREDENTIAL_ID_MAX_LEN,
+            },
+            Writers::Any,
+            Concealment::Shown,
+        ),
+        Some(ATTR_PRIVATE_KEY) => known(
+            Expected::Bytes {
+                len: PASSKEY_PRIVATE_KEY_LEN,
+            },
+            Writers::Any,
+            Concealment::Concealed,
+        ),
+        Some(ATTR_PUBLIC_KEY_COSE) => known(
+            Expected::BytesMax {
+                len: PASSKEY_PUBLIC_KEY_COSE_MAX_LEN,
+            },
+            Writers::Any,
+            Concealment::Shown,
+        ),
+        Some(ATTR_ALG) => known(Expected::Enum, Writers::Any, Concealment::Shown),
+        Some(ATTR_DISCOVERABLE) => known(Expected::Bool, Writers::Any, Concealment::Shown),
+        Some(ATTR_CREATED_MS) => known(Expected::U64, Writers::Any, Concealment::Shown),
         _ => KeyClass::Unknown,
     }
 }

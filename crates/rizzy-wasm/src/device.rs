@@ -64,6 +64,11 @@ use rizzy_client::items::{FieldEdit, ItemId};
 use rizzy_client::login::{
     Enrolled, LoggedIn, LoginAwaitingSession, LoginInput, LoginStarted, start_login,
 };
+use rizzy_client::passkey::get_assertion;
+use rizzy_client::rizzy_core::item::key::ElementId;
+use rizzy_client::rizzy_core::item::schema::{ATTR_CREDENTIAL_ID, ATTR_PRIVATE_KEY, LIST_PASSKEY};
+use rizzy_client::rizzy_core::item::value::ValueRef;
+use rizzy_client::rizzy_core::passkey::Es256SigningKey;
 use rizzy_client::rizzy_core::sign::DeviceKind;
 use rizzy_client::rizzy_proto::auth::{
     DeviceAuthFinishResponse, DeviceAuthStartResponse, LoginFinishResponse, LoginStartResponse,
@@ -84,6 +89,7 @@ use zeroize::Zeroizing;
 use crate::error::{CoreError, CoreResult, WRONG_STATE};
 use crate::http::{self, HttpRequest};
 use crate::items::{self, FieldView, ItemDraft, ItemSummary, hex, type_from_name, visible_item};
+use crate::passkey::PasskeyAssertion;
 use crate::rng::{Rng, os_rng};
 use crate::secret::take_secret;
 use crate::store::{CacheDelta, KvRow, decode_rows, encode_rows};
@@ -895,6 +901,68 @@ impl DeviceSession {
         let vault = self.vault_ref()?;
         let item = visible_item(vault, id)?;
         Ok(items::reveal(vault, item, key)?.as_str().to_owned())
+    }
+
+    /// Produces a `WebAuthn` assertion for one stored passkey (`passkey/<passkey_id>/…` on
+    /// item `id`, ADR 0039 §1, §2; [`crate::passkey`] module docs — the extension's own
+    /// durable-device path there: this crate's other passkey call, [`crate::passkey::create_passkey`],
+    /// needs no session at all). The stored private key is read and used here, never
+    /// returned: only the resulting [`PasskeyAssertion`] crosses to JavaScript, the same
+    /// pattern [`DeviceSession::reveal_field`] uses for a different concealed field (text
+    /// there; this one is never text-revealable at all, module docs).
+    ///
+    /// `origin` must be the browser-verified origin — the extension's background script reads
+    /// it from the browser's own sender information, never from the intercepted
+    /// `navigator.credentials.get()` call's relayed payload ([ADR 0036] §4; [`crate::passkey`]
+    /// module docs, "What this does not decide"); `rp_id` is the page's requested `rpId`,
+    /// already defaulted by the caller to `origin`'s host if the page omitted it.
+    ///
+    /// # Errors
+    /// As [`DeviceSession::item`]; `invalid_input` when `passkey_id` is not a valid element
+    /// id, the item has no such passkey, or its stored key is not a valid 32-byte scalar;
+    /// otherwise whatever `get_assertion` returns (`rp_id_rejected` for INV-64).
+    ///
+    /// [ADR 0036]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0036-browser-extension-architecture-and-key-custody.md
+    #[wasm_bindgen(js_name = passkeyAssertion)]
+    pub fn passkey_assertion(
+        &self,
+        id: &str,
+        passkey_id: &str,
+        origin: &str,
+        rp_id: &str,
+        challenge: &[u8],
+    ) -> Result<PasskeyAssertion, CoreError> {
+        let vault = self.vault_ref()?;
+        let item = visible_item(vault, id)?;
+        let bad = || CoreError::from(ClientError::InvalidInput);
+        let element = ElementId::from_bytes(items::parse_id(passkey_id)?);
+
+        let credential_id_key = element
+            .key(LIST_PASSKEY, ATTR_CREDENTIAL_ID)
+            .map_err(|_| bad())?;
+        let credential_id = match vault
+            .field_value(item, credential_id_key.as_str())
+            .ok_or_else(bad)?
+            .decode()
+        {
+            Ok(ValueRef::Bytes(bytes)) => bytes.to_vec(),
+            _ => return Err(bad()),
+        };
+
+        let private_key_key = element
+            .key(LIST_PASSKEY, ATTR_PRIVATE_KEY)
+            .map_err(|_| bad())?;
+        let signing_key = match vault
+            .field_value(item, private_key_key.as_str())
+            .ok_or_else(bad)?
+            .decode()
+        {
+            Ok(ValueRef::Bytes(bytes)) => Es256SigningKey::from_bytes(bytes).map_err(|_| bad())?,
+            _ => return Err(bad()),
+        };
+
+        let assertion = get_assertion(&signing_key, &credential_id, origin, rp_id, challenge)?;
+        Ok(assertion.into())
     }
 
     /// Creates an item of `item_type` (a name of [`crate::items::TYPES`]) with the draft's

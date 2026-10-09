@@ -17,6 +17,7 @@
 //! | Save | [`Session::create_item`], [`Session::edit_item`] with an [`ItemDraft`] |
 //! | Trash, restore, purge | [`Session::trash_item`], [`Session::restore_item`], [`Session::purge_item`] |
 //! | TOTP code | [`Session::totp`] |
+//! | Passkey assertion | [`Session::passkey_assertion`] ([`create_passkey`](crate::passkey::create_passkey) is stateless, module docs) |
 //! | Export | [`Session::reauth`] + [`Session::confirm_reauth`], then [`Session::export_encrypted`], or [`Session::plaintext_warning_shown`] + [`Session::export_plaintext`] after the hold |
 //! | Import | [`detect_import_format`], then [`Session::import_file`] or [`Session::import_encrypted`] |
 //! | Devices | [`Session::devices`] |
@@ -57,9 +58,14 @@ use rizzy_client::export::plaintext::{
 };
 use rizzy_client::items::{FieldEdit, ItemId};
 use rizzy_client::login::WebSession;
+use rizzy_client::passkey::get_assertion;
 use rizzy_client::rizzy_core::ids::AccountId;
-use rizzy_client::rizzy_core::item::schema::LOGIN_TOTP;
+use rizzy_client::rizzy_core::item::key::ElementId;
+use rizzy_client::rizzy_core::item::schema::{
+    ATTR_CREDENTIAL_ID, ATTR_PRIVATE_KEY, LIST_PASSKEY, LOGIN_TOTP,
+};
 use rizzy_client::rizzy_core::item::value::ValueRef;
+use rizzy_client::rizzy_core::passkey::Es256SigningKey;
 use rizzy_client::rizzy_core::sign::DeviceKind;
 use rizzy_client::rizzy_core::totp::{OtpAuthUri, TotpParams, TotpSecret};
 use rizzy_client::rizzy_import::{self, Format};
@@ -75,6 +81,7 @@ use crate::error::{CoreError, CoreResult, IMPORT_FAILED, LOCKED, UNKNOWN_FORMAT,
 use crate::http::{self, HttpRequest};
 use crate::items::{self, FieldView, ItemDraft, ItemSummary, hex, type_from_name, visible_item};
 use crate::login::{Credentials, LoginFlow, Purpose};
+use crate::passkey::PasskeyAssertion;
 use crate::rng::{Rng, os_rng};
 use crate::secret::take_secret;
 use crate::sync::{Ctx, Signer, SyncDriver};
@@ -495,6 +502,62 @@ impl Session {
             valid_for_s: period - seconds % period,
             period_s: period,
         })
+    }
+
+    /// Produces a `WebAuthn` assertion for one stored passkey (`passkey/<passkey_id>/…` on
+    /// item `id`, ADR 0039 §1, §2; [`crate::passkey`] module docs). The stored private key is
+    /// read and used here, never returned: only the resulting [`PasskeyAssertion`] crosses to
+    /// JavaScript, the same pattern [`Session::totp`] uses for a different concealed field.
+    ///
+    /// `origin` must be the browser-verified origin
+    /// ([`rizzy_client::passkey`]'s `verify_rp_id` scope-boundary docs — this call cannot
+    /// establish that itself, [`crate::passkey`] module docs); `rp_id` is the page's requested
+    /// `rpId`, already defaulted by the caller to `origin`'s host if the page omitted it.
+    ///
+    /// # Errors
+    /// As [`Session::item`]; `invalid_input` when `passkey_id` is not a valid element id, the
+    /// item has no such passkey, or its stored key is not a valid 32-byte scalar; otherwise
+    /// whatever `get_assertion` returns (`rp_id_rejected` for INV-64).
+    #[wasm_bindgen(js_name = passkeyAssertion)]
+    pub fn passkey_assertion(
+        &self,
+        id: &str,
+        passkey_id: &str,
+        origin: &str,
+        rp_id: &str,
+        challenge: &[u8],
+    ) -> Result<PasskeyAssertion, CoreError> {
+        let vault = &self.inner()?.vault;
+        let item = visible_item(vault, id)?;
+        let bad = || CoreError::from(ClientError::InvalidInput);
+        let element = ElementId::from_bytes(items::parse_id(passkey_id)?);
+
+        let credential_id_key = element
+            .key(LIST_PASSKEY, ATTR_CREDENTIAL_ID)
+            .map_err(|_| bad())?;
+        let credential_id = match vault
+            .field_value(item, credential_id_key.as_str())
+            .ok_or_else(bad)?
+            .decode()
+        {
+            Ok(ValueRef::Bytes(bytes)) => bytes.to_vec(),
+            _ => return Err(bad()),
+        };
+
+        let private_key_key = element
+            .key(LIST_PASSKEY, ATTR_PRIVATE_KEY)
+            .map_err(|_| bad())?;
+        let signing_key = match vault
+            .field_value(item, private_key_key.as_str())
+            .ok_or_else(bad)?
+            .decode()
+        {
+            Ok(ValueRef::Bytes(bytes)) => Es256SigningKey::from_bytes(bytes).map_err(|_| bad())?,
+            _ => return Err(bad()),
+        };
+
+        let assertion = get_assertion(&signing_key, &credential_id, origin, rp_id, challenge)?;
+        Ok(assertion.into())
     }
 
     /// The vault as an encrypted export file (CRYPTO.md §11.14; ADR 0027), under a new

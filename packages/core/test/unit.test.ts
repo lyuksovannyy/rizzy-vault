@@ -7,6 +7,7 @@ import {
   type CoreRequest,
   type Transport,
   checkServer,
+  createPasskey,
   fetchTransport,
   generatePassphraseWithOptions,
   generatePasswordWithOptions,
@@ -78,6 +79,25 @@ describe("the module", () => {
   it("carries the frozen plaintext-export texts", () => {
     expect(plaintextExportPhrase()).toBe("EXPORT PLAINTEXT");
     expect(plaintextExportWarning()).toContain("unencrypted");
+  });
+
+  // The ceremony itself (signature verification, the client-data fields, INV-64's full origin/
+  // rpId table) is `rizzy-client::passkey`'s own job and is covered there; a round trip through
+  // a real session's stored private key is covered in e2e.test.ts. This is a smoke test that
+  // the wasm binding is wired and that a bad rpId is refused rather than silently accepted.
+  it("creates a passkey credential in Rust, with a distinct key and id each time", () => {
+    const a = createPasskey("https://example.com", "example.com", new Uint8Array([1, 2, 3]));
+    const b = createPasskey("https://example.com", "example.com", new Uint8Array([1, 2, 3]));
+    expect(a.credentialId).toHaveLength(32);
+    expect(a.privateKey).toHaveLength(32);
+    expect(a.publicKeyCose).toHaveLength(77);
+    expect(a.credentialId).not.toEqual(b.credentialId);
+    expect(a.privateKey).not.toEqual(b.privateKey);
+  });
+
+  it("refuses a passkey rpId that is not the origin's host or a registrable suffix of it (INV-64)", () => {
+    expect(() => createPasskey("https://example.com", "evil.example", new Uint8Array([1]))).toThrow(CoreError);
+    expect(() => createPasskey("http://example.com", "example.com", new Uint8Array([1]))).toThrow(CoreError);
   });
 });
 

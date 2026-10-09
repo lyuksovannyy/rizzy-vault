@@ -41,6 +41,12 @@ hkdf = { version = "=0.13.0", default-features = false }
 hmac = { version = "=0.13.0", default-features = false, features = ["zeroize"] }
 hpke = { version = "=0.14.1", default-features = false, features = ["alloc", "x25519", "chacha"] }
 opaque-ke = { version = "=4.0.1", default-features = false, features = ["ristretto255"] }
+# ES256 (COSE alg -7, ECDSA P-256 / SHA-256) for WebAuthn passkeys (ADR 0039 §3, ADR 0041).
+# `ecdsa` pulls curve arithmetic and the optional `sha2` digest ES256 needs; no separate `sha256`
+# feature is named. `alloc` is for DER signature encoding. Never `getrandom`, `std`, `pem`,
+# `pkcs8` or `serde`: ADR 0016 R1 keeps `getrandom` out of `rizzy-core`'s closure. Key generation
+# uses only `SigningKey::random(&mut rng)` with the injected `rand_core::CryptoRng`.
+p256 = { version = "=0.14.0", default-features = false, features = ["ecdsa", "alloc"] }
 # Feature unification only; see `blake2` above.
 poly1305 = { version = "=0.9.1", default-features = false, features = ["zeroize"] }
 rand_core = { version = "=0.10.1", default-features = false }

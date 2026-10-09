@@ -126,6 +126,7 @@
 //! | [`padding`] | §8.5 | Padmé plaintext framing | At least 256 bytes; the reader accepts only the canonical frame; the envelope applies it for padded purposes |
 //! | [`hpke`] | §4.3, §9.2, §10.1 | HPKE envelopes `0x10` (Base) and `0x12` (PSK), X25519 key types, the device-grant PSK | The purpose fixes the mode, so a PSK purpose is never sealed in Base mode; the header key id must be the caller's own key; randomness only from the injected RNG |
 //! | [`sign`] | §9.3, §9.6, §10.2, §10.3 | Ed25519 keys by role, the signature container, every signed statement, the bundle chain | `verify_strict` only; signing only through a key that holds its own public key; the label is prepended by the verifier, never transmitted; roles are types; the bundle chain rejects rollback and reports forks |
+//! | [`passkey`] | ADR 0039 §2, §3, §5 | ES256 (ECDSA P-256) key generation and deterministic signing for WebAuthn passkey credentials; the public key's raw SEC1 coordinates | Keys only from the injected RNG, never derived from another vault secret; signing is always deterministic (RFC 6979), never randomized; the WebAuthn wire format (CBOR, `clientDataJSON`) is `rizzy-client`'s, not built here |
 //! | [`keys`] | §4, §8.4, §10.1 | Account, vault, item, identity and device keys; the M1 wrapped-key objects; unlock and recovery keys; device-set and settings hashes; fingerprints | Keys carry their epoch and home; a wrap refuses a context that does not describe its keys; an unwrap checks the key id before any crypto |
 //! | [`normalize`] | §2 | Login names and `server_origin` | One normalisation function each, shared by client and server; bounded input; rejects rather than guesses |
 //! | [`secret_key`] | §7, §11.9, §12.3 | The Secret Key and recovery code: generation and the `RV1-`/`RVR1-` format | 16 bytes from the injected CSPRNG, never sent to the server; branch-free Base32; the check value is for typos only and compared with `ct_eq` |
@@ -161,6 +162,7 @@ pub mod labels;
 pub mod normalize;
 pub mod opaque;
 pub mod padding;
+pub mod passkey;
 pub mod rng;
 pub mod secret;
 pub mod secret_key;

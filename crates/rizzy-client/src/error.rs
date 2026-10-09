@@ -24,6 +24,11 @@ pub enum ClientError {
     KdfNotAllowed,
     /// The server's canonical origin is not the origin this client dialled (CRYPTO.md §5.3).
     OriginMismatch,
+    /// A `WebAuthn` `rpId` failed INV-64 against the browser-verified origin (ADR 0039 §2): the
+    /// origin was not `https`, or `rpId` is neither the origin's host nor its registrable
+    /// domain (eTLD+1) — including a bare public suffix such as `co.uk` or `github.io`, which
+    /// is always refused. The registration or assertion does not proceed.
+    RpIdRejected,
     /// The user has not confirmed the Emergency Kit by re-typing the last group of the Secret
     /// Key, so the signup commit is withheld (CRYPTO.md §7, §11 "Secrets before commit").
     EmergencyKitNotConfirmed,
@@ -167,6 +172,7 @@ impl ClientError {
             Self::WrongPasswordOrSecretKey => "wrong_password_or_secret_key",
             Self::KdfNotAllowed => "kdf_not_allowed",
             Self::OriginMismatch => "origin_mismatch",
+            Self::RpIdRejected => "rp_id_rejected",
             Self::EmergencyKitNotConfirmed => "emergency_kit_not_confirmed",
             Self::InvalidServerResponse => "invalid_server_response",
             Self::Rollback => "rollback",
@@ -215,6 +221,9 @@ impl fmt::Display for ClientError {
                 "the server asked for key-derivation parameters this client refuses"
             }
             Self::OriginMismatch => "this is not the server's configured address",
+            Self::RpIdRejected => {
+                "this website is not allowed to use that passkey relying party id"
+            }
             Self::EmergencyKitNotConfirmed => "the Emergency Kit has not been confirmed",
             Self::InvalidServerResponse => "the server's answer failed verification",
             Self::Rollback => "possible rollback by the server",
@@ -294,6 +303,7 @@ mod tests {
             ClientError::WrongPasswordOrSecretKey,
             ClientError::KdfNotAllowed,
             ClientError::OriginMismatch,
+            ClientError::RpIdRejected,
             ClientError::EmergencyKitNotConfirmed,
             ClientError::InvalidServerResponse,
             ClientError::Rollback,

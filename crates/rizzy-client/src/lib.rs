@@ -48,6 +48,7 @@
 //! | [`session`] | CRYPTO.md §5.10; ADR 0012 §7 "A device enrolled after the backup" | Device authentication (also certificate-carrying, after a restore) and request signing |
 //! | [`healing`] | ADR 0012 §7 steps 1–3 as ADR 0032 §1–§4 replace them; ADR 0021 §9 "Server behind" | Account-side restore healing: the older-chain rollback, the bundle chain, the newest `account-state` with `E_id` and the settings, the self-grants of step 3b; the recovery repair; the reconciliation objects |
 //! | [`matching`] | ADR 0037, ADR 0038 | URL matching for autofill, over `rizzy-match` |
+//! | [`passkey`] | ADR 0039 §2; `THREAT_MODEL.md` INV-64 | Checking a `WebAuthn` `rpId` against the browser-verified origin, over `rizzy-match`'s PSL |
 //! | [`sync`] | ADR 0012 §4, §7; ADR 0018 §3, §10; ADR 0021 §2, §4, §9 | The sync driver of one vault |
 //! | [`items`] | ADR 0018 §2, §6–§9; ADR 0012 §5; ADR 0027 §2 steps 3–5 | Item create, edit, trash, restore, purge and reads; the import path, which splits an item over a create op and the ops that follow |
 //! | [`lists`] | ADR 0018 §6 "List elements", "List order" | The writes that add, edit and remove URIs, custom fields, password-history entries and tags of an item |
@@ -106,6 +107,7 @@ pub mod items;
 pub mod lists;
 pub mod login;
 pub mod matching;
+pub mod passkey;
 pub mod recovery;
 pub mod reregister;
 pub mod rotation;

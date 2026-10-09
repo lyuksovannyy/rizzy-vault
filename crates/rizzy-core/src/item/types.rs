@@ -8,10 +8,15 @@
 //! | `0x0000` | invalid | – |
 //! | `0x0001`–`0x0004` | Login, Secure Note, Card, Identity | M1 |
 //! | `0x0005`–`0x0009` | SSH key, API credential, Software license, Wi-Fi, Bank account | M3, reserved |
-//! | `0x000A` | Passkey, standalone | M7, reserved (owner decision 6) |
-//! | `0x000B`–`0xEFFF` | unassigned; each needs an ADR line | – |
+//! | `0x000A`–`0xEFFF` | unassigned; each needs an ADR line | – |
 //! | `0xF001` | Vault settings (system type) | M1 |
 //! | `0xF000`, `0xF002`–`0xFFFF` | reserved for system types | – |
+//!
+//! **`0x000A`, released** (ADR 0039 §1, 2026-10-07). ADR 0018 owner decision 6 reserved both
+//! `0x000A` (a standalone Passkey item type) and the `passkey/` list on Login for "the M7
+//! passkey ADR," to pick one. ADR 0039 picked the list (see [`super::schema::LIST_PASSKEY`])
+//! and released `0x000A` back to unassigned; it stays permanently retired in practice (ADR 0039
+//! Negative consequences), even though an unassigned id is nominally reusable.
 //!
 //! **Unknown types** (ADR 0018 §8). An item whose type this client does not support (a reserved
 //! or unassigned id, `0x0000`, or no valid `item.type` at all) shows as "Unsupported item, update
@@ -71,8 +76,6 @@ impl ItemType {
     pub const WIFI: Self = Self(0x0008);
     /// `0x0009`: Bank account (M3, reserved).
     pub const BANK_ACCOUNT: Self = Self(0x0009);
-    /// `0x000A`: standalone Passkey (M7, reserved; owner decision 6).
-    pub const PASSKEY: Self = Self(0x000A);
     /// `0xF001`: Vault settings, a system type (M1).
     pub const VAULT_SETTINGS: Self = Self(0xF001);
 
@@ -109,8 +112,7 @@ impl ItemType {
             0x0003 => ItemTypeClass::Supported(SupportedType::Card),
             0x0004 => ItemTypeClass::Supported(SupportedType::Identity),
             0x0005..=0x0009 => ItemTypeClass::ReservedM3,
-            0x000A => ItemTypeClass::ReservedM7,
-            0x000B..=0xEFFF => ItemTypeClass::Unassigned,
+            0x000A..=0xEFFF => ItemTypeClass::Unassigned,
             0xF001 => ItemTypeClass::Supported(SupportedType::VaultSettings),
             _ => ItemTypeClass::ReservedSystem,
         }
@@ -136,9 +138,8 @@ pub enum ItemTypeClass {
     Supported(SupportedType),
     /// `0x0005`–`0x0009`, the M3 types.
     ReservedM3,
-    /// `0x000A`, the standalone passkey of M7.
-    ReservedM7,
-    /// `0x000B`–`0xEFFF`: no ADR assigns it yet.
+    /// `0x000A`–`0xEFFF`: no ADR assigns it yet. `0x000A` itself was the standalone passkey
+    /// candidate ADR 0018 reserved and ADR 0039 released back here (ADR 0039 §1).
     Unassigned,
     /// `0xF000` and `0xF002`–`0xFFFF`: reserved for system types.
     ReservedSystem,

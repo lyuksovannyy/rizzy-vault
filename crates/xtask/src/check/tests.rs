@@ -160,6 +160,22 @@ impl Tree {
             kind,
             features: features.iter().map(|f| (*f).to_owned()).collect(),
             default_features: false,
+            optional: false,
+        });
+    }
+
+    /// Like [`Tree::declare`], but for an `optional = true` dependency: live only when `from`'s
+    /// own resolved `features` (set directly, `t.g.packages[from].features = ...`) names it —
+    /// the liveness rule a dormant edge like `primeorder -> serdect` needs (ADR 0041, ADR 0009
+    /// amendment).
+    fn declare_optional(&mut self, from: usize, name: &str, kind: Kind) {
+        self.g.packages[from].declared.push(Declared {
+            name: name.to_owned(),
+            rename: None,
+            kind,
+            features: Vec::new(),
+            default_features: false,
+            optional: true,
         });
     }
 
@@ -286,6 +302,55 @@ fn r1_dev_dependencies_may_use_test_crates() {
     let chacha = t.external("chacha20", "0.10.2");
     t.edge(core, chacha, &[Kind::Dev]);
     assert_eq!(t.run(), []);
+}
+
+#[test]
+fn r1_dormant_optional_dependency_is_ignored() {
+    // Mirrors p256 0.14.0's `primeorder -> serdect` edge (ADR 0041; ADR 0009 amendment,
+    // 2026-10-08): `cargo metadata`'s resolve graph keeps an edge to an optional dependency
+    // even when no feature anywhere switches it on. rizzy-core's own resolved `features` here
+    // never name `serdect`, so the edge is dormant and must not be reported, even though
+    // `serdect` is not on rizzy-core's external allow-list.
+    let mut t = Tree::current();
+    let core = t.id("rizzy-core");
+    let serdect = t.external("serdect", "0.4.3");
+    t.edge(core, serdect, &[Kind::Normal]);
+    t.declare_optional(core, "serdect", Kind::Normal);
+    assert_eq!(t.run(), []);
+}
+
+#[test]
+fn r1_activated_optional_dependency_still_fails() {
+    // Same optional edge as above, but this time rizzy-core's own resolved `features` do name
+    // it (the implicit per-optional-dependency feature Cargo sets once something switches it
+    // on): it is live, and an unlisted crate reached that way is reported exactly like a
+    // non-optional one — the liveness filter narrows false alarms, it does not weaken R1.
+    let mut t = Tree::current();
+    let core = t.id("rizzy-core");
+    let serdect = t.external("serdect", "0.4.3");
+    t.edge(core, serdect, &[Kind::Normal]);
+    t.declare_optional(core, "serdect", Kind::Normal);
+    t.g.packages[core].features = vec!["serdect".to_owned()];
+    assert_only(&t.run(), "ADR 0016 R1", "rizzy-core", "serdect@0.4");
+}
+
+#[test]
+fn r1_edge_declared_both_optional_and_plain_still_fails_when_live() {
+    // A manifest can declare the same `(kind, name)` more than once, once per
+    // `[target.'cfg(..)'.…]` table: one declaration optional (and dormant, nothing
+    // activates it), another plain. `Graph::edge_is_live` must check every declaration that
+    // matches, not just the first one found — an earlier version took only the first match,
+    // so whenever the dormant-optional declaration was pushed first, a genuinely-live,
+    // unlisted dependency was wrongly dropped from the closure walk and R1 never fired. Here
+    // `left-pad` is unconditionally compiled through its plain declaration, so it must be
+    // reported regardless of which declaration `edge_is_live` happens to see first.
+    let mut t = Tree::current();
+    let core = t.id("rizzy-core");
+    let pad = t.external("left-pad", "1.0.0");
+    t.edge(core, pad, &[Kind::Normal]);
+    t.declare_optional(core, "left-pad", Kind::Normal);
+    t.declare(core, "left-pad", Kind::Normal, &[]);
+    assert_fires(&t.run(), "ADR 0016 R1", "rizzy-core", "left-pad");
 }
 
 #[test]

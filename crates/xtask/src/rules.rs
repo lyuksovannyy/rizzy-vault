@@ -165,7 +165,9 @@ impl CrateRule {
 pub(crate) const CORE_EXTERNAL_ALLOW: &[&str] = &[
     "aead@0.6",
     "argon2@0.6",
+    "autocfg@1",
     "base16ct@0.2",
+    "base16ct@1",
     "base64ct@1",
     "blake2@0.11",
     "block-buffer@0.10",
@@ -176,9 +178,16 @@ pub(crate) const CORE_EXTERNAL_ALLOW: &[&str] = &[
     "cipher@0.5",
     "cmov@0.5",
     "const-oid@0.9",
+    "const-oid@0.10",
+    // `cpubits` (crypto-bigint 0.7's limb-count-detection helper, ADR 0041) is new with p256.
+    "cpubits@0.1",
     "cpufeatures@0.2",
     "cpufeatures@0.3",
     "crypto-bigint@0.5",
+    // `crypto-bigint` 0.7, `elliptic-curve` 0.14 and friends below are the newer RustCrypto
+    // generation p256 0.14.0 pulls in alongside opaque-ke's older one (ADR 0041 §"New cargo-deny
+    // duplicates"; ADR 0009 Amendments, this entry).
+    "crypto-bigint@0.7",
     "crypto-common@0.1",
     "crypto-common@0.2",
     "ctutils@0.4",
@@ -186,18 +195,25 @@ pub(crate) const CORE_EXTERNAL_ALLOW: &[&str] = &[
     "curve25519-dalek@4",
     "curve25519-dalek@5",
     "der@0.7",
+    "der@0.8",
     "derive-where@1",
     "digest@0.10",
     "digest@0.11",
     "displaydoc@0.2",
+    // ES256 (COSE alg -7) for WebAuthn passkeys (ADR 0039 §3, ADR 0041). `ecdsa` is `p256`'s
+    // optional `ecdsa-core` dependency (renamed in `p256`'s own manifest).
+    "ecdsa@0.17",
     "ed25519-dalek@3",
     "ed25519@3",
     "elliptic-curve@0.13",
+    "elliptic-curve@0.14",
     "ff@0.13",
+    "ff@0.14",
     "fiat-crypto@0.2",
     "fiat-crypto@0.3",
     "generic-array@0.14",
     "group@0.13",
+    "group@0.14",
     "hkdf@0.12",
     "hkdf@0.13",
     "hmac@0.12",
@@ -206,20 +222,48 @@ pub(crate) const CORE_EXTERNAL_ALLOW: &[&str] = &[
     "hybrid-array@0.4",
     "inout@0.2",
     "libc@0.2",
+    // `crypto-bigint` 0.7's `impl Encoding` bounds; not used by our own code, pulled in purely
+    // structurally through p256's new RustCrypto generation (ADR 0041 §"New cargo-deny
+    // duplicates").
+    "num-traits@0.2",
     "opaque-ke@4",
+    // ES256 (ECDSA P-256 / SHA-256) key generation and signing for WebAuthn passkey credentials
+    // (ADR 0039 §3, §5; ADR 0041, approved 2026-10-08). `ecdsa`, `alloc` only; no `getrandom`,
+    // `std`, `pem`, `pkcs8` feature or `serde`. Keys come only from
+    // `SigningKey::random(&mut rng)` through the injected `rand_core::CryptoRng`.
+    //
+    // Not listed: `pkcs8`, and `serde`/`serde_core`/`serde_derive`/`serdect`. `elliptic-curve`
+    // 0.14.1 and `primeorder` 0.14.0 declare them `optional = true`, and `cargo metadata`'s
+    // resolve graph keeps the edge regardless, but neither name is ever in the declaring
+    // package's own resolved `features` (confirmed with `cargo metadata --all-features
+    // --locked`, cross-checked against `target/`: no build artifact for any of the five is ever
+    // produced). `cargo xtask check-deps`'s closure now filters exactly this shape of dormant
+    // optional edge (ADR 0009 amendment, this entry); a future feature change that actually
+    // switches one on will fail the check again, which is the point.
+    "p256@0.14",
     "poly1305@0.9",
+    // `p256`'s field-arithmetic backend (ADR 0041).
+    "primefield@0.14",
+    // `p256`'s complete point-addition-formula backend (ADR 0041).
+    "primeorder@0.14",
     "proc-macro2@1",
     "quote@1",
     "rand@0.8",
     "rand_core@0.10",
     "rand_core@0.6",
+    // RFC 6979 deterministic ECDSA nonces, the construction `ecdsa` implements for signing
+    // (ADR 0041 §8, RFC 6979 Appendix A.2.5).
+    "rfc6979@0.6",
     "rustc_version@0.4",
     "sec1@0.7",
+    "sec1@0.8",
     "semver@1",
     "sha1@0.11",
     "sha2@0.10",
     "sha2@0.11",
     "signature@3",
+    // `ecdsa`'s DER signature encoding path (its own resolved features name `der` and `spki`).
+    "spki@0.8",
     "subtle@2",
     "syn@2",
     "syn@3",
@@ -230,6 +274,8 @@ pub(crate) const CORE_EXTERNAL_ALLOW: &[&str] = &[
     "universal-hash@0.6",
     "version_check@0.9",
     "voprf@0.5",
+    // `p256`'s windowed-NAF scalar-multiplication backend (ADR 0041).
+    "wnaf@0.14",
     "x25519-dalek@3",
     "zeroize@1",
     "zeroize_derive@1",
