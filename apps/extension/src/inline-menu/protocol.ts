@@ -43,7 +43,7 @@
 //     `inline_menu_fill_chosen` message that would have to follow only ever carries the real
 //     `itemId` the real iframe's own click handler holds — a forged show message cannot make
 //     the iframe send that for an id it never really rendered a trusted click for.
-import { MAX_CANDIDATES, MAX_FIELD_VALUE_LEN, MAX_TITLE_LEN } from "../messaging/contract.ts";
+import { MAX_CANDIDATES, MAX_FIELD_VALUE_LEN, MAX_HOST_LEN, MAX_TITLE_LEN } from "../messaging/contract.ts";
 
 export const INLINE_MENU_SHOW = "rizzy-inline-menu-show";
 export const INLINE_MENU_PICK = "rizzy-inline-menu-pick";
@@ -57,6 +57,11 @@ export interface InlineMenuCandidate {
    * module's) — the menu must show a warning and ask for a second, explicit confirmation before
    * filling it. */
   readonly needsWarning: boolean;
+  /** The saved URI's exact normalised host, A-label form (ADR 0037 §5 "Exact host shown";
+   * gap 31 in the M2 gap audit) — "the saved site" in the equivalence-only warning. Computed by
+   * `rizzy-match`, never by this module: render it verbatim, never decoded to Unicode, so a
+   * mixed-script host keeps showing its punycode `xn--` form. */
+  readonly savedHost: string;
 }
 
 export interface InlineMenuShowMessage {
@@ -64,6 +69,10 @@ export interface InlineMenuShowMessage {
   /** The embedding page's origin, used only as this message's own `postMessage` target when
    * the iframe later replies — never trusted as an identity claim beyond that. */
   readonly pageOrigin: string;
+  /** The page's own exact normalised host, A-label form (ADR 0037 §5 "Exact host shown"; gap
+   * 31 in the M2 gap audit): the menu always shows this, matching or not, so the user can
+   * notice an unexpected match. Computed by `rizzy-match`, never by this module. */
+  readonly pageHost: string;
   readonly candidates: readonly InlineMenuCandidate[];
 }
 
@@ -85,7 +94,8 @@ function isCandidate(value: unknown): value is InlineMenuCandidate {
     isBoundedString(v["itemId"], 256) &&
     isBoundedString(v["title"], MAX_TITLE_LEN) &&
     isBoundedString(v["username"], MAX_FIELD_VALUE_LEN) &&
-    typeof v["needsWarning"] === "boolean"
+    typeof v["needsWarning"] === "boolean" &&
+    isBoundedString(v["savedHost"], MAX_HOST_LEN)
   );
 }
 
@@ -94,7 +104,11 @@ export function isInlineMenuShowMessage(value: unknown): value is InlineMenuShow
     return false;
   }
   const v = value as Record<string, unknown>;
-  if (v["type"] !== INLINE_MENU_SHOW || !isBoundedString(v["pageOrigin"], MAX_FIELD_VALUE_LEN)) {
+  if (
+    v["type"] !== INLINE_MENU_SHOW ||
+    !isBoundedString(v["pageOrigin"], MAX_FIELD_VALUE_LEN) ||
+    !isBoundedString(v["pageHost"], MAX_HOST_LEN)
+  ) {
     return false;
   }
   return Array.isArray(v["candidates"]) && v["candidates"].length <= MAX_CANDIDATES && v["candidates"].every(isCandidate);

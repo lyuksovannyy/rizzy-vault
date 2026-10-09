@@ -47,6 +47,20 @@ function installContentScript(): void {
   const report = () => {
     const fields = detectFields();
     if (fields.length === 0) {
+      // A real bug, found fixing the security review's iframe-geometry finding: with no visible
+      // field left at all (e.g. a client-side route change replaced a login form with other
+      // content, without the old field ever receiving a `blur` — single-page apps routinely
+      // unmount a focused element without the browser running the usual focus-loss sequence),
+      // this used to return without ever destroying a still-open `menu` from an earlier report,
+      // leaving its iframe sitting on the page indefinitely. Harmless-looking while the iframe's
+      // own height tracked `candidates.length` (often tiny), but the fixed outer height the
+      // geometry fix now always uses made the leftover iframe large enough to cover unrelated
+      // page content below where the vanished field used to be (an e2e regression this fix
+      // surfaced against the web vault's own post-login view). Tear down exactly as
+      // `wireInlineMenu` already does when it finds no password field.
+      menu?.destroy();
+      menu = undefined;
+      activeFillTargets = undefined;
       return;
     }
     void sendToBackground({
@@ -66,10 +80,17 @@ function installContentScript(): void {
     const passwordField = document.querySelector<HTMLInputElement>('input[data-rizzy-field="password"]');
     menu?.destroy();
     activeFillTargets = undefined;
-    if (answer.candidates.length === 0 || passwordField === null) {
+    if (passwordField === null) {
       menu = undefined;
       return;
     }
+    // Gap 32 in the M2 gap audit: the menu is now shown for ANY detected password field, even
+    // with zero saved candidates — it always offers "Generate password" (ROADMAP §4.4's
+    // generator, not only in the popup), which needs no saved item at all. A blank signup form
+    // (the generator's main use case) is exactly the `candidates.length === 0` case this used to
+    // skip entirely. `activeFillTargets` is still needed either way: the generator's own
+    // `apply_fill` push (`values: { password }`, no `username`) lands through the exact same
+    // `activeFillTargets.passwordField` lookup a real fill does.
     activeFillTargets = { usernameField, passwordField };
     // `InlineMenu` no longer tells this script which candidate was picked (ADR 0036 §4's new
     // bullet): the iframe itself sends the fill request straight to the background
@@ -78,7 +99,7 @@ function installContentScript(): void {
     // indirectly, as an `apply_fill` push the background sends back to *this* tab once it has
     // validated that request — never as anything the iframe tells this content script directly,
     // which a compromised content script could otherwise have spoofed by itself.
-    menu = new InlineMenu(passwordField, answer.candidates);
+    menu = new InlineMenu(passwordField, answer.candidates, answer.pageHost);
   }
 
   let savePrompt: SavePromptBanner | undefined;
@@ -313,6 +334,22 @@ function sendToBackground(message: FromContentScript): Promise<ToContentScript |
   return ext.runtime.sendMessage(message).then((r) => r as ToContentScript | undefined);
 }
 
+/** Fixed outer size of the inline-menu `<iframe>` (security review finding: a size derived from
+ * `candidates.length` let the embedding page's own script read, via `getBoundingClientRect()`
+ * on an element it can always see even though it cannot see *into* it, how many saved items
+ * matched — 0 vs. N is exactly the "does this user have an account here" oracle THREAT_MODEL
+ * INV-37 exists to deny a page by default). The iframe's outer element — size, position,
+ * attributes, insertion and removal — is observable DOM, cross-origin or not; only its
+ * *document* is protected. Every one of those properties must therefore be fixed or depend only
+ * on the page's own already-known layout (the anchor field's position), never on candidate data
+ * or count. `candidates.length` no longer reaches `frame.style` at all; a candidate list longer
+ * than fits scrolls inside the iframe's own document instead (`inline-menu/index.html`'s own
+ * `overflow-y: auto`) — this constant is deliberately tall enough for a few rows plus the
+ * header and the generator button without scrolling in the common case, while every case,
+ * including zero candidates, renders at this exact same outer height. */
+const INLINE_MENU_WIDTH_PX = 240;
+const INLINE_MENU_HEIGHT_PX = 220;
+
 /** The extension-origin inline menu (ADR 0036 §4/§5, ADR 0036 §75 "the inline-menu iframe app";
  * INV-36, INV-40): an `<iframe>` loaded from this extension's own `chrome-extension://` origin
  * (`inline-menu/index.html`/`main.ts`), positioned under the password field, one entry per
@@ -323,21 +360,27 @@ function sendToBackground(message: FromContentScript): Promise<ToContentScript |
  * it does and does not let a hostile page do. Destroyed on blur or a new report, and by itself
  * the instant it reports a pick — by then the iframe has already sent the actual fill request
  * straight to the background on its own (ADR 0040), so nothing of this menu's
- * own is ever what a later visibility recheck sees covering the field. */
+ * own is ever what a later visibility recheck sees covering the field.
+ *
+ * Outer geometry is fixed ({@link INLINE_MENU_WIDTH_PX}/{@link INLINE_MENU_HEIGHT_PX}) and
+ * `left`/`top` depend only on the anchor field's own position — never on `candidates` — so a
+ * page cannot distinguish 0 from N matches, or which host matched, by reading this element's
+ * `getBoundingClientRect()`, `className`, or attributes (security review finding; see the
+ * constants' own doc). */
 class InlineMenu {
   readonly #frame: HTMLIFrameElement;
   readonly #onMessage: (event: MessageEvent) => void;
   readonly #onBlur: () => void;
 
-  constructor(anchor: HTMLInputElement, candidates: CandidatesMessage["candidates"]) {
+  constructor(anchor: HTMLInputElement, candidates: CandidatesMessage["candidates"], pageHost: string) {
     const frame = document.createElement("iframe");
     frame.setAttribute("data-rizzy-inline-menu", "");
     const rect = anchor.getBoundingClientRect();
     frame.style.position = "fixed";
     frame.style.left = `${rect.left}px`;
     frame.style.top = `${rect.bottom}px`;
-    frame.style.width = `${Math.max(rect.width, 220)}px`;
-    frame.style.height = `${candidates.length * 36 + 8}px`;
+    frame.style.width = `${INLINE_MENU_WIDTH_PX}px`;
+    frame.style.height = `${INLINE_MENU_HEIGHT_PX}px`;
     frame.style.border = "0";
     frame.style.zIndex = "2147483647";
 
@@ -350,11 +393,13 @@ class InlineMenu {
           {
             type: INLINE_MENU_SHOW,
             pageOrigin,
+            pageHost,
             candidates: candidates.map((c) => ({
               itemId: c.itemId,
               title: c.title,
               username: c.username,
               needsWarning: c.needsWarning,
+              savedHost: c.savedHost,
             })),
           },
           menuOrigin,

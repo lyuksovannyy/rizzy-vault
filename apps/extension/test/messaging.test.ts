@@ -9,6 +9,7 @@ import {
   MAX_URL_LEN,
   isApplyFillMessage,
   isInlineMenuFillRequestMessage,
+  isInlineMenuGeneratePasswordRequestMessage,
   isRelayApplyFillMessage,
 } from "../src/messaging/contract.ts";
 import { MessageRejected, parseFromContentScript } from "../src/messaging/validate.ts";
@@ -132,6 +133,13 @@ describe("parseFromContentScript: refuses bad input", () => {
     const message = { type: "inline_menu_fill_chosen", itemId: "item-1", confirmedEquivalence: true };
     expect(() => parseFromContentScript(message)).toThrow(MessageRejected);
   });
+
+  // Same ADR 0040 defence-in-depth rule, for the generator's privileged request (gap 32 in the
+  // M2 gap audit): it must never be reachable through the content-script path either.
+  it("inline_menu_generate_password_chosen is not a content-script message at all", () => {
+    const message = { type: "inline_menu_generate_password_chosen" };
+    expect(() => parseFromContentScript(message)).toThrow(MessageRejected);
+  });
 });
 
 describe("isInlineMenuFillRequestMessage", () => {
@@ -154,6 +162,23 @@ describe("isInlineMenuFillRequestMessage", () => {
   it("rejects a non-object", () => {
     expect(isInlineMenuFillRequestMessage(null)).toBe(false);
     expect(isInlineMenuFillRequestMessage("inline_menu_fill_chosen")).toBe(false);
+  });
+});
+
+// Gap 32 in the M2 gap audit: the generator's own privileged request, same validator pattern as
+// `isInlineMenuFillRequestMessage` above, but with no fields beyond `type` to bound.
+describe("isInlineMenuGeneratePasswordRequestMessage", () => {
+  it("accepts a well-formed request", () => {
+    expect(isInlineMenuGeneratePasswordRequestMessage({ type: "inline_menu_generate_password_chosen" })).toBe(true);
+  });
+
+  it("rejects the wrong type tag", () => {
+    expect(isInlineMenuGeneratePasswordRequestMessage({ type: "inline_menu_fill_chosen" })).toBe(false);
+  });
+
+  it("rejects a non-object", () => {
+    expect(isInlineMenuGeneratePasswordRequestMessage(null)).toBe(false);
+    expect(isInlineMenuGeneratePasswordRequestMessage("inline_menu_generate_password_chosen")).toBe(false);
   });
 });
 
