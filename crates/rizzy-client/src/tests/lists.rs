@@ -14,7 +14,7 @@ use crate::lists::{
 };
 
 /// A writer with one Login item.
-fn one_item(seed: u64) -> (Server, ChaCha20Rng, VaultSync, UnlockedDevice, ItemId) {
+pub(super) fn one_item(seed: u64) -> (Server, ChaCha20Rng, VaultSync, UnlockedDevice, ItemId) {
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
     let mut server = Server::new(seed + 1);
     let a = signup(&mut server, &mut rng, DeviceKind::DesktopCli);

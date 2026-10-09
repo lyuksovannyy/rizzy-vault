@@ -56,7 +56,7 @@ use rizzy_client::export::gate::{self, ExportGate, check_export_password};
 use rizzy_client::export::plaintext::{
     PLAINTEXT_EXPORT_PHRASE, PLAINTEXT_EXPORT_WARNING, PlaintextExportAck, csv_export_warning,
 };
-use rizzy_client::items::{FieldEdit, ItemId};
+use rizzy_client::items::{FieldEdit, ItemId, TRASH_RETENTION_MS};
 use rizzy_client::login::WebSession;
 use rizzy_client::passkey::get_assertion;
 use rizzy_client::rizzy_core::ids::AccountId;
@@ -465,6 +465,26 @@ impl Session {
     #[wasm_bindgen(js_name = purgeItem)]
     pub fn purge_item(&mut self, id: &str, now_ms: u64) -> Result<(), CoreError> {
         self.lifecycle(id, VaultSync::purge_item::<Rng>, now_ms)
+    }
+
+    /// Purges every trashed item whose retention period has elapsed (gap 00; ADR 0012 §5,
+    /// ADR 0018 §9, §11). The host calls this once after a successful sync (module docs of
+    /// `rizzy_client::items::VaultSync::auto_purge_due`), while the session is unlocked, so it
+    /// runs only when this device is online. Returns the purged items' ids, ascending; empty
+    /// when nothing was due.
+    ///
+    /// # Errors
+    /// `locked`; `wrong_state` while a sync runs.
+    #[wasm_bindgen(js_name = autoPurge)]
+    pub fn auto_purge(&mut self, now_ms: u64) -> Result<Vec<String>, CoreError> {
+        let inner = self.writable()?;
+        let purged = inner.vault.auto_purge_due(
+            &mut inner.rng,
+            &inner.unlocked,
+            now_ms,
+            TRASH_RETENTION_MS,
+        )?;
+        Ok(purged.into_iter().map(|id| hex(id.as_bytes())).collect())
     }
 
     /// The current TOTP code of an item's `login.totp`, which holds an `otpauth://` URI or a

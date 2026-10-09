@@ -936,6 +936,11 @@ export class VaultSession {
    * is rethrown: the outcome of that request is unknown, the unsent changes stay queued, and
    * the next `sync()` sends them again (ADR 0028 "Retry after an unknown outcome"). Writes are
    * accepted again at once.
+   *
+   * Once the fetch/upload driver settles, this also runs the client-side trash auto-purge
+   * (gap 00; ADR 0012 §5, ADR 0018 §9, §11): a pass over every trashed item whose retention
+   * period has elapsed, run only here, after a successful sync, while unlocked — never by the
+   * server (ADR 0022).
    */
   async sync(): Promise<void> {
     const s = this.#s();
@@ -943,7 +948,7 @@ export class VaultSession {
     for (;;) {
       const request = call(() => s.syncRequest());
       if (request === undefined) {
-        return;
+        break;
       }
       let answer: CoreResponse;
       try {
@@ -960,6 +965,7 @@ export class VaultSession {
       }
       call(() => s.syncRespond(answer.status, answer.body, this.#now()));
     }
+    call(() => this.#s().autoPurge(this.#now()));
   }
 
   /** The active items, or the trashed ones. */
@@ -1867,6 +1873,10 @@ export class DurableSession {
    * drains and persists the step's cache writes (class docs) before the next request is
    * released (ADR 0026 §4's write order) — the durable device's own addition over the
    * ephemeral web vault's sync.
+   *
+   * Once the driver settles, this also runs the client-side trash auto-purge (gap 00; ADR
+   * 0012 §5, ADR 0018 §9, §11) and drains its cache writes, the same write-order rule as every
+   * other step.
    */
   async sync(): Promise<void> {
     const s = this.#inner;
@@ -1874,6 +1884,8 @@ export class DurableSession {
     for (;;) {
       const request = call(() => s.syncRequest());
       if (request === undefined) {
+        await this.#drain();
+        call(() => s.autoPurge(this.#now()));
         await this.#drain();
         return;
       }

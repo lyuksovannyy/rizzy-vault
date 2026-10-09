@@ -264,6 +264,46 @@ test("signup, item, reload, login, lock, unlock", async ({ page }) => {
   expect(problems).toEqual([]);
 });
 
+// Permanent delete (ADR 0018 §3 "Surfacing"; ROADMAP §4.2 "Trash with restore"): the
+// confirm dialog (ItemView.tsx's "purge" `ConfirmDialog`) purges on confirm and keeps the
+// item on cancel. The wasm `purgeItem` binding and the packages/core wrapper underneath this
+// click have their own tests (packages/core, crates/rizzy-wasm); this covers the UI's own
+// wiring: the button, the dialog, the toast and the trash list.
+test("permanent delete: cancelling the dialog keeps the item, confirming purges it", async ({ page }) => {
+  await signUp(page, "purgeuser");
+  await newItem(page, "Login");
+  await page.getByLabel("Title").fill("ToPurge");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("heading", { name: "ToPurge" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Move to trash" }).click();
+  await page
+    .getByRole("dialog", { name: "Move this item to trash?" })
+    .getByRole("button", { name: "Move to trash" })
+    .click();
+  await page.getByRole("button", { name: "Trash", exact: true }).click();
+  await page.getByRole("button", { name: /ToPurge/ }).click();
+
+  // Cancelling leaves the item in the trash.
+  await page.getByRole("button", { name: "Delete for good" }).click();
+  const dialog = page.getByRole("dialog", { name: "Delete this item for good?" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole("heading", { name: "ToPurge" })).toBeVisible();
+
+  // Confirming purges it for good.
+  await page.getByRole("button", { name: "Delete for good" }).click();
+  await page
+    .getByRole("dialog", { name: "Delete this item for good?" })
+    .getByRole("button", { name: "Delete for good" })
+    .click();
+  await expect(page.getByText("Item deleted for good.")).toBeVisible();
+  await expect(page.getByText("The trash is empty.")).toBeVisible();
+  await page.getByRole("button", { name: "All items", exact: true }).click();
+  await expect(page.getByText("No items yet.")).toBeVisible();
+});
+
 test("the editor's generate popover: custom options, save, reload, password present", async ({ page }) => {
   const { problems } = watch(page);
   const secretKey = await signUp(page, "generatoruser");

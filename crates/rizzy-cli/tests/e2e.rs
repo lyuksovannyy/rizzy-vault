@@ -2914,3 +2914,84 @@ fn rv_reaches_the_server_through_a_tls_proxy() {
     let (outcome, _) = b.try_run(&["sync"], &[PASSWORD], &[], &[]);
     assert!(matches!(outcome, Err(CliError::Tls { .. })), "{outcome:?}");
 }
+
+/// `item show` lists password history (gap 01; ADR 0012 §5 "Password history is the history
+/// of `login.password`"): concealed unless `--reveal`, newest first, never through the
+/// generic field loop.
+#[test]
+fn item_show_lists_password_history() {
+    let server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("pwhist");
+    sign_up(&a, &origin, "alice");
+    let item = a
+        .ok(
+            &[
+                "item",
+                "create",
+                "--type",
+                "login",
+                "--field",
+                "item.name=Mail",
+                "--secret",
+                "login.password",
+            ],
+            &["first-password"],
+        )
+        .out[0]
+        .clone();
+
+    // No history yet: the item has only ever held one value.
+    let shown = a.ok(&["item", "show", &item], &[]);
+    assert!(
+        !shown.out.iter().any(|l| l.starts_with("password history")),
+        "{:?}",
+        shown.out
+    );
+
+    a.ok(
+        &["item", "edit", &item, "--secret", "login.password"],
+        &["second-password"],
+    );
+    a.ok(
+        &["item", "edit", &item, "--secret", "login.password"],
+        &["third-password"],
+    );
+
+    // Concealed without --reveal: the heading names the count, the entries do not leak the
+    // old values.
+    let hidden = a.ok(&["item", "show", &item], &[]);
+    assert!(
+        hidden
+            .out
+            .iter()
+            .any(|l| l == "password history (2 older values, newest first):"),
+        "{:?}",
+        hidden.out
+    );
+    assert!(!hidden.out.iter().any(|l| l.contains("first-password")));
+    assert!(!hidden.out.iter().any(|l| l.contains("second-password")));
+    assert!(hidden.out.iter().any(|l| l.ends_with(": ********")));
+
+    // Revealed: both older values, newest (second-password) first; the current value
+    // (third-password) is not a history entry.
+    let revealed = a.ok(&["item", "show", &item, "--reveal"], &[]);
+    let history_lines: Vec<&String> = revealed
+        .out
+        .iter()
+        .skip_while(|l| !l.starts_with("password history"))
+        .skip(1)
+        .take_while(|l| l.starts_with("  "))
+        .collect();
+    assert_eq!(history_lines.len(), 2, "{:?}", revealed.out);
+    assert!(
+        history_lines[0].ends_with(": second-password"),
+        "{history_lines:?}"
+    );
+    assert!(
+        history_lines[1].ends_with(": first-password"),
+        "{history_lines:?}"
+    );
+    assert!(!history_lines.iter().any(|l| l.contains("third-password")));
+    assert_eq!(a.field(&item, "login.password"), "third-password");
+}
