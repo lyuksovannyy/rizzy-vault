@@ -20,7 +20,20 @@
 //! shape: the stored private key never leaves Rust. It is read back from the already-decrypted
 //! vault internally (the same pattern [`crate::session::Session::totp`] already uses for a
 //! different concealed field) and only the resulting [`PasskeyAssertion`] — never the key —
-//! crosses out.
+//! crosses out. [`PasskeyAssertion::user_handle`] closes gap 35(a) of the M2 gap audit: the
+//! stored `passkey/<id>/user_handle` is now read back and echoed out for the page's
+//! `AuthenticatorAssertionResponse.userHandle`, the same way `credential_id` already was.
+//!
+//! [`Session::passkey_candidates`](crate::session::Session::passkey_candidates) lists one
+//! item's stored passkeys' non-secret metadata — `rp_id`, `user_handle`, `credential_id`,
+//! `alg`, `created_ms` — without the private key, for the host to pick which credential to run
+//! `passkey_assertion` with and, for gap 35(b), to filter candidates against the page's
+//! `allowCredentials` *before* calling it: `get_assertion`/`passkey_assertion` sign with
+//! whatever credential the caller selects and do not themselves check it against
+//! `allowCredentials` ([`rizzy_client::passkey::get_assertion`]'s own doc, "entirely the
+//! caller's"). A host that skips this filtering step would let a relying party's call sign
+//! with a credential it did not list — that filtering must run in the host (never only in UI
+//! code the page can see) before the one matching `passkey_assertion` call.
 //!
 //! # What this does not decide
 //!
@@ -114,6 +127,13 @@ pub struct PasskeyAssertion {
     /// Echoed back unchanged from the caller's own already-stored `credential_id` (ADR 0039
     /// §5, "the API is coarse": the caller does not thread it through a second path).
     credential_id: Vec<u8>,
+    /// Echoed back unchanged from the caller's own already-stored `user_handle`, for the
+    /// page's `AuthenticatorAssertionResponse.userHandle` (gap 35(a) in the M2 gap audit).
+    /// Empty when the caller had none to attach ([`rizzy_client::passkey::Assertion`]'s own
+    /// doc on why that should not happen in practice); `js_name = userHandle` with an empty
+    /// `Vec` rather than an `Option` because every other byte field on this boundary already
+    /// uses an empty `Vec` for "nothing here" (module docs' "Rules of the boundary").
+    user_handle: Vec<u8>,
     /// `clientDataJSON`, for the caller to hand back to the page verbatim.
     client_data_json: Vec<u8>,
     /// `authenticatorData`, for the caller to hand back to the page verbatim.
@@ -129,6 +149,14 @@ impl PasskeyAssertion {
     #[must_use]
     pub fn credential_id(&self) -> Vec<u8> {
         self.credential_id.clone()
+    }
+
+    /// The user handle, echoed back unchanged (ADR 0039 §1's `passkey/<id>/user_handle`); an
+    /// empty `Vec` when there is none to attach.
+    #[wasm_bindgen(getter, js_name = userHandle)]
+    #[must_use]
+    pub fn user_handle(&self) -> Vec<u8> {
+        self.user_handle.clone()
     }
 
     /// `clientDataJSON`.
@@ -157,6 +185,7 @@ impl From<rizzy_client::passkey::Assertion> for PasskeyAssertion {
     fn from(assertion: rizzy_client::passkey::Assertion) -> Self {
         Self {
             credential_id: assertion.credential_id,
+            user_handle: assertion.user_handle.unwrap_or_default(),
             client_data_json: assertion.client_data_json,
             authenticator_data: assertion.authenticator_data,
             signature_der: assertion.signature_der,
@@ -191,6 +220,81 @@ pub fn create_passkey(
         client_data_json: created.client_data_json,
         attestation_object: created.attestation_object,
     })
+}
+
+/// One stored passkey's non-secret metadata (ADR 0039 §1), built by
+/// [`crate::session::Session::passkey_candidates`] — **never** `private_key` (module docs).
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct PasskeyCandidate {
+    /// The element id (`passkey/<id>/…`'s `<id>`, hex), for a later `passkeyAssertion` call.
+    pub(crate) element_id: String,
+    /// `passkey/<id>/rp_id`.
+    pub(crate) rp_id: String,
+    /// `passkey/<id>/user_handle`.
+    pub(crate) user_handle: Vec<u8>,
+    /// `passkey/<id>/credential_id`, for the host to filter against the page's
+    /// `allowCredentials` (gap 35(b)) before picking a candidate to assert with.
+    pub(crate) credential_id: Vec<u8>,
+    /// `passkey/<id>/alg` (`1` = ES256, `2` = `EdDSA`; ADR 0039 §1).
+    pub(crate) alg: u16,
+    /// `passkey/<id>/created_ms`.
+    pub(crate) created_ms: u64,
+}
+
+impl core::fmt::Debug for PasskeyCandidate {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PasskeyCandidate")
+            .field("element_id", &self.element_id)
+            .field("rp_id", &self.rp_id)
+            .field("alg", &self.alg)
+            .finish_non_exhaustive()
+    }
+}
+
+#[wasm_bindgen]
+impl PasskeyCandidate {
+    /// The element id, for a later `passkeyAssertion` call.
+    #[wasm_bindgen(getter, js_name = elementId)]
+    #[must_use]
+    pub fn element_id(&self) -> String {
+        self.element_id.clone()
+    }
+
+    /// `passkey/<id>/rp_id`.
+    #[wasm_bindgen(getter, js_name = rpId)]
+    #[must_use]
+    pub fn rp_id(&self) -> String {
+        self.rp_id.clone()
+    }
+
+    /// `passkey/<id>/user_handle`.
+    #[wasm_bindgen(getter, js_name = userHandle)]
+    #[must_use]
+    pub fn user_handle(&self) -> Vec<u8> {
+        self.user_handle.clone()
+    }
+
+    /// `passkey/<id>/credential_id`.
+    #[wasm_bindgen(getter, js_name = credentialId)]
+    #[must_use]
+    pub fn credential_id(&self) -> Vec<u8> {
+        self.credential_id.clone()
+    }
+
+    /// `passkey/<id>/alg`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn alg(&self) -> u16 {
+        self.alg
+    }
+
+    /// `passkey/<id>/created_ms`.
+    #[wasm_bindgen(getter, js_name = createdMs)]
+    #[must_use]
+    pub fn created_ms(&self) -> u64 {
+        self.created_ms
+    }
 }
 
 #[cfg(test)]

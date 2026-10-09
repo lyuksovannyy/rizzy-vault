@@ -248,7 +248,7 @@ export async function resolveSavePrompt(token: string, action: "save" | "update"
 export function matchCandidatesFor(
   pageUrl: string,
   frame: MatchFrameInfo,
-): { candidates: readonly MatchCandidate[]; warnings: readonly string[] } | undefined {
+): { pageHost: string; candidates: readonly MatchCandidate[]; warnings: readonly string[] } | undefined {
   if (session === undefined) {
     return undefined;
   }
@@ -280,6 +280,20 @@ export function revealCredentialsForFill(itemId: string): { username?: string; p
   }
   const { username, password } = itemCredentials(session, itemId);
   return { ...(username !== "" ? { username } : {}), password };
+}
+
+/** `content-handler.ts`'s `handleInlineMenuGeneratePasswordRequest` (gap 32 in the M2 gap
+ * audit, ADR 0040's trusted-click pattern applied to the generator): the same
+ * `generatePasswordWithOptions` the popup's own `generate_password` handler (below) calls, with
+ * its own default length — this one-button inline affordance offers no length/kind picker of its
+ * own (ROADMAP §4.4's generator is the popup's; duplicating a picker into the small iframe menu
+ * is unneeded surface, YAGNI). Independent of enrolment/unlock, same as the popup's handler:
+ * `initCore()` is memoised, so this is a no-op once anything else has already loaded the wasm
+ * module. Never throws — `handleInlineMenuGeneratePasswordRequest` catches and reports a plain
+ * refusal, matching every other inline-menu-iframe request's `ContentErrorMessage` fallback. */
+export async function generatePasswordForFill(): Promise<string> {
+  await initCore();
+  return generatePasswordWithOptions({}).value;
 }
 
 /** The passkey consent ceremony's pending-request store (`core-host/passkey-ceremony.ts`'s own
@@ -327,15 +341,27 @@ export function offerPasskeyCreate(
 }
 
 /** `content-handler.ts`'s `passkey_get_request` handling: registers a pending "sign in with a
- * passkey" ceremony with every candidate whose stored `rp_id` matches, or `undefined` while
- * locked or when nothing matches (ADR 0039 §2's consent prompt needs at least one real choice —
- * an empty list falls straight back to the native authenticator, `content-handler.ts`'s own
- * decision, not this function's). */
+ * passkey" ceremony with every candidate whose stored `rp_id` matches — and, when the page's own
+ * `navigator.credentials.get()` call named `allowCredentials` (`allowCredentialIdsB64`, gap
+ * 35(b) in the M2 gap audit), only the ones among those matches whose `credentialId` the page
+ * actually listed. `undefined` while locked or when nothing matches (ADR 0039 §2's consent
+ * prompt needs at least one real choice — an empty list falls straight back to the native
+ * authenticator, `content-handler.ts`'s own decision, not this function's).
+ *
+ * An empty `allowCredentialIdsB64` means "any discoverable credential for this `rpId`"
+ * (`PasskeyGetRequestMessage`'s own doc, mirroring the WebAuthn spec's own "omitted or empty
+ * `allowCredentials` means a discoverable-credential request") — every `rp_id` match is offered,
+ * same as before this gap was filled. A non-empty list narrows to the intersection: this is the
+ * one place that intersection is computed, so `passkey_assertion` itself never has to (`crate::
+ * device::DeviceSession::passkey_assertion`'s own doc: "This call does **not** check
+ * `passkey_id` against the page's `allowCredentials`").
+ */
 export function offerPasskeyGet(
   origin: string,
   tabId: number,
   rpIdHint: string | undefined,
   challengeB64: string,
+  allowCredentialIdsB64: readonly string[],
 ): { readonly ceremonyToken: string; readonly rpId: string; readonly candidates: readonly PasskeyCandidateSummary[] } | undefined {
   if (session === undefined) {
     return undefined;
@@ -344,7 +370,11 @@ export function offerPasskeyGet(
   if (rpId === undefined) {
     return undefined;
   }
-  const matches = sessionPasskeyCandidatesForRpId(session, rpId);
+  let matches = sessionPasskeyCandidatesForRpId(session, rpId);
+  if (allowCredentialIdsB64.length > 0) {
+    const allowed = new Set(allowCredentialIdsB64);
+    matches = matches.filter((m) => allowed.has(bytesToBase64(m.credentialId)));
+  }
   if (matches.length === 0) {
     return undefined;
   }
@@ -487,11 +517,13 @@ function runGetPasskey(
     clientDataJsonB64: bytesToBase64(assertion.clientDataJson),
     authenticatorDataB64: bytesToBase64(assertion.authenticatorData),
     signatureB64: bytesToBase64(assertion.signatureDer),
-    // `userHandle` is deliberately absent (`StoredPasskey`'s own doc, `bindings.ts`): no
-    // `@rizzy-vault/core` call returns it back once stored, only at creation time. Legal per the
-    // WebAuthn spec (`AuthenticatorAssertionResponse.userHandle` is nullable), but an RP that
-    // requires it for a fully "typeless" discoverable sign-in will not accept this response —
-    // `not_done`, reported honestly rather than worked around.
+    // Gap 35(a) in the M2 gap audit: `DurableSession.passkeyAssertion` now reads the stored
+    // `user_handle` back alongside the credential id (`crates/rizzy-wasm/src/device.rs`'s
+    // `passkey_assertion`, never the private key) and returns it on every assertion, so this is
+    // always set, not conditionally — an RP that requires `userHandle` for a fully "typeless"
+    // discoverable sign-in (WebAuthn's own nullable field, but some RPs do require it in
+    // practice) now gets it.
+    userHandleB64: bytesToBase64(assertion.userHandle),
   };
 }
 
@@ -508,7 +540,7 @@ export function offerSavePrompt(
     return undefined;
   }
   const username = usernameValue ?? "";
-  const existing = findItemForUpdate(session, pageUrl);
+  const existing = findItemForUpdate(session, pageUrl, username);
   if (existing === undefined) {
     const token = addPendingSavePrompt({ action: "save", pageUrl, usernameValue: username, passwordValue });
     rememberPendingOfferByLocation(tabId, pageUrl, token);

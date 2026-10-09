@@ -65,8 +65,8 @@ describe("handleContentScriptRequest: check_save_prompt", () => {
 // still needs its second confirmation (ADR 0037 §5). Pure and synchronous, so no session or
 // locked-device plumbing is needed to exercise it directly.
 describe("selectFillCandidate", () => {
-  const plainCandidate: MatchCandidate = { itemId: "item-1", uriId: "uri-1", needsWarning: false };
-  const warningCandidate: MatchCandidate = { itemId: "item-2", uriId: "uri-2", needsWarning: true };
+  const plainCandidate: MatchCandidate = { itemId: "item-1", uriId: "uri-1", needsWarning: false, savedHost: "example.com" };
+  const warningCandidate: MatchCandidate = { itemId: "item-2", uriId: "uri-2", needsWarning: true, savedHost: "example.net" };
 
   it("accepts an itemId that is a current candidate with no warning needed", () => {
     expect(selectFillCandidate([plainCandidate], "item-1", false)).toEqual({ ok: true });

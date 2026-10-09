@@ -30,9 +30,14 @@ import {
   trustedOriginOf,
 } from "../messaging/sender.ts";
 import { MessageRejected, parseFromContentScript } from "../messaging/validate.ts";
-import { isInlineMenuFillRequestMessage, isPasskeyCeremonyMessage } from "../messaging/contract.ts";
+import { isInlineMenuFillRequestMessage, isInlineMenuGeneratePasswordRequestMessage, isPasskeyCeremonyMessage } from "../messaging/contract.ts";
 import type { ContentScriptForward, PopupRequest, PopupResponse, ToContentScript } from "../messaging/contract.ts";
-import { handleContentScriptRequest, handleInlineMenuFillRequest, handlePasskeyCeremonyApproval } from "./content-handler.ts";
+import {
+  handleContentScriptRequest,
+  handleInlineMenuFillRequest,
+  handleInlineMenuGeneratePasswordRequest,
+  handlePasskeyCeremonyApproval,
+} from "./content-handler.ts";
 import { handlePopupRequest, lockFromIdleState, startCoreContext } from "./core-context.ts";
 import { DEFAULT_AUTO_LOCK_MS } from "./lifecycle.ts";
 
@@ -129,6 +134,15 @@ export function installCoreContextListener(ext: WebExtNamespace, options: Instal
         void handlePasskeyCeremonyApproval(ext, tabId, tabUrl, message)
           .then(sendResponse)
           .catch(() => sendResponse({ type: "content_error", code: "passkey_ceremony: failed" } satisfies ToContentScript));
+        return true;
+      }
+      if (isInlineMenuGeneratePasswordRequestMessage(message)) {
+        // Gap 32 in the M2 gap audit: the same trusted-click/never-back-to-the-iframe pattern
+        // as the fill request just above, for the generator instead of a saved item's
+        // credentials — see `handleInlineMenuGeneratePasswordRequest`'s own doc.
+        void handleInlineMenuGeneratePasswordRequest(ext, tabId, tabUrl)
+          .then(sendResponse)
+          .catch(() => sendResponse({ type: "content_error", code: "inline_menu_generate_password_chosen: failed" } satisfies ToContentScript));
         return true;
       }
       if (!isInlineMenuFillRequestMessage(message)) {

@@ -3,6 +3,24 @@
   <head>
     <meta charset="utf-8" />
     <title>rizzy-vault</title>
+    <style>
+      /* Security review finding: `content-script.ts` now gives this document's own `<iframe>`
+         a fixed outer size regardless of how many candidates render, so the page can never read
+         the saved-candidate count (or whether there is even one) off the iframe element's own
+         `getBoundingClientRect()`. The scrolling that used to come from resizing the iframe to
+         fit now happens inside this document instead: `html`/`body` fill the fixed outer frame
+         exactly and never grow past it, and `#list` scrolls its own overflow. */
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+      }
+      #list {
+        max-height: calc(100% - 64px);
+        overflow-y: auto;
+      }
+    </style>
   </head>
   <body>
     <!-- The extension-origin inline-menu surface (ADR 0036 §4/§5, INV-36, INV-40): loaded by
@@ -11,7 +29,15 @@
          `postMessage` into it (`protocol.ts` covers what that does and does not let it do) —
          so a page script can never synthesize a trusted click on a candidate here the way it
          could when the menu was a plain element in the page's own DOM. -->
+    <!-- ADR 0037 §5 "Exact host shown": the page's own exact normalised host, always shown,
+         matching or not (gap 31 in the M2 gap audit). Filled by `main.ts` as plain text only,
+         never as a link or anything else `innerHTML` could parse as markup. -->
+    <div id="page-host"></div>
     <div id="list"></div>
+    <!-- Gap 32 in the M2 gap audit: a password generator offered right in the page's own
+         password field, not only in the popup (ROADMAP §4.4) — on the same trusted click as
+         every other button here (INV-36), never anything a page script can synthesize. -->
+    <div id="generate"></div>
     <script type="module" src="./main.ts"></script>
   </body>
 </html>

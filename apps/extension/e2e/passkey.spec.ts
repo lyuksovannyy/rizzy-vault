@@ -35,6 +35,15 @@ function b64ToBuf(b64) {
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return bytes.buffer;
 }
+// \`PublicKeyCredential.id\` (and so \`allowCredentials[].id\`, per real-RP-code convention: store
+// the base64url \`id\` at registration, decode it back for \`allowCredentials\` at sign-in) is
+// base64url, not the plain base64 \`b64ToBuf\` above expects (gap 35(b) in the M2 gap audit's own
+// test) — \`atob\` does not accept \`-\`/\`_\` or unpadded input.
+function b64urlToBuf(b64url) {
+  const padded = b64url.replace(/-/g, "+").replace(/_/g, "/");
+  const pad = padded.length % 4 === 0 ? "" : "=".repeat(4 - (padded.length % 4));
+  return b64ToBuf(padded + pad);
+}
 function bufToB64(buf) {
   const bytes = new Uint8Array(buf);
   let bin = "";
@@ -59,13 +68,20 @@ window.rizzyTestCreate = async (opts) => {
 };
 window.rizzyTestGet = async (opts) => {
   const cred = await navigator.credentials.get({
-    publicKey: { challenge: b64ToBuf(opts.challengeB64), timeout: opts.timeoutMs },
+    publicKey: {
+      challenge: b64ToBuf(opts.challengeB64),
+      timeout: opts.timeoutMs,
+      ...(opts.allowCredentialIdsB64 !== undefined
+        ? { allowCredentials: opts.allowCredentialIdsB64.map((id) => ({ type: "public-key", id: b64urlToBuf(id) })) }
+        : {}),
+    },
   });
   return {
     id: cred.id,
     authenticatorDataB64: bufToB64(cred.response.authenticatorData),
     clientDataJsonB64: bufToB64(cred.response.clientDataJSON),
     signatureB64: bufToB64(cred.response.signature),
+    userHandleB64: cred.response.userHandle ? bufToB64(cred.response.userHandle) : null,
   };
 };
 </script></body></html>`;
@@ -81,6 +97,9 @@ interface GetResult {
   readonly authenticatorDataB64: string;
   readonly clientDataJsonB64: string;
   readonly signatureB64: string;
+  /** `null` only if the real `AuthenticatorAssertionResponse.userHandle` were ever null — gap
+   * 35(a) in the M2 gap audit: this extension's own assertions always set it now. */
+  readonly userHandleB64: string | null;
 }
 
 declare global {
@@ -93,7 +112,7 @@ declare global {
       challengeB64: string;
       timeoutMs: number;
     }): Promise<CreateResult>;
-    rizzyTestGet(opts: { challengeB64: string; timeoutMs: number }): Promise<GetResult>;
+    rizzyTestGet(opts: { challengeB64: string; timeoutMs: number; allowCredentialIdsB64?: readonly string[] }): Promise<GetResult>;
   }
 }
 
@@ -209,6 +228,11 @@ test("registers a passkey through consent, verifies the attestation, signs in wi
 
   const assertion = await getPromise;
   expect(assertion.id).toBe(created.id);
+  // Gap 35(a) in the M2 gap audit: `userHandle` is never null for an assertion this extension
+  // produces, and it is the exact `user.id` the create ceremony registered — `userIdB64` above,
+  // "user-1" — never a placeholder or an empty value.
+  expect(assertion.userHandleB64).not.toBeNull();
+  expect(Buffer.from(assertion.userHandleB64 as string, "base64").toString("utf8")).toBe("user-1");
   const authenticatorData = Buffer.from(assertion.authenticatorDataB64, "base64");
   const assertionClientDataJson = Buffer.from(assertion.clientDataJsonB64, "base64");
   const signature = Buffer.from(assertion.signatureB64, "base64");
@@ -254,6 +278,57 @@ test("registers a passkey through consent, verifies the attestation, signs in wi
   // `outcome.ok`, module docs), so either settlement here proves the real native call ran; a
   // `rejected` settlement is what this environment is expected to produce.
   expect(outcome.settled).toBe("rejected");
+});
+
+test("navigator.credentials.get() with allowCredentials narrows the consent UI to the matching passkey only", async ({
+  context,
+  extensionId,
+  server,
+  rp,
+}) => {
+  // Gap 35(b) in the M2 gap audit: two passkeys registered for the same RP (both land on the
+  // same Login item — `core-host/core-context.ts`'s `runCreatePasskey` attaches a second
+  // passkey for an already-known `rpId` rather than creating a second item, so both candidates'
+  // consent-UI label — `itemTitle (userName)` — is identical either way; filtering has to be
+  // proven by the *count* of offered candidates and by which credential the resulting assertion
+  // actually names, not by distinct button text).
+  await enrol(context, extensionId, server, "pkallow");
+  const page = await openTestRpPage(context, rp.origin);
+  const consentFrame = page.frameLocator("iframe[data-rizzy-passkey-consent]");
+
+  async function createOne(userIdB64: string, userName: string, challengeB64: string): Promise<CreateResult> {
+    const createPromise = page.evaluate(
+      (opts) => window.rizzyTestCreate(opts),
+      { rpName: "Test RP", userIdB64, userName, userDisplayName: userName, challengeB64, timeoutMs: 20_000 },
+    );
+    await expect(consentFrame.getByRole("button", { name: "Test RP" })).toBeVisible({ timeout: 8_000 });
+    await consentFrame.getByRole("button", { name: "Test RP" }).click();
+    return createPromise;
+  }
+
+  const first = await createOne(b64("user-A"), "alice", b64("create-challenge-A"));
+  const second = await createOne(b64("user-B"), "bob", b64("create-challenge-B"));
+  expect(first.id).not.toBe(second.id);
+
+  // --- An unrestricted get() would offer both (same rpId, two passkeys) — restricting
+  // `allowCredentials` to `first`'s own id must narrow the consent UI down to exactly one
+  // candidate, never both and never zero.
+  const getPromise = page.evaluate((opts) => window.rizzyTestGet(opts), {
+    challengeB64: b64("get-challenge-allow"),
+    timeoutMs: 20_000,
+    allowCredentialIdsB64: [first.id],
+  });
+  const candidateButtons = consentFrame.getByRole("button", { name: /Test RP \(alice\)/ });
+  await expect(candidateButtons).toHaveCount(1, { timeout: 15_000 });
+  await candidateButtons.click();
+
+  const assertion = await getPromise;
+  // The filtered-in credential, never the excluded one — proof the filtering happened at the
+  // credential-id level, not merely that some candidate was offered.
+  expect(assertion.id).toBe(first.id);
+  expect(assertion.id).not.toBe(second.id);
+  expect(assertion.userHandleB64).not.toBeNull();
+  expect(Buffer.from(assertion.userHandleB64 as string, "base64").toString("utf8")).toBe("user-A");
 });
 
 /** Logs in to the web vault (`apps/web/e2e/helpers.ts`'s own `logIn`, inlined rather than
