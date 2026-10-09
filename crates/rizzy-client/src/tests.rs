@@ -2076,7 +2076,10 @@ mod credentials;
 mod durable_device;
 mod export;
 mod healing;
+mod late_edits;
 mod lists;
+mod password_history;
+mod retention;
 mod rotation;
 mod store;
 

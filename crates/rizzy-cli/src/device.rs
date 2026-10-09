@@ -116,6 +116,7 @@ use rizzy_client::credentials::PendingCredentialChange;
 use rizzy_client::device::{DeviceState, UnlockedDevice};
 use rizzy_client::export::gate::ExportGate;
 use rizzy_client::healing::{self, HeldAccount};
+use rizzy_client::items::TRASH_RETENTION_MS;
 use rizzy_client::login::{LoggedIn, LoginInput, start_login};
 use rizzy_client::reregister::start_device_reregistration;
 use rizzy_client::rizzy_proto::account::{AccountStateQuery, AccountView, DeviceGrantsResponse};
@@ -1173,18 +1174,59 @@ impl Device {
         }
     }
 
-    /// Online, then Fetch, restore healing when the server is behind (`heal`), upload, Fetch:
-    /// the device holds what the server holds and the server holds what the device wrote
-    /// (ADR 0025 §2 step 1; ADR 0021 §9).
+    /// Online, then Fetch, restore healing when the server is behind (`heal`), the client-side
+    /// trash auto-purge pass (`auto_purge`), upload, Fetch: the device holds what the server
+    /// holds and the server holds what the device wrote (ADR 0025 §2 step 1; ADR 0021 §9).
+    ///
+    /// This is the one place the `sync` command and `sync_after_write` (every write command)
+    /// reach, so it is where the auto-purge pass (gap 00; ADR 0012 §5, ADR 0018 §9, §11)
+    /// belongs. (`unlock` calls only [`Device::online`], not this method — it is a status
+    /// command and deliberately does not fetch or upload the vault, so it does not auto-purge
+    /// either; auto-purge needs the fresh vault fetch this method does first, both for an
+    /// accurate trashed-at read and for `holds_unapplied`'s ADR 0018 §11 check.) `auto_purge`
+    /// runs after `heal` (so it sees the latest known trash state) and before `upload` (so any
+    /// purge it queues ships in the same round as every other own op, with no separate upload
+    /// call).
     ///
     /// # Errors
-    /// As [`Device::online`], [`Device::fetch`] and [`Device::upload`].
+    /// As [`Device::online`], [`Device::fetch`] and [`Device::upload`]; the errors of the
+    /// auto-purge pass (private: the errors of
+    /// [`VaultSync::auto_purge_due`], of the commit, and of the
+    /// writability check).
     pub async fn sync(&mut self, ui: &mut dyn Ui) -> Result<(), CliError> {
         self.online(ui).await?;
         self.fetch().await?;
         self.heal(ui).await?;
+        self.auto_purge().await?;
         self.upload(ui).await?;
         self.fetch().await
+    }
+
+    /// The client-side trash auto-purge pass (gap 00; ADR 0012 §5 "manually, or automatically
+    /// once an item has been in the trash for the retention period"; ADR 0018 §9 "Trashed at",
+    /// §11 "No purge over an unapplied record"): purges every trashed item whose retention
+    /// period has elapsed, then persists the resulting cache writes the same way every other
+    /// mutating step does (`take_writes` then `commit`), so the purge survives a restart even if
+    /// the device never reaches the following `upload`.
+    ///
+    /// No `tests/e2e.rs` test drives this past the real 30-day
+    /// [`rizzy_client::items::TRASH_RETENTION_MS`]: `rv` reads the wall clock
+    /// ([`crate::sys::now_ms`]) with no injection seam, and backdating a trash op's `now_ms`
+    /// does not backdate its HLC (ADR 0012 §2) once this account's clock has already ticked
+    /// near real time from earlier real ops in the same test, because `Hlc::tick` clamps to
+    /// `max(last_hlc + 1, now_ms << 16)`. The same `auto_purge_due` call this method makes is
+    /// covered directly, with full control of `now_ms`, by the six tests in
+    /// `rizzy-client/src/tests/retention.rs`.
+    ///
+    /// # Errors
+    /// The errors of [`VaultSync::auto_purge_due`]; [`Device::commit`];
+    /// [`Device::check_writable`].
+    async fn auto_purge(&mut self) -> Result<(), CliError> {
+        self.vault
+            .auto_purge_due(&mut self.rng, &self.unlocked, now_ms(), TRASH_RETENTION_MS)?;
+        let changeset = self.vault.take_writes();
+        self.commit(changeset).await?;
+        self.check_writable()
     }
 
     /// A re-authentication over this device's session (CRYPTO.md §11.6 step 1, §11.8 step 0).

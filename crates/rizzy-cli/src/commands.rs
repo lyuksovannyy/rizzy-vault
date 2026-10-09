@@ -59,7 +59,8 @@ use rizzy_core::generator::{
 };
 use rizzy_core::ids::DeviceId;
 use rizzy_core::item::schema::{
-    Concealment, Expected, ITEM_NAME, KeyClass, LIST_FIELD, LIST_URI, LOGIN_TOTP, classify,
+    Concealment, Expected, ITEM_NAME, KeyClass, LIST_FIELD, LIST_PWHIST, LIST_URI, LOGIN_TOTP,
+    classify,
 };
 use rizzy_core::item::tag::{tag_key, tag_name};
 use rizzy_core::item::value::ValueRef;
@@ -387,6 +388,13 @@ fn item_show(device: &Device, ui: &mut dyn Ui, item: &str, reveal: bool) -> Resu
         let Ok(parsed) = FieldKey::parse(key.as_bytes()) else {
             continue;
         };
+        // Imported password history is its own section below (gap 01), concealed the same
+        // way as every other secret, never through this generic loop's `concealed()` check
+        // (the schema classifies `pwhist/*` as `Concealment::Shown`, since concealment there
+        // is this view's call, not the schema's).
+        if parsed.as_key().namespace() == LIST_PWHIST {
+            continue;
+        }
         let Some(value) = vault.field_value(item, &key) else {
             continue;
         };
@@ -421,6 +429,58 @@ fn item_show(device: &Device, ui: &mut dyn Ui, item: &str, reveal: bool) -> Resu
         let ids: Vec<&str> = elements.iter().map(|e| e.element.as_str()).collect();
         let line = Zeroizing::new(format!("order of {list}: {}", ids.join(" ")));
         ui.print(&line)?;
+    }
+    print_password_history(vault, ui, item, reveal)?;
+    Ok(())
+}
+
+/// The password-history section of `item show` (gap 01; ADR 0012 §5 "Password history is the
+/// history of `login.password`"; ADR 0018 §7): newest first, concealed unless `--reveal`
+/// exactly like every other secret (module docs). Tags and password history have no order of
+/// their own (docs/rv.md). The merge history and the imported history are separate sections:
+/// the ADR defines no order across the two.
+fn print_password_history(
+    vault: &VaultSync,
+    ui: &mut dyn Ui,
+    item: ItemId,
+    reveal: bool,
+) -> Result<(), CliError> {
+    let history = vault.password_history(item);
+    if !history.is_empty() {
+        let plural = if history.len() == 1 { "" } else { "s" };
+        ui.print(&format!(
+            "password history ({} older value{plural}, newest first):",
+            history.len()
+        ))?;
+        for entry in &history {
+            let shown = if reveal {
+                show_value(&entry.value)
+            } else {
+                Zeroizing::new(CONCEALED.to_owned())
+            };
+            let line = Zeroizing::new(format!("  {} ms: {}", entry.changed_ms, shown.as_str()));
+            ui.print(&line)?;
+        }
+    }
+    let imported = vault.imported_password_history(item);
+    if !imported.is_empty() {
+        let plural = if imported.len() == 1 { "" } else { "s" };
+        ui.print(&format!(
+            "imported password history ({imported_len} value{plural}):",
+            imported_len = imported.len()
+        ))?;
+        for entry in &imported {
+            let shown = match (&entry.value, reveal) {
+                (Some(_), false) => Zeroizing::new(CONCEALED.to_owned()),
+                (Some(value), true) => show_value(value),
+                (None, _) => Zeroizing::new("(no value)".to_owned()),
+            };
+            let when = entry
+                .changed_ms
+                .map_or_else(|| "unknown time".to_owned(), |ms| format!("{ms} ms"));
+            let line = Zeroizing::new(format!("  {when}: {}", shown.as_str()));
+            ui.print(&line)?;
+        }
     }
     Ok(())
 }
