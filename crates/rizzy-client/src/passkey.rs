@@ -210,6 +210,15 @@ pub struct Assertion {
     /// response needs its own `rawId`/`id`, and the caller must not have to thread it through a
     /// second path parallel to this one just to hand it back (ADR 0039 §5, "the API is coarse").
     pub credential_id: Vec<u8>,
+    /// `passkey/<id>/user_handle`, echoed back unchanged, for the page's
+    /// `AuthenticatorAssertionResponse.userHandle` (gap 35(a) in the M2 gap audit: this field
+    /// was stored at creation but never read back out for an assertion). `None` only when the
+    /// caller has no stored user handle to attach — `WebAuthn` allows an assertion response to
+    /// omit `userHandle` when the relying party already identified the user some other way
+    /// (`allowCredentials` was non-empty); every passkey this project creates does store one
+    /// (ADR 0039 §1's field list has no "absent" case), so a caller reading it from storage
+    /// should never actually need to pass `None` in practice.
+    pub user_handle: Option<Vec<u8>>,
     /// `clientDataJSON`, for the caller to hand back to the page verbatim.
     pub client_data_json: Vec<u8>,
     /// `authenticatorData`, for the caller to hand back to the page verbatim.
@@ -223,12 +232,14 @@ pub struct Assertion {
 /// caller (from the page's `allowCredentials`, or the one discoverable credential the person
 /// picked) and its signing key already decrypted from `passkey/<id>/private_key` (ADR 0039 §2).
 ///
-/// `credential_id` is `passkey/<id>/credential_id` for that same credential: this function
-/// does not look it up or check it against anything (there is nothing in this crate yet to look
-/// it up *in*, module docs), it only carries it through to [`Assertion::credential_id`] so the
-/// caller has one self-contained ceremony result instead of a second value to remember to
-/// attach. Matching `credential_id` to `signing_key` — and, when the page sent
-/// `allowCredentials`, checking this credential is one of them — is entirely the caller's.
+/// `credential_id` is `passkey/<id>/credential_id` and `user_handle` is
+/// `passkey/<id>/user_handle` for that same credential: this function does not look either up
+/// or check them against anything (there is nothing in this crate yet to look them up *in*,
+/// module docs), it only carries them through to [`Assertion::credential_id`] and
+/// [`Assertion::user_handle`] so the caller has one self-contained ceremony result instead of
+/// further values to remember to attach. Matching `credential_id` to `signing_key` — and, when
+/// the page sent `allowCredentials`, checking this credential is one of them — is entirely the
+/// caller's.
 ///
 /// # Errors
 /// Whatever `verify_rp_id` returns. [`ClientError::Internal`] only for the unreachable
@@ -239,6 +250,7 @@ pub struct Assertion {
 pub fn get_assertion(
     signing_key: &Es256SigningKey,
     credential_id: &[u8],
+    user_handle: &[u8],
     origin: &str,
     rp_id: &str,
     challenge: &[u8],
@@ -257,6 +269,7 @@ pub fn get_assertion(
 
     Ok(Assertion {
         credential_id: credential_id.to_vec(),
+        user_handle: Some(user_handle.to_vec()),
         client_data_json,
         authenticator_data,
         signature_der,
@@ -438,6 +451,7 @@ mod ceremony_tests {
         let assertion = get_assertion(
             &created.signing_key,
             &created.credential_id,
+            b"user-handle",
             "https://example.com",
             "example.com",
             b"login-challenge",
@@ -445,6 +459,7 @@ mod ceremony_tests {
         .expect("valid origin/rp_id");
 
         assert_eq!(assertion.credential_id, created.credential_id);
+        assert_eq!(assertion.user_handle, Some(b"user-handle".to_vec()));
 
         let mut message = assertion.authenticator_data.clone();
         message.extend_from_slice(&rizzy_core::passkey::client_data_hash(
@@ -466,6 +481,7 @@ mod ceremony_tests {
         let err = get_assertion(
             &created.signing_key,
             &created.credential_id,
+            b"user-handle",
             "http://example.com",
             "example.com",
             b"c",
@@ -489,6 +505,7 @@ mod ceremony_tests {
         let assertion = get_assertion(
             &created.signing_key,
             &created.credential_id,
+            b"user-handle",
             "https://example.com",
             "example.com.",
             b"c",

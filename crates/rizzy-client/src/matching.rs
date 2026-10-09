@@ -30,6 +30,44 @@ pub use rizzy_match::{
 
 use crate::error::ClientError;
 
+/// The compiled-in global equivalence list's groups (ADR 0038 §1–§2, §7; gap 27(a) in the M2
+/// gap audit), or empty when none is compiled in yet, or when a compiled-in list fails to
+/// verify.
+///
+/// **Only the global-list half of ADR 0038 §5's merged view is wired here.** The account's own
+/// disabled-global-group set and user-defined groups are a separate, larger gap (27(b)/"G3" in
+/// the audit): reading them needs `ACCOUNT_SETTINGS`'s plaintext layout, which [ADR 0042] has
+/// not fixed yet (`Status: Proposed`). Until it lands, a caller passes this function's result
+/// as the `global` slice of [`EquivalenceView::new`] with an empty `disabled_global` set and an
+/// empty `user_defined` slice — exactly what [`EquivalenceView::empty`] in all other respects,
+/// widened only by whatever the compiled-in global list itself allows.
+///
+/// **`highest_accepted_version` is always `0`.** Persisting the caller's highest accepted
+/// `list_version` across launches (INV-39) is gap 27(b), which needs a new ADR: [ADR 0026]'s
+/// `cache_meta` format (Accepted) has no field for it, and CLAUDE.md requires an Accepted ADR
+/// for a persistent-format change. `0` is the value [`rizzy_match::compiled::global_list`]'s
+/// own docs name for "a caller that has never accepted any list," so this is the correct,
+/// conservative value to pass until that ADR exists — never a placeholder. The practical effect
+/// today is nil either way: [`rizzy_match::compiled::GLOBAL_LIST`] is `None`, so
+/// `global_list` always returns `Ok(None)` regardless of the version passed in.
+///
+/// **A list that fails verification is treated as absent, not as a hard error.** ADR 0038 §1
+/// already requires rejecting an unsigned list; extending that to a structurally invalid,
+/// badly-signed or stale compiled-in list means a corrupt constant narrows matching back to
+/// plain registrable-domain equality for that process's lifetime rather than breaking autofill
+/// entirely. This is unreachable while `GLOBAL_LIST` is `None`.
+///
+/// [ADR 0026]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0026-client-device-state-and-cache.md
+/// [ADR 0042]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0042-account-settings-matching-layout.md
+#[must_use]
+pub fn global_equivalence_groups() -> Vec<EquivalenceGroup> {
+    rizzy_match::compiled::global_list(0)
+        .ok()
+        .flatten()
+        .map(|list| list.groups().to_vec())
+        .unwrap_or_default()
+}
+
 /// One saved URI to match against (ADR 0037 §2, §4): an item's `uri/<id>`.
 #[derive(Clone, Copy, Debug)]
 pub struct ItemUri<'a> {
@@ -57,7 +95,7 @@ pub struct FrameContext<'a> {
 }
 
 /// One candidate offered for autofill: a saved URI that matched, and why.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Candidate {
     /// The matching item.
     pub item_id: [u8; 16],
@@ -66,6 +104,11 @@ pub struct Candidate {
     /// Why it matched, and whether the equivalence warning is needed
     /// ([`MatchedVia::needs_warning`]).
     pub matched_via: MatchedVia,
+    /// The saved URI's own exact normalised host, A-label form (ADR 0037 §5 "Exact host
+    /// shown"; §2 point 4). The fill UI shows this as "the saved site" in the equivalence-only
+    /// warning — never decoded to Unicode outside `rizzy-match`, so a mixed-script host still
+    /// displays in its punycode `xn--` form.
+    pub saved_host: String,
 }
 
 /// Why no candidate was offered for one URI, or for the frame as a whole.
@@ -82,6 +125,10 @@ pub enum Skipped {
 /// The result of one [`decide_candidates`] call.
 #[derive(Debug, Default)]
 pub struct Decision {
+    /// The page's own exact normalised host, A-label form (ADR 0037 §5 "Exact host shown").
+    /// Empty only in the never-reached `Default` value; every value this module returns from
+    /// [`decide_candidates`] fills it from the already-parsed, already-validated page URL.
+    pub page_host: String,
     /// Every URI that matched, in the order given.
     pub candidates: Vec<Candidate>,
     /// One line per URI this build could not evaluate or that did not match for a reason worth
@@ -106,7 +153,10 @@ pub fn decide_candidates(
     equivalence: &EquivalenceView<'_>,
 ) -> Result<Decision, ClientError> {
     let page = NormalizedUrl::parse(page_url).map_err(|_| ClientError::InvalidInput)?;
-    let mut out = Decision::default();
+    let mut out = Decision {
+        page_host: page.host().to_owned(),
+        ..Decision::default()
+    };
     // ADR 0037 §5: a non-top frame gets automatic candidates only when it shares the page's
     // registrable domain; any other frame is narrowed to none, with one explanatory warning
     // (never silently, and never by guessing a candidate it cannot defend).
@@ -135,6 +185,7 @@ pub fn decide_candidates(
                 item_id: item_uri.item_id,
                 uri_id: item_uri.uri_id,
                 matched_via,
+                saved_host: uri.host().to_owned(),
             }),
             MatchOutcome::NoMatch => {}
             MatchOutcome::NotSupported => {
@@ -193,6 +244,8 @@ mod tests {
             decision.candidates[0].matched_via,
             MatchedVia::RegistrableDomain
         );
+        assert_eq!(decision.page_host, "example.com");
+        assert_eq!(decision.candidates[0].saved_host, "login.example.com");
     }
 
     #[test]
@@ -300,5 +353,56 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, ClientError::InvalidInput);
+    }
+
+    /// `rizzy_match::compiled::GLOBAL_LIST` is `None` today (no production list-signing key
+    /// exists yet), so [`global_equivalence_groups`] must return an empty `Vec`, never a
+    /// placeholder or an error.
+    #[test]
+    fn global_equivalence_groups_is_empty_while_no_list_is_compiled_in() {
+        assert!(global_equivalence_groups().is_empty());
+    }
+
+    /// The merge path a production caller would exercise once a list *is* compiled in: a
+    /// global group, fed through [`EquivalenceView::new`] exactly as a caller would pass
+    /// [`global_equivalence_groups`]'s result as the `global` slice (with no disabled groups
+    /// and no user-defined groups, since the account-settings half is out of scope here),
+    /// still produces an `Equivalence` candidate that needs the ADR 0037 §5 warning. This
+    /// cannot go through `global_equivalence_groups` itself (no real signed list exists to
+    /// compile in), so it builds the view from a fixture group directly, the same shape
+    /// `EquivalenceList::groups()` would hand back.
+    #[test]
+    fn a_fixture_global_group_still_produces_a_warned_equivalence_candidate() {
+        let global = vec![
+            EquivalenceGroup::new(
+                GroupId::from_bytes([7; 16]),
+                ["example.com", "example.net"],
+                false,
+            )
+            .unwrap(),
+        ];
+        let disabled: BTreeSet<GroupId> = BTreeSet::new();
+        let user_defined: Vec<EquivalenceGroup> = Vec::new();
+        let equivalence = EquivalenceView::new(&global, &disabled, &user_defined);
+
+        let uris = [uri("https://example.net/login", MatchMode::BaseDomain)];
+        let decision = decide_candidates(
+            "https://example.com/",
+            &top(""),
+            MatchMode::BaseDomain,
+            &uris,
+            &equivalence,
+        )
+        .unwrap();
+        assert_eq!(decision.candidates.len(), 1);
+        assert!(decision.candidates[0].matched_via.needs_warning());
+        assert_eq!(
+            decision.candidates[0].matched_via,
+            MatchedVia::Equivalence(GroupId::from_bytes([7; 16]))
+        );
+        // ADR 0037 §5 "Exact host shown": the fill UI needs both hosts to name the matched
+        // site and the saved site in the equivalence-only warning.
+        assert_eq!(decision.page_host, "example.com");
+        assert_eq!(decision.candidates[0].saved_host, "example.net");
     }
 }

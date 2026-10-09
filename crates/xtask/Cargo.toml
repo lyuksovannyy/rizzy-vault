@@ -19,6 +19,13 @@ serde_json.workspace = true
 # directly is unrestricted by R1.
 rizzy-core.workspace = true
 rizzy-match.workspace = true
+# `cargo xtask check-deps`'s `psl_check` (ADR 0037 §3): hashes the resolved `psl` package's
+# `data/rules.txt` and `src/list.rs` on disk and compares against the constants in
+# `rizzy-match::suffix`. `sha2` is already in the lockfile (`rizzy-core`, `rizzy-domain-auth`,
+# `rizzy-storage` all depend on it); this is a new edge from a tool/leaf crate (ADR 0016 R6
+# "Tool", unrestricted by R1), not a new crate. `.workspace = true` inherits the root entry's
+# `default-features = false`.
+sha2.workspace = true
 
 [lints]
 workspace = true
