@@ -95,8 +95,8 @@ pub enum EffectiveMode {
     StartsWith,
     /// Byte-equal full normalised URL.
     Exact,
-    /// No regex crate is named by ADR 0037; this build implements
-    /// Never/Exact/Host/`StartsWith`/`BaseDomain` only. [`decide`] returns
+    /// No regex crate is named by ADR 0037 or approved by any other Accepted ADR; this build
+    /// implements Never/Exact/Host/`StartsWith`/`BaseDomain` only. [`decide`] returns
     /// [`MatchOutcome::NotSupported`] unconditionally for this mode, so a caller can tell "not
     /// implemented" apart from "checked, does not match" (ADR 0037 §4 row `0x0005`).
     Regex,
@@ -153,6 +153,21 @@ fn registrable_gate(
         .map(MatchedVia::Equivalence)
 }
 
+/// The per-mode rules [`decide`] runs after the HTTPS→HTTP rule and the registrable-domain gate:
+/// every [`EffectiveMode`] except *Regex* and *Never*, which [`decide`] answers before either
+/// gate.
+#[derive(Clone, Copy)]
+enum GatedRule {
+    /// [`EffectiveMode::BaseDomain`]: the gate itself is the rule.
+    BaseDomain,
+    /// [`EffectiveMode::Host`].
+    Host,
+    /// [`EffectiveMode::StartsWith`].
+    StartsWith,
+    /// [`EffectiveMode::Exact`].
+    Exact,
+}
+
 /// Decides whether `uri` is a match candidate for `page`.
 ///
 /// Order, deliberately, so a future mode cannot widen past either rule: *Regex* is reported
@@ -167,27 +182,29 @@ pub fn decide(
     account_default: MatchMode,
     equivalence: &EquivalenceView<'_>,
 ) -> MatchOutcome {
-    let effective = mode.resolve(account_default);
-    if effective == EffectiveMode::Regex {
-        return MatchOutcome::NotSupported;
-    }
-    if effective == EffectiveMode::Never {
-        return MatchOutcome::NoMatch;
-    }
+    // Every arm returns or names the rule to run after the gates, so there is no "handled
+    // above" arm left to reach (CLAUDE.md: no panic path in non-test code).
+    let rule = match mode.resolve(account_default) {
+        EffectiveMode::Regex => return MatchOutcome::NotSupported,
+        EffectiveMode::Never => return MatchOutcome::NoMatch,
+        EffectiveMode::BaseDomain => GatedRule::BaseDomain,
+        EffectiveMode::Host => GatedRule::Host,
+        EffectiveMode::StartsWith => GatedRule::StartsWith,
+        EffectiveMode::Exact => GatedRule::Exact,
+    };
     if https_downgrade_blocks(uri.scheme(), page.scheme()) {
         return MatchOutcome::NoMatch;
     }
     let Some(matched_via) = registrable_gate(page, uri, equivalence) else {
         return MatchOutcome::NoMatch;
     };
-    let passes_mode_rule = match effective {
-        EffectiveMode::BaseDomain => true,
-        EffectiveMode::Host => page.host() == uri.host(),
-        EffectiveMode::StartsWith => page
+    let passes_mode_rule = match rule {
+        GatedRule::BaseDomain => true,
+        GatedRule::Host => page.host() == uri.host(),
+        GatedRule::StartsWith => page
             .normalized_string()
             .starts_with(&uri.normalized_string()),
-        EffectiveMode::Exact => page.normalized_string() == uri.normalized_string(),
-        EffectiveMode::Regex | EffectiveMode::Never => unreachable!("handled above"),
+        GatedRule::Exact => page.normalized_string() == uri.normalized_string(),
     };
     if passes_mode_rule {
         MatchOutcome::Match(matched_via)
