@@ -98,6 +98,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0039 | [Passkeys in the vault and in the browser extension](0039-passkeys-vault-and-extension.md) | Accepted | M2 |
 | 0040 | [The extension's fill request comes from the inline menu, not the content script](0040-extension-fill-request-from-inline-menu.md) | Accepted | M2 |
 | 0041 | [Approving the `p256` crate for ES256 (ECDSA P-256) in passkeys](0041-p256-crate-approval.md) | Accepted | M2 |
+| 0042 | [ACCOUNT_SETTINGS plaintext: canonical layout and the M2 matching section](0042-account-settings-matching-layout.md) | Proposed | M2 |
 
 ## Gates
 
