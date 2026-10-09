@@ -236,6 +236,57 @@ describe("installCoreContextListener: inline_menu_fill_chosen routing (ADR 0040)
   });
 });
 
+const inlineMenuGeneratePasswordChosen = { type: "inline_menu_generate_password_chosen" };
+
+// Gap 32 in the M2 gap audit: the generator's own privileged request, same ADR 0040 sender gate
+// as `inline_menu_fill_chosen` just above — mirrors that describe block's three routing cases.
+describe("installCoreContextListener: inline_menu_generate_password_chosen routing (ADR 0040)", () => {
+  it("refuses a real content-script sender's inline_menu_generate_password_chosen, even when acceptContentScripts is true", async () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: true });
+    const sendResponse = vi.fn();
+    const result = installedListener(ext)(
+      inlineMenuGeneratePasswordChosen,
+      { id: EXT_ID, tab: { url: "https://example.com/login" } },
+      sendResponse,
+    );
+    expect(result).toBe(true);
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith(expect.objectContaining({ type: "content_error" })));
+  });
+
+  it("ignores a content-script sender's inline_menu_generate_password_chosen when acceptContentScripts is false (Chromium)", () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: false });
+    const sendResponse = vi.fn();
+    const result = installedListener(ext)(
+      inlineMenuGeneratePasswordChosen,
+      { id: EXT_ID, tab: { url: "https://example.com/login" } },
+      sendResponse,
+    );
+    expect(result).toBeUndefined();
+    expect(sendResponse).not.toHaveBeenCalled();
+  });
+
+  it("routes a genuine inline-menu-iframe sender to the privileged handler, never back through the iframe (ADR 0040)", async () => {
+    const ext = fakeExt();
+    installCoreContextListener(ext, { acceptContentScripts: false });
+    const sendResponse = vi.fn();
+    const sender: WebExtMessageSender = { id: EXT_ID, origin: EXT_ORIGIN, tab: { id: 7, url: "https://example.com/login" } };
+    const result = installedListener(ext)(inlineMenuGeneratePasswordChosen, sender, sendResponse);
+    expect(result).toBe(true);
+    // Whatever the outcome (wasm may or may not be available in this test environment), the
+    // response must never carry a generated value itself (ADR 0040: "never back to the
+    // iframe") — only ever the plain dispatch acknowledgement or a content_error.
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+    const response = sendResponse.mock.calls[0]?.[0];
+    expect(["inline_menu_generate_password_dispatched", "content_error"]).toContain(
+      (response as { type?: string } | undefined)?.type,
+    );
+    expect(response).not.toHaveProperty("value");
+    expect(response).not.toHaveProperty("password");
+  });
+});
+
 // `passkey_ceremony_approved`/`passkey_ceremony_declined` (ADR 0039 §2) reuse the exact same
 // `isInlineMenuSender` gate as `inline_menu_fill_chosen` (`messaging/contract.ts`'s own doc on
 // why): a real content script can never reach `handlePasskeyCeremonyApproval` either, only the

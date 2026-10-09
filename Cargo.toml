@@ -74,12 +74,15 @@ idna = { version = "=1.1.0", default-features = false, features = ["alloc", "com
 # - psl: the compiled-in Mozilla Public Suffix List snapshot (ADR 0037 §3; ADR 0016 §3's own
 #   naming of this crate for `rizzy-match`). Exact pin, as ADR 0037 §3 requires: the crate ships
 #   its PSL snapshot as Rust source compiled from `data/rules.txt` at publish time (no build
-#   script, no runtime fetch), so the exact version pin here *is* the snapshot pin (ADR 0037 §3
-#   assumes a separately hashed data file; `psl` has none to hash, see `rizzy-match`'s crate
-#   docs for this reading). Version 2.1.240, fetched 2026-10-07 from crates.io
+#   script, no runtime fetch). `cargo xtask check-deps` hashes both `data/rules.txt` and
+#   `src/list.rs` of the resolved `psl` package and asserts them against the constants in
+#   `crates/rizzy-match/src/suffix.rs` (`PSL_RULES_TXT_SHA256`, `PSL_LIST_RS_SHA256`), per ADR
+#   0037 §3's "build step... computes its SHA-256 and asserts it against a constant in the
+#   source". Version 2.1.240, fetched 2026-10-07 from crates.io
 #   (https://github.com/addr-rs/psl), `MIT OR Apache-2.0`. `helpers` only, for `domain_str`/
 #   `suffix_str`; depends only on `psl-types` (no further dependencies, `#![no_std]`,
-#   `forbid(unsafe_code)`).
+#   `forbid(unsafe_code)`). A version bump updates this pin and both hash constants together,
+#   reviewed with a diff of `rules.txt`.
 psl = { version = "=2.1.240", default-features = false, features = ["helpers"] }
 
 # Wire types. Not cryptography.

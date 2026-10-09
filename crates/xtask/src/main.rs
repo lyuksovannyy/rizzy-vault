@@ -53,6 +53,9 @@
 //! - **ADR 0019 §4.1 (b)** the committed expansion baseline of `rizzy-wasm` exists, records the
 //!   `wasm-bindgen` version of `Cargo.lock`, and its `unsafe`/`extern`/`no_mangle`/`export_name`
 //!   counts are those of the committed expansion ([`mod@bindings`]).
+//! - **ADR 0037 §3** the resolved `psl` package's `data/rules.txt` and `src/list.rs` hash to
+//!   the constants pinned in `rizzy_match::suffix`, and its version matches
+//!   `rizzy_match::suffix::PSL_VERSION` ([`mod@psl_check`]).
 //!
 //! R3, R5 and R6 cover dev-dependencies too. The rules table is in `rules.rs`.
 //!
@@ -111,6 +114,7 @@ mod equivalence_list;
 mod js;
 mod manifest;
 mod metadata;
+mod psl_check;
 mod rules;
 mod signoff;
 mod unsafe_scan;
@@ -281,26 +285,32 @@ fn check_deps() -> ExitCode {
         }
     };
     let violations = check::run(&inputs);
-    if violations.is_empty() {
+    let psl_violations = psl_check::check(&inputs.all_targets)
+        .err()
+        .unwrap_or_default();
+    if violations.is_empty() && psl_violations.is_empty() {
         let members = inputs.all_targets.members().count();
         let sources = inputs.rust_sources.len();
         let _ = writeln!(
             io::stdout().lock(),
             "check-deps: ok ({members} workspace crates, {sources} first-party .rs files; \
-             ADR 0016 R1–R8, ADR 0009, ADR 0019 §4.1, ADR 0024, ADR 0030)"
+             ADR 0016 R1–R8, ADR 0009, ADR 0019 §4.1, ADR 0024, ADR 0030, ADR 0037 §3)"
         );
         return ExitCode::SUCCESS;
     }
     for v in &violations {
         let _ = writeln!(err, "error: {v}");
     }
+    for v in &psl_violations {
+        let _ = writeln!(err, "error: [ADR 0037 §3] {v}");
+    }
     let _ = writeln!(
         err,
-        "check-deps: {} violation(s) of the crate-boundary rules (ADR 0016 §4, ADR 0009) or \
-         the token scans (`unsafe`: ADR 0019 §4.1; rustls `dangerous()`: ADR 0030). The rules \
-         table is crates/xtask/src/rules.rs; \
+        "check-deps: {} violation(s) of the crate-boundary rules (ADR 0016 §4, ADR 0009), the \
+         token scans (`unsafe`: ADR 0019 §4.1; rustls `dangerous()`: ADR 0030), or the PSL \
+         snapshot check (ADR 0037 §3). The rules table is crates/xtask/src/rules.rs; \
          changing it is a security review.",
-        violations.len()
+        violations.len() + psl_violations.len()
     );
     ExitCode::FAILURE
 }

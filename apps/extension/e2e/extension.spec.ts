@@ -189,7 +189,17 @@ async function openInlineMenuWithOneCandidate(context: BrowserContext, extension
         }
       });
       window.postMessage(
-        { type: showType, pageOrigin: location.origin, candidates: [{ itemId, title: "Example", username: "alice", needsWarning: false }] },
+        {
+          type: showType,
+          pageOrigin: location.origin,
+          // Gap 31 in the M2 gap audit: `isInlineMenuShowMessage` now requires `pageHost` and
+          // every candidate's own `savedHost` too (ADR 0037 §5 "Exact host shown") — omitting
+          // either makes this fixture fail validation silently, so `main.ts` never calls
+          // `render()` and `#list` never gets a button, which is exactly the hang this fixture
+          // used to produce before these two fields were added here.
+          pageHost: location.hostname,
+          candidates: [{ itemId, title: "Example", username: "alice", needsWarning: false, savedHost: location.hostname }],
+        },
         location.origin,
       );
     },

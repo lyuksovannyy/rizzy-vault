@@ -32,6 +32,7 @@ import initWasm, {
   KvRow,
   LoginFlow,
   PasskeyAssertion as WasmPasskeyAssertion,
+  PasskeyCandidate as WasmPasskeyCandidate,
   Session,
   SignupFlow,
   TwoFactorEnrolment,
@@ -734,12 +735,29 @@ export interface CreatedPasskey {
 export const PASSKEY_ALG_ES256 = 1;
 
 /** One `navigator.credentials.get()` ceremony's result (ADR 0039 §2): everything the page's
- * `PublicKeyCredential` response needs, never the private key that signed it. */
+ * `PublicKeyCredential` response needs, never the private key that signed it. `userHandle` is
+ * empty only when the stored passkey somehow has none (`PasskeyAssertion`'s own doc on why that
+ * should not happen in practice); gap 35(a) in the M2 gap audit added this field — it used to be
+ * missing from every assertion, so a relying party doing username-less discoverable sign-in
+ * could not identify the user from the response alone. */
 export interface PasskeyAssertionResult {
   readonly credentialId: Uint8Array;
+  readonly userHandle: Uint8Array;
   readonly clientDataJson: Uint8Array;
   readonly authenticatorData: Uint8Array;
   readonly signatureDer: Uint8Array;
+}
+
+/** One stored passkey's non-secret metadata (ADR 0039 §1), for the host to list
+ * `navigator.credentials.get()`/`.create()` candidates (gaps 35(a)/(b) in the M2 gap audit) —
+ * never the private key, which stays behind the wasm boundary. */
+export interface PasskeyCandidateResult {
+  readonly elementId: string;
+  readonly rpId: string;
+  readonly userHandle: Uint8Array;
+  readonly credentialId: Uint8Array;
+  readonly alg: number;
+  readonly createdMs: number;
 }
 
 /**
@@ -775,9 +793,25 @@ export function createPasskey(origin: string, rpId: string, challenge: Uint8Arra
 function mapPasskeyAssertion(assertion: WasmPasskeyAssertion): PasskeyAssertionResult {
   return mapOne(assertion, (a) => ({
     credentialId: a.credentialId,
+    userHandle: a.userHandle,
     clientDataJson: a.clientDataJson,
     authenticatorData: a.authenticatorData,
     signatureDer: a.signatureDer,
+  }));
+}
+
+/** Maps every generated {@link WasmPasskeyCandidate} and frees them — shared by
+ * {@link VaultSession.passkeyCandidates} and {@link DurableSession.passkeyCandidates}.
+ * `createdMs` narrows from the generated `bigint` to `number`, the same convention
+ * `StoredPasskey`/`mapOne`'s other `U64` fields already use for a local-display timestamp. */
+function mapPasskeyCandidates(candidates: WasmPasskeyCandidate[]): PasskeyCandidateResult[] {
+  return mapFree(candidates, (c) => ({
+    elementId: c.elementId,
+    rpId: c.rpId,
+    userHandle: c.userHandle,
+    credentialId: c.credentialId,
+    alg: c.alg,
+    createdMs: Number(c.createdMs),
   }));
 }
 
@@ -1076,6 +1110,15 @@ export class VaultSession {
    */
   passkeyAssertion(id: string, passkeyId: string, origin: string, rpId: string, challenge: Uint8Array): PasskeyAssertionResult {
     return mapPasskeyAssertion(call(() => this.#s().passkeyAssertion(id, passkeyId, origin, rpId, challenge)));
+  }
+
+  /**
+   * Every stored passkey's non-secret metadata on one item (ADR 0039 §1), for the host to pick
+   * which credential to run {@link passkeyAssertion} with — in particular, to filter against
+   * the page's `allowCredentials` before picking one (gap 35(b) in the M2 gap audit).
+   */
+  passkeyCandidates(id: string): PasskeyCandidateResult[] {
+    return mapPasskeyCandidates(call(() => this.#s().passkeyCandidates(id)));
   }
 
   /**
@@ -1973,6 +2016,15 @@ export class DurableSession {
     return mapPasskeyAssertion(call(() => this.#inner.passkeyAssertion(id, passkeyId, origin, rpId, challenge)));
   }
 
+  /**
+   * Every stored passkey's non-secret metadata on one item (ADR 0039 §1), for the host to pick
+   * which credential to run {@link passkeyAssertion} with — in particular, to filter against
+   * the page's `allowCredentials` before picking one (gap 35(b) in the M2 gap audit).
+   */
+  passkeyCandidates(id: string): PasskeyCandidateResult[] {
+    return mapPasskeyCandidates(call(() => this.#inner.passkeyCandidates(id)));
+  }
+
   /** Creates an item; returns its id. Persisted before this resolves (class docs). */
   async createItem(itemType: ItemType, changes: readonly ItemChange[]): Promise<string> {
     const draft = draftOf(changes);
@@ -2066,10 +2118,17 @@ export interface MatchCandidate {
   /** Whether the fill UI must show the equivalence-only warning (ADR 0037 §5) before the
    * fill. */
   readonly needsWarning: boolean;
+  /** The saved URI's exact normalised host, A-label form (ADR 0037 §5 "Exact host shown";
+   * gap 31 in the M2 gap audit). Never decode this to Unicode in a host UI: a mixed-script
+   * host must keep showing its punycode `xn--` form. */
+  readonly savedHost: string;
 }
 
 /** The result of one {@link decideMatchCandidates} call. */
 export interface MatchDecisionResult {
+  /** The page's own exact normalised host, A-label form (ADR 0037 §5 "Exact host shown";
+   * gap 31 in the M2 gap audit): what the fill UI always shows, matching or not. */
+  readonly pageHost: string;
   readonly candidates: readonly MatchCandidate[];
   readonly warnings: readonly string[];
 }
@@ -2093,10 +2152,12 @@ export function registrableDomainOf(url: string): string | undefined {
 
 /**
  * Decides which of `itemUris` are autofill candidates for `pageUrl`, requested by `frame`
- * (ADR 0037 §4, §5). `accountDefaultMode` resolves any URI whose own mode is `0x0000`; this
- * call never threads the account's equivalence settings through yet (`not_done`:
- * `crates/rizzy-wasm/src/matching.rs`'s module docs), so matching narrows to plain
- * registrable-domain equality.
+ * (ADR 0037 §4, §5). `accountDefaultMode` resolves any URI whose own mode is `0x0000`. The
+ * compiled-in global equivalence list is wired into the merged view (ADR 0037 §7, ADR 0038
+ * §5; gap 27(a) in the M2 gap audit); the account's own disabled-global-group set and
+ * user-defined groups are not yet (ADR 0042 is Proposed, not Accepted), and no list is
+ * compiled in today either way, so this call's observable matching is unchanged until both
+ * land (`crates/rizzy-wasm/src/matching.rs`'s module docs).
  */
 export function decideMatchCandidates(
   pageUrl: string,
@@ -2112,12 +2173,12 @@ export function decideMatchCandidates(
   try {
     const candidates = decision.candidates.map((c) => {
       try {
-        return { itemId: c.itemId, uriId: c.uriId, needsWarning: c.needsWarning };
+        return { itemId: c.itemId, uriId: c.uriId, needsWarning: c.needsWarning, savedHost: c.savedHost };
       } finally {
         c.free();
       }
     });
-    return { candidates, warnings: [...decision.warnings] };
+    return { pageHost: decision.pageHost, candidates, warnings: [...decision.warnings] };
   } finally {
     decision.free();
   }

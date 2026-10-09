@@ -66,7 +66,10 @@ use rizzy_client::login::{
 };
 use rizzy_client::passkey::get_assertion;
 use rizzy_client::rizzy_core::item::key::ElementId;
-use rizzy_client::rizzy_core::item::schema::{ATTR_CREDENTIAL_ID, ATTR_PRIVATE_KEY, LIST_PASSKEY};
+use rizzy_client::rizzy_core::item::schema::{
+    ATTR_ALG, ATTR_CREATED_MS, ATTR_CREDENTIAL_ID, ATTR_PRIVATE_KEY, ATTR_RP_ID, ATTR_USER_HANDLE,
+    LIST_PASSKEY,
+};
 use rizzy_client::rizzy_core::item::value::ValueRef;
 use rizzy_client::rizzy_core::passkey::Es256SigningKey;
 use rizzy_client::rizzy_core::sign::DeviceKind;
@@ -89,7 +92,7 @@ use zeroize::Zeroizing;
 use crate::error::{CoreError, CoreResult, WRONG_STATE};
 use crate::http::{self, HttpRequest};
 use crate::items::{self, FieldView, ItemDraft, ItemSummary, hex, type_from_name, visible_item};
-use crate::passkey::PasskeyAssertion;
+use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
 use crate::rng::{Rng, os_rng};
 use crate::secret::take_secret;
 use crate::store::{CacheDelta, KvRow, decode_rows, encode_rows};
@@ -922,6 +925,10 @@ impl DeviceSession {
     /// id, the item has no such passkey, or its stored key is not a valid 32-byte scalar;
     /// otherwise whatever `get_assertion` returns (`rp_id_rejected` for INV-64).
     ///
+    /// This call does **not** check `passkey_id` against the page's `allowCredentials` — the
+    /// extension's background filters [`DeviceSession::passkey_candidates`]'s result first
+    /// (gap 35(b) in the M2 gap audit; [`crate::passkey`] module docs).
+    ///
     /// [ADR 0036]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0036-browser-extension-architecture-and-key-custody.md
     #[wasm_bindgen(js_name = passkeyAssertion)]
     pub fn passkey_assertion(
@@ -937,17 +944,20 @@ impl DeviceSession {
         let bad = || CoreError::from(ClientError::InvalidInput);
         let element = ElementId::from_bytes(items::parse_id(passkey_id)?);
 
-        let credential_id_key = element
-            .key(LIST_PASSKEY, ATTR_CREDENTIAL_ID)
-            .map_err(|_| bad())?;
-        let credential_id = match vault
-            .field_value(item, credential_id_key.as_str())
-            .ok_or_else(bad)?
-            .decode()
-        {
-            Ok(ValueRef::Bytes(bytes)) => bytes.to_vec(),
-            _ => return Err(bad()),
+        let bytes_field = |attr: &str| -> Result<Vec<u8>, CoreError> {
+            let key = element.key(LIST_PASSKEY, attr).map_err(|_| bad())?;
+            match vault
+                .field_value(item, key.as_str())
+                .ok_or_else(bad)?
+                .decode()
+            {
+                Ok(ValueRef::Bytes(bytes)) => Ok(bytes.to_vec()),
+                _ => Err(bad()),
+            }
         };
+
+        let credential_id = bytes_field(ATTR_CREDENTIAL_ID)?;
+        let user_handle = bytes_field(ATTR_USER_HANDLE)?;
 
         let private_key_key = element
             .key(LIST_PASSKEY, ATTR_PRIVATE_KEY)
@@ -961,8 +971,67 @@ impl DeviceSession {
             _ => return Err(bad()),
         };
 
-        let assertion = get_assertion(&signing_key, &credential_id, origin, rp_id, challenge)?;
+        let assertion = get_assertion(
+            &signing_key,
+            &credential_id,
+            &user_handle,
+            origin,
+            rp_id,
+            challenge,
+        )?;
         Ok(assertion.into())
+    }
+
+    /// Every stored passkey's non-secret metadata on item `id` (`passkey/<id>/…`; ADR 0039
+    /// §1), for the extension's background to list `navigator.credentials.get()`/`.create()`
+    /// candidates (gaps 35(a)/(b) in the M2 gap audit; [`crate::passkey`] module docs) — never
+    /// `private_key`, which stays in Rust and is read only by [`DeviceSession::passkey_assertion`].
+    ///
+    /// # Errors
+    /// As [`DeviceSession::item`].
+    #[wasm_bindgen(js_name = passkeyCandidates)]
+    pub fn passkey_candidates(&self, id: &str) -> Result<Vec<PasskeyCandidate>, CoreError> {
+        let vault = self.vault_ref()?;
+        let item = visible_item(vault, id)?;
+        let mut out = Vec::new();
+        for element in vault.list_elements(item, LIST_PASSKEY) {
+            let element_id = element.element.as_str();
+            let key = |attr: &str| format!("{LIST_PASSKEY}/{element_id}/{attr}");
+            let text = |attr: &str| match vault.field_value(item, &key(attr))?.decode() {
+                Ok(ValueRef::Text(text)) => Some(text.to_owned()),
+                _ => None,
+            };
+            let bytes = |attr: &str| match vault.field_value(item, &key(attr))?.decode() {
+                Ok(ValueRef::Bytes(bytes)) => Some(bytes.to_vec()),
+                _ => None,
+            };
+            let enum_value = |attr: &str| match vault.field_value(item, &key(attr))?.decode() {
+                Ok(ValueRef::Enum(value)) => Some(value),
+                _ => None,
+            };
+            let u64_value = |attr: &str| match vault.field_value(item, &key(attr))?.decode() {
+                Ok(ValueRef::U64(value)) => Some(value),
+                _ => None,
+            };
+
+            let (Some(rp_id), Some(user_handle), Some(credential_id), Some(alg)) = (
+                text(ATTR_RP_ID),
+                bytes(ATTR_USER_HANDLE),
+                bytes(ATTR_CREDENTIAL_ID),
+                enum_value(ATTR_ALG),
+            ) else {
+                continue;
+            };
+            out.push(PasskeyCandidate {
+                element_id: element_id.to_owned(),
+                rp_id,
+                user_handle,
+                credential_id,
+                alg,
+                created_ms: u64_value(ATTR_CREATED_MS).unwrap_or(0),
+            });
+        }
+        Ok(out)
     }
 
     /// Creates an item of `item_type` (a name of [`crate::items::TYPES`]) with the draft's

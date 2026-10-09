@@ -11,6 +11,7 @@ import {
   approvePasskeyCeremony,
   checkPendingSavePromptByLocation,
   declinePasskeyCeremony,
+  generatePasswordForFill,
   itemSummaryFor,
   matchCandidatesFor,
   offerPasskeyCreate,
@@ -26,6 +27,7 @@ import type {
   FromContentScript,
   InlineMenuFillRequestMessage,
   InlineMenuFillResponse,
+  InlineMenuGeneratePasswordResponse,
   PasskeyCeremonyMessage,
   PasskeyCeremonyResponse,
   RelayApplyFillMessage,
@@ -122,15 +124,15 @@ export async function handleContentScriptRequest(
       if (result === undefined) {
         return refused("fields_detected: the device is locked");
       }
-      // The match decision itself only ever carries `itemId`/`uriId`/`needsWarning` (never a
-      // secret, ADR 0013 §3 rule 3); title/username for display come from one `item()` lookup
-      // per candidate here. A candidate whose item vanished between the match and this lookup
-      // (e.g. deleted mid-request) is dropped rather than shown blank.
+      // The match decision itself only ever carries `itemId`/`uriId`/`needsWarning`/`savedHost`
+      // (never a secret, ADR 0013 §3 rule 3); title/username for display come from one `item()`
+      // lookup per candidate here. A candidate whose item vanished between the match and this
+      // lookup (e.g. deleted mid-request) is dropped rather than shown blank.
       const candidates = result.candidates.flatMap((c) => {
         const summary = itemSummaryFor(c.itemId);
-        return summary === undefined ? [] : [{ itemId: c.itemId, ...summary, needsWarning: c.needsWarning }];
+        return summary === undefined ? [] : [{ itemId: c.itemId, ...summary, needsWarning: c.needsWarning, savedHost: c.savedHost }];
       });
-      return { type: "candidates", candidates, warnings: result.warnings };
+      return { type: "candidates", pageHost: result.pageHost, candidates, warnings: result.warnings };
     }
     case "credentials_submitted": {
       if (!pageUrlMatchesSender(message.pageUrl, trustedOrigin)) {
@@ -194,7 +196,7 @@ export async function handleContentScriptRequest(
       if (!isSecureOrigin(trustedOrigin)) {
         return refused("passkey_get_request: origin is not https");
       }
-      const offer = offerPasskeyGet(trustedOrigin, trustedTabId, message.rpIdHint, message.challengeB64);
+      const offer = offerPasskeyGet(trustedOrigin, trustedTabId, message.rpIdHint, message.challengeB64, message.allowCredentialIdsB64);
       if (offer === undefined) {
         return refused("passkey_get_request: the device is locked, or no stored passkey matches this rpId");
       }
@@ -312,4 +314,35 @@ export async function handleInlineMenuFillRequest(
   }
   await pushApplyFill(ext, tabId, values);
   return { type: "inline_menu_fill_dispatched" };
+}
+
+/**
+ * Handles an {@link InlineMenuGeneratePasswordRequestMessage} from the inline-menu iframe (gap
+ * 32 in the M2 gap audit) — the same sender class and the same "never back to the iframe" rule
+ * as {@link handleInlineMenuFillRequest} (ADR 0040), applied to the generator instead of a saved
+ * item's credentials: `core-host/listener.ts` routes to this only once `sender.ts`'s
+ * `isInlineMenuSender` has vouched for the sender, with that sender's own real `tabId`. The
+ * generated value is pushed straight to that tab's content script as an {@link ApplyFillMessage}
+ * (`values: { password }`, no `username` — {@link pushApplyFill}'s existing shape, reused as-is
+ * rather than a second push type for the same "values land on the content script's own tagged
+ * fields" rule), never answered back to the iframe that asked.
+ */
+export async function handleInlineMenuGeneratePasswordRequest(
+  ext: WebExtNamespace,
+  tabId: number,
+  tabUrl: string,
+): Promise<InlineMenuGeneratePasswordResponse> {
+  try {
+    new URL(tabUrl);
+  } catch {
+    return refused("inline_menu_generate_password_chosen: the sender's tab URL does not parse");
+  }
+  let password: string;
+  try {
+    password = await generatePasswordForFill();
+  } catch {
+    return refused("inline_menu_generate_password_chosen: generation failed");
+  }
+  await pushApplyFill(ext, tabId, { password });
+  return { type: "inline_menu_generate_password_dispatched" };
 }

@@ -22,6 +22,7 @@ import {
   type MatchFrameInfo,
   type MatchUriInput,
   type PasskeyAssertionResult,
+  type PasskeyCandidateResult,
   DurableSession,
   MatchMode,
   PASSKEY_ALG_ES256,
@@ -53,14 +54,14 @@ export function createPasskey(origin: string, rpId: string, challenge: Uint8Arra
   return coreCreatePasskey(origin, rpId, challenge);
 }
 
-/** One stored passkey's non-secret, re-derivable-from-`fields()` metadata — everything
- * {@link sessionPasskeyCandidatesForRpId} and the web vault's own listing need, and nothing a
- * `FieldView` of kind `"bytes"` could give anyway (`FieldView.value` is always `undefined` for a
- * Bytes field — `crates/rizzy-wasm/src/items.rs`'s own "Bytes and order keys have no text" —
- * which is also why this shape carries no `userHandle`/`credentialId`/`publicKeyCose`: there is
- * no `@rizzy-vault/core` call today that returns those back out once stored, only at creation
- * time, `not_done`, reported honestly rather than worked around by reaching past this package's
- * API into wasm internals). */
+/** One stored passkey's non-secret, re-derivable-from-`fields()` metadata — the `rp_id`/
+ * `created_ms` half {@link itemPasskeyFields} reads straight from `fields()`, never
+ * `userHandle`/`credentialId`/`publicKeyCose` (Bytes fields, `FieldView.value` always
+ * `undefined` for those — `crates/rizzy-wasm/src/items.rs`'s own "Bytes and order keys have no
+ * text"). `sessionPasskeyCandidatesForRpId` below reads those two byte fields through
+ * `DurableSession.passkeyCandidates` instead (gap 35(a)/(b) in the M2 gap audit's read path),
+ * never through this shape — kept only for the web vault's own non-filtering listing, which never
+ * needed either byte field. */
 export interface StoredPasskey {
   readonly elementId: string;
   readonly rpId: string;
@@ -93,22 +94,49 @@ export function itemPasskeyFields(fields: readonly FieldView[]): readonly Stored
 }
 
 /** Every stored passkey, across every active item, whose `rp_id` exactly equals `rpId` (ADR
- * 0039 §2: a `get` ceremony's candidate list for a `navigator.credentials.get()` call with no
- * `allowCredentials`, or one this project's own API has no way to narrow further by credential
- * id — `StoredPasskey`'s own doc on why). Exact string equality, not a PSL/suffix comparison:
- * `rp_id` is already the resolved value `verify_rp_id` accepted at creation time (INV-64), so
- * there is nothing left to re-derive here — the actual authority for "is this `rpId` allowed for
- * the calling origin" stays in Rust, re-checked again on the assertion call itself
- * (`DurableSession.passkeyAssertion`), never trusted from this list alone. */
+ * 0039 §2: a `get` ceremony's candidate list). Exact string equality, not a PSL/suffix
+ * comparison: `rp_id` is already the resolved value `verify_rp_id` accepted at creation time
+ * (INV-64), so there is nothing left to re-derive here — the actual authority for "is this
+ * `rpId` allowed for the calling origin" stays in Rust, re-checked again on the assertion call
+ * itself (`DurableSession.passkeyAssertion`), never trusted from this list alone.
+ *
+ * Reads through `DurableSession.passkeyCandidates` (gap 35(a) in the M2 gap audit's read path),
+ * never `itemPasskeyFields`'s own fields()-only `StoredPasskey`, specifically because
+ * `credentialId` is the one thing {@link offerPasskeyGet} needs to apply `allowCredentials`
+ * filtering (gap 35(b)): the private key itself is never read back through this or any other
+ * call — `passkeyCandidates`' own module doc in `packages/core/src/index.ts` is explicit that it
+ * exposes only the non-secret half of the stored item.
+ */
 export function sessionPasskeyCandidatesForRpId(
   session: DurableSession,
   rpId: string,
-): ReadonlyArray<{ readonly itemId: string; readonly elementId: string; readonly itemTitle: string; readonly userName: string }> {
-  const out: Array<{ itemId: string; elementId: string; itemTitle: string; userName: string }> = [];
+): ReadonlyArray<{
+  readonly itemId: string;
+  readonly elementId: string;
+  readonly itemTitle: string;
+  readonly userName: string;
+  readonly credentialId: Uint8Array;
+}> {
+  const out: Array<{ itemId: string; elementId: string; itemTitle: string; userName: string; credentialId: Uint8Array }> = [];
   for (const item of session.items()) {
-    for (const passkey of itemPasskeyFields(session.fields(item.id))) {
+    let candidates: readonly PasskeyCandidateResult[];
+    try {
+      candidates = session.passkeyCandidates(item.id);
+    } catch {
+      // Not a passkey-bearing item at all, or the call otherwise failed for this one item:
+      // skip it rather than aborting every other item's own candidates (the same "one bad item
+      // never blocks the rest" rule `handleContentScriptRequest`'s own candidate mapping uses).
+      continue;
+    }
+    for (const passkey of candidates) {
       if (passkey.rpId === rpId) {
-        out.push({ itemId: item.id, elementId: passkey.elementId, itemTitle: item.title, userName: item.username ?? "" });
+        out.push({
+          itemId: item.id,
+          elementId: passkey.elementId,
+          itemTitle: item.title,
+          userName: item.username ?? "",
+          credentialId: passkey.credentialId,
+        });
       }
     }
   }
@@ -329,31 +357,79 @@ export function decideCandidates(
   session: DurableSession,
   pageUrl: string,
   frame: MatchFrameInfo,
-): { candidates: readonly MatchCandidate[]; warnings: readonly string[] } {
+): { pageHost: string; candidates: readonly MatchCandidate[]; warnings: readonly string[] } {
   return decideMatchCandidates(pageUrl, frame, MatchMode.BaseDomain, sessionItemUris(session));
 }
 
-/** The first active item whose saved URI normalises to the same URL as `pageUrl` (ADR 0037 §2's
- * normalisation) — used to offer "update" rather than "save" on a submitted form that already
- * has a matching item. Deliberately simpler than full match-mode matching (no equivalence list,
- * no base-domain narrowing): this is only a save-prompt *suggestion*, not an autofill decision,
- * and a wrong suggestion here costs the user one extra click, never a wrong fill. */
-export function findItemForUpdate(session: DurableSession, pageUrl: string): ItemSummary | undefined {
-  let normalized: string;
+/** The active item to offer "update" for on a submitted form, or `undefined` to offer "save"
+ * instead (gap 33 in the M2 gap audit). Uses the real matcher (ADR 0037 modes, `decideCandidates`
+ * — the same decision autofill itself makes, not a separate, looser notion of "the same site")
+ * and the submitted `username`, not the URL alone:
+ *
+ * - **Same host, same username** → that item (update it).
+ * - **Same host, a different username** → `undefined` (save as a new item): a second account on
+ *   a site the user already has one item for must never overwrite that other account's
+ *   credentials just because the form posted to the same host.
+ * - **An equivalence-only match** (`candidate.needsWarning`, ADR 0037 §5 — a different
+ *   registrable domain `rizzy-match` treats as the same site) is never an update target, even
+ *   with a matching username: silently overwriting one site's saved password because the user
+ *   submitted a form on a different, merely "equivalent" domain is a worse outcome than an extra
+ *   save prompt. (A direct registrable-domain match or better still counts, same as autofill.)
+ * - **A look-alike host** (a different registrable domain with no equivalence relationship) is
+ *   not a match candidate at all, so it is never returned.
+ *
+ * Deliberately reuses the one matcher every other ADR 0037 decision goes through, rather than a
+ * second, independent "is this the same site" rule that could drift from it.
+ */
+export function findItemForUpdate(session: DurableSession, pageUrl: string, username: string): ItemSummary | undefined {
+  let decision: ReturnType<typeof decideCandidates>;
   try {
-    normalized = normalizePageUrl(pageUrl);
+    decision = decideCandidates(session, pageUrl, { isTopFrame: true, frameOrigin: "" });
   } catch {
     return undefined;
   }
-  for (const item of session.items()) {
-    for (const uri of itemUriFields(session.fields(item.id))) {
+  const itemId = selectUpdateCandidate(
+    decision.candidates,
+    (candidateId) => {
       try {
-        if (normalizePageUrl(uri.value) === normalized) {
-          return item;
-        }
+        return session.item(candidateId).username;
       } catch {
-        // A saved URI that no longer parses: skip it, do not let it abort the search.
+        return undefined;
       }
+    },
+    username,
+  );
+  if (itemId === undefined) {
+    return undefined;
+  }
+  try {
+    return session.item(itemId);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The selection core of {@link findItemForUpdate}, pulled out so it is unit-testable without a
+ * `DurableSession` — the same reason `content-handler.ts`'s `selectFillCandidate` is its own
+ * function. The first already-matched, non-equivalence-only candidate whose own saved username
+ * equals `username` exactly, or `undefined` if none does (every one of `candidates` is already
+ * a registrable-domain-or-better match or an equivalence-only one; `usernameOf` resolves each
+ * candidate's current saved username, `undefined` if the lookup itself fails). Each `itemId` is
+ * resolved through `usernameOf` at most once, even if `candidates` lists it more than once (one
+ * match per saved URI, so one item can appear several times). */
+export function selectUpdateCandidate(
+  candidates: readonly MatchCandidate[],
+  usernameOf: (itemId: string) => string | undefined,
+  username: string,
+): string | undefined {
+  const checked = new Set<string>();
+  for (const candidate of candidates) {
+    if (candidate.needsWarning || checked.has(candidate.itemId)) {
+      continue;
+    }
+    checked.add(candidate.itemId);
+    if ((usernameOf(candidate.itemId) ?? "") === username) {
+      return candidate.itemId;
     }
   }
   return undefined;

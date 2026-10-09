@@ -26,6 +26,12 @@ export const MAX_FIELD_VALUE_LEN = 4096;
 export const MAX_FIELDS_PER_REPORT = 64;
 export const MAX_CANDIDATES = 32;
 export const MAX_TITLE_LEN = 256;
+/** A DNS name is at most 253 characters (RFC 1035 §3.1's 255-byte wire form, minus the root
+ * label and the length-prefix byte it elides in presentation form). Bounds `pageHost`/
+ * `savedHost` (ADR 0037 §5 "Exact host shown"; gap 31 in the M2 gap audit): `rizzy-match`
+ * already enforces this on every host it normalises, so this is a defence-in-depth bound on an
+ * untrusted-boundary string, not the authority for host validity. */
+export const MAX_HOST_LEN = 253;
 
 // --- Passkeys (ADR 0039 §2, ADR 0040's pattern applied to a passkey ceremony instead of a
 // fill) -------------------------------------------------------------------------------------
@@ -177,6 +183,30 @@ export interface InlineMenuFillDispatchedMessage {
 }
 
 /**
+ * The user clicked "Generate password" in the extension-origin inline-menu iframe, on a trusted
+ * gesture (gap 32 in the M2 gap audit) — sent directly to the long-lived context, exactly
+ * mirroring {@link InlineMenuFillRequestMessage}'s own rationale (ADR 0040): a compromised
+ * content script cannot produce `sender.origin` equal to this extension's own, so
+ * `isInlineMenuSender` is what the background trusts, never a claim this message could make.
+ * Carries no options (length/kind) at all — there is nothing here for a compromised sender to
+ * lie about, and the one generator call behind it (`core-host/core-context.ts`'s
+ * `generatePasswordForFill`) takes none either.
+ */
+export interface InlineMenuGeneratePasswordRequestMessage {
+  readonly type: "inline_menu_generate_password_chosen";
+}
+
+/** Acknowledges a successful {@link InlineMenuGeneratePasswordRequestMessage}: never carries the
+ * generated value itself (same ADR 0040 rule as {@link InlineMenuFillDispatchedMessage}) — the
+ * value goes straight to the content script's own tab as an {@link ApplyFillMessage} (`values: {
+ * password }`, reusing that exact shape rather than inventing a second one — `content-script.ts`
+ * already maps `values.password` onto whichever field it has tagged `"password"`, which for this
+ * request is always the one the inline menu is anchored to). */
+export interface InlineMenuGeneratePasswordDispatchedMessage {
+  readonly type: "inline_menu_generate_password_dispatched";
+}
+
+/**
  * The user approved a pending passkey ceremony in the extension-origin consent UI
  * (`passkey-consent/main.ts`), on a trusted gesture (INV-36) — sent **directly** to the
  * long-lived context, never relayed by the content script, exactly mirroring
@@ -297,10 +327,18 @@ export interface MatchCandidateSummary {
   readonly title: string;
   readonly username: string;
   readonly needsWarning: boolean;
+  /** The saved URI's exact normalised host, A-label form — exactly
+   * `@rizzy-vault/core`'s `MatchCandidate.savedHost` (ADR 0037 §5 "Exact host shown"; gap 31
+   * in the M2 gap audit): "the saved site" in the inline menu's equivalence-only warning. */
+  readonly savedHost: string;
 }
 
 export interface CandidatesMessage {
   readonly type: "candidates";
+  /** The page's own exact normalised host, A-label form — exactly
+   * `@rizzy-vault/core`'s `MatchDecisionResult.pageHost` (ADR 0037 §5 "Exact host shown"; gap
+   * 31 in the M2 gap audit). */
+  readonly pageHost: string;
   readonly candidates: readonly MatchCandidateSummary[];
   readonly warnings: readonly string[];
 }
@@ -391,6 +429,11 @@ export type ToContentScript =
  * success-plus-values shape; see {@link InlineMenuFillDispatchedMessage}'s own doc for why. */
 export type InlineMenuFillResponse = InlineMenuFillDispatchedMessage | ContentErrorMessage;
 
+/** `core-host/listener.ts`'s answer to an {@link InlineMenuGeneratePasswordRequestMessage} —
+ * same never-the-secret-itself rule, see {@link InlineMenuGeneratePasswordDispatchedMessage}'s
+ * own doc. */
+export type InlineMenuGeneratePasswordResponse = InlineMenuGeneratePasswordDispatchedMessage | ContentErrorMessage;
+
 /** `core-host/listener.ts`'s answer to a {@link PasskeyCeremonyMessage} — same
  * never-the-secret-itself rule, see {@link PasskeyCeremonyDispatchedMessage}'s own doc. */
 export type PasskeyCeremonyResponse = PasskeyCeremonyDispatchedMessage | ContentErrorMessage;
@@ -410,6 +453,13 @@ export function isInlineMenuFillRequestMessage(value: unknown): value is InlineM
   }
   const v = value as Record<string, unknown>;
   return v["type"] === "inline_menu_fill_chosen" && isBoundedString(v["itemId"], 256) && typeof v["confirmedEquivalence"] === "boolean";
+}
+
+/** Validates a raw message claimed to be an {@link InlineMenuGeneratePasswordRequestMessage} —
+ * same gate as {@link isInlineMenuFillRequestMessage}'s own doc explains. The message carries no
+ * fields beyond `type`, so there is nothing else to bound. */
+export function isInlineMenuGeneratePasswordRequestMessage(value: unknown): value is InlineMenuGeneratePasswordRequestMessage {
+  return typeof value === "object" && value !== null && (value as Record<string, unknown>)["type"] === "inline_menu_generate_password_chosen";
 }
 
 /** Validates a raw message claimed to be a {@link PasskeyCeremonyMessage} — only

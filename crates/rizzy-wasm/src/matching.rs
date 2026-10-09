@@ -10,18 +10,26 @@
 //! strings and small integers `wasm-bindgen` can hand to JavaScript (ADR 0013 §3 rule 6, "the
 //! API is coarse": one call, [`decide_match_candidates`], per autofill request).
 //!
-//! **Deferred (reported, not attempted here):** the account's equivalence settings
-//! (ADR 0037 §7, ADR 0038 §5 — the compiled-in global list, which `rizzy-match` itself does
-//! not ship yet, the account's disabled-global-group set, and its own user-defined groups) are
-//! not threaded through this call yet; every decision runs against
-//! [`EquivalenceView::empty`], so matching narrows to plain registrable-domain equality and
-//! never offers an equivalence-only candidate. Wiring the account's settings in is the
-//! integration step's job once `ACCOUNT_SETTINGS`'s equivalence fields are read on the
-//! extension side; this binding's signature (`uris` and the two mode values) does not change
-//! when that lands, only the `equivalence` argument gains real groups.
+//! **The global equivalence list is wired in; the account's own settings are not (gap
+//! 27(a)/(b) in the M2 gap audit).** [`rizzy_client::matching::global_equivalence_groups`]
+//! (ADR 0037 §7, ADR 0038 §5) supplies the `global` half of the merged
+//! [`EquivalenceView`] every call below builds; the account's disabled-global-group set and its
+//! own user-defined groups are still empty, because reading them needs `ACCOUNT_SETTINGS`'s
+//! plaintext layout, which ADR 0042 (`Status: Proposed`) has not fixed yet. Persisting the
+//! highest accepted `list_version` across launches (INV-39) is also deferred: it needs a new
+//! ADR amending ADR 0026's `cache_meta` format, so every call accepts version `0`
+//! (`global_equivalence_groups`'s own docs). None of this changes this binding's signature
+//! (`uris` and the two mode values); only the `equivalence` argument gains real groups once a
+//! signed list ships and once ADR 0042 lands. Until then, `rizzy_match::compiled::GLOBAL_LIST`
+//! being `None` means this call behaves exactly as before: matching narrows to plain
+//! registrable-domain equality and never offers an equivalence-only candidate.
 
 use rizzy_client::ClientError;
-use rizzy_client::matching::{self, EquivalenceView, FrameContext, ItemUri, MatchMode, MatchedVia};
+use rizzy_client::matching::{
+    self, EquivalenceGroup, EquivalenceView, FrameContext, GroupId, ItemUri, MatchMode, MatchedVia,
+    global_equivalence_groups,
+};
+use std::collections::BTreeSet;
 use wasm_bindgen::prelude::wasm_bindgen;
 
 use crate::error::CoreError;
@@ -71,6 +79,10 @@ pub struct MatchCandidate {
     uri_id: String,
     /// Whether the equivalence-only warning is needed before the fill ([`MatchedVia::needs_warning`]).
     needs_warning: bool,
+    /// The saved URI's own exact normalised host, A-label form (ADR 0037 §5 "Exact host
+    /// shown"): "the saved site" in the equivalence-only warning. Never decode this to Unicode
+    /// in a host UI; a mixed-script host must keep showing its punycode `xn--` form.
+    saved_host: String,
 }
 
 #[wasm_bindgen]
@@ -95,12 +107,23 @@ impl MatchCandidate {
     pub fn needs_warning(&self) -> bool {
         self.needs_warning
     }
+
+    /// The saved URI's exact normalised host, A-label form (ADR 0037 §5 "Exact host shown").
+    #[wasm_bindgen(getter, js_name = savedHost)]
+    #[must_use]
+    pub fn saved_host(&self) -> String {
+        self.saved_host.clone()
+    }
 }
 
 /// The result of one [`decide_match_candidates`] call.
 #[wasm_bindgen]
 #[derive(Clone, Debug, Default)]
 pub struct MatchDecision {
+    /// The page's own exact normalised host, A-label form (ADR 0037 §5 "Exact host shown"):
+    /// "the page" in the equivalence-only warning, and what the fill UI always shows, matching
+    /// or not.
+    page_host: String,
     /// Every matching candidate, in the order given.
     candidates: Vec<MatchCandidate>,
     /// Lines explaining a URI or the frame as a whole that this build could not evaluate
@@ -110,6 +133,13 @@ pub struct MatchDecision {
 
 #[wasm_bindgen]
 impl MatchDecision {
+    /// The page's exact normalised host, A-label form (ADR 0037 §5 "Exact host shown").
+    #[wasm_bindgen(getter, js_name = pageHost)]
+    #[must_use]
+    pub fn page_host(&self) -> String {
+        self.page_host.clone()
+    }
+
     /// Every matching candidate.
     #[wasm_bindgen(getter)]
     #[must_use]
@@ -202,12 +232,20 @@ pub fn decide_match_candidates(
         is_top_frame,
         frame_origin,
     };
-    // Deferred (module docs): no account equivalence settings are threaded through yet.
-    let equivalence = EquivalenceView::empty();
+    // Wired (module docs, gap 27(a)): the compiled-in global list's groups, with no disabled
+    // groups and no user-defined groups yet (ADR 0042 is Proposed, not Accepted). `global` is
+    // `global_equivalence_groups()`'s owned `Vec`, borrowed for the lifetime of this one
+    // decision, exactly as `EquivalenceView` requires (`rizzy-match` is R1, no I/O, and never
+    // owns this data itself).
+    let global: Vec<EquivalenceGroup> = global_equivalence_groups();
+    let no_disabled_groups: BTreeSet<GroupId> = BTreeSet::new();
+    let no_user_defined_groups: Vec<EquivalenceGroup> = Vec::new();
+    let equivalence = EquivalenceView::new(&global, &no_disabled_groups, &no_user_defined_groups);
     let decision =
         matching::decide_candidates(page_url, &frame, account_default, &item_uris, &equivalence)
             .map_err(CoreError::from)?;
     Ok(MatchDecision {
+        page_host: decision.page_host,
         candidates: decision
             .candidates
             .into_iter()
@@ -215,6 +253,7 @@ pub fn decide_match_candidates(
                 item_id: hex(&c.item_id),
                 uri_id: hex(&c.uri_id),
                 needs_warning: matches!(c.matched_via, MatchedVia::Equivalence(_)),
+                saved_host: c.saved_host,
             })
             .collect(),
         warnings: decision.warnings.into_iter().map(str::to_owned).collect(),
@@ -269,6 +308,25 @@ mod tests {
         assert_eq!(decision.candidates().len(), 1);
         assert!(!decision.candidates()[0].needs_warning());
         assert!(decision.warnings().is_empty());
+        assert_eq!(decision.page_host(), "example.com");
+        assert_eq!(decision.candidates()[0].saved_host(), "example.com");
+    }
+
+    /// Gap 27(a): the global list's groups now flow through to the merged `EquivalenceView`
+    /// this call builds, so `rizzy_match::compiled::GLOBAL_LIST` being `None` today means
+    /// exactly what it always meant — no equivalence-only candidate — never a different
+    /// outcome than before this binding wired the global list in.
+    #[test]
+    fn with_no_compiled_in_global_list_matching_is_unchanged() {
+        let uris = vec![UriInput::new(
+            hex(&[1; 16]),
+            hex(&[2; 16]),
+            "https://other.example/".to_owned(),
+            0x0001,
+        )];
+        let decision =
+            decide_match_candidates("https://example.com/", true, "", 0x0001, uris).unwrap();
+        assert!(decision.candidates().is_empty());
     }
 
     #[test]

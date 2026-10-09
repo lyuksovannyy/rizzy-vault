@@ -2673,6 +2673,7 @@ dependencies = [
  "rizzy-core",
  "rizzy-match",
  "serde_json",
+ "sha2 0.11.0",
 ]
 
 [[package]]
