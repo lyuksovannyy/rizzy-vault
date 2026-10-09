@@ -198,6 +198,17 @@ fn one_row(changed: u64) -> Result<(), sqlx::Error> {
     }
 }
 
+/// Removes the file of a failed [`Db::create`] and its rollback journal, if one is left
+/// (`journal_mode=DELETE`). Nothing was committed: the file holds no enrolment, and leaving it
+/// would make the next signup or login fail as "already enrolled". The caller's error is the one
+/// reported; a file that cannot be removed is reported by that next attempt.
+fn discard(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let mut journal = path.as_os_str().to_owned();
+    journal.push("-journal");
+    let _ = std::fs::remove_file(journal);
+}
+
 /// An open cache file. One connection, used by one task.
 pub struct Db {
     /// The connection.
@@ -239,17 +250,41 @@ fn options(path: &Path) -> SqliteConnectOptions {
 impl Db {
     /// Connects to an existing file and applies the settings.
     async fn connect(path: &Path) -> Result<Self, CliError> {
-        let mut conn = SqliteConnection::connect_with(&options(path))
+        let conn = SqliteConnection::connect_with(&options(path))
             .await
             .map_err(|e| db_error(&e))?;
+        let mut db = Self { conn };
         // The settings as the store's text states them, whatever the driver's defaults are.
         for pragma in PRAGMAS {
-            sqlx::query(*pragma)
-                .fetch_all(&mut conn)
+            if let Err(e) = sqlx::query(*pragma).fetch_all(&mut db.conn).await {
+                let error = db_error(&e);
+                // Closed, not dropped: sqlx closes a dropped connection later on its worker
+                // thread, and until then the file cannot be removed on Windows.
+                db.close().await;
+                return Err(error);
+            }
+        }
+        Ok(db)
+    }
+
+    /// Writes the schema and the first changeset as one `BEGIN IMMEDIATE` transaction. On an
+    /// error the transaction is dropped, which rolls it back.
+    async fn initialise(&mut self, first: &Changeset) -> Result<(), CliError> {
+        let mut tx = self
+            .conn
+            .begin_with(BEGIN_IMMEDIATE)
+            .await
+            .map_err(|e| db_error(&e))?;
+        for statement in SCHEMA {
+            sqlx::query(*statement)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| db_error(&e))?;
         }
-        Ok(Self { conn })
+        for write in first.writes() {
+            apply(&mut tx, write).await.map_err(|e| db_error(&e))?;
+        }
+        tx.commit().await.map_err(|e| db_error(&e))
     }
 
     /// Creates the cache of a new enrolment at `path` with its first changeset (module docs).
@@ -262,32 +297,24 @@ impl Db {
             CliError::FileExists => CliError::AlreadyEnrolled,
             other => other,
         })?);
-        let created = async {
-            let mut db = Self::connect(path).await?;
-            let mut tx = db
-                .conn
-                .begin_with(BEGIN_IMMEDIATE)
-                .await
-                .map_err(|e| db_error(&e))?;
-            for statement in SCHEMA {
-                sqlx::query(*statement)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| db_error(&e))?;
+        let mut db = match Self::connect(path).await {
+            Ok(db) => db,
+            Err(e) => {
+                discard(path);
+                return Err(e);
             }
-            for write in first.writes() {
-                apply(&mut tx, write).await.map_err(|e| db_error(&e))?;
+        };
+        match db.initialise(first).await {
+            Ok(()) => Ok(db),
+            Err(e) => {
+                // The connection is closed before the file is removed: on Windows a file with
+                // an open handle cannot be deleted, and sqlx closes a dropped connection only
+                // later, on its worker thread.
+                db.close().await;
+                discard(path);
+                Err(e)
             }
-            tx.commit().await.map_err(|e| db_error(&e))?;
-            Ok(db)
         }
-        .await;
-        if created.is_err() {
-            // Nothing was committed: the file holds no enrolment, and leaving it would make the
-            // next signup or login fail as "already enrolled".
-            let _ = std::fs::remove_file(path);
-        }
-        created
     }
 
     /// Opens an existing cache.
@@ -1289,6 +1316,12 @@ mod tests {
             let other = path.with_file_name("bad.sqlite3");
             assert!(Db::create(&other, &bad).await.is_err());
             assert!(!other.exists());
+            let mut journal = other.as_os_str().to_owned();
+            journal.push("-journal");
+            assert!(!Path::new(&journal).exists());
+            // And the next attempt at the same path is not refused as "already enrolled".
+            let retried = Db::create(&other, &first()).await.unwrap();
+            retried.close().await;
             // Not SQLite at all.
             let garbage = path.with_file_name("garbage.sqlite3");
             std::fs::write(&garbage, b"this is not a database, not even nearly one").unwrap();
