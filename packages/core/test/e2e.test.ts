@@ -307,6 +307,22 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     first.restoreItem(id);
     expect(first.items().map((i) => i.id)).toEqual([id]);
 
+    // Permanent delete, on a dedicated item so the export/import counts below stay
+    // unaffected: gone for good on this session, rejected on a non-trashed or unknown item,
+    // and gone on the second session once it syncs (gap 03; the web vault's confirm dialog and
+    // the durable-device binding below have their own tests).
+    const toPurge = first.createItem("login", [{ op: "set", key: "item.name", value: "To purge" }]);
+    first.trashItem(toPurge);
+    first.purgeItem(toPurge);
+    expect(first.items().some((i) => i.id === toPurge)).toBe(false);
+    expect(first.items(true).some((i) => i.id === toPurge)).toBe(false);
+    expect(() => first.purgeItem(toPurge)).toThrowError(expect.objectContaining({ code: "unknown_item" }));
+    expect(() => first.purgeItem("0".repeat(32))).toThrowError(expect.objectContaining({ code: "unknown_item" }));
+    await first.sync();
+    await second.sync();
+    expect(second.items().some((i) => i.id === toPurge)).toBe(false);
+    expect(second.items(true).some((i) => i.id === toPurge)).toBe(false);
+
     // TOTP from an item's secret (RFC 6238's SHA-1 key, as Base32).
     const totpItem = first.createItem("login", [
       { op: "set", key: "item.name", value: "With 2FA" },
@@ -617,7 +633,58 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     const [summary] = reopened.items();
     expect(summary).toMatchObject({ id, itemType: "login", title: "Extension item" });
     expect(reopened.reveal(id, "login.username")).toBe("extension-user");
+
+    // Permanent delete through the async durable-device binding (index.ts:2001): purges,
+    // rejected on a non-trashed item, and the deletion persists across a reopen from the
+    // store without any further sync.
+    await reopened.trashItem(id);
+    await reopened.purgeItem(id);
+    expect(reopened.items()).toEqual([]);
+    await expect(reopened.purgeItem(id)).rejects.toMatchObject({ code: "unknown_item" });
     reopened.lock();
+
+    const reopenedAgain = await unlockDurableDevice(transport, store, PASSWORD);
+    await reopenedAgain.authenticate();
+    expect(reopenedAgain.items()).toEqual([]);
+    reopenedAgain.lock();
+  });
+
+  // Gap 00 (ADR 0012 §5, ADR 0018 §9, §11): `VaultSession.sync` runs the client-side trash
+  // auto-purge once the fetch/upload driver settles. Before the retention period, trashing
+  // alone must not purge; past it, the next `sync()` does, and the server never does it
+  // (ADR 0022) — only this client-side pass does.
+  it("auto-purges a trashed item once its retention period has elapsed, on sync", async () => {
+    const transport = fetchTransport(origin);
+    let skew = 0;
+    const clock = () => Date.now() + skew;
+    const signup = await Signup.start(
+      transport,
+      { origin, loginName: "Carol", password: PASSWORD, issueRecoveryCode: false },
+      clock,
+    );
+    const lastGroup = (() => {
+      const kit = signup.emergencyKit();
+      const secretKey = new TextDecoder().decode(kit.secretKey);
+      kit.secretKey.fill(0);
+      return secretKey.split("-").at(-1) ?? "";
+    })();
+    await signup.confirm(lastGroup);
+    const first = await signup.login();
+
+    const id = first.createItem("login", [{ op: "set", key: "item.name", value: "To expire" }]);
+    await first.sync();
+    first.trashItem(id);
+    await first.sync();
+    // Well before 30 days: trashing alone never purges.
+    expect(first.items(true).map((i) => i.id)).toEqual([id]);
+
+    // Past the 30-day default retention (ADR 0012 §5): the next sync purges it client-side.
+    skew += 30 * 24 * 60 * 60 * 1000 + 60_000;
+    await first.sync();
+    expect(first.items(true)).toEqual([]);
+    expect(first.items()).toEqual([]);
+
+    first.lock();
   });
 });
 
