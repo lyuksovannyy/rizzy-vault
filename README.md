@@ -24,10 +24,11 @@ Scope and milestones are defined in [docs/ROADMAP.md](docs/ROADMAP.md#3-mileston
 | Milestone | State |
 |---|---|
 | **M0** Foundations | **Deliverables in place, not formally closed.** The workspace, toolchain pin, lints, CI, cargo-deny policy, crypto design, ADRs, and security and contribution policy exist. M0 has no tag or "what we learned" note yet ([ROADMAP §3](docs/ROADMAP.md#3-milestones)). [ADR 0017](docs/adr/0017-licensing.md) (licensing) was Accepted on 2026-09-27; its App Store permission text is not done yet; CI checks the sign-off of every PR commit (`cargo xtask check-signoff`). [THREAT_MODEL.md](docs/THREAT_MODEL.md) became normative on 2026-09-27. |
-| **M1** Core vault (MVP) | **In progress.** Step 1, the `rizzy-core` cryptography, is implemented, with known-answer vectors, property tests and fuzz targets. It has been through an independent review, and every confirmed finding is fixed. Steps 2 (item schema and sync engine) and 3 (the server) are in progress. The remaining steps, in planned order, are below. |
-| **M2–M10** | Not started. M4 is removed: Server mode is the only sync mode, and On-device sync is parked post-1.0 ([ROADMAP §3](docs/ROADMAP.md#3-milestones)). |
+| **M1** Core vault (MVP) | **In progress; not formally closed (no tagged release yet).** Step 1, the `rizzy-core` cryptography, is implemented, with known-answer vectors, property tests and fuzz targets. It has been through an independent review, and every confirmed finding is fixed. Steps 2–5 (item schema and sync engine, server, client core and `rv` CLI, wasm bindings and web vault) all have code landed; what each covers is below. |
+| **M2** URL matching and browser extension | **In progress.** `rizzy-match`, the browser extension (`apps/extension`, Chromium and Firefox) and passkeys are underway; see [docs/README.md](docs/README.md) for what is wired in and what is not. |
+| **M3–M10** | Not started. M4 is removed: Server mode is the only sync mode, and On-device sync is parked post-1.0 ([ROADMAP §3](docs/ROADMAP.md#3-milestones)). |
 
-The remaining M1 steps. Every ADR is Accepted (2026-09-27; see the [index](docs/adr/README.md#index)), with its "On acceptance" edits made. Steps 2 and 3 are in progress.
+The M1 steps below all have code landed; every ADR that gates them is Accepted, with its "On acceptance" edits made (see the [index](docs/adr/README.md#index) for each ADR's current status; as of 2026-10-09, ADR 0033 and ADR 0042 are the two still Proposed, and neither gates an M1 step). The milestone itself stays "in progress" until ROADMAP's exit criteria are met and it is tagged.
 
 1. **Step 2:** the item schema in `rizzy-core` ([ADR 0018](docs/adr/0018-item-record-encoding.md)) and the sync engine in `rizzy-sync` ([ADR 0012](docs/adr/0012-sync-engine.md) and ADR 0018: HLC, version vectors, op log, merge, tombstones, the evidence merge), with convergence property tests seeded from the merge spike ([`spikes/merge-model`](spikes/merge-model/README.md)), and the caller of the durable-certificate expiry rule ([CRYPTO.md §10.2](docs/CRYPTO.md#102-ed25519-signatures-and-signed-statements)).
 2. **Step 3:** the server (ADRs 0010, 0011 and [0021](docs/adr/0021-server-compaction.md), which is Accepted before any step 3 code): API, SQLite storage, OPAQUE and device authentication with request signing, op upload and fetch with compaction and restore healing, backup and restore (the backup reader refuses a `data` field over `MAX_DATA_FIELD_LEN` before decoding, [CRYPTO.md §11.14](docs/CRYPTO.md#1114-encrypted-export-m1)), and the container image with its compose file and operator docs.
@@ -40,17 +41,24 @@ ADRs 0010–0014 are Accepted, so the gate for server and client scaffolding (st
 
 ```text
 crates/rizzy-core     crypto, envelopes, key hierarchy, item models (no I/O, builds for wasm32)
-crates/rizzy-sync     sync engine (skeleton; code arrives in M1 step 2)
+crates/rizzy-sync     sync engine: HLC, version vectors, op/snapshot/tombstone record layer, merge, compaction (no I/O, builds for wasm32)
 crates/rizzy-proto    /api/v1 request and response types, serde (no I/O, builds for wasm32)
 crates/rizzy-client   sans-I/O client flows: signup, login, unlock, sessions, sync driver, items, export (no I/O, builds for wasm32)
 crates/rizzy-import   importers: Bitwarden JSON, 1PUX, KeePass XML, CSV (no I/O, builds for wasm32)
+crates/rizzy-match    URL matching, autofill rules, the signed equivalence list (no I/O, builds for wasm32; ADR 0037, ADR 0038)
 crates/rizzy-storage  server storage: sqlx pools, migrations, account lock, backup and restore
 crates/rizzy-bus      in-process domain events for the server (ids only; M1 step 3)
 crates/rizzy-domain-auth  server auth domain: OPAQUE, sessions, devices, signed state, 2FA, recovery
 crates/rizzy-domain-vault  server vault domain: op and snapshot upload, Fetch, compaction, restore healing
 crates/rizzy-server   server binary `rizzy-vault`: roles api, web, worker; secrets and migrate commands
 crates/rizzy-cli      command-line client `rv`: accounts, items, sync, export, import, devices, recovery (docs/rv.md)
+crates/rizzy-wasm     wasm-bindgen bindings over rizzy-client for the web vault and extension (ADR 0019 §4.1)
 crates/xtask          repository checks: `cargo xtask check-deps`, `cargo xtask check-clippy`, `cargo xtask check-signoff`
+apps/web              the React web vault (ADR 0014); loads the rizzy-wasm core via packages/core
+apps/extension        the browser extension (Chromium MV3 and Firefox; ADR 0036), M2
+packages/core         the typed wrapper that is the only import path to the generated wasm bindings
+packages/ui           shared UI components and the M1 token CSS (ADR 0014)
+deploy/               the container image (deploy/Containerfile) and compose files (ADR 0010 §4)
 docs/                 roadmap, threat model, crypto design, ADRs; index in docs/README.md
 fuzz/                 cargo-fuzz targets; its own workspace, run on nightly
 ```
@@ -66,7 +74,7 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-Before every push, run the full gate in [CONTRIBUTING.md](CONTRIBUTING.md#checks-to-run-before-every-push). CI runs exactly that list, and a PR is not reviewed until it passes.
+Before every push, run the full gate in [CONTRIBUTING.md](CONTRIBUTING.md#checks-to-run-before-every-push). CI runs every one of those checks, each as its own job, and a PR is not reviewed until they pass.
 
 ## Documentation
 
