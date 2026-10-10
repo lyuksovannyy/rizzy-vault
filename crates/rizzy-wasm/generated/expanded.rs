@@ -20393,6 +20393,14 @@ pub mod matching {
         #[doc =
         " in a host UI; a mixed-script host must keep showing its punycode `xn--` form."]
         saved_host: String,
+        #[doc =
+        " The saved URI\'s own port, only when it is not its scheme\'s default"]
+        #[doc =
+        " (`rizzy_client::matching::Candidate::saved_port`\'s own doc explains why a host that does"]
+        #[doc =
+        " a \"same site\" gate for a destructive decision, never autofill itself, must compare this"]
+        #[doc = " alongside `saved_host`, not `saved_host` alone)."]
+        saved_port: Option<u16>,
     }
     #[automatically_derived]
     impl ::core::clone::Clone for MatchCandidate {
@@ -20403,6 +20411,7 @@ pub mod matching {
                 uri_id: ::core::clone::Clone::clone(&self.uri_id),
                 needs_warning: ::core::clone::Clone::clone(&self.needs_warning),
                 saved_host: ::core::clone::Clone::clone(&self.saved_host),
+                saved_port: ::core::clone::Clone::clone(&self.saved_port),
             }
         }
     }
@@ -20410,10 +20419,11 @@ pub mod matching {
     impl ::core::fmt::Debug for MatchCandidate {
         #[inline]
         fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-            ::core::fmt::Formatter::debug_struct_field4_finish(f,
+            ::core::fmt::Formatter::debug_struct_field5_finish(f,
                 "MatchCandidate", "item_id", &self.item_id, "uri_id",
                 &self.uri_id, "needs_warning", &self.needs_warning,
-                "saved_host", &&self.saved_host)
+                "saved_host", &self.saved_host, "saved_port",
+                &&self.saved_port)
         }
     }
     #[automatically_derived]
@@ -21060,6 +21070,113 @@ pub mod matching {
                 };
             self.saved_host.clone()
         }
+        #[doc =
+        " The saved URI\'s own port, only when it is not its scheme\'s default (module docs,"]
+        #[doc =
+        " [`MatchCandidate::saved_host`]\'s own doc). `undefined` on the JavaScript side exactly"]
+        #[doc =
+        " when the port is the scheme\'s default or absent, same as [`MatchDecision::page_port`]."]
+        #[must_use]
+        pub fn saved_port(&self) -> Option<u16> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The saved URI\'s own port, only when it is not its scheme\'s default (module docs,"]
+                    #[doc =
+                    " [`MatchCandidate::saved_host`]\'s own doc). `undefined` on the JavaScript side exactly"]
+                    #[doc =
+                    " when the port is the scheme\'s default or absent, same as [`MatchDecision::page_port`]."]
+                    #[must_use]
+                    #[export_name = "matchcandidate_savedPort_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_MatchCandidate_savedPort(me:
+                            <MatchCandidate as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<u16> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<MatchCandidate>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<MatchCandidate>();
+                                            let me =
+                                                unsafe {
+                                                    <MatchCandidate as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.saved_port();
+                                            _ret
+                                        }
+                                    });
+                        <Option<u16> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The saved URI\'s own port, only when it is not its scheme\'s default (module docs,"]
+                    #[doc =
+                    " [`MatchCandidate::saved_host`]\'s own doc). `undefined` on the JavaScript side exactly"]
+                    #[doc =
+                    " when the port is the scheme\'s default or absent, same as [`MatchDecision::page_port`]."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_matchcandidate_savedPort_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<u16> as WasmDescribe>::describe();
+                        <Option<u16> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0eMatchCandidate\x03Q The saved URI's own port, only when it is not its scheme's default (module docs,V [`MatchCandidate::saved_host`]'s own doc). `undefined` on the JavaScript side exactlyW when the port is the scheme's default or absent, same as [`MatchDecision::page_port`].\0\0\0\0\tsavedPort\x01\x01\0\0\0\0\x01\0\x02\tsavedPort\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.saved_port
+        }
     }
     #[automatically_derived]
     const _: () =
@@ -21103,6 +21220,11 @@ pub mod matching {
         " \"the page\" in the equivalence-only warning, and what the fill UI always shows, matching"]
         #[doc = " or not."]
         page_host: String,
+        #[doc =
+        " The page\'s own port, only when it is not its scheme\'s default"]
+        #[doc =
+        " (`rizzy_client::matching::Decision::page_port`\'s own doc)."]
+        page_port: Option<u16>,
         #[doc = " Every matching candidate, in the order given."]
         candidates: Vec<MatchCandidate>,
         #[doc =
@@ -21116,6 +21238,7 @@ pub mod matching {
         fn clone(&self) -> MatchDecision {
             MatchDecision {
                 page_host: ::core::clone::Clone::clone(&self.page_host),
+                page_port: ::core::clone::Clone::clone(&self.page_port),
                 candidates: ::core::clone::Clone::clone(&self.candidates),
                 warnings: ::core::clone::Clone::clone(&self.warnings),
             }
@@ -21125,9 +21248,10 @@ pub mod matching {
     impl ::core::fmt::Debug for MatchDecision {
         #[inline]
         fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-            ::core::fmt::Formatter::debug_struct_field3_finish(f,
-                "MatchDecision", "page_host", &self.page_host, "candidates",
-                &self.candidates, "warnings", &&self.warnings)
+            ::core::fmt::Formatter::debug_struct_field4_finish(f,
+                "MatchDecision", "page_host", &self.page_host, "page_port",
+                &self.page_port, "candidates", &self.candidates, "warnings",
+                &&self.warnings)
         }
     }
     #[automatically_derived]
@@ -21136,6 +21260,7 @@ pub mod matching {
         fn default() -> MatchDecision {
             MatchDecision {
                 page_host: ::core::default::Default::default(),
+                page_port: ::core::default::Default::default(),
                 candidates: ::core::default::Default::default(),
                 warnings: ::core::default::Default::default(),
             }
@@ -21502,6 +21627,131 @@ pub mod matching {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             self.page_host.clone()
+        }
+        #[doc =
+        " The page\'s own port, only when it is not its scheme\'s default (module docs,"]
+        #[doc =
+        " [`MatchDecision::page_host`]\'s own doc). A caller doing a \"same site\" gate for a"]
+        #[doc =
+        " destructive decision (an update-vs-save gate, never autofill, which is `BaseDomain`-mode"]
+        #[doc =
+        " narrowing-only by design, ADR 0037 §4) must compare this against each candidate\'s own"]
+        #[doc =
+        " [`MatchCandidate::saved_port`], not `page_host`/`savedHost` alone — two different ports"]
+        #[doc =
+        " on the same host are two different sites (ADR 0037 §2 rule 5)."]
+        #[must_use]
+        pub fn page_port(&self) -> Option<u16> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The page\'s own port, only when it is not its scheme\'s default (module docs,"]
+                    #[doc =
+                    " [`MatchDecision::page_host`]\'s own doc). A caller doing a \"same site\" gate for a"]
+                    #[doc =
+                    " destructive decision (an update-vs-save gate, never autofill, which is `BaseDomain`-mode"]
+                    #[doc =
+                    " narrowing-only by design, ADR 0037 §4) must compare this against each candidate\'s own"]
+                    #[doc =
+                    " [`MatchCandidate::saved_port`], not `page_host`/`savedHost` alone — two different ports"]
+                    #[doc =
+                    " on the same host are two different sites (ADR 0037 §2 rule 5)."]
+                    #[must_use]
+                    #[export_name = "matchdecision_pagePort_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_MatchDecision_pagePort(me:
+                            <MatchDecision as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<u16> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<MatchDecision>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<MatchDecision>();
+                                            let me =
+                                                unsafe {
+                                                    <MatchDecision as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.page_port();
+                                            _ret
+                                        }
+                                    });
+                        <Option<u16> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The page\'s own port, only when it is not its scheme\'s default (module docs,"]
+                    #[doc =
+                    " [`MatchDecision::page_host`]\'s own doc). A caller doing a \"same site\" gate for a"]
+                    #[doc =
+                    " destructive decision (an update-vs-save gate, never autofill, which is `BaseDomain`-mode"]
+                    #[doc =
+                    " narrowing-only by design, ADR 0037 §4) must compare this against each candidate\'s own"]
+                    #[doc =
+                    " [`MatchCandidate::saved_port`], not `page_host`/`savedHost` alone — two different ports"]
+                    #[doc =
+                    " on the same host are two different sites (ADR 0037 §2 rule 5)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_matchdecision_pagePort_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<u16> as WasmDescribe>::describe();
+                        <Option<u16> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rMatchDecision\x06L The page's own port, only when it is not its scheme's default (module docs,Q [`MatchDecision::page_host`]'s own doc). A caller doing a \"same site\" gate for aY destructive decision (an update-vs-save gate, never autofill, which is `BaseDomain`-modeW narrowing-only by design, ADR 0037 \xc2\xa74) must compare this against each candidate's ownZ [`MatchCandidate::saved_port`], not `page_host`/`savedHost` alone \xe2\x80\x94 two different ports@ on the same host are two different sites (ADR 0037 \xc2\xa72 rule 5).\0\0\0\0\x08pagePort\x01\x01\0\0\0\0\x01\0\x02\x08pagePort\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.page_port
         }
         #[doc = " Every matching candidate."]
         #[must_use]
@@ -22065,6 +22315,7 @@ pub mod matching {
                         &item_uris, &equivalence).map_err(CoreError::from)?;
         Ok(MatchDecision {
                 page_host: decision.page_host,
+                page_port: decision.page_port,
                 candidates: decision.candidates.into_iter().map(|c|
                             MatchCandidate {
                                 item_id: hex(&c.item_id),
@@ -22075,6 +22326,7 @@ pub mod matching {
                                     _ => false,
                                 },
                                 saved_host: c.saved_host,
+                                saved_port: c.saved_port,
                             }).collect(),
                 warnings: decision.warnings.into_iter().map(str::to_owned).collect(),
             })

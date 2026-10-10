@@ -85,6 +85,11 @@ pub struct MatchCandidate {
     /// shown"): "the saved site" in the equivalence-only warning. Never decode this to Unicode
     /// in a host UI; a mixed-script host must keep showing its punycode `xn--` form.
     saved_host: String,
+    /// The saved URI's own port, only when it is not its scheme's default
+    /// (`rizzy_client::matching::Candidate::saved_port`'s own doc explains why a host that does
+    /// a "same site" gate for a destructive decision, never autofill itself, must compare this
+    /// alongside `saved_host`, not `saved_host` alone).
+    saved_port: Option<u16>,
 }
 
 #[wasm_bindgen]
@@ -116,6 +121,15 @@ impl MatchCandidate {
     pub fn saved_host(&self) -> String {
         self.saved_host.clone()
     }
+
+    /// The saved URI's own port, only when it is not its scheme's default (module docs,
+    /// [`MatchCandidate::saved_host`]'s own doc). `undefined` on the JavaScript side exactly
+    /// when the port is the scheme's default or absent, same as [`MatchDecision::page_port`].
+    #[wasm_bindgen(getter, js_name = savedPort)]
+    #[must_use]
+    pub fn saved_port(&self) -> Option<u16> {
+        self.saved_port
+    }
 }
 
 /// The result of one [`decide_match_candidates`] call.
@@ -126,6 +140,9 @@ pub struct MatchDecision {
     /// "the page" in the equivalence-only warning, and what the fill UI always shows, matching
     /// or not.
     page_host: String,
+    /// The page's own port, only when it is not its scheme's default
+    /// (`rizzy_client::matching::Decision::page_port`'s own doc).
+    page_port: Option<u16>,
     /// Every matching candidate, in the order given.
     candidates: Vec<MatchCandidate>,
     /// Lines explaining a URI or the frame as a whole that this build could not evaluate
@@ -140,6 +157,18 @@ impl MatchDecision {
     #[must_use]
     pub fn page_host(&self) -> String {
         self.page_host.clone()
+    }
+
+    /// The page's own port, only when it is not its scheme's default (module docs,
+    /// [`MatchDecision::page_host`]'s own doc). A caller doing a "same site" gate for a
+    /// destructive decision (an update-vs-save gate, never autofill, which is `BaseDomain`-mode
+    /// narrowing-only by design, ADR 0037 §4) must compare this against each candidate's own
+    /// [`MatchCandidate::saved_port`], not `page_host`/`savedHost` alone — two different ports
+    /// on the same host are two different sites (ADR 0037 §2 rule 5).
+    #[wasm_bindgen(getter, js_name = pagePort)]
+    #[must_use]
+    pub fn page_port(&self) -> Option<u16> {
+        self.page_port
     }
 
     /// Every matching candidate.
@@ -248,6 +277,7 @@ pub fn decide_match_candidates(
             .map_err(CoreError::from)?;
     Ok(MatchDecision {
         page_host: decision.page_host,
+        page_port: decision.page_port,
         candidates: decision
             .candidates
             .into_iter()
@@ -256,6 +286,7 @@ pub fn decide_match_candidates(
                 uri_id: hex(&c.uri_id),
                 needs_warning: matches!(c.matched_via, MatchedVia::Equivalence(_)),
                 saved_host: c.saved_host,
+                saved_port: c.saved_port,
             })
             .collect(),
         warnings: decision.warnings.into_iter().map(str::to_owned).collect(),
@@ -329,6 +360,37 @@ mod tests {
         let decision =
             decide_match_candidates("https://example.com/", true, "", 0x0001, uris).unwrap();
         assert!(decision.candidates().is_empty());
+    }
+
+    #[test]
+    fn exposes_the_page_and_saved_ports_for_a_host_gate_on_top() {
+        // ADR 0037 §2 rule 5: a destructive "same site" decision on top of `BaseDomain`-mode
+        // candidates (never autofill itself) needs the port, not just `pageHost`/`savedHost`,
+        // so this binding must thread it through to JavaScript.
+        let uris = vec![UriInput::new(
+            hex(&[1; 16]),
+            hex(&[2; 16]),
+            "https://example.com:9000/login".to_owned(),
+            0x0001,
+        )];
+        let decision =
+            decide_match_candidates("https://example.com:8443/", true, "", 0x0001, uris).unwrap();
+        assert_eq!(decision.page_port(), Some(8443));
+        assert_eq!(decision.candidates()[0].saved_port(), Some(9000));
+    }
+
+    #[test]
+    fn default_ports_expose_as_undefined_on_both_sides() {
+        let uris = vec![UriInput::new(
+            hex(&[1; 16]),
+            hex(&[2; 16]),
+            "https://example.com/login".to_owned(),
+            0x0001,
+        )];
+        let decision =
+            decide_match_candidates("https://example.com/", true, "", 0x0001, uris).unwrap();
+        assert_eq!(decision.page_port(), None);
+        assert_eq!(decision.candidates()[0].saved_port(), None);
     }
 
     #[test]

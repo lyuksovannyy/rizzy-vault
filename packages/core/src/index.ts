@@ -2225,6 +2225,13 @@ export interface MatchCandidate {
    * gap 31 in the M2 gap audit). Never decode this to Unicode in a host UI: a mixed-script
    * host must keep showing its punycode `xn--` form. */
   readonly savedHost: string;
+  /** The saved URI's own port, `undefined` when it is its scheme's default (ADR 0037 §2 rule
+   * 5). `savedHost` alone is the page's *registrable-domain-narrowed* candidate set (ADR 0037
+   * §4's `BaseDomain` mode, autofill's own default); a caller doing a destructive "same site"
+   * decision on top of it — never autofill itself — must compare this alongside `savedHost`
+   * against {@link MatchDecisionResult.pagePort}, or two different ports on the same host are
+   * wrongly treated as the same site. */
+  readonly savedPort?: number | undefined;
 }
 
 /** The result of one {@link decideMatchCandidates} call. */
@@ -2232,6 +2239,9 @@ export interface MatchDecisionResult {
   /** The page's own exact normalised host, A-label form (ADR 0037 §5 "Exact host shown";
    * gap 31 in the M2 gap audit): what the fill UI always shows, matching or not. */
   readonly pageHost: string;
+  /** The page's own port, `undefined` when it is its scheme's default ({@link
+   * MatchCandidate.savedPort}'s own doc explains why a "same site" gate must compare this). */
+  readonly pagePort: number | undefined;
   readonly candidates: readonly MatchCandidate[];
   readonly warnings: readonly string[];
 }
@@ -2276,12 +2286,12 @@ export function decideMatchCandidates(
   try {
     const candidates = decision.candidates.map((c) => {
       try {
-        return { itemId: c.itemId, uriId: c.uriId, needsWarning: c.needsWarning, savedHost: c.savedHost };
+        return { itemId: c.itemId, uriId: c.uriId, needsWarning: c.needsWarning, savedHost: c.savedHost, savedPort: c.savedPort };
       } finally {
         c.free();
       }
     });
-    return { pageHost: decision.pageHost, candidates, warnings: [...decision.warnings] };
+    return { pageHost: decision.pageHost, pagePort: decision.pagePort, candidates, warnings: [...decision.warnings] };
   } finally {
     decision.free();
   }

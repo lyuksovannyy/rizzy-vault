@@ -18,20 +18,30 @@
 // `admin.example.com`, even though both share the registrable domain `example.com` and even if
 // the submitted username happens to match. So `selectUpdateCandidate` applies one more, narrower
 // gate on top of the ordinary `BaseDomain` candidate set, specific to the update decision: the
-// candidate's own saved host (`MatchCandidate.savedHost`) must equal the page's own host
-// (`pageHost`, `MatchDecisionResult.pageHost` — both already the same normalised, A-label,
-// port-excluded form, ADR 0037 §2/§5) exactly, byte for byte. A saved `example.com` item does
-// not update from a `www.example.com` submission either, under this same rule; that costs an
-// extra save prompt (and possibly a duplicate item) rather than risk the wrong overwrite — the
-// trade-off ADR 0037's own Negative consequences accept for autofill (reversible) does not carry
-// over to update (not reversible).
+// candidate's own saved host and port (`MatchCandidate.savedHost`/`savedPort`) must equal the
+// page's own host and port (`pageHost`/`pagePort`, `MatchDecisionResult.pageHost`/`pagePort` —
+// all already the same normalised, A-label form, ADR 0037 §2/§5) exactly, byte for byte for the
+// host and value-equal for the port. A saved `example.com` item does not update from a
+// `www.example.com` submission either, under this same rule; that costs an extra save prompt
+// (and possibly a duplicate item) rather than risk the wrong overwrite — the trade-off ADR 0037's
+// own Negative consequences accept for autofill (reversible) does not carry over to update (not
+// reversible). The same is true of the port (ADR 0037 §2 rule 5: a non-default port is part of
+// the same-site comparison): a page at `https://example.com:8443` must never update an item saved
+// for `https://example.com:9000`, even though `BaseDomain` mode — the only mode this extension
+// resolves URIs to, and the candidate set this gate narrows on top of — does not tell the two
+// ports apart at all.
 import { describe, expect, it } from "vitest";
 
 import { selectUpdateCandidate } from "../src/core-host/bindings.ts";
 import type { MatchCandidate } from "../src/core-host/bindings.ts";
 
-function candidate(itemId: string, needsWarning: boolean, savedHost = "example.com"): MatchCandidate {
-  return { itemId, uriId: `${itemId}-uri`, needsWarning, savedHost };
+function candidate(
+  itemId: string,
+  needsWarning: boolean,
+  savedHost = "example.com",
+  savedPort: number | undefined = undefined,
+): MatchCandidate {
+  return { itemId, uriId: `${itemId}-uri`, needsWarning, savedHost, savedPort };
 }
 
 describe("selectUpdateCandidate", () => {
@@ -41,7 +51,7 @@ describe("selectUpdateCandidate", () => {
   it("same host, different username -> no update target (save as a new item)", () => {
     const candidates = [candidate("item-1", false)];
     const usernameOf = (id: string) => (id === "item-1" ? "alice" : undefined);
-    expect(selectUpdateCandidate(candidates, usernameOf, "bob", "example.com")).toBeUndefined();
+    expect(selectUpdateCandidate(candidates, usernameOf, "bob", "example.com", undefined)).toBeUndefined();
   });
 
   // Same full host and the same username on file: this is the one case `findItemForUpdate`
@@ -49,7 +59,7 @@ describe("selectUpdateCandidate", () => {
   it("same host, same username -> that item (update it)", () => {
     const candidates = [candidate("item-1", false)];
     const usernameOf = (id: string) => (id === "item-1" ? "alice" : undefined);
-    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "example.com")).toBe("item-1");
+    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "example.com", undefined)).toBe("item-1");
   });
 
   // A look-alike/merely-equivalent host (ADR 0037 §5, `needsWarning: true`) is never an update
@@ -58,11 +68,11 @@ describe("selectUpdateCandidate", () => {
   it("look-alike host (equivalence-only match) -> never an update target, even with a matching username", () => {
     const candidates = [candidate("item-1", true)];
     const usernameOf = (id: string) => (id === "item-1" ? "alice" : undefined);
-    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "example.com")).toBeUndefined();
+    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "example.com", undefined)).toBeUndefined();
   });
 
   it("no candidates at all -> no update target", () => {
-    expect(selectUpdateCandidate([], () => "alice", "alice", "example.com")).toBeUndefined();
+    expect(selectUpdateCandidate([], () => "alice", "alice", "example.com", undefined)).toBeUndefined();
   });
 
   // A direct match takes priority over an equivalence-only one for the same item id: the
@@ -71,7 +81,7 @@ describe("selectUpdateCandidate", () => {
   it("skips an equivalence-only duplicate once the same itemId already matched via a direct candidate", () => {
     const candidates = [candidate("item-1", false), candidate("item-1", true)];
     const usernameOf = () => "alice";
-    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "example.com")).toBe("item-1");
+    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "example.com", undefined)).toBe("item-1");
   });
 
   // If the first (direct) listing for an itemId fails the username check, a later equivalence-only
@@ -80,7 +90,7 @@ describe("selectUpdateCandidate", () => {
   it("does not fall through to a later equivalence-only listing of an itemId already checked", () => {
     const candidates = [candidate("item-1", false), candidate("item-1", true)];
     const usernameOf = () => "bob";
-    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "example.com")).toBeUndefined();
+    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "example.com", undefined)).toBeUndefined();
   });
 
   // Two different saved items on the same host: only the one whose username matches is picked,
@@ -88,7 +98,7 @@ describe("selectUpdateCandidate", () => {
   it("picks the matching item among several candidates for different items", () => {
     const candidates = [candidate("item-1", false), candidate("item-2", false)];
     const usernameOf = (id: string) => (id === "item-1" ? "alice" : "bob");
-    expect(selectUpdateCandidate(candidates, usernameOf, "bob", "example.com")).toBe("item-2");
+    expect(selectUpdateCandidate(candidates, usernameOf, "bob", "example.com", undefined)).toBe("item-2");
   });
 
   // `usernameOf` returning `undefined` (the lookup itself failed, e.g. `session.item` threw) must
@@ -97,8 +107,8 @@ describe("selectUpdateCandidate", () => {
   it("treats a failed username lookup as empty, not as a wildcard match", () => {
     const candidates = [candidate("item-1", false)];
     const usernameOf = () => undefined;
-    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "example.com")).toBeUndefined();
-    expect(selectUpdateCandidate(candidates, usernameOf, "", "example.com")).toBe("item-1");
+    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "example.com", undefined)).toBeUndefined();
+    expect(selectUpdateCandidate(candidates, usernameOf, "", "example.com", undefined)).toBe("item-1");
   });
 
   // Finding 1 (2026-10-09 review): a different subdomain of the SAME registrable domain — the
@@ -110,7 +120,7 @@ describe("selectUpdateCandidate", () => {
   it("different subdomain of the same registrable domain -> no update target, even with a matching username", () => {
     const candidates = [candidate("item-1", false, "a.example.com")];
     const usernameOf = () => "alice";
-    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "b.example.com")).toBeUndefined();
+    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "b.example.com", undefined)).toBeUndefined();
   });
 
   // The same shape, but for a domain a single owner does not control end to end: a shared
@@ -122,7 +132,9 @@ describe("selectUpdateCandidate", () => {
   it("different tenant on a shared, not-yet-PSL-split hosting domain -> no update target, even with a matching username", () => {
     const candidates = [candidate("item-1", false, "tenant-one.example-hosting.test")];
     const usernameOf = () => "alice";
-    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "tenant-two.example-hosting.test")).toBeUndefined();
+    expect(
+      selectUpdateCandidate(candidates, usernameOf, "alice", "tenant-two.example-hosting.test", undefined),
+    ).toBeUndefined();
   });
 
   // The host gate is per-candidate (per saved URI), not per-item: a second saved URI for the
@@ -132,7 +144,7 @@ describe("selectUpdateCandidate", () => {
   it("a second saved URI for the same item, on the page's own host, is still picked after an earlier one on a different host", () => {
     const candidates = [candidate("item-1", false, "a.example.com"), candidate("item-1", false, "b.example.com")];
     const usernameOf = () => "alice";
-    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "b.example.com")).toBe("item-1");
+    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "b.example.com", undefined)).toBe("item-1");
   });
 
   // Two different items: the one whose username matches is on the WRONG host, and the one on the
@@ -142,6 +154,45 @@ describe("selectUpdateCandidate", () => {
   it("never picks an item by combining one candidate's host match with a different candidate's username match", () => {
     const candidates = [candidate("item-1", false, "wrong.example.com"), candidate("item-2", false, "b.example.com")];
     const usernameOf = (id: string) => (id === "item-1" ? "alice" : "bob");
-    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "b.example.com")).toBeUndefined();
+    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "b.example.com", undefined)).toBeUndefined();
+  });
+
+  // Regression (the bug this file's test suite grows for): the SAME host on two different
+  // explicit ports — `BaseDomain` mode (the candidate set this gate narrows on top of) does not
+  // tell these two sites apart at all, so the port check here is the only thing that does.
+  // Without it, a page at `https://example.com:8443` could silently overwrite a password saved
+  // for `https://example.com:9000`.
+  it("same host, different explicit ports -> no update target, even with a matching username", () => {
+    const candidates = [candidate("item-1", false, "example.com", 9000)];
+    const usernameOf = () => "alice";
+    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "example.com", 8443)).toBeUndefined();
+  });
+
+  // Same host, same explicit port -> still an update target, same as the portless case.
+  it("same host, same explicit port -> that item (update it)", () => {
+    const candidates = [candidate("item-1", false, "example.com", 8443)];
+    const usernameOf = () => "alice";
+    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "example.com", 8443)).toBe("item-1");
+  });
+
+  // A page with no explicit port (`undefined`, its scheme's default) must never match a
+  // candidate saved on an explicit, different port, or vice versa: `undefined` means "the
+  // default port", not "any port".
+  it("an explicit port never matches a page with no explicit port (the default)", () => {
+    const candidates = [candidate("item-1", false, "example.com", 8443)];
+    const usernameOf = () => "alice";
+    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "example.com", undefined)).toBeUndefined();
+  });
+
+  // A second saved URI for the same item, on the page's own host AND port, is still picked after
+  // an earlier one on the same host but a different port — the port check is per-candidate too,
+  // not folded into the `checked` de-dup.
+  it("a second saved URI for the same item, on the page's own host and port, is still picked after an earlier one on the same host but a different port", () => {
+    const candidates = [
+      candidate("item-1", false, "example.com", 9000),
+      candidate("item-1", false, "example.com", 8443),
+    ];
+    const usernameOf = () => "alice";
+    expect(selectUpdateCandidate(candidates, usernameOf, "alice", "example.com", 8443)).toBe("item-1");
   });
 });
