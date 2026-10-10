@@ -1208,26 +1208,32 @@ impl Device {
     /// once an item has been in the trash for the retention period"; ADR 0018 §9 "Trashed at",
     /// §11 "No purge over an unapplied record"): purges every trashed item whose retention
     /// period has elapsed, then persists the resulting cache writes the same way every other
-    /// mutating step does (`take_writes` then `commit`), so the purge survives a restart even if
-    /// the device never reaches the following `upload`.
+    /// mutating step does (`take_writes` then `commit`) **before** any error of the pass itself
+    /// is reported, so the purge survives a restart even if the device never reaches the
+    /// following `upload` — including a pass that purges some items and then fails on a later
+    /// one ([`VaultSync::auto_purge_due`]'s own doc: "purges already written are not undone").
     ///
     /// No `tests/e2e.rs` test drives this past the real 30-day
     /// [`rizzy_client::items::TRASH_RETENTION_MS`]: `rv` reads the wall clock
     /// ([`crate::sys::now_ms`]) with no injection seam, and backdating a trash op's `now_ms`
     /// does not backdate its HLC (ADR 0012 §2) once this account's clock has already ticked
     /// near real time from earlier real ops in the same test, because `Hlc::tick` clamps to
-    /// `max(last_hlc + 1, now_ms << 16)`. The same `auto_purge_due` call this method makes is
-    /// covered directly, with full control of `now_ms`, by the six tests in
-    /// `rizzy-client/src/tests/retention.rs`.
+    /// `max(last_hlc + 1, now_ms << 16)`. The same `auto_purge_due` call this method makes,
+    /// including its partial-failure path, is covered directly, with full control of `now_ms`,
+    /// by the tests in `rizzy-client/src/tests/retention.rs`.
     ///
     /// # Errors
-    /// The errors of [`VaultSync::auto_purge_due`]; [`Device::commit`];
-    /// [`Device::check_writable`].
+    /// [`Device::commit`]'s error takes precedence, as [`Device::edit`]: it reports a failure
+    /// to persist what the pass already wrote over the pass's own error. Otherwise, the
+    /// errors of [`VaultSync::auto_purge_due`]; [`Device::check_writable`].
     async fn auto_purge(&mut self) -> Result<(), CliError> {
-        self.vault
-            .auto_purge_due(&mut self.rng, &self.unlocked, now_ms(), TRASH_RETENTION_MS)?;
-        let changeset = self.vault.take_writes();
-        self.commit(changeset).await?;
+        let purged =
+            self.vault
+                .auto_purge_due(&mut self.rng, &self.unlocked, now_ms(), TRASH_RETENTION_MS);
+        // Whatever the pass purged before it failed is committed too: the rows are own ops the
+        // merge already holds (as `Device::edit`).
+        self.flush().await?;
+        purged?;
         self.check_writable()
     }
 
