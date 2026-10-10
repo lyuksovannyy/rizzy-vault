@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `content/menu-visibility.ts`'s pure functions, no DOM (this workspace's `vitest`
 // `environment: "node"` has none) — same pattern as `decide-click.test.ts` and
 // `own-overlay-mutation.test.ts`. A7/THREAT_MODEL.md gap, HANDOFF X6.
