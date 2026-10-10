@@ -253,4 +253,29 @@ describe("Gate B: initMenuVisibilityState / recordSample / isFillAllowed", () =>
     recordSample(before, 5, true);
     expect(before).toEqual(snapshot);
   });
+
+  // Adversarial-report finding (not yet owner-dated): a sampler that STOPS TICKING ENTIRELY
+  // (e.g. a main-thread stall covering Gate A's own `requestAnimationFrame` loop) never calls
+  // `recordSample` at all, so `lastBadSampleAt` can stay `undefined` even while the frame is
+  // actually hidden the whole time — the pre-existing trailing-bad-sample check alone had no way
+  // to tell that apart from "never been bad, still fine." `isFillAllowed` now also requires
+  // `lastGoodSampleAt` itself to be within the trailing window.
+  it("refuses once the last good sample is stale, even with no bad sample ever recorded (a stalled sampler, not merely an untouched one)", () => {
+    let state = initMenuVisibilityState();
+    state = recordSample(state, 0, true); // one real good tick, then the sampler never ticks again
+    expect(isFillAllowed(state, DEFAULT_MENU_VISIBILITY_WINDOW_MS + 1, DEFAULT_MENU_VISIBILITY_WINDOW_MS)).toBe(false);
+  });
+
+  it("still allows right at the good-sample freshness boundary", () => {
+    let state = initMenuVisibilityState();
+    state = recordSample(state, 0, true);
+    expect(isFillAllowed(state, DEFAULT_MENU_VISIBILITY_WINDOW_MS, DEFAULT_MENU_VISIBILITY_WINDOW_MS)).toBe(true);
+  });
+
+  it("a later bad sample cannot make a stale-good state pass again (freshness is checked independently of the bad-sample window)", () => {
+    const state: MenuVisibilityState = { lastGoodSampleAt: 0, lastBadSampleAt: 0 };
+    // The bad sample is itself old enough to pass its own window, but the good sample is EVEN
+    // staler — both conditions must hold.
+    expect(isFillAllowed(state, DEFAULT_MENU_VISIBILITY_WINDOW_MS + 1, DEFAULT_MENU_VISIBILITY_WINDOW_MS)).toBe(false);
+  });
 });
