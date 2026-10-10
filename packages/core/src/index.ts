@@ -648,6 +648,30 @@ export interface FieldView {
   readonly conflict: boolean;
 }
 
+/**
+ * One password-history entry, without its value (ADR 0013 §3 rule 3): `merge` is the history
+ * of `login.password` (ADR 0012 §5), `imported` came from another manager (`pwhist`, ADR 0018
+ * §7). `index` is its position within its source; `changedMs` the date it stopped being
+ * current (`merge`) or the other manager's date (`imported`, when it gave one).
+ */
+export interface HistoryEntry {
+  readonly source: "merge" | "imported";
+  readonly index: number;
+  readonly changedMs: number | undefined;
+}
+
+/**
+ * A notice of {@link VaultSession.takeNotices}: ids only. `late-edit`: "An edit from
+ * `<devices>` arrived for an item you deleted permanently. Restore it as a new item?" (ADR 0018
+ * §3). `concurrent-trash`: "deleted on `devices[0]` while it was being edited on `devices[1]`"
+ * (ADR 0012 §5). Name the devices from {@link VaultSession.devices}.
+ */
+export interface Notice {
+  readonly kind: "late-edit" | "concurrent-trash";
+  readonly item: string;
+  readonly devices: readonly string[];
+}
+
 /** A current TOTP code. */
 export interface TotpCode {
   readonly code: string;
@@ -1094,6 +1118,48 @@ export class VaultSession {
   /** Purges a trashed item for good. */
   purgeItem(id: string): void {
     call(() => this.#s().purgeItem(id, this.#now()));
+  }
+
+  /**
+   * The item's password history, without values (ADR 0013 §3 rule 3): one entry per former
+   * password, `merge` entries newest first, then `imported` ones. List it again after every
+   * sync: a sync can shift the entries.
+   */
+  passwordHistory(id: string): HistoryEntry[] {
+    return mapFree(
+      call(() => this.#s().passwordHistory(id)),
+      (h) => ({
+        source: h.source as HistoryEntry["source"],
+        index: h.index,
+        changedMs: h.changedMs === undefined ? undefined : Number(h.changedMs),
+      }),
+    );
+  }
+
+  /** One password-history entry's value, as {@link passwordHistory} listed it, on the user's request only. */
+  revealPasswordHistory(id: string, source: HistoryEntry["source"], index: number): string {
+    return call(() => this.#s().revealPasswordHistory(id, source, index));
+  }
+
+  /**
+   * The notices not yet handed over in this session, each handed over once (gap 02): an edit
+   * that arrived for an item deleted permanently (offer {@link restoreLateAsNew}), and an item
+   * deleted on one device while it was being edited on another. Call it after each `sync`.
+   * The "handed over" marks live in the core's memory only and end with the session.
+   */
+  takeNotices(): Notice[] {
+    return mapFree(
+      call(() => this.#s().takeNotices()),
+      (n) => ({ kind: n.kind as Notice["kind"], item: n.item, devices: n.devices }),
+    );
+  }
+
+  /**
+   * Restores the late edits of an item deleted permanently as a new item of `itemType`, the
+   * type the user picked; returns the new item's id. The deleted item stays deleted.
+   */
+  restoreLateAsNew(id: string, itemType: ItemType): string {
+    return call(() => this.#s().restoreLateAsNew(id, itemType, this.#now()));
   }
 
   /** The item's current TOTP code. */

@@ -686,6 +686,156 @@ describe.skipIf(binary === undefined)("against a real server", () => {
 
     first.lock();
   });
+
+  /** A confirmed signup of `loginName` and its first session, with the Secret Key text. */
+  async function freshAccount(
+    loginName: string,
+  ): Promise<{ session: VaultSession; secretKey: string }> {
+    const transport = fetchTransport(origin);
+    const signup = await Signup.start(transport, {
+      origin,
+      loginName,
+      password: PASSWORD,
+      issueRecoveryCode: false,
+    });
+    const kit = signup.emergencyKit();
+    const secretKey = new TextDecoder().decode(kit.secretKey);
+    kit.secretKey.fill(0);
+    await signup.confirm(secretKey.split("-").at(-1) ?? "");
+    return { session: await signup.login(), secretKey };
+  }
+
+  // Gap 01 (ADR 0012 §5, ADR 0013 §3 rule 3): the history crosses as dates only; one value
+  // crosses per reveal.
+  it("lists password history without values and reveals one entry on request", async () => {
+    const { session: s } = await freshAccount("Dave");
+    const id = s.createItem("login", [
+      { op: "set", key: "item.name", value: "Mail" },
+      { op: "set", key: "login.password", value: "v0" },
+    ]);
+    const bare = s.createItem("note", [{ op: "set", key: "item.name", value: "No history" }]);
+
+    // Empty: one value only, or no password at all.
+    expect(s.passwordHistory(id)).toEqual([]);
+    expect(s.passwordHistory(bare)).toEqual([]);
+
+    s.editItem(id, [{ op: "set", key: "login.password", value: "v1" }]);
+    s.editItem(id, [{ op: "set", key: "login.password", value: "v2" }]);
+    await s.sync();
+    const two = s.passwordHistory(id);
+    expect(two.map((h) => [h.source, h.index])).toEqual([
+      ["merge", 0],
+      ["merge", 1],
+    ]);
+    for (const entry of two) {
+      expect(typeof entry.changedMs).toBe("number");
+      // Dates only: no value of any kind in the listing.
+      expect(Object.keys(entry).sort()).toEqual(["changedMs", "index", "source"]);
+    }
+    expect(JSON.stringify(two)).not.toContain("v0");
+    expect(JSON.stringify(two)).not.toContain("v1");
+    expect(s.revealPasswordHistory(id, "merge", 0)).toBe("v1");
+    expect(s.revealPasswordHistory(id, "merge", 1)).toBe("v0");
+    expect(() => s.revealPasswordHistory(id, "merge", 2)).toThrowError(
+      expect.objectContaining({ code: "unknown_item" }),
+    );
+    expect(() => s.revealPasswordHistory(id, "imported", 0)).toThrowError(
+      expect.objectContaining({ code: "unknown_item" }),
+    );
+    expect(() => s.revealPasswordHistory(id, "other" as never, 0)).toThrowError(
+      expect.objectContaining({ code: "invalid_input" }),
+    );
+    // The current value is never a history entry, and fields() carries no former password.
+    expect(s.fields(id).some((f) => f.list === "pwhist")).toBe(false);
+
+    // Capped at 50 (the merge's history limit): v0..v54 replaced, the 50 newest kept.
+    for (let n = 3; n <= 55; n += 1) {
+      s.editItem(id, [{ op: "set", key: "login.password", value: `v${n}` }]);
+    }
+    const capped = s.passwordHistory(id);
+    expect(capped).toHaveLength(50);
+    expect(s.revealPasswordHistory(id, "merge", 0)).toBe("v54");
+    expect(s.revealPasswordHistory(id, "merge", 49)).toBe("v5");
+    expect(() => s.revealPasswordHistory(id, "merge", 50)).toThrowError(
+      expect.objectContaining({ code: "unknown_item" }),
+    );
+    s.lock();
+  });
+
+  // Gap 02 (ADR 0018 §3 "Surfacing", ADR 0012 §5 "Active wins"): each notice is handed over
+  // once per session, kept in session memory only, and a late edit restores as a new item.
+  it("hands over late-edit and concurrent-trash notices once per session", async () => {
+    const transport = fetchTransport(origin);
+    const { session: first, secretKey } = await freshAccount("Erin");
+    const kept = first.createItem("note", [{ op: "set", key: "item.name", value: "Kept" }]);
+    const gone = first.createItem("note", [{ op: "set", key: "item.name", value: "Gone" }]);
+    await first.sync();
+    // No notice on a quiet vault.
+    expect(first.takeNotices()).toEqual([]);
+
+    const second = await login(transport, {
+      origin,
+      loginName: "erin",
+      secretKey,
+      password: PASSWORD,
+    });
+    await second.sync();
+
+    // The first session trashes one item, then purges the other; each time the second edits
+    // the item before it has heard of that.
+    first.trashItem(kept);
+    await first.sync();
+    second.editItem(kept, [{ op: "set", key: "item.notes", value: "still needed" }]);
+    await second.sync();
+    first.trashItem(gone);
+    first.purgeItem(gone);
+    await first.sync();
+    second.editItem(gone, [{ op: "set", key: "item.notes", value: "late" }]);
+    await second.sync();
+
+    await first.sync();
+    const notices = first.takeNotices();
+    expect(notices).toHaveLength(2);
+    expect(notices).toContainEqual({
+      kind: "concurrent-trash",
+      item: kept,
+      devices: [first.deviceId, second.deviceId],
+    });
+    expect(notices).toContainEqual({ kind: "late-edit", item: gone, devices: [second.deviceId] });
+    // Handed over once in this session, even after another sync.
+    expect(first.takeNotices()).toEqual([]);
+    await first.sync();
+    expect(first.takeNotices()).toEqual([]);
+    // The edit kept the trashed item; the purged one stays gone.
+    expect(first.items().map((i) => i.id)).toContain(kept);
+    expect(first.items().map((i) => i.id)).not.toContain(gone);
+
+    // Restore as a new item of the type the user picks.
+    expect(() => first.restoreLateAsNew(kept, "note")).toThrowError(
+      expect.objectContaining({ code: "unknown_item" }),
+    );
+    expect(() => first.restoreLateAsNew(gone, "spaceship" as never)).toThrowError(
+      expect.objectContaining({ code: "invalid_input" }),
+    );
+    const restored = first.restoreLateAsNew(gone, "note");
+    expect(restored).not.toBe(gone);
+    expect(first.fields(restored).find((f) => f.key === "item.notes")?.value).toBe("late");
+    await first.sync();
+    expect(first.items().map((i) => i.id)).not.toContain(gone);
+
+    // Session memory only: a new session is handed the notices again.
+    const third = await login(transport, {
+      origin,
+      loginName: "erin",
+      secretKey,
+      password: PASSWORD,
+    });
+    await third.sync();
+    const again = third.takeNotices().map((n) => [n.kind, n.item]);
+    expect(again).toContainEqual(["late-edit", gone]);
+    expect(again).toContainEqual(["concurrent-trash", kept]);
+    lockAll(first, second, third);
+  });
 });
 
 /** Locks every session. */
