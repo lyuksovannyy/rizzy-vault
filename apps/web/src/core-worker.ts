@@ -155,6 +155,14 @@ function bool(v: unknown): boolean {
   return v;
 }
 
+/** A non-negative safe-integer argument (a list position), or `invalid_input`. */
+function index(v: unknown): number {
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) {
+    throw new CoreError("invalid_input");
+  }
+  return v;
+}
+
 /** Zeroes every byte array among `args`, whatever the call did with them. */
 function wipe(args: readonly unknown[]): void {
   for (const a of args) {
@@ -239,6 +247,12 @@ async function run(m: CallMessage): Promise<unknown> {
     trashItem: () => current().trashItem(str(a[0])),
     restoreItem: () => current().restoreItem(str(a[0])),
     purgeItem: () => current().purgeItem(str(a[0])),
+    // Dates only; one value per reveal (ADR 0013 §3 rule 3): the history is never sent whole.
+    passwordHistory: () => current().passwordHistory(str(a[0])),
+    revealPasswordHistory: () =>
+      current().revealPasswordHistory(str(a[0]), str(a[1]) as never, index(a[2])),
+    takeNotices: () => current().takeNotices(),
+    restoreLateAsNew: () => current().restoreLateAsNew(str(a[0]), str(a[1]) as never),
     totp: () => current().totp(str(a[0])),
     exportEncrypted: () => current().exportEncrypted(bytes(a[0])),
     exportBlockers: () => current().exportBlockers(),

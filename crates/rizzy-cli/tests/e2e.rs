@@ -2995,3 +2995,105 @@ fn item_show_lists_password_history() {
     assert!(!history_lines.iter().any(|l| l.contains("third-password")));
     assert_eq!(a.field(&item, "login.password"), "third-password");
 }
+
+/// The first 8 hex digits of the id of the device `rv` runs as, from `device list`.
+fn own_device_prefix(rv: &Rv) -> String {
+    let list = rv.ok(&["device", "list"], &[]);
+    let line = list
+        .out
+        .iter()
+        .find(|l| l.ends_with("this device"))
+        .unwrap_or_else(|| panic!("{:?}", list.out));
+    line[..8].to_owned()
+}
+
+/// Whether a note is one of the gap 02 notices.
+fn is_notice(note: &str) -> bool {
+    note.contains("arrived for an item you deleted permanently") || note.contains("deleted on")
+}
+
+/// `rv sync` prints the gap 02 notices (ADR 0018 §3 "Surfacing"; ADR 0012 §5 "Active wins"):
+/// none on a quiet vault; "deleted on X while it was being edited on Y" when an edit wins over
+/// a concurrent trash; "An edit from <device> arrived for an item you deleted permanently" for
+/// an edit concurrent with a purge, which `item restore-late` restores as a new item. `rv`
+/// keeps no "already shown" mark (it would be an ADR 0026 cache record), so the next sync
+/// prints the late-edit notice again.
+#[test]
+fn sync_prints_late_edit_and_trash_notices_and_restore_late_restores() {
+    let server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("late-a");
+    let (secret_key, _) = sign_up(&a, &origin, "alice");
+    let b = Rv::new("late-b");
+    log_in(&b, &origin, "alice", &secret_key);
+    let b_prefix = own_device_prefix(&b);
+
+    // A quiet vault: no notice.
+    let kept = create_note(&a, "Kept");
+    let gone = create_note(&a, "Gone");
+    let quiet = a.ok(&["sync"], &[]);
+    assert!(
+        !quiet.notes.iter().any(|n| is_notice(n)),
+        "{:?}",
+        quiet.notes
+    );
+    b.ok(&["sync"], &[]);
+
+    // A trashes one item, then purges the other; each time B edits the item without having
+    // seen that (every write syncs, so the steps alternate).
+    a.ok(&["item", "trash", &kept], &[]);
+    b.ok(
+        &["item", "edit", &kept, "--field", "item.notes=still needed"],
+        &[],
+    );
+    a.ok(&["item", "trash", &gone], &[]);
+    a.ok(&["item", "purge", &gone], &[]);
+    b.ok(&["item", "edit", &gone, "--field", "item.notes=late"], &[]);
+
+    let synced = a.ok(&["sync"], &[]);
+    let trash_notice = format!(
+        "{kept}  Kept: deleted on this device while it was being edited on desktop/cli \
+         {b_prefix}; the edit kept it."
+    );
+    assert!(synced.notes.contains(&trash_notice), "{:?}", synced.notes);
+    let late_notice = format!(
+        "An edit from desktop/cli {b_prefix} arrived for an item you deleted permanently \
+         ({gone}). Restore it as a new item? `rv item restore-late {gone} --type <type>`"
+    );
+    assert!(synced.notes.contains(&late_notice), "{:?}", synced.notes);
+    // The edit kept the trashed item; the purged one stays gone.
+    assert!(a.items().iter().any(|(id, _)| *id == kept));
+    assert!(!a.items().iter().any(|(id, _)| *id == gone));
+
+    // Shown again by the next sync: rv keeps no mark across processes.
+    let again = a.ok(&["sync"], &[]);
+    assert!(again.notes.contains(&late_notice), "{:?}", again.notes);
+
+    // restore-late refuses an item that is not deleted, and a type it does not know.
+    let (refused, _) = a.try_run(
+        &["item", "restore-late", &kept, "--type", "note"],
+        &[PASSWORD],
+        &[],
+        &[],
+    );
+    assert!(
+        matches!(refused, Err(CliError::Client(ClientError::UnknownItem))),
+        "{refused:?}"
+    );
+    let (bad_type, _) = a.try_run(
+        &["item", "restore-late", &gone, "--type", "spaceship"],
+        &[PASSWORD],
+        &[],
+        &[],
+    );
+    assert!(matches!(bad_type, Err(CliError::Usage(_))), "{bad_type:?}");
+
+    // Restored as a new item of the type the user names; the deleted item stays deleted.
+    let restored = a
+        .ok(&["item", "restore-late", &gone[..8], "--type", "note"], &[])
+        .out[0]
+        .clone();
+    assert_ne!(restored, gone);
+    assert_eq!(a.field(&restored, "item.notes"), "late");
+    assert!(!a.items().iter().any(|(id, _)| *id == gone));
+}

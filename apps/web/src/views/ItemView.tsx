@@ -1,5 +1,6 @@
 // One item: its fields, masked where the core conceals them, with reveal and copy; its URIs as
-// safe links (INV-42); its TOTP code; edit, trash, restore and purge.
+// safe links (INV-42); its TOTP code; its password history (`PasswordHistory.tsx`); edit,
+// trash, restore and purge.
 //
 // A concealed value crosses from the Worker only when the user asks (reveal or copy; ADR 0013
 // §3 rule 3), and a revealed value is shown in the secret-field component (INV-68).
@@ -10,6 +11,7 @@ import { useEffect, useId, useState } from "react";
 import { codeOf } from "../core-client.ts";
 import { type Element, type Grouped, group, labelOf, matchModeLabel } from "../fields.ts";
 import { SafeLink, SafeOpenButton } from "../SafeLink.tsx";
+import { PasswordHistory } from "./PasswordHistory.tsx";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText, useAction } from "./common.tsx";
 
@@ -312,6 +314,7 @@ export function ItemView(props: {
       {grouped.other.map((f) => (
         <FieldValue key={f.key} ctx={ctx} id={id} field={f} label={f.key} />
       ))}
+      <PasswordHistory ctx={ctx} id={id} />
       {grouped.tags.length > 0 && (
         <p className="tags">
           {grouped.tags.map((t) => (

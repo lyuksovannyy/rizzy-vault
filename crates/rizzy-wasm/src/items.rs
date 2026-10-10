@@ -9,7 +9,14 @@
 //!   list, element and attribute, its kind, and its value **only if the schema shows it**. A
 //!   concealed value (passwords, TOTP secrets, card numbers, hidden custom fields, and to be
 //!   safe every key this build does not know) crosses only through
-//!   [`crate::Session::reveal_field`], on the user's request.
+//!   [`crate::Session::reveal_field`], on the user's request. The `pwhist` list (imported
+//!   password history, ADR 0018 §7) is left out: the schema shows its values, but they are
+//!   former passwords, so they cross only as a password-history entry.
+//! - **Password history** ([`HistoryEntryView`]) carries, per entry, its source (`merge` for
+//!   the history of `login.password`, ADR 0012 §5; `imported` for `pwhist`), its position and
+//!   its date. Never the value: one value crosses through
+//!   [`crate::Session::reveal_password_history`], on the user's request, so the Worker never
+//!   sends the whole history to the UI thread (ADR 0013 §3 rule 3).
 //! - **An edit** ([`ItemDraft`]) is built in Rust from the user's input, call by call, and
 //!   written as one op by [`crate::Session::create_item`] or [`crate::Session::edit_item`],
 //!   where every write passes the schema checks. The draft holds the typed values in zeroizing
@@ -30,8 +37,8 @@ use rizzy_client::rizzy_core::item::schema::{
     ATTR_ALG, ATTR_CREATED_MS, ATTR_CREDENTIAL_ID, ATTR_DISCOVERABLE, ATTR_KIND, ATTR_LABEL,
     ATTR_PRIVATE_KEY, ATTR_PUBLIC_KEY_COSE, ATTR_RP_ID, ATTR_USER_HANDLE, ATTR_VALUE,
     CUSTOM_KIND_BOOLEAN, CUSTOM_KIND_HIDDEN, CUSTOM_KIND_TEXT, Concealment, CustomFieldKind,
-    Expected, ITEM_FAVORITE, ITEM_NAME, KeyClass, LIST_FIELD, LIST_PASSKEY, LIST_TAG, LIST_URI,
-    LOGIN_TOTP, LOGIN_USERNAME, classify,
+    Expected, ITEM_FAVORITE, ITEM_NAME, KeyClass, LIST_FIELD, LIST_PASSKEY, LIST_PWHIST, LIST_TAG,
+    LIST_URI, LOGIN_TOTP, LOGIN_USERNAME, classify,
 };
 use rizzy_client::rizzy_core::item::tag::{tag_key, tag_name};
 use rizzy_client::rizzy_core::item::value::ValueRef;
@@ -476,7 +483,8 @@ pub(crate) fn visible_item(vault: &VaultSync, id: &str) -> CoreResult<ItemId> {
     }
 }
 
-/// The displayed fields of `item`, concealed values withheld (module docs).
+/// The displayed fields of `item`, concealed values withheld, the `pwhist` list left out
+/// (module docs).
 ///
 /// `vault.field_keys` gives no guarantee about the order of two elements of the same list: the
 /// `order` attribute (ADR 0018 §6) is a value elements carry, not a property of the key's
@@ -488,13 +496,18 @@ pub(crate) fn fields(vault: &VaultSync, item: ItemId) -> Vec<FieldView> {
         let Ok(parsed) = FieldKey::parse(key.as_bytes()) else {
             continue;
         };
+        let parts = parsed.as_key();
+        // Former passwords: only [`password_history`] lists them, and only
+        // [`reveal_history`] sends one value (module docs).
+        if parts.list() == Some(LIST_PWHIST) {
+            continue;
+        }
         let Some(value) = vault.field_value(item, &key) else {
             continue;
         };
         if value.is_cleared() {
             continue;
         }
-        let parts = parsed.as_key();
         let hidden = concealed(&parsed);
         let (kind, text) = kind_and_text(&value);
         out.push(FieldView {
@@ -557,6 +570,110 @@ pub(crate) fn reveal(vault: &VaultSync, item: ItemId, key: &str) -> CoreResult<Z
         .field_value(item, key)
         .filter(|v| !v.is_cleared())
         .ok_or(ClientError::UnknownItem)?;
+    kind_and_text(&value)
+        .1
+        .ok_or(ClientError::InvalidInput.into())
+}
+
+/// [`HistoryEntryView::source`] of the history of `login.password` (ADR 0012 §5).
+pub const HISTORY_MERGE: &str = "merge";
+/// [`HistoryEntryView::source`] of password history imported from another manager (`pwhist`,
+/// ADR 0018 §7).
+pub const HISTORY_IMPORTED: &str = "imported";
+
+/// One password-history entry without its value (module docs): the UI lists these, and asks
+/// for one value at a time.
+#[wasm_bindgen]
+#[derive(Clone, Debug)]
+pub struct HistoryEntryView {
+    /// [`HISTORY_MERGE`] or [`HISTORY_IMPORTED`].
+    source: &'static str,
+    /// The entry's position within its source: newest first for `merge`, list order for
+    /// `imported` (`rizzy-client`'s `password_history` and `imported_password_history`).
+    index: usize,
+    /// When the value stopped being current (`merge`), or the source manager's own date
+    /// (`imported`, if it gave one), in Unix milliseconds.
+    changed_ms: Option<u64>,
+}
+
+#[wasm_bindgen]
+impl HistoryEntryView {
+    /// `merge` or `imported`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn source(&self) -> String {
+        self.source.to_owned()
+    }
+
+    /// The position to pass to [`crate::Session::reveal_password_history`].
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    /// The entry's date in Unix milliseconds, or `undefined` for an imported entry without one.
+    #[wasm_bindgen(getter, js_name = changedMs)]
+    #[must_use]
+    pub fn changed_ms(&self) -> Option<u64> {
+        self.changed_ms
+    }
+}
+
+/// The password history of `item`, without values (module docs): the `merge` entries newest
+/// first, then the `imported` ones in list order. The ADR defines no order across the two
+/// sources, so they are never interleaved. Empty when the item has none.
+pub(crate) fn password_history(vault: &VaultSync, item: ItemId) -> Vec<HistoryEntryView> {
+    let merge = vault
+        .password_history(item)
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| HistoryEntryView {
+            source: HISTORY_MERGE,
+            index,
+            changed_ms: Some(entry.changed_ms),
+        });
+    let imported = vault
+        .imported_password_history(item)
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| HistoryEntryView {
+            source: HISTORY_IMPORTED,
+            index,
+            changed_ms: entry.changed_ms,
+        });
+    merge.chain(imported).collect()
+}
+
+/// The value of one password-history entry as text: call it only on the user's request (ADR
+/// 0013 §3 rule 3). The history is read again here and the index bounds-checked: an index past
+/// the end is `unknown_item`. A sync between the listing and the reveal can shift the entries
+/// of the same item, so the host lists the history again after every sync.
+///
+/// # Errors
+/// `invalid_input` for a source other than `merge` or `imported`, or a value with no text
+/// form; `unknown_item` for an index past the end or an imported entry without a value.
+pub(crate) fn reveal_history(
+    vault: &VaultSync,
+    item: ItemId,
+    source: &str,
+    index: usize,
+) -> CoreResult<Zeroizing<String>> {
+    let value = match source {
+        HISTORY_MERGE => vault
+            .password_history(item)
+            .into_iter()
+            .nth(index)
+            .map(|entry| entry.value),
+        HISTORY_IMPORTED => vault
+            .imported_password_history(item)
+            .into_iter()
+            .nth(index)
+            .and_then(|entry| entry.value),
+        _ => return Err(ClientError::InvalidInput.into()),
+    }
+    .filter(|v| !v.is_cleared())
+    .ok_or(ClientError::UnknownItem)?;
     kind_and_text(&value)
         .1
         .ok_or(ClientError::InvalidInput.into())

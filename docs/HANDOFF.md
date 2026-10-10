@@ -17,6 +17,7 @@ Delete or rewrite this file when its next steps are done.
 | 00–03 | `feat(client,cli,web): trash auto-purge, password history, late-edit API` | Client trash auto-purge after sync (rv, web vault, extension), with the ADR 0018 §12 "no purge over an unapplied record" test. Password-history API, shown by `rv item show`. Late-edit API. Web permanent-delete tests. |
 | 27 (a), 30–33, 35 | `feat(match,extension): HANDOFF M2 gaps 27a, 30-33, 35` | PSL snapshot pinned by SHA-256 and checked in `cargo xtask check-deps`. Global list wired into the equivalence view (empty until a list is signed). Fill UI names the page host and the saved host. Generator in the page's password field. Save vs. update uses the matcher and the username. Passkey `userHandle` and `allowCredentials`. |
 | 13, 25, 37, 44–49 | `docs: fix docs that contradict the code` | README, SECURITY, CONTRIBUTING, docs/README, docs/rv.md, rizzy-cli crate docs, CLAUDE.md status list. |
+| 01, 02 (rest) | `feat(web,cli): password history view and late-edit notices` | Web vault password-history section: dates only from the Worker, one value per reveal; imported `pwhist` rows no longer cross through `itemFields`. Late-edit and concurrent-trash notices in `rv sync` and the web vault, with restore as a new item (`rv item restore-late`, web type picker). "Already shown" marks in session memory only, so `rv` repeats them each sync. The extension (`DeviceSession`) has no history view or notices yet. |
 
 ## Next work: cleared by an Accepted ADR or needing no ADR
 
@@ -24,8 +25,6 @@ Recheck each gap's evidence before you implement it: the audit's verifiers refut
 
 ### Product
 
-- **01 (rest)** Web vault view of password history (the client API exists). ADR 0013 §3 rule 3 applies: reveal only on the user's request, and the Worker never sends the whole history to the UI thread eagerly.
-- **02 (rest)** Hosts (rv, web vault) surface the late-edit and purge notices (the client API exists). Keep the "already shown" set in session memory only: persisting it is a cache-format change and needs an ADR 0026 amendment first.
 - **36** Community equivalence-list PR process: templates and a CONTRIBUTING section (ADR 0038). The owner creates the GitHub label.
 
 ### Tests and verification that CLAUDE.md, CRYPTO.md or THREAT_MODEL.md require

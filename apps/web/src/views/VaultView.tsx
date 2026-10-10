@@ -12,7 +12,7 @@
 // It locks itself after `IDLE_LOCK_MS` without input (`autolock.ts`). When changes are still
 // unsent then, it first tries one sync, bounded by `FINAL_SYNC_MS`, and locks in any case;
 // changes that still did not reach the server are counted in the lock notice.
-import type { ItemType } from "@rizzy-vault/core";
+import type { DeviceView, ItemType, Notice } from "@rizzy-vault/core";
 import {
   ConfirmDialog,
   IconAccount,
@@ -37,10 +37,12 @@ import { type CoreClient, codeOf } from "../core-client.ts";
 import { useDismissableMenu } from "../dismissable-menu.ts";
 import { CREATABLE_TYPES, tagCounts } from "../fields.ts";
 import { type GeneratorMemory, useGeneratorMemory } from "../generator-memory.ts";
+import { mergeNotices, noticeKey } from "../notices.ts";
 import type { SessionInfo } from "../protocol.ts";
 import { shortcutFor } from "../shortcuts.ts";
 import { GeneratorPane } from "./GeneratorPane.tsx";
 import { ItemsPane, type Scope } from "./ItemsPane.tsx";
+import { NoticesPanel } from "./NoticesPanel.tsx";
 import { SettingsView } from "./SettingsView.tsx";
 import { ShortcutsHelp } from "./ShortcutsHelp.tsx";
 import { TransferPane } from "./TransferPane.tsx";
@@ -106,6 +108,11 @@ export function VaultView(props: {
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | undefined>();
   const [revision, setRevision] = useState(0);
+  /** The late-edit and trash notices the syncs handed over (gap 02), until dismissed, and the
+   * device list that names their devices. React state only: gone on a lock or a reload, like
+   * the Worker's own "handed over" marks (`notices.ts` module docs). */
+  const [notices, setNotices] = useState<readonly Notice[]>([]);
+  const [noticeDevices, setNoticeDevices] = useState<readonly DeviceView[]>([]);
   /** Tag names and counts over the active (non-trash) items, for the sidebar's Tags group
    * (item 6). Loaded here, separately from `ItemsPane`'s own list, because the sidebar needs
    * it whichever section is showing, not only while the item list itself is on screen. */
@@ -141,6 +148,13 @@ export function VaultView(props: {
     try {
       update(await client.call("sync"));
       setSyncError(undefined);
+      // Each notice is handed over once per session, so it is held before anything else can
+      // fail; the device list only names their devices ("device <id>" without it).
+      const fresh = await client.call("takeNotices");
+      if (fresh.length > 0) {
+        setNotices((held) => mergeNotices(held, fresh));
+        client.call("devices").then(setNoticeDevices, () => undefined);
+      }
     } catch (e) {
       const code = codeOf(e);
       setSyncError(code);
@@ -450,6 +464,12 @@ export function VaultView(props: {
           </div>
         </header>
         <ErrorText code={syncError} />
+        <NoticesPanel
+          ctx={ctx}
+          notices={notices}
+          devices={noticeDevices}
+          onDismiss={(gone) => setNotices((held) => held.filter((n) => noticeKey(n) !== noticeKey(gone)))}
+        />
         <section className="vault-body">
           {section === "items" && (
             <ItemsPane ctx={ctx} trash={false} scope={scope} newItemSignal={newItemSignal} />
