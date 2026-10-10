@@ -253,13 +253,39 @@ export const DEFAULT_MENU_VISIBILITY_WINDOW_MS = 1000;
  * the click, flip back after" attack have already happened — not merely before the click. See
  * this module's own header for the full reasoning; in short: requires at least one real good
  * sample to have EVER been recorded (`lastGoodSampleAt !== undefined` — rules out a
- * permanently-hidden menu on a technicality) AND no bad sample in the trailing `windowMs` window
- * ending at `now` (`lastBadSampleAt === undefined`, or old enough). No separate dwell/settle
- * constant is layered on top: the window itself IS the dwell, applied at the one point in time —
- * `apply_fill` arrival — that actually matters.
+ * permanently-hidden menu on a technicality), that good sample to still be RECENT
+ * (`now - lastGoodSampleAt <= windowMs` — see below), AND no bad sample in the trailing
+ * `windowMs` window ending at `now` (`lastBadSampleAt === undefined`, or old enough). No separate
+ * dwell/settle constant is layered on top: the window itself IS the dwell, applied at the one
+ * point in time — `apply_fill` arrival — that actually matters.
+ *
+ * The `lastGoodSampleAt` recency requirement (adversarial-report finding, not yet owner-dated —
+ * recorded per CLAUDE.md "deviate only with a stated reason" at the point it was added): without
+ * it, a sampler that STOPS TICKING ENTIRELY — a main-thread stall covering Gate A's own
+ * `requestAnimationFrame` loop, not merely a CSS flip `tick()` would still observe — can leave
+ * `lastBadSampleAt` permanently `undefined` even while the frame is actually hidden, because
+ * {@link recordSample} is the ONLY thing that ever sets either timestamp, and it never runs
+ * during a genuine stall. The pre-existing trailing-bad-sample check alone treats
+ * `lastBadSampleAt === undefined` as an unconditional pass, with no requirement on HOW LONG ago
+ * `lastGoodSampleAt` was recorded — so a stalled-forever sampler reads as "still good," not as
+ * "haven't checked in a while, so we don't actually know." Requiring `lastGoodSampleAt` itself to
+ * be within the SAME trailing window closes that: once nobody has reported anything — good OR bad
+ * — in `windowMs`, this refuses, fail-closed, same as a frame that has been continuously bad the
+ * whole time.
+ *
+ * Reuses `windowMs` rather than a second tunable (DRY/KISS). Measured directly rather than
+ * assumed (instrumented `apply_fill` arrival against the real positive-control e2e test,
+ * `adversarial-fill-requests.spec.ts`, 5 runs): `now - lastGoodSampleAt` at the moment `apply_fill`
+ * is actually processed was 0.6–5.2ms every time — Gate A's `tick()` loop is still running at that
+ * point (not yet cancelled; `destroy()` only runs once `requestFill` in `inline-menu/main.ts`
+ * settles, and `handleInlineMenuFillRequest` awaits pushing `apply_fill` to the tab before that
+ * response resolves — so the push causally PRECEDES teardown here, not the other way around).
+ * `windowMs` (1000ms, U) therefore has roughly 200x headroom over the normal gap in this
+ * implementation; a future change to that ordering could shrink the margin, which is exactly why
+ * this is measured and re-checked, not assumed permanent.
  */
 export function isFillAllowed(state: MenuVisibilityState, now: number, windowMs: number = DEFAULT_MENU_VISIBILITY_WINDOW_MS): boolean {
-  if (state.lastGoodSampleAt === undefined) {
+  if (state.lastGoodSampleAt === undefined || now - state.lastGoodSampleAt > windowMs) {
     return false;
   }
   return state.lastBadSampleAt === undefined || now - state.lastBadSampleAt >= windowMs;
