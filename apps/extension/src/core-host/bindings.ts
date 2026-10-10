@@ -359,7 +359,7 @@ export function decideCandidates(
   session: DurableSession,
   pageUrl: string,
   frame: MatchFrameInfo,
-): { pageHost: string; candidates: readonly MatchCandidate[]; warnings: readonly string[] } {
+): { pageHost: string; pagePort: number | undefined; candidates: readonly MatchCandidate[]; warnings: readonly string[] } {
   return decideMatchCandidates(pageUrl, frame, MatchMode.BaseDomain, sessionItemUris(session));
 }
 
@@ -368,9 +368,9 @@ export function decideCandidates(
  * — the same decision autofill itself makes, not a separate, looser notion of "the same site")
  * and the submitted `username`, not the URL alone:
  *
- * - **Same full host, same username** → that item (update it).
- * - **Same full host, a different username** → `undefined` (save as a new item): a second
- *   account on a site the user already has one item for must never overwrite that other
+ * - **Same full host and port, same username** → that item (update it).
+ * - **Same full host and port, a different username** → `undefined` (save as a new item): a
+ *   second account on a site the user already has one item for must never overwrite that other
  *   account's credentials just because the form posted to the same host.
  * - **A different full host, even one sharing the same registrable domain** (`BaseDomain` mode's
  *   own candidate set, ADR 0037 §4 — the same set autofill uses, since `sessionItemUris` resolves
@@ -381,11 +381,15 @@ export function decideCandidates(
  *   *autofill* on purpose (ADR 0037 §4's "Base domain" rule); they are two different full hosts
  *   for *update*, so a credential submitted on one subdomain can never silently overwrite an
  *   item saved on another, even a third-party-hostable one sharing an apex domain the Public
- *   Suffix List has not split. {@link selectUpdateCandidate}'s `pageHost` parameter is this extra
- *   gate: `candidate.savedHost` must equal the page's own exact host, not merely its registrable
- *   domain. The cost is a user who saved an item for `example.com` and later logs in at
- *   `www.example.com` gets an extra save prompt (and possibly a duplicate item) rather than a
- *   silently "updated" password — the right default for a destructive action.
+ *   Suffix List has not split. {@link selectUpdateCandidate}'s `pageHost`/`pagePort` parameters
+ *   are this extra gate: `candidate.savedHost`/`savedPort` must equal the page's own exact host
+ *   and port, not merely its registrable domain (ADR 0037 §2 rule 5: a non-default port is part
+ *   of the same-site comparison, same as `Host`/`Exact` mode's own fix — `https://example.com:8443`
+ *   and `https://example.com:9000` are two different sites even though `BaseDomain` mode, which
+ *   this gate narrows on top of, does not tell them apart). The cost is a user who saved an item
+ *   for `example.com` and later logs in at `www.example.com`, or at a different port, gets an
+ *   extra save prompt (and possibly a duplicate item) rather than a silently "updated" password —
+ *   the right default for a destructive action.
  * - **An equivalence-only match** (`candidate.needsWarning`, ADR 0037 §5 — a different
  *   registrable domain `rizzy-match` treats as the same site) is never an update target either,
  *   even with a matching username: silently overwriting one site's saved password because the
@@ -417,6 +421,7 @@ export function findItemForUpdate(session: DurableSession, pageUrl: string, user
     },
     username,
     decision.pageHost,
+    decision.pagePort,
   );
   if (itemId === undefined) {
     return undefined;
@@ -431,27 +436,33 @@ export function findItemForUpdate(session: DurableSession, pageUrl: string, user
 /** The selection core of {@link findItemForUpdate}, pulled out so it is unit-testable without a
  * `DurableSession` — the same reason `content-handler.ts`'s `selectFillCandidate` is its own
  * function. The first candidate that is: not equivalence-only (`!needsWarning`); saved under
- * exactly `pageHost` (`candidate.savedHost === pageHost` — the full host, not just the
- * registrable domain the `BaseDomain`-mode candidate set already narrowed to, {@link
- * findItemForUpdate}'s own doc comment); and whose item's own saved username equals `username`
- * exactly. `undefined` if no candidate satisfies all three (`usernameOf` resolves each
- * candidate's current saved username, `undefined` if the lookup itself fails). The host check
- * runs first and, on a mismatch, `continue`s without marking the itemId `checked`: a host
- * mismatch says nothing about that item, only about this one saved URI of it, so a later
- * candidate for the SAME item through a different saved URI that does match `pageHost` is still
- * considered. Once a candidate passes the host and warning checks, its itemId is resolved through
- * `usernameOf` at most once, even if `candidates` lists it again (one match per saved URI, so one
- * item can appear several times) — this is the pre-existing `checked` de-dup, narrowed to apply
- * only among same-host candidates. */
+ * exactly `pageHost` **and** `pagePort` (`candidate.savedHost === pageHost && candidate.savedPort
+ * === pagePort` — the full host and port, not just the registrable domain the `BaseDomain`-mode
+ * candidate set already narrowed to, {@link findItemForUpdate}'s own doc comment; ADR 0037 §2
+ * rule 5 treats a non-default port as part of the same-site comparison, and this gate must agree
+ * with that or `https://example.com:8443` could silently update an item saved for
+ * `https://example.com:9000`); and whose item's own saved username equals `username` exactly.
+ * `undefined` if no candidate satisfies all four (`usernameOf` resolves each candidate's current
+ * saved username, `undefined` if the lookup itself fails). The host/port check runs first and, on
+ * a mismatch, `continue`s without marking the itemId `checked`: a mismatch says nothing about
+ * that item, only about this one saved URI of it, so a later candidate for the SAME item through
+ * a different saved URI that does match `pageHost`/`pagePort` is still considered. Once a
+ * candidate passes the host, port and warning checks, its itemId is resolved through `usernameOf`
+ * at most once, even if `candidates` lists it again (one match per saved URI, so one item can
+ * appear several times) — this is the pre-existing `checked` de-dup, narrowed to apply only among
+ * same-host-and-port candidates. `pagePort`/`savedPort` are `number | undefined`, never defaulted
+ * to a sentinel, so two `undefined` ports (both at their scheme's default, ADR 0037 §2 rule 5)
+ * compare equal via `===`, exactly like `rizzy_match::modes::decide`'s own `Host` mode check. */
 export function selectUpdateCandidate(
   candidates: readonly MatchCandidate[],
   usernameOf: (itemId: string) => string | undefined,
   username: string,
   pageHost: string,
+  pagePort: number | undefined,
 ): string | undefined {
   const checked = new Set<string>();
   for (const candidate of candidates) {
-    if (candidate.savedHost !== pageHost) {
+    if (candidate.savedHost !== pageHost || candidate.savedPort !== pagePort) {
       continue;
     }
     if (candidate.needsWarning || checked.has(candidate.itemId)) {
