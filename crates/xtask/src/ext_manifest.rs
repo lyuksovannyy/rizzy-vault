@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `cargo xtask check-manifest`: checks the built browser-extension manifests (Chromium and
 //! Firefox) against INV-40 and ADR 0036 §4/§5 / ADR 0040 (HANDOFF gap X4, audit uid
 //! `X4-INV40-MANIFEST-CI-CHECK`). Today these hold only by inspection; this gives them a check
