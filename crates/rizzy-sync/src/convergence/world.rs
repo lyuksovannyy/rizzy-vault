@@ -232,7 +232,9 @@ struct RotationRecord {
     keys: Vec<SymmetricKeyId>,
     /// The vault key epochs it held.
     vault_keys: BTreeSet<u32>,
-    /// Every envelope that existed at the rotation: what was not written after it.
+    /// Every envelope that existed at the rotation, or earlier: what was not written after it
+    /// ([`World::ever_envelopes`] as of that moment, not just the live set, so a body R1 drops
+    /// and a later restore brings back still counts as pre-existing).
     before: BTreeSet<Vec<u8>>,
 }
 
@@ -286,6 +288,17 @@ pub(super) struct World {
     /// Used by [`World::check_rotations`]'s writer-rule exemption, alongside envelopes that
     /// came in through a healing request.
     restore_floors: Vec<u32>,
+    /// Every envelope ever observed live, server or device-held, accumulated across the run
+    /// (never shrinks). [`Server::worker`]'s R1 can drop an op's body from
+    /// [`Server::envelopes`]'s view (it stays fully covered by a retained snapshot); a later
+    /// restore to a backup taken before that drop (ADR 0021 §2) brings the body back. Without
+    /// this accumulator, a [`RotationRecord::before`] snapshot taken while the body was absent
+    /// would miss it, and the resurrected, honestly pre-rotation envelope would then look like
+    /// a fresh post-rotation write to [`World::check_rotations`]'s writer-rule check. Updated
+    /// wherever a body could first become unreachable ([`Server::worker`]) and at every
+    /// [`World::rotate`], so every `before` snapshot is this set as of that moment, not just the
+    /// live one.
+    ever_envelopes: BTreeSet<Vec<u8>>,
     /// The VVs last seen, for monotonicity.
     seen: Seen,
     /// Whether the drain runs: Fetch responses then come as one page (see [`World::drain`]).
@@ -350,6 +363,7 @@ impl World {
             written: 0,
             restored: false,
             restore_floors: Vec::new(),
+            ever_envelopes: BTreeSet::new(),
             seen: Seen::new(),
             draining: false,
             faulty: BTreeSet::new(),
@@ -500,7 +514,13 @@ impl World {
                     *o = !*o;
                 }
             }
-            Step::Worker => self.server.worker(),
+            Step::Worker => {
+                // Capture every live envelope before R1 can drop a covered op's body
+                // (see `ever_envelopes`'s doc).
+                let live = self.envelopes();
+                self.ever_envelopes.extend(live);
+                self.server.worker();
+            }
             Step::Backup => self.server.backup(),
             Step::RestoreServer => {
                 if self.server.restore() {
@@ -788,7 +808,9 @@ impl World {
             dropped,
             revoke: revoked_id,
         };
-        let before = self.envelopes();
+        let live = self.envelopes();
+        self.ever_envelopes.extend(live);
+        let before = self.ever_envelopes.clone();
         match self.server.rotate(&rotation) {
             Ok(cutoff) => {
                 self.epoch = epoch;
