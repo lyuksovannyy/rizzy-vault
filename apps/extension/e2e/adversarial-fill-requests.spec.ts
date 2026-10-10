@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Adversarial e2e coverage for INV-37 and INV-40 that needs a real enrolled device (HANDOFF gap
 // X3; `docs/THREAT_MODEL.md` A7, INV-37, INV-40; ADR 0036 §4/§5; ADR 0040). The inline menu
 // renders nothing at all — not even the generator button — while the device is locked, so every
