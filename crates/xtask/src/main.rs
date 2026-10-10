@@ -8,6 +8,7 @@
 //! cargo xtask expand-bindings [--write]
 //! cargo xtask build-wasm
 //! cargo xtask check-js
+//! cargo xtask check-manifest
 //! ```
 //!
 //! `check-deps` enforces the crate-boundary rules of ADR 0016 (R1–R8) and the dependency rules
@@ -78,6 +79,13 @@
 //!
 //! `check-js` checks the JavaScript dependency policy of ADR 0014 §3 ([`mod@js`]).
 //!
+//! `check-manifest` checks the built browser-extension manifests (Chromium and Firefox) against
+//! INV-40 and ADR 0036 §4/§5 / ADR 0040 ([`mod@ext_manifest`]): no `externally_connectable`, an
+//! allow-listed `permissions`/`host_permissions`, `all_frames: false` on every content script,
+//! an allow-listed `web_accessible_resources`, and a CSP that bans remote code and inline/eval
+//! beyond the one wasm exception. It needs `apps/extension/dist/{chromium,firefox}/manifest.json`
+//! already built (`cargo xtask build-wasm` then `pnpm run build` in `apps/extension`).
+//!
 //! # How `check-deps` works
 //!
 //! 1. [`load`] gathers every input: `cargo metadata --all-features --locked` three times (all
@@ -111,6 +119,7 @@
 mod bindings;
 mod check;
 mod equivalence_list;
+mod ext_manifest;
 mod js;
 mod manifest;
 mod metadata;
@@ -157,6 +166,11 @@ COMMANDS:
     check-js        Check the JavaScript dependency policy: exact versions, pinned pnpm,
                     empty install-script allow-list, deny.toml licences, pnpm audit
                     (ADR 0014 §3)
+    check-manifest  Check the built browser-extension manifests (Chromium and Firefox) against
+                    INV-40 and ADR 0036 §4/§5 / ADR 0040: no externally_connectable,
+                    allow-listed permissions/host_permissions/web_accessible_resources,
+                    all_frames: false, and the extension-pages CSP. Needs apps/extension/dist/
+                    already built (cargo xtask build-wasm, then pnpm run build)
     equivalence-list <source> <key-file> <list-version> <published-at-ms>
                     Compile data/equivalence/groups.txt-style source into the signed
                     equivalence list (ADR 0038 §3) and write its wire bytes to stdout.
@@ -192,6 +206,7 @@ fn main() -> ExitCode {
         }
         [Some("build-wasm")] => report(bindings::build_wasm(&workspace_root())),
         [Some("check-js")] => report(js::check_js(&workspace_root())),
+        [Some("check-manifest")] => report(ext_manifest::check_built_manifests(&workspace_root())),
         [
             Some("equivalence-list"),
             Some(source),
