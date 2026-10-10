@@ -11,10 +11,12 @@
 //!
 //! - looping [`rizzy_match::decide`] over every saved URI of the items a host is offering for
 //!   autofill, instead of one call per URI (ADR 0037 §4);
-//! - the frame-narrowing gate of ADR 0037 §5: "same registrable domain" top-frame iframes are
-//!   treated as the top frame; any other iframe gets no automatic candidates. This is narrowing
-//!   only (INV-38): it can only remove candidates the registrable-domain gate already allowed,
-//!   never add one.
+//! - the frame-narrowing gate of ADR 0037 §5: a *same-origin* (scheme, host and port all equal)
+//!   non-top-frame iframe is treated as the top frame; any other iframe gets no automatic
+//!   candidates. Same-registrable-domain is explicitly **not** enough (§5: relaxing it that way
+//!   "is a later, explicitly reviewed change, not an implicit consequence of Base domain
+//!   matching"). This is narrowing only (INV-38): it can only remove candidates the
+//!   registrable-domain gate already allowed, never add one.
 //!
 //! No new decision is made here: [`decide_candidates`] never widens what
 //! [`rizzy_match::modes::decide`] would return for a single (page, URI) pair; it only decides
@@ -29,6 +31,8 @@ pub use rizzy_match::{
     EquivalenceGroup, EquivalenceList, EquivalenceView, GroupId, MatchMode, MatchOutcome,
     MatchedVia, NormalizedUrl, Scheme, normalize_domain,
 };
+
+use rizzy_match::security::frame_may_request_candidates;
 
 use crate::error::ClientError;
 
@@ -172,19 +176,24 @@ pub fn decide_candidates(
         page_port: page.port(),
         ..Decision::default()
     };
-    // ADR 0037 §5: a non-top frame gets automatic candidates only when it shares the page's
-    // registrable domain; any other frame is narrowed to none, with one explanatory warning
-    // (never silently, and never by guessing a candidate it cannot defend).
+    // ADR 0037 §5 (INV-37): a non-top frame gets automatic candidates only when it is
+    // same-origin with the page (scheme, host and port all equal) — not merely same
+    // registrable domain, which §5 explicitly reserves for "a later, explicitly reviewed
+    // change, not an implicit consequence of Base domain matching". Any other frame is
+    // narrowed to none, with one explanatory warning (never silently, and never by guessing a
+    // candidate it cannot defend). The same-origin boolean itself is computed here (rizzy-match
+    // has no frame-origin string parsing of its own to compare), but the resulting policy
+    // decision is `rizzy-match`'s own function, not a convention left to this caller (ADR 0037
+    // §5: "a `rizzy-match` function, not a convention left to callers").
     if !frame.is_top_frame {
-        let same = NormalizedUrl::parse(frame.frame_origin)
+        let same_origin = NormalizedUrl::parse(frame.frame_origin)
             .ok()
             .is_some_and(|f| {
-                page.registrable_domain().is_some()
-                    && f.registrable_domain() == page.registrable_domain()
+                f.scheme() == page.scheme() && f.host() == page.host() && f.port() == page.port()
             });
-        if !same {
+        if !frame_may_request_candidates(same_origin) {
             out.warnings.push(
-                "matching: frame is not the top frame and does not share its registrable domain; no automatic candidates",
+                "matching: frame is not the top frame and is not same-origin with it; no automatic candidates",
             );
             return Ok(out);
         }
@@ -376,7 +385,14 @@ mod tests {
     }
 
     #[test]
-    fn a_non_top_frame_on_the_same_domain_is_treated_as_top() {
+    fn a_non_top_frame_on_the_same_registrable_domain_but_a_different_host_is_narrowed_to_no_candidates()
+     {
+        // ADR 0037 §5 (INV-37): "a same-origin iframe is treated as the top frame. A
+        // cross-origin iframe gets no automatic candidate list... relaxing it for
+        // same-registrable-domain iframes is a later, explicitly reviewed change." `pay.
+        // example.com` is cross-origin to `example.com` (different host) even though both
+        // share the registrable domain `example.com`, so this must get zero candidates, the
+        // same as any other cross-origin iframe.
         let equivalence = EquivalenceView::empty();
         let uris = [uri("https://example.com/", MatchMode::BaseDomain)];
         let frame = FrameContext {
@@ -391,8 +407,94 @@ mod tests {
             &equivalence,
         )
         .unwrap();
+        assert!(decision.candidates.is_empty());
+        assert_eq!(decision.warnings.len(), 1);
+    }
+
+    #[test]
+    fn a_non_top_frame_that_is_cross_scheme_but_otherwise_identical_is_narrowed_to_no_candidates() {
+        // Same host, same (default) port, different scheme: still cross-origin. Confirms the
+        // gate compares the scheme too, not just host and port.
+        let equivalence = EquivalenceView::empty();
+        let uris = [uri("https://example.com/", MatchMode::BaseDomain)];
+        let frame = FrameContext {
+            is_top_frame: false,
+            frame_origin: "http://example.com/",
+        };
+        let decision = decide_candidates(
+            "https://example.com/",
+            &frame,
+            MatchMode::BaseDomain,
+            &uris,
+            &equivalence,
+        )
+        .unwrap();
+        assert!(decision.candidates.is_empty());
+        assert_eq!(decision.warnings.len(), 1);
+    }
+
+    #[test]
+    fn a_non_top_frame_that_is_truly_same_origin_is_treated_as_top() {
+        // Exact scheme + host + port match: this is the one case ADR 0037 §5 actually grants
+        // automatic candidates to for a non-top frame.
+        let equivalence = EquivalenceView::empty();
+        let uris = [uri("https://example.com/", MatchMode::BaseDomain)];
+        let frame = FrameContext {
+            is_top_frame: false,
+            frame_origin: "https://example.com/some/path",
+        };
+        let decision = decide_candidates(
+            "https://example.com/",
+            &frame,
+            MatchMode::BaseDomain,
+            &uris,
+            &equivalence,
+        )
+        .unwrap();
         assert_eq!(decision.candidates.len(), 1);
         assert!(decision.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_non_top_frame_same_origin_on_an_explicit_non_default_port_is_treated_as_top() {
+        // Same-origin still requires the port to match when one is explicit (ADR 0037 §2 rule
+        // 5): confirms the gate does not drop the port half of the comparison.
+        let equivalence = EquivalenceView::empty();
+        let uris = [uri("https://example.com:8443/", MatchMode::BaseDomain)];
+        let frame = FrameContext {
+            is_top_frame: false,
+            frame_origin: "https://example.com:8443/",
+        };
+        let decision = decide_candidates(
+            "https://example.com:8443/",
+            &frame,
+            MatchMode::BaseDomain,
+            &uris,
+            &equivalence,
+        )
+        .unwrap();
+        assert_eq!(decision.candidates.len(), 1);
+        assert!(decision.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_non_top_frame_same_host_but_a_different_explicit_port_is_narrowed_to_no_candidates() {
+        let equivalence = EquivalenceView::empty();
+        let uris = [uri("https://example.com:8443/", MatchMode::BaseDomain)];
+        let frame = FrameContext {
+            is_top_frame: false,
+            frame_origin: "https://example.com:9000/",
+        };
+        let decision = decide_candidates(
+            "https://example.com:8443/",
+            &frame,
+            MatchMode::BaseDomain,
+            &uris,
+            &equivalence,
+        )
+        .unwrap();
+        assert!(decision.candidates.is_empty());
+        assert_eq!(decision.warnings.len(), 1);
     }
 
     #[test]
