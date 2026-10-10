@@ -459,6 +459,9 @@ fn a_base_purpose_never_accepts_psk_mode() {
     assert_eq!(opens, 0);
 }
 
+/// A server that relabels a grant with a symmetric or reserved algorithm.
+///
+/// ETH class: 4 (threat model §5.2, envelope and algorithm downgrade).
 #[test]
 fn symmetric_and_reserved_algorithms_are_rejected_before_crypto() {
     let rcpt = recipient();

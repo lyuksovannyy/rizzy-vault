@@ -2143,6 +2143,16 @@ impl VaultSync {
             .collect()
     }
 
+    /// Test access: the bytes of the vault key and of every item key held, for the INV-15
+    /// canary (`tests/canary.rs`), which searches what the fake server saw for them.
+    #[cfg(test)]
+    pub(crate) fn key_bytes_for_tests(&self) -> Vec<Vec<u8>> {
+        core::iter::once(self.vault_key.key())
+            .chain(self.item_keys.values().flatten().map(ItemKey::key))
+            .map(|k| k.expose_secret().to_vec())
+            .collect()
+    }
+
     /// Test access: whether the log counts the own op `seq` as possibly stored and served
     /// ([`VaultLog::may_have_been_served`]), the verdict the restore generations decide.
     #[cfg(test)]

@@ -300,6 +300,8 @@ pub fn argon2id(
         return Err(KdfError::InvalidOutputLength);
     }
     let argon = argon2id_context(kdf_id.params(), out.len())?;
+    #[cfg(test)]
+    test_hooks::note_run(kdf_id);
     // One allocation of exactly `block_count` blocks (64 MiB for `kdf_id` 1), owned here so
     // that it can be wiped; argon2 fills it in place.
     let mut memory = new_block_memory(&argon);
@@ -309,6 +311,30 @@ pub fn argon2id(
     // Wipe on the error path too: the result is held until the matrix is gone.
     wipe_block_memory(memory);
     result
+}
+
+/// Test-only instrumentation: the `kdf_id` of every [`argon2id`] evaluation on this thread, the
+/// OPAQUE KSF's and the local wraps' alike, so tests can count each flow's evaluations against
+/// threat model INV-6's table (`kdf_runs_tests`). It does not exist outside `cfg(test)`.
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use std::cell::RefCell;
+
+    use super::KdfId;
+
+    std::thread_local! {
+        static RUNS: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Records one evaluation at `kdf_id`.
+    pub(crate) fn note_run(kdf_id: KdfId) {
+        RUNS.with(|r| r.borrow_mut().push(kdf_id.get()));
+    }
+
+    /// The `kdf_id`s of every evaluation on this thread so far.
+    pub(crate) fn runs() -> Vec<u16> {
+        RUNS.with(|r| r.borrow().clone())
+    }
 }
 
 /// Wipes the block matrix before it is freed. Every block is wiped in place first, keeping the

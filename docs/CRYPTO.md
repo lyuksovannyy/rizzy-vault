@@ -1388,7 +1388,7 @@ All of this lands with the code in M1. None of it is optional.
    - A caller holding only a share's `share_id` sends 10 bad `link_token`s → the share is not burned.
    - Canary: the `E_dev`, `E_local`, `E_ks` and `ACCOUNT_KEY_FORWARD` envelope bytes never appear in any request body or server row (with threat model INV-15).
 
-   Each test is tagged with the ETH attack class it covers.
+   Each test is tagged with the ETH attack class it covers: a doc-comment line `ETH class: N (threat model §5.x, ...)`, or `ETH class: none` with the reason when the threat model's §5 gives the attack no class (rollback, withholding, forks, restore, origin binding, Secret Key stripping).
 6. **Pairing tests:** parked with pairing ([ADR 0022](adr/0022-server-mode-only.md)).
 7. **Fuzzing** (cargo-fuzz). Targets:
    - envelope parser

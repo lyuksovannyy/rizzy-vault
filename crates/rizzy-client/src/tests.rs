@@ -120,6 +120,9 @@ struct Server {
     device_grants: Vec<rizzy_proto::objects::DeviceGrant>,
     /// The next random value.
     rng: ChaCha20Rng,
+    /// Every request and answer the handlers below saw, as the JSON bodies a real transport
+    /// would carry: the haystack of the INV-15 canary (`canary`).
+    wire: std::cell::RefCell<Vec<Vec<u8>>>,
 }
 
 fn bytes<const N: usize>(v: &[u8]) -> Bytes<N> {
@@ -146,7 +149,13 @@ impl Server {
             generation: [7; 16],
             device_grants: Vec::new(),
             rng,
+            wire: std::cell::RefCell::new(Vec::new()),
         }
+    }
+
+    /// Records one JSON body in [`Server::wire`].
+    fn capture(&self, json: Result<Vec<u8>, serde_json::Error>) {
+        self.wire.borrow_mut().push(json.unwrap());
     }
 
     fn stored(&self) -> &Stored {
@@ -154,17 +163,21 @@ impl Server {
     }
 
     fn register_start(&self, req: &RegisterStartRequest) -> RegisterStartResponse {
+        self.capture(serde_json::to_vec(req));
         let id =
             CredentialIdentifier::for_account(AccountId::from_bytes(req.account_id.to_bytes()));
         let m2 = server_registration_start(&self.setup, req.registration_request.as_slice(), &id)
             .unwrap();
-        RegisterStartResponse {
+        let response = RegisterStartResponse {
             registration_response: bytes(&m2),
             setup_id: self.setup_id,
-        }
+        };
+        self.capture(serde_json::to_vec(&response));
+        response
     }
 
     fn register_finish(&mut self, account_id: AccountId, req: &RegisterFinishRequest) {
+        self.capture(serde_json::to_vec(req));
         let file = server_registration_finish(req.registration_upload.as_slice()).unwrap();
         self.account = Some(Stored {
             account_id,
@@ -184,6 +197,7 @@ impl Server {
     }
 
     fn login_start(&mut self, req: &LoginStartRequest) -> LoginStartResponse {
+        self.capture(serde_json::to_vec(req));
         let stored = self.stored();
         let record = RegisteredCredential {
             account_id: stored.account_id,
@@ -205,17 +219,19 @@ impl Server {
         self.rng.fill_bytes(&mut id);
         let login_id = Id::from_bytes(id);
         self.logins.push((login_id, start.state));
-        LoginStartResponse {
+        let response = LoginStartResponse {
             login_id,
             ke2: bytes(&start.ke2),
             kdf_id: 1,
             server_origin: Text::from_str(ORIGIN).unwrap(),
-        }
+        };
+        self.capture(serde_json::to_vec(&response));
+        response
     }
 
     fn view(&self) -> AccountView {
         let s = self.stored();
-        AccountView {
+        let view = AccountView {
             account_state: bytes(&s.state),
             bundles: List::new(s.bundles.iter().map(|b| bytes(b)).collect()).unwrap(),
             device_certificates: List::new(s.certs.iter().map(|c| bytes(c)).collect()).unwrap(),
@@ -223,7 +239,9 @@ impl Server {
             account_settings: s.settings.clone(),
             identity_secret_keys: s.e_id.clone(),
             vault_self_grants: List::new(s.grants.clone()).unwrap(),
-        }
+        };
+        self.capture(serde_json::to_vec(&view));
+        view
     }
 
     /// The answer to an [`AccountStateQuery`], as the real server builds it: the settings are
@@ -247,6 +265,7 @@ impl Server {
     }
 
     fn login_finish(&mut self, req: &LoginFinishRequest) -> Result<LoginFinishResponse, ()> {
+        self.capture(serde_json::to_vec(req));
         let at = self
             .logins
             .iter()
@@ -255,16 +274,19 @@ impl Server {
         let (_, state) = self.logins.swap_remove(at);
         let ctx = self.context();
         server_login_finish(state, req.ke3.as_slice(), &ctx).map_err(|_| ())?;
-        Ok(LoginFinishResponse {
+        let response = LoginFinishResponse {
             session_token: self.token(),
             account_id: Id::from_bytes(self.stored().account_id.to_bytes()),
             account_key_server_wrap: self.stored().e_srv.clone(),
             account: self.view(),
             reregister: self.reregister,
-        })
+        };
+        self.capture(serde_json::to_vec(&response));
+        Ok(response)
     }
 
     fn enrol(&mut self, req: &EnrolDeviceRequest) {
+        self.capture(serde_json::to_vec(req));
         let s = self.account.as_mut().unwrap();
         s.certs.push(req.device_certificate.as_slice().to_vec());
         s.state = req.account_state.as_slice().to_vec();
@@ -273,6 +295,7 @@ impl Server {
     /// `devices/web-certificate`: the ephemeral certificate joins the served certificates, not
     /// the device set (CRYPTO.md §11.4).
     fn web_certificate(&mut self, req: &rizzy_proto::account::UploadWebDeviceCertificateRequest) {
+        self.capture(serde_json::to_vec(req));
         let s = self.account.as_mut().unwrap();
         s.certs.push(req.device_certificate.as_slice().to_vec());
     }
@@ -298,19 +321,23 @@ impl Server {
         Authors::from_statements(&certs, &revs).unwrap()
     }
 
-    fn device_auth_start(&mut self, _req: &DeviceAuthStartRequest) -> DeviceAuthStartResponse {
+    fn device_auth_start(&mut self, req: &DeviceAuthStartRequest) -> DeviceAuthStartResponse {
+        self.capture(serde_json::to_vec(req));
         let mut c = [0u8; 32];
         self.rng.fill_bytes(&mut c);
         self.challenges.push(c);
-        DeviceAuthStartResponse {
+        let response = DeviceAuthStartResponse {
             challenge: Fixed::from_bytes(c),
-        }
+        };
+        self.capture(serde_json::to_vec(&response));
+        response
     }
 
     fn device_auth_finish(
         &mut self,
         req: &DeviceAuthFinishRequest,
     ) -> Result<DeviceAuthFinishResponse, ()> {
+        self.capture(serde_json::to_vec(req));
         let challenge = req.challenge.to_bytes();
         let at = self
             .challenges
@@ -336,11 +363,13 @@ impl Server {
         let mut sid = [0u8; 16];
         self.rng.fill_bytes(&mut sid);
         self.sessions.push((sid, device_id));
-        Ok(DeviceAuthFinishResponse {
+        let response = DeviceAuthFinishResponse {
             session_token: self.token(),
             session_id: Id::from_bytes(sid),
             reregister: self.reregister,
-        })
+        };
+        self.capture(serde_json::to_vec(&response));
+        Ok(response)
     }
 
     fn heads(&self) -> SeqVector {
@@ -359,6 +388,7 @@ impl Server {
     }
 
     fn upload(&mut self, req: &UploadRequest) -> UploadResponse {
+        self.capture(serde_json::to_vec(req));
         let authors = self.authors();
         let mut results = Vec::new();
         for record in req.records.as_slice() {
@@ -399,10 +429,12 @@ impl Server {
             };
             results.push(result);
         }
-        UploadResponse {
+        let response = UploadResponse {
             restore_generation: Fixed::from_bytes(self.generation),
             results: List::new(results).unwrap(),
-        }
+        };
+        self.capture(serde_json::to_vec(&response));
+        response
     }
 
     /// Checks an uploaded snapshot as the server does (ADR 0021 §9): the signature under its
@@ -460,6 +492,7 @@ impl Server {
         &mut self,
         req: &rizzy_proto::vault::HealingRequest,
     ) -> Result<rizzy_proto::vault::HealingResponse, ()> {
+        self.capture(serde_json::to_vec(req));
         let saved = (
             self.ops.clone(),
             self.wraps.clone(),
@@ -558,6 +591,7 @@ impl Server {
     }
 
     fn fetch(&self, req: &FetchRequest) -> FetchResponse {
+        self.capture(serde_json::to_vec(req));
         let mut ops = Vec::new();
         let mut covers: Vec<SnapshotRecord> = Vec::new();
         for (device, chain) in &self.ops {
@@ -583,14 +617,16 @@ impl Server {
                 ops.push(record);
             }
         }
-        FetchResponse {
+        let response = FetchResponse {
             restore_generation: Fixed::from_bytes(self.generation),
             heads: self.heads(),
             ops: List::new(ops).unwrap(),
             covers: List::new(covers).unwrap(),
             item_key_wraps: List::new(self.wraps.clone()).unwrap(),
             complete: true,
-        }
+        };
+        self.capture(serde_json::to_vec(&response));
+        response
     }
 }
 
@@ -976,6 +1012,12 @@ fn signup_login_enrol_unlock_and_sync() {
     );
 }
 
+/// Malicious server: serves an older `account-state`, a fork at an accepted `state_seq`, and a
+/// state that hides an enrolled device (CRYPTO.md §15 item 5).
+///
+/// ETH class: 3 for the hidden device (threat model §5.5, forged device registrations; §5.9
+/// gives it class 3). None for the rollback and the fork: threat model §5.6 gives rollback,
+/// withholding and forks no ETH class.
 #[test]
 fn unlock_detects_rollback_fork_and_hidden_devices() {
     let mut rng = ChaCha20Rng::seed_from_u64(3);
@@ -1031,6 +1073,11 @@ fn unlock_detects_rollback_fork_and_hidden_devices() {
     assert_eq!(a_state.pin().state().state_seq, 2);
 }
 
+/// Malicious server: names a refused `kdf_id`, or relays the login under a foreign origin
+/// (CRYPTO.md §15 item 5).
+///
+/// ETH class: 5 for the `kdf_id` (threat model §5.1, KDF parameter downgrade). None for the
+/// foreign origin: the phishing relay is not one of the five ETH classes (threat model §5).
 #[test]
 fn login_refuses_foreign_origin_kdf_and_wrong_password() {
     let mut rng = ChaCha20Rng::seed_from_u64(5);
@@ -1227,6 +1274,11 @@ fn web_sessions_refresh_the_account_and_read_later_certificates() {
     );
 }
 
+/// Malicious server: withholds an item key's wrap, serves a body that does not match its
+/// signed hash, and serves an op from an unknown signer (CRYPTO.md §15 item 5).
+///
+/// ETH class: 2 for the forged body and the unknown signer (threat model §5.3, unbound
+/// items). None for the withheld wrap: threat model §5.6 gives withholding no ETH class.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -1348,6 +1400,9 @@ fn fetch_drops_forged_records() {
     ));
 }
 
+/// Malicious server: withholds the device grant of a rotation (CRYPTO.md §15 item 5).
+///
+/// ETH class: none. Withholding is threat model §5.6, which has no ETH class.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -1506,6 +1561,10 @@ fn serve_state(
     state
 }
 
+/// Malicious server: leaves out or rolls back the `ACCOUNT_SETTINGS` the signed state commits
+/// to (CRYPTO.md §15 item 5).
+///
+/// ETH class: 2 (threat model §5.3, unbound items and stale settings).
 #[test]
 fn unlock_keeps_settings_the_server_leaves_out() {
     use rizzy_core::envelope::purpose::AccountSettingsCtx;
@@ -1587,6 +1646,10 @@ fn unlock_keeps_settings_the_server_leaves_out() {
     assert_eq!(account_state_query(&a_state).known_settings_seq, 2);
 }
 
+/// Malicious server: serves a validly signed state whose certificate under this device's id
+/// certifies other keys (CRYPTO.md §15 item 5).
+///
+/// ETH class: 3 (threat model §5.4, public-key substitution).
 #[test]
 fn unlock_requires_a_certificate_of_this_devices_keys() {
     use rizzy_core::keys::{DeviceKeys, device_set_hash};
@@ -1691,6 +1754,10 @@ fn synced_writer(
     (vault, unlocked, ids)
 }
 
+/// A server that is behind the client, or restored from a backup (CRYPTO.md §15 item 5).
+///
+/// ETH class: none. Rollback and restore are threat model §5.6 and §5.8, which have no ETH
+/// class.
 #[test]
 fn server_behind_and_restore_generations() {
     let mut rng = ChaCha20Rng::seed_from_u64(18);
@@ -2072,6 +2139,7 @@ fn fake_server_refuses_forged_snapshots_and_serves_covers() {
     ));
 }
 
+mod canary;
 mod credentials;
 mod durable_device;
 mod export;

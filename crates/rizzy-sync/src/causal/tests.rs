@@ -192,6 +192,9 @@ fn links_follow_vault_prev_seq_across_seqs_of_other_vaults() {
 
 /// INV-27's test: the server omits op n from a device and serves n + 1; the client reports
 /// missing data and applies nothing past the gap.
+///
+/// ETH class: none. Withholding is threat model §5.6, which has no ETH class (CRYPTO.md §15
+/// item 5).
 #[test]
 fn a_withheld_header_is_a_gap_and_nothing_past_it_is_applied() {
     let mut log = new_log();
@@ -1106,7 +1109,10 @@ fn revoked_authors_ops_are_accepted_up_to_the_cutoff() {
 }
 
 /// CRYPTO.md §10.2 rule (c): the op's HLC, read as milliseconds (its top 48 bits), is at most
-/// `expires_at_ms`; the logical counter does not count.
+/// `expires_at_ms`; the logical counter does not count. A kind-4 author's op past its expiry is
+/// rejected (CRYPTO.md §15 item 5).
+///
+/// ETH class: 3 (threat model §5.5, forged device registrations; §5.9 gives it class 3).
 #[test]
 fn rule_c_reads_the_hlc_milliseconds() {
     let expiring = status(None, 1_000);
