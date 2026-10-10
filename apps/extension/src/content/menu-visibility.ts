@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The inline-menu iframe's own visibility/topmost checks (A7 / THREAT_MODEL.md gap, HANDOFF
 // X6; ADR 0037 §5 "visibility and topmost checks," extended here from the target field — which
 // `content-script.ts`'s `isVisible`/`isTopmost` already covered — to the inline-menu iframe
