@@ -203,6 +203,10 @@ struct Db {
     /// For the stale-epoch check of the world: each op stored outside a healing request, with
     /// the vault epoch at the moment it was stored.
     stored_epoch: BTreeMap<Dot, u32>,
+    /// For the world's writer-rule check: every op body and snapshot envelope stored through a
+    /// healing request (ADR 0021 §9 "Healing request" exempts it from the stale-epoch check,
+    /// so it may carry a key from before a rotation the request's author missed).
+    healed_envelopes: BTreeSet<Vec<u8>>,
 }
 
 impl Db {
@@ -571,6 +575,7 @@ impl Server {
                 epoch: 0,
                 rows: Rows::new(),
                 stored_epoch: BTreeMap::new(),
+                healed_envelopes: BTreeSet::new(),
             },
             backup: None,
             generations: 0,
@@ -619,6 +624,13 @@ impl Server {
             .stored_epoch
             .iter()
             .filter_map(|(&dot, &epoch)| self.db.record(dot).map(|r| (&r.header, epoch)))
+    }
+
+    /// Every op body and snapshot envelope stored through a healing request: for the world's
+    /// writer-rule check, which excuses these (ADR 0021 §9 "Healing request" exempts them from
+    /// the stale-epoch check, so one may carry a key from before a rotation its author missed).
+    pub(super) fn healed_envelopes(&self) -> &BTreeSet<Vec<u8>> {
+        &self.db.healed_envelopes
     }
 
     /// The revocation cut-offs.
@@ -718,7 +730,11 @@ impl Server {
             record.body.as_deref(),
             record.wrap.as_ref(),
         );
-        if record.body.is_none() {
+        if let Some(body) = &record.body {
+            if healing {
+                db.healed_envelopes.insert(body.clone());
+            }
+        } else {
             db.healed.insert(record.header.dot);
         }
         db.chains
@@ -844,6 +860,7 @@ impl Server {
                     {
                         stored.body = Some(body.clone());
                         db.healed.remove(&dot);
+                        db.healed_envelopes.insert(body.clone());
                         db.add_row(record.header.item_id, Some(body), record.wrap.as_ref());
                     }
                 }
@@ -866,6 +883,7 @@ impl Server {
                 self.stats.heals_refused += 1;
                 return Err(HealRefusal::Snapshot(refusal));
             }
+            db.healed_envelopes.insert(snap.data.clone());
         }
         for (item, dots) in &stored_bodiless {
             let rows: Vec<RetainedSnapshot> = db
