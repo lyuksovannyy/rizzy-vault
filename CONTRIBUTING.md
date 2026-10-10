@@ -238,6 +238,52 @@ Rules:
 - **A cryptographic crate** (anything that touches key material, randomness, or encryption, hashing or signature code paths) additionally needs the approval procedure and exact pin from [ADR 0009](docs/adr/0009-crypto-dependency-policy.md#approving-a-new-crypto-crate).
 - Licenses must be on the allow-list in [`deny.toml`](deny.toml). The policy behind it is [ADR 0017](docs/adr/0017-licensing.md#5-the-dependency-license-allow-list-is-denytoml).
 
+## Equivalence list contributions
+
+The global equivalence list ([ADR 0038](docs/adr/0038-equivalent-domain-list.md)) is data
+every client trusts for autofill, so adding or changing a group has its own path on top of the
+general [workflow](#workflow) above:
+
+1. **Propose the group as a GitHub issue first**, from the
+   [`equivalence-group`](.github/ISSUE_TEMPLATE/equivalence-group.yml) issue template, under
+   [ADR 0038 §4](docs/adr/0038-equivalent-domain-list.md#4-review-rules-for-list-entries)'s
+   rules. What it needs:
+   - **evidence of shared ownership** for every domain, and separately for every ccTLD
+     pairing (`brand.com` and `brand.co.uk` each need their own proof, not an assumption from
+     the base domain): a shared WHOIS registrant/organisation, or a public
+     cross-referencing statement on both domains (a `security.txt`, a support article).
+     "Looks plausible next to a big brand" is not proof;
+   - whether any domain is third-party-hostable, and the Public Suffix List entry that
+     splits it by registrant if so (`flag_third_party_hostable = 1` is the explicit,
+     reviewed exception, never silently assumed);
+   - a note of the next scheduled re-check (at minimum every release cycle).
+
+   The project owner creates an `equivalence-list` label in the repository's Settings →
+   Labels; the template applies it automatically once that label exists, and it is the
+   review queue for both the issue and the PR that follows.
+2. **Open the PR** that edits [`data/equivalence/groups.txt`](data/equivalence/groups.txt)
+   once the issue's evidence stands up to review, using the
+   [`equivalence-list`](.github/PULL_REQUEST_TEMPLATE/equivalence-list.md) pull request
+   template and linking the issue, following
+   [docs/equivalence-list.md §2](docs/equivalence-list.md#2-editing-the-source-file).
+3. **An entry without ownership proof, or without proof for every ccTLD variant, is
+   rejected.** A domain a scheduled re-check finds lapsed is removed, not kept on the benefit
+   of the doubt (ADR 0038 §4, points 1, 4 and 5).
+4. **Review is the owner's own act; so is signing and shipping a new list version.** With
+   one maintainer, the owner reviews the PR and records the evidence cited in it; the
+   two-maintainer rule in [ADR 0038 §4](docs/adr/0038-equivalent-domain-list.md#4-review-rules-for-list-entries)
+   becomes real review the moment a second maintainer exists. No community PR ships a signed
+   list on its own: merging a PR only changes the human-editable
+   `data/equivalence/groups.txt`. Separately, and only the owner does this
+   ([docs/equivalence-list.md](docs/equivalence-list.md)), the reviewed source is signed
+   offline with a dedicated Ed25519 keypair kept apart from every release-signing credential
+   (ADR 0038 §3), under a `list_version` strictly greater than every version published
+   before it (clients reject an equal or lower version, ADR 0038 §2, INV-39). The signed
+   bytes and the pinned public key are then committed together into
+   `crates/rizzy-match/src/compiled.rs`'s `GLOBAL_LIST` and `LIST_SIGNING_PUBLIC_KEY`, so a
+   new or updated list always ships inside a client release — there is no out-of-band list
+   update in M2.
+
 ## AI coding agents
 
 AI-assisted contributions follow the same rules. [CLAUDE.md](CLAUDE.md) states them in the form agents read. The human who opens the PR is responsible for every line in it.
