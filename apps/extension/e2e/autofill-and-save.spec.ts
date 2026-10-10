@@ -24,9 +24,13 @@
 // there too — correctly. ADR 0037 point 5/point 33 ("any other port ... is never part of the
 // registrable-domain computation") excludes port from `BaseDomain` matching everywhere,
 // including the exact-host fallback this very host shape uses. `newLogin` is only ever used to
-// get an item the vault has never saved an exact-URL match for (`findItemForUpdate` IS an exact
-// URL compare, port included, so it still offers "save," not "update," there) — it does not,
-// and was never meant to, exercise "no candidates for an unrelated host."
+// get "save," not "update," offered on submit there — and that is `NEW_LOGIN_USERNAME` (below)
+// differing from `EXISTING_USERNAME`, not any URL/host comparison: `findItemForUpdate`'s own
+// matcher narrows to the SAME full host as the page's own (`bindings.ts`'s `selectUpdateCandidate`,
+// finding 1 of the 2026-10-09 review — port excluded, same as every other host comparison here),
+// which `127.0.0.1` on either port already satisfies; the username mismatch is what keeps this
+// an offered "save," not an "update" of the existing item. `newLogin` does not, and was never
+// meant to, exercise "no candidates for an unrelated host."
 import { mkdtempSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";

@@ -368,20 +368,36 @@ export function decideCandidates(
  * — the same decision autofill itself makes, not a separate, looser notion of "the same site")
  * and the submitted `username`, not the URL alone:
  *
- * - **Same host, same username** → that item (update it).
- * - **Same host, a different username** → `undefined` (save as a new item): a second account on
- *   a site the user already has one item for must never overwrite that other account's
- *   credentials just because the form posted to the same host.
+ * - **Same full host, same username** → that item (update it).
+ * - **Same full host, a different username** → `undefined` (save as a new item): a second
+ *   account on a site the user already has one item for must never overwrite that other
+ *   account's credentials just because the form posted to the same host.
+ * - **A different full host, even one sharing the same registrable domain** (`BaseDomain` mode's
+ *   own candidate set, ADR 0037 §4 — the same set autofill uses, since `sessionItemUris` resolves
+ *   every URI to that mode) → never an update target, even with a matching username. Update
+ *   overwrites the matched item's live password, unconditionally and irreversibly
+ *   (`core-context.ts`'s `applySavePromptAction`) — unlike a fill, which the user can simply
+ *   decline or correct. `accounts.example.com` and `example.com` are treated as the same site for
+ *   *autofill* on purpose (ADR 0037 §4's "Base domain" rule); they are two different full hosts
+ *   for *update*, so a credential submitted on one subdomain can never silently overwrite an
+ *   item saved on another, even a third-party-hostable one sharing an apex domain the Public
+ *   Suffix List has not split. {@link selectUpdateCandidate}'s `pageHost` parameter is this extra
+ *   gate: `candidate.savedHost` must equal the page's own exact host, not merely its registrable
+ *   domain. The cost is a user who saved an item for `example.com` and later logs in at
+ *   `www.example.com` gets an extra save prompt (and possibly a duplicate item) rather than a
+ *   silently "updated" password — the right default for a destructive action.
  * - **An equivalence-only match** (`candidate.needsWarning`, ADR 0037 §5 — a different
- *   registrable domain `rizzy-match` treats as the same site) is never an update target, even
- *   with a matching username: silently overwriting one site's saved password because the user
- *   submitted a form on a different, merely "equivalent" domain is a worse outcome than an extra
- *   save prompt. (A direct registrable-domain match or better still counts, same as autofill.)
+ *   registrable domain `rizzy-match` treats as the same site) is never an update target either,
+ *   even with a matching username: silently overwriting one site's saved password because the
+ *   user submitted a form on a different, merely "equivalent" domain is a worse outcome than an
+ *   extra save prompt. (A direct registrable-domain match or better still counts, same as
+ *   autofill — subject to the same-full-host gate above.)
  * - **A look-alike host** (a different registrable domain with no equivalence relationship) is
  *   not a match candidate at all, so it is never returned.
  *
  * Deliberately reuses the one matcher every other ADR 0037 decision goes through, rather than a
- * second, independent "is this the same site" rule that could drift from it.
+ * second, independent "is this the same site" rule that could drift from it; the host gate above
+ * narrows the result afterward, specific to this destructive decision, not a second matcher.
  */
 export function findItemForUpdate(session: DurableSession, pageUrl: string, username: string): ItemSummary | undefined {
   let decision: ReturnType<typeof decideCandidates>;
@@ -400,6 +416,7 @@ export function findItemForUpdate(session: DurableSession, pageUrl: string, user
       }
     },
     username,
+    decision.pageHost,
   );
   if (itemId === undefined) {
     return undefined;
@@ -413,19 +430,30 @@ export function findItemForUpdate(session: DurableSession, pageUrl: string, user
 
 /** The selection core of {@link findItemForUpdate}, pulled out so it is unit-testable without a
  * `DurableSession` — the same reason `content-handler.ts`'s `selectFillCandidate` is its own
- * function. The first already-matched, non-equivalence-only candidate whose own saved username
- * equals `username` exactly, or `undefined` if none does (every one of `candidates` is already
- * a registrable-domain-or-better match or an equivalence-only one; `usernameOf` resolves each
- * candidate's current saved username, `undefined` if the lookup itself fails). Each `itemId` is
- * resolved through `usernameOf` at most once, even if `candidates` lists it more than once (one
- * match per saved URI, so one item can appear several times). */
+ * function. The first candidate that is: not equivalence-only (`!needsWarning`); saved under
+ * exactly `pageHost` (`candidate.savedHost === pageHost` — the full host, not just the
+ * registrable domain the `BaseDomain`-mode candidate set already narrowed to, {@link
+ * findItemForUpdate}'s own doc comment); and whose item's own saved username equals `username`
+ * exactly. `undefined` if no candidate satisfies all three (`usernameOf` resolves each
+ * candidate's current saved username, `undefined` if the lookup itself fails). The host check
+ * runs first and, on a mismatch, `continue`s without marking the itemId `checked`: a host
+ * mismatch says nothing about that item, only about this one saved URI of it, so a later
+ * candidate for the SAME item through a different saved URI that does match `pageHost` is still
+ * considered. Once a candidate passes the host and warning checks, its itemId is resolved through
+ * `usernameOf` at most once, even if `candidates` lists it again (one match per saved URI, so one
+ * item can appear several times) — this is the pre-existing `checked` de-dup, narrowed to apply
+ * only among same-host candidates. */
 export function selectUpdateCandidate(
   candidates: readonly MatchCandidate[],
   usernameOf: (itemId: string) => string | undefined,
   username: string,
+  pageHost: string,
 ): string | undefined {
   const checked = new Set<string>();
   for (const candidate of candidates) {
+    if (candidate.savedHost !== pageHost) {
+      continue;
+    }
     if (candidate.needsWarning || checked.has(candidate.itemId)) {
       continue;
     }
