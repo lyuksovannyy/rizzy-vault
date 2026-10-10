@@ -18,6 +18,11 @@
 //! | `faults` | the delivery shuffles of `random` | pages, shuffled and duplicated records and pages, lost answers |
 //! | `mixed` | `random-ops` | all of the above, restores and revocations in separate runs |
 //! | `faulty` | `faulty`, `faulty-kinds`, `random-faults` | one faulty device writing the lies of [`super::faults`] (claims of held and unheld dots up to `u64::MAX`, omissions, a known write recorded as the purge); a device parked across a first drain and a device enrolled after it, which meet the lies as covers |
+//! | `rotation` | `reissue`, `random-reissue*`, `rev-*` | key rotations, with revocations or (in runs that restore) without: fresh item keys under the writer rule, wraps re-wrapped, stale-epoch answers to ops and snapshots, re-issues and re-publications, lost answers, the ADR 0032 lag repair after a restore, devices enrolled after a rotation |
+//! | `kind4` | none (the spike did not model kind 4) | a web vault (kind 4) whose certificate expires during or after the history: its last uploads refused, its retained snapshots served as covers to a device enrolled after it expired |
+//! | `faulty2` | `faulty`, with two liars | two faulty devices: beyond the ADR 0021 bound on items both lied about ([`super::world`] "Two or more faulty devices"), the one-liar rules everywhere else |
+//!
+//! Every revocation, in every family, is one request with a rotation (CRYPTO.md §11.8).
 //!
 //! In every family but `long`, one write in eight writes several keys in one op; the key pool
 //! ([`super::KEYS`]) holds list elements with prefix-related keys.
@@ -40,7 +45,7 @@ use crate::causal::Report;
 use crate::merge::ItemLifecycle;
 
 /// The families, by index.
-const FAMILIES: [&str; 9] = [
+const FAMILIES: [&str; 12] = [
     "edits",
     "purges",
     "snapshots",
@@ -50,6 +55,9 @@ const FAMILIES: [&str; 9] = [
     "faults",
     "mixed",
     "faulty",
+    "rotation",
+    "kind4",
+    "faulty2",
 ];
 
 /// Generated histories per PR run of the main test (ADR 0012 §12: "starting at 1,000").
@@ -97,15 +105,21 @@ enum Kind {
     Backup,
     /// A restore of the server.
     RestoreServer,
-    /// A revocation.
+    /// A revocation (with its rotation).
     Revoke,
+    /// A rotation without a revocation.
+    Rotate,
 }
 
 /// The weights of a family.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one table of step weights per family, each a few lines"
+)]
 fn weights(family: &str) -> Vec<(Kind, u64)> {
     use Kind::{
-        Backup, Fetch, Lie, Purge, Restore, RestoreServer, Revoke, Snapshot, Toggle, Trash, Upload,
-        UploadEarly, Worker, Write,
+        Backup, Fetch, Lie, Purge, Restore, RestoreServer, Revoke, Rotate, Snapshot, Toggle, Trash,
+        Upload, UploadEarly, Worker, Write,
     };
     match family {
         "edits" | "faults" => vec![
@@ -171,7 +185,33 @@ fn weights(family: &str) -> Vec<(Kind, u64)> {
             (Trash, 3),
             (Purge, 3),
         ],
-        "faulty" => vec![
+        "rotation" => vec![
+            (Write, 35),
+            (Upload, 15),
+            (Fetch, 12),
+            (Toggle, 6),
+            (Snapshot, 8),
+            (Worker, 5),
+            (Revoke, 4),
+            (Rotate, 4),
+            (Trash, 3),
+            (Purge, 2),
+            (UploadEarly, 2),
+            (Backup, 2),
+            (RestoreServer, 2),
+        ],
+        "kind4" => vec![
+            (Write, 35),
+            (Snapshot, 12),
+            (Upload, 15),
+            (Fetch, 18),
+            (Worker, 10),
+            (Toggle, 3),
+            (Trash, 2),
+            (Purge, 2),
+            (UploadEarly, 2),
+        ],
+        "faulty" | "faulty2" => vec![
             (Write, 30),
             (Upload, 15),
             (Fetch, 20),
@@ -246,7 +286,13 @@ fn pick(world: &World, family: &str, rng: &mut Rng, restores: bool) -> Step {
         }
         Kind::Write => Step::Write { d, i, k },
         Kind::Lie => Step::Lie {
-            d: world.faulty().unwrap_or(d),
+            d: {
+                let faulty: Vec<usize> = world.faulty_set().iter().copied().collect();
+                faulty
+                    .get(rng.below(faulty.len().max(1)))
+                    .copied()
+                    .unwrap_or(d)
+            },
             i,
             fault: rng.below(super::faults::ALL.len()),
         },
@@ -266,7 +312,7 @@ fn pick(world: &World, family: &str, rng: &mut Rng, restores: bool) -> Step {
             d,
             // Lost answers, also where the server may then be restored: an own op sent
             // without an answer across a restore (the spike's `stale_sent_resolution`).
-            lose: matches!(family, "faults" | "restore" | "mixed") && rng.chance(1, 3),
+            lose: matches!(family, "faults" | "restore" | "mixed" | "rotation") && rng.chance(1, 3),
         },
         Kind::UploadEarly => Step::UploadEarly { d },
         Kind::Toggle => Step::Toggle { d },
@@ -274,6 +320,7 @@ fn pick(world: &World, family: &str, rng: &mut Rng, restores: bool) -> Step {
         Kind::Backup if restores => Step::Backup,
         Kind::RestoreServer if restores => Step::RestoreServer,
         Kind::Revoke if !restores => Step::Revoke { d },
+        Kind::Rotate => Step::Rotate { d },
         // A restore and a revocation are not combined in one run (see [`super::world`]).
         Kind::Backup | Kind::RestoreServer | Kind::Revoke | Kind::Fetch => Step::Fetch { d },
     }
@@ -294,8 +341,9 @@ fn history(family: usize, seed: u64) -> World {
     let devices = 3 + rng.below(5);
     let late = matches!(
         name,
-        "snapshots" | "restore" | "purges" | "mixed" | "faulty"
-    ) && rng.chance(1, 2);
+        "snapshots" | "restore" | "purges" | "mixed" | "faulty" | "rotation" | "faulty2"
+    ) && rng.chance(1, 2)
+        || name == "kind4";
     let joined = if late { devices - 1 } else { devices };
     let faults = if matches!(name, "faults" | "mixed") {
         Faults {
@@ -309,7 +357,7 @@ fn history(family: usize, seed: u64) -> World {
     };
     let restores = match name {
         "restore" => true,
-        "mixed" => rng.chance(1, 2),
+        "mixed" | "rotation" => rng.chance(1, 2),
         _ => false,
     };
     let steps = if name == "long" {
@@ -321,9 +369,22 @@ fn history(family: usize, seed: u64) -> World {
     let mut world = World::new(devices, joined, 2, rng.next(), faults);
     if name == "faulty" {
         // One faulty device (ADR 0021 §3: "One faulty device never holds the only server
-        // copy"; f faulty devices need f + 1 authors, beyond this harness's one).
+        // copy"; f faulty devices need f + 1 authors: `faulty2` goes beyond).
         let d = rng.below(joined);
         world.set_faulty(d, None);
+    }
+    if name == "faulty2" {
+        // Two faulty devices: beyond the bound ADR 0021 accepts for M1 (see `world`).
+        let d = rng.below(joined);
+        let e = (d + 1 + rng.below(joined - 1)) % joined;
+        world.set_faulty(d, None);
+        world.set_faulty(e, None);
+    }
+    if name == "kind4" {
+        // A web vault session whose certificate expires during the history, or not at all.
+        let k = rng.below(joined);
+        let after = u64::try_from(rng.below(80)).unwrap_or(0);
+        world.set_kind4(k, super::T0 + 20 + after);
     }
     if restores {
         world.step(Step::Backup);
@@ -331,11 +392,11 @@ fn history(family: usize, seed: u64) -> World {
     // In the `faulty` family the late device enrols after a first drain, once `worker` has
     // compacted behind the lies: a new device that must take everything from covers (ADR 0021
     // §8 "then a new device").
-    let fresh_after = late && name == "faulty";
+    let fresh_after = late && matches!(name, "faulty" | "faulty2");
     // And a device other than the faulty one may sit out the first drain, holding the bodies
     // it merged, so that it meets the lies about them as covers.
-    let parked = if name == "faulty" && rng.chance(1, 2) {
-        (0..joined).find(|&d| Some(d) != world.faulty())
+    let parked = if matches!(name, "faulty" | "faulty2") && rng.chance(1, 2) {
+        (0..joined).find(|d| !world.faulty_set().contains(d))
     } else {
         None
     };
@@ -352,26 +413,13 @@ fn history(family: usize, seed: u64) -> World {
         let step = pick(&world, name, &mut rng, restores);
         world.step(step);
     }
-    if (fresh_after || parked.is_some())
-        && let Some(f) = world.faulty()
+    if fresh_after || parked.is_some() {
+        last_lies(&mut world, &mut rng);
+    }
+    if let Some(k) = world.kind4_device()
+        && !world.is_expired(k)
     {
-        // The faulty device's last snapshots are lies the server stores, so that they are the
-        // newest covers when the parked or new device fetches.
-        world.step(Step::Fetch { d: f });
-        for i in 0..world.items.len() {
-            let stored = [Fault::ClaimHeld, Fault::OmitValue, Fault::FakeTomb];
-            let fault = stored.get(rng.below(stored.len())).copied();
-            let index = super::faults::ALL
-                .iter()
-                .position(|k| Some(*k) == fault)
-                .unwrap_or(0);
-            world.step(Step::Lie {
-                d: f,
-                i,
-                fault: index,
-            });
-        }
-        world.step(Step::Upload { d: f, lose: false });
+        compact_then_expire(&mut world, k, (k + 1) % joined);
     }
     if (fresh_after || parked.is_some()) && !world.drain() {
         world
@@ -391,6 +439,49 @@ fn history(family: usize, seed: u64) -> World {
     }
     world.check_quiescent(2);
     world
+}
+
+/// The faulty devices' last snapshots: lies the server stores, so that they are the newest
+/// covers when a parked or new device fetches.
+fn last_lies(world: &mut World, rng: &mut Rng) {
+    let liars: Vec<usize> = world.faulty_set().iter().copied().collect();
+    for f in liars {
+        world.step(Step::Fetch { d: f });
+        for i in 0..world.items.len() {
+            let stored = [Fault::ClaimHeld, Fault::OmitValue, Fault::FakeTomb];
+            let fault = stored.get(rng.below(stored.len())).copied();
+            let index = super::faults::ALL
+                .iter()
+                .position(|k| Some(*k) == fault)
+                .unwrap_or(0);
+            world.step(Step::Lie {
+                d: f,
+                i,
+                fault: index,
+            });
+        }
+        world.step(Step::Upload { d: f, lose: false });
+    }
+}
+
+/// The web vault `k` and device `other` snapshot every item, `worker` compacts behind them,
+/// and time passes the certificate's expiry: a device enrolled later then takes the expired
+/// author's retained snapshots as covers (ADR 0021 §9: "keeps counting retained ones as
+/// covers").
+fn compact_then_expire(world: &mut World, k: usize, other: usize) {
+    for d in [k, other] {
+        if !world.is_online(d) {
+            world.step(Step::Toggle { d });
+        }
+        world.step(Step::Upload { d, lose: false });
+        world.step(Step::Fetch { d });
+        for i in 0..world.items.len() {
+            world.step(Step::Snapshot { d, i });
+        }
+        world.step(Step::Upload { d, lose: false });
+    }
+    world.step(Step::Worker);
+    world.pass_time(1_000);
 }
 
 /// Runs one gap-detection history (property 7, ADR 0012 §12 "a server that withholds an op on
@@ -613,6 +704,23 @@ struct Reach {
     lies_refused: u64,
     /// Items whose property 1 was excused for a reported lie.
     excused: u64,
+    /// Rotations the server stored, and those that revoked a device.
+    rotations: (u64, u64),
+    /// Fresh item keys the writer rule created, and keys learned from wrap-set rows.
+    keys: (u64, u64),
+    /// Stale-epoch answers to ops and to snapshots.
+    stale: (u64, u64),
+    /// Ops re-issued, and ops re-published after a stale answer.
+    reissued: (u64, u64),
+    /// Envelopes written after a rotation that property 6 checked, and its key attempts.
+    p6: (u64, u64),
+    /// Kind-4 devices expired, their uploads refused, their snapshots refused, and covers by
+    /// them served after their expiry.
+    expired: (u64, u64, u64, u64),
+    /// ADR 0032 lag repairs of the vault epoch.
+    epoch_heals: u64,
+    /// Items beyond the faulty-device bound, and those of them that did not converge.
+    beyond: (u64, u64),
 }
 
 /// Sums what `seeds` histories of `family` reached; every run must also pass.
@@ -633,12 +741,29 @@ fn reach(family: usize, seeds: u64) -> Reach {
         r.older_kept += w.server.stats.worker_checks.older_kept;
         r.linear += w.server.stats.worker_checks.linear;
         r.excused += w.excused_items;
+        r.rotations.0 += w.server.stats.rotations;
+        r.rotations.1 += w.revocations();
+        r.stale.0 += w.server.stats.stale_ops;
+        r.stale.1 += w.server.stats.stale_snapshots;
+        r.p6.0 += w.p6_checked.0;
+        r.p6.1 += w.p6_checked.1;
+        r.expired.0 += w.expirations();
+        r.expired.1 += w.server.stats.expired_uploads;
+        r.expired.2 += w.server.stats.expired_snapshots;
+        r.expired.3 += w.server.stats.expired_covers;
+        r.epoch_heals += w.server.stats.epoch_heals;
+        r.beyond.0 += w.beyond_bound.0;
+        r.beyond.1 += w.beyond_bound.1;
         for dev in &w.devices {
             r.absorbed += dev.stats.absorbed;
             r.early_refused += dev.stats.snapshots_refused;
             r.lies_written += dev.stats.lies_written;
             r.lies_absorbed += dev.stats.lies_absorbed;
             r.lies_refused += dev.stats.lie_refused;
+            r.keys.0 += dev.stats.fresh_keys;
+            r.keys.1 += dev.stats.keys_unwrapped;
+            r.reissued.0 += dev.stats.reissued;
+            r.reissued.1 += dev.stats.republished;
             for merge in dev.items.values() {
                 if let Ok(super::oracle::State::Tombstone { late, .. }) = super::oracle::held(merge)
                     && !late.is_empty()
@@ -654,7 +779,9 @@ fn reach(family: usize, seeds: u64) -> Reach {
 /// The families reach the rules they are for: compaction and absorption, restores with
 /// healing requests, re-uploads answered "already stored", late values on tombstones, revoked
 /// authors' snapshots refused, the server properties 4 and 5, property 3 with absorptions,
-/// and lies written, absorbed and refused. A generator that silently stopped reaching one
+/// lies written, absorbed and refused; rotations, fresh keys, stale answers, re-issues,
+/// property 6 and lag repairs; kind-4 expiries and their covers; items beyond the
+/// faulty-device bound. A generator that silently stopped reaching one
 /// would make the property tests vacuous there. The paging finding may skip the "no gap"
 /// check only in a small minority of the paged families' runs.
 #[test]
@@ -690,5 +817,39 @@ fn the_families_reach_their_rules() {
     assert!(
         faulty.lies_written > 0 && faulty.lies_absorbed > 0 && faulty.lies_refused > 0,
         "{faulty:?}"
+    );
+    // Every revocation rotates, and property 6 checks what is written after it.
+    assert!(
+        revocation.rotations.1 > 0 && revocation.p6.0 > 0 && revocation.p6.1 > 0,
+        "{revocation:?}"
+    );
+    // Rotations with and without revocations, fresh item keys and wraps, stale answers to ops
+    // and snapshots, re-issues, property 6, and the ADR 0032 lag repair after restores.
+    let rotation = reach(index("rotation"), 30);
+    assert!(
+        rotation.rotations.0 > rotation.rotations.1
+            && rotation.rotations.1 > 0
+            && rotation.keys.0 > 0
+            && rotation.keys.1 > 0
+            && rotation.stale.0 > 0
+            && rotation.stale.1 > 0
+            && rotation.reissued.0 > 0
+            && rotation.p6.0 > 0
+            && rotation.p6.1 > 0
+            && rotation.epoch_heals > 0
+            && rotation.heals > 0,
+        "{rotation:?}"
+    );
+    // Kind-4 devices expire: uploads and new snapshots refused, retained ones served as covers.
+    let kind4 = reach(index("kind4"), 20);
+    assert!(
+        kind4.expired.0 > 0 && kind4.expired.2 > 0 && kind4.expired.3 > 0 && kind4.absorbed > 0,
+        "{kind4:?}"
+    );
+    // Two faulty devices: lies absorbed, and items both lied about reached.
+    let faulty2 = reach(index("faulty2"), 30);
+    assert!(
+        faulty2.lies_absorbed > 0 && faulty2.beyond.0 > 0 && faulty2.excused > 0,
+        "{faulty2:?}"
     );
 }
