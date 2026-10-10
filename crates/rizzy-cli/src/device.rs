@@ -1218,9 +1218,19 @@ impl Device {
     /// ([`crate::sys::now_ms`]) with no injection seam, and backdating a trash op's `now_ms`
     /// does not backdate its HLC (ADR 0012 §2) once this account's clock has already ticked
     /// near real time from earlier real ops in the same test, because `Hlc::tick` clamps to
-    /// `max(last_hlc + 1, now_ms << 16)`. The same `auto_purge_due` call this method makes,
-    /// including its partial-failure path, is covered directly, with full control of `now_ms`,
-    /// by the tests in `rizzy-client/src/tests/retention.rs`.
+    /// `max(last_hlc + 1, now_ms << 16)`.
+    ///
+    /// The tests in `rizzy-client/src/tests/retention.rs` cover `auto_purge_due` itself,
+    /// including its partial-failure path, with full control of `now_ms` — this method's own
+    /// precondition, "purges already written are not undone", above. **They do not cover this
+    /// method.** This flush-before-propagate ordering (`flush` before `purged?`, mirroring
+    /// [`Device::edit`]) has no automated regression test: forcing it needs a live
+    /// [`UnlockedDevice`], which only unlocking real enrollment material hands out
+    /// ([`DeviceRecord::unlock`] and its siblings; ADR 0013 §3 rule 1 — no public constructor
+    /// outside `rizzy-client`), so neither a real device (the clock
+    /// problem above) nor a synthetic one built the way `rizzy-cli/src/db.rs`'s own tests build
+    /// a cache (fabricated rows, no keys) can reach it. The ordering is reasoned by inspection
+    /// against `Device::edit`'s already-tested shape instead.
     ///
     /// # Errors
     /// [`Device::commit`]'s error takes precedence, as [`Device::edit`]: it reports a failure
