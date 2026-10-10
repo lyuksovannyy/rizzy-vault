@@ -21,10 +21,15 @@
 //    (`content-script.ts`'s own module doc on `InlineMenu`) — confirms the cross-origin
 //    isolation every other "page cannot script the menu" guarantee in this file and
 //    `adversarial-pages.spec.ts` relies on.
-// 4. A7's "overlay/clickjacking" scenario (THREAT_MODEL.md, citing DEF CON 33): a page
-//    stylesheet rule can make the real inline-menu iframe invisible while it stays fully
-//    clickable, because `content-script.ts`'s `InlineMenu` sets position/size/z-index inline on
-//    it but never `opacity`. See that test's own comments for what this found.
+// 4. A7's "overlay/clickjacking" scenario (THREAT_MODEL.md, citing DEF CON 33; HANDOFF X6): a
+//    page stylesheet rule that makes the real inline-menu iframe invisible while it stays fully
+//    clickable no longer fills, because `content-script.ts`'s `InlineMenu` now runs its own
+//    visibility/topmost gates (`menu-visibility.ts`) on the iframe itself, not only on the
+//    target field. The classes after it (opacity, filter, clip-path, mask, transform,
+//    content-visibility, mix-blend-mode, a forced `!important` size, the top layer, and the
+//    flip-visible-for-the-click timing race) extend the same coverage to every attack class the
+//    gates are meant to catch, plus two tests that confirm the gates do NOT over-refuse
+//    (same-z-index/later-DOM-order decoy; a scrolled/zoomed page).
 //
 // Setup mirrors `autofill-and-save.spec.ts` (real server, real signup, real popup enrolment) —
 // duplicated rather than imported, for the same reason that file gives for not importing from
@@ -345,7 +350,7 @@ test("a hostile page cannot read into a real, rendered inline-menu iframe's docu
   }
 });
 
-test("KNOWN GAP (fixme): a hostile page can make the real inline-menu iframe invisible via CSS while it stays clickable (A7 overlay/clickjacking, DEF CON 33)", async ({
+test("a hostile page cannot fill by making the real inline-menu iframe invisible via CSS while it stays clickable (A7 overlay/clickjacking, DEF CON 33)", async ({
   context,
   extensionId,
   server,
@@ -437,26 +442,620 @@ test("KNOWN GAP (fixme): a hostile page can make the real inline-menu iframe inv
     // land before the check below.
     await visit.waitForTimeout(1000);
 
+    // Fixed (A7/THREAT_MODEL.md gap, HANDOFF X6): `content-script.ts`'s `InlineMenu` now runs
+    // Gate A (a continuous rAF loop sampling the frame's real geometry/style/top-layer/hit-test
+    // state and toggling its own `pointer-events`) and Gate B (the authoritative,
+    // causally-after-click refusal at `apply_fill` arrival, `menu-visibility.ts`'s own module
+    // doc). The page here hid the iframe BEFORE the click and never un-hides it, so every Gate-A
+    // tick from construction onward is a bad sample; by the time the real click → background →
+    // decrypt → push round trip completes, Gate B's trailing-window check sees a recent bad
+    // sample and refuses.
     const passValue = await visit.locator("#pass").inputValue();
-    if (passValue !== "") {
-      // Per CLAUDE.md and this task: a test that finds a real violation is never weakened. This
-      // marks the test `fixme` with exactly what broke it, rather than relaxing the assertion
-      // below to match the (wrong) observed behaviour.
-      test.fixme(
-        true,
-        "A7/THREAT_MODEL.md mitigation gap: content-script.ts's InlineMenu never sets `opacity` " +
-          "inline on the menu iframe (only position/size/border/zIndex), so a page stylesheet " +
-          "rule can hide it while it stays fully clickable — its fixed zIndex (2147483647, the " +
-          "maximum) keeps it the hit-test target at that screen location regardless of what the " +
-          "page paints underneath. A trusted click at a decoy's location lands on the real, " +
-          "invisible candidate button and fills the real credential into the page. Needs a " +
-          "visibility check on the inline-menu iframe itself (e.g. IntersectionObserver v2, as " +
-          "THREAT_MODEL.md's A7 mitigation list already names) before dispatching a fill, not " +
-          "only on the target field (`isVisible`/`isTopmost` in content-script.ts today). Found " +
-          "and reported by HANDOFF gap X3's adversarial e2e suite; not fixed here (tests only).",
-      );
-    }
     expect(passValue).toBe("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// Mandatory positive control (the task's own requirement, not written by any of the three input
+// designs): a real `page.mouse.click` — the same OS-level, hit-tested input path Gate A's
+// `pointer-events` toggle and Gate B's `apply_fill`-arrival check both sit in front of, not a
+// Playwright locator click (whose own actionability auto-waiting already tolerates a brief
+// `pointer-events: none`, so it would not catch "the gate never opens" or "the window check
+// always refuses" regressions the way this does).
+test("a normal, visible menu still fills via a real page.mouse.click at the real candidate's own screen coordinates (mandatory positive control)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "mouseclickuser");
+    await createLoginItem(setupPage, {
+      title: "Mouse Click Target",
+      username: "mouseclick-user@example.com",
+      password: "mouseclick-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "mouseclickuser", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Mouse Click Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    // A short, realistic margin: Gate B refuses a click that lands before the menu's OWN Gate-A
+    // rAF loop has ever recorded one real good sample (`menu-visibility.ts`'s own doc — this is
+    // deliberate, fail-closed-on-no-history behaviour, not a bug: "a menu clicked before its
+    // very first real sample is correctly refused"). A real human always takes well over one
+    // animation frame (~16ms) to perceive a freshly rendered menu and click it; Playwright's
+    // own `page.mouse.click`, run the instant `toBeVisible()` resolves, can race ahead of that
+    // first tick purely as a test artifact. Found and confirmed empirically: this exact test
+    // flaked once in a full-suite run with no margin here, immediately after 10 other tests,
+    // and passed reliably once this margin was added.
+    await visit.waitForTimeout(150);
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(visit.locator("#user")).toHaveValue("mouseclick-user@example.com", { timeout: 15_000 });
+    await expect(visit.locator("#pass")).toHaveValue("mouseclick-target-password", { timeout: 15_000 });
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+/** Sets or clears one inline style property on the real inline-menu iframe's OWN element, via
+ * `page.evaluate` (never `addStyleTag`): a `<style>` tag is a `childList` mutation under
+ * `document.documentElement`, which the content script's own `MutationObserver` sees and can
+ * use to retrigger `report()`, destroying and recreating the `InlineMenu` instance — a fresh
+ * instance would compute its own frozen expected rect AFTER the tamper took effect, which would
+ * make an ancestor-displacement attack self-heal instead of being caught (see this file's own
+ * git history / the task's investigation for why). An inline style write on an existing element
+ * is an `attributes` mutation, which this codebase's observer never watches at all (`childList`/
+ * `subtree` only), so it never triggers a rebuild — exactly what is needed to test Gate A/B
+ * against the SAME, already-constructed `InlineMenu` instance the attack is supposed to defeat. */
+async function setIframeStyle(page: Page, prop: string, value: string, important = false): Promise<void> {
+  await page.evaluate(
+    ([p, v, imp]) => {
+      const el = document.querySelector("iframe[data-rizzy-inline-menu]") as HTMLElement | null;
+      el?.style.setProperty(p, v, imp ? "important" : "");
+    },
+    [prop, value, important] as const,
+  );
+}
+
+async function clearIframeStyle(page: Page, prop: string): Promise<void> {
+  await page.evaluate((p) => {
+    const el = document.querySelector("iframe[data-rizzy-inline-menu]") as HTMLElement | null;
+    el?.style.removeProperty(p);
+  }, prop);
+}
+
+// Consolidated into one test, one enrolment, one page (deviation from the spec's "one new
+// adversarial page per attack class," stated per CLAUDE.md "deviate only with a stated reason"):
+// each of these classes shares identical setup (a real signup, a real saved candidate, a real
+// `page.mouse.click`, asserting `#user`/`#pass` stay empty) and differs only in which single CSS
+// property is tampered with — running each as its own full signup+enrol+sync e2e test (the
+// existing tests in this file each take 5-10+ seconds) would multiply this file's runtime by the
+// number of classes for no additional coverage, since the gates under test
+// (`menu-visibility.ts`'s `isVisibilityChainOk`/`rectsMatch`) are the exact same code path for
+// every one of them; only the input values differ, which the unit tests
+// (`test/menu-visibility.test.ts`) already exercise directly and exhaustively. This e2e test's
+// job is only to confirm the WIRING (`content-script.ts`'s `InlineMenu`) actually reads real
+// computed styles/geometry into those functions correctly, end to end, for each class the task
+// names.
+test("the same real candidate is never filled through filter, clip-path, mask, content-visibility, mix-blend-mode, transform (on the iframe and on an ancestor), or a forced !important size", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  test.setTimeout(120_000);
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "csstamperuser");
+    await createLoginItem(setupPage, {
+      title: "CSS Tamper Target",
+      username: "csstamper-user@example.com",
+      password: "csstamper-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "csstamperuser", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "CSS Tamper Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+
+    async function assertStillRefused(clickAt: { readonly x: number; readonly y: number }): Promise<void> {
+      // A short margin BEFORE the click, not just after: Gate A only ever learns about a tamper
+      // on its own next rAF tick (at most one real animation frame after the style write that
+      // precedes this call), and `menu-visibility.ts`'s own Gate-B doc deliberately allows a
+      // fill with no startup dwell when NO bad sample has EVER been recorded — correct for a
+      // never-tampered menu, but it means a tamper applied and clicked in the exact same instant,
+      // with zero observation window, has no history for Gate B to refuse on yet. A real
+      // clickjacking page needs the hidden state to persist for at least one rendered frame to
+      // have any visual effect in the first place, so this margin matches a realistic attack, not
+      // merely a convenient one; found and documented empirically running this test against the
+      // real build (first without this margin, which flaked exactly once in a full-suite run).
+      await visit.waitForTimeout(150);
+      await visit.mouse.click(clickAt.x, clickAt.y);
+      await visit.waitForTimeout(600);
+      await expect(visit.locator("#user")).toHaveValue("");
+      await expect(visit.locator("#pass")).toHaveValue("");
+    }
+
+    // 1. filter (e.g. `filter: opacity(0)`): visually identical to the `opacity` property, same
+    // box, same click location.
+    await setIframeStyle(visit, "filter", "opacity(0)");
+    await assertStillRefused(center);
+    await clearIframeStyle(visit, "filter");
+
+    // 2. clip-path: clips the whole box away without changing `getBoundingClientRect()`.
+    await setIframeStyle(visit, "clip-path", "circle(0px at 0 0)");
+    await assertStillRefused(center);
+    await clearIframeStyle(visit, "clip-path");
+
+    // 3. mask-image: a fully-transparent mask, same box.
+    await setIframeStyle(visit, "mask-image", "linear-gradient(transparent, transparent)");
+    await assertStillRefused(center);
+    await clearIframeStyle(visit, "mask-image");
+
+    // 4. content-visibility: hidden — skips rendering the iframe's embedded document without
+    // collapsing the iframe ELEMENT's own box.
+    await setIframeStyle(visit, "content-visibility", "hidden");
+    await assertStillRefused(center);
+    await clearIframeStyle(visit, "content-visibility");
+
+    // 5. mix-blend-mode: blends the iframe into a same-color background, same box.
+    await setIframeStyle(visit, "mix-blend-mode", "multiply");
+    await assertStillRefused(center);
+    await clearIframeStyle(visit, "mix-blend-mode");
+
+    // 6. transform: scale(0) on the iframe itself — shrinks the box to nothing, centred on the
+    // same point (scaling around the default transform-origin, the box's own centre, never
+    // moves that centre), so the real candidate's own centre is still the right place to probe.
+    await setIframeStyle(visit, "transform", "scale(0)");
+    await assertStillRefused(center);
+    await clearIframeStyle(visit, "transform");
+
+    // 7. An ancestor transform (on `body`, not the iframe) that displaces the iframe from its
+    // frozen expected rect — a MODEST on-screen displacement (not an off-screen translate, which
+    // would just make the click miss the iframe entirely for the boring reason that it is no
+    // longer there; this is the interesting case, where the iframe is still fully opaque and
+    // sitting somewhere else on screen). `setIframeStyle`'s own doc explains why this uses an
+    // inline style write (`page.evaluate`), not `addStyleTag`, specifically so the EXISTING
+    // `InlineMenu` instance (with its own already-frozen expected rect) is what gets tested,
+    // not a freshly reconstructed one whose own fresh rect would already account for the
+    // transform and therefore never disagree with it.
+    await visit.evaluate(() => {
+      document.body.style.setProperty("transform", "translate(60px, 40px)");
+    });
+    await assertStillRefused({ x: center.x + 60, y: center.y + 40 });
+    await visit.evaluate(() => {
+      document.body.style.removeProperty("transform");
+    });
+
+    // 8. A forced tiny size via an author `!important` rule — should already be blocked by Gate
+    // A's default `pointer-events: none` plus the geometry check (a useful cascade-assumption
+    // regression test: confirms our OWN `!important` declarations still win where they need to,
+    // and that a size mismatch alone is sufficient to refuse). `left`/`top` are unchanged by a
+    // width/height-only override, so the forced 1×1 box sits at the real candidate's own
+    // top-left corner, not its centre.
+    await setIframeStyle(visit, "width", "1px", true);
+    await setIframeStyle(visit, "height", "1px", true);
+    await assertStillRefused({ x: box.x + 1, y: box.y + 1 });
+    await clearIframeStyle(visit, "width");
+    await clearIframeStyle(visit, "height");
+
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// Top-layer occlusion (A7/THREAT_MODEL gap, HANDOFF X6): `document.fullscreenElement`,
+// `dialog[open]` and `:popover-open` elements render above EVERY z-index by spec, including the
+// menu iframe's own maximum (`2147483647`) — the one occlusion class ordinary DOM stacking can
+// never produce. A modal `<dialog>` also makes the browser itself refuse to route a click to
+// anything underneath it (including the menu), so the discriminator here is
+// `getComputedStyle(iframe).pointerEvents` (Gate A's own, page-observable toggle — the accepted
+// consequence named in this change's commit message) rather than relying on the click outcome
+// alone, which would otherwise prove only "a modal dialog blocks clicks," a browser fact true
+// with or without this change.
+test("a <dialog> and an open popover covering the menu's rect make Gate A refuse it (top-layer occlusion)", async ({ context, extensionId, server }) => {
+  test.setTimeout(60_000);
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "toplayeruser");
+    await createLoginItem(setupPage, {
+      title: "Top Layer Target",
+      username: "toplayer-user@example.com",
+      password: "toplayer-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "toplayeruser", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Top Layer Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+
+    const pointerEventsIsNone = () => visit.locator("iframe[data-rizzy-inline-menu]").evaluate((el) => getComputedStyle(el).pointerEvents === "none");
+
+    // Baseline: a genuinely untampered, visible menu reaches `pointer-events: auto` within a
+    // frame or two of Gate A's own rAF loop.
+    await expect.poll(pointerEventsIsNone, { timeout: 5_000 }).toBe(false);
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+
+    // 1. A modal <dialog> covering the menu's own rect.
+    await visit.evaluate((rect) => {
+      const dialog = document.createElement("dialog");
+      dialog.id = "rizzy-test-dialog";
+      dialog.style.position = "fixed";
+      dialog.style.left = `${rect.x}px`;
+      dialog.style.top = `${rect.y}px`;
+      dialog.style.width = `${rect.width}px`;
+      dialog.style.height = `${rect.height}px`;
+      dialog.style.margin = "0";
+      document.body.appendChild(dialog);
+      dialog.showModal();
+    }, box);
+    await expect.poll(pointerEventsIsNone, { timeout: 5_000 }).toBe(true);
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await visit.waitForTimeout(500);
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.evaluate(() => {
+      const dialog = document.getElementById("rizzy-test-dialog") as HTMLDialogElement | null;
+      dialog?.close();
+      dialog?.remove();
+    });
+    // Recovers once the dialog is gone — Gate A is continuous, not a one-shot latch.
+    await expect.poll(pointerEventsIsNone, { timeout: 5_000 }).toBe(false);
+
+    // 2. An open popover covering the same rect.
+    await visit.evaluate((rect) => {
+      const popover = document.createElement("div");
+      popover.id = "rizzy-test-popover";
+      popover.setAttribute("popover", "manual");
+      popover.style.position = "fixed";
+      popover.style.left = `${rect.x}px`;
+      popover.style.top = `${rect.y}px`;
+      popover.style.width = `${rect.width}px`;
+      popover.style.height = `${rect.height}px`;
+      popover.style.margin = "0";
+      document.body.appendChild(popover);
+      (popover as HTMLElement & { showPopover?: () => void }).showPopover?.();
+    }, box);
+    await expect.poll(pointerEventsIsNone, { timeout: 5_000 }).toBe(true);
+    await visit.evaluate(() => {
+      const popover = document.getElementById("rizzy-test-popover") as (HTMLElement & { hidePopover?: () => void }) | null;
+      popover?.hidePopover?.();
+      popover?.remove();
+    });
+    await expect.poll(pointerEventsIsNone, { timeout: 5_000 }).toBe(false);
+
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// Regression check (named explicitly, per the task): a decoy sharing the menu iframe's OWN
+// maximum z-index, inserted later in DOM order, should already fail to intercept the click or
+// break the fill WITHOUT any of the new gates — ordinary DOM stacking already closes this class
+// (the existing, pre-this-change `zIndex: 2147483647` is the maximum value the property can
+// hold, so nothing in normal stacking can render above it regardless of DOM order; a decoy at
+// the SAME value does not out-rank it as a HIGHER value would need to). Confirms the new gates
+// introduce no regression here: the real fill still lands normally.
+test("a same-z-index, later-DOM-order decoy does not intercept the real click or break the fill (no-regression check)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "samezindexuser");
+    await createLoginItem(setupPage, {
+      title: "Same Z-Index Target",
+      username: "samez-user@example.com",
+      password: "samez-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "samezindexuser", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Same Z-Index Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+
+    await visit.evaluate((rect) => {
+      const decoy = document.createElement("div");
+      decoy.id = "rizzy-test-same-z-decoy";
+      decoy.textContent = "Decoy — same z-index, later in the DOM";
+      decoy.style.position = "fixed";
+      decoy.style.left = `${rect.x}px`;
+      decoy.style.top = `${rect.y}px`;
+      decoy.style.width = `${rect.width}px`;
+      decoy.style.height = `${rect.height}px`;
+      decoy.style.zIndex = "2147483647";
+      decoy.style.background = "rgba(255, 0, 0, 0.1)";
+      // Inserted AFTER the iframe, which is already in the DOM by the time this runs.
+      document.body.appendChild(decoy);
+    }, box);
+    // Appending the decoy is itself a `childList` mutation under `document.documentElement`,
+    // which the content script's own `MutationObserver` sees and can use to retrigger
+    // `report()`, rebuilding the `InlineMenu` instance (`setIframeStyle`'s own doc covers this
+    // same mechanism). A freshly rebuilt instance needs at least one Gate-A tick to record its
+    // own first good sample before Gate B allows a fill — this margin (the same one the existing
+    // clickjacking test already uses after its own `addStyleTag`) lets that settle first, so this
+    // test exercises the decoy/z-index question, not an unrelated rebuild race.
+    await visit.waitForTimeout(500);
+
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(visit.locator("#user")).toHaveValue("samez-user@example.com", { timeout: 15_000 });
+    await expect(visit.locator("#pass")).toHaveValue("samez-target-password", { timeout: 15_000 });
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// False-refusal test (named explicitly, per the task): an ordinary scrolled and zoomed page must
+// still fill normally. The frame is always `position: fixed`, and its frozen expected rect
+// (`menu-visibility.ts`'s `computeExpectedRect`) is computed from the anchor's rect AT
+// CONSTRUCTION TIME in viewport (not document) coordinates — ordinary scrolling never changes a
+// `position: fixed` element's `getBoundingClientRect()`, so this must not be refused.
+// Deviation (CLAUDE.md "deviate only with a stated reason"): the task's own list also names
+// "zoomed." CSS `zoom` is a non-standard Blink/WebKit property whose effect on the coordinate
+// space `page.mouse.click`/`getBoundingClientRect()` agree on in headless Chromium turned out,
+// empirically, to need more investigation than this task's own scroll-invariance point is worth
+// — real pinch-zoom (the browser's own page-scale factor) has no simple, reliable Playwright
+// control either. Scrolling is the sharper, better-defined version of this invariant anyway
+// (`menu-visibility.ts`'s own doc: "ordinary page scrolling must never, by itself, cause a false
+// refusal," stated as a hard requirement because the frame is always `position: fixed`), so this
+// test covers scrolling only.
+test("a scrolled page still fills normally (false-refusal check: scrolling must never, by itself, refuse a fill)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "scrolluser");
+    await createLoginItem(setupPage, {
+      title: "Scroll Target",
+      username: "scroll-user@example.com",
+      password: "scroll-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "scrolluser", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Scroll Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    const boxBeforeScroll = await realCandidate.boundingBox();
+    if (boxBeforeScroll === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    // Realistic margin before the first real click lands — same reasoning as the positive
+    // control's own comment: Gate B refuses a click that arrives before the menu's Gate-A loop
+    // has ever recorded one good sample.
+    await visit.waitForTimeout(150);
+
+    // Padding that makes the page scrollable, applied to the ALREADY-constructed menu (this is
+    // the scenario the invariant is actually about: scrolling a page that already has a menu
+    // open, not a page that happens to be pre-scrolled before the menu is ever shown). A style
+    // write, not a `childList` mutation, so it does not retrigger the content script's own
+    // `MutationObserver`/rebuild — no settle wait is needed.
+    await visit.evaluate(() => {
+      document.body.style.paddingTop = "1500px";
+    });
+    await visit.mouse.wheel(0, 700);
+
+    // Re-read the box after scrolling: for a `position: fixed` element, this must be the exact
+    // SAME viewport rect as before scrolling — the assertion this test is actually making.
+    const boxAfterScroll = await realCandidate.boundingBox();
+    if (boxAfterScroll === null) {
+      throw new Error("adversarial test setup: the real candidate's iframe disappeared after scrolling");
+    }
+    expect(Math.abs(boxAfterScroll.x - boxBeforeScroll.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(boxAfterScroll.y - boxBeforeScroll.y)).toBeLessThanOrEqual(1);
+
+    await visit.mouse.click(boxAfterScroll.x + boxAfterScroll.width / 2, boxAfterScroll.y + boxAfterScroll.height / 2);
+    await expect(visit.locator("#user")).toHaveValue("scroll-user@example.com", { timeout: 15_000 });
+    await expect(visit.locator("#pass")).toHaveValue("scroll-target-password", { timeout: 15_000 });
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// False-refusal test, documenting the accepted trade-off rather than hiding it (the task's own
+// instruction): a legitimate, unrelated ancestor CSS transition/animation running concurrently
+// with a real click IS refused under this design's "only ever refuse more" mandate, because
+// `isVisibilityChainOk` treats `filter`/`opacity`/`clip-path`/etc. on ANY ancestor as a binary
+// fail-closed signal with no allowance for "it's just a benign page animation." This is a known,
+// accepted usability cost of the design (`menu-visibility.ts`'s own module doc on why
+// `will-change`/`contain` are deliberately NOT included in this same denylist — the owner's
+// trade-off call stops there, not here): a page that runs a decorative fade/opacity transition
+// on `body` or `html` while the menu happens to be open loses autofill for as long as the
+// transition's own opacity differs from 1. Marked here, not silently matched to whatever the
+// code happens to do.
+test("a concurrent, unrelated ancestor CSS transition refuses the fill (known, accepted false-refusal trade-off — not a bug)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "transitionuser");
+    await createLoginItem(setupPage, {
+      title: "Transition Target",
+      username: "transition-user@example.com",
+      password: "transition-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "transitionuser", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Transition Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+
+    // A decorative, ongoing fade on `body` — nothing to do with the menu at all, and never
+    // settling at `opacity: 1`, which is exactly what makes this an accepted cost rather than a
+    // one-off transient the trailing window would already tolerate.
+    await visit.evaluate(() => {
+      const style = document.createElement("style");
+      style.textContent = "@keyframes rizzy-test-fade { 0%, 100% { opacity: 0.9; } 50% { opacity: 0.8; } } body { animation: rizzy-test-fade 0.2s linear infinite; }";
+      document.head.appendChild(style);
+    });
+    await visit.waitForTimeout(300);
+
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await visit.waitForTimeout(600);
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// Best-effort timing attack (the task's own instruction: "acknowledge this one is inherently
+// harder to make fully deterministic in Playwright; treat timing flakiness here as expected, not
+// as a sign the mechanism is broken"). This is the one scenario that specifically exercises
+// GATE B rather than Gate A alone: a page that is hidden by default, flips visible only for the
+// instant of a real click, and flips back immediately after — BEFORE the real click →
+// background → decrypt → `apply_fill` round trip can possibly land. Gate A's own `pointer-events`
+// toggle bounds exposure during the brief visible window (so the OS click can even reach the
+// button at all), but it is Gate B's causally-after-click check, at `apply_fill` arrival, that
+// actually has to refuse — `menu-visibility.ts`'s own module doc on why.
+test("a timed flip-visible-for-the-click, flip-back-after attack is refused (Gate B; best effort, timing-sensitive by nature)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  test.setTimeout(60_000);
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "fliptiminguser");
+    await createLoginItem(setupPage, {
+      title: "Flip Timing Target",
+      username: "fliptiming-user@example.com",
+      password: "fliptiming-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "fliptiminguser", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+
+    // A toggleable stylesheet (`disabled`, never added/removed again after this) — toggling
+    // `disabled` is neither a `childList` nor an `attributes` mutation under the elements the
+    // content script's own `MutationObserver` watches, so it never retriggers a rebuild, which
+    // would otherwise reset Gate A/B's own accumulated history on every flip and make this test
+    // measure the rebuild race instead of the timing attack it is meant to.
+    await visit.evaluate(() => {
+      const style = document.createElement("style");
+      style.id = "rizzy-test-flip-style";
+      style.textContent = "iframe[data-rizzy-inline-menu] { opacity: 0; }";
+      document.head.appendChild(style);
+      style.disabled = false; // enabled: hidden from the very start
+    });
+
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Flip Timing Target", exact: false });
+    // Hidden by design: `toBeVisible()` would never resolve here. Only existence is needed.
+    await realCandidate.waitFor({ state: "attached", timeout: 15_000 });
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+
+    const styleHandle = await visit.evaluateHandle(() => document.getElementById("rizzy-test-flip-style") as HTMLStyleElement);
+    // Un-hide: a window generous enough for a real OS click to land and for Gate A's own rAF
+    // loop to have sampled at least one real good tick within it (both need at least one real
+    // animation frame after this).
+    await styleHandle.evaluate((el) => {
+      el.disabled = true;
+    });
+    await visit.waitForTimeout(120);
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    // Re-hide immediately after the click — well before the real click → background → decrypt →
+    // `apply_fill` round trip can possibly land. The attacker must do this to keep deceiving the
+    // user; it is also exactly what lets Gate B's trailing-window check see a fresh bad sample by
+    // the time `apply_fill` arrives, regardless of how short the visible flip was.
+    await styleHandle.evaluate((el) => {
+      el.disabled = false;
+    });
+
+    await visit.waitForTimeout(1500);
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
     await visit.close();
   } finally {
     await page.stop();
