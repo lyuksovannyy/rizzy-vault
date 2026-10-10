@@ -69,13 +69,21 @@ const PR_CASES: u32 = 1_000;
 const PR_GAP_CASES: u32 = 1_000;
 
 /// Fixed seeds that once failed, run on every PR: `(family, seed)`.
-const REGRESSIONS: [(usize, u64); 3] = [
+const REGRESSIONS: [(usize, u64); 5] = [
     // A restore to an empty backup: own acknowledged ops without bodies need a fresh snapshot
     // that covers own unacknowledged ops too (the healing closure in `device`).
     (4, 11_895_903_307_134_407_466),
     // A paged response splits a tombstone cover from its recorded purge (`World::drain`; the named finding test pins it).
     (7, 8_380_964_389_207_079_218),
     (7, 16_352_471_332_150_547_450),
+    // `World::check_rotations`'s writer-rule check flagged an envelope `Server::worker`'s R1
+    // had dropped the body of (fully covered by a retained snapshot) and a later restore to a
+    // backup taken before that drop brought back: the pre-rotation `RotationRecord::before`
+    // snapshot, taken from the live set only, missed it. Fixed by accumulating every envelope
+    // ever observed live (`World::ever_envelopes`) instead of resnapshotting the live set at
+    // each rotation.
+    (9, 11_249_547_759_304_926_993),
+    (9, 11_582_194_142_707_026_397),
 ];
 
 /// The step kinds a family weights.
