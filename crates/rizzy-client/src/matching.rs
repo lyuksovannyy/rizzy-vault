@@ -111,6 +111,14 @@ pub struct Candidate {
     /// warning — never decoded to Unicode outside `rizzy-match`, so a mixed-script host still
     /// displays in its punycode `xn--` form.
     pub saved_host: String,
+    /// The saved URI's own port, only when it is not its scheme's default (ADR 0037 §2 rule 5;
+    /// [`NormalizedUrl::port`]). A caller that needs "the same site, not merely the same host"
+    /// for a destructive decision (an update-vs-save gate, never autofill itself, which is
+    /// `BaseDomain`-mode narrowing-only by design) must compare this alongside `saved_host`
+    /// against the page's own [`Decision::page_port`] — `saved_host` alone is exactly the gap
+    /// `rizzy_match::modes::decide`'s `Host` mode fix closes: two different ports on the same
+    /// host are two different sites.
+    pub saved_port: Option<u16>,
 }
 
 /// Why no candidate was offered for one URI, or for the frame as a whole.
@@ -131,6 +139,10 @@ pub struct Decision {
     /// Empty only in the never-reached `Default` value; every value this module returns from
     /// [`decide_candidates`] fills it from the already-parsed, already-validated page URL.
     pub page_host: String,
+    /// The page's own port, only when it is not its scheme's default ([`Candidate::saved_port`]
+    /// explains why a caller doing "same site" for a destructive decision must compare this
+    /// too, not `page_host` alone).
+    pub page_port: Option<u16>,
     /// Every URI that matched, in the order given.
     pub candidates: Vec<Candidate>,
     /// One line per URI this build could not evaluate or that did not match for a reason worth
@@ -157,6 +169,7 @@ pub fn decide_candidates(
     let page = NormalizedUrl::parse(page_url).map_err(|_| ClientError::InvalidInput)?;
     let mut out = Decision {
         page_host: page.host().to_owned(),
+        page_port: page.port(),
         ..Decision::default()
     };
     // ADR 0037 §5: a non-top frame gets automatic candidates only when it shares the page's
@@ -188,6 +201,7 @@ pub fn decide_candidates(
                 uri_id: item_uri.uri_id,
                 matched_via,
                 saved_host: uri.host().to_owned(),
+                saved_port: uri.port(),
             }),
             MatchOutcome::NoMatch => {}
             MatchOutcome::NotSupported => {
@@ -248,6 +262,46 @@ mod tests {
         );
         assert_eq!(decision.page_host, "example.com");
         assert_eq!(decision.candidates[0].saved_host, "login.example.com");
+    }
+
+    #[test]
+    fn a_match_carries_the_page_and_saved_ports_for_a_host_gate_on_top() {
+        // `decide_candidates` resolves every URI to `BaseDomain` (`sessionItemUris`'s own
+        // choice in the extension), which is port-blind by design (ADR 0037 §4) — so a caller
+        // doing a destructive "same site" decision on top (an update-vs-save gate, never
+        // autofill) must use `page_port`/`saved_port`, not just `page_host`/`saved_host`, which
+        // this test confirms are both threaded through for a page and a saved URI on different
+        // explicit ports.
+        let equivalence = EquivalenceView::empty();
+        let uris = [uri("https://example.com:9000/login", MatchMode::BaseDomain)];
+        let decision = decide_candidates(
+            "https://example.com:8443/",
+            &top(""),
+            MatchMode::BaseDomain,
+            &uris,
+            &equivalence,
+        )
+        .unwrap();
+        assert_eq!(decision.candidates.len(), 1);
+        assert_eq!(decision.page_port, Some(8443));
+        assert_eq!(decision.candidates[0].saved_port, Some(9000));
+        assert_ne!(decision.page_port, decision.candidates[0].saved_port);
+    }
+
+    #[test]
+    fn a_default_port_decision_carries_no_port() {
+        let equivalence = EquivalenceView::empty();
+        let uris = [uri("https://example.com/login", MatchMode::BaseDomain)];
+        let decision = decide_candidates(
+            "https://example.com/",
+            &top(""),
+            MatchMode::BaseDomain,
+            &uris,
+            &equivalence,
+        )
+        .unwrap();
+        assert_eq!(decision.page_port, None);
+        assert_eq!(decision.candidates[0].saved_port, None);
     }
 
     #[test]
