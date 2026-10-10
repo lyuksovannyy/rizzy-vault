@@ -986,3 +986,31 @@ button.sidebar-item .sidebar-item-count {
   margin: 0;
   white-space: nowrap;
 }
+
+/* The late-edit and trash notices after a sync (gap 02; NoticesPanel.tsx). */
+.notices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-2) 0;
+}
+
+.notice {
+  background: var(--color-surface);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-1);
+  padding: var(--space-3);
+}
+
+.notice p {
+  margin: 0 0 var(--space-2);
+}
+
+/* An item's password history (gap 01; PasswordHistory.tsx). */
+.password-history {
+  margin: var(--space-3) 0;
+}
+
+.password-history summary {
+  cursor: pointer;
+}

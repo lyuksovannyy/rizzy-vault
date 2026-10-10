@@ -79,6 +79,7 @@ rv item edit 3fa2 --uri https://login.example.org --custom "Account=1234" --cust
 rv item edit 3fa2 --set-uri 9b1c=https://example.org/new --remove-custom 52e0
 rv item edit 3fa2 --move-uri 9b1c=first --move-custom 52e0=after:7d41
 rv item trash 3fa2             # restore, purge
+rv item restore-late 77c0 --type login
 rv generate --length 24        # or --words 6
 rv totp 3fa2
 ```
@@ -90,6 +91,13 @@ URIs and custom fields are list elements: `item show` prints each with its eleme
 `--move-uri <id>=<place>` and `--move-custom <id>=<place>` reorder them; a place is `first`, `last`, `before:<id>` or `after:<id>`, and `item show` prints each list's ids in order (`order of uri: …`). Moves run in the order given, after the same command's removals and additions. A move writes only the moved element's position; when two devices placed elements at the same spot and nothing fits between them any more, the whole list's positions are rewritten evenly, which is invisible apart from the new `order` values. Tags and password history have no order of their own and cannot be moved.
 
 `item show` lists `login.password`'s history (up to 50 older values) in its own section, newest first, each concealed as `********` unless `--reveal` is given, same as every other secret. A password imported from another manager (`pwhist/<id>/value` · `/ms`) gets a second, separate section: the ADR defines no order across the two, so they are never interleaved.
+
+`rv sync` prints two kinds of notice on standard error ([ADR 0018](adr/0018-item-record-encoding.md) §3 "Surfacing", [ADR 0012](adr/0012-sync-engine.md) §5):
+
+- **An edit arrived for an item you deleted permanently**: another device edited the item before it heard of the deletion. The item stays deleted; `rv item restore-late <item> --type <type>` copies those edits into a new item of the type you name and prints its id. The deleted item keeps the edits, so the notice stays.
+- **Deleted on X while it was being edited on Y**: the edit wins, so the item stays in the list. The notice stays until the item is next changed.
+
+Devices are named by kind and the first 8 digits of their id, as `rv device list` prints them. `rv` cannot remember that it already showed a notice: every command is its own process, and keeping that mark in the local file would change the file's format, which needs a new decision ([ADR 0026](adr/0026-client-device-state-and-cache.md)) first. So every `rv sync` repeats the notices that still hold.
 
 Item types: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`, `software-license`, `wifi`, `bank-account`, `passkey`. Field keys are those of the item schema ([ADR 0018](adr/0018-item-record-encoding.md)), for example `item.name`, `item.notes`, `login.username`, `login.password`, `login.totp`, `card.number`.
 

@@ -15,11 +15,13 @@ import type {
   FieldView,
   Generated,
   GeneratorLimits,
+  HistoryEntry,
   ImportFormat,
   ImportReport,
   ItemChange,
   ItemSummary,
   ItemType,
+  Notice,
   PassphraseOptions,
   PasswordOptions,
   TotpCode,
@@ -78,6 +80,14 @@ export interface CoreApi {
   trashItem(id: string): void;
   restoreItem(id: string): void;
   purgeItem(id: string): void;
+  /** The item's password history: sources, positions and dates, never a value (ADR 0013 §3 rule 3). */
+  passwordHistory(id: string): HistoryEntry[];
+  /** One password-history entry's value, on the user's request only. */
+  revealPasswordHistory(id: string, source: HistoryEntry["source"], index: number): string;
+  /** The late-edit and trash notices not yet handed over in this session (gap 02). */
+  takeNotices(): Notice[];
+  /** Restores the late edits of an item deleted permanently as a new item; returns its id. */
+  restoreLateAsNew(id: string, itemType: ItemType): string;
   totp(id: string): TotpCode;
   exportEncrypted(password: Uint8Array): EncryptedExport;
   exportBlockers(): string[];
@@ -129,6 +139,10 @@ export const METHODS: readonly Method[] = [
   "trashItem",
   "restoreItem",
   "purgeItem",
+  "passwordHistory",
+  "revealPasswordHistory",
+  "takeNotices",
+  "restoreLateAsNew",
   "totp",
   "exportEncrypted",
   "exportBlockers",

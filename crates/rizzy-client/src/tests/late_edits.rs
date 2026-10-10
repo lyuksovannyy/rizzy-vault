@@ -6,6 +6,7 @@
 use rizzy_core::item::schema::LOGIN_USERNAME;
 
 use super::*;
+use crate::items::ConcurrentTrash;
 
 /// Like [`login_and_enrol`], but without its "exactly one certificate so far" assertion: these
 /// tests enrol a third and fourth device on one account.
@@ -133,12 +134,25 @@ fn concurrent_trash_device_names_the_losing_device() {
         c_vault.concurrent_trash_device(item),
         Some(b.unlocked.device_id)
     );
+    // Both devices of "deleted on X while it was being edited on Y".
+    assert_eq!(
+        c_vault.concurrent_trash(item),
+        Some(ConcurrentTrash {
+            trashed_by: b.unlocked.device_id,
+            edited_by: a_unlocked.device_id,
+        })
+    );
 
-    // No notice when there is nothing concurrent to lose.
+    // No notice when there is nothing concurrent to lose, nor for an item never seen.
     let other_signup = signup(&mut server, &mut rng, DeviceKind::DesktopCli);
     let (other_vault, _other_unlocked, other_items) =
         synced_writer(&mut server, &mut rng, other_signup, &authors, 1);
     assert_eq!(other_vault.concurrent_trash_device(other_items[0]), None);
+    assert_eq!(other_vault.concurrent_trash(other_items[0]), None);
+    assert_eq!(
+        other_vault.concurrent_trash(ItemId::from_bytes([0xee; 16])),
+        None
+    );
 }
 
 /// "An edit from Laptop arrived for an item you deleted permanently. Restore it as a new

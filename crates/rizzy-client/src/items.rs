@@ -171,6 +171,16 @@ impl fmt::Debug for ImportedHistoryEntry {
     }
 }
 
+/// The two devices of "deleted on X while it was being edited on Y" (ADR 0012 §5 "Active
+/// wins"), from [`VaultSync::concurrent_trash`]. Device ids only, no item data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConcurrentTrash {
+    /// X: the device of the highest Trashed value that lost to Active.
+    pub trashed_by: DeviceId,
+    /// Y: the device of the displayed Active value, the edit that kept the item.
+    pub edited_by: DeviceId,
+}
+
 /// Op data bytes before the writes: `record_kind`, `lifecycle`, `u16 n` (ADR 0018 §3).
 const OP_DATA_HEADER_LEN: usize = 4;
 
@@ -736,31 +746,38 @@ impl VaultSync {
             .collect()
     }
 
-    /// Whose edit this device is shown as keeping, when `@lifecycle` displays Active over a
-    /// concurrently trashed value ("Active wins", ADR 0012 §5): the device that trashed the
-    /// item, for "deleted on `<that device>` while it was being edited on `<this one>`"
-    /// (module docs). `None` unless the item is Active with a losing concurrent Trashed
-    /// value.
-    ///
-    /// No host calls this yet: `rv` and the web vault do not show this notice today. This is
-    /// the Rust API only (gap 02).
+    /// The device that trashed the item, when `@lifecycle` displays Active over a concurrently
+    /// trashed value ("Active wins", ADR 0012 §5): [`VaultSync::concurrent_trash`]'s
+    /// `trashed_by`. `None` unless the item is Active with a losing concurrent Trashed value.
     #[must_use]
     pub fn concurrent_trash_device(&self, item: ItemId) -> Option<DeviceId> {
+        self.concurrent_trash(item).map(|c| c.trashed_by)
+    }
+
+    /// Both devices of "deleted on X while it was being edited on Y" (ADR 0012 §5 "Active
+    /// wins"), when `@lifecycle` displays Active over a concurrently trashed value: the device
+    /// of the highest losing Trashed value and the device of the displayed Active value. `None`
+    /// unless the item is Active with a losing concurrent Trashed value. Presentation only: the
+    /// host decides when the notice was already shown (`rv sync` and the web vault keep that in
+    /// memory only; ADR 0026 has no slot for it).
+    #[must_use]
+    pub fn concurrent_trash(&self, item: ItemId) -> Option<ConcurrentTrash> {
         let merge = self.merge(item)?;
         let display = merge.lifecycle_display()?;
         let losing = display.trashed_by?;
         let lifecycle = merge.field(LIFECYCLE_KEY)?;
-        Some(lifecycle.current.get(losing)?.dot().device_id())
+        Some(ConcurrentTrash {
+            trashed_by: lifecycle.current.get(losing)?.dot().device_id(),
+            edited_by: lifecycle.current.get(display.displayed)?.dot().device_id(),
+        })
     }
 
     /// The devices with a late edit on a purged item not yet surfaced (ADR 0018 §3
     /// "Surfacing"): "An edit from `<device>` arrived for an item you deleted permanently.
     /// Restore it as a new item?" Ascending, deduplicated; empty for a live item or one with
     /// nothing left to surface. The host resolves each id to a device name from whatever
-    /// device list it already has; this crate holds no device directory.
-    ///
-    /// No host calls this yet: `rv` and the web vault do not show this notice today. This is
-    /// the Rust API only (gap 02).
+    /// device list it already has; this crate holds no device directory. `rv sync` and the web
+    /// vault's notices (gap 02) read it.
     #[must_use]
     pub fn late_edit_devices(&self, item: ItemId) -> Vec<DeviceId> {
         let Some(merge) = self.merge(item) else {
@@ -781,11 +798,9 @@ impl VaultSync {
     /// this writes nothing to the cache journal. By design, a host that calls this would see
     /// the notice once per unlock session, not forever, since the surfaced mark lives only in
     /// this in-memory merge and is gone on the next unlock; persisting it across sessions needs
-    /// an ADR 0026 change first. A no-op for an item this replica never saw.
-    ///
-    /// No host calls this yet: `rv` and the web vault do not show this notice today, so nothing
-    /// currently surfaces late edits for the user to dismiss. This is the Rust API only (gap
-    /// 02).
+    /// an ADR 0026 change first. A no-op for an item this replica never saw. The web vault
+    /// calls it when it hands a notice to the UI; `rv` runs one process per command, so its
+    /// marks end with the process.
     pub fn mark_late_edits_surfaced(&mut self, item: ItemId) {
         if let Some(merge) = self.existing_merge_mut(item) {
             merge.mark_surfaced();
@@ -798,11 +813,8 @@ impl VaultSync {
     /// register that fits `item_type`; a late value that type does not expect, or that is
     /// Cleared, is dropped rather than failing the whole restore, the way an import drops a
     /// write the schema refuses. The purged item is unchanged: it stays a tombstone, and its
-    /// late values stay available to restore again.
-    ///
-    /// No host calls this yet: `rv` and the web vault do not show the "restore it as a new
-    /// item?" prompt today, so nothing currently invokes this method outside tests. This is
-    /// the Rust API only (gap 02).
+    /// late values stay available to restore again. `rv item restore-late` and the web vault's
+    /// late-edit notice call it (gap 02).
     ///
     /// # Errors
     /// [`ClientError::UnknownItem`] unless `item` is purged; [`ClientError::InvalidEdit`] for

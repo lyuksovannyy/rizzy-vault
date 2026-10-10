@@ -16,6 +16,8 @@
 //! | List, view, reveal | [`Session::items`], [`Session::item`], [`Session::item_fields`], [`Session::reveal_field`] |
 //! | Save | [`Session::create_item`], [`Session::edit_item`] with an [`ItemDraft`] |
 //! | Trash, restore, purge | [`Session::trash_item`], [`Session::restore_item`], [`Session::purge_item`] |
+//! | Password history | [`Session::password_history`] (dates only), [`Session::reveal_password_history`] (one value) |
+//! | Late-edit and trash notices | [`Session::take_notices`] after a sync; [`Session::restore_late_as_new`] |
 //! | TOTP code | [`Session::totp`] |
 //! | Passkey assertion | [`Session::passkey_assertion`] ([`create_passkey`](crate::passkey::create_passkey) is stateless, module docs) |
 //! | Export | [`Session::reauth`] + [`Session::confirm_reauth`], then [`Session::export_encrypted`], or [`Session::plaintext_warning_shown`] + [`Session::export_plaintext`] after the hold |
@@ -47,6 +49,7 @@
 //!   `account/state` first.
 
 use core::fmt;
+use std::collections::BTreeSet;
 
 use rizzy_client::ClientError;
 use rizzy_client::account::VerifiedAccount;
@@ -56,7 +59,7 @@ use rizzy_client::export::gate::{self, ExportGate, check_export_password};
 use rizzy_client::export::plaintext::{
     PLAINTEXT_EXPORT_PHRASE, PLAINTEXT_EXPORT_WARNING, PlaintextExportAck, csv_export_warning,
 };
-use rizzy_client::items::{FieldEdit, ItemId, TRASH_RETENTION_MS};
+use rizzy_client::items::{DeviceId, FieldEdit, ItemId, TRASH_RETENTION_MS};
 use rizzy_client::login::WebSession;
 use rizzy_client::passkey::get_assertion;
 use rizzy_client::rizzy_core::ids::AccountId;
@@ -80,7 +83,9 @@ use zeroize::Zeroizing;
 
 use crate::error::{CoreError, CoreResult, IMPORT_FAILED, LOCKED, UNKNOWN_FORMAT, WRONG_STATE};
 use crate::http::{self, HttpRequest};
-use crate::items::{self, FieldView, ItemDraft, ItemSummary, hex, type_from_name, visible_item};
+use crate::items::{
+    self, FieldView, HistoryEntryView, ItemDraft, ItemSummary, hex, type_from_name, visible_item,
+};
 use crate::login::{Credentials, LoginFlow, Purpose};
 use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
 use crate::rng::{Rng, os_rng};
@@ -121,6 +126,15 @@ struct Inner {
     gate: ExportGate,
     /// The RNG.
     rng: Rng,
+    /// The "deleted on X while it was being edited on Y" notices already handed to the host
+    /// (item, X, Y), so that [`Session::take_notices`] hands each one over once.
+    ///
+    /// Session memory only, on purpose: it is dropped with the session, so a notice shows again
+    /// after the next unlock. Keeping it across sessions would mean a new record in the local
+    /// cache, a persistent-format change that needs an ADR 0026 amendment first (gap 02). The
+    /// late-edit notices' marks live in the same place for the same reason (`rizzy-client`'s
+    /// `VaultSync::mark_late_edits_surfaced`).
+    shown_trash_notices: BTreeSet<(ItemId, DeviceId, DeviceId)>,
 }
 
 /// An unlocked web-vault session (module docs). `Debug` shows nothing secret.
@@ -177,6 +191,7 @@ impl Session {
                 sync: SyncDriver::default(),
                 gate: ExportGate::new(),
                 rng: os_rng(),
+                shown_trash_notices: BTreeSet::new(),
             })),
         })
     }
@@ -486,6 +501,110 @@ impl Session {
             TRASH_RETENTION_MS,
         )?;
         Ok(purged.into_iter().map(|id| hex(id.as_bytes())).collect())
+    }
+
+    /// One item's password history without values (gap 01; [`crate::items`] module docs):
+    /// source, position and date per entry. Empty when the item has none.
+    ///
+    /// # Errors
+    /// As [`Session::item`].
+    #[wasm_bindgen(js_name = passwordHistory)]
+    pub fn password_history(&self, id: &str) -> Result<Vec<HistoryEntryView>, CoreError> {
+        let vault = &self.inner()?.vault;
+        let item = visible_item(vault, id)?;
+        Ok(items::password_history(vault, item))
+    }
+
+    /// The value of one password-history entry, as [`Session::password_history`] listed it:
+    /// call it only on the user's request (ADR 0013 §3 rule 3).
+    ///
+    /// # Errors
+    /// As [`Session::item`]; `invalid_input` for an unknown source; `unknown_item` for an
+    /// entry that is not there (any more).
+    #[wasm_bindgen(js_name = revealPasswordHistory)]
+    pub fn reveal_password_history(
+        &self,
+        id: &str,
+        source: &str,
+        index: usize,
+    ) -> Result<String, CoreError> {
+        let vault = &self.inner()?.vault;
+        let item = visible_item(vault, id)?;
+        Ok(items::reveal_history(vault, item, source, index)?
+            .as_str()
+            .to_owned())
+    }
+
+    /// The notices not yet handed over in this session (gap 02), each handed over once: an edit
+    /// that arrived for an item deleted permanently (ADR 0018 §3 "Surfacing"; the host offers
+    /// [`Session::restore_late_as_new`]), and an item deleted on one device while it was being
+    /// edited on another (ADR 0012 §5 "Active wins"). Device ids only; the host names them from
+    /// [`Session::devices`]. The host calls this after each sync.
+    ///
+    /// "Handed over once" lasts this session only: the marks live in memory (the late-edit
+    /// marks in the vault's merge, the trash notices in this session), so the next unlock shows
+    /// the notices again. Persisting them is an ADR 0026 cache-format change (gap 02).
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(js_name = takeNotices)]
+    pub fn take_notices(&mut self) -> Result<Vec<Notice>, CoreError> {
+        let inner = self.inner_mut()?;
+        let mut out = Vec::new();
+        for item in inner.vault.item_ids() {
+            let late = inner.vault.late_edit_devices(item);
+            if !late.is_empty() {
+                inner.vault.mark_late_edits_surfaced(item);
+                out.push(Notice {
+                    kind: NOTICE_LATE_EDIT,
+                    item: hex(item.as_bytes()),
+                    devices: late.iter().map(|d| hex(d.as_bytes())).collect(),
+                });
+            }
+            if let Some(trash) = inner.vault.concurrent_trash(item)
+                && inner
+                    .shown_trash_notices
+                    .insert((item, trash.trashed_by, trash.edited_by))
+            {
+                out.push(Notice {
+                    kind: NOTICE_CONCURRENT_TRASH,
+                    item: hex(item.as_bytes()),
+                    devices: vec![
+                        hex(trash.trashed_by.as_bytes()),
+                        hex(trash.edited_by.as_bytes()),
+                    ],
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Restores the late edits of an item deleted permanently as a new item of `item_type`,
+    /// the type the user picked (ADR 0018 §3 "Surfacing": never inferred). Returns the new
+    /// item's id; the deleted item stays deleted.
+    ///
+    /// # Errors
+    /// `locked`; `wrong_state` while a sync runs; `invalid_input` for an id that is not 32 hex
+    /// digits or an unknown type; `unknown_item` unless the item was deleted permanently;
+    /// `read_only`.
+    #[wasm_bindgen(js_name = restoreLateAsNew)]
+    pub fn restore_late_as_new(
+        &mut self,
+        id: &str,
+        item_type: &str,
+        now_ms: u64,
+    ) -> Result<String, CoreError> {
+        let item_type = type_from_name(item_type)?;
+        let inner = self.writable()?;
+        let item = items::item_id(id)?;
+        let restored = inner.vault.restore_late_as_new_item(
+            &mut inner.rng,
+            &inner.unlocked,
+            item,
+            item_type,
+            now_ms,
+        )?;
+        Ok(hex(restored.as_bytes()))
     }
 
     /// The current TOTP code of an item's `login.totp`, which holds an `otpauth://` URI or a
@@ -1205,6 +1324,50 @@ impl ImportReport {
     #[must_use]
     pub fn fields_not_carried(&self) -> usize {
         self.fields_not_carried
+    }
+}
+
+/// [`Notice::kind`] of "An edit from `<device>` arrived for an item you deleted permanently.
+/// Restore it as a new item?" (ADR 0018 §3 "Surfacing").
+pub const NOTICE_LATE_EDIT: &str = "late-edit";
+/// [`Notice::kind`] of "deleted on X while it was being edited on Y" (ADR 0012 §5).
+pub const NOTICE_CONCURRENT_TRASH: &str = "concurrent-trash";
+
+/// One notice of [`Session::take_notices`]: ids only, no item data.
+#[wasm_bindgen]
+#[derive(Clone, Debug)]
+pub struct Notice {
+    /// [`NOTICE_LATE_EDIT`] or [`NOTICE_CONCURRENT_TRASH`].
+    kind: &'static str,
+    /// The item, hex.
+    item: String,
+    /// For a late edit, the devices whose edits arrived, ascending; for a concurrent trash,
+    /// X (the device that deleted it) then Y (the device whose edit kept it). Hex.
+    devices: Vec<String>,
+}
+
+#[wasm_bindgen]
+impl Notice {
+    /// `late-edit` or `concurrent-trash`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn kind(&self) -> String {
+        self.kind.to_owned()
+    }
+
+    /// The item id, 32 hex digits.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn item(&self) -> String {
+        self.item.clone()
+    }
+
+    /// The device ids, 32 hex digits each: the late edits' devices, or `[X, Y]` for a
+    /// concurrent trash.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn devices(&self) -> Vec<String> {
+        self.devices.clone()
     }
 }
 

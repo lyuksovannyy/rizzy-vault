@@ -10,10 +10,19 @@
 //! `item list`, `item show`, `totp` and `generate` need no network: the cache is unlocked and
 //! loaded, and that is all (ROADMAP §4.2 "Offline read access"). `export` reads the cache as it
 //! is too, but first re-authenticates with the server (owner decision 2026-10-05), so it needs
-//! the server. `rv sync` brings the cache up to date. A command that writes (`item
-//! create/edit/trash/restore/purge`, `import`) commits the new ops to the cache first and then
-//! syncs; if the server cannot be reached the ops stay queued, the command says so and still
-//! succeeds, and the next sync uploads them.
+//! the server. `rv sync` brings the cache up to date, then prints the late-edit and trash
+//! notices of gap 02 (see "Notices" below). A command that writes (`item
+//! create/edit/trash/restore/purge/restore-late`, `import`) commits the new ops to the cache
+//! first and then syncs; if the server cannot be reached the ops stay queued, the command says
+//! so and still succeeds, and the next sync uploads them.
+//!
+//! # Notices (gap 02)
+//!
+//! After a sync, `rv` notes "An edit from `<device>` arrived for an item you deleted
+//! permanently. Restore it as a new item?" (ADR 0018 §3 "Surfacing"; `item restore-late`
+//! restores it) and "deleted on X while it was being edited on Y" (ADR 0012 §5 "Active
+//! wins"). It keeps no "already shown" mark: that would be a new local cache record, an ADR
+//! 0026 format change, so every `rv sync` repeats the notices that still hold.
 //!
 //! # Secrets (threat model INV-56)
 //!
@@ -137,6 +146,7 @@ pub async fn run(invocation: Invocation, env: &mut Env<'_>) -> Result<(), CliErr
                 "Synced; {} items.",
                 visible_items(device.vault(), false).len()
             ));
+            print_notices(&device, env.ui);
             Ok(())
         }
         Command::ItemList { trash } => {
@@ -168,6 +178,9 @@ pub async fn run(invocation: Invocation, env: &mut Env<'_>) -> Result<(), CliErr
                 vault.purge_item(rng, unlocked, item, now)
             }))
             .await
+        }
+        Command::ItemRestoreLate { item, item_type } => {
+            Box::pin(item_restore_late(env, &item, &item_type)).await
         }
         Command::Generate(options) => generate(env.ui, options),
         Command::Totp(item) => {
@@ -256,19 +269,39 @@ fn visible_items(vault: &VaultSync, trash: bool) -> Vec<ItemId> {
 
 /// The item a hex id or a unique prefix of one names, among the active and trashed items.
 fn resolve_item(vault: &VaultSync, text: &str) -> Result<ItemId, CliError> {
+    resolve_among(vault, text, |item| {
+        matches!(
+            vault.item_lifecycle(item),
+            ItemLifecycle::Active | ItemLifecycle::Trashed
+        )
+    })
+}
+
+/// The item a hex id or a unique prefix of one names, among the items deleted permanently that
+/// hold late edits ([`print_notices`]).
+fn resolve_late_item(vault: &VaultSync, text: &str) -> Result<ItemId, CliError> {
+    resolve_among(vault, text, |item| {
+        vault.item_lifecycle(item) == ItemLifecycle::Purged
+            && !vault.late_edit_devices(item).is_empty()
+    })
+}
+
+/// The item a hex id or a unique prefix of one names, among the items `candidate` accepts.
+fn resolve_among(
+    vault: &VaultSync,
+    text: &str,
+    candidate: impl Fn(ItemId) -> bool,
+) -> Result<ItemId, CliError> {
     let wanted = text.to_ascii_lowercase();
     if wanted.is_empty() || !wanted.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(CliError::BadInput(
             "an item is named by its hex id or a prefix of it",
         ));
     }
-    let mut matches = vault.item_ids().into_iter().filter(|item| {
-        hex(item.as_bytes()).starts_with(&wanted)
-            && matches!(
-                vault.item_lifecycle(*item),
-                ItemLifecycle::Active | ItemLifecycle::Trashed
-            )
-    });
+    let mut matches = vault
+        .item_ids()
+        .into_iter()
+        .filter(|item| hex(item.as_bytes()).starts_with(&wanted) && candidate(*item));
     match (matches.next(), matches.next()) {
         (Some(item), None) => Ok(item),
         (None, _) => Err(CliError::Client(ClientError::UnknownItem)),
@@ -282,6 +315,15 @@ fn type_name(item_type: Option<ItemType>) -> &'static str {
         .iter()
         .find(|(_, t)| Some(*t) == item_type)
         .map_or("unknown", |(name, _)| name)
+}
+
+/// The item type `--type` names.
+fn type_named(text: &str) -> Result<ItemType, CliError> {
+    TYPES
+        .iter()
+        .find(|(name, _)| *name == text)
+        .map(|(_, t)| *t)
+        .ok_or_else(|| CliError::Usage("unknown item type".into()))
 }
 
 /// The item types `--type` names.
@@ -571,11 +613,7 @@ async fn item_create(
     type_text: &str,
     fields: &FieldArgs,
 ) -> Result<(), CliError> {
-    let item_type = TYPES
-        .iter()
-        .find(|(name, _)| *name == type_text)
-        .map(|(_, t)| *t)
-        .ok_or_else(|| CliError::Usage("unknown item type".into()))?;
+    let item_type = type_named(type_text)?;
     let mut device = Device::open(env).await?;
     // A new item has no element whose `order` a rewrite would write: one op at most.
     let writes: Vec<(FieldKey, Value)> = collect_writes(env.ui, device.vault(), None, fields)?
@@ -638,6 +676,75 @@ async fn lifecycle(
         .edit(|vault, rng, unlocked, now| op(vault, rng, unlocked, item, now))
         .await?;
     sync_after_write(&mut device, env.ui).await
+}
+
+/// `item restore-late`: the late edits of an item deleted permanently, restored as a new item
+/// of the type the user names (ADR 0018 §3 "Surfacing": the type is never inferred). Prints the
+/// new item's id; the deleted item stays deleted, and its late edits stay restorable.
+async fn item_restore_late(env: &mut Env<'_>, item: &str, type_text: &str) -> Result<(), CliError> {
+    let item_type = type_named(type_text)?;
+    let mut device = Device::open(env).await?;
+    let item = resolve_late_item(device.vault(), item)?;
+    let restored = device
+        .edit(|vault, rng, unlocked, now| {
+            vault.restore_late_as_new_item(rng, unlocked, item, item_type, now)
+        })
+        .await?;
+    env.ui.print(&hex(restored.as_bytes()))?;
+    sync_after_write(&mut device, env.ui).await
+}
+
+/// The notices after `sync` (gap 02): "An edit from `<device>` arrived for an item you deleted
+/// permanently. Restore it as a new item?" (ADR 0018 §3 "Surfacing"), and "deleted on X while
+/// it was being edited on Y" (ADR 0012 §5 "Active wins"). Notes, not results: standard error.
+///
+/// `rv` keeps no "already shown" mark. Its session is one process, so the only memory that
+/// outlasts a command is the local cache, and a mark there is a new cache record: a
+/// persistent-format change that needs an ADR 0026 amendment first. So each `rv sync` prints
+/// every notice that still holds; a late-edit notice holds as long as the deleted item keeps
+/// its late edits, a trash notice until the next write of the item's lifecycle.
+fn print_notices(device: &Device, ui: &mut dyn Ui) {
+    let vault = device.vault();
+    for item in vault.item_ids() {
+        let id = hex(item.as_bytes());
+        let late = vault.late_edit_devices(item);
+        if !late.is_empty() {
+            let from: Vec<String> = late.iter().map(|d| device_label(device, *d)).collect();
+            ui.note(&format!(
+                "An edit from {} arrived for an item you deleted permanently ({id}). Restore it \
+                 as a new item? `rv item restore-late {id} --type <type>`",
+                from.join(" and ")
+            ));
+        }
+        if let Some(trash) = vault.concurrent_trash(item) {
+            let name = text_field(vault, item, ITEM_NAME).unwrap_or_default();
+            let line = Zeroizing::new(format!(
+                "{id}  {}: deleted on {} while it was being edited on {}; the edit kept it.",
+                name.as_str(),
+                device_label(device, trash.trashed_by),
+                device_label(device, trash.edited_by),
+            ));
+            ui.note(&line);
+        }
+    }
+}
+
+/// How a notice names a device: "this device", or its kind and the first 8 digits of its id as
+/// `device list` prints them. A device certificate holds a kind and an id, no name.
+fn device_label(device: &Device, id: DeviceId) -> String {
+    if id == device.state().device_id() {
+        return "this device".to_owned();
+    }
+    let text = hex(id.as_bytes());
+    let short = text.get(..8).unwrap_or(&text);
+    let (certificates, _) = device.devices();
+    certificates
+        .iter()
+        .find(|c| c.certificate.device_id == id)
+        .map_or_else(
+            || format!("device {short}"),
+            |c| format!("{} {short}", kind_name(c.certificate.device_kind)),
+        )
 }
 
 /// `generate`: the generator of `rizzy-core` (CRYPTO.md §12.1), printed because that is what
