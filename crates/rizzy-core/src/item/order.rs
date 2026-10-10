@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! List elements and their order (ADR 0018 §6 "List elements", "List order"; ADR 0012 §1).
 //!
 //! A list (URIs, custom fields, password history, tags) is a map from an element id to fields,

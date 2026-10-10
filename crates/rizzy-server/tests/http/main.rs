@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! In-process HTTP tests of `rizzy-vault`'s router over a real `SQLite` database: the security
 //! headers and CSP (INV-49), body limits, slow and anonymous clients, the listener's timeouts and
 //! bounded shutdown, the uniform error answers, the session gating and strict bodies of the

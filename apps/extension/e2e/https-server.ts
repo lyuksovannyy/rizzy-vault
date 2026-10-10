@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // A real (self-signed) HTTPS test-RP server for the passkey E2E suite (`passkey.spec.ts`).
 // INV-64 requires `https:` and this project's Rust layer (`rizzy-client::passkey::
 // verify_rp_id`) enforces it literally — no loopback exception, unlike a real browser's own

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The binding generator's controls for `rizzy-wasm` (ADR 0019 §4.1, owner decision 7; ADR
 //! 0013 §4 "Build"): the committed expansion baseline, its `unsafe`/`extern`/`no_mangle`
 //! counts, and the build of the wasm module into `packages/core`.

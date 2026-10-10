@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-bus` — typed domain events for the rizzy-vault server (roadmap M1, [ADR 0016] §3).
 //!
 //! Roles inside one process talk through Rust APIs and this in-process event bus ([ADR 0010]

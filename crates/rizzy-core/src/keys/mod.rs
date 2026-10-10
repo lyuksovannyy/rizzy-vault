@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The key hierarchy (CRYPTO.md §4.1, §4.2, §4.4; ADR 0006).
 //!
 //! **Role.** This module is the single home of every key an account owns and of every object

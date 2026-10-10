@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The popup's top-level view (ADR 0036 §4 "Popup... unlock, search, item list and detail with
 // copy, generator, lock, open web vault" — ROADMAP §4.4 wording).
 import { useEffect, useState } from "react";

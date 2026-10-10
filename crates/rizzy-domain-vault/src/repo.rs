@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The vault domain's queries over its own tables (`vault_`, ADR 0011 point 5), run on a
 //! connection of a `rizzy-storage` transaction with [`on_engine!`].
 //!

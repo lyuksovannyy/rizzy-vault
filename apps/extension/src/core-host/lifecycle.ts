@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Auto-lock (ADR 0036 §3): "a configurable idle timeout (default 15 minutes), lock on
 // `chrome.idle`/`browser.idle` reaching `locked` or `idle`, and an explicit 'lock now' action."
 // `AutoLockTimer` is the idle-timeout half, written with an injectable clock so it is a plain

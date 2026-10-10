@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Version vectors and causal contexts (ADR 0012 §2 "Per-item version vector" and "Causal
 //! context", §3 "Canonical VV encoding").
 //!

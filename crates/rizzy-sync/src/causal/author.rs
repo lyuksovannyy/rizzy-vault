@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The author checks of "Verify first" that read only a header and the author's signed
 //! statements ([ADR 0012] §4 step 1; CRYPTO.md §10.2 "Web-vault certificates" rule (c), §11.8
 //! step 4; [ADR 0021] §9 "Revoked and kind-4 authors").

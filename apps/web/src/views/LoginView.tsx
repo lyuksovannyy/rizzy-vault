@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Login (CRYPTO.md §11.4: every web-vault session is an OPAQUE login with the login name, the
 // Secret Key and the master password; the second factor is asked for when the server wants
 // it). Also the "unlock" screen after a lock: the login name stays in memory, nothing else.

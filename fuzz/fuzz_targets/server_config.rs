@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes `rizzy-server`'s configuration file parser (`rizzy_server::config::parse_file`) and
 //! the validation over it (`Config::from_sources`). The file is written by an operator, but a
 //! damaged or hostile file must still be refused without a panic.

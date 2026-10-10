@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The per-account lock (ADR 0011 "Transactions and concurrency").
 //!
 //! Every write transaction that reads state and then writes based on it first takes the

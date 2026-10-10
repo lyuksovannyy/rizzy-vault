@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `account-config.ts`: the fix for a real bug (see that module's doc comment) where
 // `chrome.storage.local` silently no-ops inside a Chromium `chrome.offscreen` document, so
 // `saveAccountConfig` never persisted anything there and `readAccountConfig` always reported

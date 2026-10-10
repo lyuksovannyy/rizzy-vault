@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Hands a file to the user as a download: the Emergency Kit, exports. The bytes become a
 // `blob:` URL that lives only for the click, and nothing is uploaded or stored. This and
 // `SafeLink.tsx` are the only places that set an `href` (`eslint.config.js`).

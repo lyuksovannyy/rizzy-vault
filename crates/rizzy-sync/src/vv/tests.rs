@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Version-vector tests.
 //!
 //! - Known answers for the canonical encoding (ADR 0012 §3), independent of insertion order,

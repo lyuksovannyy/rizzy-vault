@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Normalisation of login names and server origins (CRYPTO.md §2).
 //!
 //! Both values are public, but they are bound into security decisions, so each has exactly one

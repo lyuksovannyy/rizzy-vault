@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Strict parsing of op and snapshot data (ADR 0018 §5), under the §10 limits.
 //!
 //! Each function reads one production of the §3 layouts and applies the rules that concern

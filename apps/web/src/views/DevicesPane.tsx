@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The account's durable devices, as the login verified them (CRYPTO.md §11.8). The web vault
 // itself is an ephemeral device and is not listed. Revocation needs a key rotation, which the
 // web vault does not offer in M1; `rv devices revoke` does.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The own chain: writing, uploading and acknowledging this device's ops in one vault
 //! ([ADR 0012] §7 "Upload" as partly superseded by [ADR 0021] §9; ADR 0021 §2 "Restore
 //! generation"; [ADR 0018] §3 "Re-issued ops").

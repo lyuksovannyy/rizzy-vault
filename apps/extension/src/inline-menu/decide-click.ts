@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `main.ts`'s click-handler decision (ADR 0037 §5), pulled into its own dependency-free module —
 // not left inline in `main.ts` — so it is unit-testable without a `document` (`main.ts` throws
 // at module load if `#list` is missing, which a plain `vitest` `node` environment has no DOM to

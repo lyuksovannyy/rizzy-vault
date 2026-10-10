@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Picks whichever WebExtension global this browser provides (ADR 0036 §2: Chromium `chrome.*`,
 // Firefox `browser.*`, both promise-based for everything this extension calls). One indirection
 // point so the rest of the source never branches on browser.

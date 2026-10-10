@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! A minimal, bounded zip reader (PKWARE APPNOTE.TXT) that extracts one member by name, for
 //! 1PUX's `export.data`.
 //!

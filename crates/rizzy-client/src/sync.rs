@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The sync driver of one vault on one device (ADR 0012 §4, §7; ADR 0018 §3, §10; ADR 0021
 //! §2, §4, §9; CRYPTO.md §8.4, §10.2, §11.6 reader and writer rules).
 //!

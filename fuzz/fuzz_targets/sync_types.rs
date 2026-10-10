@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the decoders of `rizzy-sync`'s core types, which read server-supplied op and snapshot
 //! headers and decrypted item records: the canonical version vector (ADR 0012 §3), the dot
 //! (ADR 0018 §3) and the HLC (ADR 0012 §2). None may panic or allocate in proportion to a

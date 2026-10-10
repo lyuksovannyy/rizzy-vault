@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the signature container and the signed-statement parsers (CRYPTO.md §9.3, §9.6,
 //! §10.2, §15 item 7): they never panic and never allocate in proportion to a length field.
 //! Every statement decoder runs before its signature check, so arbitrary input reaches it.

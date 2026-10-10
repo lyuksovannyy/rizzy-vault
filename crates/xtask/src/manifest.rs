@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! A reader for the subset of TOML that Cargo manifests, `.cargo/config.toml` and `clippy.toml`
 //! use, enough for the R7 and R8 checks, the `check-wasm` alias and the R1 clippy lists.
 //! `cargo metadata` reports resolved values, but not whether `publish` and `license` were

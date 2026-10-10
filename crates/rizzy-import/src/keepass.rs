@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `KeePass`'s XML export (`KeePass` 2.x "`KeePass` XML (2.x)", which `KeePassXC` writes too).
 //!
 //! **KDBX is not read.** A KDBX database needs `KeePass`'s own KDF and ciphers (AES-KDF or

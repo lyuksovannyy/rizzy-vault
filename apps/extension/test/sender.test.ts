@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Sender checks (ADR 0036 §4, INV-40): origin comes only from `sender`, never the message body;
 // only this extension's own content scripts and pages are accepted.
 import { describe, expect, it } from "vitest";

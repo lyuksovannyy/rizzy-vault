@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The item schema: the schema layer of the item record (ADR 0018 §2, "Two layers").
 //!
 //! ADR 0018 splits the item record in two. The **record layer** (`rizzy-sync`, module `record`)

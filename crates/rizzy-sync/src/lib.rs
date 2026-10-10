@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-sync` — the sync engine of rizzy-vault's Server mode (roadmap M1, [ADR 0012]).
 //!
 //! ADR 0012 is binding as partially superseded by ADR 0018 (item-record encoding), ADR 0021

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `VaultSync::password_history` and `VaultSync::imported_password_history` tests (ADR 0012
 //! §5 "Password history is the history of `login.password`"; ADR 0018 §7, §9).
 

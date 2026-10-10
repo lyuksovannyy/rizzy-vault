@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes `rizzy-server`'s secrets file reader (`rizzy_server::secrets_file::parse`, CRYPTO.md
 //! §5.11 contents in this build's layout). The file sits on the operator's secrets mount; a
 //! damaged file must be refused without a panic, and an error must never carry the file's

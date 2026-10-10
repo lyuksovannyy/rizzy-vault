@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The browser extension's durable device, kind 2 (ADR 0036 §1), against the fake server of
 //! the parent module: this is the "wasm-free" convergence test the M2 durable-device task asks
 //! for, proving the split `crates/rizzy-wasm/src/device.rs` documents is correct before any

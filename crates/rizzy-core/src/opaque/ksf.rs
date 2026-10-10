@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `RizzySuiteV1` and `RizzyArgon2idKsf` (CRYPTO.md §5.1, §6.1, §12.2; ADR 0003 decisions 2
 //! and 3).
 //!

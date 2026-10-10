@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The keyboard-shortcuts help dialog, opened by `?` (redesign slice 2, item 3; `shortcuts.ts`).
 // Not built on `ConfirmDialog` (there is nothing to confirm here, and a single "Close" action
 // has no "safe" vs. "dangerous" distinction), but it shares the same overlay/dialog shell,

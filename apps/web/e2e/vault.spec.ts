@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The web vault end to end, in Chromium, against the real `rizzy-vault` with `embed-web`:
 // signup with the Emergency Kit → the vault → create an item → reload (nothing persists) →
 // log in again and see the item → lock → unlock → trash and restore.

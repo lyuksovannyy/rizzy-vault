@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The evidence join: the one merge function behind applying an op and absorbing a snapshot
 //! (ADR 0012 §4 step 4 and §5 as ADR 0018 §3 restates them; ADR 0018 §3 "Snapshots are
 //! claims", owner decision 14).

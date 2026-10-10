@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Account recovery with the Emergency Kit (CRYPTO.md §11.9; ADR 0008; ADR 0025 §1).
 //!
 //! | Flow step | Request | Response |

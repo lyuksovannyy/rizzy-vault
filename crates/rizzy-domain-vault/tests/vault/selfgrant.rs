@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Healing step 3b (ADR 0032 §2–§3): a lagging self-grant and the wrap set at its epoch, sent
 //! in a healing request without records, on real SQLite (or PostgreSQL, `common::Slot`) with real
 //! envelopes from `rizzy-core`. One test per refusal of §3, the repair's writes, the repeat

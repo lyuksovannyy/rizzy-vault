@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The generator's calls to the core, apart from React, so the mapping from UI options to the
 // core's calls and the handling of its refusals are tested without a DOM (the pattern of
 // `export-flow.ts`'s module docs). The core generates and computes entropy (packages/core,

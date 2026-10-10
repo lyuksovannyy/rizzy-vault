@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Vitest for packages/ui (ADR 0014 §3 "Vitest for unit tests"). Node environment, matching
 // apps/web and packages/core: this package's tests cover the pure logic behind its components
 // (the toast queue reducer, the confirm dialog's focus-trap arithmetic), not DOM rendering —

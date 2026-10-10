@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Startup, serving and graceful shutdown of `rizzy-vault` ([ADR 0010] §1, §2, §4; [ADR 0011]
 //! point 9; CRYPTO.md §5.8, §5.11; [ADR 0021] §2).
 //!

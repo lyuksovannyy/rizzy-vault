@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Identifiers (CRYPTO.md §2, §4.3, §4.4).
 //!
 //! - **Object ids** are 16 random bytes from the injected CSPRNG, created by whoever creates the

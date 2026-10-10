@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Plaintext framing and Padmé padding (CRYPTO.md §8.5).
 //!
 //! ```text

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! After `secrets rotate --data-key` (CRYPTO.md §5.11 "Rotation"): `worker` re-seals the TOTP
 //! rows under the account lock, and the old key is dropped once no row names it.
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Errors and warnings. Neither carries any byte of the import file: an import file is full of
 //! passwords, and an error or warning may end up in a log, a bug report or a UI toast
 //! (CLAUDE.md "Never log secrets", CRYPTO.md §12.2). They carry kinds, and a warning also the

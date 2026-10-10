@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! INV-64: checking a `WebAuthn` `rpId` against the browser-verified origin
 //! ([THREAT_MODEL] §8 INV-64; [ADR 0039] §2; the PSL from [ADR 0037] §3).
 //!

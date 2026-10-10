@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes `rizzy-client`'s cache loader (ADR 0026 §3 "Columns are indexes, never facts", §4
 //! steps 5 and 7, §5, §6): the rows of the local cache are read back from a file anyone with
 //! the user's rights can change, so every row is untrusted input.

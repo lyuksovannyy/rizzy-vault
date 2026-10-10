@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! rizzy-vault's own plaintext JSON export, read back ([ADR 0027] §3 and §6; roadmap §4.2).
 //!
 //! **Document** (ADR 0027 §3). `rizzy-client` writes it; this module reads it:

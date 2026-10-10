@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Property checks at quiescence: ADR 0012 §12 properties 1-3 (with ADR 0018 §12's tombstone
 //! form of property 2), plus the answers' own checks and observed side conditions.
 //!

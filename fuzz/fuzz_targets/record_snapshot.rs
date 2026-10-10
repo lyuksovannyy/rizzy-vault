@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the snapshot-data parser of the item record on live snapshots (ADR 0018 §5
 //! `parse_snapshot`, record kind `0x02`), which reads the decrypted `data` of `ITEM_SNAPSHOT`
 //! envelopes: every register, history group and value of an item. The parser must never panic,

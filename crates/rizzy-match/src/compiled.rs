@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The compiled-in global equivalence list and its pinned public key (ADR 0038 §1–§3).
 //!
 //! **Both are `None` today.** The production list-signing keypair does not exist yet — the

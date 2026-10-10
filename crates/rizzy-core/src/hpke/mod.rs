@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! HPKE envelopes: algorithms `0x10` (Base mode) and `0x12` (PSK mode) (CRYPTO.md §9.2, §10.1;
 //! ADR 0006 decision 9), the HPKE key types, and the HPKE PSK derivations (§4.3).
 //!

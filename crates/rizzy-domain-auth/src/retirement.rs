@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Retiring old OPAQUE setups (CRYPTO.md §5.8 "Rotating `server_setup`" steps 3–4; [ADR 0031]).
 //!
 //! # What is stored (point 1)

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The UI thread's end of the core Worker (ADR 0013 §4): typed calls over `postMessage`.
 //
 // The UI imports no wasm and holds no key. `call` sends one call and resolves with its value,

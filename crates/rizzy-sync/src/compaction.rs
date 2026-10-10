@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The server's compaction rules ([ADR 0021] §2–§4, §7) and its pure snapshot-acceptance checks
 //! (§9 "Server acceptance", "Revoked and kind-4 authors").
 //!

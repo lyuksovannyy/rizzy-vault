@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fetch from a cursor (ADR 0012 §7 "Fetch" as ADR 0021 §4 supersedes its bodiless-header
 //! sentence).
 //!

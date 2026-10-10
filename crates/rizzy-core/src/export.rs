@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Encrypted export (CRYPTO.md §11.14; §4.3 "Export file key"; §8.4 `EXPORT_FILE`; §9.6
 //! "Files").
 //!

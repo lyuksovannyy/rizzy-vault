@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-storage` on a real PostgreSQL database.
 //!
 //! `#[ignore]`d by default: run with `RIZZY_TEST_POSTGRES_URL` set to an **empty** database the

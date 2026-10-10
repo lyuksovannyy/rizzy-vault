@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Rotation flow tests (CRYPTO.md §11.6; ADR 0025 §2) against the fake server of the parent
 //! module, which here also plays the account commit of a rotation with the checks these tests
 //! need: the compare-and-swap on `state_seq`, the exact cursor and a covered wrap set (ADR 0025

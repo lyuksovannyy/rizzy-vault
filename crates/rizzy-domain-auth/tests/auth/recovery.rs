@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Recovery with the Emergency Kit (CRYPTO.md §11.9; ADR 0008): the waiting period,
 //! cancellation by an enrolled device, the release, and the recovery commit.
 

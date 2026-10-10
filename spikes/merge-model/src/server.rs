@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The Server-mode server: ADR 0012 §7 upload rules and ADR 0021 §2-§4 (clamped VV, store
 //! sequence, R1/R3 retention and deletion, Fetch covers), with the server rules the spike answers
 //! propose as knobs (healing requests, refusal of unheld claims, two-author covers, the revoked

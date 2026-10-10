@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // packages/core end to end against a real `rizzy-vault` server, through the wasm module:
 // signup → Emergency Kit → login → items → sync → a second session sees them → reveal → edit →
 // trash and restore → TOTP → encrypted export behind a re-authentication, recognised and

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Signup and item creation through the real web vault's own UI (`apps/web/e2e/vault.spec.ts`'s
 // `signUp`/`newItem` pattern, duplicated here for the same reason as `server.ts`: separate
 // `tsconfig.json` trees, one small self-contained helper). The extension has no signup flow of

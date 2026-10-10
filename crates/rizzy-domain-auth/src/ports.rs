@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! What the auth domain needs from the vault domain (ADR 0016 R4).
 //!
 //! No `rizzy-domain-*` crate depends on another: "A domain that needs something from another

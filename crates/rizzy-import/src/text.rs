@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Text helpers shared by the readers: the input gate (size cap, byte-order mark, UTF-8), a
 //! zeroizing string of fixed capacity, and small parsers of decimal numbers.
 

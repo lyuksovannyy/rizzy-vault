@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The account-level flows of an enrolled device that need a fresh OPAQUE session: a master
 //! password or Secret Key change (CRYPTO.md §11.5), following such a change made on another
 //! device (§11.3 step 5), and server-side 2FA enrolment and removal (§5.10, §11.15).

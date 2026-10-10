@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The auth domain's side of the vault domain's certificate source (ADR 0012 §7 "Upload":
 //! "Certificates come from the `auth` domain through a trait"; ADR 0016 R4).
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The vault half of a key rotation ([ADR 0025] §3, §4; CRYPTO.md §11.6 steps 3 and 9, §11.8
 //! step 3, §11.9 step 5; ADR 0012 §6 and ADR 0021 §9 "Rotation cut-off").
 //!

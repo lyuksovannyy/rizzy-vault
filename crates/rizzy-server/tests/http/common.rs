@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The harness: a server started the way `rizzy-vault` starts (a secrets file on its own
 //! directory, a real `SQLite` database in a data directory, the startup checks), its router driven
 //! in-process with `tower::ServiceExt::oneshot`.

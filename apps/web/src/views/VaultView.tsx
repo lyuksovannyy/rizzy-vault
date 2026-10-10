@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The unlocked vault: the header (account, sync state, lock), and the sections.
 //
 // Writes go to the core's memory first; the vault syncs right after each write, every five

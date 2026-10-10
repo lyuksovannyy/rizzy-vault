@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The auth domain's configuration: the canonical origin, the signup policy, session
 //! lifetimes, the recovery waiting period and the rate limits.
 //!

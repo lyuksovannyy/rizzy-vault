@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `worker` role (ADR 0010 §1 row `worker`, §5; ADR 0011 point 9; ADR 0021 §3, §7).
 //!
 //! One run ([`run_once`]) does, in order, each step isolated from the others' failures:

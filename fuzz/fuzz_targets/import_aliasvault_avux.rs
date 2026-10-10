@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes `AliasVault`'s `.avux` importer (roadmap §4.2, M1; threat model A16: zip bombs,
 //! malicious import files): the zip reader and the manifest's item mapping
 //! (`crates/rizzy-import/src/aliasvault.rs`). Neither may panic, and every item that comes out

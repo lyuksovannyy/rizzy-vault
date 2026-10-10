@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Scenario-family runs (quick variants) that pin the spike's findings as regression checks.
 //! `cargo test --release --manifest-path spikes/merge-model/Cargo.toml`.
 //!

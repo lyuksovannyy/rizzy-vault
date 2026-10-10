@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The server configuration: a file and environment variables ([ADR 0010] §1, §4; [ADR 0028]
 //! items 11 and 12).
 //!

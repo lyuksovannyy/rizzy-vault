@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `messaging/bytes.ts`: the shared base64 encode/decode for every passkey message's byte fields.
 import { describe, expect, it } from "vitest";
 

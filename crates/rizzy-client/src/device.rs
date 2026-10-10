@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The device state of an enrolled device, and the offline unlock (CRYPTO.md §4.2, §5.6,
 //! §11.3 step 1).
 //!

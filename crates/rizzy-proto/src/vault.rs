@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Server-mode sync: upload, Fetch and the healing request (ADR 0012 §7 as ADR 0021 §1, §2, §4
 //! and §9 supersede it in part; ADR 0022: Server mode only).
 //!

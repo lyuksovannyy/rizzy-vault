@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Dots, version vectors, HLC values, key ids, register entries and the op record.
 //!
 //! Model simplifications (each keeps the ordering the ADRs specify):

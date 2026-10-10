@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Login (CRYPTO.md §5.9–§5.11, §11.2 steps 2–5, §11.4, §11.15; INV-7, INV-8, INV-59).
 //!
 //! **Start.** The login name is normalised by the §2 function, then counted against the

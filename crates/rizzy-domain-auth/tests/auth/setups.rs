@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Retiring old OPAQUE setups (ADR 0031): the `reregister` flag, only after KE3 or the device
 //! signature and only for a record on a non-current setup (point 2); the echoed `setup_id`,
 //! accepted and stored as echoed for a loaded non-current setup, refused with `setup_retired`

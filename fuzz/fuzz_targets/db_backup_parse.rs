@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes `rizzy-storage`'s logical backup file (`rizzy_storage::backup::file`, ADR 0023):
 //! `rizzy-vault restore` reads it from the operator's disk or a pipe, so a damaged or hostile
 //! file must be refused without a panic, and an error must never carry a value.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The passkey relay content script (ADR 0039 §2; THREAT_MODEL A7's "Passkey provider" section):
 // a SEPARATE content-script entry from `content-script.ts` (not folded into it), registered at
 // `document_start` (`manifest.*.json`) rather than `document_idle` — a page can call

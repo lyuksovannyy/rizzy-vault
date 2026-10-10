@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Copy-with-clearing (ROADMAP §4.4 "copy... with clipboard clearing"): writes `value` to the
 // system clipboard, then after `afterMs` clears it again — but only if the clipboard still holds
 // exactly what this call put there, so a later, unrelated copy by the user is never wiped. No

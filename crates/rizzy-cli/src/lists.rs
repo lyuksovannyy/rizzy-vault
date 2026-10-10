@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The list options of `item create` and `item edit`: URIs and custom fields (ADR 0018 §6
 //! "List elements", "List order", §7 `uri/…`, `field/…`; the writes are `rizzy_client::lists`'s).
 //!

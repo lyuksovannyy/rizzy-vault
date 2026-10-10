@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `VaultSync::auto_purge_due` tests (ADR 0012 §5 "manually, or automatically once an item has
 //! been in the trash for the retention period"; ADR 0018 §9 "Trashed at", §11 "No purge over an
 //! unapplied record").

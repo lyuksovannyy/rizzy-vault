@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the snapshot-data parser of the item record on tombstones (ADR 0018 §5
 //! `parse_snapshot`, record kind `0x03`), which clients keep for the life of the vault and
 //! read back on every load. The parser must never panic, never allocate in proportion to a

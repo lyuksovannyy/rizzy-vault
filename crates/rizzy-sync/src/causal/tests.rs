@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Unit tests of the per-device-chain layer, one or more per rule.
 //!
 //! - Chain check (ADR 0012 §7, INV-27): chain order, links by `vault_prev_seq` across seqs of

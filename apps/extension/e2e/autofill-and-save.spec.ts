@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The extension end to end, against the real server (`server.ts`) and a real account created
 // through the web vault's own signup (`account.ts`): enrol this device, unlock, offer autofill
 // only for the page whose host the saved item's URI actually matches (never for a different

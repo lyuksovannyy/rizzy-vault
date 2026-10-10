@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The ESLint rules of ADR 0014 §2 (`eslint.config.mjs` at the repository root) fire on what
 // they ban, and leave the allowed files alone. Each sample is linted as if it were a file of
 // the web vault's UI thread.

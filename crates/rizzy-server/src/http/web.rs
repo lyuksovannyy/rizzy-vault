@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `web` role (ADR 0010 §1, §4; threat model §7.7).
 //!
 //! ADR 0010 §4 embeds the web vault in the binary behind the `embed-web` cargo feature, off by

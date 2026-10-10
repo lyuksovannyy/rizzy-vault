@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! List order tests (ADR 0018 §6 "List order"; `crate::lists`): moves between neighbours,
 //! the rewrite with evenly spaced keys when no key fits, and the split of a large rewrite into
 //! consecutive ops.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes `rv`'s private CA file reader (`rizzy_cli::tls::parse_ca_pem`; ADR 0030 Decision 4).
 //! The file is named by the user, but a damaged or hostile one must be refused without a
 //! panic, before any connection.

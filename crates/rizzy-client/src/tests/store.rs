@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The device-state record and the encrypted local cache ([ADR 0026] §6) against the fake
 //! server of the parent module:
 //!

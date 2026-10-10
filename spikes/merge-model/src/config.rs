@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Model configuration: the knobs that pick one reading of an ambiguous ADR passage, or switch on
 //! one of the spike's proposed rules. `literal` is the most literal reading everywhere; `README.md`
 //! lists what each knob decides. `integrated` switches on every rule the five spike answers chose,

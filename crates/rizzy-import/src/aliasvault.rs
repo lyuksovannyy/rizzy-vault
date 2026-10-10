@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `AliasVault`'s plaintext export formats (roadmap §4.2, M1; owner decision 2026-10-06:
 //! "`AliasVault` export (added by the owner on 2026-10-06)"), researched from `AliasVault`'s own
 //! source (L throughout: `github.com/aliasvault/aliasvault`, read on 2026-10-06, not re-read

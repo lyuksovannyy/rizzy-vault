@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Display rules and item times (ADR 0018 §6 "Display", owner decision 4; ADR 0012 §5
 //! "Active wins"; ADR 0018 §9).
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `cargo xtask equivalence-list` (ADR 0038 §3): compiles the human-editable source
 //! (`data/equivalence/groups.txt`) into the canonical `rizzy-match` equivalence-list bytes and
 //! signs them with the owner's offline Ed25519 key.

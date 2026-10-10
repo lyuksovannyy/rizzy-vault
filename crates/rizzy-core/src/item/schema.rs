@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The key registry of the M1 item schema, and the checks a writer runs (ADR 0018 §6–§8, §10,
 //! §11).
 //!

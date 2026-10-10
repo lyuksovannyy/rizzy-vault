@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The messaging contract between the content script, the background (MV3 service worker /
 // Firefox event page), and the long-lived core-holding context (ADR 0036 §4). Every shape here
 // is a plain, serializable object (structured-clone safe, no class instances, no functions),

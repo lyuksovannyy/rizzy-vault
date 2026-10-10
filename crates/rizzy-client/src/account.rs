@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Verifying what the server says about the account (CRYPTO.md §11.2 step 6, §11.3 steps
 //! 2.3–3; threat model §5.4–§5.6, INV-25, INV-30).
 //!

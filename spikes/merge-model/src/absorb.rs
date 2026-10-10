@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Snapshot absorption strategies (ADR 0018 "Settled by the merge spike" item 1; ADR 0021
 //! "Settled by the merge spike" first bullet). The ADRs do not define absorption; this is a
 //! pluggable trait so candidate rules can be compared.

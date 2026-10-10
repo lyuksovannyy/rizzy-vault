@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The web vault's top level: start the core, then log in or sign up, then the vault.
 //
 // The web vault persists nothing (CRYPTO.md §11.4): every session is an OPAQUE login, and a

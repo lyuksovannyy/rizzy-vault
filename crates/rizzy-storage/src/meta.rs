@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The restore hooks the domain crates use: the restore generation (ADR 0021 §2) and the
 //! per-account reconciliation epoch (THREAT_MODEL INV-59, ADR 0012 §7).
 //!

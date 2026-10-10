@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The error type of `rizzy-storage`.
 //!
 //! **What an error may say.** Messages name a table, a column, a migration version, an engine

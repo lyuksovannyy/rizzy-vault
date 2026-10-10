@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The database handle: engine dispatch, pools, PRAGMAs and transactions (ADR 0011 points 1
 //! and 3, "Transactions and concurrency", "SQLite settings").
 //!

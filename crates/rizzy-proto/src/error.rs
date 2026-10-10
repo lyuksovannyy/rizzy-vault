@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The error response body (ADR 0002 point 3: "a machine-readable error code").
 //!
 //! Every error answer of `/api/v1` and `/api/meta` is one [`ErrorResponse`]: a JSON object with
