@@ -35,6 +35,31 @@ fn edit_password(
         .unwrap();
 }
 
+/// Clears `login.password` at `now_ms` (the item editor's "clear" action): the current value
+/// becomes Cleared, and whatever it replaces is pushed into history as usual.
+fn clear_password(
+    vault: &mut VaultSync,
+    rng: &mut ChaCha20Rng,
+    unlocked: &UnlockedDevice,
+    item: ItemId,
+    now_ms: u64,
+) {
+    let key = SchemaKey::parse(LOGIN_PASSWORD.as_bytes()).unwrap();
+    let value = Value::cleared();
+    vault
+        .edit_item(
+            rng,
+            unlocked,
+            item,
+            &[FieldEdit {
+                key: &key,
+                value: &value,
+            }],
+            now_ms,
+        )
+        .unwrap();
+}
+
 /// The decoded text of a history entry.
 fn text_of(value: &Value) -> String {
     match value.decode().unwrap() {
@@ -85,6 +110,23 @@ fn history_is_capped_at_the_merge_limit() {
     // never enters history) is kept; the oldest ones ("p", "p0", ...) were pruned.
     let newest = text_of(&history[0].value);
     assert_eq!(newest, format!("p{}", edits - 2));
+}
+
+#[test]
+fn a_cleared_value_pushed_into_history_is_never_listed() {
+    // `one_item` creates the item with `login.password` = "p". Clearing it, then setting a
+    // new password, pushes the Cleared value into history too (ADR 0012 §5: "every value
+    // removed from a register goes into the item's history"). A Cleared entry is a blank, not
+    // a former password: it is never listed, and `password_history_len` agrees with the
+    // listing it counts.
+    let (_server, mut rng, mut vault, unlocked, item) = one_item(304);
+    clear_password(&mut vault, &mut rng, &unlocked, item, T0 + 10);
+    edit_password(&mut vault, &mut rng, &unlocked, item, "p1", T0 + 20);
+
+    let history = vault.password_history(item);
+    assert_eq!(history.len(), 1);
+    assert_eq!(text_of(&history[0].value), "p");
+    assert_eq!(vault.password_history_len(item), 1);
 }
 
 #[test]

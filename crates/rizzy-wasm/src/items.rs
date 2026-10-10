@@ -15,10 +15,13 @@
 //!   password history, ADR 0018 §7) is left out: the schema shows its values, but they are
 //!   former passwords, so they cross only as a password-history entry.
 //! - **Password history** ([`HistoryEntryView`]) carries, per entry, its source (`merge` for
-//!   the history of `login.password`, ADR 0012 §5; `imported` for `pwhist`), its position and
-//!   its date. Never the value: one value crosses through
-//!   [`crate::Session::reveal_password_history`], on the user's request, so the Worker never
-//!   sends the whole history to the UI thread (ADR 0013 §3 rule 3).
+//!   the history of `login.password`, ADR 0012 §5; `imported` for `pwhist`), its position, its
+//!   date and its identity (the entry's dot for `merge`, the `pwhist` element id for
+//!   `imported`): never two entries share one, unlike the date. Never the value: one value
+//!   crosses through [`crate::Session::reveal_password_history`], on the user's request, so
+//!   the Worker never sends the whole history to the UI thread (ADR 0013 §3 rule 3). The host
+//!   names the entry's identity, not its date, on that call, so a sync that only reorders the
+//!   list between the listing and the reveal still reveals the entry the user asked for.
 //! - **An edit** ([`ItemDraft`]) is built in Rust from the user's input, call by call, and
 //!   written as one op by [`crate::Session::create_item`] or [`crate::Session::edit_item`],
 //!   where every write passes the schema checks. The draft holds the typed values in zeroizing
@@ -32,7 +35,7 @@ use core::fmt;
 use std::collections::HashMap;
 
 use rizzy_client::ClientError;
-use rizzy_client::items::{FieldKey, ItemId, ItemLifecycle, ItemType, Value};
+use rizzy_client::items::{Dot, FieldKey, ItemId, ItemLifecycle, ItemType, Value};
 use rizzy_client::lists::{ListMove, ListPlace, MAX_WRITES_PER_OP};
 use rizzy_client::rizzy_core::item::key::ElementId;
 use rizzy_client::rizzy_core::item::schema::{
@@ -583,6 +586,15 @@ pub const HISTORY_MERGE: &str = "merge";
 /// ADR 0018 §7).
 pub const HISTORY_IMPORTED: &str = "imported";
 
+/// Hex encoding of a dot's canonical bytes (`device_id ‖ seq`, [`Dot::encode`]): a merge
+/// history entry's identity, stable across a sync that only reorders the list (ADR 0012 §2).
+/// Not a persistent or wire format: computed fresh for one in-memory host call, never stored.
+fn dot_hex(dot: Dot) -> String {
+    let mut buf = Vec::with_capacity(Dot::ENCODED_LEN);
+    dot.encode(&mut buf);
+    hex(&buf)
+}
+
 /// One password-history entry without its value (module docs): the UI lists these, and asks
 /// for one value at a time.
 #[wasm_bindgen]
@@ -594,8 +606,12 @@ pub struct HistoryEntryView {
     /// `imported` (`rizzy-client`'s `password_history` and `imported_password_history`).
     index: usize,
     /// When the value stopped being current (`merge`), or the source manager's own date
-    /// (`imported`, if it gave one), in Unix milliseconds.
+    /// (`imported`, if it gave one), in Unix milliseconds. Display only.
     changed_ms: Option<u64>,
+    /// The entry's identity: the hex of its dot (`merge`) or its `pwhist` element id
+    /// (`imported`), the id [`crate::Session::reveal_password_history`] takes. Unlike
+    /// `changed_ms`, never shared by two entries and never absent.
+    id: String,
 }
 
 #[wasm_bindgen]
@@ -607,7 +623,7 @@ impl HistoryEntryView {
         self.source.to_owned()
     }
 
-    /// The position to pass to [`crate::Session::reveal_password_history`].
+    /// The position within its source, for display and list keys.
     #[wasm_bindgen(getter)]
     #[must_use]
     pub fn index(&self) -> usize {
@@ -619,6 +635,13 @@ impl HistoryEntryView {
     #[must_use]
     pub fn changed_ms(&self) -> Option<u64> {
         self.changed_ms
+    }
+
+    /// The id to pass to [`crate::Session::reveal_password_history`].
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn id(&self) -> String {
+        self.id.clone()
     }
 }
 
@@ -634,6 +657,7 @@ pub(crate) fn password_history(vault: &VaultSync, item: ItemId) -> Vec<HistoryEn
             source: HISTORY_MERGE,
             index,
             changed_ms: Some(entry.changed_ms),
+            id: dot_hex(entry.dot),
         });
     let imported = vault
         .imported_password_history(item)
@@ -643,6 +667,7 @@ pub(crate) fn password_history(vault: &VaultSync, item: ItemId) -> Vec<HistoryEn
             source: HISTORY_IMPORTED,
             index,
             changed_ms: entry.changed_ms,
+            id: entry.id.as_str().to_owned(),
         });
     merge.chain(imported).collect()
 }
@@ -650,33 +675,34 @@ pub(crate) fn password_history(vault: &VaultSync, item: ItemId) -> Vec<HistoryEn
 /// The value of one password-history entry as text: call it only on the user's request (ADR
 /// 0013 §3 rule 3). The history is read again here and the index bounds-checked: an index past
 /// the end is `unknown_item`. A sync between the listing and the reveal can shift the entries
-/// of the same item, so the caller passes the date it showed for the entry
-/// ([`HistoryEntryView::changed_ms`]) and an entry whose date differs is `unknown_item` too:
-/// a stale position never reveals a value under another entry's date.
+/// of the same item, so the caller passes the entry's own id as the listing gave it
+/// ([`HistoryEntryView::id`]), and an entry at `index` with another id is `unknown_item` too:
+/// a stale position never reveals a value under another entry's identity, including when the
+/// two happen to share the same displayed date, or when neither has one (ADR 0012 §2).
 ///
 /// # Errors
 /// `invalid_input` for a source other than `merge` or `imported`, or a value with no text
-/// form; `unknown_item` for an index past the end, a date that does not match, or an imported
+/// form; `unknown_item` for an index past the end, an id that does not match, or an imported
 /// entry without a value.
 pub(crate) fn reveal_history(
     vault: &VaultSync,
     item: ItemId,
     source: &str,
     index: usize,
-    changed_ms: Option<u64>,
+    entry_id: &str,
 ) -> CoreResult<Zeroizing<String>> {
     let value = match source {
         HISTORY_MERGE => vault
             .password_history(item)
             .into_iter()
             .nth(index)
-            .filter(|entry| Some(entry.changed_ms) == changed_ms)
+            .filter(|entry| dot_hex(entry.dot) == entry_id)
             .map(|entry| entry.value),
         HISTORY_IMPORTED => vault
             .imported_password_history(item)
             .into_iter()
             .nth(index)
-            .filter(|entry| entry.changed_ms == changed_ms)
+            .filter(|entry| entry.id.as_str() == entry_id)
             .and_then(|entry| entry.value),
         _ => return Err(ClientError::InvalidInput.into()),
     }

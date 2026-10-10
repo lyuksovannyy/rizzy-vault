@@ -10,11 +10,11 @@
 // `revision`).
 //
 // A sync can shift the entries, so a position read before it may name another entry after
-// it. Two guards keep a row from revealing a value under the wrong date: Reveal and Copy stay
-// disabled until the list read after the latest sync has arrived (`canReveal`), and each
-// reveal carries the date the row shows, which the core checks against the entry it finds
-// at that position (`unknown_item` when they differ, e.g. a sync that ran while the reveal
-// waited in the Worker's queue).
+// it. Two guards keep a row from revealing a value under the wrong identity: Reveal and Copy
+// stay disabled until the list read after the latest sync has arrived (`canReveal`), and each
+// reveal carries the row's own id, which the core checks against the entry it finds at that
+// position (`unknown_item` when they differ, e.g. a sync that ran while the reveal waited in
+// the Worker's queue).
 import type { HistoryEntry } from "@rizzy-vault/core";
 import { SecretField } from "@rizzy-vault/ui";
 import { useEffect, useState } from "react";
@@ -61,7 +61,7 @@ function HistoryRow(props: {
   const disabled = !props.ready || busy;
 
   const value = (): Promise<string> =>
-    ctx.client.call("revealPasswordHistory", id, entry.source, entry.index, entry.changedMs);
+    ctx.client.call("revealPasswordHistory", id, entry.source, entry.index, entry.id);
 
   const copy = () =>
     void run(async () => {

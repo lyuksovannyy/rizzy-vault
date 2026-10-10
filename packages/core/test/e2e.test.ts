@@ -24,6 +24,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   type CacheRow,
   type CacheStore,
+  type Clock,
   CoreError,
   type HistoryEntry,
   Signup,
@@ -690,17 +691,26 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     first.lock();
   });
 
-  /** A confirmed signup of `loginName` and its first session, with the Secret Key text. */
+  /**
+   * A confirmed signup of `loginName` and its first session, with the Secret Key text. `clock`
+   * (default `Date.now`) is the session's clock for every write it makes afterwards: a frozen
+   * clock forces two edits to land on the very same millisecond, on purpose, for a test.
+   */
   async function freshAccount(
     loginName: string,
+    clock: Clock = Date.now,
   ): Promise<{ session: VaultSession; secretKey: string }> {
     const transport = fetchTransport(origin);
-    const signup = await Signup.start(transport, {
-      origin,
-      loginName,
-      password: PASSWORD,
-      issueRecoveryCode: false,
-    });
+    const signup = await Signup.start(
+      transport,
+      {
+        origin,
+        loginName,
+        password: PASSWORD,
+        issueRecoveryCode: false,
+      },
+      clock,
+    );
     const kit = signup.emergencyKit();
     const secretKey = new TextDecoder().decode(kit.secretKey);
     kit.secretKey.fill(0);
@@ -709,9 +719,13 @@ describe.skipIf(binary === undefined)("against a real server", () => {
   }
 
   // Gap 01 (ADR 0012 §5, ADR 0013 §3 rule 3): the history crosses as dates only; one value
-  // crosses per reveal.
+  // crosses per reveal, bound to the entry's own id (finding 0), not its display date. A
+  // frozen clock forces every edit onto the same millisecond, so two entries share one
+  // `changedMs` by construction, not by luck: the deterministic version of the race a sync
+  // between the listing and the reveal could otherwise cause only sometimes.
   it("lists password history without values and reveals one entry on request", async () => {
-    const { session: s } = await freshAccount("Dave");
+    const frozen = Date.now();
+    const { session: s } = await freshAccount("Dave", () => frozen);
     const id = s.createItem("login", [
       { op: "set", key: "item.name", value: "Mail" },
       { op: "set", key: "login.password", value: "v0" },
@@ -732,21 +746,31 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     ]);
     for (const entry of two) {
       expect(typeof entry.changedMs).toBe("number");
+      expect(typeof entry.id).toBe("string");
       // Dates only: no value of any kind in the listing.
-      expect(Object.keys(entry).sort()).toEqual(["changedMs", "index", "source"]);
+      expect(Object.keys(entry).sort()).toEqual(["changedMs", "id", "index", "source"]);
     }
+    // The collision this test forces: the same millisecond, by the frozen clock above.
+    expect(two[0]?.changedMs).toBe(frozen);
+    expect(two[1]?.changedMs).toBe(frozen);
+    // Distinguishable all the same: each entry's own dot.
+    expect(two[0]?.id).not.toBe(two[1]?.id);
     expect(JSON.stringify(two)).not.toContain("v0");
     expect(JSON.stringify(two)).not.toContain("v1");
     const [newer, older] = two as [HistoryEntry, HistoryEntry];
-    expect(s.revealPasswordHistory(id, "merge", 0, newer.changedMs)).toBe("v1");
-    expect(s.revealPasswordHistory(id, "merge", 1, older.changedMs)).toBe("v0");
-    const refused = (source: HistoryEntry["source"], index: number, ms: number | undefined) =>
-      expect(() => s.revealPasswordHistory(id, source, index, ms)).toThrowError(
+    expect(s.revealPasswordHistory(id, "merge", 0, newer.id)).toBe("v1");
+    expect(s.revealPasswordHistory(id, "merge", 1, older.id)).toBe("v0");
+    // The two entries' own ids never reveal the other's value, even at the other's index.
+    expect(() => s.revealPasswordHistory(id, "merge", 0, older.id)).toThrowError(
+      expect.objectContaining({ code: "unknown_item" }),
+    );
+    const refused = (source: HistoryEntry["source"], index: number, entryId: string) =>
+      expect(() => s.revealPasswordHistory(id, source, index, entryId)).toThrowError(
         expect.objectContaining({ code: "unknown_item" }),
       );
-    refused("merge", 2, older.changedMs);
-    refused("imported", 0, undefined);
-    expect(() => s.revealPasswordHistory(id, "other" as never, 0, newer.changedMs)).toThrowError(
+    refused("merge", 2, older.id);
+    refused("imported", 0, "irrelevant");
+    expect(() => s.revealPasswordHistory(id, "other" as never, 0, newer.id)).toThrowError(
       expect.objectContaining({ code: "invalid_input" }),
     );
 
@@ -756,13 +780,14 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     }
     const capped = s.passwordHistory(id);
     expect(capped).toHaveLength(50);
-    expect(s.revealPasswordHistory(id, "merge", 0, capped[0]?.changedMs)).toBe("v54");
-    expect(s.revealPasswordHistory(id, "merge", 49, capped[49]?.changedMs)).toBe("v5");
-    refused("merge", 50, capped[49]?.changedMs);
-    // A stale listing: position 0 now holds v54, not the v1 the old listing dated. Refused,
-    // never another entry's value under the old date.
-    expect(capped[0]?.changedMs).not.toBe(newer.changedMs);
-    refused("merge", 0, newer.changedMs);
+    expect(s.revealPasswordHistory(id, "merge", 0, capped[0]?.id ?? "")).toBe("v54");
+    expect(s.revealPasswordHistory(id, "merge", 49, capped[49]?.id ?? "")).toBe("v5");
+    refused("merge", 50, capped[49]?.id ?? "");
+    // A stale listing: position 0 now holds v54, not the v1 the old listing named, even
+    // though every entry here shares the exact same frozen date. Refused, never another
+    // entry's value under the old entry's identity.
+    expect(capped[0]?.id).not.toBe(newer.id);
+    refused("merge", 0, newer.id);
     s.lock();
   });
 
@@ -802,26 +827,75 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     expect(JSON.stringify(listed)).not.toContain("imported-old");
     const byDate = new Map(history.map((h) => [Date.parse(h.lastUsedDate), h.password]));
     expect(new Set(listed.map((h) => h.changedMs))).toEqual(new Set(byDate.keys()));
+    // Every entry's id is its own, never shared with the other.
+    expect(listed[0]?.id).not.toBe(listed[1]?.id);
 
-    // Each reveal returns the value of the entry the listing dated.
+    // Each reveal returns the value of the entry the listing named by id.
     for (const entry of listed) {
-      expect(s.revealPasswordHistory(id, "imported", entry.index, entry.changedMs)).toBe(
+      expect(s.revealPasswordHistory(id, "imported", entry.index, entry.id)).toBe(
         byDate.get(entry.changedMs ?? -1),
       );
     }
-    // Out of range, the wrong source, or a date the entry does not carry: refused.
+    // Out of range, the wrong source, or an id the entry does not carry: refused.
     const first = listed[0] as HistoryEntry;
-    for (const [source, index, ms] of [
-      ["imported", 2, first.changedMs],
-      ["imported", 99, first.changedMs],
-      ["merge", 0, first.changedMs],
-      ["imported", first.index, (first.changedMs ?? 0) + 1],
-      ["imported", first.index, undefined],
+    const second = listed[1] as HistoryEntry;
+    for (const [source, index, entryId] of [
+      ["imported", 2, first.id],
+      ["imported", 99, first.id],
+      ["merge", 0, first.id],
+      ["imported", first.index, second.id],
+      ["imported", first.index, "not-a-real-id"],
     ] as const) {
-      expect(() => s.revealPasswordHistory(id, source, index, ms)).toThrowError(
+      expect(() => s.revealPasswordHistory(id, source, index, entryId)).toThrowError(
         expect.objectContaining({ code: "unknown_item" }),
       );
     }
+
+    // Finding 0 (imported branch, deterministic): an importer that wrote no `lastUsedDate`
+    // for either row leaves both `changedMs` fields `undefined`. The old date-based guard
+    // matched `undefined === undefined` at any index, so a sync that reordered the list
+    // could reveal the wrong row's password under the right one's label. The id-based guard
+    // never collides, because two different `pwhist` rows never share one.
+    const noDates = [{ password: "no-date-a" }, { password: "no-date-b" }];
+    const noDatesFile = new TextEncoder().encode(
+      JSON.stringify({
+        encrypted: false,
+        items: [
+          {
+            type: 1,
+            name: "No dates",
+            login: { username: "frank2", password: "current" },
+            passwordHistory: noDates,
+          },
+        ],
+      }),
+    );
+    expect(s.importFile("bitwarden-json", noDatesFile).imported).toBe(1);
+    const noDatesId = s.items().find((i) => i.title === "No dates")?.id ?? "";
+    expect(noDatesId).not.toBe("");
+
+    const listedNoDates = s.passwordHistory(noDatesId);
+    expect(listedNoDates).toHaveLength(2);
+    for (const entry of listedNoDates) {
+      // The old guard's hole exactly: every entry's date is absent.
+      expect(entry.changedMs).toBeUndefined();
+    }
+    // Distinguishable ids, even though the dates coincide (both absent).
+    const [a, b] = listedNoDates as [HistoryEntry, HistoryEntry];
+    expect(a.id).not.toBe(b.id);
+
+    const byPassword = new Set(
+      listedNoDates.map((entry) => s.revealPasswordHistory(noDatesId, "imported", entry.index, entry.id)),
+    );
+    expect(byPassword).toEqual(new Set(["no-date-a", "no-date-b"]));
+    // `a`'s id never reveals `b`'s value at `b`'s index, nor the reverse: no coincidental
+    // `undefined === undefined` match.
+    expect(() => s.revealPasswordHistory(noDatesId, "imported", b.index, a.id)).toThrowError(
+      expect.objectContaining({ code: "unknown_item" }),
+    );
+    expect(() => s.revealPasswordHistory(noDatesId, "imported", a.index, b.id)).toThrowError(
+      expect.objectContaining({ code: "unknown_item" }),
+    );
     s.lock();
   });
 
@@ -887,6 +961,46 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     expect(first.items().map((i) => i.id)).not.toContain(gone);
 
     // Still nothing new for the session that was handed them.
+    expect(first.takeNotices()).toEqual([]);
+
+    // Finding 3: a second, genuinely distinct conflict between the very same two devices,
+    // within this one session, is handed over too -- not silently dropped because it shares
+    // a device pair with a conflict already shown.
+    const raced = first.createItem("note", [{ op: "set", key: "item.name", value: "Raced" }]);
+    await first.sync();
+    await second.sync();
+    first.trashItem(raced);
+    await first.sync();
+    second.editItem(raced, [{ op: "set", key: "item.notes", value: "round one" }]);
+    await second.sync();
+    await first.sync();
+    expect(first.takeNotices()).toContainEqual({
+      kind: "concurrent-trash",
+      item: raced,
+      devices: [first.deviceId, second.deviceId],
+    });
+    // Handed over once already, same as any other notice.
+    expect(first.takeNotices()).toEqual([]);
+
+    // The conflict resolves: `second` learns of `first`'s trash, then writes an edit whose
+    // causal context covers both the losing Trashed op and the kept Active op (ADR 0012 §5).
+    await second.sync();
+    second.editItem(raced, [{ op: "set", key: "item.notes", value: "resolved" }]);
+    await second.sync();
+
+    // The same two devices race again, from that new base: `first` (who never fetched the
+    // resolving edit) trashes once more; `second` (who never fetched `first`'s new trash)
+    // edits once more too. A fresh, genuinely distinct conflict between the very same pair.
+    first.trashItem(raced);
+    await first.sync();
+    second.editItem(raced, [{ op: "set", key: "item.notes", value: "round two" }]);
+    await second.sync();
+    await first.sync();
+    expect(first.takeNotices()).toContainEqual({
+      kind: "concurrent-trash",
+      item: raced,
+      devices: [first.deviceId, second.deviceId],
+    });
     expect(first.takeNotices()).toEqual([]);
 
     // Session memory only: lock, then unlock again (the web vault's unlock is a fresh login

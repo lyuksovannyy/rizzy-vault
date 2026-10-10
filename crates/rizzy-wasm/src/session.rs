@@ -61,7 +61,7 @@ use rizzy_client::export::gate::{self, ExportGate, check_export_password};
 use rizzy_client::export::plaintext::{
     PLAINTEXT_EXPORT_PHRASE, PLAINTEXT_EXPORT_WARNING, PlaintextExportAck, csv_export_warning,
 };
-use rizzy_client::items::{DeviceId, FieldEdit, ItemId, TRASH_RETENTION_MS};
+use rizzy_client::items::{Dot, FieldEdit, ItemId, TRASH_RETENTION_MS};
 use rizzy_client::login::WebSession;
 use rizzy_client::passkey::get_assertion;
 use rizzy_client::rizzy_core::ids::AccountId;
@@ -129,14 +129,17 @@ struct Inner {
     /// The RNG.
     rng: Rng,
     /// The "deleted on X while it was being edited on Y" notices already handed to the host
-    /// (item, X, Y), so that [`Session::take_notices`] hands each one over once.
+    /// (item, the losing Trashed dot, the displayed Active dot), so that
+    /// [`Session::take_notices`] hands each one over once. Keyed on the dots, not just the
+    /// device pair: a conflict that resolves and then recurs between the very same two devices
+    /// is a new conflict with new dots, and must be handed over too.
     ///
     /// Session memory only, on purpose: it is dropped with the session, so a notice shows again
     /// after the next unlock. Keeping it across sessions would mean a new record in the local
     /// cache, a persistent-format change that needs an ADR 0026 amendment first (gap 02). The
     /// late-edit notices' marks live in the same place for the same reason (`rizzy-client`'s
     /// `VaultSync::mark_late_edits_surfaced`).
-    shown_trash_notices: BTreeSet<(ItemId, DeviceId, DeviceId)>,
+    shown_trash_notices: BTreeSet<(ItemId, Dot, Dot)>,
 }
 
 /// An unlocked web-vault session (module docs). `Debug` shows nothing secret.
@@ -518,29 +521,27 @@ impl Session {
     }
 
     /// The value of one password-history entry, as [`Session::password_history`] listed it:
-    /// call it only on the user's request (ADR 0013 §3 rule 3). `changed_ms` is the date the
-    /// listing gave for the entry (`undefined` when it gave none); an entry at `index` with
-    /// another date is refused, so a listing made stale by a sync never reveals a value under
-    /// the wrong date.
+    /// call it only on the user's request (ADR 0013 §3 rule 3). `entry_id` is the entry's own
+    /// id as the listing gave it ([`crate::items::HistoryEntryView::id`]); an entry at `index`
+    /// with another id is refused, so a listing made stale by a sync never reveals a value
+    /// under another entry's identity.
     ///
     /// # Errors
     /// As [`Session::item`]; `invalid_input` for an unknown source; `unknown_item` for an
-    /// entry that is not there (any more) or whose date differs.
+    /// entry that is not there (any more) or whose id differs.
     #[wasm_bindgen(js_name = revealPasswordHistory)]
     pub fn reveal_password_history(
         &self,
         id: &str,
         source: &str,
         index: usize,
-        changed_ms: Option<u64>,
+        entry_id: &str,
     ) -> Result<String, CoreError> {
         let vault = &self.inner()?.vault;
         let item = visible_item(vault, id)?;
-        Ok(
-            items::reveal_history(vault, item, source, index, changed_ms)?
-                .as_str()
-                .to_owned(),
-        )
+        Ok(items::reveal_history(vault, item, source, index, entry_id)?
+            .as_str()
+            .to_owned())
     }
 
     /// The notices not yet handed over in this session (gap 02), each handed over once: an edit
@@ -572,7 +573,7 @@ impl Session {
             if let Some(trash) = inner.vault.concurrent_trash(item)
                 && inner
                     .shown_trash_notices
-                    .insert((item, trash.trashed_by, trash.edited_by))
+                    .insert((item, trash.trashed_dot, trash.edited_dot))
             {
                 out.push(Notice {
                     kind: NOTICE_CONCURRENT_TRASH,

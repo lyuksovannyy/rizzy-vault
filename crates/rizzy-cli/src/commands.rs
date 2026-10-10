@@ -731,14 +731,22 @@ fn print_notices(device: &Device, ui: &mut dyn Ui) {
     }
 }
 
-/// How a notice names a device: "this device", or its kind and the first 8 digits of its id as
-/// `device list` prints them. A device certificate holds a kind and an id, no name.
+/// How many hex digits of a device id a notice shows (module-wide: [`device_label`] and the
+/// web vault's `notices.ts` `deviceLabel` use the same length), a prefix of what `device list`
+/// prints in full: short enough to read in a sentence, long enough that `device revoke`
+/// (which accepts a prefix, module docs) rarely sees two devices sharing it.
+const DEVICE_LABEL_HEX_LEN: usize = 16;
+
+/// How a notice names a device: "this device", or its kind and the first
+/// [`DEVICE_LABEL_HEX_LEN`] digits of its id, a prefix of the full id `device list` prints
+/// (and that `device revoke` accepts in place of the full id). A device certificate holds a
+/// kind and an id, no name.
 fn device_label(device: &Device, id: DeviceId) -> String {
     if id == device.state().device_id() {
         return "this device".to_owned();
     }
     let text = hex(id.as_bytes());
-    let short = text.get(..8).unwrap_or(&text);
+    let short = text.get(..DEVICE_LABEL_HEX_LEN).unwrap_or(&text);
     let (certificates, _) = device.devices();
     certificates
         .iter()
