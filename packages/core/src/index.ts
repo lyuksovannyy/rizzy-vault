@@ -2020,8 +2020,19 @@ export class DurableSession {
       const request = call(() => s.syncRequest());
       if (request === undefined) {
         await this.#drain();
-        call(() => s.autoPurge(this.#now()));
+        // Mirrors `Device::auto_purge` (rizzy-cli/src/device.rs): whatever the pass journals
+        // before it fails is drained too, so the next drain below always runs before the
+        // error propagates (class docs' write order) — never skipped by a `call()` rethrow.
+        let failure: { error: unknown } | undefined;
+        try {
+          s.autoPurge(this.#now());
+        } catch (e) {
+          failure = { error: toCoreError(e) };
+        }
         await this.#drain();
+        if (failure !== undefined) {
+          throw failure.error;
+        }
         return;
       }
       let answer: CoreResponse;
