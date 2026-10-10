@@ -60,11 +60,14 @@ pnpm install --frozen-lockfile
 cargo xtask check-js                                        # exact versions, pinned pnpm, empty install-script allow-list, deny.toml licences, pnpm audit
 pnpm run lint
 pnpm run build
+cargo xtask check-manifest                                  # not in CI yet: built extension manifests (Chromium, Firefox) against INV-40, ADR 0036 §4/§5, ADR 0040: no externally_connectable, allow-listed permissions/host_permissions/web_accessible_resources, all_frames: false, extension-pages CSP
 cargo build --locked -p rizzy-server --bin rizzy-vault     # so the end-to-end test below has a server binary
 pnpm run test
 pnpm run e2e                                                 # Playwright against rizzy-vault built with embed-web
 cargo xtask expand-bindings                                 # regenerates crates/rizzy-wasm/generated/; CI fails on any diff from the committed baseline (ADR 0019 §4.1)
 ```
+
+`cargo xtask check-manifest` is not yet a CI job: [`docs/HANDOFF.md`](docs/HANDOFF.md) lists wiring it (and `check-tables`) into `.github/workflows/` as blocked on the owner. Run it locally, right after `pnpm run build`, until that's wired.
 
 CI also builds the server image, [`deploy/Containerfile`](deploy/Containerfile), for `linux/amd64` and `linux/arm64` on every PR, each natively on its own runner. It pushes nothing. Locally: `docker build -f deploy/Containerfile .` (or `podman build`).
 
