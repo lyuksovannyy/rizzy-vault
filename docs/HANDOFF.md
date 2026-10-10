@@ -28,6 +28,7 @@ Recheck each gap's evidence before you implement it: the audit's verifiers refut
 ### Tests and verification that CLAUDE.md, CRYPTO.md or THREAT_MODEL.md require
 
 - **X3** INV-37 adversarial-page e2e tests. **X4** INV-40 manifest check (an xtask; its CI wiring is blocked below).
+- **X6** A7/THREAT_MODEL.md gap confirmed by X3's own clickjacking test (`apps/extension/e2e/adversarial-fill-requests.spec.ts`, `test.fixme`): the inline-menu iframe has no visibility/topmost check of its own (only the target field does), so a page can hide it with `opacity: 0` while it stays clickable, and a trusted click at a decoy's location fills a real credential. Needs a visibility check on the iframe itself (e.g. IntersectionObserver v2, as THREAT_MODEL.md's A7 mitigation list already names) before dispatching a fill.
 - **16** Convergence harness: key rotation (property 6), stale-epoch answers, re-issued ops, kind-4 authors, two or more faulty devices (ADR 0012 §12, ADR 0021 §8). It may reproduce gap 14; if it does, report the failing property, do not weaken the test.
 
 ### Licensing

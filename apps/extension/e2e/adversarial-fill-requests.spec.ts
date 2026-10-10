@@ -8,11 +8,13 @@
 //    also pass if matching were broken entirely, not only the downgrade rule specifically.
 // 2. A forged `postMessage` straight into the real inline-menu iframe (bypassing the content
 //    script entirely, the one direction `inline-menu/protocol.ts` already documents as
-//    forgeable) cannot reveal a credential even for a fabricated candidate a real, trusted
-//    Playwright click picks — because `handleInlineMenuFillRequest` (ADR 0040 point 3)
-//    re-derives the real candidate list from the tab's own browser-vouched URL and refuses an
-//    `itemId` that is not genuinely a member of it, independent of whatever the iframe's own DOM
-//    was tricked into rendering.
+//    forgeable) cannot reveal a credential even for a REAL, currently-valid `itemId` (just one
+//    saved for a different host) that a real, trusted Playwright click picks — because
+//    `handleInlineMenuFillRequest` (ADR 0040 point 3) re-derives the real candidate list from
+//    the tab's own browser-vouched URL and refuses an `itemId` that is not genuinely a member of
+//    it, independent of whatever the iframe's own DOM was tricked into rendering. A merely
+//    fabricated, nonexistent `itemId` would not exercise that check at all (it would be refused
+//    by `revealCredentialsForFill` finding nothing either way), so this uses a real one.
 // 3. The embedding page has no same-origin access to the real menu's document at all
 //    (`content-script.ts`'s own module doc on `InlineMenu`) — confirms the cross-origin
 //    isolation every other "page cannot script the menu" guarantee in this file and
@@ -163,31 +165,80 @@ test("an HTTPS-saved credential is never offered on the HTTP version of the same
   }
 });
 
-// No positive control in this specific test (no saved item at all, deliberately, to isolate the
-// forgery path from matching itself) — "a real trusted click on a real candidate fills" is
-// already proven elsewhere in this same suite run (`autofill-and-save.spec.ts`, and the
-// downgrade test above), so a bug that broke fill entirely would already be caught there, not
-// silently hidden behind this test alone.
+// This needs a REAL, currently-valid `itemId` to forge with, not a merely fabricated string:
+// `handleInlineMenuFillRequest` re-derives the real candidate list from the attacker page's own
+// browser-vouched URL and looks `itemId` up in THAT list (`content-handler.ts`'s
+// `selectFillCandidate`) — a nonexistent id would be refused by that lookup regardless of
+// whether the lookup itself (the actual fix) exists at all, since `revealCredentialsForFill`
+// would find nothing for it either way. A real item saved for a DIFFERENT host than the attacker
+// page gives the forged message something real to try to steal: if the membership check were
+// ever deleted, `revealCredentialsForFill` would happily return that other item's real
+// credentials for its real `itemId`, and this test would catch that. `localhost` vs `127.0.0.1`
+// (one server, two host strings) is the same look-alike-host pair `startLoginPageServer`'s own
+// doc relies on, and `autofill-and-save.spec.ts` already establishes that `rizzy-match` treats
+// them as genuinely different, unrelated hosts (no equivalence between them).
 test("a forged postMessage directly into the real inline-menu iframe cannot reveal a credential, even for a real trusted click", async ({
   context,
   extensionId,
   server,
 }) => {
+  test.setTimeout(180_000);
   const page = await startLoginPageServer();
   try {
     const setupPage = await context.newPage();
     const secretKey = await signUp(setupPage, server.origin, "forgeduser");
+    await createLoginItem(setupPage, {
+      title: "Other Host Item",
+      username: "otherhost-user@example.com",
+      password: "otherhost-target-password",
+      websiteUrl: `http://localhost:${page.port}/`,
+    });
     await setupPage.close();
 
     const popup = await enrol(context, extensionId, server, "forgeduser", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
     await popup.close();
+
+    // Learn that item's real `itemId` the same way the top-level page already legitimately can:
+    // `inline-menu/protocol.ts`'s own module doc on `InlineMenuPickMessage` — every real pick
+    // posts `{ type: "rizzy-inline-menu-pick", itemId }` straight to `window.parent` for UI
+    // teardown, and `content-script.ts`'s own `#onMessage` listens for exactly this on `window`
+    // itself (the same object this page's own scripts share — isolated worlds notwithstanding).
+    // Nothing stops a listener this test adds to that same `window` from seeing it too. This is
+    // not a new disclosure invented for this test; it is the one channel a page already has
+    // today on a real pick, used here only to obtain a real id to forge with — never to assert
+    // anything about the disclosure itself. `addInitScript` (not a post-navigation `evaluate`)
+    // installs the listener before any page script runs, so there is no race with the real pick.
+    const legitVisit = await context.newPage();
+    await legitVisit.addInitScript(() => {
+      window.addEventListener("message", (event) => {
+        const data = event.data as { readonly type?: unknown; readonly itemId?: unknown };
+        if (data?.type === "rizzy-inline-menu-pick" && typeof data.itemId === "string") {
+          (window as unknown as { __rizzyRealItemId?: string }).__rizzyRealItemId = data.itemId;
+        }
+      });
+    });
+    await legitVisit.goto(`http://localhost:${page.port}/`);
+    const legitMenu = legitVisit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = legitMenu.getByRole("button", { name: "Other Host Item", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    await realCandidate.click();
+    // The positive control this test needs: a real trusted click on a real candidate really
+    // fills, so the refusal asserted below, on the forged candidate, is evidence of the
+    // membership check specifically, not of fill being broken entirely.
+    await expect(legitVisit.locator("#pass")).toHaveValue("otherhost-target-password", { timeout: 15_000 });
+    const realItemId = await legitVisit.evaluate(() => (window as unknown as { __rizzyRealItemId?: string }).__rizzyRealItemId);
+    if (typeof realItemId !== "string" || realItemId === "") {
+      throw new Error("adversarial test setup: did not capture a real itemId from the legitimate pick");
+    }
+    await legitVisit.close();
 
     const visit = await context.newPage();
     await visit.goto(`http://127.0.0.1:${page.port}/`);
     // The real content script creates the real iframe the moment it detects the password field
-    // (there are no saved items at all, so its own, honest `rizzy-inline-menu-show` carries zero
-    // candidates — only the generator button). This test's forged message is sent AFTER that,
-    // straight to the same real iframe element, exactly as `protocol.ts`'s own module doc
+    // (no item is saved for `127.0.0.1`, so its own, honest `rizzy-inline-menu-show` carries
+    // zero candidates — only the generator button). This test's forged message is sent AFTER
+    // that, straight to the same real iframe element, exactly as `protocol.ts`'s own module doc
     // describes: "a hostile page's own script can call `frame.contentWindow.postMessage(...)`
     // just as validly as the content script can."
     const frame = visit.locator("iframe[data-rizzy-inline-menu]");
@@ -200,7 +251,6 @@ test("a forged postMessage directly into the real inline-menu iframe cannot reve
       timeout: 15_000,
     });
 
-    const FORGED_ITEM_ID = "attacker-forged-item-id-does-not-exist";
     await visit.evaluate((forgedItemId) => {
       const el = document.querySelector("iframe[data-rizzy-inline-menu]") as HTMLIFrameElement | null;
       if (el?.contentWindow === null || el?.contentWindow === undefined) {
@@ -223,7 +273,7 @@ test("a forged postMessage directly into the real inline-menu iframe cannot reve
         },
         "*",
       );
-    }, FORGED_ITEM_ID);
+    }, realItemId);
 
     const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
     const forgedButton = menu.getByRole("button", { name: "Fake PayPal", exact: false });
@@ -231,8 +281,10 @@ test("a forged postMessage directly into the real inline-menu iframe cannot reve
     // A real, OS-level, trusted Playwright click — not a page-script-synthesized one. The
     // defence this test exists to prove is NOT "untrusted clicks are ignored" (that's
     // `extension.spec.ts`'s own test); it is that a real trusted click on a row the real iframe
-    // was merely tricked into *rendering* still cannot reveal anything, because the background
-    // re-derives the real candidate list itself and `forgedItemId` is never a member of it.
+    // was merely tricked into *rendering* still cannot reveal anything — even when the claimed
+    // `itemId` is a REAL, currently-valid one for a real item (just saved for a different host)
+    // — because the background re-derives the real candidate list itself from the attacker
+    // page's own URL, and `realItemId` is never a member of it.
     await forgedButton.click();
     // No fixed wait proves a negative with certainty, but this gives the (absent) async fill
     // ample time to land before asserting it never did.

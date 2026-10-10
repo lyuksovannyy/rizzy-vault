@@ -11,9 +11,9 @@
 //! | No `externally_connectable` key at all | [INV-40](../../../docs/THREAT_MODEL.md#8-security-invariants); ADR 0036 §4 last bullet ("not even the web vault's own origin") |
 //! | `permissions` is a subset of the allow-list ([`BASE_ALLOWED_PERMISSIONS`], plus [`Browser::extra_permission`]) | INV-40 ("the background treats every ... message as untrusted"; a wider permission set widens what a compromised context could reach) |
 //! | `host_permissions` is exactly [`EXPECTED_HOST_PERMISSIONS`] | ADR 0037 (matching needs every host; never wider, e.g. `<all_urls>`, which also covers `file:`/`ftp:`) |
-//! | Every `content_scripts` entry has `all_frames: false` and `matches` of `http`/`https` only | INV-37 clause 2, INV-40; ADR 0036 §4 |
-//! | `web_accessible_resources` exposes only [`EXPECTED_WEB_ACCESSIBLE_RESOURCES`], to `http`/`https` only | ADR 0036 §4 ("no `externally_connectable`... not even the web vault"); exposing an unlisted page (e.g. the popup or options page) would let a hostile page navigate or iframe straight into privileged UI |
-//! | `content_security_policy.extension_pages` allows only [`ALLOWED_CSP_SCRIPT_SRC`] in `script-src`, `'self'` in `object-src`, `'none'` in `base-uri` | ADR 0036 (MV3 bans remote code; no inline/eval beyond the one wasm exception) |
+//! | Every `content_scripts` entry has `all_frames: false`, `matches` of `http`/`https` only, and no `world: "MAIN"` | INV-37 clause 2, INV-40; ADR 0036 §4 |
+//! | `web_accessible_resources` exposes only a subset of [`EXPECTED_WEB_ACCESSIBLE_RESOURCES`], to `http`/`https` only | ADR 0036 §4 ("no `externally_connectable`... not even the web vault"); exposing an unlisted page (e.g. the popup or options page) would let a hostile page navigate or iframe straight into privileged UI |
+//! | `content_security_policy.extension_pages` allows only [`ALLOWED_CSP_SCRIPT_SRC`] in `script-src`, `'self'` or `'none'` in `object-src`, `'none'` in `base-uri` | ADR 0036 (MV3 bans remote code; no inline/eval beyond the one wasm exception) |
 //!
 //! Changing an allow-list above is a security review, same framing as `rules.rs`'s own
 //! crate-boundary tables.
@@ -74,10 +74,11 @@ const BASE_ALLOWED_PERMISSIONS: &[&str] = &["storage", "idle"];
 /// 0037).
 const EXPECTED_HOST_PERMISSIONS: &[&str] = &["http://*/*", "https://*/*"];
 
-/// The exact `web_accessible_resources[].resources` every build must declare: the
-/// extension-origin UI pages the content script injects into an untrusted page (ADR 0036 §4,
-/// §75: the inline-menu iframe app, the passkey-consent iframe app, and the passkey
-/// page-world shim it loads). Nothing else — in particular never the popup or options page,
+/// The exact `web_accessible_resources[].resources` every build may expose, at most (checked as
+/// a subset, [`check_web_accessible_resources`] below — a build exposing fewer, even zero, of
+/// these still passes): the extension-origin UI pages the content script injects into an
+/// untrusted page (ADR 0036 §4, §6: the inline-menu iframe app, the passkey-consent iframe app,
+/// and the passkey page-world shim it loads). Nothing else — in particular never the popup or options page,
 /// which carry no secrets of their own either but are the one place `packages/core`'s
 /// messaging-backed client talks to the long-lived context, and have no reason to be reachable
 /// from a page's own `<iframe src="...">` or navigation at all.
@@ -109,8 +110,10 @@ fn is_subset_of(actual: &[&str], allowed: &[&str]) -> bool {
     actual.iter().all(|a| allowed.contains(a))
 }
 
-/// Whether `actual` and `expected` contain exactly the same strings (order-independent,
-/// duplicate-insensitive — a manifest with a duplicated entry is still "exactly this set").
+/// Whether `actual` and `expected` contain exactly the same strings (order-independent). The
+/// `len()` equality means this is NOT duplicate-insensitive: a manifest with a duplicated entry
+/// has a different length from `expected` and is rejected, not treated as equivalent to the
+/// deduplicated set.
 fn same_set(actual: &[&str], expected: &[&str]) -> bool {
     actual.len() == expected.len()
         && is_subset_of(actual, expected)
@@ -149,9 +152,13 @@ fn check_host_permissions(manifest: &Value) -> Vec<String> {
     }
 }
 
-/// Every `content_scripts` entry (module docs table, row 5): `all_frames: false`, and `matches`
-/// of `http(s)` patterns only — never `<all_urls>`, `file://*/*` or anything else that would run
-/// this extension's own code somewhere INV-37/INV-40 does not expect it.
+/// Every `content_scripts` entry (module docs table, row 5): `all_frames: false`, `matches` of
+/// `http(s)` patterns only — never `<all_urls>`, `file://*/*` or anything else that would run
+/// this extension's own code somewhere INV-37/INV-40 does not expect it — and no `world:
+/// "MAIN"`. MV3's default (absent, or explicitly `"ISOLATED"`) is the isolated world
+/// `docs/THREAT_MODEL.md`'s A7 mitigations and INV-36–INV-40 all assume; `"MAIN"` would run the
+/// content script in the page's own world instead, sharing its JS globals and reachable by the
+/// page's own code, not merely its shared DOM/BOM.
 fn check_content_scripts(manifest: &Value) -> Vec<String> {
     let Some(entries) = manifest.get("content_scripts").and_then(Value::as_array) else {
         return vec!["content_scripts must be an array".to_owned()];
@@ -175,6 +182,13 @@ fn check_content_scripts(manifest: &Value) -> Vec<String> {
         {
             out.push(format!(
                 "content_scripts[{i}].matches {matches:?} must contain only http(s) patterns"
+            ));
+        }
+        if let Some(world) = entry.get("world").and_then(Value::as_str)
+            && world != "ISOLATED"
+        {
+            out.push(format!(
+                "content_scripts[{i}].world {world:?} must be absent or \"ISOLATED\", never \"MAIN\" (INV-37/INV-40; THREAT_MODEL.md A7)"
             ));
         }
     }
@@ -372,8 +386,11 @@ mod tests {
         m
     }
 
+    /// Exercises the hand-written fixtures above (mirrors of the allow-list constants in this
+    /// same file), NOT the real committed manifest source files — see
+    /// `the_real_committed_manifest_source_files_pass` below for that.
     #[test]
-    fn the_real_committed_manifests_pass() {
+    fn the_fixture_shaped_manifests_pass() {
         assert_eq!(
             check_manifest_security(Browser::Chromium, &good_chromium()),
             Vec::<String>::new()
@@ -381,6 +398,36 @@ mod tests {
         assert_eq!(
             check_manifest_security(Browser::Firefox, &good_firefox()),
             Vec::<String>::new()
+        );
+    }
+
+    /// Reads the REAL committed `apps/extension/manifest.{chromium,firefox}.json` source files
+    /// (never the fixtures above, which only mirror this module's own allow-lists and so could
+    /// never catch the source files actually drifting) and runs them through
+    /// `check_manifest_security` directly. Needs no built `dist/` tree, so unlike
+    /// `check_built_manifests` (exercised only by the separate, not-yet-CI-wired `cargo xtask
+    /// check-manifest`), this runs under plain `cargo test --workspace` — closing the gap where
+    /// a real regression (e.g. a new permission, a wider `web_accessible_resources` entry) could
+    /// drift the source files while `cargo test` stayed green.
+    #[test]
+    fn the_real_committed_manifest_source_files_pass() {
+        let chromium: Value = serde_json::from_str(include_str!(
+            "../../../apps/extension/manifest.chromium.json"
+        ))
+        .expect("apps/extension/manifest.chromium.json must be valid JSON");
+        let firefox: Value = serde_json::from_str(include_str!(
+            "../../../apps/extension/manifest.firefox.json"
+        ))
+        .expect("apps/extension/manifest.firefox.json must be valid JSON");
+        assert_eq!(
+            check_manifest_security(Browser::Chromium, &chromium),
+            Vec::<String>::new(),
+            "apps/extension/manifest.chromium.json violates the allow-lists in this module"
+        );
+        assert_eq!(
+            check_manifest_security(Browser::Firefox, &firefox),
+            Vec::<String>::new(),
+            "apps/extension/manifest.firefox.json violates the allow-lists in this module"
         );
     }
 
@@ -446,6 +493,21 @@ mod tests {
     }
 
     #[test]
+    fn a_content_script_running_in_the_main_world_is_a_violation() {
+        let mut m = good_chromium();
+        m["content_scripts"][0]["world"] = json!("MAIN");
+        let violations = check_manifest_security(Browser::Chromium, &m);
+        assert!(violations.iter().any(|v| v.contains("world")));
+    }
+
+    #[test]
+    fn a_content_script_explicitly_isolated_is_not_a_violation() {
+        let mut m = good_chromium();
+        m["content_scripts"][0]["world"] = json!("ISOLATED");
+        assert!(check_manifest_security(Browser::Chromium, &m).is_empty());
+    }
+
+    #[test]
     fn web_accessible_resources_exposing_the_popup_is_a_violation() {
         let mut m = good_chromium();
         m["web_accessible_resources"][0]["resources"] = json!(["src/popup/index.html"]);
@@ -485,6 +547,17 @@ mod tests {
             json!("script-src 'self' 'wasm-unsafe-eval'; object-src *; base-uri 'none'");
         let violations = check_manifest_security(Browser::Chromium, &m);
         assert!(violations.iter().any(|v| v.contains("object-src")));
+    }
+
+    /// `object-src 'none'` is strictly tighter than `'self'` (nothing may load there at all) and
+    /// is explicitly allowed by `check_csp`'s own match arm — the module docs table said only
+    /// `'self'` was allowed, which this test (previously untested) pins against drifting back.
+    #[test]
+    fn csp_object_src_none_is_not_a_violation() {
+        let mut m = good_chromium();
+        m["content_security_policy"]["extension_pages"] =
+            json!("script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'");
+        assert!(check_manifest_security(Browser::Chromium, &m).is_empty());
     }
 
     #[test]

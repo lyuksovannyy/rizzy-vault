@@ -445,7 +445,7 @@ The admin may be a family member (M9) or an employer (M10). The social context m
 **Mitigations** ([INV-36](#8-security-invariants), [INV-37](#8-security-invariants), [INV-40](#8-security-invariants)):
 - Content scripts run in isolated worlds.
 - UI that can trigger a fill is rendered in an extension-origin iframe or popup, not in the page DOM.
-- Before filling, the extension checks that the target field and the UI are visible and topmost (for example with IntersectionObserver v2 where the browser supports it).
+- Before filling, the extension checks that the target field and the UI are visible and topmost (for example with IntersectionObserver v2 where the browser supports it) (implemented for the target field only today; the inline-menu iframe itself has no such check yet — see Residual risk).
 - Only visible fields in the top frame or same-origin frames are filled.
 - The content script receives only the values for the fill the user chose.
 - The background treats every message as untrusted input and takes the origin from the browser's sender information, never from the message.
@@ -462,7 +462,9 @@ The admin may be a family member (M9) or an employer (M10). The social context m
 
 **Key custody in the extension (M2).** Under MV3 the service worker is terminated when idle. "Session only" key storage ([ADR 0013](adr/0013-shared-client-core.md) §2) then either re-locks constantly or tempts an implementer to persist keys to `storage.local` or IndexedDB. Content scripts can read `chrome.storage.local` by default. [INV-63](#8-security-invariants) keeps unlocked keys in memory only.
 
-**Residual risk.** New clickjacking and overlay techniques will keep appearing. The M8 audit and the bug bounty include the extension.
+**Residual risk.**
+- **Confirmed gap (HANDOFF X6):** the visibility/topmost check above runs only on the target field (`content-script.ts`'s `isVisible`/`isTopmost`), never on the inline-menu iframe itself, which sets `position`/`size`/`zIndex` inline but never `opacity`. A page stylesheet rule can hide the iframe while it stays the topmost hit-test target, so a trusted click at a decoy's location lands on the real, invisible candidate button and fills a real credential. Reproduced by `apps/extension/e2e/adversarial-fill-requests.spec.ts`'s clickjacking test (`test.fixme`, not fixed there — tests only).
+- New clickjacking and overlay techniques will keep appearing. The M8 audit and the bug bounty include the extension.
 
 ### A8. Stolen or lost device
 

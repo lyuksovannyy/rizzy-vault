@@ -170,9 +170,10 @@ test("a hostile page's own main-world script cannot reach the background directl
         sendMessage: (extensionId: string, message: unknown, callback: (response: unknown) => void) => void;
         readonly lastError?: { readonly message?: string };
       };
-      const runtime = (window as unknown as { chrome?: { runtime?: ExternalRuntime } }).chrome?.runtime;
+      const chromeObj = (window as unknown as { chrome?: Record<string, unknown> }).chrome;
+      const runtime = (chromeObj as { runtime?: ExternalRuntime } | undefined)?.runtime;
       if (runtime === undefined) {
-        return { noRuntime: true } as const;
+        return { hasChrome: chromeObj !== undefined, noRuntime: true } as const;
       }
       return new Promise((resolve) => {
         try {
@@ -180,17 +181,26 @@ test("a hostile page's own main-world script cannot reach the background directl
             extId,
             { type: "inline_menu_fill_chosen", itemId: "forged-from-page-main-world", confirmedEquivalence: false },
             (response: unknown) => {
-              resolve({ response, lastError: runtime.lastError?.message });
+              resolve({ hasChrome: true, noRuntime: false, response, lastError: runtime.lastError?.message });
             },
           );
         } catch (e) {
-          resolve({ thrown: String(e) });
+          resolve({ hasChrome: true, noRuntime: false, thrown: String(e) });
         }
       });
     }, extensionId);
-    // Whichever shape the refusal takes (a thrown error, or a `chrome.runtime.lastError` with no
-    // real response — Chrome's documented behaviour for an extension with no
-    // `externally_connectable` entry matching the caller), there must be no real response.
+    // Chrome exposes `chrome.runtime` (the one piece of it a web page can see, for exactly this
+    // cross-extension-messaging purpose) on a page ONLY when some installed extension's own
+    // `externally_connectable.matches` covers that page's origin — confirmed empirically here,
+    // not assumed: with only this extension loaded and it declaring no `externally_connectable`
+    // at all (INV-40), `window.chrome` itself is present (the browser's ordinary, non-extension
+    // page APIs: `loadTimes`/`csi`/`app`) but `window.chrome.runtime` is `undefined`, always —
+    // not a browser/config difference this test needs to guard against, but INV-40's own,
+    // permanent, observable consequence. The `sendMessage`/`thrown`/`lastError` branch below is
+    // kept as a fallback, not the expected path: if a future change ever exposed `chrome.runtime`
+    // here, this test must still fail on a real response rather than silently skip past it.
+    expect((result as { hasChrome?: boolean }).hasChrome).toBe(true);
+    expect((result as { noRuntime?: boolean }).noRuntime).toBe(true);
     expect((result as { response?: unknown }).response).toBeUndefined();
     // The behavioural proof that matters: the page's own password field is still empty, exactly
     // as if this call had never happened.
