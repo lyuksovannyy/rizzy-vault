@@ -63,7 +63,6 @@ cargo check-wasm
 cargo deny check
 cargo xtask check-deps
 cargo xtask check-clippy
-cargo xtask check-spdx
 cargo check --manifest-path fuzz/Cargo.toml --locked --bins
 cargo deny --manifest-path fuzz/Cargo.toml check
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
