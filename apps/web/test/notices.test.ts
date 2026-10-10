@@ -39,14 +39,24 @@ describe("device labels", () => {
 
 describe("notice text", () => {
   it("words a late edit with the ADR's question", () => {
-    const late: Notice = { kind: "late-edit", item: "11".repeat(16), devices: [LAPTOP, PHONE] };
+    const late: Notice = {
+      kind: "late-edit",
+      item: "11".repeat(16),
+      devices: [LAPTOP, PHONE],
+      conflictId: undefined,
+    };
     expect(noticeText(late, label, "")).toBe(
       `An edit from ${DEVICE_KINDS["desktop-cli"]} abababababababab and Mobile cdcdcdcdcdcdcdcd arrived for an item you deleted permanently. Restore it as a new item?`,
     );
   });
 
   it("words a concurrent trash as deleted on X while edited on Y", () => {
-    const trash: Notice = { kind: "concurrent-trash", item: "22".repeat(16), devices: [OWN, LAPTOP] };
+    const trash: Notice = {
+      kind: "concurrent-trash",
+      item: "22".repeat(16),
+      devices: [OWN, LAPTOP],
+      conflictId: "dot-a:dot-b",
+    };
     expect(noticeText(trash, label, "Mail")).toBe(
       `“Mail” was deleted on this browser while it was being edited on ${DEVICE_KINDS["desktop-cli"]} abababababababab. The edit kept it.`,
     );
@@ -55,8 +65,13 @@ describe("notice text", () => {
 });
 
 describe("held notices", () => {
-  const a: Notice = { kind: "late-edit", item: "11".repeat(16), devices: [LAPTOP] };
-  const b: Notice = { kind: "concurrent-trash", item: "11".repeat(16), devices: [OWN, LAPTOP] };
+  const a: Notice = { kind: "late-edit", item: "11".repeat(16), devices: [LAPTOP], conflictId: undefined };
+  const b: Notice = {
+    kind: "concurrent-trash",
+    item: "11".repeat(16),
+    devices: [OWN, LAPTOP],
+    conflictId: "dot-a:dot-b",
+  };
 
   it("appends fresh notices once, keyed by kind, item and devices", () => {
     expect(mergeNotices([], [])).toEqual([]);
@@ -64,6 +79,22 @@ describe("held notices", () => {
     expect(noticeKey(a)).not.toBe(noticeKey(b));
     const laterEdit: Notice = { ...a, devices: [LAPTOP, PHONE] };
     expect(mergeNotices([a], [laterEdit])).toEqual([a, laterEdit]);
+  });
+
+  // Finding 3b (re-review of finding 3): the Rust layer now re-emits a second, genuinely
+  // distinct concurrent-trash conflict between the same device pair on the same item (its own
+  // dots differ), but the old key -- kind, item and devices only -- made it collide with a
+  // conflict already held, so the web vault silently dropped it. `conflictId` fixes that.
+  it("keeps a second, genuinely distinct conflict between the same device pair (finding 3b)", () => {
+    const raceOne: Notice = { ...b, conflictId: "dot-a1:dot-b1" };
+    const raceTwo: Notice = { ...b, conflictId: "dot-a2:dot-b2" };
+    expect(noticeKey(raceOne)).not.toBe(noticeKey(raceTwo));
+    // Both held: the second race is not mistaken for a repeat of the first.
+    expect(mergeNotices([raceOne], [raceTwo])).toEqual([raceOne, raceTwo]);
+    // The exact same conflict, synced again, is still a duplicate.
+    expect(mergeNotices([raceOne], [{ ...raceOne }])).toEqual([raceOne]);
+    // late-edit has no conflictId: two late-edit notices for the same devices are still one.
+    expect(mergeNotices([a], [{ ...a }])).toEqual([a]);
   });
 });
 

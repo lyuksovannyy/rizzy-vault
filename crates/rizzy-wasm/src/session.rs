@@ -547,7 +547,9 @@ impl Session {
     /// The notices not yet handed over in this session (gap 02), each handed over once: an edit
     /// that arrived for an item deleted permanently (ADR 0018 §3 "Surfacing"; the host offers
     /// [`Session::restore_late_as_new`]), and an item deleted on one device while it was being
-    /// edited on another (ADR 0012 §5 "Active wins"). Device ids only; the host names them from
+    /// edited on another (ADR 0012 §5 "Active wins"), with [`Notice::conflict_id`] set so a
+    /// second, genuinely distinct race between the same two devices on the same item is not
+    /// mistaken for a repeat of the first. Device ids only; the host names them from
     /// [`Session::devices`]. The host calls this after each sync.
     ///
     /// "Handed over once" lasts this session only: the marks live in memory (the late-edit
@@ -568,6 +570,7 @@ impl Session {
                     kind: NOTICE_LATE_EDIT,
                     item: hex(item.as_bytes()),
                     devices: late.iter().map(|d| hex(d.as_bytes())).collect(),
+                    conflict_id: None,
                 });
             }
             if let Some(trash) = inner.vault.concurrent_trash(item)
@@ -582,6 +585,10 @@ impl Session {
                         hex(trash.trashed_by.as_bytes()),
                         hex(trash.edited_by.as_bytes()),
                     ],
+                    conflict_id: Some(concurrent_trash_conflict_id(
+                        trash.trashed_dot,
+                        trash.edited_dot,
+                    )),
                 });
             }
         }
@@ -1336,6 +1343,18 @@ impl ImportReport {
     }
 }
 
+/// [`Notice::conflict_id`] for a concurrent trash: the hex of both dots, joined, so two
+/// distinct conflicts between the same device pair and item (two different races, or the same
+/// race re-read) compare equal only when both dots match. Not a persistent or wire format
+/// (ADR 0018 §3 "Surfacing"): computed fresh for one in-memory host call, never stored.
+fn concurrent_trash_conflict_id(trashed_dot: Dot, edited_dot: Dot) -> String {
+    format!(
+        "{}:{}",
+        items::dot_hex(trashed_dot),
+        items::dot_hex(edited_dot)
+    )
+}
+
 /// [`Notice::kind`] of "An edit from `<device>` arrived for an item you deleted permanently.
 /// Restore it as a new item?" (ADR 0018 §3 "Surfacing").
 pub const NOTICE_LATE_EDIT: &str = "late-edit";
@@ -1353,6 +1372,14 @@ pub struct Notice {
     /// For a late edit, the devices whose edits arrived, ascending; for a concurrent trash,
     /// X (the device that deleted it) then Y (the device whose edit kept it). Hex.
     devices: Vec<String>,
+    /// For a concurrent trash, this one conflict's own identity: the two dots, not just the
+    /// device pair, so a host-side dedup (the web vault's `noticeKey`) can tell a second,
+    /// genuinely distinct race between the same two devices on the same item apart from the
+    /// first instead of mistaking it for a duplicate (`ConcurrentTrash` docs, ADR 0012 §2).
+    /// `None` for a late edit, which has no per-conflict identity: `late_edit_devices` names
+    /// devices, not one op. Not a persistent or wire format (ADR 0018 §3 "Surfacing"):
+    /// computed fresh for one in-memory host call, never stored.
+    conflict_id: Option<String>,
 }
 
 #[wasm_bindgen]
@@ -1377,6 +1404,16 @@ impl Notice {
     #[must_use]
     pub fn devices(&self) -> Vec<String> {
         self.devices.clone()
+    }
+
+    /// This one conflict's own identity, for `concurrent-trash` only (`undefined` for
+    /// `late-edit`): fold it into a host-side dedup key alongside `item` and `devices`, so a
+    /// second race between the same two devices on the same item is kept, not dropped as a
+    /// duplicate of the first.
+    #[wasm_bindgen(getter, js_name = conflictId)]
+    #[must_use]
+    pub fn conflict_id(&self) -> Option<String> {
+        self.conflict_id.clone()
     }
 }
 
