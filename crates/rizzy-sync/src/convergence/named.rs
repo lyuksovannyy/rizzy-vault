@@ -24,14 +24,20 @@
 //! | [`property_6_reports_a_record_sealed_under_a_revoked_key`] | the property 6 check itself: a record sealed under a key the revoked device holds is reported |
 //! | [`a_stale_answer_lost_across_a_restore`] | ADR 0021 §9 "Stale epoch" (re-issue, or re-publication of an op that may have been served), §2 "Restore generation"; ADR 0032 §3 lag repair |
 //! | [`a_kind4_snapshot_after_expiry`] | ADR 0021 §9 "Revoked and kind-4 authors"; CRYPTO.md §10.2 "Web-vault certificates" |
+//! | [`server_rotate_refuses_a_non_advancing_epoch`] | ADR 0025 §3 check 2; a negative control for `Server::rotate`'s `RotationRefusal::Epoch` |
+//! | [`server_rotate_refuses_a_cursor_that_is_not_every_head`] | ADR 0025 §3 check 4 ("Rotation cut-off"); a negative control for `RotationRefusal::Cursor`, below and above a head |
+//! | [`server_rotate_refuses_a_mismatched_wrap_set`] | ADR 0025 §3 check 3; a negative control for `RotationRefusal::Wraps`: a wrong epoch, a duplicated row, a row named in neither list |
+//! | [`a_kind4_author_retrying_an_already_stored_snapshot_is_acknowledged`] | ADR 0021 §9 "Already stored" vs. "Revoked and kind-4 authors": a byte-identical retry from an expired author is acknowledged; a fresh one is refused |
 
 use super::faults::{self, Fault};
 use super::oracle::{State, held};
-use super::server::{SnapAnswer, SnapRecord};
+use super::server::{Rotation, RotationRefusal, SnapAnswer, SnapRecord, Wrap, WrapRow};
 use super::world::{Faults, Step, World};
 use super::{KEYS, crypto};
 use crate::causal::Report;
+use crate::dot::Dot;
 use crate::merge::ItemLifecycle;
+use crate::vv::VersionVector;
 
 /// Uploads then fetches for device `d`.
 fn sync(w: &mut World, d: usize) {
@@ -952,4 +958,257 @@ fn a_kind4_snapshot_after_expiry() {
     settle(&mut w);
     assert!(w.server.stats.expired_covers > 0, "{:?}", w.server.stats);
     assert_eq!(state(&w, 3, 0), w.expected_state(0));
+}
+
+/// ADR 0025 §3 check 2: a rotation whose epoch is not above the vault's stored one is refused
+/// as `RotationRefusal::Epoch`, and changes nothing. [`World::rotate`] never builds one of
+/// these (it always computes a strictly-increasing epoch), so there was no negative control on
+/// [`Server::rotate`] itself.
+#[test]
+fn server_rotate_refuses_a_non_advancing_epoch() {
+    let mut w = World::new(3, 3, 1, 101, Faults::default());
+    w.step(Step::Write { d: 0, i: 0, k: 0 });
+    sync(&mut w, 0);
+    w.step(Step::Rotate { d: 0 });
+    assert_eq!(w.server.epoch(), 1, "the rotation did not land");
+    let epoch_before = w.server.epoch();
+    let rows_before = w.server.rows();
+    let heads = w.server.heads();
+
+    // Equal to the stored epoch, and below it: neither advances.
+    for stale_epoch in [epoch_before, 0] {
+        let rotation = Rotation {
+            epoch: stale_epoch,
+            cursor: heads.clone(),
+            rewrapped: Vec::new(),
+            dropped: Vec::new(),
+            revoke: None,
+        };
+        assert_eq!(w.server.rotate(&rotation), Err(RotationRefusal::Epoch));
+        assert_eq!(
+            w.server.epoch(),
+            epoch_before,
+            "a refused rotation moved the epoch"
+        );
+        assert_eq!(
+            w.server.rows(),
+            rows_before,
+            "a refused rotation changed the rows"
+        );
+    }
+}
+
+/// ADR 0025 §3 check 4 ("Rotation cut-off"): a rotation whose cursor is not every head h(V, d)
+/// is refused as `RotationRefusal::Cursor`, both below a head (ADR 0012 §6's refusal
+/// territory) and above one ("the server is behind", ADR 0021 §9), and changes nothing.
+/// [`World::rotate`] pre-validates this with the server's own predicate before ever sending a
+/// `Rotation`, so there was no negative control on [`Server::rotate`] itself.
+#[test]
+fn server_rotate_refuses_a_cursor_that_is_not_every_head() {
+    let mut w = World::new(3, 3, 1, 102, Faults::default());
+    w.step(Step::Write { d: 0, i: 0, k: 0 });
+    sync(&mut w, 0);
+    w.step(Step::Rotate { d: 0 });
+    assert_eq!(w.server.epoch(), 1, "the rotation did not land");
+    let epoch_before = w.server.epoch();
+    let rows_before = w.server.rows();
+    let heads = w.server.heads();
+    let author = w.devices[0].id;
+
+    let below = Rotation {
+        epoch: epoch_before + 1,
+        cursor: VersionVector::new(),
+        rewrapped: Vec::new(),
+        dropped: Vec::new(),
+        revoke: None,
+    };
+    assert_eq!(w.server.rotate(&below), Err(RotationRefusal::Cursor));
+    assert_eq!(
+        w.server.epoch(),
+        epoch_before,
+        "a refused rotation moved the epoch"
+    );
+    assert_eq!(
+        w.server.rows(),
+        rows_before,
+        "a refused rotation changed the rows"
+    );
+
+    let mut above_cursor = heads.clone();
+    above_cursor.add(Dot::new(author, heads.get(author) + 1).expect("a nonzero seq"));
+    let above = Rotation {
+        epoch: epoch_before + 1,
+        cursor: above_cursor,
+        rewrapped: Vec::new(),
+        dropped: Vec::new(),
+        revoke: None,
+    };
+    assert_eq!(w.server.rotate(&above), Err(RotationRefusal::Cursor));
+    assert_eq!(
+        w.server.epoch(),
+        epoch_before,
+        "a refused rotation moved the epoch"
+    );
+    assert_eq!(
+        w.server.rows(),
+        rows_before,
+        "a refused rotation changed the rows"
+    );
+}
+
+/// ADR 0025 §3 check 3: a rotation is refused as `RotationRefusal::Wraps` when a rewrapped row
+/// is not at the new epoch, when a row is named twice across `rewrapped` and `dropped`, or when
+/// a stored row is named in neither list, and each refusal changes nothing.
+/// [`World::rotate`] always builds `rewrapped`/`dropped` directly from the server's own rows
+/// ([`Device::rewrap`](super::device::Device::rewrap)), so there was no negative control on
+/// [`Server::rotate`] itself.
+#[test]
+fn server_rotate_refuses_a_mismatched_wrap_set() {
+    let mut w = World::new(3, 3, 1, 103, Faults::default());
+    // The initial, enrolment-time item key has no wrap-set row (CRYPTO.md §11.6): one is
+    // created only once the writer rule gives this item a fresh key after a rotation.
+    w.step(Step::Write { d: 0, i: 0, k: 0 });
+    sync(&mut w, 0);
+    w.step(Step::Rotate { d: 0 });
+    assert_eq!(w.server.epoch(), 1, "the rotation did not land");
+    w.step(Step::Write { d: 0, i: 0, k: 1 });
+    sync(&mut w, 0);
+    let epoch_before = w.server.epoch();
+    let rows_before = w.server.rows();
+    assert_eq!(
+        rows_before.len(),
+        1,
+        "expected exactly one post-rotation row: {rows_before:?}"
+    );
+    let row = rows_before[0].clone();
+    let heads = w.server.heads();
+
+    // A rewrapped row not at the new epoch.
+    let wrong_epoch = Rotation {
+        epoch: epoch_before + 1,
+        cursor: heads.clone(),
+        rewrapped: vec![WrapRow {
+            item: row.item,
+            key: row.key,
+            wrap: Wrap {
+                epoch: epoch_before,
+                envelope: row.wrap.envelope.clone(),
+            },
+        }],
+        dropped: Vec::new(),
+        revoke: None,
+    };
+    assert_eq!(w.server.rotate(&wrong_epoch), Err(RotationRefusal::Wraps));
+    assert_eq!(
+        w.server.epoch(),
+        epoch_before,
+        "a refused rotation moved the epoch"
+    );
+    assert_eq!(
+        w.server.rows(),
+        rows_before,
+        "a refused rotation changed the rows"
+    );
+
+    // The same (item, key) named twice, across rewrapped and dropped.
+    let duplicate = Rotation {
+        epoch: epoch_before + 1,
+        cursor: heads.clone(),
+        rewrapped: vec![WrapRow {
+            item: row.item,
+            key: row.key,
+            wrap: Wrap {
+                epoch: epoch_before + 1,
+                envelope: row.wrap.envelope.clone(),
+            },
+        }],
+        dropped: vec![(row.item, row.key)],
+        revoke: None,
+    };
+    assert_eq!(w.server.rotate(&duplicate), Err(RotationRefusal::Wraps));
+    assert_eq!(
+        w.server.epoch(),
+        epoch_before,
+        "a refused rotation moved the epoch"
+    );
+    assert_eq!(
+        w.server.rows(),
+        rows_before,
+        "a refused rotation changed the rows"
+    );
+
+    // A stored row named in neither list.
+    let incomplete = Rotation {
+        epoch: epoch_before + 1,
+        cursor: heads,
+        rewrapped: Vec::new(),
+        dropped: Vec::new(),
+        revoke: None,
+    };
+    assert_eq!(w.server.rotate(&incomplete), Err(RotationRefusal::Wraps));
+    assert_eq!(
+        w.server.epoch(),
+        epoch_before,
+        "a refused rotation moved the epoch"
+    );
+    assert_eq!(
+        w.server.rows(),
+        rows_before,
+        "a refused rotation changed the rows"
+    );
+}
+
+/// ADR 0021 §9 "Already stored" is checked before the kind-4 expiry refusal (CRYPTO.md §10.2
+/// "Web-vault certificates"): a web vault retrying a byte-identical snapshot the server already
+/// holds, after its certificate has expired, is acknowledged like any other "already stored"
+/// upload, the client's own retry-as-acknowledgement path; a *new* snapshot from the same
+/// expired author is refused ([`SnapshotRefusal::AuthorExpired`](crate::compaction::SnapshotRefusal::AuthorExpired)),
+/// as the module doc's "its new snapshots refused" already distinguishes from a plain retry.
+#[test]
+fn a_kind4_author_retrying_an_already_stored_snapshot_is_acknowledged() {
+    let mut w = World::new(3, 3, 1, 104, Faults::default());
+    w.set_kind4(0, super::T0 + 10_000);
+    w.step(Step::Write { d: 0, i: 0, k: 0 });
+    sync(&mut w, 0);
+    w.step(Step::Snapshot { d: 0, i: 0 });
+    w.step(Step::Upload { d: 0, lose: false });
+    let item = w.items[0];
+    let stored = w
+        .server
+        .snapshot_records()
+        .find(|s| s.header.item_id == item)
+        .cloned()
+        .expect("the honest snapshot was stored");
+    w.pass_time(20_000);
+    assert!(w.is_expired(0));
+
+    // A byte-identical retry: "already stored" wins over the expiry refusal.
+    assert_eq!(
+        w.server.upload_snapshot(&stored),
+        SnapAnswer::AlreadyStored,
+        "a retried already-stored snapshot from an expired author must still be acknowledged"
+    );
+
+    // A fresh snapshot (same state, a new id) from the now-expired author: refused.
+    let mut header = stored.header.clone();
+    header.snapshot_id = rizzy_core::ids::SnapshotId::from_bytes([0x77; 16]);
+    let data = w.devices[0].items[&item]
+        .snapshot_data()
+        .unwrap()
+        .expect("the item has a snapshot");
+    let data = crate::record::encode_snapshot(&header.covered, &data).unwrap();
+    let mut nonces = crypto::Nonces::new(62, w.devices[0].id);
+    let key = crypto::initial_key(item);
+    let envelope = crypto::seal_snapshot(&mut nonces, &header, &key, data.expose_secret()).unwrap();
+    let fresh = SnapRecord {
+        signed: crypto::sign_snapshot(&header, &envelope).unwrap(),
+        header,
+        data: envelope,
+        wrap: None,
+        tainted: false,
+    };
+    assert_eq!(
+        w.server.upload_snapshot(&fresh),
+        SnapAnswer::Refused(crate::compaction::SnapshotRefusal::AuthorExpired)
+    );
 }

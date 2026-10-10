@@ -277,6 +277,13 @@ pub(super) struct World {
     written: u64,
     /// Whether the server was ever restored.
     restored: bool,
+    /// The server's `vault_key_epoch` immediately after each successful restore (ADR 0032 §3):
+    /// a floor a plain (non-healing) upload may legitimately sit at or above once the server
+    /// has rolled back to it, even if a later-recorded rotation's epoch is above it (a lag
+    /// repair, [`Server::heal_epoch`], can then re-raise the server past that rotation again).
+    /// Used by [`World::check_rotations`]'s writer-rule exemption, alongside envelopes that
+    /// came in through a healing request.
+    restore_floors: Vec<u32>,
     /// The VVs last seen, for monotonicity.
     seen: Seen,
     /// Whether the drain runs: Fetch responses then come as one page (see [`World::drain`]).
@@ -340,6 +347,7 @@ impl World {
             faults,
             written: 0,
             restored: false,
+            restore_floors: Vec::new(),
             seen: Seen::new(),
             draining: false,
             faulty: BTreeSet::new(),
@@ -495,6 +503,7 @@ impl World {
             Step::RestoreServer => {
                 if self.server.restore() {
                     self.restored = true;
+                    self.restore_floors.push(self.server.epoch());
                 }
             }
             Step::Revoke { d } => self.revoke(d),
@@ -846,10 +855,15 @@ impl World {
             }
         }
         let rows = self.server.rows();
-        // After a restore a device that missed a rotation may write under an old key and the
-        // restored server store it (ADR 0032 keeps such records); the writer-rule check then
-        // does not apply, property 6 still does.
-        let restored = self.restored;
+        // A device that missed a rotation may still write under its old key, two ways ADR 0032
+        // keeps the record: (1) the ADR 0021 §9 "Healing request" path, exempt from the
+        // stale-epoch check outright; (2) a restore that rolls the server back to or below a
+        // floor epoch F makes a plain upload at F legitimate again, and a later lag repair
+        // ([`Server::heal_epoch`]) can then re-raise the server past a rotation this run still
+        // records above F. Excuses exactly those envelopes, never every rotation for the rest
+        // of the run just because a restore happened once. Property 6 is never excused.
+        let healed_envelopes = self.server.healed_envelopes().clone();
+        let restore_floors = self.restore_floors.clone();
         let mut found = Vec::new();
         let (mut checked, mut attempts) = (0, 0);
         for rotation in &self.rotations {
@@ -863,7 +877,11 @@ impl World {
                 checked += 1;
                 let key = crypto::envelope_key(envelope);
                 let created = key.as_ref().and_then(crypto::key_info).map(|(_, e)| e);
-                if !restored && created.is_none_or(|e| e < rotation.epoch) {
+                let excused = healed_envelopes.contains(envelope)
+                    || restore_floors.iter().any(|&floor| {
+                        floor < rotation.epoch && created.is_some_and(|e| e >= floor)
+                    });
+                if !excused && created.is_none_or(|e| e < rotation.epoch) {
                     found.push(format!(
                         "writer rule: an envelope of {item:?} written after the rotation to epoch {} is sealed under an item key created at {created:?}",
                         rotation.epoch
