@@ -464,6 +464,133 @@ fn a_bodiless_header_counts_behind_a_held_snapshot() {
     assert!(log.complete_fetch_reports().is_empty());
 }
 
+/// Production-defect regression, minimised from `convergence::generate::history(9,
+/// 14_939_291_970_441_682_164)` (family "rotation"): a verified op past a gap in a device's
+/// chain must never be applied (INV-27; ADR 0012 §7 "nothing past the gap is applied"), but
+/// `ItemMerge::absorb_snapshot` applies one anyway when it arrives inside a same-response cover.
+/// Its cut is computed from the item's own verified headers only (`merge.rs` `evidence::heads`,
+/// "the cut uses the item's own headers"), which has no notion of a gap on *another* item of the
+/// same device's chain -- only the causal layer, spanning every item, can see that gap
+/// ([`CoverPlan::cut`], reading 7). So the op whose header sits past the gap is still joined into
+/// `merge.covered()`, which then feeds the author's own next op's causal context exactly as
+/// ADR 0012 §2 requires ("causal context is the item VV the device had"). That op is entirely
+/// legitimate, but [`VaultLog::record_own_op`] -- correctly checking it against the causal
+/// layer's own (gap-respecting) settled VV -- refuses it with `OwnError::ContextNotSettled`.
+/// (Corroboration, not the violated clause: this module's docs claim "the merge keeps its own
+/// and the two agree when the client reports every absorption" -- here they do not.)
+///
+/// Device B's chain interleaves items X and Y: B:1 (Y), B:2 (X), B:3 (Y). ME's Fetch serves B:1
+/// and B:3 on Y plus a cover of Y claiming B:3, but withholds B:2 (X) with no cover, so the
+/// per-device chain walk stops at B:1 (reading 7's `SettledPastHead`, already covered by
+/// [`a_bodiless_header_counts_behind_a_held_snapshot`] at the causal layer alone). Wiring in a
+/// real [`ItemMerge`] on both sides shows the further, untested consequence.
+///
+/// This test is fix-agnostic: it asserts only that the own write must be accepted, built from
+/// whatever `merge.covered()` actually is, not from the buggy value `{B:3}` a correct fix would
+/// change.
+#[test]
+#[ignore = "production defect: merge.rs absorb_snapshot's per-item cut (evidence::heads) ignores a same-device gap on another item, so it applies an op past the gap (INV-27 / ADR 0012 §7) and merge.covered() races past VaultLog's settled VV; the device's own next write is then spuriously refused with ContextNotSettled (causal.rs record_own_op); ADR 0012 §2"]
+fn an_own_write_is_never_blocked_by_a_cover_absorbed_past_a_gap_on_another_item() {
+    use rizzy_core::ids::SymmetricKeyId;
+
+    use crate::merge::{AbsorbOutcome, ItemMerge, OpInput, OwnWrite, SnapshotInput};
+    use crate::record::{Lifecycle, OpData, parse_snapshot};
+
+    let key = SymmetricKeyId::from_bytes([0x40; 16]);
+    let empty = OpData::new(Lifecycle::Active, Vec::new());
+
+    // B's own view: it writes Y, then X (seq 2, elsewhere), then Y again.
+    let b1 = op(B, 1, 0, Y, &[]);
+    let b3 = op(B, 3, 2, Y, &[(B, 1)]);
+    let mut b_merge = ItemMerge::new(item(Y));
+    b_merge.add_item_key(key);
+    b_merge
+        .apply_own_op(
+            OpInput {
+                header: &b1,
+                key_id: key,
+                data: &empty,
+            },
+            OwnWrite::default(),
+        )
+        .unwrap();
+    b_merge
+        .apply_own_op(
+            OpInput {
+                header: &b3,
+                key_id: key,
+                data: &empty,
+            },
+            OwnWrite::default(),
+        )
+        .unwrap();
+    let written = b_merge.write_snapshot().unwrap();
+    assert_eq!(written.covered, vv(&[(B, 3)]));
+    let snap_data = parse_snapshot(&written.covered, written.data.expose_secret()).unwrap();
+    let snap_header = SnapshotHeader {
+        vault_id: VAULT,
+        item_id: item(Y),
+        snapshot_id: SnapshotId::from_bytes([0xcc; 16]),
+        author: device(B),
+        item_schema_version: ItemSchemaVersion::V1,
+        vault_key_epoch: 1,
+        covered: written.covered.clone(),
+    };
+
+    // ME's Fetch response: Y's B:1 and B:3 are served; X's B:2 is withheld with no cover.
+    let ops = [
+        bodiless(b1.clone()),
+        bodiless(op(B, 2, 1, X, &[])),
+        verified(b3.clone()),
+    ];
+    let covers = [snap_header];
+
+    let mut log = new_log();
+    let plan = log.plan_covers(&ops, &covers);
+    assert_eq!(plan.links, [dot(B, 1)]);
+    assert_eq!(plan.cut, vv(&[(B, 1)]));
+    assert_eq!(plan.absorb, [0]);
+
+    let mut me_merge = ItemMerge::new(item(Y));
+    me_merge.add_item_key(key);
+    let with = [OpInput {
+        header: &b3,
+        key_id: key,
+        data: &empty,
+    }];
+    let absorption = me_merge
+        .absorb_snapshot(
+            SnapshotInput {
+                header: &covers[0],
+                data: &snap_data,
+            },
+            &with,
+        )
+        .unwrap();
+    assert!(matches!(absorption.outcome, AbsorbOutcome::Absorbed(_)));
+    // Today, the merge takes the full claim: its cut is per-item evidence only, so B's gap on
+    // item X (a different item) never bounds it. A fix would make this `vv(&[(B, 1)])`; this
+    // test does not pin that value, only what follows from whatever it is.
+
+    let taken = me_merge.covered().clone();
+    let recorded = log.record_absorbed(&plan, item(Y), &taken);
+    // The causal layer correctly caps what *it* records to `plan.cut` (reading 7), and that
+    // must hold whether or not the merge itself is fixed to match.
+    assert_eq!(recorded, vv(&[(B, 1)]));
+    assert_eq!(log.settled(item(Y)), vv(&[(B, 1)]));
+
+    // ME now writes its own op on Y. Its causal context is -- correctly, per ADR 0012 §2 --
+    // the item VV the device actually had: `me_merge.covered()`, whatever that is.
+    let mut own = op(ME, 1, 0, Y, &[]);
+    own.causal_context = me_merge.covered().clone();
+
+    // BUG: `record_own_op` validates that context against the causal layer's settled VV. A
+    // device's own op, built from its own item state, must always be accepted -- "the author
+    // applies its own op when it writes it" (causal::own module docs) -- but today it is
+    // spuriously refused whenever the merge's claim outran what the causal layer settled.
+    assert_eq!(log.record_own_op(own), Ok(()));
+}
+
 /// CRYPTO.md §11.8 step 4: a revoked author's snapshot whose covered-VV entry for it is above
 /// its cut-off is refused; it counts for no header and is not absorbed.
 #[test]
