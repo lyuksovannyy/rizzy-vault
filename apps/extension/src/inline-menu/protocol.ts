@@ -2,7 +2,7 @@
 
 // The `window.postMessage` protocol between the content script (running in the untrusted
 // page's own window — isolated-world JS, but a shared DOM/BOM, including `window` itself) and
-// the extension-origin inline-menu iframe it creates (ADR 0036 §4/§5, ADR 0036 §75 "the
+// the extension-origin inline-menu iframe it creates (ADR 0036 §4/§5, ADR 0036 §6 "the
 // inline-menu iframe app"; INV-36, INV-40). Carries no secrets, only title/username summaries
 // (ADR 0013 §3 rule 3) in, and the user's chosen `itemId` out — never crosses
 // `messaging/contract.ts`'s background-messaging boundary, and is validated on both ends all

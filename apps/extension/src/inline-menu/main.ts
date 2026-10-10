@@ -8,6 +8,46 @@ import { INLINE_MENU_PICK, isInlineMenuShowMessage, type InlineMenuCandidate } f
 import { decideClick } from "./decide-click.ts";
 import type { InlineMenuFillRequestMessage, InlineMenuGeneratePasswordRequestMessage } from "../messaging/contract.ts";
 
+// GATE C (A7/THREAT_MODEL gap, HANDOFF X6; defense-in-depth, Chromium only, never the sole
+// gate — Firefox has no IntersectionObserver v2, and the manual Gates A/B in
+// `content-script.ts`/`menu-visibility.ts` are the floor on both browsers regardless): if this
+// browser supports IOv2's `isVisible` (anti-clickjacking, the same mechanism payment/ad iframes
+// use), observe every candidate button and the generate-password button as they render, and
+// refuse to even ASK for a fill/generate when the most recent entry says `isVisible === false`.
+// This assumes IOv2's `isVisible`, computed inside this cross-origin document, reflects
+// opacity/occlusion effects the EMBEDDING page applies to the outer `<iframe>` element —
+// plausible from general knowledge of why IOv2 exists, but not independently verified here (U).
+// Degrades gracefully either way: on a browser without it, or if the assumption above is wrong,
+// this simply never blocks anything beyond what Gates A/B already would.
+interface Iov2Entry extends IntersectionObserverEntry {
+  readonly isVisible?: boolean;
+}
+const IOV2_SUPPORTED =
+  typeof IntersectionObserver !== "undefined" &&
+  typeof IntersectionObserverEntry !== "undefined" &&
+  "isVisible" in IntersectionObserverEntry.prototype;
+const iov2LastVisible = new WeakMap<Element, boolean>();
+const iov2Observer: IntersectionObserver | undefined = IOV2_SUPPORTED
+  ? new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          const isVisible = (entry as Iov2Entry).isVisible;
+          if (isVisible !== undefined) {
+            iov2LastVisible.set(entry.target, isVisible);
+          }
+        }
+      },
+      { threshold: 1, trackVisibility: true, delay: 100 } as IntersectionObserverInit,
+    )
+  : undefined;
+
+/** `true` only once IOv2 has actually delivered an entry for `el` saying it is NOT visible. No
+ * entry yet (or no IOv2 support at all) never blocks on this alone — Gates A/B remain the
+ * authoritative checks regardless of what this returns. */
+function isHiddenByIov2(el: Element): boolean {
+  return iov2LastVisible.get(el) === false;
+}
+
 const list = document.getElementById("list");
 if (list === null) {
   throw new Error("inline-menu: #list is missing from index.html");
@@ -78,12 +118,18 @@ function renderCandidate(candidate: InlineMenuCandidate): HTMLElement {
       ? `${candidate.title} (${candidate.username}) — saved for ${candidate.savedHost}, this page is ${pageHost} (equivalent domain). Click again to fill.`
       : `${candidate.title} (${candidate.username})`;
   item.textContent = label();
+  iov2Observer?.observe(item);
   item.addEventListener("click", (event) => {
     // Defence in depth, not the primary guarantee (INV-36): the primary guarantee is that this
     // document's DOM is unreachable from the page's own JS at all (cross-origin iframe), so the
     // page cannot call `.click()` on this button in the first place. This check only guards
     // against some future change accidentally making that call reachable.
     if (!event.isTrusted) {
+      return;
+    }
+    // GATE C (module header): Chromium-only, additive. Gates A/B in `content-script.ts` are
+    // authoritative regardless of this result.
+    if (isHiddenByIov2(item)) {
       return;
     }
     // Captured now, not read again inside the `.finally` below: `replyOrigin` is a `let`
@@ -177,9 +223,14 @@ generateButton.addEventListener("click", (event) => {
   if (!event.isTrusted) {
     return;
   }
+  // GATE C: same rationale as the candidate buttons' own check above.
+  if (isHiddenByIov2(generateButton)) {
+    return;
+  }
   void requestGeneratePassword();
 });
 generateContainer.appendChild(generateButton);
+iov2Observer?.observe(generateButton);
 
 /**
  * Sends the generator's one privileged message (ADR 0040's pattern, applied to the generator

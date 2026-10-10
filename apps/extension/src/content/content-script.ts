@@ -29,6 +29,20 @@ import {
 } from "../messaging/contract.ts";
 import { INLINE_MENU_SHOW, isInlineMenuPickMessage } from "../inline-menu/protocol.ts";
 import { isOwnOverlayMutation } from "./own-overlay-mutation.ts";
+import {
+  type ChainStyleSample,
+  type MenuVisibilityState,
+  type PointHitResult,
+  type Rect,
+  computeExpectedRect,
+  initMenuVisibilityState,
+  isFillAllowed,
+  isPointHitOk,
+  isTopLayerClear,
+  isVisibilityChainOk,
+  rectsMatch,
+  recordSample,
+} from "./menu-visibility.ts";
 
 if (window.top === window) {
   installContentScript();
@@ -178,10 +192,23 @@ function installContentScript(): void {
   // (`core-host/listener.ts`, `core-host/content-handler.ts`). This listener does not and cannot
   // re-check either of those — it has no way to — so it trusts the push exactly as much as it
   // already trusts every other extension-internal message delivered to a content script, and
-  // relies entirely on `activeFillTargets` plus a fresh visibility recheck for the rest.
+  // relies entirely on `activeFillTargets`, a fresh visibility recheck on the target field, and
+  // (A7/THREAT_MODEL gap, HANDOFF X6) Gate B below on the menu iframe itself, for the rest.
   const ext = typeof chrome !== "undefined" ? chrome : browser;
   ext?.runtime.onMessage.addListener((message) => {
     if (!isApplyFillMessage(message) || activeFillTargets === undefined) {
+      return undefined;
+    }
+    // GATE B (`menu-visibility.ts`'s own module doc): the causally-after-click, authoritative
+    // refusal. Checked here, at `apply_fill` arrival — after the real click → iframe →
+    // background → decrypt → push round trip has already happened — never only at click time,
+    // which a timed "flip visible for the click, flip back after" attack would already have
+    // defeated by the time this message lands. `menu` is the same InlineMenu instance
+    // `activeFillTargets` was set from (they only ever change together); it can already be torn
+    // down by the time this arrives (the normal post-click teardown), in which case its gate
+    // state is simply frozen at its last sample, which is exactly the informative state for this
+    // check.
+    if (menu === undefined || !menu.isFillAllowedNow(performance.now())) {
       return undefined;
     }
     applyFill(message.values, activeFillTargets.usernameField, activeFillTargets.passwordField);
@@ -352,7 +379,7 @@ function sendToBackground(message: FromContentScript): Promise<ToContentScript |
 const INLINE_MENU_WIDTH_PX = 240;
 const INLINE_MENU_HEIGHT_PX = 220;
 
-/** The extension-origin inline menu (ADR 0036 §4/§5, ADR 0036 §75 "the inline-menu iframe app";
+/** The extension-origin inline menu (ADR 0036 §4/§5, ADR 0036 §6 "the inline-menu iframe app";
  * INV-36, INV-40): an `<iframe>` loaded from this extension's own `chrome-extension://` origin
  * (`inline-menu/index.html`/`main.ts`), positioned under the password field, one entry per
  * candidate (title + username only, ADR 0013 §3 rule 3). The page's own JS has no same-origin
@@ -368,23 +395,93 @@ const INLINE_MENU_HEIGHT_PX = 220;
  * `left`/`top` depend only on the anchor field's own position — never on `candidates` — so a
  * page cannot distinguish 0 from N matches, or which host matched, by reading this element's
  * `getBoundingClientRect()`, `className`, or attributes (security review finding; see the
- * constants' own doc). */
+ * constants' own doc).
+ *
+ * A7/THREAT_MODEL.md gap (HANDOFF X6): the two checks above only ever covered the TARGET FIELD
+ * (`isVisible`/`isTopmost`, above) — this iframe itself had no visibility/topmost check of its
+ * own, so a page could hide it with CSS while it stayed the topmost hit-test target, and a
+ * trusted click at a decoy's location would land on the real, invisible candidate button. This
+ * class now also runs two additive gates (`menu-visibility.ts`'s own module doc has the full
+ * reasoning): GATE A is a `requestAnimationFrame` loop, for the lifetime of this instance, that
+ * samples the frame's real rendered/hit-test state every frame and toggles its own
+ * `pointer-events` from the result — not `MutationObserver`, which the content script already
+ * uses elsewhere but only for `childList`, so it would miss an attribute change, an injected
+ * `<style>` tag, or a running CSS transition/animation with no DOM mutation at all. GATE B is
+ * the authoritative refusal at `apply_fill` arrival (`installContentScript`'s `onMessage`
+ * listener, via {@link isFillAllowedNow}), which is what actually closes a timed
+ * "flip-visible-for-the-click, flip-back-after" race, because it runs after the click has
+ * already happened. Gate A never calls {@link destroy} on a bad sample — this content script's
+ * own `MutationObserver` callback already documents a real, previously-fixed unbounded
+ * destroy/recreate loop from treating incidental DOM churn as "menu changed, rebuild it"; doing
+ * that here against a page that simply leaves a permanent hiding rule in place would reproduce
+ * exactly that failure mode. Toggling `pointer-events` is idempotent, reversible, and the one
+ * new thing a page can observe about this element (`getComputedStyle(iframe).pointerEvents`) —
+ * accepted, because it differs only by whether THIS page is currently tampering with the menu,
+ * never by candidate count (INV-37 stays intact: outer geometry, attributes and this toggle are
+ * all independent of `candidates`). */
 class InlineMenu {
   readonly #frame: HTMLIFrameElement;
   readonly #onMessage: (event: MessageEvent) => void;
   readonly #onBlur: () => void;
+  readonly #expectedRect: Rect;
+  #visibilityState: MenuVisibilityState;
+  #rafId: number | undefined;
 
   constructor(anchor: HTMLInputElement, candidates: CandidatesMessage["candidates"], pageHost: string) {
     const frame = document.createElement("iframe");
     frame.setAttribute("data-rizzy-inline-menu", "");
-    const rect = anchor.getBoundingClientRect();
+    const anchorRect = anchor.getBoundingClientRect();
+    // Frozen once, here, never re-derived from `anchor` again (`menu-visibility.ts`'s own doc on
+    // why `computeExpectedRect` clamps into the viewport): this is both the frame's real
+    // position AND Gate A's geometry baseline for this instance's whole lifetime, so the two can
+    // never disagree with each other.
+    const expectedRect = computeExpectedRect(anchorRect, { width: window.innerWidth, height: window.innerHeight }, { width: INLINE_MENU_WIDTH_PX, height: INLINE_MENU_HEIGHT_PX });
+    this.#expectedRect = expectedRect;
     frame.style.position = "fixed";
-    frame.style.left = `${rect.left}px`;
-    frame.style.top = `${rect.bottom}px`;
-    frame.style.width = `${INLINE_MENU_WIDTH_PX}px`;
-    frame.style.height = `${INLINE_MENU_HEIGHT_PX}px`;
+    frame.style.left = `${expectedRect.left}px`;
+    frame.style.top = `${expectedRect.top}px`;
+    frame.style.width = `${expectedRect.width}px`;
+    frame.style.height = `${expectedRect.height}px`;
     frame.style.border = "0";
     frame.style.zIndex = "2147483647";
+    // Set *before* `frame.src` is assigned below, closing the gap between iframe creation and
+    // the first animation frame: inline `!important` outranks any author-stylesheet rule in the
+    // same bucket by specificity, including one that is itself `!important` — this is what
+    // defeats the fixme reproducer's one-line `iframe[data-rizzy-inline-menu]{opacity:0}` (no
+    // `!important` needed on the attacker's side at all, since there was nothing competing with
+    // it before this change).
+    //
+    // Deviation from the spec, stated per CLAUDE.md ("deviate only with a stated reason"): the
+    // spec also calls for `frame.style.setProperty("visibility", "visible", "important")` here,
+    // as "cheap insurance against a plain visibility:hidden page rule." `visibility` INHERITS,
+    // so forcing the frame's own computed value to `visible` does not only defeat an attacker's
+    // rule — it defeats every OTHER reason an ancestor might legitimately be
+    // `visibility:hidden` at some point (a loading/transition state on a page this extension
+    // runs on for reasons that have nothing to do with it, including the web vault's own pages,
+    // which get an inline menu too whenever they have a password field). A real, OS-level click
+    // never reaches an element whose OWN computed `visibility` is `hidden` — that is the
+    // browser's ordinary hit-testing rule, with no code of ours involved — so while this
+    // override is in place, our frame can intercept a click at a moment when, left to ordinary
+    // CSS inheritance, it would not have been clickable at all, exactly like the un-tampered
+    // iframe this change is supposed to leave no more clickable than before. `isVisibilityChainOk`
+    // already catches an ancestor's OWN `visibility: hidden` directly (`menu-visibility.ts`'s own
+    // doc) — the one case this override exists for — so Gate A still refuses it; it just does so
+    // through the chain check instead of through inheritance, with no need to touch hit-testing
+    // itself. Confirmed empirically: this line was the discriminator in a flake found running
+    // this change's own E2E suite against a real Chromium build (`passkey.spec.ts`'s "a passkey
+    // the extension created shows up in the web vault" test — this extension's content script
+    // shows its OWN inline menu on the web vault's own login page too, for the real "Master
+    // password" field; removing this one line stopped the flake across repeated runs).
+    frame.style.setProperty("pointer-events", "none", "important");
+
+    this.#visibilityState = initMenuVisibilityState();
+    const tick = () => {
+      const ok = this.#sampleOk();
+      frame.style.setProperty("pointer-events", ok ? "auto" : "none", "important");
+      this.#visibilityState = recordSample(this.#visibilityState, performance.now(), ok);
+      this.#rafId = requestAnimationFrame(tick);
+    };
+    this.#rafId = requestAnimationFrame(tick);
 
     const pageOrigin = location.origin;
     const menuOrigin = inlineMenuOrigin();
@@ -451,8 +548,105 @@ class InlineMenu {
   }
 
   destroy(): void {
+    if (this.#rafId !== undefined) {
+      cancelAnimationFrame(this.#rafId);
+    }
     window.removeEventListener("message", this.#onMessage);
     this.#frame.remove();
+  }
+
+  /** GATE B (`menu-visibility.ts`'s own module doc): the authoritative, causally-after-click
+   * check `installContentScript`'s `apply_fill` listener runs before ever writing a value into
+   * the page. Reads whatever Gate A's rAF loop last recorded — frozen at its last sample once
+   * {@link destroy} has cancelled that loop, which is exactly the informative state for a push
+   * that arrives shortly after the normal post-click teardown. */
+  isFillAllowedNow(now: number): boolean {
+    return isFillAllowed(this.#visibilityState, now);
+  }
+
+  /** One Gate-A tick's full sample: geometry, the `{frame, body, documentElement}` style chain,
+   * the browser's top layer, and a single-point hit test — any `false` is a bad sample
+   * (`menu-visibility.ts`'s own fail-closed doc). */
+  #sampleOk(): boolean {
+    if (!rectsMatch(toRect(this.#frame.getBoundingClientRect()), this.#expectedRect)) {
+      return false;
+    }
+    if (!isVisibilityChainOk(this.#chainSamples())) {
+      return false;
+    }
+    if (!isTopLayerClear(this.#expectedRect, this.#topLayerRects())) {
+      return false;
+    }
+    return isPointHitOk(this.#pointHitResult());
+  }
+
+  /** Walks `parentElement` generically from the frame up to (and including) `documentElement` —
+   * today, with the frame appended directly to `document.body`, that is exactly
+   * `{frame, body, documentElement}`, confirmed by reading this constructor, but a generic walk
+   * stays correct if the insertion point ever changes. */
+  #chainSamples(): ChainStyleSample[] {
+    const samples: ChainStyleSample[] = [];
+    let node: Element | null = this.#frame;
+    while (node !== null) {
+      const style = getComputedStyle(node);
+      samples.push({
+        opacity: Number(style.opacity),
+        visibility: style.visibility,
+        display: style.display,
+        filter: style.filter,
+        clipPath: style.clipPath,
+        mask: style.getPropertyValue("mask") || style.getPropertyValue("-webkit-mask") || "none",
+        mixBlendMode: style.mixBlendMode,
+        contentVisibility: style.getPropertyValue("content-visibility") || "visible",
+      });
+      node = node.parentElement;
+    }
+    return samples;
+  }
+
+  /** The rects of every element the browser's top layer can render above all z-index (spec):
+   * `document.fullscreenElement`, every open `<dialog>`, and every open popover. The `:popover-
+   * open` selector throws in a browser/version without the Popover API — caught and treated as
+   * "no open popovers," which matches reality (nothing can be a popover there either). */
+  #topLayerRects(): Rect[] {
+    const rects: Rect[] = [];
+    if (document.fullscreenElement !== null) {
+      rects.push(toRect(document.fullscreenElement.getBoundingClientRect()));
+    }
+    for (const dialog of document.querySelectorAll("dialog[open]")) {
+      rects.push(toRect(dialog.getBoundingClientRect()));
+    }
+    try {
+      for (const popover of document.querySelectorAll(":popover-open")) {
+        rects.push(toRect(popover.getBoundingClientRect()));
+      }
+    } catch {
+      // No Popover API support: nothing can be `:popover-open` either.
+    }
+    return rects;
+  }
+
+  /** `document.elementFromPoint` excludes a `pointer-events: none` target from hit-testing by
+   * spec — exactly the value this instance's own Gate-A toggle may currently have set on the
+   * frame. Measuring with that value still in place would make the check watch its own
+   * defensive posture and conclude "occluded" forever, a permanent false-refusal bug, not a
+   * security property. So this measures with `pointer-events` momentarily forced to `auto`,
+   * then restores whatever value was there before — entirely within this one synchronous call,
+   * with no `await` or task boundary in between, so no real pointer event can ever be routed
+   * using the intermediate value (the browser only dispatches input events between tasks, never
+   * mid-script). `tick()` (the constructor's rAF loop) applies the real, authoritative value
+   * right after this returns, from the full sample including this result. */
+  #pointHitResult(): PointHitResult {
+    const cx = this.#expectedRect.left + this.#expectedRect.width / 2;
+    const cy = this.#expectedRect.top + this.#expectedRect.height / 2;
+    const previous = this.#frame.style.getPropertyValue("pointer-events");
+    this.#frame.style.setProperty("pointer-events", "auto", "important");
+    const el = document.elementFromPoint(cx, cy);
+    this.#frame.style.setProperty("pointer-events", previous === "" ? "none" : previous, "important");
+    if (el === null) {
+      return "none";
+    }
+    return el === this.#frame ? "frame" : "other";
   }
 }
 
@@ -526,4 +720,10 @@ function inlineMenuUrl(): string {
 
 function inlineMenuOrigin(): string {
   return new URL(inlineMenuUrl()).origin;
+}
+
+/** A plain, already-read `Rect` from a live `DOMRect` — `menu-visibility.ts`'s pure functions
+ * never take a DOM type directly. */
+function toRect(rect: DOMRect): Rect {
+  return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
 }
