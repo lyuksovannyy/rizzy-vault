@@ -8,7 +8,6 @@
 use rizzy_core::item::schema::LOGIN_USERNAME;
 
 use super::*;
-use crate::items::ConcurrentTrash;
 
 /// Like [`login_and_enrol`], but without its "exactly one certificate so far" assertion: these
 /// tests enrol a third and fourth device on one account.
@@ -61,6 +60,29 @@ fn edit(
         .unwrap();
 }
 
+/// Fetches everything new for `vault` from `server` and applies it.
+fn fetch_and_apply(vault: &mut VaultSync, server: &mut Server, authors: &Authors, now_ms: u64) {
+    vault
+        .apply_fetch(
+            authors,
+            &server.fetch(&vault.fetch_request().unwrap()),
+            now_ms,
+        )
+        .unwrap();
+}
+
+/// Uploads whatever `vault` has queued, writer by writer (the round-trip every own write
+/// needs before another device can see it).
+fn upload(
+    vault: &mut VaultSync,
+    server: &mut Server,
+    rng: &mut ChaCha20Rng,
+    unlocked: &UnlockedDevice,
+) {
+    let up = vault.upload_request(rng, unlocked).unwrap().unwrap();
+    server.upload(&up);
+}
+
 /// "Deleted on X while it was being edited on Y": Active wins over a concurrent trash
 /// (ADR 0012 §5), and `concurrent_trash_device` names the device that trashed it.
 #[test]
@@ -79,26 +101,14 @@ fn concurrent_trash_device_names_the_losing_device() {
     let mut b_account = b.account;
     let mut b_vault =
         VaultSync::new(b_account.take_vault_key(vault_id).unwrap(), &b.unlocked, 1).unwrap();
-    b_vault
-        .apply_fetch(
-            &b_authors,
-            &server.fetch(&b_vault.fetch_request().unwrap()),
-            T0 + 1,
-        )
-        .unwrap();
+    fetch_and_apply(&mut b_vault, &mut server, &b_authors, T0 + 1);
 
     let c = enrol_another_device(&mut server, &mut rng, &sk);
     let c_authors = Authors::from_account(&c.account).unwrap();
     let mut c_account = c.account;
     let mut c_vault =
         VaultSync::new(c_account.take_vault_key(vault_id).unwrap(), &c.unlocked, 1).unwrap();
-    c_vault
-        .apply_fetch(
-            &c_authors,
-            &server.fetch(&c_vault.fetch_request().unwrap()),
-            T0 + 2,
-        )
-        .unwrap();
+    fetch_and_apply(&mut c_vault, &mut server, &c_authors, T0 + 2);
 
     // A edits (writes Active); B trashes. Neither has seen the other's op yet: concurrent.
     edit(
@@ -113,37 +123,62 @@ fn concurrent_trash_device_names_the_losing_device() {
     b_vault
         .trash_item(&mut rng, &b.unlocked, item, T0 + 10)
         .unwrap();
-    let a_up = a_vault
-        .upload_request(&mut rng, &a_unlocked)
-        .unwrap()
-        .unwrap();
-    server.upload(&a_up);
-    let b_up = b_vault
-        .upload_request(&mut rng, &b.unlocked)
-        .unwrap()
-        .unwrap();
-    server.upload(&b_up);
+    upload(&mut a_vault, &mut server, &mut rng, &a_unlocked);
+    upload(&mut b_vault, &mut server, &mut rng, &b.unlocked);
 
-    c_vault
-        .apply_fetch(
-            &c_authors,
-            &server.fetch(&c_vault.fetch_request().unwrap()),
-            T0 + 20,
-        )
-        .unwrap();
+    fetch_and_apply(&mut c_vault, &mut server, &c_authors, T0 + 20);
     assert_eq!(c_vault.item_lifecycle(item), ItemLifecycle::Active);
     assert_eq!(
         c_vault.concurrent_trash_device(item),
         Some(b.unlocked.device_id)
     );
     // Both devices of "deleted on X while it was being edited on Y".
-    assert_eq!(
-        c_vault.concurrent_trash(item),
-        Some(ConcurrentTrash {
-            trashed_by: b.unlocked.device_id,
-            edited_by: a_unlocked.device_id,
-        })
+    let first = c_vault.concurrent_trash(item).unwrap();
+    assert_eq!(first.trashed_by, b.unlocked.device_id);
+    assert_eq!(first.edited_by, a_unlocked.device_id);
+
+    // The conflict resolves: A learns of B's trash, then writes an edit whose causal context
+    // covers both the losing Trashed dot and the kept Active dot (ADR 0012 §5), which moves
+    // both off `current`. The same two devices then race again, from that new base: B (now
+    // seeing Active) trashes once more; A, who never fetched that second trash, edits once
+    // more too. A fresh, genuinely distinct conflict between the very same device pair.
+    fetch_and_apply(&mut a_vault, &mut server, &authors, T0 + 25);
+    edit(
+        &mut a_vault,
+        &mut rng,
+        &a_unlocked,
+        item,
+        LOGIN_USERNAME,
+        "resolved",
+        T0 + 30,
     );
+    upload(&mut a_vault, &mut server, &mut rng, &a_unlocked);
+
+    fetch_and_apply(&mut b_vault, &mut server, &b_authors, T0 + 31);
+    assert_eq!(b_vault.item_lifecycle(item), ItemLifecycle::Active);
+    b_vault
+        .trash_item(&mut rng, &b.unlocked, item, T0 + 32)
+        .unwrap();
+    upload(&mut b_vault, &mut server, &mut rng, &b.unlocked);
+
+    edit(
+        &mut a_vault,
+        &mut rng,
+        &a_unlocked,
+        item,
+        LOGIN_USERNAME,
+        "still-active-again",
+        T0 + 33,
+    );
+    upload(&mut a_vault, &mut server, &mut rng, &a_unlocked);
+
+    fetch_and_apply(&mut c_vault, &mut server, &c_authors, T0 + 40);
+    let second = c_vault.concurrent_trash(item).unwrap();
+    assert_eq!(second.trashed_by, b.unlocked.device_id);
+    assert_eq!(second.edited_by, a_unlocked.device_id);
+    // Same device pair as `first`, but a genuinely new conflict: the dots differ, so a host
+    // that dedupes "already shown" on them (not just on the device pair) shows this one too.
+    assert_ne!(second, first);
 
     // No notice when there is nothing concurrent to lose, nor for an item never seen.
     let other_signup = signup(&mut server, &mut rng, DeviceKind::DesktopCli);

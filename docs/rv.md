@@ -97,7 +97,7 @@ URIs and custom fields are list elements: `item show` prints each with its eleme
 - **An edit arrived for an item you deleted permanently**: another device edited the item before it heard of the deletion. The item stays deleted; `rv item restore-late <item> --type <type>` copies those edits into a new item of the type you name and prints its id. The deleted item keeps the edits, so the notice stays.
 - **Deleted on X while it was being edited on Y**: the edit wins, so the item stays in the list. The notice stays until the item is next changed.
 
-Devices are named by kind and the first 8 digits of their id, as `rv device list` prints them. `rv` cannot remember that it already showed a notice: every command is its own process, and keeping that mark in the local file would change the file's format, which needs a new decision ([ADR 0026](adr/0026-client-device-state-and-cache.md)) first. So every `rv sync` repeats the notices that still hold.
+Devices are named by kind and the first 16 digits of their id, a prefix of the full id `rv device list` prints (which `device revoke` also accepts in place of the full id). `rv` cannot remember that it already showed a notice: every command is its own process, and keeping that mark in the local file would change the file's format, which needs a new decision ([ADR 0026](adr/0026-client-device-state-and-cache.md)) first. So every `rv sync` repeats the notices that still hold.
 
 Item types: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`, `software-license`, `wifi`, `bank-account`, `passkey`. Field keys are those of the item schema ([ADR 0018](adr/0018-item-record-encoding.md)), for example `item.name`, `item.notes`, `login.username`, `login.password`, `login.totp`, `card.number`.
 

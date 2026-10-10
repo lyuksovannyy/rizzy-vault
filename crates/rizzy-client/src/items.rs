@@ -88,6 +88,11 @@ pub use rizzy_core::item::value::Value;
 use rizzy_core::item::value::ValueRef;
 use rizzy_core::rng::CryptoRng;
 use rizzy_import::ImportedItem;
+/// The identity of an op (ADR 0012 §2), re-exported for hosts so a binding need not depend on
+/// `rizzy-sync` directly (ADR 0016 §3): [`HistoryEntry::dot`] and [`ConcurrentTrash`] bind a
+/// host call to the exact op it names, not to a lossy display value that can coincide with
+/// another op's.
+pub use rizzy_sync::dot::Dot;
 /// The lifecycle [`VaultSync::item_lifecycle`] returns, re-exported for hosts (see [`ItemType`]).
 pub use rizzy_sync::merge::ItemLifecycle;
 /// The default retention period for [`VaultSync::auto_purge_due`] (ADR 0012 §5), re-exported
@@ -143,8 +148,15 @@ pub struct HistoryEntry {
     /// The former value, as encoded bytes (ADR 0018 §6).
     pub value: Value,
     /// When this value stopped being current: the HLC of the op that superseded or cleared
-    /// it, in Unix milliseconds (ADR 0018 §9).
+    /// it, in Unix milliseconds (ADR 0018 §9). Display only: two entries can share this date
+    /// (the HLC's logical counter is not part of it), so a host binds a reveal to
+    /// [`HistoryEntry::dot`], not to this.
     pub changed_ms: u64,
+    /// The dot of the op that superseded or cleared this value (ADR 0012 §2): unique per op,
+    /// unlike `changed_ms`. A host names this, not the index or the date, to bind a reveal to
+    /// the exact entry a listing showed, so a sync that only reorders the list still reveals
+    /// the same entry instead of refusing or revealing another one under a coincident date.
+    pub dot: Dot,
 }
 
 impl fmt::Debug for HistoryEntry {
@@ -157,8 +169,13 @@ impl fmt::Debug for HistoryEntry {
 /// · `/ms`), kept separate from [`HistoryEntry`]: the ADR defines no order across the two
 /// sources, and `pwhist` elements carry no `order` attribute of their own (module docs,
 /// "Password history view"). A secret: reveal it only on the user's request (ADR 0013 §3 rule
-/// 3). `Debug` redacts both fields.
+/// 3). `Debug` redacts every field.
 pub struct ImportedHistoryEntry {
+    /// The element id of this `pwhist` row (ADR 0018 §7): random per row, so it never collides
+    /// and never repeats, unlike `changed_ms`, which the importer may have written for no row
+    /// at all. A host names this, not the index or the date, to bind a reveal to the exact
+    /// entry a listing showed.
+    pub id: Zeroizing<String>,
     /// The imported value, as encoded bytes; `None` if the importer wrote no `value` for this
     /// element, which the schema permits for a partially written import.
     pub value: Option<Value>,
@@ -174,13 +191,19 @@ impl fmt::Debug for ImportedHistoryEntry {
 }
 
 /// The two devices of "deleted on X while it was being edited on Y" (ADR 0012 §5 "Active
-/// wins"), from [`VaultSync::concurrent_trash`]. Device ids only, no item data.
+/// wins"), from [`VaultSync::concurrent_trash`]. Device ids and dots only, no item data: the
+/// dots identify the two conflicting ops (not just the two devices), so a host can tell two
+/// conflicts between the same device pair apart, for example to show each only once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConcurrentTrash {
     /// X: the device of the highest Trashed value that lost to Active.
     pub trashed_by: DeviceId,
     /// Y: the device of the displayed Active value, the edit that kept the item.
     pub edited_by: DeviceId,
+    /// The dot of the losing Trashed value (`trashed_by`'s op).
+    pub trashed_dot: Dot,
+    /// The dot of the displayed Active value (`edited_by`'s op).
+    pub edited_dot: Dot,
 }
 
 /// Op data bytes before the writes: `record_kind`, `lifecycle`, `u16 n` (ADR 0018 §3).
@@ -688,19 +711,31 @@ impl VaultSync {
     }
 
     /// How many [`VaultSync::password_history`] entries the item holds, without revealing any
-    /// of them (ADR 0013 §3 rule 3). 0 for a tombstone or an item with no `login.password`
-    /// history.
+    /// of them (ADR 0013 §3 rule 3): cheaply, without decoding a value, since Cleared is
+    /// encoded as 0 bytes ([`Value::is_cleared`] is exactly `expose_secret().is_empty()`). 0
+    /// for a tombstone or an item with no `login.password` history. The same count
+    /// [`VaultSync::password_history`] lists (a Cleared value is never one of them: it is a
+    /// blank, never a revealable former password).
     #[must_use]
     pub fn password_history_len(&self, item: ItemId) -> usize {
         self.merge(item)
             .and_then(|m| m.field(LOGIN_PASSWORD))
-            .map_or(0, |v| v.history.len())
+            .map_or(0, |v| {
+                v.history
+                    .iter()
+                    .filter(|e| !e.value().expose_secret().is_empty())
+                    .count()
+            })
     }
 
     /// The history of `login.password` (module docs; ADR 0012 §5 "Password history is the
     /// history of `login.password`"), newest first (the pruning order of ADR 0012 §5: highest
-    /// `(hlc, device_id, seq)` first). Never includes the current value. Empty for a tombstone
-    /// or an item with no history. A secret: reveal entries only on the user's request.
+    /// `(hlc, device_id, seq)` first). Never includes the current value, nor a Cleared one: a
+    /// cleared field pushes a blank into the history (ADR 0012 §5 "every value removed from a
+    /// register goes into the item's history"), but a blank is never a former password to show
+    /// or reveal, so it is left out here rather than listed only to fail every reveal of it.
+    /// Empty for a tombstone or an item with no history. A secret: reveal entries only on the
+    /// user's request.
     #[must_use]
     pub fn password_history(&self, item: ItemId) -> Vec<HistoryEntry> {
         let Some(view) = self.merge(item).and_then(|m| m.field(LOGIN_PASSWORD)) else {
@@ -712,9 +747,13 @@ impl VaultSync {
             .into_iter()
             .filter_map(|e| {
                 let value = Value::copy_from_encoded(e.value().expose_secret()).ok()?;
+                if value.is_cleared() {
+                    return None;
+                }
                 Some(HistoryEntry {
                     value,
                     changed_ms: hlc_ms(e.hlc().to_u64()),
+                    dot: e.dot(),
                 })
             })
             .collect()
@@ -730,20 +769,19 @@ impl VaultSync {
         self.list_elements(item, LIST_PWHIST)
             .into_iter()
             .map(|element| {
-                let value = self.field_value(
-                    item,
-                    &format!("{LIST_PWHIST}/{}/value", element.element.as_str()),
-                );
+                let id = element.element;
+                let value = self.field_value(item, &format!("{LIST_PWHIST}/{}/value", id.as_str()));
                 let changed_ms = self
-                    .field_value(
-                        item,
-                        &format!("{LIST_PWHIST}/{}/ms", element.element.as_str()),
-                    )
+                    .field_value(item, &format!("{LIST_PWHIST}/{}/ms", id.as_str()))
                     .and_then(|v| match v.decode().ok()? {
                         ValueRef::U64(ms) => Some(ms),
                         _ => None,
                     });
-                ImportedHistoryEntry { value, changed_ms }
+                ImportedHistoryEntry {
+                    id,
+                    value,
+                    changed_ms,
+                }
             })
             .collect()
     }
@@ -758,9 +796,11 @@ impl VaultSync {
 
     /// Both devices of "deleted on X while it was being edited on Y" (ADR 0012 §5 "Active
     /// wins"), when `@lifecycle` displays Active over a concurrently trashed value: the device
-    /// of the highest losing Trashed value and the device of the displayed Active value. `None`
-    /// unless the item is Active with a losing concurrent Trashed value. Presentation only: the
-    /// host decides when the notice was already shown (`rv sync` and the web vault keep that in
+    /// of the highest losing Trashed value and the device of the displayed Active value, and
+    /// each value's own dot, which identifies this one conflict and not just the device pair
+    /// (two different races between the same two devices have different dots). `None` unless
+    /// the item is Active with a losing concurrent Trashed value. Presentation only: the host
+    /// decides when the notice was already shown (`rv sync` and the web vault keep that in
     /// memory only; ADR 0026 has no slot for it).
     #[must_use]
     pub fn concurrent_trash(&self, item: ItemId) -> Option<ConcurrentTrash> {
@@ -768,9 +808,13 @@ impl VaultSync {
         let display = merge.lifecycle_display()?;
         let losing = display.trashed_by?;
         let lifecycle = merge.field(LIFECYCLE_KEY)?;
+        let trashed = lifecycle.current.get(losing)?;
+        let edited = lifecycle.current.get(display.displayed)?;
         Some(ConcurrentTrash {
-            trashed_by: lifecycle.current.get(losing)?.dot().device_id(),
-            edited_by: lifecycle.current.get(display.displayed)?.dot().device_id(),
+            trashed_by: trashed.dot().device_id(),
+            edited_by: edited.dot().device_id(),
+            trashed_dot: trashed.dot(),
+            edited_dot: edited.dot(),
         })
     }
 
