@@ -9,12 +9,12 @@ body:
   - type: markdown
     attributes:
       value: |
-        Read [ADR 0038 §4](../../docs/adr/0038-equivalent-domain-list.md#4-review-rules-for-list-entries)
-        and [docs/equivalence-list.md §2](../../docs/equivalence-list.md#2-editing-the-source-file)
+        Read [ADR 0038 §4](https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0038-equivalent-domain-list.md#4-review-rules-for-list-entries)
+        and [docs/equivalence-list.md §2](https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/equivalence-list.md#2-editing-the-source-file)
         before filing this. This issue is where the group is reviewed; it does not change
         `data/equivalence/groups.txt` by itself — once the evidence below stands up to review,
         follow up with a PR using the
-        [`equivalence-list` pull request template](../../.github/PULL_REQUEST_TEMPLATE/equivalence-list.md).
+        [`equivalence-list` pull request template](https://github.com/lyuksovannyy/rizzy-vault/blob/main/.github/PULL_REQUEST_TEMPLATE/equivalence-list.md).
 
         The global list stays deliberately short and high-bar (ADR 0038 §4 point 6): a
         well-known multi-domain brand with clear public ownership evidence, not a long tail.

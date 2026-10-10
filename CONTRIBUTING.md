@@ -254,8 +254,9 @@ general [workflow](#workflow) above:
      cross-referencing statement on both domains (a `security.txt`, a support article).
      "Looks plausible next to a big brand" is not proof;
    - whether any domain is third-party-hostable, and the Public Suffix List entry that
-     splits it by registrant if so (`flag_third_party_hostable = 1` is the explicit,
-     reviewed exception, never silently assumed);
+     splits it by registrant if so (`third_party_hostable = 1` in
+     `data/equivalence/groups.txt` is the explicit, reviewed exception, never silently
+     assumed);
    - a note of the next scheduled re-check (at minimum every release cycle).
 
    The project owner creates an `equivalence-list` label in the repository's Settings →
@@ -278,7 +279,7 @@ general [workflow](#workflow) above:
    ([docs/equivalence-list.md](docs/equivalence-list.md)), the reviewed source is signed
    offline with a dedicated Ed25519 keypair kept apart from every release-signing credential
    (ADR 0038 §3), under a `list_version` strictly greater than every version published
-   before it (clients reject an equal or lower version, ADR 0038 §2, INV-39). The signed
+   before it (clients reject an equal or lower version, ADR 0038 §2). The signed
    bytes and the pinned public key are then committed together into
    `crates/rizzy-match/src/compiled.rs`'s `GLOBAL_LIST` and `LIST_SIGNING_PUBLIC_KEY`, so a
    new or updated list always ships inside a client release — there is no out-of-band list

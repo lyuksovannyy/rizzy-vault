@@ -22,8 +22,8 @@ section "2. Editing the source file", first.
 - [ ] **Per-ccTLD-variant proof.** Each ccTLD pairing (e.g. `brand.com` / `brand.co.uk`) has
       its own evidence, not an assumption from the base domain (point 4).
 - [ ] **No third-party-hostable domain**, unless the Public Suffix List already splits that
-      suffix by registrant — if so, `flag_third_party_hostable = 1` is set and the PSL entry
-      is cited here (point 3).
+      suffix by registrant — if so, `third_party_hostable = 1` is set in
+      `data/equivalence/groups.txt` and the PSL entry is cited here (point 3).
 - [ ] **Two-maintainer review.** Until a second maintainer exists, this box confirms the
       owner's own review is recorded here with the evidence cited, for a later second
       reviewer to audit (point 2).
