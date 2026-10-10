@@ -23,6 +23,7 @@ import {
   type CacheRow,
   type CacheStore,
   CoreError,
+  type HistoryEntry,
   Signup,
   type Transport,
   type VaultSession,
@@ -734,19 +735,18 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     }
     expect(JSON.stringify(two)).not.toContain("v0");
     expect(JSON.stringify(two)).not.toContain("v1");
-    expect(s.revealPasswordHistory(id, "merge", 0)).toBe("v1");
-    expect(s.revealPasswordHistory(id, "merge", 1)).toBe("v0");
-    expect(() => s.revealPasswordHistory(id, "merge", 2)).toThrowError(
-      expect.objectContaining({ code: "unknown_item" }),
-    );
-    expect(() => s.revealPasswordHistory(id, "imported", 0)).toThrowError(
-      expect.objectContaining({ code: "unknown_item" }),
-    );
-    expect(() => s.revealPasswordHistory(id, "other" as never, 0)).toThrowError(
+    const [newer, older] = two as [HistoryEntry, HistoryEntry];
+    expect(s.revealPasswordHistory(id, "merge", 0, newer.changedMs)).toBe("v1");
+    expect(s.revealPasswordHistory(id, "merge", 1, older.changedMs)).toBe("v0");
+    const refused = (source: HistoryEntry["source"], index: number, ms: number | undefined) =>
+      expect(() => s.revealPasswordHistory(id, source, index, ms)).toThrowError(
+        expect.objectContaining({ code: "unknown_item" }),
+      );
+    refused("merge", 2, older.changedMs);
+    refused("imported", 0, undefined);
+    expect(() => s.revealPasswordHistory(id, "other" as never, 0, newer.changedMs)).toThrowError(
       expect.objectContaining({ code: "invalid_input" }),
     );
-    // The current value is never a history entry, and fields() carries no former password.
-    expect(s.fields(id).some((f) => f.list === "pwhist")).toBe(false);
 
     // Capped at 50 (the merge's history limit): v0..v54 replaced, the 50 newest kept.
     for (let n = 3; n <= 55; n += 1) {
@@ -754,11 +754,72 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     }
     const capped = s.passwordHistory(id);
     expect(capped).toHaveLength(50);
-    expect(s.revealPasswordHistory(id, "merge", 0)).toBe("v54");
-    expect(s.revealPasswordHistory(id, "merge", 49)).toBe("v5");
-    expect(() => s.revealPasswordHistory(id, "merge", 50)).toThrowError(
-      expect.objectContaining({ code: "unknown_item" }),
+    expect(s.revealPasswordHistory(id, "merge", 0, capped[0]?.changedMs)).toBe("v54");
+    expect(s.revealPasswordHistory(id, "merge", 49, capped[49]?.changedMs)).toBe("v5");
+    refused("merge", 50, capped[49]?.changedMs);
+    // A stale listing: position 0 now holds v54, not the v1 the old listing dated. Refused,
+    // never another entry's value under the old date.
+    expect(capped[0]?.changedMs).not.toBe(newer.changedMs);
+    refused("merge", 0, newer.changedMs);
+    s.lock();
+  });
+
+  // Gap 01, imported history (ADR 0018 §7 `pwhist/<id>/value` · `/ms`): the schema shows
+  // `pwhist` values, but they never cross through fields(); one crosses per reveal.
+  it("keeps imported password history out of fields and reveals it one entry at a time", async () => {
+    const { session: s } = await freshAccount("Frank");
+    const history = [
+      { password: "imported-old-a", lastUsedDate: "2024-01-02T03:04:05.000Z" },
+      { password: "imported-old-b", lastUsedDate: "2023-05-06T07:08:09.000Z" },
+    ];
+    const file = new TextEncoder().encode(
+      JSON.stringify({
+        encrypted: false,
+        items: [
+          {
+            type: 1,
+            name: "Imported login",
+            login: { username: "frank", password: "imported-current" },
+            passwordHistory: history,
+          },
+        ],
+      }),
     );
+    expect(s.importFile("bitwarden-json", file).imported).toBe(1);
+    const id = s.items().find((i) => i.title === "Imported login")?.id ?? "";
+    expect(id).not.toBe("");
+
+    // fields(): no pwhist row, so no former password crosses with the item view.
+    const fields = s.fields(id);
+    expect(fields.some((f) => f.list === "pwhist" || f.key.startsWith("pwhist/"))).toBe(false);
+    expect(JSON.stringify(fields)).not.toContain("imported-old");
+
+    // The listing: imported entries with their dates, no values.
+    const listed = s.passwordHistory(id);
+    expect(listed.map((h) => h.source)).toEqual(["imported", "imported"]);
+    expect(JSON.stringify(listed)).not.toContain("imported-old");
+    const byDate = new Map(history.map((h) => [Date.parse(h.lastUsedDate), h.password]));
+    expect(new Set(listed.map((h) => h.changedMs))).toEqual(new Set(byDate.keys()));
+
+    // Each reveal returns the value of the entry the listing dated.
+    for (const entry of listed) {
+      expect(s.revealPasswordHistory(id, "imported", entry.index, entry.changedMs)).toBe(
+        byDate.get(entry.changedMs ?? -1),
+      );
+    }
+    // Out of range, the wrong source, or a date the entry does not carry: refused.
+    const first = listed[0] as HistoryEntry;
+    for (const [source, index, ms] of [
+      ["imported", 2, first.changedMs],
+      ["imported", 99, first.changedMs],
+      ["merge", 0, first.changedMs],
+      ["imported", first.index, (first.changedMs ?? 0) + 1],
+      ["imported", first.index, undefined],
+    ] as const) {
+      expect(() => s.revealPasswordHistory(id, source, index, ms)).toThrowError(
+        expect.objectContaining({ code: "unknown_item" }),
+      );
+    }
     s.lock();
   });
 
@@ -823,18 +884,27 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     await first.sync();
     expect(first.items().map((i) => i.id)).not.toContain(gone);
 
-    // Session memory only: a new session is handed the notices again.
-    const third = await login(transport, {
+    // Still nothing new for the session that was handed them.
+    expect(first.takeNotices()).toEqual([]);
+
+    // Session memory only: lock, then unlock again (the web vault's unlock is a fresh login
+    // of the same account). The marks went with the locked session, so the notices come back,
+    // and are again handed over once.
+    first.lock();
+    const unlocked = await login(transport, {
       origin,
       loginName: "erin",
       secretKey,
       password: PASSWORD,
     });
-    await third.sync();
-    const again = third.takeNotices().map((n) => [n.kind, n.item]);
+    await unlocked.sync();
+    const again = unlocked.takeNotices().map((n) => [n.kind, n.item]);
     expect(again).toContainEqual(["late-edit", gone]);
     expect(again).toContainEqual(["concurrent-trash", kept]);
-    lockAll(first, second, third);
+    expect(unlocked.takeNotices()).toEqual([]);
+    await unlocked.sync();
+    expect(unlocked.takeNotices()).toEqual([]);
+    lockAll(first, second, unlocked);
   });
 });
 

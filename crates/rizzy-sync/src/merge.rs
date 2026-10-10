@@ -128,9 +128,12 @@
 //! Besides the state, an [`ItemMerge`] keeps local evidence that no format freezes: the
 //! verified header of each dot, which dots it merged from bodies, every op body it merged or
 //! received with a snapshot (what each wrote), the retained ops and the newest-snapshot basis, the unresolved disagreements, and which late
-//! values it surfaced. `rizzy-client` persists them. A replica rebuilt from its kept records
-//! (every item header through [`ItemMerge::record_header`], its newest snapshot or pair through
-//! [`ItemMerge::absorb_snapshot`], then its retained ops) reaches the same state bytes.
+//! values it surfaced. `rizzy-client` persists them, except the surfaced marks: those live in
+//! session memory only, since the ADR 0026 cache has no slot for them (a new record would be a
+//! persistent-format change), so a notice shows again after the next unlock. A replica rebuilt
+//! from its kept records (every item header through [`ItemMerge::record_header`], its newest
+//! snapshot or pair through [`ItemMerge::absorb_snapshot`], then its retained ops) reaches the
+//! same state bytes.
 //!
 //! [ADR 0012]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0012-sync-engine.md
 //! [ADR 0018]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0018-item-record-encoding.md
