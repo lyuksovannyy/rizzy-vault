@@ -4,17 +4,27 @@
 //! # What is real
 //!
 //! - **Envelopes.** Every op body is an `ITEM_OP` envelope and every snapshot's data an
-//!   `ITEM_SNAPSHOT` envelope, sealed by [`rizzy_core::envelope::seal`] under the item's
-//!   [`ItemKey`] with the AAD context the record's header gives
-//!   ([`OpHeader::envelope_context`], [`SnapshotHeader::envelope_context`]: the ids, the dot,
-//!   the HLC and `SHA-256` of the canonical header, CRYPTO.md §8.4). A device opens an
-//!   envelope under the context it rebuilds from the header it verified, so a body moved to
-//!   another header, item or covered VV does not open (ADR 0018 owner decision 3).
+//!   `ITEM_SNAPSHOT` envelope, sealed by [`rizzy_core::envelope::seal`] under an item key with
+//!   the AAD context the record's header gives ([`OpHeader::envelope_context`],
+//!   [`SnapshotHeader::envelope_context`]: the ids, the dot, the HLC, `vault_key_epoch` and
+//!   `SHA-256` of the canonical header, CRYPTO.md §8.4). A reader finds the key by the
+//!   envelope header's `key_id` among the item keys it holds for that item (CRYPTO.md §11.6
+//!   reader rule) and opens the envelope under the context it rebuilds from the header it
+//!   verified, so a body moved to another header, item or covered VV does not open (ADR 0018
+//!   owner decision 3).
 //! - **Signatures.** Every record travels with its `op` or `snapshot` statement in the signed
 //!   wire form (CRYPTO.md §9.6, §10.2), signed with its author's [`DeviceSigningKey`]. The
 //!   server and every device verify it under the key of the device the record names, parse
 //!   the header from the verified statement, and require that header to name that device
 //!   (CRYPTO.md §10.2, INV-22).
+//! - **Vault keys, item keys and wraps** (CRYPTO.md §4.4, §11.6). One [`VaultKey`] per vault
+//!   epoch. Every item starts with one item key created at epoch 0 (its *initial* key). The
+//!   writer rule's fresh item keys ([`fresh_key`]) are created at a later epoch, one per
+//!   item, epoch and author, and reach other devices only as `ITEM_KEY_WRAP` envelopes under
+//!   the vault key of an epoch ([`wrap`], [`unwrap`], through [`VaultKey::wrap_item_key`] and
+//!   [`VaultKey::unwrap_item_key`]). A device holds a fresh item key only once it has opened a
+//!   wrap of it with a vault key it holds, so what a revoked device can decrypt is derived,
+//!   not stipulated (ADR 0012 §12 property 6, [`super::world`]).
 //!
 //! # The test RNG
 //!
@@ -27,9 +37,12 @@
 //! given this RNG.
 //!
 //! - **Keys** ([`KEYS`]) are drawn once per test process from a fixed seed: one signing key
-//!   per device id the harness can name and one item key per item id. They are test values
-//!   only; a run never sees another run's records, so sharing them between runs shares
-//!   nothing.
+//!   per device id the harness can name, one initial item key per item id, one vault key per
+//!   epoch below [`EPOCHS`], and the fresh item key each device would create for each item at
+//!   each later epoch. They are test values only; a run never sees another run's records, so
+//!   sharing them between runs shares nothing. The table is the harness's ground truth of key
+//!   material: a device names the keys it holds by key id, and gains a fresh one only by
+//!   opening a wrap.
 //! - **Nonces** come from each device's own source ([`Nonces`]), seeded from the run's seed,
 //!   the device id and a count of the device's seals, so two devices of a run never draw the
 //!   same stream and a history is reproducible from its `(family, seed)`. A device that rolls
@@ -39,62 +52,104 @@
 //! # What is not modelled
 //!
 //! Certificates (the harness's directory of verifying keys stands in for the verified device
-//! set), the vault key and the `ITEM_KEY_WRAP` envelope (every device holds every item key
-//! from the start, and no statement signs a wrap hash), and key rotation (one vault key epoch,
-//! one item key per item).
+//! set), the account key, self-grants and device grants (the world hands the current vault
+//! key to every device the rotation keeps, see [`super::world`]), and the wrap hash in a
+//! signed statement (a wrap travels beside the record that first uses its key, unsigned, as
+//! the re-wraps of a rotation do). Every device holds every initial item key from enrolment,
+//! as the creation wraps would give it.
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use chacha20::ChaCha20Rng;
 use rand_core::SeedableRng as _;
+use rizzy_core::envelope::parse::{EnvelopeRef, parse};
+use rizzy_core::envelope::purpose::ItemKeyWrapCtx;
 use rizzy_core::envelope::{open, seal};
 use rizzy_core::ids::{DeviceId, ItemId, SymmetricKeyId};
-use rizzy_core::keys::ItemKey;
+use rizzy_core::keys::{ItemKey, VaultKey};
 use rizzy_core::secret::SecretBytes;
 use rizzy_core::sign::{DeviceSigningKey, OpStatement, SnapshotStatement, Verified};
 
-use super::{device_id, item_id};
+use super::{VAULT, device_id, item_id};
 use crate::header::{OpHeader, SnapshotHeader};
 
 /// How many device ids [`device_id`] and item ids [`item_id`] can name: both keep the low four
 /// bits of their index.
 const SLOTS: usize = 16;
 
+/// How many vault key epochs the harness has keys for: epochs `0..EPOCHS`. A run rotates at
+/// most `EPOCHS - 1` times; the world refuses a rotation past that.
+pub(super) const EPOCHS: u32 = 6;
+
 /// The seed of the harness's keys. Any fixed value does.
 const KEY_SEED: u64 = 0x0012_c0de;
 
-/// One item's key and its key id.
+/// A key id as a map key (`SymmetricKeyId` has no order).
+type KeyBytes = [u8; 16];
+
+/// One item key and the item it belongs to.
 struct Item {
-    /// The item key every device holds.
+    /// The item.
+    item: ItemId,
+    /// The key.
     key: ItemKey,
-    /// Its key id (CRYPTO.md §4.4): what the envelope header carries and the merge records.
-    key_id: SymmetricKeyId,
 }
 
-/// The keys of every device and item of the harness.
+/// The keys of every device, item and epoch of the harness.
 struct Keys {
     /// Each device's signing key. Its verifying half is what a certificate would carry.
     devices: BTreeMap<DeviceId, DeviceSigningKey>,
-    /// Each item's key.
-    items: BTreeMap<ItemId, Item>,
+    /// Every item key, by key id.
+    items: BTreeMap<KeyBytes, Item>,
+    /// Each item's initial key (created at epoch 0).
+    initial: BTreeMap<ItemId, SymmetricKeyId>,
+    /// The fresh item key a device creates for an item at an epoch (CRYPTO.md §11.6 writer
+    /// rule), by `(item, epoch, author)`.
+    fresh: BTreeMap<(ItemId, u32, DeviceId), SymmetricKeyId>,
+    /// The vault key of each epoch, by epoch.
+    vaults: Vec<VaultKey>,
 }
 
 /// The harness's keys, drawn once from [`KEY_SEED`] through `rizzy-core`'s public `generate`
-/// functions.
+/// functions. The signing and initial item keys are drawn first, in the order the harness drew
+/// them before it modelled epochs.
 static KEYS: LazyLock<Keys> = LazyLock::new(|| {
     let mut rng = ChaCha20Rng::seed_from_u64(KEY_SEED);
     let devices = (0..SLOTS)
         .map(|d| (device_id(d), DeviceSigningKey::generate(&mut rng)))
         .collect();
-    let items = (0..SLOTS)
-        .map(|i| {
-            let key = ItemKey::generate(&mut rng, 0);
-            let key_id = key.key_id().expect("a key id derives");
-            (item_id(i), Item { key, key_id })
-        })
+    let mut items = BTreeMap::new();
+    let mut initial = BTreeMap::new();
+    let add = |items: &mut BTreeMap<KeyBytes, Item>, item: ItemId, key: ItemKey| {
+        let key_id = key.key_id().expect("a key id derives");
+        items.insert(*key_id.as_bytes(), Item { item, key });
+        key_id
+    };
+    for i in 0..SLOTS {
+        let key = ItemKey::generate(&mut rng, 0);
+        initial.insert(item_id(i), add(&mut items, item_id(i), key));
+    }
+    let vaults = (0..EPOCHS)
+        .map(|epoch| VaultKey::generate(&mut rng, VAULT, epoch))
         .collect();
-    Keys { devices, items }
+    let mut fresh = BTreeMap::new();
+    for i in 0..SLOTS {
+        for epoch in 1..EPOCHS {
+            for d in 0..SLOTS {
+                let key = ItemKey::generate(&mut rng, epoch);
+                let key_id = add(&mut items, item_id(i), key);
+                fresh.insert((item_id(i), epoch, device_id(d)), key_id);
+            }
+        }
+    }
+    Keys {
+        devices,
+        items,
+        initial,
+        fresh,
+        vaults,
+    }
 });
 
 /// A device's source of envelope nonces: one fresh `ChaCha20Rng` per seal, keyed by the run's
@@ -137,50 +192,175 @@ impl Nonces {
     }
 }
 
-/// The key id of `item`'s key. An item outside the harness's table has no key; its id is then
-/// the item id's bytes, which no envelope carries.
-pub(super) fn item_key_id(item: ItemId) -> SymmetricKeyId {
-    KEYS.items
+/// The key id of `item`'s initial key, created at epoch 0. An item outside the harness's table
+/// has no key; its id is then the item id's bytes, which no envelope carries.
+pub(super) fn initial_key(item: ItemId) -> SymmetricKeyId {
+    KEYS.initial
         .get(&item)
-        .map_or_else(|| SymmetricKeyId::from_bytes(item.to_bytes()), |i| i.key_id)
+        .copied()
+        .unwrap_or_else(|| SymmetricKeyId::from_bytes(item.to_bytes()))
 }
 
-/// Seals op `data` as the `ITEM_OP` envelope of the op with `header`, under the item's key,
-/// with a nonce from `nonces`. `None` if the item has no key, the header does not encode, or
-/// `rizzy-core` refuses the plaintext (above its size limit).
-pub(super) fn seal_op(nonces: &mut Nonces, header: &OpHeader, data: &[u8]) -> Option<Vec<u8>> {
-    let item = KEYS.items.get(&header.item_id)?;
+/// The initial key of every item of the harness's table: what every device holds from
+/// enrolment.
+pub(super) fn initial_keys() -> impl Iterator<Item = (ItemId, SymmetricKeyId)> {
+    KEYS.initial.iter().map(|(&item, &key)| (item, key))
+}
+
+/// The fresh item key `author` creates for `item` at vault epoch `epoch` under the CRYPTO.md
+/// §11.6 writer rule. `None` outside the table (epoch 0 or at least [`EPOCHS`]).
+pub(super) fn fresh_key(item: ItemId, epoch: u32, author: DeviceId) -> Option<SymmetricKeyId> {
+    KEYS.fresh.get(&(item, epoch, author)).copied()
+}
+
+/// The item and creation epoch of the item key with id `key`.
+pub(super) fn key_info(key: &SymmetricKeyId) -> Option<(ItemId, u32)> {
+    KEYS.items
+        .get(key.as_bytes())
+        .map(|i| (i.item, i.key.created_vault_key_epoch()))
+}
+
+/// Whether the item key with id `key` is stale at vault epoch `epoch`
+/// ([`ItemKey::is_stale`]); an unknown key counts as stale.
+pub(super) fn is_stale(key: &SymmetricKeyId, epoch: u32) -> bool {
+    KEYS.items
+        .get(key.as_bytes())
+        .is_none_or(|i| i.key.is_stale(epoch))
+}
+
+/// The `key_id` in an envelope's header, if it parses as a symmetric envelope. Server-visible.
+pub(super) fn envelope_key(envelope: &[u8]) -> Option<SymmetricKeyId> {
+    match parse(envelope).ok()? {
+        EnvelopeRef::Symmetric(s) => Some(SymmetricKeyId::from_bytes(*s.key_id())),
+        EnvelopeRef::Hpke(_) => None,
+    }
+}
+
+/// The item key with id `key`, if it is a key of `item`.
+fn item_key(item: ItemId, key: &SymmetricKeyId) -> Option<&'static ItemKey> {
+    KEYS.items
+        .get(key.as_bytes())
+        .filter(|i| i.item == item)
+        .map(|i| &i.key)
+}
+
+/// The key a reader opens `envelope` of `item` with: the one its header's `key_id` names, if
+/// the reader `holds` it and it is a key of `item` (CRYPTO.md §11.6 reader rule).
+fn reader_key(
+    item: ItemId,
+    envelope: &[u8],
+    holds: impl Fn(&SymmetricKeyId) -> bool,
+) -> Option<(&'static ItemKey, SymmetricKeyId)> {
+    let id = envelope_key(envelope)?;
+    if !holds(&id) {
+        return None;
+    }
+    Some((item_key(item, &id)?, id))
+}
+
+/// Seals op `data` as the `ITEM_OP` envelope of the op with `header`, under the item key with
+/// id `key`, with a nonce from `nonces`. `None` if `key` is not a key of the header's item,
+/// the header does not encode, or `rizzy-core` refuses the plaintext (above its size limit).
+pub(super) fn seal_op(
+    nonces: &mut Nonces,
+    header: &OpHeader,
+    key: &SymmetricKeyId,
+    data: &[u8],
+) -> Option<Vec<u8>> {
+    let key = item_key(header.item_id, key)?;
     let ctx = header.envelope_context().ok()?;
-    seal(&mut nonces.next_rng(), item.key.key(), &ctx, data).ok()
+    seal(&mut nonces.next_rng(), key.key(), &ctx, data).ok()
 }
 
-/// Opens the `ITEM_OP` envelope of the op with `header`: the op `data`. `None` for every
-/// failure (another key, header or item, a changed byte).
-pub(super) fn open_op(header: &OpHeader, envelope: &[u8]) -> Option<SecretBytes> {
-    let item = KEYS.items.get(&header.item_id)?;
+/// Opens the `ITEM_OP` envelope of the op with `header` with the item key its `key_id` names,
+/// if the reader `holds` it: the op `data` and that key id. `None` for every failure (a key not
+/// held, another header or item, a changed byte).
+pub(super) fn open_op(
+    header: &OpHeader,
+    envelope: &[u8],
+    holds: impl Fn(&SymmetricKeyId) -> bool,
+) -> Option<(SecretBytes, SymmetricKeyId)> {
+    let (key, id) = reader_key(header.item_id, envelope, holds)?;
     let ctx = header.envelope_context().ok()?;
-    open(item.key.key(), &ctx, envelope).ok()
+    open(key.key(), &ctx, envelope).ok().map(|data| (data, id))
 }
 
-/// Seals snapshot `data` as the `ITEM_SNAPSHOT` envelope of the snapshot with `header`. `None`
-/// as [`seal_op`].
+/// Seals snapshot `data` as the `ITEM_SNAPSHOT` envelope of the snapshot with `header`, under
+/// the item key with id `key`. `None` as [`seal_op`].
 pub(super) fn seal_snapshot(
     nonces: &mut Nonces,
     header: &SnapshotHeader,
+    key: &SymmetricKeyId,
     data: &[u8],
 ) -> Option<Vec<u8>> {
-    let item = KEYS.items.get(&header.item_id)?;
+    let key = item_key(header.item_id, key)?;
     let ctx = header.envelope_context().ok()?;
-    seal(&mut nonces.next_rng(), item.key.key(), &ctx, data).ok()
+    seal(&mut nonces.next_rng(), key.key(), &ctx, data).ok()
 }
 
-/// Opens the `ITEM_SNAPSHOT` envelope of the snapshot with `header`: the snapshot `data`.
-/// `None` for every failure; the covered VV and the author are in the header hash the AAD
+/// Opens the `ITEM_SNAPSHOT` envelope of the snapshot with `header`, as [`open_op`]: the
+/// snapshot `data` and the key id. The covered VV and the author are in the header hash the AAD
 /// binds, so data sealed for another covered VV does not open.
-pub(super) fn open_snapshot(header: &SnapshotHeader, envelope: &[u8]) -> Option<SecretBytes> {
-    let item = KEYS.items.get(&header.item_id)?;
+pub(super) fn open_snapshot(
+    header: &SnapshotHeader,
+    envelope: &[u8],
+    holds: impl Fn(&SymmetricKeyId) -> bool,
+) -> Option<(SecretBytes, SymmetricKeyId)> {
+    let (key, id) = reader_key(header.item_id, envelope, holds)?;
     let ctx = header.envelope_context().ok()?;
-    open(item.key.key(), &ctx, envelope).ok()
+    open(key.key(), &ctx, envelope).ok().map(|data| (data, id))
+}
+
+/// Whether the item key with id `key` opens the `ITEM_OP` envelope of the op with `header`,
+/// whatever key id the envelope names: the property 6 attempt of [`super::world`].
+pub(super) fn op_opens_under(header: &OpHeader, envelope: &[u8], key: &SymmetricKeyId) -> bool {
+    let (Some(k), Ok(ctx)) = (KEYS.items.get(key.as_bytes()), header.envelope_context()) else {
+        return false;
+    };
+    open(k.key.key(), &ctx, envelope).is_ok()
+}
+
+/// Whether the item key with id `key` opens the `ITEM_SNAPSHOT` envelope of the snapshot with
+/// `header`, as [`op_opens_under`].
+pub(super) fn snapshot_opens_under(
+    header: &SnapshotHeader,
+    envelope: &[u8],
+    key: &SymmetricKeyId,
+) -> bool {
+    let (Some(k), Ok(ctx)) = (KEYS.items.get(key.as_bytes()), header.envelope_context()) else {
+        return false;
+    };
+    open(k.key.key(), &ctx, envelope).is_ok()
+}
+
+/// The `ITEM_KEY_WRAP` of the item key with id `key` under the vault key of `epoch` (ctx
+/// `vault_id ‖ item_id ‖ epoch`), with a nonce from `nonces`. `None` if the key or epoch is
+/// outside the table, or `rizzy-core` refuses (a key created after `epoch`).
+pub(super) fn wrap(nonces: &mut Nonces, key: &SymmetricKeyId, epoch: u32) -> Option<Vec<u8>> {
+    let item = KEYS.items.get(key.as_bytes())?;
+    let vault = KEYS.vaults.get(usize::try_from(epoch).ok()?)?;
+    let ctx = ItemKeyWrapCtx {
+        vault_id: VAULT,
+        item_id: item.item,
+        vault_key_epoch: epoch,
+    };
+    vault
+        .wrap_item_key(&mut nonces.next_rng(), &ctx, &item.key)
+        .ok()
+}
+
+/// Opens the `ITEM_KEY_WRAP` `envelope` of `item` with the vault key of `epoch` (ctx
+/// `vault_id ‖ item_id ‖ epoch`): the id of the item key inside, derived from the unwrapped
+/// key. `None` for every failure (another epoch's vault key, another item, a changed byte).
+pub(super) fn unwrap(epoch: u32, item: ItemId, envelope: &[u8]) -> Option<SymmetricKeyId> {
+    let vault = KEYS.vaults.get(usize::try_from(epoch).ok()?)?;
+    let ctx = ItemKeyWrapCtx {
+        vault_id: VAULT,
+        item_id: item,
+        vault_key_epoch: epoch,
+    };
+    let key = vault.unwrap_item_key(&ctx, envelope).ok()?;
+    key.key_id().ok()
 }
 
 /// The signed `op` statement (wire form) over `header` and `envelope`, by the device the
@@ -257,6 +437,11 @@ mod tests {
         }
     }
 
+    /// A reader that holds every key.
+    fn all(_: &SymmetricKeyId) -> bool {
+        true
+    }
+
     /// An op `data` writing `item.name`.
     fn op_data() -> Vec<u8> {
         let key = FieldKey::new("item.name").unwrap();
@@ -269,11 +454,13 @@ mod tests {
     fn op_record(d: usize, i: usize) -> OpRecord {
         let header = op_header(d, i);
         let mut rng = Nonces::new(1, device_id(d));
-        let envelope = seal_op(&mut rng, &header, &op_data()).unwrap();
+        let envelope =
+            seal_op(&mut rng, &header, &initial_key(header.item_id), &op_data()).unwrap();
         OpRecord {
             signed: sign_op(&header, &envelope).unwrap(),
             header,
             body: Some(envelope),
+            wrap: None,
         }
     }
 
@@ -282,16 +469,17 @@ mod tests {
         let header = op_header(0, 0);
         let data = op_data();
         let mut rng = Nonces::new(1, device_id(0));
-        let envelope = seal_op(&mut rng, &header, &data).unwrap();
+        let envelope = seal_op(&mut rng, &header, &initial_key(header.item_id), &data).unwrap();
         // A real envelope: header, nonce, commitment, the padded frame and the tag, under the
         // item's key id; never the plaintext.
         assert_eq!(envelope.len(), 90 + 256);
         assert_eq!(
             envelope.get(2..18),
-            Some(&item_key_id(item_id(0)).as_bytes()[..])
+            Some(&initial_key(item_id(0)).as_bytes()[..])
         );
         assert!(!envelope.windows(6).any(|w| w == b"a name"));
-        let opened = open_op(&header, &envelope).unwrap();
+        let (opened, key) = open_op(&header, &envelope, all).unwrap();
+        assert_eq!(key, initial_key(item_id(0)));
         assert_eq!(opened.expose_secret(), data);
         assert!(parse_op(opened.expose_secret()).is_ok());
 
@@ -299,30 +487,33 @@ mod tests {
         // header hash), and a changed byte: none opens.
         let mut other_item = header.clone();
         other_item.item_id = item_id(1);
-        assert!(open_op(&other_item, &envelope).is_none());
+        assert!(open_op(&other_item, &envelope, all).is_none());
         let mut other_dot = header.clone();
         other_dot.dot = Dot::new(device_id(0), 2).unwrap();
-        assert!(open_op(&other_dot, &envelope).is_none());
+        assert!(open_op(&other_dot, &envelope, all).is_none());
         let mut other_hlc = header.clone();
         other_hlc.hlc = Hlc::from_u64(header.hlc.to_u64() + 1);
-        assert!(open_op(&other_hlc, &envelope).is_none());
+        assert!(open_op(&other_hlc, &envelope, all).is_none());
         let mut other_context = header.clone();
         other_context.causal_context = [Dot::new(device_id(1), 1).unwrap()].into_iter().collect();
-        assert!(open_op(&other_context, &envelope).is_none());
+        assert!(open_op(&other_context, &envelope, all).is_none());
         let mut other_prev = header.clone();
         other_prev.vault_prev_seq = 7;
-        assert!(open_op(&other_prev, &envelope).is_none());
+        assert!(open_op(&other_prev, &envelope, all).is_none());
         for at in [0, 17, 18, 60, 100, envelope.len() - 1] {
             let mut changed = envelope.clone();
             if let Some(b) = changed.get_mut(at) {
                 *b ^= 1;
             }
-            assert!(open_op(&header, &changed).is_none(), "byte {at}");
+            assert!(open_op(&header, &changed, all).is_none(), "byte {at}");
         }
         // Each seal draws a fresh nonce: the same op sealed again is another envelope.
-        let again = seal_op(&mut rng, &header, &data).unwrap();
+        let again = seal_op(&mut rng, &header, &initial_key(header.item_id), &data).unwrap();
         assert_ne!(again, envelope);
-        assert_eq!(open_op(&header, &again).unwrap().expose_secret(), data);
+        assert_eq!(
+            open_op(&header, &again, all).unwrap().0.expose_secret(),
+            data
+        );
     }
 
     #[test]
@@ -339,9 +530,13 @@ mod tests {
         };
         let data = b"snapshot data stand-in";
         let mut rng = Nonces::new(1, device_id(0));
-        let envelope = seal_snapshot(&mut rng, &header, data).unwrap();
+        let envelope =
+            seal_snapshot(&mut rng, &header, &initial_key(header.item_id), data).unwrap();
         assert_eq!(
-            open_snapshot(&header, &envelope).unwrap().expose_secret(),
+            open_snapshot(&header, &envelope, all)
+                .unwrap()
+                .0
+                .expose_secret(),
             data
         );
         // ADR 0018 owner decision 3: the item VV is in the header, and the AAD binds it.
@@ -352,17 +547,17 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        assert!(open_snapshot(&wider, &envelope).is_none());
+        assert!(open_snapshot(&wider, &envelope, all).is_none());
         let mut other_author = header.clone();
         other_author.author = device_id(1);
-        assert!(open_snapshot(&other_author, &envelope).is_none());
+        assert!(open_snapshot(&other_author, &envelope, all).is_none());
         let mut other_item = header.clone();
         other_item.item_id = item_id(1);
-        assert!(open_snapshot(&other_item, &envelope).is_none());
+        assert!(open_snapshot(&other_item, &envelope, all).is_none());
         // An `ITEM_OP` envelope of the same item is not an `ITEM_SNAPSHOT` envelope.
         let op = op_header(0, 0);
-        let op_envelope = seal_op(&mut rng, &op, data).unwrap();
-        assert!(open_snapshot(&header, &op_envelope).is_none());
+        let op_envelope = seal_op(&mut rng, &op, &initial_key(op.item_id), data).unwrap();
+        assert!(open_snapshot(&header, &op_envelope, all).is_none());
 
         // The signed statement verifies under its author only, and gives the header back.
         let signed = sign_snapshot(&header, &envelope).unwrap();
@@ -411,7 +606,7 @@ mod tests {
         let mut no_key = op_header(0, 0);
         no_key.item_id = ItemId::from_bytes([0xee; 16]);
         let mut rng = Nonces::new(1, device_id(0));
-        assert!(seal_op(&mut rng, &no_key, &op_data()).is_none());
+        assert!(seal_op(&mut rng, &no_key, &initial_key(no_key.item_id), &op_data()).is_none());
     }
 
     #[test]
@@ -423,7 +618,8 @@ mod tests {
         let mut other = op_header(0, 0);
         other.op_id = OpId::from_bytes([0x78; 16]);
         let mut rng = Nonces::new(2, device_id(0));
-        let other_envelope = seal_op(&mut rng, &other, &op_data()).unwrap();
+        let other_envelope =
+            seal_op(&mut rng, &other, &initial_key(other.item_id), &op_data()).unwrap();
         let mut wrong_statement = record.clone();
         wrong_statement.signed = sign_op(&other, &other_envelope).unwrap();
         assert_eq!(server.upload_op(&wrong_statement), OpAnswer::BadSignature);
@@ -457,11 +653,13 @@ mod tests {
             vault_key_epoch: 0,
             covered: [record.header.dot].into_iter().collect(),
         };
-        let envelope = seal_snapshot(&mut rng, &header, b"stand-in").unwrap();
+        let envelope =
+            seal_snapshot(&mut rng, &header, &initial_key(header.item_id), b"stand-in").unwrap();
         let snapshot = SnapRecord {
             signed: sign_snapshot(&header, &envelope).unwrap(),
             header,
             data: envelope,
+            wrap: None,
             tainted: false,
         };
         let mut bad_signature = snapshot.clone();
@@ -473,9 +671,49 @@ mod tests {
             SnapAnswer::BadSignature
         );
         let mut bad_data = snapshot.clone();
-        bad_data.data = seal_snapshot(&mut rng, &snapshot.header, b"other").unwrap();
+        bad_data.data = seal_snapshot(
+            &mut rng,
+            &snapshot.header,
+            &initial_key(snapshot.header.item_id),
+            b"other",
+        )
+        .unwrap();
         assert_eq!(server.upload_snapshot(&bad_data), SnapAnswer::BadData);
         assert_eq!(server.upload_snapshot(&snapshot), SnapAnswer::Stored);
+    }
+
+    #[test]
+    fn wraps_open_only_under_their_epochs_vault_key() {
+        let item = item_id(0);
+        let key = fresh_key(item, 1, device_id(0)).unwrap();
+        assert_eq!(key_info(&key), Some((item, 1)));
+        assert_ne!(fresh_key(item, 1, device_id(1)), Some(key));
+        // CRYPTO.md §11.6 writer rule, through `ItemKey::is_stale`.
+        assert!(!is_stale(&key, 1) && is_stale(&key, 2));
+        assert!(!is_stale(&initial_key(item), 0) && is_stale(&initial_key(item), 1));
+        let mut rng = Nonces::new(1, device_id(0));
+        let wrap1 = wrap(&mut rng, &key, 1).unwrap();
+        assert_eq!(unwrap(1, item, &wrap1), Some(key));
+        for (epoch, other) in [(0, item), (2, item), (1, item_id(1))] {
+            assert_eq!(unwrap(epoch, other, &wrap1), None, "{epoch}");
+        }
+        // A key created at epoch 1 is never wrapped under an older vault key; a re-wrap keeps
+        // it and opens only under the new vault key.
+        assert!(wrap(&mut rng, &key, 0).is_none());
+        let wrap2 = wrap(&mut rng, &key, 2).unwrap();
+        assert_eq!(unwrap(2, item, &wrap2), Some(key));
+        assert_eq!(unwrap(1, item, &wrap2), None);
+        // An envelope under the fresh key opens only for a reader that holds it.
+        let mut header = op_header(0, 0);
+        header.vault_key_epoch = 1;
+        let envelope = seal_op(&mut rng, &header, &key, &op_data()).unwrap();
+        assert_eq!(envelope_key(&envelope), Some(key));
+        assert!(open_op(&header, &envelope, |k| *k == initial_key(item)).is_none());
+        assert_eq!(open_op(&header, &envelope, |k| *k == key).unwrap().1, key);
+        assert!(!op_opens_under(&header, &envelope, &initial_key(item)));
+        assert!(op_opens_under(&header, &envelope, &key));
+        // The key of another item seals nothing for this one.
+        assert!(seal_op(&mut rng, &header, &initial_key(item_id(1)), &op_data()).is_none());
     }
 
     #[test]
