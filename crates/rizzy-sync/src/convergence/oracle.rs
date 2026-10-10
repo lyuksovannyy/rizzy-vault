@@ -20,10 +20,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rizzy_core::ids::ItemId;
+use rizzy_core::ids::{ItemId, SymmetricKeyId};
 
+use super::crypto;
 use super::server::SnapRecord;
-use super::{crypto, item_key};
 use crate::dot::Dot;
 use crate::header::OpHeader;
 use crate::hlc::Hlc;
@@ -46,6 +46,8 @@ pub(super) struct LedgerOp {
     pub(super) header: OpHeader,
     /// The encoded op data (the plaintext of the op's `ITEM_OP` envelope).
     pub(super) body: Vec<u8>,
+    /// The `key_id` of the item key its envelope is sealed under (a re-issue changes it).
+    pub(super) key_id: SymmetricKeyId,
     /// Its lifecycle marker.
     pub(super) lifecycle: Lifecycle,
     /// Its field writes, `(key, value)`.
@@ -53,9 +55,9 @@ pub(super) struct LedgerOp {
 }
 
 impl LedgerOp {
-    /// The ledger entry of an op with this header and encoded data; `None` if it does not
-    /// parse, which the harness's own encoder never produces.
-    pub(super) fn new(header: OpHeader, body: Vec<u8>) -> Option<Self> {
+    /// The ledger entry of an op with this header, encoded data and item key id; `None` if it
+    /// does not parse, which the harness's own encoder never produces.
+    pub(super) fn new(header: OpHeader, body: Vec<u8>, key_id: SymmetricKeyId) -> Option<Self> {
         let parsed = parse_op(&body).ok()?;
         let lifecycle = parsed.lifecycle();
         let writes = parsed
@@ -71,6 +73,7 @@ impl LedgerOp {
         Some(Self {
             header,
             body,
+            key_id,
             lifecycle,
             writes,
         })
@@ -343,7 +346,17 @@ pub(super) fn replay(
     strict: bool,
 ) -> Result<Replayed, String> {
     let mut merge = ItemMerge::new(item);
-    merge.add_item_key(item_key(item));
+    // The wrap set: the item's initial key and every key an op or snapshot is sealed under.
+    merge.add_item_key(crypto::initial_key(item));
+    for op in ops {
+        merge.add_item_key(op.key_id);
+    }
+    for key in snapshots
+        .iter()
+        .filter_map(|s| crypto::envelope_key(&s.data))
+    {
+        merge.add_item_key(key);
+    }
     for op in ops {
         merge
             .record_header(&op.header)
@@ -353,11 +366,11 @@ pub(super) fn replay(
     // `replay_fresh_item` learns every body first (`learn_body`); an absorption takes them as
     // bodies received with it. The strict replay takes none, the harder case for an honest
     // snapshot.
-    let mut evidence: Vec<(&OpHeader, OpData<'_>)> = Vec::new();
+    let mut evidence: Vec<(&LedgerOp, OpData<'_>)> = Vec::new();
     if !strict {
         for op in ops {
             let data = parse_op(&op.body).map_err(|e| format!("parse_op: {e:?}"))?;
-            evidence.push((&op.header, data));
+            evidence.push((op, data));
         }
     }
     let mut pending: Vec<&LedgerOp> = ops.to_vec();
@@ -367,12 +380,12 @@ pub(super) fn replay(
     loop {
         if !snaps.is_empty() && rng.chance(1, 4) {
             let snap = snaps.swap_remove(rng.below(snaps.len()));
-            absorbed += absorb(&mut merge, item, snap, &evidence, strict)?;
+            absorbed += absorb(&mut merge, snap, &evidence, strict)?;
             continue;
         }
         if !done.is_empty() && rng.chance(1, 6) {
             if let Some(op) = done.get(rng.below(done.len())) {
-                apply(&mut merge, item, op)?;
+                apply(&mut merge, op)?;
             }
             continue;
         }
@@ -386,11 +399,11 @@ pub(super) fn replay(
             break;
         };
         let op = pending.swap_remove(at);
-        apply(&mut merge, item, op)?;
+        apply(&mut merge, op)?;
         done.push(op);
     }
     for snap in snaps {
-        absorbed += absorb(&mut merge, item, snap, &evidence, strict)?;
+        absorbed += absorb(&mut merge, snap, &evidence, strict)?;
     }
     if !pending.is_empty() {
         return Err(format!("{} ops never became ready", pending.len()));
@@ -411,21 +424,20 @@ pub(super) fn replay(
 /// `strict`, a refusal or a disagreement is an error.
 fn absorb(
     merge: &mut ItemMerge,
-    item: ItemId,
     snap: &SnapRecord,
-    evidence: &[(&OpHeader, OpData<'_>)],
+    evidence: &[(&LedgerOp, OpData<'_>)],
     strict: bool,
 ) -> Result<u64, String> {
     let with: Vec<OpInput<'_>> = evidence
         .iter()
-        .map(|(header, data)| OpInput {
-            header,
-            key_id: item_key(item),
+        .map(|(op, data)| OpInput {
+            header: &op.header,
+            key_id: op.key_id,
             data,
         })
         .collect();
     // The record's data is its sealed `ITEM_SNAPSHOT` envelope, opened under its own header.
-    let opened = crypto::open_snapshot(&snap.header, &snap.data)
+    let (opened, _) = crypto::open_snapshot(&snap.header, &snap.data, |_| true)
         .ok_or_else(|| "a snapshot envelope did not open".to_owned())?;
     let data = parse_snapshot(&snap.header.covered, opened.expose_secret())
         .map_err(|e| format!("parse_snapshot: {e:?}"))?;
@@ -453,12 +465,12 @@ fn absorb(
 }
 
 /// Applies one ledger op to `merge`.
-fn apply(merge: &mut ItemMerge, item: ItemId, op: &LedgerOp) -> Result<(), String> {
+fn apply(merge: &mut ItemMerge, op: &LedgerOp) -> Result<(), String> {
     let data = parse_op(&op.body).map_err(|e| format!("parse_op: {e:?}"))?;
     merge
         .apply_op(OpInput {
             header: &op.header,
-            key_id: item_key(item),
+            key_id: op.key_id,
             data: &data,
         })
         .map(|_| ())
