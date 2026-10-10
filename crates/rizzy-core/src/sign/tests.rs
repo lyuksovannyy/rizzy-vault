@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Signature tests: RFC 8032 through the wrappers, `verify_strict` behaviour, the container,
 //! independent known answers for every statement, a round trip and a bit-flip tamper test per
 //! statement, the structural rules and length bounds of each statement, the `account-state`

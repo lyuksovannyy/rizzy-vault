@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes `rizzy-client`'s export-file JSON reader (CRYPTO.md §11.14, §15 item 7): the whole-
 //! file size cap and the strict parser never panic, and the header checks that follow never
 //! panic either.

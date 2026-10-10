@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The rules table of ADR 0016 §3–§5 and ADR 0009, as data.
 //!
 //! **This table is a security boundary.** Review a change to it like a change to `deny.toml`

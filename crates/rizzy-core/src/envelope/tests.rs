@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Envelope tests: registries, context layouts, round trips for every M1 symmetric purpose,
 //! known answers, and the negative tests of CRYPTO.md §15 item 4.
 

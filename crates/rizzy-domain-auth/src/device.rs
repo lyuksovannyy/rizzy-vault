@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Devices: device authentication and request signing (CRYPTO.md §5.10), enrolment (§11.2
 //! step 7), the web vault's certificate (§11.4), device grants (§10.1, §11.3 step 4) and
 //! suspension, the first phase of revocation (§11.8 step 0; ADR 0012 §6).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Error types.
 //!
 //! Rules (CRYPTO.md §9.5, §12.2, §12.3):

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `ItemsPane`'s pure helpers: the sidebar's item filter (`inScope`, `Scope`) and the empty-state
 // text and call-to-action (`emptyState`), including their combination with the existing
 // free-text search (`matches`, fields.ts) the way the pane itself applies them (ItemsPane.tsx

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Per-URI match modes and the match decision (ADR 0037 §4; INV-38).
 //!
 //! [`decide`] is the one function that combines a page's [`NormalizedUrl`], an item URI's

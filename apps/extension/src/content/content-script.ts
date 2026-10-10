@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The content script (ADR 0036 §4, §5; ADR 0014 §2: "plain TypeScript, no wasm, no React").
 // Top frame only for now (ADR 0037 §5 "no cross-origin iframe fill by default" — this file
 // does not even try same-origin-iframe fill yet, a stricter default than the ADR requires,

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the otpauth URI and Base32 secret parsers (CRYPTO.md §11.15, §15 item 7): never
 //! panic, and an accepted URI formats to one of at most `MAX_URI_LEN` bytes that parses to the
 //! same secret and parameters and formats identically again. The parser's label and issuer

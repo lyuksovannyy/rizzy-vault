@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Phone width (redesign slice 2, item 4): at 375×812 the item list and the open item share no
 // screen space — opening an item hides the list and shows a back button, which returns to the
 // list — and the page never gains horizontal scroll.

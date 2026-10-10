@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Test-only WebAuthn wire-format verification (ADR 0039 §4's hand-written CBOR, verified from
 // the *other* side): a minimal CBOR decoder — only the handful of major types `attestationObject`
 // and a COSE EC2 key ever use (unsigned int, negative int, byte string, text string, map) — and

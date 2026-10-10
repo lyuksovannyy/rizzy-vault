@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The compaction job `worker` runs (ADR 0021 §3 "Where it runs", §7).
 //!
 //! `api` stores a snapshot with its clamped VV and store sequence and queues its item

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Slow and anonymous clients (threat model §7.6 "D"): the session is checked before a large
 //! body is read, the listener's header-read timeout, and a shutdown that a stalled client
 //! cannot hold open.

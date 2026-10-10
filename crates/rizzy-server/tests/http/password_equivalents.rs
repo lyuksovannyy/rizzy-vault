@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Threat model INV-1: "the server never receives a value from which the master password can be
 //! verified offline without the OPRF seed. Registration, login and password change send only
 //! OPAQUE protocol messages (RFC 9807)." Its verification: "an integration test captures every

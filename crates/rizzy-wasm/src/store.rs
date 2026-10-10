@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The byte-blob codec of the encrypted local cache ([ADR 0026] §3, §4) for a host that stores
 //! raw bytes only (`IndexedDB`), as opposed to the typed `SQLite` columns `rv` writes.
 //!

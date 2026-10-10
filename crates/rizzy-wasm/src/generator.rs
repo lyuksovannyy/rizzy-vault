@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The password generator (CRYPTO.md §12.1; ROADMAP §4.2 "generate"), as `rv generate` offers
 //! it: characters or words, drawn from the CSPRNG in Rust. No session is needed.
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-vault backup-secrets`: the secrets file encrypted under an operator passphrase
 //! ([ADR 0011] "Backups" and owner decision 3; CRYPTO.md §5.11 `SERVER_SECRETS_BACKUP`).
 //!

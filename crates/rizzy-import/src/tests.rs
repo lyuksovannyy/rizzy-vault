@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! End-to-end tests of each importer on small synthetic fixtures. No fixture is a real export
 //! and no value is a real secret.
 

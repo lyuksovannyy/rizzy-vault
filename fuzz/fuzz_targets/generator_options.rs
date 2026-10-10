@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the password generator's option parsing and checks (CRYPTO.md §12.1; ADR 0013 §3
 //! rule 8): never panic, and every password or passphrase the generator accepts to make obeys
 //! the options it was given.

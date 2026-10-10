@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Escape and outside-click dismissal for a menu/popover (redesign slice 2 follow-up fix, item 3:
 // "Esc closes dialogs/popovers and returns focus"). `ConfirmDialog` (packages/ui) already gets
 // this through its own `onKeyDown` and backdrop button; this hook gives the same two behaviours

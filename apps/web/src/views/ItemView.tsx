@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // One item: its fields, masked where the core conceals them, with reveal and copy; its URIs as
 // safe links (INV-42); its TOTP code; its password history (`PasswordHistory.tsx`); edit,
 // trash, restore and purge.

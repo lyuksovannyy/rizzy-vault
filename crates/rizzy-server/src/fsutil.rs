@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The file-system facts the server is responsible for (ADR 0010 §4; CRYPTO.md §5.8, §5.11):
 //! bounded reads, private files (mode 0600), atomic replacement, and whether one path lies
 //! inside another.

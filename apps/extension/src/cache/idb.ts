@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The IndexedDB adapter (ADR 0036 §3, §6): "a small TypeScript module... that implements the
 // host-provided storage capability... calling `rizzy-wasm`'s `store` bindings with raw bytes it
 // never interprets." Implements `@rizzy-vault/core`'s `CacheStore` contract exactly: one

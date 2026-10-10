@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Shared Playwright helpers for the web vault's end-to-end specs (signup/login/lock, the
 // secret-field INV-68 check): kept in one module so `vault.spec.ts`, `keyboard-nav.spec.ts` and
 // `phone.spec.ts` exercise login/signup/lock the same way, rather than three copies drifting.

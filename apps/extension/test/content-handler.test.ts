@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `handleContentScriptRequest` must never hand `decide()` a `pageUrl` the sender-validation step
 // did not itself vouch for (THREAT_MODEL.md row 2, "a compromised/malicious content script").
 // Pure logic, no browser APIs: `decide()` (the stub) is deterministic and synchronous.

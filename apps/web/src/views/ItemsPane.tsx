@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The item list with search, and the selected item's view or editor. In the trash, the list
 // shows trashed items, and the view offers restore and purge instead of edit.
 //

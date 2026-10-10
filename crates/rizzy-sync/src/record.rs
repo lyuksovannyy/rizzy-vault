@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The item-record layer (ADR 0018 §2 "Record"): the `data` of `ITEM_OP` and `ITEM_SNAPSHOT`
 //! envelopes, `item_schema_version` 1.
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! URL matching for autofill (ADR 0037, ADR 0038), over [`rizzy_client::matching`], which in
 //! turn is `rizzy-client`'s thin wrap of `rizzy-match` (that module's own docs explain the
 //! split: no decision is made twice, in no layer).

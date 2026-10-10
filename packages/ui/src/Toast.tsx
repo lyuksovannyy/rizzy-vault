@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // A small, auto-dismissing notice stack (redesign slice 2, item 1 of the follow-up list):
 // success/error/info toasts, each with its own dismiss button, stacked newest-last.
 //

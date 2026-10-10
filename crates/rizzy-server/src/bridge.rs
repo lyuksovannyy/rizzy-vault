@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The two cross-domain traits, implemented by wiring in the other domain's public API
 //! ([ADR 0016] R4: "A domain that needs something from another defines a trait for it.
 //! `rizzy-server` implements the trait by wiring in the other domain's public API").

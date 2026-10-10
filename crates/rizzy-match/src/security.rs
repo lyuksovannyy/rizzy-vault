@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The security rules of ADR 0037 §5, each as its own pure decision function, "not a
 //! convention left to callers": the extension's background/content-script pair calls these
 //! directly, so every client enforces them identically.

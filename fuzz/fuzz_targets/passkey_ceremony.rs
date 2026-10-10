@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the `WebAuthn` passkey ceremonies (`rizzy_client::passkey::{create_credential,
 //! get_assertion}`, [ADR 0039] §1, §2, §4) on attacker/relying-party-controlled input: the
 //! origin and `rpId` strings a malicious or buggy page can send through the extension's

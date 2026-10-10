@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! URL normalisation (ADR 0037 §2) and bare-domain normalisation (ADR 0038 §1).
 //!
 //! [`NormalizedUrl::parse`] is the one entry point every match mode and security rule builds

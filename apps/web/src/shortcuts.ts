@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Keyboard shortcuts (redesign slice 2, item 3): pure dispatch logic, kept separate from the
 // `keydown` listener that calls it so it can be unit-tested without a DOM (module docs of
 // `@rizzy-vault/ui`'s `Toast.tsx`: this workspace's Vitest runs with no jsdom).

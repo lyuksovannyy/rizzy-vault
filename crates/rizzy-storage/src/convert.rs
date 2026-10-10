@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Integer conversions between the protocol's unsigned types and SQL's signed 64-bit integer.
 //!
 //! Both engines store integers as signed 64-bit values (SQLite `INTEGER`, PostgreSQL `BIGINT`,

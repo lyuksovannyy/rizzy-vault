@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Plaintext export: JSON and CSV, behind the warning and the typed acknowledgement
 //! ([ADR 0027] §3–§5; ROADMAP §4.2 "plaintext JSON/CSV with scary warning").
 //!

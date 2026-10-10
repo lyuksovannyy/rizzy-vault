@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Backup and restore primitives (ADR 0011 "Backups", point 9).
 //!
 //! - **Native SQLite copy:** [`Database::vacuum_into`], a consistent copy of the whole file with

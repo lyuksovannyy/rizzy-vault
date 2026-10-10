@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The content-script <-> inline-menu-iframe `postMessage` protocol's own shape validation
 // (`inline-menu/protocol.ts`): pure logic, no DOM needed. `window.postMessage` delivers to any
 // listener regardless of claimed source, so both message shapes are checked defensively even

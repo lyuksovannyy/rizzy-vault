@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The UI ↔ Worker messages: shape checks, transfers, the client's call and second-factor
 // round trips.
 import { describe, expect, it } from "vitest";

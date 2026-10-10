@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the Firefox CSV importer (ADR 0002 point 2; threat model A16): row mapping, the
 //! host-name extraction for item names, and the `timeCreated` reader. It may not panic, and
 //! every item that comes out keeps the importer's guarantees ([`import_common::check`]).

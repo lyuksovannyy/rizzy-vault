@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The late-edit and trash notices (gap 02): "An edit from <device> arrived for an item you
 // deleted permanently. Restore it as a new item?" (ADR 0018 §3 "Surfacing") and "deleted on X
 // while it was being edited on Y" (ADR 0012 §5 "Active wins"), worded from the ids the Worker

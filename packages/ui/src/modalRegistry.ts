@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // A tiny shared registry of "is any accessible modal dialog open right now" (redesign slice 2
 // follow-up fix). `ConfirmDialog` instances live in several unrelated components across
 // `apps/web` (the lock-with-unsaved-changes dialog in `VaultView`, trash/purge in `ItemView`,

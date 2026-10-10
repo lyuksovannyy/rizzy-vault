@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The only component that renders a link from item data (INV-42; `safe-url.ts`). A URL that is
 // not `http:` or `https:` renders as plain text. Links open in a new tab with no opener and no
 // referrer, so the site gets no handle on the vault page.

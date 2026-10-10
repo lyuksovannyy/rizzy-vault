@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Keyboard shortcuts and list navigation (redesign slice 2, item 3; `src/shortcuts.ts`): `/`
 // focuses search, arrow keys move the list selection and Enter opens the selected row, `N`
 // starts a new item, `?` opens the shortcuts help (and Escape closes it), and a shortcut like

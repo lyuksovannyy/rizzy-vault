@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The label registry (CRYPTO.md §2, §4.3 "Label registry rule").
 //!
 //! `LABEL(x)` is the ASCII string `"rizzy-vault/v1/" + x`. Every HKDF `info`, signed message

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the strict parsers of the canonical op and snapshot headers (ADR 0012 §3), which
 //! read the header bytes of every `op` and `snapshot` statement the server stores and every
 //! client fetches. They run before any field of a verified statement is trusted, so they must

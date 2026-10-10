@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The theme choice in browser storage (src/theme.ts; CRYPTO.md §11.4).
 import { describe, expect, it } from "vitest";
 import { THEME_STORAGE_KEY, type ThemeStore, loadTheme, saveTheme } from "../src/theme.ts";

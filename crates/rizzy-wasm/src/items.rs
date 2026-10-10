@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Items across the boundary: what a list or an item view shows, and what an edit asks for
 //! (ADR 0013 §3 rule 3, "Plaintext crosses at the smallest useful size"; ADR 0018 §6–§7; the
 //! writes are `rizzy-client`'s `items` and `lists`).

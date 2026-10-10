@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The IndexedDB database the browser extension's durable-device cache lives in (ADR 0026 §3
 // "IndexedDB (M2)"; ADR 0036 §6). `packages/core`'s `cacheStoreNames()` — not this file — is now
 // the single source of truth for which object stores exist and what each is named: that is

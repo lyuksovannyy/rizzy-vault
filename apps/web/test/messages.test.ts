@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Every code gets a message, and no message echoes input (INV-48).
 import { describe, expect, it } from "vitest";
 

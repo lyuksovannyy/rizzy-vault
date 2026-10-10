@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! A bounded JSON reader (RFC 8259) into a tree of zeroizing strings, for the Bitwarden JSON
 //! export, 1PUX's `export.data` and rizzy-vault's own plaintext JSON export.
 //!

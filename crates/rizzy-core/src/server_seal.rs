@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Server-side sealing (CRYPTO.md §5.11; audit target 10 in §1).
 //!
 //! These objects are sealed **by the server, for the server**. That protects them from a reader

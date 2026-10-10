@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Playwright for the extension (ADR 0014 §3). Chromium only: a persistent context loading the
 // unpacked `dist/chromium` build (Firefox's `about:debugging` temporary-add-on flow has no
 // Playwright-automatable equivalent, so Firefox e2e coverage is `not_done`). Run

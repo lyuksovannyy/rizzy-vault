@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The key-byte half of the INV-15 canary (threat model INV-15: the account key, vault keys,
 //! item keys and private keys never leave a client unencrypted) and the envelope canary of
 //! CRYPTO.md §15 item 5 ("the `E_dev`, `E_local`, `E_ks` and `ACCOUNT_KEY_FORWARD` envelope

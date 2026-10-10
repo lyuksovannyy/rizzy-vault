@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Moving an OPAQUE record to the server's current setup, and restarting a registration whose
 //! setup was retired (CRYPTO.md §5.8 "Rotating `server_setup`" steps 3–4; [ADR 0031] points 2,
 //! 3 and 8).

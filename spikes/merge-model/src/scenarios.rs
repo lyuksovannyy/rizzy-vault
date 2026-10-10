@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Scenario-family enumerators. Each family generates scenarios from small option menus (one
 //! option per device); the explorer then runs every interleaving of each scenario.
 //!

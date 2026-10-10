@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-match` — URL normalisation, registrable-domain and match-mode decisions, and the
 //! signed equivalence list (ADR 0037, ADR 0038).
 //!

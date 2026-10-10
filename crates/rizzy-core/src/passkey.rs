@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! ES256 (ECDSA P-256, SHA-256) key generation and signing for `WebAuthn` passkey credentials
 //! (CRYPTO.md §3; [ADR 0039] §2, §3, §5; [ADR 0009] Amendments, 2026-10-09).
 //!

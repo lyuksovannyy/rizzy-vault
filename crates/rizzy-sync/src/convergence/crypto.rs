@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The harness's cryptography: real `rizzy-core` keys, signatures and envelopes, under a
 //! seeded test RNG (ADR 0012 §12: "real `rizzy-core` crypto with a test RNG").
 //!

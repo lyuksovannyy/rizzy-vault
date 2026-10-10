@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! What never goes backwards ([ADR 0026] §4, "What never goes backwards"; threat model INV-25,
 //! INV-27): the check every [`Changeset`] passes before the host writes it.
 //!

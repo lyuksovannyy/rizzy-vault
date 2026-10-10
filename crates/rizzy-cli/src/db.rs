@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `SQLite` executor of the local cache ([ADR 0026] §3–§5; ADR 0019 §5: "sqlx sits in …
 //! `rizzy-cli` from M1"; owner decision on ADR 0026 open question 1: the sqlx code lives in the
 //! leaf for M1).

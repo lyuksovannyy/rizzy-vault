@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The persistent device state and encrypted local cache ([ADR 0026]): the record codec, the
 //! row model, the schema, the changeset each step returns, the floors that never go backwards,
 //! and the load.

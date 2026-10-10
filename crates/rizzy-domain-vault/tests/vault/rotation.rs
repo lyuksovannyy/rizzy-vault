@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The vault half of a key rotation (ADR 0025 §3–§5; CRYPTO.md §11.6 step 9; ADR 0012 §6), on
 //! real SQLite (or PostgreSQL, see `common::Slot`), with real envelopes from `rizzy-core`: the
 //! self-grant under a fresh account key, the wrap set under the old and the new vault key.

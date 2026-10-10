@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rv`'s TLS client against loopback `tokio-rustls` test servers (ADR 0030 Decision 7).
 //!
 //! Each test starts a TLS server on a free loopback port with a committed test certificate

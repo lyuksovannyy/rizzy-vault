@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Dishonest snapshots of the `faulty` family: ADR 0021 §8 "snapshots that claim unheld dots,
 //! up to `u64::MAX`", and the ADR 0018 §3 "Snapshots are claims" lies of the merge spike's
 //! fault kinds (`spikes/merge-model/src/replica.rs` `Fault`: `ClaimNext`, `OmitValue`,

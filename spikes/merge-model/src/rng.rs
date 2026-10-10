@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Deterministic xorshift64 RNG for the seeded explorer (ADR 0012 §12 "a deterministic scheduler
 //! and a seeded RNG drive everything").
 

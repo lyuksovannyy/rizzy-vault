@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Error types for URL normalisation and the equivalence list (ADR 0037, ADR 0038).
 //!
 //! None of these carry secrets: a URL and an equivalence list are both public data (ADR 0037

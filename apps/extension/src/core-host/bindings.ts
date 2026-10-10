@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Host glue over `@rizzy-vault/core`'s durable-device surface (ADR 0036 §1–§3). Lives in
 // `core-host/`, not `core/` (where this module's unimplemented predecessor, `core/bindings.ts`,
 // used to live): `eslint.config.mjs` allows a *value* import of `@rizzy-vault/core` only from

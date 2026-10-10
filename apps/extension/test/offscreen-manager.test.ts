@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `ensureOffscreenDocument` (`src/background/service-worker.ts`) must never let two concurrent
 // callers both see `hasDocument() === false` and both call `chrome.offscreen.createDocument` —
 // the second such call throws ("Only a single offscreen document may be created"). This is the

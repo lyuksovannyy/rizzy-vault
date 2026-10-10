@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The item state, the op merge (ADR 0012 §4-§5 as refined by ADR 0018 §3), the canonical form
 //! (ADR 0018 §4) and the snapshot parse checks the merge relies on (ADR 0018 §5).
 

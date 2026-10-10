@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The Firefox background page's entry point (ADR 0036 §2): "the background page on Firefox
 // (MV3 `background.scripts`, which Firefox keeps non-ephemeral unlike Chromium's event page)."
 // Firefox has no `chrome.offscreen`; its manifest (`manifest.firefox.json`) loads this script

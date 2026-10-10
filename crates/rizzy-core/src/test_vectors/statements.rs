@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `statements.json`: every signed statement of CRYPTO.md §10.2 and the §9.3 container.
 //!
 //! The vectors tell one account's story, so the statements refer to each other: signup (the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Writers of op and snapshot data (ADR 0018 §3), and the §4 state-hash input.
 //!
 //! Each writer runs in three passes:

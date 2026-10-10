@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Recovery with the Emergency Kit (CRYPTO.md §11.9), on a computer where this account is not
 //! enrolled.
 //!

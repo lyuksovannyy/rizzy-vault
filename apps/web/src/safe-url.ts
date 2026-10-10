@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The one URL check of the web vault (ADR 0014 §2 "One openUrl / SafeLink helper"; INV-42):
 // only `http:` and `https:` URLs taken from item fields are ever opened. `javascript:`,
 // `data:`, `file:`, `blob:` and every other scheme are shown as text and never become a link.

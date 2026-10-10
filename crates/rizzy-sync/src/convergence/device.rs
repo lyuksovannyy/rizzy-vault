@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! A simulated client device: one [`VaultLog`] and one [`ItemMerge`] per item, driven through
 //! the client cycle the `causal` module documents (verify, plan, absorb, commit, deliver), the
 //! own-chain upload bookkeeping, "Server behind" and the healing request (ADR 0012 §4, §7;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-domain-auth` — the server's auth domain (roadmap M1 step 3; [ADR 0016] §3 row
 //! `rizzy-domain-auth`; [ADR 0010] §5; CRYPTO.md §5, §10.2, §11): OPAQUE server side,
 //! sessions, device authentication and request signing, devices, key bundles, the signed

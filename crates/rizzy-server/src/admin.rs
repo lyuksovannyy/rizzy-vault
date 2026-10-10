@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The admin subcommands the Accepted ADRs name for M1, as far as they are specified
 //! ([ADR 0010] §2, §4; [ADR 0011] "Migrations", "Backups"; CRYPTO.md §5.8, §5.11).
 //!

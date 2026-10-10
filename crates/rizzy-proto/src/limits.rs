@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Every size limit of the `/api/v1` types, with its source, and the character sets of the
 //! [`Text`](crate::wire::Text) fields.
 //!

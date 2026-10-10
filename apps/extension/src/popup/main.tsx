@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The popup's entry point (ADR 0036 §4, §6): a short-lived React app that never loads wasm
 // directly, reaching the core only through `core/client.ts`'s messaging-backed client.
 import { StrictMode } from "react";

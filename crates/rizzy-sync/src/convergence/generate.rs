@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Generated histories (ADR 0012 §12 "Generated histories", ADR 0021 §8) and the budget.
 //!
 //! A history is drawn from a seed and a *family*, after the merge spike's scenario families

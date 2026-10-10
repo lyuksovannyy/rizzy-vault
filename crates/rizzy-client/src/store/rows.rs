@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The cache schema (cache format 1), its row model, and the changeset a step returns
 //! ([ADR 0026] §3, §4).
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The auto-lock timer (ADR 0036 §3: "a configurable idle timeout... default 15 minutes").
 // Uses a fake, injectable clock (`lifecycle.ts`'s `Clock`) so this is a pure unit test with no
 // real timers and no browser APIs.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! A client device: HLC, per-vault device seq, causal delivery, authoring, snapshots, absorption,
 //! re-issue after a stale-epoch rejection, Fetch processing with the chain check, the ADR 0012 §6
 //! recomputation, and the answers' client rules (evidence merge, merged snapshot, kept headers).

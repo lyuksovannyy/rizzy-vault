@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The long-lived core-holding context's own lifetime, measured, not assumed (ADR 0036 §2's
 // design: the offscreen document holds the decrypted `DurableSession` so a real MV3 service
 // worker — which Chromium is free to suspend after ~30s of inactivity — never has to). A 6-minute

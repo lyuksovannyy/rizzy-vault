@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Atomic changes of the signed account state that carry credentials, keys or devices
 //! (CRYPTO.md §11 "Replacing credentials" and "Secrets before commit"; §11.3 step 5, §11.5,
 //! §11.6, §11.8 steps 1–3, §11.9 steps 5–6; ADR 0012 §6).

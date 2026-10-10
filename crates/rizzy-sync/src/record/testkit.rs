@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Helpers shared by the record tests: ids, dots, HLCs and version vectors from single bytes,
 //! hex, and [`Spec`], an independent writer of the ADR 0018 §3 layouts.
 //!

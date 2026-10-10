@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Base64 (standard alphabet, no URL-safe substitution — this extension's own messaging
 // boundary only, never a wire format any other client reads) encode/decode for the one new
 // class of message payload that is not already a plain string/number/boolean: WebAuthn byte

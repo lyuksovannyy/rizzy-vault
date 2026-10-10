@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the field-key grammar of the item record (ADR 0018 §7), which the record parser
 //! applies to every key of every op and snapshot (§5 rules 2 and 3) and writers apply before
 //! encrypting (§10). Keys are user content (a tag's name is in its key), so the check must

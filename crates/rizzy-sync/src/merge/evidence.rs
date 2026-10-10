@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! "Snapshots are claims" (ADR 0018 §3, owner decision 14): what a replica takes from a
 //! verified snapshot, when it refuses one, and what it reports.
 //!

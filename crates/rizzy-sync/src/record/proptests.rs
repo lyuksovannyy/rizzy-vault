@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Record property tests (ADR 0018 §12 "Property tests", first bullet).
 //!
 //! Generated op data, live snapshots and tombstones, over random grammar keys (known and

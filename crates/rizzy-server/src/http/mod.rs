@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The public listener's router: the `api` role under `/api/`, the `web` role everywhere else
 //! ([ADR 0010] §1, §4; [ADR 0002] point 3; [ADR 0028] items 1, 3, 10 and 15).
 //!

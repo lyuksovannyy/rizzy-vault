@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Property tests: ADR 0012 §12 properties 1–3 in miniature, with ADR 0018 §12's tombstone,
 //! absorption and no-silent-loss properties.
 //!

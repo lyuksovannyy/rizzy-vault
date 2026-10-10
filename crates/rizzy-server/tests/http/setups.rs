@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Retiring old OPAQUE setups end to end ([ADR 0031] point 11, integration): `rizzy-client`
 //! against the router and the admin commands, over a real `SQLite` database and secrets file.
 //!

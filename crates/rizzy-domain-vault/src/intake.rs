@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Verifying one uploaded op or snapshot record before anything about it is trusted (ADR 0012
 //! §3, §7 "Upload"; CRYPTO.md §10.2). Pure: no I/O, no clock.
 //!

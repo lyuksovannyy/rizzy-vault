@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Secrets crossing the boundary as bytes (ADR 0019 §3, "Secrets cross as bytes"; CRYPTO.md
 //! §12.2, "JavaScript strings").
 //!

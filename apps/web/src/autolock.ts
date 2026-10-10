@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Auto-lock after inactivity (THREAT_MODEL §7.1 "I": "Lock clears decrypted state. Auto-lock.").
 // Any keyboard, pointer or wheel input restarts the timer. The web vault persists nothing
 // (CRYPTO.md §11.4), so a lock means a new OPAQUE login to continue.

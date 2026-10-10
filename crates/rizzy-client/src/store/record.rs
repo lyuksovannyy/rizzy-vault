@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The device-state record, record version 1 ([ADR 0026] §2): the one opaque byte string a
 //! durable device persists for its enrolment (ADR 0013 §3 rule 2).
 //!

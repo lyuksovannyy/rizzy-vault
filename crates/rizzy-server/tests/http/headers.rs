@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Security headers and CSP (threat model INV-49, §7.7), body limits (§7.6 "D"), and the
 //! uniform error answers (ADR 0002 point 3).
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Loads the generated wasm module from disk for the tests (`cargo xtask build-wasm` writes it).
 import { readFileSync } from "node:fs";
 

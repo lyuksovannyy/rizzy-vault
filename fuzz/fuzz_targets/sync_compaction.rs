@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes `rizzy-sync`'s compaction rules (ADR 0021 §2–§4, §9), which the server runs on a
 //! client-supplied covered VV and on its own rows, which a damaged database can make
 //! inconsistent. None may panic, and each answer must keep its rule's guarantee.

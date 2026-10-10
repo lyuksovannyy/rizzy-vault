@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Surfacing tests for an edit that arrives after a trash or a purge (ADR 0012 §5 "Active
 //! wins"; ADR 0018 §3 "Surfacing"): `VaultSync::concurrent_trash_device`,
 //! `VaultSync::late_edit_devices`, `VaultSync::mark_late_edits_surfaced` and

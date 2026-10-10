@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The long-lived context's message handling, shared between the Chromium offscreen document
 // (`offscreen.ts`) and the Firefox background page (`background-page.ts`) — ADR 0036 §2: "one
 // long-lived context holds the instance... for the whole extension lifetime." This is the ONE

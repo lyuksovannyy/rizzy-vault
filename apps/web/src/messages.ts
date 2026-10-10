@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // User-facing text for the stable error codes (ADR 0013 §3 rule 4: errors are codes; the host
 // words them). A code without an entry is shown as a generic failure with the code itself, so
 // that a report names it. No message ever includes a value the user typed (INV-48).
