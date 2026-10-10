@@ -155,7 +155,7 @@ function bool(v: unknown): boolean {
   return v;
 }
 
-/** A non-negative safe-integer argument (a list position), or `invalid_input`. */
+/** A non-negative safe-integer argument (a list position, a date in ms), or `invalid_input`. */
 function index(v: unknown): number {
   if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) {
     throw new CoreError("invalid_input");
@@ -250,7 +250,12 @@ async function run(m: CallMessage): Promise<unknown> {
     // Dates only; one value per reveal (ADR 0013 §3 rule 3): the history is never sent whole.
     passwordHistory: () => current().passwordHistory(str(a[0])),
     revealPasswordHistory: () =>
-      current().revealPasswordHistory(str(a[0]), str(a[1]) as never, index(a[2])),
+      current().revealPasswordHistory(
+        str(a[0]),
+        str(a[1]) as never,
+        index(a[2]),
+        a[3] === undefined ? undefined : index(a[3]),
+      ),
     takeNotices: () => current().takeNotices(),
     restoreLateAsNew: () => current().restoreLateAsNew(str(a[0]), str(a[1]) as never),
     totp: () => current().totp(str(a[0])),

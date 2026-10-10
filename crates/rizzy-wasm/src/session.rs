@@ -516,23 +516,29 @@ impl Session {
     }
 
     /// The value of one password-history entry, as [`Session::password_history`] listed it:
-    /// call it only on the user's request (ADR 0013 §3 rule 3).
+    /// call it only on the user's request (ADR 0013 §3 rule 3). `changed_ms` is the date the
+    /// listing gave for the entry (`undefined` when it gave none); an entry at `index` with
+    /// another date is refused, so a listing made stale by a sync never reveals a value under
+    /// the wrong date.
     ///
     /// # Errors
     /// As [`Session::item`]; `invalid_input` for an unknown source; `unknown_item` for an
-    /// entry that is not there (any more).
+    /// entry that is not there (any more) or whose date differs.
     #[wasm_bindgen(js_name = revealPasswordHistory)]
     pub fn reveal_password_history(
         &self,
         id: &str,
         source: &str,
         index: usize,
+        changed_ms: Option<u64>,
     ) -> Result<String, CoreError> {
         let vault = &self.inner()?.vault;
         let item = visible_item(vault, id)?;
-        Ok(items::reveal_history(vault, item, source, index)?
-            .as_str()
-            .to_owned())
+        Ok(
+            items::reveal_history(vault, item, source, index, changed_ms)?
+                .as_str()
+                .to_owned(),
+        )
     }
 
     /// The notices not yet handed over in this session (gap 02), each handed over once: an edit
