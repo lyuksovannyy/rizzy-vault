@@ -20,15 +20,25 @@ export const DEVICE_KINDS: Readonly<Record<string, string>> = {
 };
 
 /**
+ * How many digits of a device id a label shows: one length, shared by `deviceLabel` below and
+ * by the Devices pane's own display (`DevicesPane.tsx`), including its own-session caption, so
+ * the two surfaces of this app always agree. `rv`'s notices use the same length
+ * (`device_label`'s `DEVICE_LABEL_HEX_LEN`, `docs/rv.md`), though that agreement is a human
+ * convention across the two codebases, not shared code.
+ */
+export const DEVICE_LABEL_HEX_LEN = 16;
+
+/**
  * How a notice names a device: "this browser" for this session, else the kind and the first
- * 8 digits of the id as the Devices pane shows them. Devices have no names. A device the
- * device list does not hold (another web session, which is never listed) is "device <id>".
+ * {@link DEVICE_LABEL_HEX_LEN} digits of the id, a prefix of the full id the Devices pane
+ * shows. Devices have no names. A device the device list does not hold (another web session,
+ * which is never listed) is "device <id>".
  */
 export function deviceLabel(id: string, devices: readonly DeviceView[], ownId: string): string {
   if (id === ownId) {
     return "this browser";
   }
-  const short = id.slice(0, 8);
+  const short = id.slice(0, DEVICE_LABEL_HEX_LEN);
   const device = devices.find((d) => d.id === id);
   if (device === undefined) {
     return `device ${short}`;

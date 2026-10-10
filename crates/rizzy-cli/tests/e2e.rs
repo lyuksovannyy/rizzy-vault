@@ -3038,7 +3038,9 @@ fn item_show_lists_password_history() {
     assert_eq!(a.field(&item, "login.password"), "third-password");
 }
 
-/// The first 8 hex digits of the id of the device `rv` runs as, from `device list`.
+/// The first 16 hex digits of the id of the device `rv` runs as, from `device list`: the
+/// length `rv sync`'s notices use (`device_label`'s `DEVICE_LABEL_HEX_LEN`), a prefix of the
+/// full id this line prints.
 fn own_device_prefix(rv: &Rv) -> String {
     let list = rv.ok(&["device", "list"], &[]);
     let line = list
@@ -3046,7 +3048,7 @@ fn own_device_prefix(rv: &Rv) -> String {
         .iter()
         .find(|l| l.ends_with("this device"))
         .unwrap_or_else(|| panic!("{:?}", list.out));
-    line[..8].to_owned()
+    line[..16].to_owned()
 }
 
 /// Whether a note is one of the gap 02 notices.

@@ -653,13 +653,17 @@ export interface FieldView {
 /**
  * One password-history entry, without its value (ADR 0013 §3 rule 3): `merge` is the history
  * of `login.password` (ADR 0012 §5), `imported` came from another manager (`pwhist`, ADR 0018
- * §7). `index` is its position within its source; `changedMs` the date it stopped being
- * current (`merge`) or the other manager's date (`imported`, when it gave one).
+ * §7). `index` is its position within its source, for display only; `changedMs` the date it
+ * stopped being current (`merge`) or the other manager's date (`imported`, when it gave one),
+ * also display only, since two entries can share one date. `id` is the entry's own identity
+ * (never shared, never absent): pass it to {@link VaultSession.revealPasswordHistory}, not
+ * `index` or `changedMs`, to bind a reveal to the exact entry this listing showed.
  */
 export interface HistoryEntry {
   readonly source: "merge" | "imported";
   readonly index: number;
   readonly changedMs: number | undefined;
+  readonly id: string;
 }
 
 /**
@@ -1134,23 +1138,23 @@ export class VaultSession {
         source: h.source as HistoryEntry["source"],
         index: h.index,
         changedMs: h.changedMs === undefined ? undefined : Number(h.changedMs),
+        id: h.id,
       }),
     );
   }
 
   /**
    * One password-history entry's value, as {@link passwordHistory} listed it, on the user's
-   * request only. Pass the entry's `changedMs` as listed: when a sync has since moved another
-   * entry to that position, the core refuses (`unknown_item`) instead of revealing it.
+   * request only. Pass the entry's `id` as listed: when a sync has since moved another entry
+   * to that position, the core refuses (`unknown_item`) instead of revealing it.
    */
   revealPasswordHistory(
     id: string,
     source: HistoryEntry["source"],
     index: number,
-    changedMs: number | undefined,
+    entryId: string,
   ): string {
-    const ms = changedMs === undefined ? undefined : BigInt(Math.trunc(changedMs));
-    return call(() => this.#s().revealPasswordHistory(id, source, index, ms));
+    return call(() => this.#s().revealPasswordHistory(id, source, index, entryId));
   }
 
   /**
