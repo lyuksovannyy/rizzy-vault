@@ -12330,10 +12330,13 @@ pub mod items {
     //!   password history, ADR 0018 §7) is left out: the schema shows its values, but they are
     //!   former passwords, so they cross only as a password-history entry.
     //! - **Password history** ([`HistoryEntryView`]) carries, per entry, its source (`merge` for
-    //!   the history of `login.password`, ADR 0012 §5; `imported` for `pwhist`), its position and
-    //!   its date. Never the value: one value crosses through
-    //!   [`crate::Session::reveal_password_history`], on the user's request, so the Worker never
-    //!   sends the whole history to the UI thread (ADR 0013 §3 rule 3).
+    //!   the history of `login.password`, ADR 0012 §5; `imported` for `pwhist`), its position, its
+    //!   date and its identity (the entry's dot for `merge`, the `pwhist` element id for
+    //!   `imported`): never two entries share one, unlike the date. Never the value: one value
+    //!   crosses through [`crate::Session::reveal_password_history`], on the user's request, so
+    //!   the Worker never sends the whole history to the UI thread (ADR 0013 §3 rule 3). The host
+    //!   names the entry's identity, not its date, on that call, so a sync that only reorders the
+    //!   list between the listing and the reveal still reveals the entry the user asked for.
     //! - **An edit** ([`ItemDraft`]) is built in Rust from the user's input, call by call, and
     //!   written as one op by [`crate::Session::create_item`] or [`crate::Session::edit_item`],
     //!   where every write passes the schema checks. The draft holds the typed values in zeroizing
@@ -12346,7 +12349,7 @@ pub mod items {
     use std::collections::HashMap;
     use rizzy_client::ClientError;
     use rizzy_client::items::{
-        FieldKey, ItemId, ItemLifecycle, ItemType, Value,
+        Dot, FieldKey, ItemId, ItemLifecycle, ItemType, Value,
     };
     use rizzy_client::lists::{ListMove, ListPlace, MAX_WRITES_PER_OP};
     use rizzy_client::rizzy_core::item::key::ElementId;
@@ -15098,6 +15101,14 @@ pub mod items {
     /// [`HistoryEntryView::source`] of password history imported from another manager (`pwhist`,
     /// ADR 0018 §7).
     pub const HISTORY_IMPORTED: &str = "imported";
+    /// Hex encoding of a dot's canonical bytes (`device_id ‖ seq`, [`Dot::encode`]): a merge
+    /// history entry's identity, stable across a sync that only reorders the list (ADR 0012 §2).
+    /// Not a persistent or wire format: computed fresh for one in-memory host call, never stored.
+    fn dot_hex(dot: Dot) -> String {
+        let mut buf = Vec::with_capacity(Dot::ENCODED_LEN);
+        dot.encode(&mut buf);
+        hex(&buf)
+    }
     #[wasm_bindgen()]
     #[__wasm_bindgen_retried]
     #[doc =
@@ -15113,8 +15124,16 @@ pub mod items {
         index: usize,
         #[doc =
         " When the value stopped being current (`merge`), or the source manager\'s own date"]
-        #[doc = " (`imported`, if it gave one), in Unix milliseconds."]
+        #[doc =
+        " (`imported`, if it gave one), in Unix milliseconds. Display only."]
         changed_ms: Option<u64>,
+        #[doc =
+        " The entry\'s identity: the hex of its dot (`merge`) or its `pwhist` element id"]
+        #[doc =
+        " (`imported`), the id [`crate::Session::reveal_password_history`] takes. Unlike"]
+        #[doc =
+        " `changed_ms`, never shared by two entries and never absent."]
+        id: String,
     }
     #[automatically_derived]
     impl ::core::clone::Clone for HistoryEntryView {
@@ -15124,6 +15143,7 @@ pub mod items {
                 source: ::core::clone::Clone::clone(&self.source),
                 index: ::core::clone::Clone::clone(&self.index),
                 changed_ms: ::core::clone::Clone::clone(&self.changed_ms),
+                id: ::core::clone::Clone::clone(&self.id),
             }
         }
     }
@@ -15131,9 +15151,9 @@ pub mod items {
     impl ::core::fmt::Debug for HistoryEntryView {
         #[inline]
         fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-            ::core::fmt::Formatter::debug_struct_field3_finish(f,
+            ::core::fmt::Formatter::debug_struct_field4_finish(f,
                 "HistoryEntryView", "source", &self.source, "index",
-                &self.index, "changed_ms", &&self.changed_ms)
+                &self.index, "changed_ms", &self.changed_ms, "id", &&self.id)
         }
     }
     #[automatically_derived]
@@ -15501,15 +15521,14 @@ pub mod items {
                 };
             self.source.to_owned()
         }
-        #[doc =
-        " The position to pass to [`crate::Session::reveal_password_history`]."]
+        #[doc = " The position within its source, for display and list keys."]
         #[must_use]
         pub fn index(&self) -> usize {
             #[automatically_derived]
             const _: () =
                 {
                     #[doc =
-                    " The position to pass to [`crate::Session::reveal_password_history`]."]
+                    " The position within its source, for display and list keys."]
                     #[must_use]
                     #[export_name = "historyentryview_index_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_HistoryEntryView_index(me:
@@ -15546,7 +15565,7 @@ pub mod items {
             const _: () =
                 {
                     #[doc =
-                    " The position to pass to [`crate::Session::reveal_password_history`]."]
+                    " The position within its source, for display and list keys."]
                     #[must_use]
                     #[no_mangle]
                     #[doc(hidden)]
@@ -15568,7 +15587,7 @@ pub mod items {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x10HistoryEntryView\x01E The position to pass to [`crate::Session::reveal_password_history`].\0\0\0\0\x05index\x01\x01\0\0\0\0\x01\0\x02\x05index\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x10HistoryEntryView\x01; The position within its source, for display and list keys.\0\0\0\0\x05index\x01\x01\0\0\0\0\x01\0\x02\x05index\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -15692,6 +15711,101 @@ pub mod items {
                 };
             self.changed_ms
         }
+        #[doc =
+        " The id to pass to [`crate::Session::reveal_password_history`]."]
+        #[must_use]
+        pub fn id(&self) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The id to pass to [`crate::Session::reveal_password_history`]."]
+                    #[must_use]
+                    #[export_name = "historyentryview_id_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_HistoryEntryView_id(me:
+                            <HistoryEntryView as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<HistoryEntryView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<HistoryEntryView>();
+                                            let me =
+                                                unsafe {
+                                                    <HistoryEntryView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.id();
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The id to pass to [`crate::Session::reveal_password_history`]."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_historyentryview_id_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x10HistoryEntryView\x01? The id to pass to [`crate::Session::reveal_password_history`].\0\0\0\0\x02id\x01\x01\0\0\0\0\x01\0\x02\x02id\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.id.clone()
+        }
     }
     #[automatically_derived]
     const _: () =
@@ -15737,6 +15851,7 @@ pub mod items {
                         source: HISTORY_MERGE,
                         index,
                         changed_ms: Some(entry.changed_ms),
+                        id: dot_hex(entry.dot),
                     });
         let imported =
             vault.imported_password_history(item).into_iter().enumerate().map(|(index,
@@ -15745,33 +15860,34 @@ pub mod items {
                         source: HISTORY_IMPORTED,
                         index,
                         changed_ms: entry.changed_ms,
+                        id: entry.id.as_str().to_owned(),
                     });
         merge.chain(imported).collect()
     }
     /// The value of one password-history entry as text: call it only on the user's request (ADR
     /// 0013 §3 rule 3). The history is read again here and the index bounds-checked: an index past
     /// the end is `unknown_item`. A sync between the listing and the reveal can shift the entries
-    /// of the same item, so the caller passes the date it showed for the entry
-    /// ([`HistoryEntryView::changed_ms`]) and an entry whose date differs is `unknown_item` too:
-    /// a stale position never reveals a value under another entry's date.
+    /// of the same item, so the caller passes the entry's own id as the listing gave it
+    /// ([`HistoryEntryView::id`]), and an entry at `index` with another id is `unknown_item` too:
+    /// a stale position never reveals a value under another entry's identity, including when the
+    /// two happen to share the same displayed date, or when neither has one (ADR 0012 §2).
     ///
     /// # Errors
     /// `invalid_input` for a source other than `merge` or `imported`, or a value with no text
-    /// form; `unknown_item` for an index past the end, a date that does not match, or an imported
+    /// form; `unknown_item` for an index past the end, an id that does not match, or an imported
     /// entry without a value.
     pub(crate) fn reveal_history(vault: &VaultSync, item: ItemId,
-        source: &str, index: usize, changed_ms: Option<u64>)
+        source: &str, index: usize, entry_id: &str)
         -> CoreResult<Zeroizing<String>> {
         let value =
             match source {
                             HISTORY_MERGE =>
                                 vault.password_history(item).into_iter().nth(index).filter(|entry|
-                                            Some(entry.changed_ms) ==
-                                                changed_ms).map(|entry| entry.value),
+                                            dot_hex(entry.dot) == entry_id).map(|entry| entry.value),
                             HISTORY_IMPORTED =>
                                 vault.imported_password_history(item).into_iter().nth(index).filter(|entry|
-                                            entry.changed_ms ==
-                                                changed_ms).and_then(|entry| entry.value),
+                                            entry.id.as_str() ==
+                                                entry_id).and_then(|entry| entry.value),
                             _ => return Err(ClientError::InvalidInput.into()),
                         }.filter(|v|
                             !v.is_cleared()).ok_or(ClientError::UnknownItem)?;
@@ -25149,9 +25265,7 @@ pub mod session {
         PLAINTEXT_EXPORT_PHRASE, PLAINTEXT_EXPORT_WARNING, PlaintextExportAck,
         csv_export_warning,
     };
-    use rizzy_client::items::{
-        DeviceId, FieldEdit, ItemId, TRASH_RETENTION_MS,
-    };
+    use rizzy_client::items::{Dot, FieldEdit, ItemId, TRASH_RETENTION_MS};
     use rizzy_client::login::WebSession;
     use rizzy_client::passkey::get_assertion;
     use rizzy_client::rizzy_core::ids::AccountId;
@@ -25220,14 +25334,17 @@ pub mod session {
         /// The RNG.
         rng: Rng,
         /// The "deleted on X while it was being edited on Y" notices already handed to the host
-        /// (item, X, Y), so that [`Session::take_notices`] hands each one over once.
+        /// (item, the losing Trashed dot, the displayed Active dot), so that
+        /// [`Session::take_notices`] hands each one over once. Keyed on the dots, not just the
+        /// device pair: a conflict that resolves and then recurs between the very same two devices
+        /// is a new conflict with new dots, and must be handed over too.
         ///
         /// Session memory only, on purpose: it is dropped with the session, so a notice shows again
         /// after the next unlock. Keeping it across sessions would mean a new record in the local
         /// cache, a persistent-format change that needs an ADR 0026 amendment first (gap 02). The
         /// late-edit notices' marks live in the same place for the same reason (`rizzy-client`'s
         /// `VaultSync::mark_late_edits_surfaced`).
-        shown_trash_notices: BTreeSet<(ItemId, DeviceId, DeviceId)>,
+        shown_trash_notices: BTreeSet<(ItemId, Dot, Dot)>,
     }
     #[wasm_bindgen()]
     #[__wasm_bindgen_retried]
@@ -28416,38 +28533,37 @@ pub mod session {
         #[doc =
         " The value of one password-history entry, as [`Session::password_history`] listed it:"]
         #[doc =
-        " call it only on the user\'s request (ADR 0013 §3 rule 3). `changed_ms` is the date the"]
+        " call it only on the user\'s request (ADR 0013 §3 rule 3). `entry_id` is the entry\'s own"]
         #[doc =
-        " listing gave for the entry (`undefined` when it gave none); an entry at `index` with"]
+        " id as the listing gave it ([`crate::items::HistoryEntryView::id`]); an entry at `index`"]
         #[doc =
-        " another date is refused, so a listing made stale by a sync never reveals a value under"]
-        #[doc = " the wrong date."]
+        " with another id is refused, so a listing made stale by a sync never reveals a value"]
+        #[doc = " under another entry\'s identity."]
         #[doc = ""]
         #[doc = " # Errors"]
         #[doc =
         " As [`Session::item`]; `invalid_input` for an unknown source; `unknown_item` for an"]
-        #[doc = " entry that is not there (any more) or whose date differs."]
+        #[doc = " entry that is not there (any more) or whose id differs."]
         pub fn reveal_password_history(&self, id: &str, source: &str,
-            index: usize, changed_ms: Option<u64>)
-            -> Result<String, CoreError> {
+            index: usize, entry_id: &str) -> Result<String, CoreError> {
             #[automatically_derived]
             const _: () =
                 {
                     #[doc =
                     " The value of one password-history entry, as [`Session::password_history`] listed it:"]
                     #[doc =
-                    " call it only on the user\'s request (ADR 0013 §3 rule 3). `changed_ms` is the date the"]
+                    " call it only on the user\'s request (ADR 0013 §3 rule 3). `entry_id` is the entry\'s own"]
                     #[doc =
-                    " listing gave for the entry (`undefined` when it gave none); an entry at `index` with"]
+                    " id as the listing gave it ([`crate::items::HistoryEntryView::id`]); an entry at `index`"]
                     #[doc =
-                    " another date is refused, so a listing made stale by a sync never reveals a value under"]
-                    #[doc = " the wrong date."]
+                    " with another id is refused, so a listing made stale by a sync never reveals a value"]
+                    #[doc = " under another entry\'s identity."]
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
                     " As [`Session::item`]; `invalid_input` for an unknown source; `unknown_item` for an"]
                     #[doc =
-                    " entry that is not there (any more) or whose date differs."]
+                    " entry that is not there (any more) or whose id differs."]
                     #[export_name =
                     "session_revealPasswordHistory_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_revealPasswordHistory(me:
@@ -28489,16 +28605,16 @@ pub mod session {
                             <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4,
                         arg4_1:
-                            <<Option<u64> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim1,
                         arg4_2:
-                            <<Option<u64> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim2,
                         arg4_3:
-                            <<Option<u64> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim3,
                         arg4_4:
-                            <<Option<u64> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4)
                         ->
                             wasm_bindgen::convert::WasmRet<<Result<String, CoreError> as
@@ -28544,15 +28660,16 @@ pub mod session {
                                                                 wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
                                                             arg3_3, arg3_4))
                                                 };
-                                            wasm_bindgen::__rt::ensure_unwind_safe::<Option<u64>>();
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
                                             let arg4 =
                                                 unsafe {
-                                                    <Option<u64> as
-                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Option<u64>
-                                                                as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                                                                 wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
                                                             arg4_3, arg4_4))
                                                 };
+                                            let arg4 = &*arg4;
                                             let _ret =
                                                 me.reveal_password_history(arg1, arg2, arg3, arg4);
                                             _ret
@@ -28568,18 +28685,18 @@ pub mod session {
                     #[doc =
                     " The value of one password-history entry, as [`Session::password_history`] listed it:"]
                     #[doc =
-                    " call it only on the user\'s request (ADR 0013 §3 rule 3). `changed_ms` is the date the"]
+                    " call it only on the user\'s request (ADR 0013 §3 rule 3). `entry_id` is the entry\'s own"]
                     #[doc =
-                    " listing gave for the entry (`undefined` when it gave none); an entry at `index` with"]
+                    " id as the listing gave it ([`crate::items::HistoryEntryView::id`]); an entry at `index`"]
                     #[doc =
-                    " another date is refused, so a listing made stale by a sync never reveals a value under"]
-                    #[doc = " the wrong date."]
+                    " with another id is refused, so a listing made stale by a sync never reveals a value"]
+                    #[doc = " under another entry\'s identity."]
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
                     " As [`Session::item`]; `invalid_input` for an unknown source; `unknown_item` for an"]
                     #[doc =
-                    " entry that is not there (any more) or whose date differs."]
+                    " entry that is not there (any more) or whose id differs."]
                     #[no_mangle]
                     #[doc(hidden)]
                     pub extern "C-unwind" fn __wbindgen_describe_session_revealPasswordHistory_e09cc0eb35f8b583() {
@@ -28591,7 +28708,7 @@ pub mod session {
                         <&str as WasmDescribe>::describe();
                         <&str as WasmDescribe>::describe();
                         <usize as WasmDescribe>::describe();
-                        <Option<u64> as WasmDescribe>::describe();
+                        <&str as WasmDescribe>::describe();
                         <Result<String, CoreError> as WasmDescribe>::describe();
                         <Result<String, CoreError> as WasmDescribe>::describe();
                     }
@@ -28604,7 +28721,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\tU The value of one password-history entry, as [`Session::password_history`] listed it:W call it only on the user's request (ADR 0013 \xc2\xa73 rule 3). `changed_ms` is the date theU listing gave for the entry (`undefined` when it gave none); an entry at `index` withW another date is refused, so a listing made stale by a sync never reveals a value under\x10 the wrong date.\0\t # ErrorsS As [`Session::item`]; `invalid_input` for an unknown source; `unknown_item` for an: entry that is not there (any more) or whose date differs.\0\x04\x02id\0\0\0\x06source\0\0\0\x05index\0\0\0\nchanged_ms\0\0\0\0\0\x15revealPasswordHistory\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\tU The value of one password-history entry, as [`Session::password_history`] listed it:X call it only on the user's request (ADR 0013 \xc2\xa73 rule 3). `entry_id` is the entry's ownX id as the listing gave it ([`crate::items::HistoryEntryView::id`]); an entry at `index`T with another id is refused, so a listing made stale by a sync never reveals a value  under another entry's identity.\0\t # ErrorsS As [`Session::item`]; `invalid_input` for an unknown source; `unknown_item` for an8 entry that is not there (any more) or whose id differs.\0\x04\x02id\0\0\0\x06source\0\0\0\x05index\0\0\0\x08entry_id\0\0\0\0\0\x15revealPasswordHistory\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -28633,7 +28750,7 @@ pub mod session {
             let vault = &self.inner()?.vault;
             let item = visible_item(vault, id)?;
             Ok(items::reveal_history(vault, item, source, index,
-                                changed_ms)?.as_str().to_owned())
+                                entry_id)?.as_str().to_owned())
         }
         #[doc =
         " The notices not yet handed over in this session (gap 02), each handed over once: an edit"]
@@ -28788,8 +28905,8 @@ pub mod session {
                         });
                 }
                 if let Some(trash) = inner.vault.concurrent_trash(item) &&
-                        inner.shown_trash_notices.insert((item, trash.trashed_by,
-                                trash.edited_by)) {
+                        inner.shown_trash_notices.insert((item, trash.trashed_dot,
+                                trash.edited_dot)) {
                     out.push(Notice {
                             kind: NOTICE_CONCURRENT_TRASH,
                             item: hex(item.as_bytes()),

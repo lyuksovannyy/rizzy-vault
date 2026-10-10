@@ -89,7 +89,7 @@ export interface CoreApi {
     id: string,
     source: HistoryEntry["source"],
     index: number,
-    changedMs: number | undefined,
+    entryId: string,
   ): string;
   /** The late-edit and trash notices not yet handed over in this session (gap 02). */
   takeNotices(): Notice[];

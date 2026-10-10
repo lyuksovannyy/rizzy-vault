@@ -7,7 +7,7 @@ import type { DeviceView } from "@rizzy-vault/core";
 import { useEffect, useState } from "react";
 
 import { codeOf } from "../core-client.ts";
-import { DEVICE_KINDS as KINDS } from "../notices.ts";
+import { DEVICE_KINDS as KINDS, DEVICE_LABEL_HEX_LEN } from "../notices.ts";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText } from "./common.tsx";
 
@@ -32,7 +32,7 @@ export function DevicesPane(props: { readonly ctx: VaultContext }) {
     <div className="panel">
       <h2>Devices</h2>
       <p className="muted">
-        This browser session is device {ctx.session.deviceId.slice(0, 8)}…, a temporary web
+        This browser session is device {ctx.session.deviceId.slice(0, DEVICE_LABEL_HEX_LEN)}…, a temporary web
         session that is not listed. To revoke a device, use <code>rv devices revoke</code>.
       </p>
       <ErrorText code={error} />
@@ -52,7 +52,7 @@ export function DevicesPane(props: { readonly ctx: VaultContext }) {
             <tbody>
               {devices.map((d) => (
                 <tr key={d.id}>
-                  <td className="mono">{d.id.slice(0, 16)}…</td>
+                  <td className="mono">{d.id.slice(0, DEVICE_LABEL_HEX_LEN)}…</td>
                   <td>{KINDS[d.kind] ?? d.kind}</td>
                   <td>{new Date(d.createdAtMs).toLocaleString()}</td>
                   <td>{d.revoked ? "Revoked" : "Active"}</td>
