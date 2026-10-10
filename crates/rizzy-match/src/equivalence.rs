@@ -363,7 +363,8 @@ impl EquivalenceList {
     /// ([`EquivalenceListError::UnsupportedVersion`], [`EquivalenceListError::Malformed`]);
     /// [`EquivalenceListError::BadSignature`] if the signature does not verify;
     /// [`EquivalenceListError::NotNewer`] if `list_version` is not strictly greater than
-    /// `highest_accepted_version` (INV-39: "reject a list with an equal or lower version").
+    /// `highest_accepted_version` (INV-39; ADR 0038 §2: "reject a list with an equal or lower
+    /// version").
     pub fn verify(
         wire: &[u8],
         public_key: &[u8; 32],
