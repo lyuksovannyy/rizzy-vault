@@ -7,7 +7,7 @@ Delete or rewrite this file when its next steps are done.
 
 - `main` is at `5922c1d` (ADR 0042 proposed). This branch adds the Windows CI fixes, the gap work below and this file.
 - ADR 0042 (account-settings layout for website matching) is still **Proposed**. Nothing that depends on it is built.
-- The full audit output (evidence, governing ADRs, implementation notes) is `docs/handoff/gap-audit.json` on the branch `wip/client-m1`. Gap ids below refer to it. The `wip/*` branches are superseded by the commits below and can be deleted.
+- The full audit output (evidence, governing ADRs, implementation notes) is `docs/handoff/gap-audit.json` on the branch `wip/client-m1`. Gap ids below refer to it. Keep that branch: it holds the only copy of the audit. Its code is superseded by the commits below.
 - The Windows CI fix (`Db::create` closes the SQLite connection before removing a failed file) is verified on Linux and macOS. **Not yet verified on Windows**: the next CI run proves it.
 
 ## Done
@@ -20,29 +20,25 @@ Delete or rewrite this file when its next steps are done.
 
 ## Next work: cleared by an Accepted ADR or needing no ADR
 
-Recheck each gap's evidence before you implement it: the audit's verifiers refuted nothing, so treat it as weak evidence.
+Recheck each gap's evidence before you implement it: the audit's verifiers refuted nothing, so treat it as weak evidence. Read each gap's `verdict.corrected_adr_gate` in the audit too: several carry a stop condition.
 
 ### Product
 
-- **01 (rest)** Web vault view of password history (the client API exists).
-- **02 (rest)** Hosts (rv, web vault) surface the late-edit and purge notices (the client API exists).
-- **36** Community equivalence-list PR process: templates, label, CONTRIBUTING section (ADR 0038).
+- **01 (rest)** Web vault view of password history (the client API exists). ADR 0013 §3 rule 3 applies: reveal only on the user's request, and the Worker never sends the whole history to the UI thread eagerly.
+- **02 (rest)** Hosts (rv, web vault) surface the late-edit and purge notices (the client API exists). Keep the "already shown" set in session memory only: persisting it is a cache-format change and needs an ADR 0026 amendment first.
+- **36** Community equivalence-list PR process: templates and a CONTRIBUTING section (ADR 0038). The owner creates the GitHub label.
 
 ### Tests and verification that CLAUDE.md, CRYPTO.md or THREAT_MODEL.md require
 
-- **05/42** Wycheproof suites (CRYPTO.md §15 item 3): XChaCha20-Poly1305, ChaCha20-Poly1305, HKDF-SHA-256, HMAC-SHA-256, HMAC-SHA-1, X25519, Ed25519.
-- **06** RFC 9807 OPAQUE vectors against the pinned opaque-ke.
-- **07/43** KAT vector files run as wasm32 under Node (CRYPTO.md §15 item 8, ADR 0019 §10).
 - **09** Tag each malicious-server test with its ETH attack class (CRYPTO.md §15 item 5).
-- **04/21** INV-15 canary test, extended to logs at the most verbose level by INV-48.
+- **04/21** INV-15 canary test, extended to logs at the most verbose level by INV-48. Stop if the test cannot reach key bytes without a new public API or a key export: that touches a security boundary.
 - **X1** INV-1 request-capture test. **X2** INV-6 per-flow Argon2id count test.
-- **X3** INV-37 adversarial-page e2e tests. **X4** INV-40 manifest check (an xtask). **X5** INV-63 storage-inspection test.
-- **16** Convergence harness: key rotation (property 6), stale-epoch answers, re-issued ops, kind-4 authors, two or more faulty devices (ADR 0012 §12, ADR 0021 §8).
+- **X3** INV-37 adversarial-page e2e tests. **X4** INV-40 manifest check (an xtask; its CI wiring is blocked below). **X5** INV-63 storage-inspection test.
+- **16** Convergence harness: key rotation (property 6), stale-epoch answers, re-issued ops, kind-4 authors, two or more faulty devices (ADR 0012 §12, ADR 0021 §8). It may reproduce gap 14; if it does, report the failing property, do not weaken the test.
 
-### Tooling and licensing
+### Licensing
 
-- **19** `cargo xtask check-tables` (ADR 0011 point 7, ADR 0016 R4).
-- **40** SPDX headers on every source file, plus a check (ADR 0017 Decision 6).
+- **40** SPDX headers on every source file, plus a check (ADR 0017 Decision 6): plain `AGPL-3.0-only` until the Decision 3 permission is committed.
 
 ## Blocked: needs the owner
 
@@ -58,6 +54,10 @@ Recheck each gap's evidence before you implement it: the audit's verifiers refut
 - **14:** open convergence bug. A paged Fetch can put a tombstone cover in one page and its purge in the next, and the merge then refuses the cover. Fixing it touches ADR 0021, so it needs an ADR.
 - **24:** with `embed-web`, the `web` role serves more than `/` and `/index.html`, which contradicts ADR 0028 item 15. The code or the ADR must change.
 - **08:** normative item-record vectors through real envelopes (ADR 0018 §12) need an owner decision.
+- **05/42** Wycheproof suites (CRYPTO.md §15 item 3): XChaCha20-Poly1305, ChaCha20-Poly1305, HKDF-SHA-256, HMAC-SHA-256, HMAC-SHA-1, X25519, Ed25519. Needs the owner's go-ahead to download the Apache-2.0 vector files, and a check of attribution against ADR 0017 if whole suite files are committed.
+- **06** RFC 9807 OPAQUE vectors need opaque-ke's Identity KSF. The owner decided on 2026-09-26 that no weakened KSF path may exist in rizzy-core; whether an integration test under `crates/rizzy-core/tests/` is acceptable is the owner's call.
+- **07/43** KAT vectors as wasm32 under Node (ADR 0019 §10) need `wasm-bindgen-test` (a new dev-dependency the owner approves) and a CI job.
+- **19** `cargo xtask check-tables` (ADR 0011 point 7, ADR 0016 R4): ADR 0011 point 5 does not cover rizzy-storage's `storage_*` tables or its backup queries that read every domain (ADR 0023). The owner confirms that rule before the check is written.
 - **CI workflow edits.** CLAUDE.md forbids editing `.github/workflows/` without an explicit ask. The edits waiting for that ask:
   - 15: nightly convergence run;
   - 17: rootless Podman and compose;
