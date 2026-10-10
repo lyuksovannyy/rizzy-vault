@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Every cap the importers apply (threat model A16: a crafted import file must not exhaust
 //! memory or time). Each is checked before the work it bounds.
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The `window.postMessage` protocol between the relay content script (`content/passkey-relay.ts`,
 // running in the untrusted page's own window) and the extension-origin passkey-consent iframe it
 // creates (ADR 0039 §2; the same asymmetric-trust pattern `inline-menu/protocol.ts` documents in

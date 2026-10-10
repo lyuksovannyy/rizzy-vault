@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The durable-device (ADR 0036) and matching (ADR 0037) wrappers, without a server: bad input,
 // cache-corrupt refusals, and the matcher's pure decisions. The full cycle against a real
 // server (enrol, authenticate, reopen) is e2e.test.ts's job.

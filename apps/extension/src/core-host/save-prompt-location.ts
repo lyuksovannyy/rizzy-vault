@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The save-prompt-by-location index (ROADMAP §4.4 "save/update on submit"; the fix for the
 // save-prompt race `apps/extension/README.md`'s residual note describes). Pure and
 // synchronous — no session, no wasm, no `crypto.randomUUID` of its own — so it is

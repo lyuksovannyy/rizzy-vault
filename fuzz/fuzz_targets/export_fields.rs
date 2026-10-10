@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the export-file field decoders and the server-secrets backup header (CRYPTO.md
 //! §11.14, §5.11, §15 item 7): they never panic, the export and backup headers accept exactly
 //! the same fields, an accepted header encodes back to the same text, and no `data` value opens

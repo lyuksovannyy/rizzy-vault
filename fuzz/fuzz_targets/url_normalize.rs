@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes `rizzy-match`'s URL and bare-domain normalisers (ADR 0037 §2): never panic, and
 //! [`NormalizedUrl::parse`] is idempotent on what it accepts (normalising its own
 //! `normalized_string()` output again must give the same value and the same string back —

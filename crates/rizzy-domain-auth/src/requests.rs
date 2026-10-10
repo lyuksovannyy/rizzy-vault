@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `rizzy-proto` entry points of the flows whose domain functions take typed arguments:
 //! credential and settings changes, suspension, recovery and TOTP enrolment (CRYPTO.md §11
 //! "Replacing credentials", §11.5, §11.8 step 0, §11.9, §11.15).

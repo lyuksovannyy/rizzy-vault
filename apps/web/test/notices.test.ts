@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The late-edit and trash notices' wording (gap 02; ADR 0018 §3, ADR 0012 §5) and the
 // password-history row labels (gap 01).
 import type { DeviceView, Notice } from "@rizzy-vault/core";

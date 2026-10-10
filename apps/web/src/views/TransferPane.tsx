@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Export and import (ROADMAP §4.2; CRYPTO.md §11.14; ADR 0027; owner decision 2026-10-05).
 //
 // - Every export, encrypted or plaintext, first needs the Secret Key and master password typed

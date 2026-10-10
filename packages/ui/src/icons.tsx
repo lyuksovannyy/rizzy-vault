@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Inline SVG icon components for the web vault (ADR 0014 §2: static markup only, no icon
 // font, no third-party origin). Every icon is `aria-hidden` and carries no text of its own: the
 // visible label beside it (a button's own accessible name) is what screen readers announce, so

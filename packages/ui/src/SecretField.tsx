@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The one secret-field component (ADR 0014 §2 "Secret input fields"; THREAT_MODEL INV-68, A14).
 //
 // Every secret input of the web surfaces — the master password, the Secret Key, the recovery

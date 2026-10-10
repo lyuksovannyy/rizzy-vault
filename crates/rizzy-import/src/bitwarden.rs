@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Bitwarden's unencrypted JSON export (ADR 0002 point 2; M1 imports the unencrypted export
 //! only, ADR 0002 owner decision 1).
 //!

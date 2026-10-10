@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The per-device chains of one vault, as a client sees them: causal delivery, deduplication
 //! and gap detection, cursors and acknowledgements, and the revocation cut-off ([ADR 0012] §4
 //! steps 1–2, §6, §7; [ADR 0021] §4, §9; CRYPTO.md §10.2 rule (c), §11.8 step 4; threat model

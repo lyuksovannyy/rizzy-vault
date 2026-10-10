@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Exhaustive and seeded-random exploration, trace minimisation and rendering.
 //!
 //! **Exhaustive.** A scenario is a setup prefix plus one program per actor (devices, then the

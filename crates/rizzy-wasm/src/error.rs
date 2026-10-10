@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The one error type that crosses the boundary (ADR 0013 §3 rule 4: "Errors are typed and
 //! carry no secrets. They cross as enums with stable codes").
 //!

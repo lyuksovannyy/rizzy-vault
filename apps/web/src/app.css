@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+
 /* The web vault's styles: static CSS only (ADR 0014 §2 "No runtime CSS-in-JS"; the INV-49 CSP
    refuses inline styles). Colours, spacing, type and radius come from the token properties of
    packages/ui (tokens.css). */

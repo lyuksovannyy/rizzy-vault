@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Key-hierarchy tests: independent known answers for the §4.3 derivations and the signed
 //! device grant, round trips of every M1 wrapped-key object, context binding (a wrap moved to
 //! another item, vault, device, account or epoch does not open), the seal-time consistency

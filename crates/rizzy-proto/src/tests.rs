@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Message-level tests: known-answer JSON for representative messages, serde round trips of
 //! every message type, rejection of unknown and oversize fields in requests, tolerance of
 //! unknown fields in responses, and redacted `Debug` output of messages that carry secrets.

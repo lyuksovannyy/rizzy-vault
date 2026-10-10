@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Account enumeration (CRYPTO.md §5.9) and rate limits (ADR 0010 §5, INV-7).
 
 use rizzy_core::ids::AccountId;

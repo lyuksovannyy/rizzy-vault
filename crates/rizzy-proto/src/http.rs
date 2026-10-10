@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The HTTP conventions of `/api/v1` that the server and every client share ([ADR 0028] items
 //! 1, 4 and 5): the endpoint paths, the bearer-token header and the two request-signing
 //! headers.

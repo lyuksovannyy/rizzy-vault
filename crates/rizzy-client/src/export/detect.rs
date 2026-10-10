@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Recognising the format of a file the user imports (owner decision 2026-10-05: "the app
 //! recognises the file format itself"), so the common case needs no format choice.
 //!

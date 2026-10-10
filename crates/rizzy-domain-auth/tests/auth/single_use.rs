@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Rows used at most once (CRYPTO.md §5.10, §5.11) stay used on every path, and a login
 //! started before the OPAQUE record was replaced cannot finish after it (§11.5 step 5, INV-59).
 

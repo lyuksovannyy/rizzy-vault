@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The hold after the plaintext-export warning (owner decision 2026-10-05): a visible countdown,
 // and the confirm control disabled until it ends. The core holds the same rule
 // (`plaintext_export_hold`, rizzy-client's export gate); this module is the visible half.

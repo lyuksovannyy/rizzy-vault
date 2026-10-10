@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rv` — the rizzy-vault command-line client, as a library the binary and the end-to-end
 //! tests share (ROADMAP §4.2, M1: "CLI client (`rv`)"; [ADR 0013] §1–§2; ADR 0016 §3 notes).
 //!

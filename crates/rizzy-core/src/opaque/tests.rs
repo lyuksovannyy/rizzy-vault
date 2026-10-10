@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Tests of the OPAQUE wrapper (CRYPTO.md §5, §15 items 1, 4 and 5): registration and login
 //! round trips, the Context bindings (origin, `kdf_id`), the refusing KSF sentinel, the
 //! fake-record path, known answers for `pw_in` and the fake derivations, server-state

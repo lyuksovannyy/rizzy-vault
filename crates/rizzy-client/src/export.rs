@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Export: the encrypted export file, its payload, and the plaintext exports (CRYPTO.md
 //! §11.14; [ADR 0027]; ROADMAP §4.2 "Export: encrypted JSON (own format) + plaintext JSON/CSV
 //! with scary warning"; threat model A16).

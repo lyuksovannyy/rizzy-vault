@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `xtask` command line: usage errors exit with code 2 and never panic (CLAUDE.md).
 
 use std::ffi::OsString;
@@ -13,6 +15,7 @@ fn help_prints_every_command() {
     assert!(stdout.contains("check-deps"), "{stdout}");
     assert!(stdout.contains("check-clippy"), "{stdout}");
     assert!(stdout.contains("check-signoff"), "{stdout}");
+    assert!(stdout.contains("check-spdx"), "{stdout}");
 }
 
 #[test]
@@ -30,6 +33,9 @@ fn unknown_or_missing_command_exits_with_usage_error() {
         &["check-signoff", "--squash", "main...HEAD"][..],
         &["check-signoff", "--squash", "main..HEAD", "extra"][..],
         &["check-signoff", "--other", "main..HEAD"][..],
+        &["check-spdx", "extra"][..],
+        &["check-spdx", "--other"][..],
+        &["check-spdx", "--fix", "extra"][..],
     ] {
         let out = Command::new(BIN).args(args).output().unwrap();
         assert_eq!(out.status.code(), Some(2), "args: {args:?}");

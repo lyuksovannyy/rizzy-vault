@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // How the web vault lays out items: the fixed fields of each writable M1 item type (ADR 0018
 // §7), their labels, and the grouping of a field list into fixed fields, URIs, custom fields
 // and tags. Which fields are concealed is the core's answer (`FieldView.concealed`), never

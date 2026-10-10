@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The signed global equivalence list (ADR 0038 §1–§3) and the merged equivalence view
 //! (ADR 0038 §5; ADR 0037 §6–§7).
 //!

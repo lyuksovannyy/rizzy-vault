@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Opening and loading a cache ([ADR 0026] §4 steps 5 and 7, §5).
 //!
 //! The file is untrusted input: it is read back from a place anyone with the user's rights can

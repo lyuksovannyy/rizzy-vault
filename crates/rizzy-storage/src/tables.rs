@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The tables a logical backup carries, with their columns, in restore order (ADR 0011
 //! "Backups").
 //!

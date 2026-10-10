@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Every Worker request has a deadline, and a lock aborts the requests in flight, so a stalled
 // server cannot hold the Worker's queue (`bounded-fetch.ts`).
 import { afterEach, describe, expect, it, vi } from "vitest";

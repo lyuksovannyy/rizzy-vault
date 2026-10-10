@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // INV-42: only `http:` and `https:` URLs from item fields are ever opened (unit test, as the
 // invariant's check column requires).
 import { describe, expect, it } from "vitest";

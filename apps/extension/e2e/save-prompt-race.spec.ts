@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The save-prompt race fix (`apps/extension/README.md`'s residual note;
 // `core-host/save-prompt-location.ts`): a login form whose submit *really* navigates — unlike
 // `autofill-and-save.spec.ts`'s own `loginPageHtml`, which deliberately stays on one document

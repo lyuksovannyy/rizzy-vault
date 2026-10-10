@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `rv` commands (ROADMAP §4.2: "CLI client (`rv`) — list, get, add, generate, copy
 //! TOTP", with import, export, devices and rotation).
 //!

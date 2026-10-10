@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Vault rows, vault self-grants and the item-key wrap set (CRYPTO.md §4.2: "`VAULT_KEY_SELF_GRANT`
 //! | Server, `vault` domain"; "`ITEM_KEY_WRAP` | Server, `vault` domain: the current wrap set").
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Copying a value to the clipboard, and clearing it after a timeout (THREAT_MODEL A14, NG-1:
 // "The clipboard is cleared after a timeout, but only if it still holds our value").
 //

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `rv` command line: `--version` and `--help` succeed, and usage errors exit with code 2
 //! and never panic, even on an argument that is not UTF-8 (CLAUDE.md: no panics). `rv generate`
 //! runs offline, so its flags are tested here too.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The page-world shim <-> relay content script channel (`content/passkey-protocol.ts`): no
 // sender authentication (module docs there on why), but every field is still shape- and
 // length-bounded before `passkey-relay.ts` ever forwards it into the real extension-messaging

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `rizzy-vault` command line, run as a process: `--version`, usage and configuration
 //! errors (exit 2, never a panic, even on an argument that is not UTF-8), and the `secrets`,
 //! `backup-secrets`, `migrate`, `backup` and `restore` admin commands against a temporary

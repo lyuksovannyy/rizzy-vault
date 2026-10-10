@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `WebAuthn` passkey ceremonies at the wasm boundary ([ADR 0039] §5: "`rizzy-wasm` exposes the
 //! coarse calls... that `rizzy-client`'s state machine implements"), over
 //! [`rizzy_client::passkey`].

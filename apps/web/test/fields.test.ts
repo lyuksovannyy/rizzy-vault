@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Edits write only the keys the user changed (ADR 0018 §11); concealed fields are never
 // cleared by an empty input; grouping and search.
 import type { FieldView } from "@rizzy-vault/core";

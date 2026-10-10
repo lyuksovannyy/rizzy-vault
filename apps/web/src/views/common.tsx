@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Small shared pieces of the views: the error line and the "busy" hook.
 import { useCallback, useRef, useState } from "react";
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the login-name and server-origin normalisers (CRYPTO.md §2): never panic, and each is
 //! idempotent on what it accepts.
 //!

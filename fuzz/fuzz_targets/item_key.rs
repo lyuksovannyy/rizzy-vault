@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the field-key grammar (ADR 0018 §7, §10) and the tag keys built on it: never panic,
 //! and an accepted key is exactly what its parts rebuild. Part of CRYPTO.md §15 item 7
 //! ("item-record parsers …: the key grammar") and ADR 0018 §12.

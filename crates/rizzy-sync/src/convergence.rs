@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The ADR 0012 §12 convergence harness: simulated devices and a simulated server running the
 //! whole engine (the `causal` layer, the per-item `merge`, the record layer and the server's
 //! `compaction` rules) inside one test process, driven by a seeded scheduler.

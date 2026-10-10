@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // An accessible confirm dialog (redesign slice 2, item 2), replacing `window.confirm` across
 // the web vault: trash, purge, lock-with-unsaved-changes, two-factor disable.
 //

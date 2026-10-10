@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Playwright for the web vault (ADR 0014 §3): end-to-end tests in Chromium against the real
 // `rizzy-vault` binary built with `embed-web` (`e2e/server.ts` starts it), so the page runs
 // under the server's own CSP and headers (INV-49) exactly as it ships.

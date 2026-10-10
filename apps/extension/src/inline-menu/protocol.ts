@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The `window.postMessage` protocol between the content script (running in the untrusted
 // page's own window — isolated-world JS, but a shared DOM/BOM, including `window` itself) and
 // the extension-origin inline-menu iframe it creates (ADR 0036 §4/§5, ADR 0036 §75 "the

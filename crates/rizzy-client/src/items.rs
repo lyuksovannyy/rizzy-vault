@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Item edits and reads through the item schema layer (ADR 0018 §2 "Flow", §3, §6–§9;
 //! ADR 0012 §5), and the import path ([ADR 0027] §2 steps 3–5, §6 "Writes").
 //!

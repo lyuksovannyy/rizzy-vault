@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Core dumps off at process start (threat model INV-60; [ADR 0024]).
 //!
 //! Release builds use `panic = "abort"`, so a panic raises `SIGABRT`; a core dump would write

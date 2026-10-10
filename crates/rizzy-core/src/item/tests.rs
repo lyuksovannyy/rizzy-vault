@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Unit tests of the item schema (ADR 0018 §6–§9, §11 and the schema-layer parts of §12): one
 //! test group per rule, each rejection with the input that breaks only that rule, the
 //! redacted `Debug` output of every type that holds a key or value, and a simulated newer

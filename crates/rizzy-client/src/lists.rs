@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! List elements of an item: URIs, custom fields, password history and tags (ADR 0018 §6
 //! "List elements", "List order", §7 `uri/…`, `field/…`, `pwhist/…`, `tag/…`; ADR 0012 §1).
 //!

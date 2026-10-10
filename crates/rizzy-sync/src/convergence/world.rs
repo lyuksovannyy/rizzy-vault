@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The simulated world: devices, the server, the ledger of every op written, a seeded
 //! scheduler, the drain to quiescence and the property checks of ADR 0012 §12 (as ADR 0018 §12,
 //! ADR 0021 §8 and ADR 0022 leave them).

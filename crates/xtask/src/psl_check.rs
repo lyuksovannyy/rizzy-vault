@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `cargo xtask check-deps`'s PSL-snapshot integrity check (ADR 0037 §3, "Verification"):
 //! hashes the resolved `psl` package's `data/rules.txt` and `src/list.rs` on disk and asserts
 //! them against the constants pinned in `rizzy_match::suffix`

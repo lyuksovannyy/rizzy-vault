@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `generator-constants.ts` copies values out of `@rizzy-vault/core` (its module docs say why:
 // the UI thread imports only types from that package). This test is the check that the copy
 // has not drifted from the real thing — it is the one place in `apps/web` allowed to import

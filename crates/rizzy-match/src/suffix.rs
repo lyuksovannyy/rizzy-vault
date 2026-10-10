@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The compiled-in Public Suffix List snapshot and registrable-domain (eTLD+1) computation
 //! (ADR 0037 §3).
 //!

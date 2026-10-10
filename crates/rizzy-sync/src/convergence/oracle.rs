@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The reference state of an item, computed directly from a set of applied ops as the specs
 //! define it, never through [`crate::merge`], and the order-independence replay.
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // packages/core without a server: loading, errors, the transport's request shape, the
 // generator, the frozen texts, and the flows' refusals of bad input.
 import { beforeAll, describe, expect, it } from "vitest";

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `cache/idb.ts` against `@rizzy-vault/core`'s `CacheStore` contract: flat (store, key, value)
 // records, one object store per name, opaque bytes in and out, no structured `keyPath`. Uses
 // `test/support/fake-idb.ts` (vitest's `environment: "node"` has no real `indexedDB`), never

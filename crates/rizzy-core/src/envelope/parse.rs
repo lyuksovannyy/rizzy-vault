@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Strict envelope parsing (CRYPTO.md §9.1, §9.2, §9.5).
 //!
 //! Envelope bytes come from the server, a file or the local cache, so they are untrusted

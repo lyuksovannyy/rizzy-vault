@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Sender identity checks (ADR 0036 §4, §4 last bullet; INV-40). The background takes the
 // sender's origin from the browser's own sender information, never from the message body, and
 // accepts a message only from the extension's own pages and content scripts — never from

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Structural/offline coverage that needs no server and no enrolled account: the extension
 // loads, its offscreen document starts, the popup opens and shows the right view for its
 // status, the `storage.session` fallback survives the long-lived context being torn down and

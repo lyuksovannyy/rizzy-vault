@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The purpose registry (CRYPTO.md §8.4, §5.11, §9.5) and the typed contexts.
 //!
 //! Every purpose in §8.4 is registered here with its `u16` id, its one encrypt algorithm, its

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The generator view (ADR 0036 §4 "generator in field"; ROADMAP §4.4). Needs no device state,
 // so it is real today, unlike the item list/detail views it sits next to in the popup.
 import { useState } from "react";

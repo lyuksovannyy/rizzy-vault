@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Errors of the canonical encodings of this crate's core types: dots, HLC values and version
 //! vectors (ADR 0012 §2–§3, ADR 0018 §3).
 //!

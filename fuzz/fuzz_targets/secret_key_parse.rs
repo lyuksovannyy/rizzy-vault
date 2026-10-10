@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the Secret Key and recovery-code parsers (CRYPTO.md §7, §15 item 7): never panic, and
 //! an accepted code formats and parses back to the same 16 bytes.
 //!

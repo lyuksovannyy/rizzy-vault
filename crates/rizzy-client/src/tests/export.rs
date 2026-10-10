@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Export and import tests (ADR 0027): the payload's known answer and refusal vectors, the
 //! round trips vault → encrypted file → new vault and vault → plaintext JSON → new vault, the
 //! import path's splitting and limits, trashed items, carried unknown keys, the plaintext

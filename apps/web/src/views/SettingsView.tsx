@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Settings (redesign slice 2, item 5): Two-factor, Devices and Appearance, grouped under one
 // sidebar entry instead of three. Each group is still its own panel; this view only lays them
 // out together and adds the Appearance group (theme.ts module docs: memory-only for now).

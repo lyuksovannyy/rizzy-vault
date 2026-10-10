@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-server` — the `rizzy-vault` server binary and the library it runs (roadmap M1 step
 //! 3; [ADR 0010], [ADR 0002] point 3, [ADR 0011], [ADR 0021]; ADR 0016 §3 notes: the leaf that
 //! wires the domain crates).

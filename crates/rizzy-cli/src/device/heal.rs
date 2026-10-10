@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Restore healing for `rv`: the host steps, in order. The client's rules are
 //! `rizzy_client::healing` (the account, ADR 0012 §7 steps 1–3 as ADR 0032 §2 replaces them)
 //! and `rizzy_client::sync`'s `heal` module (the vault, ADR 0021 §9 "Server behind", "Healing

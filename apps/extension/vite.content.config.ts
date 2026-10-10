@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The content scripts' own build (ADR 0036 §4, §6; ADR 0014 §2; ADR 0039 §2): each one self-
 // contained, no chunk splitting, because `content_scripts`/a `<script src>` load exactly the
 // file named — neither resolves a module graph the way an extension page's

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes rizzy-wasm's readers of what JavaScript hands in (ADR 0013 §3 rule 8: "Host input is
 //! untrusted"): never panic, and every accepted value is what it claims to be.
 //!

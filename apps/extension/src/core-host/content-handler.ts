@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Handles a content-script request forwarded by the service worker (ADR 0036 §4, ADR 0037 §1:
 // "matching... runs in the background/long-lived context"), and — separately —
 // {@link handleInlineMenuFillRequest}'s own privileged request from the inline-menu iframe

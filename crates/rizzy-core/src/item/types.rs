@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Item types (ADR 0018 §8, (d)).
 //!
 //! An item's type is the Enum value of its `item.type` field, written by the create op only and

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The one error type of `rv`.
 //!
 //! Every variant is a kind with, at most, a path the user typed, a server error code or an OS

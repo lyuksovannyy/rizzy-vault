@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! What every `import_*` fuzz target checks on an import result, and the deterministic RNG
 //! they pass for element ids. Shared by `#[path]` inclusion; not a target itself.
 

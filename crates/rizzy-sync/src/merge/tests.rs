@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Unit tests of the merge: every rule of ADR 0012 §4–§5 and ADR 0018 §3, §6, §9 and §10 the
 //! module implements, the named cases of ADR 0018 §12 (concurrent purges in every arrival
 //! order, a tombstone with a late value, a re-issued purge's `item_key_id`, a two-value

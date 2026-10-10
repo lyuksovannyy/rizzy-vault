@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The SQLite writer lock: one process writes the database file (ADR 0010 §2).
 //!
 //! "At startup the server takes an exclusive writer lock on a lock file next to the database,

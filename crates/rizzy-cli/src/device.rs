@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! An enrolled device, opened: the host side of `rizzy-client`'s flows for one account
 //! (ADR 0013 §2: "The host feeds in events … The state machine returns effects").
 //!

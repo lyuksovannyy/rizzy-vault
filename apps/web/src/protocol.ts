@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The messages between the UI thread and the core Worker (ADR 0013 §4 "Where the core lives").
 //
 // The Worker holds the only wasm instance, every handle and every key; the UI thread holds

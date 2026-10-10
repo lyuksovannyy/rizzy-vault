@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Flow tests that need no server: the order of the steps, the requests built, the answers
 //! refused. The flows against a real `rizzy-vault` run in `packages/core`'s end-to-end test,
 //! through the built wasm module (this crate may not depend on `rizzy-server`, ADR 0016 R6).

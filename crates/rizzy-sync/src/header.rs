@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The canonical op and snapshot headers (ADR 0012 §3), the bytes the `op` and `snapshot`
 //! statements sign (CRYPTO.md §10.2).
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The error type of `rizzy-domain-auth`.
 //!
 //! **What an error may say.** A variant names a kind of failure, never a value: no login

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the reader of rizzy-vault's own plaintext JSON export (ADR 0027 §6; threat model
 //! A16: the file is unauthenticated hostile input) and the JSON reader under it. Neither may
 //! panic, whatever the input, and every item that comes out keeps the importer's guarantees

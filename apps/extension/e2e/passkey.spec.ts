@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The passkey provider end to end (ADR 0039 §2; THREAT_MODEL A7's "Passkey provider" section),
 // against a real account, a real unlocked device, and a real test relying party served over
 // genuine TLS (`https-server.ts` — INV-64 and `rizzy_client::passkey::verify_rp_id` both demand

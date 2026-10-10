@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The Secret Key and the recovery code (CRYPTO.md §7, §11.9, §4.3 check labels, §12.3).
 //!
 //! Both are 16 bytes from the injected CSPRNG, generated on the client and never sent to the

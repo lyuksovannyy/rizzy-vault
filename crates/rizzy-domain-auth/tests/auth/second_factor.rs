@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Server-side 2FA with TOTP (CRYPTO.md §11.15): enrolment, login, replay, removal.
 
 use rizzy_core::totp::{TotpParams, TotpSecret};

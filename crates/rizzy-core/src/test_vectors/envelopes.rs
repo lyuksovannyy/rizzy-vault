@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `envelopes.json`: one envelope per M1 purpose of CRYPTO.md §8.4 (two for the padded ones),
 //! with its context bytes, AAD, subkey and commitment.
 //!

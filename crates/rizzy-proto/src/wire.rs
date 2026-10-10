@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Bounded wire value types: every variable field of a request or response is one of these.
 //!
 //! JSON bodies are untrusted in both directions: the server parses client requests, and clients

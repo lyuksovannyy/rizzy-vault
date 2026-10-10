@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The auth domain's SQL: every query text, and the helpers that run them on either engine.
 //!
 //! **Bound parameters only** (ADR 0011 point 2, INV-53). Every query is a `&'static str` read

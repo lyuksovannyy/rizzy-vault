@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `handleContentScriptRequest`'s passkey cases (ADR 0039 §2) and `handlePasskeyCeremonyApproval`
 // (ADR 0040's pattern applied to a ceremony): same style as `content-handler.test.ts` — no
 // session is ever set up in this module's test environment, so every case that would otherwise

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The passkey consent ceremony's pending-request store (ADR 0039 §2; ADR 0040's pattern applied
 // to passkeys instead of a fill). Pure and synchronous — no session, no wasm, no
 // `crypto.randomUUID` of its own — unit-testable the same way `save-prompt-location.ts` and

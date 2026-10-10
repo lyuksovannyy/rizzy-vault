@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes `rizzy-domain-auth`'s pure rules (its `rules` module): the checks the server runs on
 //! untrusted statements and state transitions before anything is stored (CRYPTO.md §5.10,
 //! §10.2, §11; ADR 0012 §7). The statement parsers themselves are `rizzy-core`'s and have

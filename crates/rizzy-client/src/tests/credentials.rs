@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Credential change tests (CRYPTO.md §11.5 with the rotation of §11.6) against the fake
 //! server of the parent module: a Secret Key change with a full rotation ("the kit was
 //! stolen"), committed through the rotation module's fake account commit.

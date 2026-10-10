@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The item state the merge keeps, and its conversions to and from the record layer
 //! (ADR 0018 §3 layouts, §4 canonical form).
 //!

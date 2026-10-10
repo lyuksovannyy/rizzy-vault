@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Signup, login and sessions: OPAQUE registration and login, device authentication, and the
 //! values of a signed request (CRYPTO.md §5.3, §5.9, §5.10, §11.1, §11.2; ADR 0002 owner
 //! decision 2; ADR 0003).

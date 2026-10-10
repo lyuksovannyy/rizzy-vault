@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `isOwnOverlayMutation` (`src/content/own-overlay-mutation.ts`): the fix for a real bug found
 // only by the E2E suite — the content script's own `MutationObserver` reacting to its own
 // inline-menu/save-prompt DOM writes, an unbounded show/hide loop. These tests use plain object
