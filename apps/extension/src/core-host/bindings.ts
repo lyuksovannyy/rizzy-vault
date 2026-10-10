@@ -22,6 +22,7 @@ import {
   type ItemSummary,
   type MatchCandidate,
   type MatchFrameInfo,
+  type MatchModeValue,
   type MatchUriInput,
   type PasskeyAssertionResult,
   type PasskeyCandidateResult,
@@ -317,36 +318,96 @@ export function updateLoginChangeset(usernameValue: string, passwordValue: strin
   ];
 }
 
-/** Every `uri/<id>/value` field of one item's `fields()` call, grouped by the list element id
- * (ADR 0018 §7, ADR 0037 §2). `uri/<id>/match` is reserved but still never written by any client
- * under owner decision 2 (`crates/rizzy-core/src/item/schema.rs`'s module docs): every URI here
- * resolves through the account-default match mode, never a per-URI override, until a later
- * change starts writing that field. */
-export function itemUriFields(fields: readonly FieldView[]): ReadonlyArray<{ uriId: string; value: string }> {
-  const out: Array<{ uriId: string; value: string }> = [];
+/** Resolves a stored `uri/<id>/match` register's decimal wire-value string (ADR 0018 §7's Enum
+ * encoding; `apps/web/src/fields.ts`'s `MATCH_MODE_OPTIONS` writes it the same way, and its
+ * `matchModeLabel` reads it back the same way, with `Number.parseInt(value, 10)`) to a
+ * {@link MatchModeValue} safe to hand to {@link decideMatchCandidates}.
+ *
+ * - `undefined` (the register was never written), `"0"` (ADR 0037 §4 row `0x0000`, the explicit
+ *   account-default sentinel), and text that does not parse as a number at all (corrupt or
+ *   otherwise not a value any client meant to set, never a deliberate choice to distinguish from
+ *   "no override") all resolve to {@link MatchMode.BaseDomain}: the account's own effective
+ *   default today, since the extension has no read path yet for a real account-level override
+ *   (ADR 0042 is `Status: Proposed`; gap 27(b) in the M2 gap audit), and `BaseDomain` is
+ *   `rizzy-match`'s own documented default for an unset mode
+ *   (`crates/rizzy-match/src/modes.rs`'s `account_default_resolves_to_base_domain_when_unset`
+ *   test) — the same "corrupt data narrows back to the safe baseline, never breaks autofill
+ *   outright" choice {@link global_equivalence_groups}'s own doc makes for a corrupt compiled-in
+ *   equivalence list.
+ * - One of the six assigned values (`0x0001`-`0x0006`) resolves to that exact mode, so a stored
+ *   override — `0x0006` Never very much included — is honored rather than silently discarded.
+ * - A well-formed but unassigned Enum value (ADR 0037 §4 row `0x0007`-`0xFFFF`: a real mode a
+ *   newer client may have meant, that this build cannot evaluate) resolves to
+ *   {@link MatchMode.Never} instead, never passed through raw: `crates/rizzy-wasm/src/matching.rs`'s
+ *   `mode_of` turns an unrecognised wire value into `invalid_input`, which would fail
+ *   {@link decideMatchCandidates}'s *entire* batch call, not just this one URI
+ *   (`crates/rizzy-core/src/item/schema.rs`'s own docs: an out-of-range value here "read back as
+ *   unsupported by the matching layer"). Narrowing to `Never` rather than widening to
+ *   `BaseDomain` keeps INV-38's narrowing-only rule for a value this build does not recognise but
+ *   that is still a real, deliberately-set Enum value, unlike the unparseable case above. */
+export function matchModeOf(raw: string | undefined): MatchModeValue {
+  if (raw !== undefined) {
+    const n = Number.parseInt(raw, 10);
+    switch (n) {
+      case MatchMode.BaseDomain:
+        return MatchMode.BaseDomain;
+      case MatchMode.Host:
+        return MatchMode.Host;
+      case MatchMode.StartsWith:
+        return MatchMode.StartsWith;
+      case MatchMode.Exact:
+        return MatchMode.Exact;
+      case MatchMode.Regex:
+        return MatchMode.Regex;
+      case MatchMode.Never:
+        return MatchMode.Never;
+      default:
+        if (n === 0 || Number.isNaN(n)) {
+          return MatchMode.BaseDomain;
+        }
+        return MatchMode.Never;
+    }
+  }
+  return MatchMode.BaseDomain;
+}
+
+/** Every `uri/<id>/value` field of one item's `fields()` call, paired with its sibling
+ * `uri/<id>/match` register (if any) and grouped by the list element id (ADR 0018 §7, ADR 0037
+ * §2, §4). `uri/<id>/match` is writable from M2 (`crates/rizzy-core/src/item/schema.rs`'s module
+ * docs: owner decision 2's M1 "carry it and never write it" restriction no longer applies) and
+ * the web vault already writes it (`apps/web/src/views/ItemEditor.tsx`), so `mode` reflects
+ * whatever the item actually has stored, decoded through {@link matchModeOf} — never a hardcoded
+ * value. */
+export function itemUriFields(fields: readonly FieldView[]): ReadonlyArray<{ uriId: string; value: string; mode: MatchModeValue }> {
+  // `FieldKey`'s grammar (`crates/rizzy-core/src/item/key.rs`): `list()` is the repeated group's
+  // name ("uri"), `element()` its per-entry hex id, `attribute()` which column
+  // ("value"/"match"/"order"). `match` is collected first so the loop below can resolve it while
+  // building each URI's entry, in the `value` fields' own order.
+  const matchByElement = new Map<string, string | undefined>();
   for (const field of fields) {
-    // `FieldKey`'s grammar (`crates/rizzy-core/src/item/key.rs`): `list()` is the repeated
-    // group's name ("uri"), `element()` its per-entry hex id, `attribute()` which column
-    // ("value"/"match"/"order"). Only `value` is ever written (see this module's doc comment).
+    if (field.list === "uri" && field.attribute === "match" && field.element !== undefined) {
+      matchByElement.set(field.element, field.value);
+    }
+  }
+  const out: Array<{ uriId: string; value: string; mode: MatchModeValue }> = [];
+  for (const field of fields) {
     if (field.list === "uri" && field.attribute === "value" && field.element !== undefined && field.value !== undefined) {
-      out.push({ uriId: field.element, value: field.value });
+      out.push({ uriId: field.element, value: field.value, mode: matchModeOf(matchByElement.get(field.element)) });
     }
   }
   return out;
 }
 
 /** Every saved URI of every active item, as `decideMatchCandidates` needs them (ADR 0037 §4).
- * `mode` is always {@link MatchMode.BaseDomain}: `itemUriFields`'s doc explains why every URI's
- * own `match` field is unresolved (never written yet) and must be treated as the account
- * default already applied — this module's one `accountDefaultMode` choice, `BaseDomain`, is also
- * `rizzy-match`'s own documented default for an unset mode
- * (`crates/rizzy-match/src/modes.rs`'s `account_default_resolves_to_base_domain_when_unset`
- * test), so this is a resolved value, not a guess. */
+ * `mode` is each URI's own resolved match mode (`itemUriFields`'s doc): a stored override is
+ * honored, not discarded, and only {@link MatchMode.BaseDomain} is used as a resolved stand-in
+ * for "no override" (absent or the account-default sentinel), never a blanket default applied
+ * regardless of what is actually stored. */
 export function sessionItemUris(session: DurableSession): readonly MatchUriInput[] {
   const out: MatchUriInput[] = [];
   for (const item of session.items()) {
     for (const uri of itemUriFields(session.fields(item.id))) {
-      out.push({ itemId: item.id, uriId: uri.uriId, value: uri.value, mode: MatchMode.BaseDomain });
+      out.push({ itemId: item.id, uriId: uri.uriId, value: uri.value, mode: uri.mode });
     }
   }
   return out;
@@ -373,8 +434,11 @@ export function decideCandidates(
  *   second account on a site the user already has one item for must never overwrite that other
  *   account's credentials just because the form posted to the same host.
  * - **A different full host, even one sharing the same registrable domain** (`BaseDomain` mode's
- *   own candidate set, ADR 0037 §4 — the same set autofill uses, since `sessionItemUris` resolves
- *   every URI to that mode) → never an update target, even with a matching username. Update
+ *   own candidate set, ADR 0037 §4 — the same set autofill uses for a URI with no stored
+ *   override, `itemUriFields`'s doc; a URI with a narrower stored mode — `Host`, `StartsWith`,
+ *   `Exact` — only shrinks this candidate set further, and one stored `Never` removes it from
+ *   the candidate set entirely, never widening it) → never an update target, even with a
+ *   matching username. Update
  *   overwrites the matched item's live password, unconditionally and irreversibly
  *   (`core-context.ts`'s `applySavePromptAction`) — unlike a fill, which the user can simply
  *   decline or correct. `accounts.example.com` and `example.com` are treated as the same site for

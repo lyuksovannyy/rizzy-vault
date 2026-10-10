@@ -10,8 +10,8 @@
 //
 // Update overwrites the matched item's live password (`core-context.ts`'s `applySavePromptAction`,
 // unconditional once a token names an `updateItemId`) — unlike autofill, it is not reversible by
-// a second click. ADR 0037 §4's `BaseDomain` mode (the account default, and the only mode this
-// extension's items currently resolve to, `sessionItemUris`) narrows only to the *registrable*
+// a second click. ADR 0037 §4's `BaseDomain` mode (the account default, and the mode every URI
+// below is given, since none carries a stored `match` override) narrows only to the *registrable*
 // domain, on purpose, for fill candidates: `accounts.example.com` and `example.com` are the same
 // site for autofill. That is the wrong granularity for a destructive overwrite: a credential
 // submitted on `blog.example.com` must never silently replace a password saved for
@@ -27,13 +27,30 @@
 // own Negative consequences accept for autofill (reversible) does not carry over to update (not
 // reversible). The same is true of the port (ADR 0037 §2 rule 5: a non-default port is part of
 // the same-site comparison): a page at `https://example.com:8443` must never update an item saved
-// for `https://example.com:9000`, even though `BaseDomain` mode — the only mode this extension
-// resolves URIs to, and the candidate set this gate narrows on top of — does not tell the two
-// ports apart at all.
+// for `https://example.com:9000`, even though `BaseDomain` mode — these fixtures' own mode, and
+// the candidate set this gate narrows on top of — does not tell the two ports apart at all.
+import type { FieldView } from "@rizzy-vault/core";
+import { MatchMode } from "@rizzy-vault/core";
 import { describe, expect, it } from "vitest";
 
-import { selectUpdateCandidate } from "../src/core-host/bindings.ts";
+import { itemUriFields, matchModeOf, selectUpdateCandidate } from "../src/core-host/bindings.ts";
 import type { MatchCandidate } from "../src/core-host/bindings.ts";
+
+/** A field view with defaults (same fixture shape as `apps/web/test/fields.test.ts`'s `f`). */
+function f(key: string, more: Partial<FieldView> = {}): FieldView {
+  return {
+    key,
+    list: undefined,
+    element: undefined,
+    attribute: undefined,
+    tag: undefined,
+    kind: "text",
+    concealed: false,
+    value: undefined,
+    conflict: false,
+    ...more,
+  };
+}
 
 function candidate(
   itemId: string,
@@ -43,6 +60,103 @@ function candidate(
 ): MatchCandidate {
   return { itemId, uriId: `${itemId}-uri`, needsWarning, savedHost, savedPort };
 }
+
+// Finding 3 (2026-10-09 review): `itemUriFields`/`sessionItemUris` used to hardcode every URI's
+// mode to `MatchMode.BaseDomain`, discarding a stored `uri/<id>/match` override. That is live
+// today, not hypothetical: `apps/web/src/views/ItemEditor.tsx` already writes `match` (including
+// `0x0006` Never, listed in `apps/web/src/fields.ts`'s `MATCH_MODE_OPTIONS`), so a user can mark
+// a website Never in the web vault, sync, and have the extension go on offering it for autofill
+// anyway unless this module actually reads the register back.
+describe("matchModeOf", () => {
+  it("resolves absent (never written) to the account default, BaseDomain", () => {
+    expect(matchModeOf(undefined)).toBe(MatchMode.BaseDomain);
+  });
+
+  it("resolves the explicit account-default sentinel (wire 0x0000) to BaseDomain", () => {
+    expect(matchModeOf("0")).toBe(MatchMode.BaseDomain);
+  });
+
+  it("round-trips every assigned wire value (ADR 0037 §4) decoded as decimal", () => {
+    expect(matchModeOf("1")).toBe(MatchMode.BaseDomain);
+    expect(matchModeOf("2")).toBe(MatchMode.Host);
+    expect(matchModeOf("3")).toBe(MatchMode.StartsWith);
+    expect(matchModeOf("4")).toBe(MatchMode.Exact);
+    expect(matchModeOf("5")).toBe(MatchMode.Regex);
+    expect(matchModeOf("6")).toBe(MatchMode.Never);
+  });
+
+  // The whole point of this finding: a stored "Never" override must survive, not get silently
+  // replaced by BaseDomain.
+  it("honors a stored Never override rather than discarding it", () => {
+    expect(matchModeOf("6")).not.toBe(MatchMode.BaseDomain);
+    expect(matchModeOf("6")).toBe(MatchMode.Never);
+  });
+
+  // A well-formed but unassigned Enum value (ADR 0037 §4 row `0x0007`-`0xFFFF`: a real mode a
+  // newer client may have meant) must never reach `decideMatchCandidates` as a raw number:
+  // `crates/rizzy-wasm/src/matching.rs`'s `mode_of` turns an unrecognised wire value into
+  // `invalid_input`, which would fail the *entire* batch call, not just this one URI. Narrowing
+  // to `Never` (never offered) rather than widening to `BaseDomain` keeps INV-38's
+  // narrowing-only rule on an unknown-but-real value too.
+  it("narrows an unassigned wire value to Never instead of passing it through or widening it", () => {
+    expect(matchModeOf("7")).toBe(MatchMode.Never);
+    expect(matchModeOf("65535")).toBe(MatchMode.Never);
+  });
+
+  // Unparseable text is corrupt or otherwise not a value any client meant to set — not a real,
+  // deliberate Enum value the way an unassigned number above might be — so it is treated the
+  // same as "no override" (BaseDomain), not narrowed to Never: a corrupt register must not
+  // silently disable autofill for a URI with no explanation anywhere.
+  it("resolves unparseable text to BaseDomain, the same as no override at all", () => {
+    expect(matchModeOf("not a number")).toBe(MatchMode.BaseDomain);
+  });
+});
+
+describe("itemUriFields", () => {
+  it("pairs a URI's value with its sibling match attribute, decoded to a MatchModeValue", () => {
+    const fields = [
+      f("uri/a/value", { list: "uri", element: "a", attribute: "value", value: "https://x.example/" }),
+      f("uri/a/match", { list: "uri", element: "a", attribute: "match", kind: "enum", value: "6" }),
+    ];
+    expect(itemUriFields(fields)).toEqual([
+      { uriId: "a", value: "https://x.example/", mode: MatchMode.Never },
+    ]);
+  });
+
+  it("resolves to BaseDomain when a URI has no match register at all (never written)", () => {
+    const fields = [f("uri/a/value", { list: "uri", element: "a", attribute: "value", value: "https://x.example/" })];
+    expect(itemUriFields(fields)).toEqual([
+      { uriId: "a", value: "https://x.example/", mode: MatchMode.BaseDomain },
+    ]);
+  });
+
+  it("handles several URIs with independent match overrides, regardless of field order", () => {
+    const fields = [
+      f("uri/a/match", { list: "uri", element: "a", attribute: "match", kind: "enum", value: "2" }),
+      f("uri/a/value", { list: "uri", element: "a", attribute: "value", value: "https://a.example/" }),
+      f("uri/b/value", { list: "uri", element: "b", attribute: "value", value: "https://b.example/" }),
+      f("uri/b/match", { list: "uri", element: "b", attribute: "match", kind: "enum", value: "0" }),
+    ];
+    expect(itemUriFields(fields)).toEqual([
+      { uriId: "a", value: "https://a.example/", mode: MatchMode.Host },
+      { uriId: "b", value: "https://b.example/", mode: MatchMode.BaseDomain },
+    ]);
+  });
+
+  it("ignores a match register whose URI has no value (not a real row to match against)", () => {
+    const fields = [f("uri/a/match", { list: "uri", element: "a", attribute: "match", kind: "enum", value: "6" })];
+    expect(itemUriFields(fields)).toEqual([]);
+  });
+
+  it("ignores fields from other lists and attributes (order, passkeys, other items' plain fields)", () => {
+    const fields = [
+      f("uri/a/order", { list: "uri", element: "a", attribute: "order", kind: "sort_key" }),
+      f("uri/a/value", { list: "uri", element: "a", attribute: "value", value: "https://a.example/" }),
+      f("login.username", { value: "alice" }),
+    ];
+    expect(itemUriFields(fields)).toEqual([{ uriId: "a", value: "https://a.example/", mode: MatchMode.BaseDomain }]);
+  });
+});
 
 describe("selectUpdateCandidate", () => {
   // Same full host, but the account on file has a different username: this must never be
