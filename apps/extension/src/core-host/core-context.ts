@@ -250,7 +250,7 @@ export async function resolveSavePrompt(token: string, action: "save" | "update"
 export function matchCandidatesFor(
   pageUrl: string,
   frame: MatchFrameInfo,
-): { pageHost: string; candidates: readonly MatchCandidate[]; warnings: readonly string[] } | undefined {
+): { pageHost: string; pagePort: number | undefined; candidates: readonly MatchCandidate[]; warnings: readonly string[] } | undefined {
   if (session === undefined) {
     return undefined;
   }
