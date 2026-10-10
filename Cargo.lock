@@ -1569,6 +1569,7 @@ dependencies = [
  "rizzy-match",
  "rizzy-proto",
  "rizzy-sync",
+ "serde_json",
  "subtle",
  "zeroize",
 ]
