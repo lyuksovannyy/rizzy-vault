@@ -32,6 +32,10 @@ zeroize.workspace = true
 chacha20.workspace = true
 # Round-trip and canonical-form properties of the device-state record (ADR 0026 §6). Test-only.
 proptest.workspace = true
+# The JSON bodies a transport would send for the fake server's requests and answers, which the
+# INV-15 canary searches (`src/tests/canary.rs`). Test-only; the version every host and
+# `rizzy-proto`'s tests already lock, so no new package.
+serde_json.workspace = true
 
 [lints]
 workspace = true

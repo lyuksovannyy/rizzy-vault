@@ -1,7 +1,9 @@
 //! `rv` end to end against a real `rizzy-vault` server: signup → login on a second device →
 //! items → sync on two devices → a conflict → export → import → TOTP and the generator →
 //! offline reads and queued writes → key rotation and its follower → device revocation with a
-//! full rotation and the identity-change confirmation → removal of a device.
+//! full rotation and the identity-change confirmation → removal of a device. And the INV-15
+//! canary: known secrets through every flow, then a search of every HTTP message, server file,
+//! debug log line and backup file for them ([`canary_secrets_never_reach_the_server_in_any_form`]).
 //!
 //! # How the server runs
 //!
@@ -100,6 +102,9 @@ fn server_binary() -> PathBuf {
     binary
 }
 
+/// The log file of a server started with a debug log ([`Server::start_with`]), in its directory.
+const DEBUG_LOG: &str = "server.log";
+
 /// A running `rizzy-vault` on a loopback port. Killed on drop.
 struct Server {
     /// The process.
@@ -128,9 +133,19 @@ impl Server {
     /// A new server whose public origin is `origin` (a proxy in front of it), or
     /// `http://127.0.0.1:<its own port>`.
     fn start_at(origin: Option<String>) -> Self {
+        Self::start_with(origin, false)
+    }
+
+    /// As [`Server::start_at`]; with `debug_log`, every `rizzy-vault` process of this server,
+    /// the serving one and the operator's commands, logs at the most verbose level into
+    /// [`DEBUG_LOG`] in its directory (threat model INV-48), instead of to nowhere.
+    fn start_with(origin: Option<String>, debug_log: bool) -> Self {
         let dir = temp_dir("server");
         std::fs::create_dir_all(dir.join("data")).unwrap();
         std::fs::create_dir_all(dir.join("secrets")).unwrap();
+        if debug_log {
+            std::fs::write(dir.join(DEBUG_LOG), b"").unwrap();
+        }
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -171,6 +186,11 @@ impl Server {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        let log = dir.join(DEBUG_LOG);
+        if log.is_file() {
+            let file = std::fs::OpenOptions::new().append(true).open(log).unwrap();
+            command.env("RIZZY_LOG_LEVEL", "debug").stderr(file);
+        }
         command
     }
 
@@ -258,6 +278,9 @@ struct ProxyState {
     first_state: Option<Vec<u8>>,
     /// The paths requested, in order.
     seen: Vec<String>,
+    /// Every request (head and body) and every answer (head and body) that passed through,
+    /// in order: the HTTP haystack of the INV-15 canary.
+    wire: Vec<Vec<u8>>,
 }
 
 /// A loopback reverse proxy in front of a [`Server`], as an operator's would be, that can
@@ -275,9 +298,14 @@ struct Proxy {
 impl Proxy {
     /// A proxy on a free loopback port and the server behind it.
     fn start() -> (Self, Server) {
+        Self::start_with(false)
+    }
+
+    /// As [`Proxy::start`]; with `debug_log`, the server logs at debug into its [`DEBUG_LOG`].
+    fn start_with(debug_log: bool) -> (Self, Server) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let server = Server::start_behind(Some(port));
+        let server = Server::start_with(Some(format!("http://127.0.0.1:{port}")), debug_log);
         let upstream = server.port;
         let state = std::sync::Arc::new(std::sync::Mutex::new(ProxyState::default()));
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -311,6 +339,11 @@ impl Proxy {
     fn count(&self, path: &str) -> usize {
         let state = self.state.lock().unwrap();
         state.seen.iter().filter(|p| *p == path).count()
+    }
+
+    /// Every request and answer that passed through, heads and bodies, in order.
+    fn wire(&self) -> Vec<Vec<u8>> {
+        self.state.lock().unwrap().wire.clone()
     }
 
     /// A whole HTTP/1.1 message with a `Content-Length` (or none) from `stream`: the head
@@ -377,6 +410,7 @@ impl Proxy {
         let (fault, old_state) = {
             let mut state = state.lock().unwrap();
             state.seen.push(path.clone());
+            state.wire.push([head.as_slice(), &body].concat());
             let fault = match state.fault {
                 Some((armed, fault)) if armed == path => {
                     state.fault = None;
@@ -431,6 +465,7 @@ impl Proxy {
                 [answer_head, answer_body].concat()
             }
         };
+        state.lock().unwrap().wire.push(reply.clone());
         client.write_all(&reply)?;
         client.flush()
     }
@@ -2050,6 +2085,8 @@ fn a_gateway_error_on_a_commit_keeps_what_was_saved_for_it() {
 /// rotation's commit with `state_conflict` and then shows an older `account-state` on the
 /// retry rule's query is a possible rollback. The alarm is written when it is detected, the
 /// device is read-only across restarts, and the file (the evidence) cannot be removed.
+///
+/// ETH class: none. Rollback is threat model §5.6, which has no ETH class (CRYPTO.md §15 item 5).
 #[test]
 fn a_rollback_shown_during_a_rotation_retry_raises_the_alarm() {
     use rizzy_client::rizzy_proto::http::paths;
@@ -2438,6 +2475,9 @@ fn a_restored_server_healed_first_by_a_device_of_the_restored_set() {
 /// rollback. The device holding the newer state raises the alarm and re-publishes, the server
 /// refuses it, and the alarm stays across runs (read-only, reads still work); the device
 /// enrolled after the copy gets no session from its certificate.
+///
+/// ETH class: none. Rollback and restore are threat model §5.6 and §5.8, which have no ETH class
+/// (CRYPTO.md §15 item 5).
 #[test]
 fn a_rollback_outside_a_reconciliation_epoch_stays_an_alarm() {
     let mut server = Server::start();
@@ -3096,4 +3136,351 @@ fn sync_prints_late_edit_and_trash_notices_and_restore_late_restores() {
     assert_ne!(restored, gone);
     assert_eq!(a.field(&restored, "item.notes"), "late");
     assert!(!a.items().iter().any(|(id, _)| *id == gone));
+}
+
+/// The INV-15 canary (threat model INV-15, "the master password, Secret Key, recovery code,
+/// account key, vault keys, item keys and private keys never leave a client unencrypted";
+/// extended to logs at the most verbose level by INV-48; INV-2's "the Secret Key is never sent
+/// to the server"; ADR 0011 "No plaintext").
+///
+/// An account with known secrets runs every flow `rv` has that reaches the server: signup with
+/// a recovery code, a login on a second device, item writes and syncs on both, a recovery
+/// request and its cancellation, a standard rotation the other device follows, a device
+/// revocation with a full rotation, a password change and a Secret Key change (a new kit and
+/// recovery code, a rotation). The server logs at `debug` ([`DEBUG_LOG`]), and an operator's
+/// `rizzy-vault backup` runs next to it. Then each haystack is searched for each secret, raw,
+/// as hex and as base64 at any alignment ([`canary_forms`]):
+/// - every HTTP request and answer, heads and bodies, as the [`Proxy`] in front of the server
+///   saw them;
+/// - every file of the server's data directory (the `SQLite` database and its WAL), byte for
+///   byte;
+/// - every line the server's processes logged;
+/// - the backup file.
+///
+/// The secrets: both master passwords, both Secret Keys and both recovery codes (as printed,
+/// without separators, and their bytes), the three `pw_in` values derived from them, and an
+/// item's secret field. The key bytes (account, vault, item and private keys) and the `E_dev`,
+/// `E_local`, `E_ks` and `ACCOUNT_KEY_FORWARD` envelopes of CRYPTO.md §15 item 5 never leave
+/// `rizzy-client`'s types through a public API, so this black-box test cannot name them: the
+/// canary of `rizzy-client`'s own flow tests (`src/tests/canary.rs`) searches for those.
+///
+/// What a search of raw database files can miss: a value `SQLite` splits across two overflow
+/// pages. The secrets searched for here are at most 64 bytes long, and the rows that would hold
+/// them are small.
+///
+/// The clients' own cache files are not haystacks: INV-15 is about what leaves a client, and
+/// the device record in the cache holds the Secret Key's bytes by design until an OS keystore
+/// holds them (CRYPTO.md §4.2, `rizzy-client`'s `store/record.rs`), so this search finds them
+/// there. [`rv_end_to_end`] checks that the cache holds no password, Secret Key or recovery code
+/// as typed or printed.
+///
+/// ETH class: none (CRYPTO.md §15 item 5's canary; key material leaving the client is not one of
+/// the threat model's §5 classes).
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one story through every flow, then one search over every haystack"
+)]
+fn canary_secrets_never_reach_the_server_in_any_form() {
+    use rizzy_client::rizzy_core::opaque::PasswordInput;
+    use rizzy_client::rizzy_core::secret_key::{RecoveryCode, SecretKey};
+
+    const NEW_PASSWORD: &str = "canary: the second master password";
+    const ITEM_SECRET: &str = "canary: the secret field of an item";
+
+    let (proxy, mut server) = Proxy::start_with(true);
+    let origin = server.origin();
+    let a = Rv::new("canary-a");
+    let b = Rv::new("canary-b");
+
+    let (secret_key, recovery_code) = sign_up(&a, &origin, "alice");
+    log_in(&b, &origin, "alice", &secret_key);
+    let mail = a
+        .ok(
+            &[
+                "item",
+                "create",
+                "--type",
+                "login",
+                "--field",
+                "item.name=Mail",
+                "--secret",
+                "login.password",
+            ],
+            &[ITEM_SECRET],
+        )
+        .out[0]
+        .clone();
+    a.ok(&["sync"], &[]);
+    b.ok(&["sync"], &[]);
+    assert_eq!(b.field(&mail, "login.password"), ITEM_SECRET);
+    b.ok(
+        &["item", "edit", &mail, "--field", "login.username=canary"],
+        &[],
+    );
+    b.ok(&["sync"], &[]);
+    a.ok(&["sync"], &[]);
+
+    // Recovery requested with the code on a third client, then cancelled on A.
+    let r = Rv::new("canary-r");
+    let (outcome, _) = r.try_run(
+        &["recovery", "start", "--server", &origin, "--name", "alice"],
+        &[&recovery_code],
+        &[],
+        &[],
+    );
+    outcome.unwrap();
+    let (outcome, _) = a.try_run(&["recovery", "cancel"], &[PASSWORD], &[], &[]);
+    outcome.unwrap();
+
+    // A standard rotation (the code is kept); B follows through its grant.
+    let (outcome, rotated) = a.try_run(
+        &["rotate", "--name", "alice"],
+        &[PASSWORD, &recovery_code],
+        &[],
+        &[],
+    );
+    outcome.unwrap_or_else(|e| panic!("rotate: {e:?}; {:?}", rotated.notes));
+    b.ok(&["sync"], &[]);
+
+    // B revoked with a full rotation.
+    let b_device = a
+        .ok(&["device", "list"], &[])
+        .out
+        .iter()
+        .find(|l| !l.contains("this device"))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    let (outcome, revoked) = a.try_run(
+        &["device", "revoke", &b_device, "--name", "alice"],
+        &[PASSWORD, &recovery_code],
+        &[],
+        &[],
+    );
+    outcome.unwrap_or_else(|e| panic!("revoke: {e:?}; {:?}", revoked.notes));
+
+    // The password change, then the Secret Key change: a new kit and a rotation.
+    let (outcome, changed) = a.try_run(
+        &["password", "--name", "alice"],
+        &[PASSWORD, NEW_PASSWORD, NEW_PASSWORD],
+        &[],
+        &[],
+    );
+    outcome.unwrap_or_else(|e| panic!("password: {e:?}; {:?}", changed.notes));
+    let (outcome, changed) = a.try_run(
+        &["secret-key", "--name", "alice"],
+        &[NEW_PASSWORD],
+        &[],
+        &[],
+    );
+    outcome.unwrap_or_else(|e| panic!("secret-key: {e:?}; {:?}", changed.notes));
+    let new_secret_key = changed.printed("Secret Key:");
+    let new_recovery_code = changed.printed("Recovery code:");
+    let (outcome, _) = a.try_run(&["sync"], &[NEW_PASSWORD], &[], &[]);
+    outcome.unwrap();
+
+    // The operator's backup next to the running server, then the server stops.
+    let backup = server.backup("canary.backup");
+    server.stop();
+
+    // The secrets.
+    let mut secrets: Vec<(String, Vec<u8>)> = vec![
+        ("the master password".into(), PASSWORD.into()),
+        ("the new master password".into(), NEW_PASSWORD.into()),
+        ("an item's secret field".into(), ITEM_SECRET.into()),
+    ];
+    let compact = |text: &str| -> Vec<u8> { text.bytes().filter(|b| *b != b'-').collect() };
+    for (label, text) in [
+        ("the Secret Key", &secret_key),
+        ("the new Secret Key", &new_secret_key),
+    ] {
+        let parsed = SecretKey::parse(text).unwrap();
+        secrets.push((format!("{label} as printed"), text.clone().into_bytes()));
+        secrets.push((format!("{label} without separators"), compact(text)));
+        secrets.push((format!("{label}'s bytes"), parsed.expose_secret().to_vec()));
+    }
+    for (label, text) in [
+        ("the recovery code", &recovery_code),
+        ("the new recovery code", &new_recovery_code),
+    ] {
+        let parsed = RecoveryCode::parse(text).unwrap();
+        secrets.push((format!("{label} as printed"), text.clone().into_bytes()));
+        secrets.push((format!("{label} without separators"), compact(text)));
+        secrets.push((format!("{label}'s bytes"), parsed.expose_secret().to_vec()));
+    }
+    for (label, password, sk) in [
+        ("pw_in", PASSWORD, &secret_key),
+        ("pw_in after the password change", NEW_PASSWORD, &secret_key),
+        (
+            "pw_in after the Secret Key change",
+            NEW_PASSWORD,
+            &new_secret_key,
+        ),
+    ] {
+        let sk = SecretKey::parse(sk).unwrap();
+        let pw_in = PasswordInput::derive(password, &sk).unwrap();
+        secrets.push((label.into(), pw_in.expose_secret().to_vec()));
+    }
+
+    // The haystacks.
+    let mut haystacks: Vec<(String, Vec<u8>)> = proxy
+        .wire()
+        .into_iter()
+        .enumerate()
+        .map(|(i, message)| (format!("HTTP message {i}"), message))
+        .collect();
+    let http_messages = haystacks.len();
+    let mut files = vec![server.dir.join("data")];
+    while let Some(path) = files.pop() {
+        if path.is_dir() {
+            files.extend(std::fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+        } else {
+            haystacks.push((
+                format!("the server file {}", path.display()),
+                std::fs::read(&path).unwrap(),
+            ));
+        }
+    }
+    let log = std::fs::read(server.dir.join(DEBUG_LOG)).unwrap();
+    haystacks.push(("the server log".into(), log.clone()));
+    haystacks.push(("the backup file".into(), std::fs::read(&backup).unwrap()));
+
+    // Positive controls: the haystacks hold what they should, so an empty search cannot pass.
+    assert!(http_messages > 40, "{http_messages} HTTP messages");
+    let holds = |prefix: &str, needle: &[u8]| {
+        haystacks
+            .iter()
+            .any(|(name, bytes)| name.starts_with(prefix) && canary_contains(bytes, needle))
+    };
+    assert!(holds("HTTP message", b"\"login_name\":\"alice\""));
+    assert!(holds("the server file", b"alice"));
+    assert!(holds("the backup file", b"alice"));
+    // The serving process logs one JSON line per request; the operator's commands write their
+    // messages for a human to the same file.
+    let log = String::from_utf8(log).unwrap();
+    let json_lines = log
+        .lines()
+        .filter(|l| serde_json::from_str::<serde_json::Value>(l).is_ok())
+        .count();
+    assert!(
+        json_lines > 20,
+        "{json_lines} JSON lines of {} in the log",
+        log.lines().count()
+    );
+
+    for (label, secret) in &secrets {
+        for form in canary_forms(secret) {
+            for (name, haystack) in &haystacks {
+                assert!(
+                    !canary_contains(haystack, &form),
+                    "{label} is in {name} (one of its forms)"
+                );
+            }
+        }
+    }
+}
+
+/// Whether `haystack` contains `needle`.
+fn canary_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Lowercase hex of `bytes`.
+fn canary_hex(bytes: &[u8]) -> String {
+    use core::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, b| {
+        write!(out, "{b:02x}").unwrap();
+        out
+    })
+}
+
+/// The base64 alphabet of RFC 4648 §4.
+const CANARY_STANDARD: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// The base64url alphabet of RFC 4648 §5.
+const CANARY_URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// Unpadded base64 of `bytes` in `alphabet` ([`CANARY_STANDARD`] or [`CANARY_URL`]).
+fn canary_base64(alphabet: &[u8; 64], bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for chunk in bytes.chunks(3) {
+        let mut word = [0u8; 3];
+        word[..chunk.len()].copy_from_slice(chunk);
+        let n = (u32::from(word[0]) << 16) | (u32::from(word[1]) << 8) | u32::from(word[2]);
+        for i in 0..=chunk.len() {
+            let index = usize::try_from((n >> (18 - 6 * i)) & 63).unwrap();
+            out.push(alphabet[index]);
+        }
+    }
+    out
+}
+
+/// Every form of `secret` the canary searches for: raw, lower- and upper-case hex, and base64
+/// in the standard and URL alphabets at each of the three byte alignments, so that the secret
+/// is found inside a longer encoded value too, padded or not.
+fn canary_forms(secret: &[u8]) -> Vec<Vec<u8>> {
+    let hex = canary_hex(secret);
+    let mut out = vec![
+        secret.to_vec(),
+        hex.to_ascii_uppercase().into_bytes(),
+        hex.into_bytes(),
+    ];
+    for shift in 0..3 {
+        let mut shifted = vec![0u8; shift];
+        shifted.extend_from_slice(secret);
+        // The characters that encode only bits of the secret.
+        let (start, end) = ((8 * shift).div_ceil(6), 8 * shifted.len() / 6);
+        for alphabet in [CANARY_STANDARD, CANARY_URL] {
+            out.push(canary_base64(alphabet, &shifted)[start..end].to_vec());
+        }
+    }
+    assert!(out.iter().all(|f| f.len() >= 8), "a needle too short");
+    out
+}
+
+/// The canary's search finds a secret in every form, inside longer values, and nothing else (a
+/// positive control: a search that silently matched nothing would let the canary pass forever).
+#[test]
+fn the_canary_search_finds_every_form() {
+    const STANDARD: &[u8; 64] = CANARY_STANDARD;
+    const URL: &[u8; 64] = CANARY_URL;
+    // RFC 4648 §10.
+    assert_eq!(canary_base64(STANDARD, b"foobar"), b"Zm9vYmFy");
+    assert_eq!(canary_base64(STANDARD, b"fooba"), b"Zm9vYmE");
+    assert_eq!(canary_base64(STANDARD, b"foob"), b"Zm9vYg");
+    assert_eq!(canary_base64(URL, &[0xfb, 0xff]), b"-_8");
+    let secret = b"a canary secret of 32 bytes!!!!!";
+    for shift in 0..3 {
+        let mut value = vec![0xa5u8; shift];
+        value.extend_from_slice(secret);
+        value.extend_from_slice(&[0x5a; 5]);
+        let hex = canary_hex(&value);
+        let mut padded = canary_base64(STANDARD, &value);
+        while !padded.len().is_multiple_of(4) {
+            padded.push(b'=');
+        }
+        for haystack in [
+            value.clone(),
+            hex.to_ascii_uppercase().into_bytes(),
+            hex.into_bytes(),
+            padded,
+            canary_base64(URL, &value),
+        ] {
+            let haystack = [b"{\"x\":\"".as_slice(), &haystack, b"\"}"].concat();
+            assert!(
+                canary_forms(secret)
+                    .iter()
+                    .any(|f| canary_contains(&haystack, f))
+            );
+        }
+    }
+    assert!(
+        !canary_forms(secret)
+            .iter()
+            .any(|f| canary_contains(b"{\"x\":\"nothing to see\"}", f))
+    );
 }

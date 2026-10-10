@@ -175,6 +175,11 @@ fn full_round_trip_at_kdf_id_1() {
 const TRANSCRIPT_SEED_2026_KDF_1: &str =
     "e62a1d378d9032c7553d0f55a417a0df0a9a19a0c5a8ef54dc66f842fbb2f3a3";
 
+/// A server that names another `kdf_id`, strips the Secret Key from the flow, or relays under
+/// another origin gets a failed login (CRYPTO.md §15 item 5).
+///
+/// ETH class: 5 for the `kdf_id` (threat model §5.1, KDF parameter downgrade). None for the
+/// Secret Key and the origin: threat model §5 gives neither an ETH class.
 #[test]
 fn wrong_password_secret_key_origin_or_kdf_id_fails_like_a_wrong_password() {
     let mut rng = seeded_rng(1);
