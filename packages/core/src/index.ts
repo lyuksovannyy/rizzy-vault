@@ -1136,9 +1136,19 @@ export class VaultSession {
     );
   }
 
-  /** One password-history entry's value, as {@link passwordHistory} listed it, on the user's request only. */
-  revealPasswordHistory(id: string, source: HistoryEntry["source"], index: number): string {
-    return call(() => this.#s().revealPasswordHistory(id, source, index));
+  /**
+   * One password-history entry's value, as {@link passwordHistory} listed it, on the user's
+   * request only. Pass the entry's `changedMs` as listed: when a sync has since moved another
+   * entry to that position, the core refuses (`unknown_item`) instead of revealing it.
+   */
+  revealPasswordHistory(
+    id: string,
+    source: HistoryEntry["source"],
+    index: number,
+    changedMs: number | undefined,
+  ): string {
+    const ms = changedMs === undefined ? undefined : BigInt(Math.trunc(changedMs));
+    return call(() => this.#s().revealPasswordHistory(id, source, index, ms));
   }
 
   /**

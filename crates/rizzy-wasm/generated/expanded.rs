@@ -15749,21 +15749,27 @@ pub mod items {
     /// The value of one password-history entry as text: call it only on the user's request (ADR
     /// 0013 §3 rule 3). The history is read again here and the index bounds-checked: an index past
     /// the end is `unknown_item`. A sync between the listing and the reveal can shift the entries
-    /// of the same item, so the host lists the history again after every sync.
+    /// of the same item, so the caller passes the date it showed for the entry
+    /// ([`HistoryEntryView::changed_ms`]) and an entry whose date differs is `unknown_item` too:
+    /// a stale position never reveals a value under another entry's date.
     ///
     /// # Errors
     /// `invalid_input` for a source other than `merge` or `imported`, or a value with no text
-    /// form; `unknown_item` for an index past the end or an imported entry without a value.
+    /// form; `unknown_item` for an index past the end, a date that does not match, or an imported
+    /// entry without a value.
     pub(crate) fn reveal_history(vault: &VaultSync, item: ItemId,
-        source: &str, index: usize) -> CoreResult<Zeroizing<String>> {
+        source: &str, index: usize, changed_ms: Option<u64>)
+        -> CoreResult<Zeroizing<String>> {
         let value =
             match source {
                             HISTORY_MERGE =>
-                                vault.password_history(item).into_iter().nth(index).map(|entry|
-                                        entry.value),
+                                vault.password_history(item).into_iter().nth(index).filter(|entry|
+                                            Some(entry.changed_ms) ==
+                                                changed_ms).map(|entry| entry.value),
                             HISTORY_IMPORTED =>
-                                vault.imported_password_history(item).into_iter().nth(index).and_then(|entry|
-                                        entry.value),
+                                vault.imported_password_history(item).into_iter().nth(index).filter(|entry|
+                                            entry.changed_ms ==
+                                                changed_ms).and_then(|entry| entry.value),
                             _ => return Err(ClientError::InvalidInput.into()),
                         }.filter(|v|
                             !v.is_cleared()).ok_or(ClientError::UnknownItem)?;
@@ -28407,26 +28413,39 @@ pub mod session {
         }
         #[doc =
         " The value of one password-history entry, as [`Session::password_history`] listed it:"]
-        #[doc = " call it only on the user\'s request (ADR 0013 §3 rule 3)."]
+        #[doc =
+        " call it only on the user\'s request (ADR 0013 §3 rule 3). `changed_ms` is the date the"]
+        #[doc =
+        " listing gave for the entry (`undefined` when it gave none); an entry at `index` with"]
+        #[doc =
+        " another date is refused, so a listing made stale by a sync never reveals a value under"]
+        #[doc = " the wrong date."]
         #[doc = ""]
         #[doc = " # Errors"]
         #[doc =
         " As [`Session::item`]; `invalid_input` for an unknown source; `unknown_item` for an"]
-        #[doc = " entry that is not there (any more)."]
+        #[doc = " entry that is not there (any more) or whose date differs."]
         pub fn reveal_password_history(&self, id: &str, source: &str,
-            index: usize) -> Result<String, CoreError> {
+            index: usize, changed_ms: Option<u64>)
+            -> Result<String, CoreError> {
             #[automatically_derived]
             const _: () =
                 {
                     #[doc =
                     " The value of one password-history entry, as [`Session::password_history`] listed it:"]
                     #[doc =
-                    " call it only on the user\'s request (ADR 0013 §3 rule 3)."]
+                    " call it only on the user\'s request (ADR 0013 §3 rule 3). `changed_ms` is the date the"]
+                    #[doc =
+                    " listing gave for the entry (`undefined` when it gave none); an entry at `index` with"]
+                    #[doc =
+                    " another date is refused, so a listing made stale by a sync never reveals a value under"]
+                    #[doc = " the wrong date."]
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
                     " As [`Session::item`]; `invalid_input` for an unknown source; `unknown_item` for an"]
-                    #[doc = " entry that is not there (any more)."]
+                    #[doc =
+                    " entry that is not there (any more) or whose date differs."]
                     #[export_name =
                     "session_revealPasswordHistory_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_revealPasswordHistory(me:
@@ -28466,6 +28485,18 @@ pub mod session {
                             wasm_bindgen::convert::WasmAbi>::Prim3,
                         arg3_4:
                             <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg4_1:
+                            <<Option<u64> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg4_2:
+                            <<Option<u64> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg4_3:
+                            <<Option<u64> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg4_4:
+                            <<Option<u64> as wasm_bindgen::convert::FromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4)
                         ->
                             wasm_bindgen::convert::WasmRet<<Result<String, CoreError> as
@@ -28511,7 +28542,17 @@ pub mod session {
                                                                 wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
                                                             arg3_3, arg3_4))
                                                 };
-                                            let _ret = me.reveal_password_history(arg1, arg2, arg3);
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<Option<u64>>();
+                                            let arg4 =
+                                                unsafe {
+                                                    <Option<u64> as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Option<u64>
+                                                                as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                            arg4_3, arg4_4))
+                                                };
+                                            let _ret =
+                                                me.reveal_password_history(arg1, arg2, arg3, arg4);
                                             _ret
                                         }
                                     });
@@ -28525,12 +28566,18 @@ pub mod session {
                     #[doc =
                     " The value of one password-history entry, as [`Session::password_history`] listed it:"]
                     #[doc =
-                    " call it only on the user\'s request (ADR 0013 §3 rule 3)."]
+                    " call it only on the user\'s request (ADR 0013 §3 rule 3). `changed_ms` is the date the"]
+                    #[doc =
+                    " listing gave for the entry (`undefined` when it gave none); an entry at `index` with"]
+                    #[doc =
+                    " another date is refused, so a listing made stale by a sync never reveals a value under"]
+                    #[doc = " the wrong date."]
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
                     " As [`Session::item`]; `invalid_input` for an unknown source; `unknown_item` for an"]
-                    #[doc = " entry that is not there (any more)."]
+                    #[doc =
+                    " entry that is not there (any more) or whose date differs."]
                     #[no_mangle]
                     #[doc(hidden)]
                     pub extern "C-unwind" fn __wbindgen_describe_session_revealPasswordHistory_e09cc0eb35f8b583() {
@@ -28538,10 +28585,11 @@ pub mod session {
                         wasm_bindgen::__rt::link_mem_intrinsics();
                         inform(FUNCTION);
                         inform(0);
-                        inform(3u32);
+                        inform(4u32);
                         <&str as WasmDescribe>::describe();
                         <&str as WasmDescribe>::describe();
                         <usize as WasmDescribe>::describe();
+                        <Option<u64> as WasmDescribe>::describe();
                         <Result<String, CoreError> as WasmDescribe>::describe();
                         <Result<String, CoreError> as WasmDescribe>::describe();
                     }
@@ -28554,7 +28602,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\x06U The value of one password-history entry, as [`Session::password_history`] listed it:: call it only on the user's request (ADR 0013 \xc2\xa73 rule 3).\0\t # ErrorsS As [`Session::item`]; `invalid_input` for an unknown source; `unknown_item` for an$ entry that is not there (any more).\0\x03\x02id\0\0\0\x06source\0\0\0\x05index\0\0\0\0\0\x15revealPasswordHistory\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\tU The value of one password-history entry, as [`Session::password_history`] listed it:W call it only on the user's request (ADR 0013 \xc2\xa73 rule 3). `changed_ms` is the date theU listing gave for the entry (`undefined` when it gave none); an entry at `index` withW another date is refused, so a listing made stale by a sync never reveals a value under\x10 the wrong date.\0\t # ErrorsS As [`Session::item`]; `invalid_input` for an unknown source; `unknown_item` for an: entry that is not there (any more) or whose date differs.\0\x04\x02id\0\0\0\x06source\0\0\0\x05index\0\0\0\nchanged_ms\0\0\0\0\0\x15revealPasswordHistory\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -28582,8 +28630,8 @@ pub mod session {
                 };
             let vault = &self.inner()?.vault;
             let item = visible_item(vault, id)?;
-            Ok(items::reveal_history(vault, item, source,
-                                index)?.as_str().to_owned())
+            Ok(items::reveal_history(vault, item, source, index,
+                                changed_ms)?.as_str().to_owned())
         }
         #[doc =
         " The notices not yet handed over in this session (gap 02), each handed over once: an edit"]

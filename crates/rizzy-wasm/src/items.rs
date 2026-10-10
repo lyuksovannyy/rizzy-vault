@@ -648,27 +648,33 @@ pub(crate) fn password_history(vault: &VaultSync, item: ItemId) -> Vec<HistoryEn
 /// The value of one password-history entry as text: call it only on the user's request (ADR
 /// 0013 §3 rule 3). The history is read again here and the index bounds-checked: an index past
 /// the end is `unknown_item`. A sync between the listing and the reveal can shift the entries
-/// of the same item, so the host lists the history again after every sync.
+/// of the same item, so the caller passes the date it showed for the entry
+/// ([`HistoryEntryView::changed_ms`]) and an entry whose date differs is `unknown_item` too:
+/// a stale position never reveals a value under another entry's date.
 ///
 /// # Errors
 /// `invalid_input` for a source other than `merge` or `imported`, or a value with no text
-/// form; `unknown_item` for an index past the end or an imported entry without a value.
+/// form; `unknown_item` for an index past the end, a date that does not match, or an imported
+/// entry without a value.
 pub(crate) fn reveal_history(
     vault: &VaultSync,
     item: ItemId,
     source: &str,
     index: usize,
+    changed_ms: Option<u64>,
 ) -> CoreResult<Zeroizing<String>> {
     let value = match source {
         HISTORY_MERGE => vault
             .password_history(item)
             .into_iter()
             .nth(index)
+            .filter(|entry| Some(entry.changed_ms) == changed_ms)
             .map(|entry| entry.value),
         HISTORY_IMPORTED => vault
             .imported_password_history(item)
             .into_iter()
             .nth(index)
+            .filter(|entry| entry.changed_ms == changed_ms)
             .and_then(|entry| entry.value),
         _ => return Err(ClientError::InvalidInput.into()),
     }

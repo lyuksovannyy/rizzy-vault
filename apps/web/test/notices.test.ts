@@ -4,7 +4,7 @@ import type { DeviceView, Notice } from "@rizzy-vault/core";
 import { describe, expect, it } from "vitest";
 
 import { DEVICE_KINDS, deviceLabel, joinNames, mergeNotices, noticeKey, noticeText } from "../src/notices.ts";
-import { historyLabel } from "../src/views/PasswordHistory.tsx";
+import { canReveal, historyLabel } from "../src/views/PasswordHistory.tsx";
 
 const OWN = "00".repeat(16);
 const LAPTOP = "ab".repeat(16);
@@ -73,5 +73,20 @@ describe("password-history labels", () => {
     expect(historyLabel({ source: "imported", index: 3, changedMs: at })).toBe(`Imported, ${when}`);
     expect(historyLabel({ source: "imported", index: 0, changedMs: undefined })).toBe("Imported");
     expect(historyLabel({ source: "merge", index: 0, changedMs: undefined })).toBe("Replaced");
+  });
+});
+
+describe("password-history reveal gate", () => {
+  const entries = [{ source: "merge" as const, index: 0, changedMs: 1 }];
+
+  it("allows reveal only for a list read at the latest sync", () => {
+    // Not loaded yet: nothing to reveal.
+    expect(canReveal(undefined, 0)).toBe(false);
+    // Read at the current revision: positions match the Worker's.
+    expect(canReveal({ revision: 3, entries }, 3)).toBe(true);
+    // A sync happened since (revision 4): the old positions may name other entries.
+    expect(canReveal({ revision: 3, entries }, 4)).toBe(false);
+    // An empty fresh list is still fresh.
+    expect(canReveal({ revision: 4, entries: [] }, 4)).toBe(true);
   });
 });
