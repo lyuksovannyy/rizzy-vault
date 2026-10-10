@@ -217,3 +217,84 @@ fn no_auto_purge_while_an_unapplied_record_is_held() {
     );
     assert_eq!(reader.item_lifecycle(item), ItemLifecycle::Trashed);
 }
+
+/// "A partial run (some items already purged) is reported as `Err`, and the caller may
+/// retry, since purges already written are not undone" (`auto_purge_due`'s own doc, this
+/// module's header). No test here drove that `Err` path at all: every other test above
+/// either has nothing due or everything due succeeds. A real writer-rule or lifecycle
+/// refusal can't reach this once an item has passed the `due` filter (the same
+/// `may_purge` gate runs at both points, with nothing in the loop body able to change a
+/// sibling item's state in between), so the one partial failure the public API can force
+/// deterministically is `device_seq` exhaustion: `write_op` (`rizzy-client/src/sync.rs`)
+/// journals an own op's row before its final `next_seq.checked_add(1)` overflows, so a
+/// purge at `device_seq = u64::MAX` lands on the merge and in the journal and only then
+/// reports `Err(ClientError::Internal)`. Starting `next_device_seq` four below `u64::MAX`
+/// (two creates, two trashes) puts the first purge exactly at `u64::MAX`: it succeeds and
+/// journals, the second purge is never attempted, and the call reports `Err` — exactly the
+/// partial run the doc describes.
+///
+/// `due` walks `merges()` in `ItemId` order, and ids are generated, so which of `item_a`/
+/// `item_b` is first (and so purged) is not fixed by this test's seed alone; the assertions
+/// below are deliberately order-agnostic — exactly one of the two, whichever it is.
+#[test]
+fn partial_failure_keeps_already_made_purges_journaled() {
+    let mut rng = ChaCha20Rng::seed_from_u64(210);
+    let mut server = Server::new(211);
+    let a = signup(&mut server, &mut rng, DeviceKind::DesktopCli);
+    let unlocked = a.unlocked;
+    let mut vault = VaultSync::new(a.vault_key, &unlocked, u64::MAX - 4).unwrap();
+    // The journal is off until a host turns it on (`persist`); off, `record` (and so
+    // `take_writes`) is a no-op, which would make the assertion below pass for the wrong
+    // reason (an empty changeset either way).
+    vault.persist();
+
+    let key = SchemaKey::parse(LOGIN_PASSWORD.as_bytes()).unwrap();
+    let value = Value::text("p").unwrap();
+    let edit = [FieldEdit {
+        key: &key,
+        value: &value,
+    }];
+    let item_a = vault
+        .create_item(&mut rng, &unlocked, ItemType::LOGIN, &edit, T0 + 1_000)
+        .unwrap();
+    let item_b = vault
+        .create_item(&mut rng, &unlocked, ItemType::LOGIN, &edit, T0 + 1_001)
+        .unwrap();
+    vault
+        .trash_item(&mut rng, &unlocked, item_a, T0 + 1_002)
+        .unwrap();
+    vault
+        .trash_item(&mut rng, &unlocked, item_b, T0 + 1_003)
+        .unwrap();
+    // Drain the four setup writes so the assertion below sees only the purge attempt.
+    assert!(!vault.take_writes().is_empty());
+
+    let err = vault
+        .auto_purge_due(&mut rng, &unlocked, T0 + 1_003 + RETENTION_MS, RETENTION_MS)
+        .unwrap_err();
+    assert_eq!(err, ClientError::Internal);
+
+    // One item purged before the overflow, the other never attempted: a real partial run,
+    // not an all-or-nothing one.
+    let lifecycles = [vault.item_lifecycle(item_a), vault.item_lifecycle(item_b)];
+    assert_eq!(
+        lifecycles
+            .iter()
+            .filter(|l| **l == ItemLifecycle::Purged)
+            .count(),
+        1,
+        "exactly one item purges before the device_seq overflow: {lifecycles:?}"
+    );
+    assert_eq!(
+        lifecycles
+            .iter()
+            .filter(|l| **l == ItemLifecycle::Trashed)
+            .count(),
+        1,
+        "the other item is never attempted: {lifecycles:?}"
+    );
+
+    // The purge that already happened is in the journal, ready for the caller to commit
+    // despite the `Err` (the doc's "purges already written are not undone").
+    assert!(!vault.take_writes().is_empty());
+}
