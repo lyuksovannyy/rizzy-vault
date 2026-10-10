@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Adversarial e2e coverage for INV-37 and INV-40 that needs no enrolled account (extension
 // loaded only, `extension.spec.ts`'s own fixture shape): hostile pages trying to read, resize or
 // message their way around the content script / inline-menu boundary (HANDOFF gap X3,
