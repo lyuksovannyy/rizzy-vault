@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The web vault's login (CRYPTO.md §11.4: "Every session is an OPAQUE login", §11.2 steps
 //! 1–6) as a request/response loop for JavaScript.
 //!

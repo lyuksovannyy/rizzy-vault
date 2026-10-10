@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The web vault's built files and the server's embedded table name the same paths
 // (`apps/web/assets.ts`, `crates/rizzy-server/src/http/web.rs`), so a file the build emits is
 // always one the server serves.

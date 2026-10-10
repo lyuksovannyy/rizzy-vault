@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `derivations.json`: every §4.3 derivation M1 implements, with the derived value itself.
 //!
 //! Not here: the M3 and M5 derivations (local index key, shares), which have no code yet, and

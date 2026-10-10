@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Messaging validation (ADR 0036 §4, INV-40): `parseFromContentScript` must accept every
 // well-formed message this contract defines and refuse anything oversized or malshaped, before
 // any shape-specific logic runs.

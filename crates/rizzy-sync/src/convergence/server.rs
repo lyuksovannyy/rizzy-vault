@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The simulated server of the harness: ADR 0012 §7 "Upload" and "Fetch" as ADR 0021 §4 and §9
 //! replace them, `worker` through [`crate::compaction`], backups and restores, and a
 //! withholding mode for property 7.

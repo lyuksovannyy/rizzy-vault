@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `ACCOUNT_KEY_DEVICE_GRANT`: the new account key sealed to a remaining device after a
 //! rotation (CRYPTO.md §8.4, §10.1, §11.3 step 4, §11.6 step 6).
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Row-level reads and writes of the auth tables that several flows share: accounts,
 //! credentials, `E_id`, recovery rows, statements, and the compare-and-swap on the signed
 //! `account-state`.

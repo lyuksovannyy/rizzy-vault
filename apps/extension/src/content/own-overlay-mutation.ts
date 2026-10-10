@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Split out of `content-script.ts` so it can be unit tested without a DOM environment
 // (`content-script.ts`'s own top-level `if (window.top === window) { installContentScript(); }`
 // runs at import time, which this workspace's `vitest` `environment: "node"` has no `window`

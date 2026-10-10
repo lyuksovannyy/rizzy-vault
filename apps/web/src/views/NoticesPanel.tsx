@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The late-edit and trash notices the last syncs handed over (gap 02; `notices.ts`): each with
 // a Dismiss button, and for an edit that arrived for an item deleted permanently, a type picker
 // and "Restore as new item" (ADR 0018 §3 "Surfacing": the user picks the type, it is never

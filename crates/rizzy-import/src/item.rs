@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Imported items: the field writes of one new item per entry, in the M1 item schema of
 //! `rizzy-core` (ADR 0018 §6–§8), and the builder the format mappers fill.
 //!

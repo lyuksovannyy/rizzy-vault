@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The save-prompt-by-location index (`core-host/save-prompt-location.ts`): the fix for the
 // save-prompt race (`apps/extension/README.md`'s residual note). Pure and synchronous, with an
 // injected clock, so every TTL and single-use edge is exercised directly, no fake timers or a

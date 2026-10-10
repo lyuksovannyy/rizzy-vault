@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Trusted Types (THREAT_MODEL §7.1 "T"; the web role's CSP carries
 // `require-trusted-types-for 'script'`). In a browser that enforces it, every script URL must
 // be a `TrustedScriptURL`, the core Worker's included. This module holds the one policy, and

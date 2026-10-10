@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The gates in front of every export (owner decision 2026-10-05): a fresh re-authentication
 //! before any export, encrypted or plaintext, and a 10-second hold after the plaintext
 //! warning.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Master password and Secret Key change on an enrolled device (CRYPTO.md §11.5), and
 //! following such a change made on another device (§11.3 step 5), as a sans-I/O state machine.
 //!

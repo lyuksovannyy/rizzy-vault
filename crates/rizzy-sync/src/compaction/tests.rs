@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Unit tests of the compaction rules (ADR 0021 §2–§4, §9).
 //!
 //! - §2: the clamp, with a known answer of the clamped VV as persisted.

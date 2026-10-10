@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Response security headers (threat model INV-49, §7.7, §7.14; INV-52).
 //!
 //! **Every response** gets, unless the handler set its own:

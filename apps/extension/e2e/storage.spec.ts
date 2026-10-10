@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Threat model INV-63: "in the browser extension, unlocked key material [...] exists only in
 // memory: the service worker, an offscreen document, or `storage.session` [...]. It is never
 // written to `storage.local`, `storage.sync` or IndexedDB, and no storage that content scripts

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Login on a new device and its enrolment (CRYPTO.md §11.2), and the web vault's ephemeral
 //! device (§11.4), as a sans-I/O state machine.
 //!

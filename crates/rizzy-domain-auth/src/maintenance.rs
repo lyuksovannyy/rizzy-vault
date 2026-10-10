@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! What `worker` runs for the auth domain (ADR 0010 §1 row `worker`, §5: "`worker` deletes
 //! expired rows"; ADR 0012 §7 "End of the reconciliation epoch"; CRYPTO.md §5.11 "Rotation":
 //! "`worker` re-seals TOTP rows under the account lock").

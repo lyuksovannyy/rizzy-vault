@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The second-factor prompt: the Worker asks for it mid-login, when the server wants a code
 // (`ask-totp` in `protocol.ts`). The code is single-use, so it is a plain numeric input.
 import { type FormEvent, useState } from "react";

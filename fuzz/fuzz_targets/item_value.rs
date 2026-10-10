@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the item value decoder (ADR 0018 §6, §10): never panics, and a value it accepts is
 //! the one encoding of that value. Part of CRYPTO.md §15 item 7 ("item-record parsers …: the
 //! value decoder") and ADR 0018 §12.

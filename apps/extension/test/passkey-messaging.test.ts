@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Passkey messages at the real extension-messaging boundary (ADR 0039 §2, INV-40):
 // `parseFromContentScript` for the two new content-script-originated request types, and the
 // privileged-sender-only validators `core-host/listener.ts` uses directly, mirroring

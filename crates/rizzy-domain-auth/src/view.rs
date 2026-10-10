@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The signed account objects a client verifies (CRYPTO.md §11.2 steps 5–6, §11.3 step 2.2,
 //! §11.9 step 3): [`AuthService::account_view`] and the builder the login and recovery flows
 //! share.

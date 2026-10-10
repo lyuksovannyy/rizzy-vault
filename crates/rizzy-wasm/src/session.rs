@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! An unlocked web-vault session: the one handle that holds keys (ADR 0013 §3 rule 1, "Hosts
 //! hold opaque handles").
 //!

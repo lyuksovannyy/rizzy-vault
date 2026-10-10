@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! HPKE tests: RFC 7748 and RFC 9180 vectors through this module's code, independent known
 //! answers for the device grant, round trips in both modes, mode separation, and the negative
 //! tests of CRYPTO.md §15 item 4 for HPKE purposes.

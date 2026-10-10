@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The per-item merge: multi-value registers with history, trash, purge and tombstones, and
 //! snapshot absorption ([ADR 0012] §4–§5, as partially superseded by [ADR 0018] §3, §6 and §10;
 //! [ADR 0018] §3, §9, §10; [ADR 0021] §9 client rules).

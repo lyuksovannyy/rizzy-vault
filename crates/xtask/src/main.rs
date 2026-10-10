@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `cargo xtask`: repository checks for rizzy-vault (ADR 0016 §5). Never shipped.
 //!
 //! ```text
@@ -9,6 +11,7 @@
 //! cargo xtask build-wasm
 //! cargo xtask check-js
 //! cargo xtask check-manifest
+//! cargo xtask check-spdx [--fix]
 //! ```
 //!
 //! `check-deps` enforces the crate-boundary rules of ADR 0016 (R1–R8) and the dependency rules
@@ -86,6 +89,11 @@
 //! beyond the one wasm exception. It needs `apps/extension/dist/{chromium,firefox}/manifest.json`
 //! already built (`cargo xtask build-wasm` then `pnpm run build` in `apps/extension`).
 //!
+//! `check-spdx` checks the SPDX header of ADR 0017 Decision 6 on every first-party Rust,
+//! TypeScript/JavaScript, shell, CSS and HTML file ([`mod@spdx`]); `--fix` inserts or corrects
+//! it. Wiring it into CI (`.github/workflows/ci.yml`) is a separate change the owner has not
+//! asked for yet.
+//!
 //! # How `check-deps` works
 //!
 //! 1. [`load`] gathers every input: `cargo metadata --all-features --locked` three times (all
@@ -126,6 +134,7 @@ mod metadata;
 mod psl_check;
 mod rules;
 mod signoff;
+mod spdx;
 mod unsafe_scan;
 
 use std::collections::BTreeSet;
@@ -171,6 +180,10 @@ COMMANDS:
                     allow-listed permissions/host_permissions/web_accessible_resources,
                     all_frames: false, and the extension-pages CSP. Needs apps/extension/dist/
                     already built (cargo xtask build-wasm, then pnpm run build)
+    check-spdx      Check that every covered first-party file starts with the SPDX header
+                    (ADR 0017 Decision 6)
+    check-spdx --fix
+                    Insert or correct the SPDX header on every covered first-party file
     equivalence-list <source> <key-file> <list-version> <published-at-ms>
                     Compile data/equivalence/groups.txt-style source into the signed
                     equivalence list (ADR 0038 §3) and write its wire bytes to stdout.
@@ -207,6 +220,8 @@ fn main() -> ExitCode {
         [Some("build-wasm")] => report(bindings::build_wasm(&workspace_root())),
         [Some("check-js")] => report(js::check_js(&workspace_root())),
         [Some("check-manifest")] => report(ext_manifest::check_built_manifests(&workspace_root())),
+        [Some("check-spdx")] => check_spdx(false),
+        [Some("check-spdx"), Some("--fix")] => check_spdx(true),
         [
             Some("equivalence-list"),
             Some(source),
@@ -390,6 +405,65 @@ fn check_clippy() -> ExitCode {
         warnings.len()
     );
     ExitCode::FAILURE
+}
+
+/// `cargo xtask check-spdx [--fix]`: checks, or inserts, the SPDX header of ADR 0017 Decision 6
+/// on every covered first-party file ([`mod@spdx`]).
+///
+/// Without `--fix`: prints `check-spdx: ok (...)` and exits 0 when every file already has its
+/// header; otherwise prints each violation and a summary to stderr and exits 1. With `--fix`:
+/// writes the header to every file that needs it, prints each one, and exits 0 (a file that
+/// needs no change is silent); an input or write error from either mode exits 1.
+fn check_spdx(fix: bool) -> ExitCode {
+    let root = workspace_root();
+    let mut err = io::stderr().lock();
+    if fix {
+        return match spdx::fix(&root) {
+            Ok(written) => {
+                let mut out = io::stdout().lock();
+                for path in &written {
+                    let _ = writeln!(out, "fixed: {path}");
+                }
+                let _ = writeln!(
+                    out,
+                    "check-spdx --fix: wrote the SPDX header (ADR 0017 Decision 6) to {} \
+                     file(s)",
+                    written.len()
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                let _ = writeln!(err, "check-spdx --fix: error: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    match spdx::check(&root) {
+        Ok(violations) if violations.is_empty() => {
+            let _ = writeln!(
+                io::stdout().lock(),
+                "check-spdx: ok (every covered first-party file starts with the SPDX header; \
+                 ADR 0017 Decision 6)"
+            );
+            ExitCode::SUCCESS
+        }
+        Ok(violations) => {
+            for v in &violations {
+                let _ = writeln!(err, "error: {v}");
+            }
+            let _ = writeln!(
+                err,
+                "check-spdx: {} file(s) with a missing or wrong SPDX header (ADR 0017 Decision \
+                 6); run `cargo xtask check-spdx --fix`",
+                violations.len()
+            );
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            let _ = writeln!(err, "check-spdx: error: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// The workspace root: two levels above this crate's manifest directory.

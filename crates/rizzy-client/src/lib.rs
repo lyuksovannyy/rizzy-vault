@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-client` — the sans-I/O client core of rizzy-vault ([ADR 0013] §1–§2, [ADR 0016] §3
 //! row `rizzy-client`, [ADR 0019] §5).
 //!

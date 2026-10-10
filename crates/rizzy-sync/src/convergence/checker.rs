@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! An independent brute-force checker of the ADR 0021 §8 server properties, written from
 //! ADR 0021 §2–§4 rather than from [`crate::compaction`] (§8: "An independent brute-force
 //! checker, written from §2–§4 rather than from that module, checks the server properties").

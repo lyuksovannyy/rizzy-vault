@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! A test harness for the merge: simulated devices that write ops on one item through the real
 //! record encoder and parser, a test-only causal delivery buffer, and builders for honest and
 //! dishonest snapshots.

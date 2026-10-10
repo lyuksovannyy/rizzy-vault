@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The vault domain's side of the `auth` domain's cross-domain flows (ADR 0016 R4).
 //!
 //! `rizzy-domain-auth` defines the trait (`VaultPort`) and `rizzy-server` implements it with the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Account state, enrolment, bundles and key grants (CRYPTO.md §10.1, §10.2, §11.2 step 7,
 //! §11.3, §11.4; ADR 0012 §7 "Healing a server rollback" steps 1–3).
 //!

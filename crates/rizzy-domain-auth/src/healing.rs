@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Healing a server rollback (ADR 0012 §7 steps 1–3, as ADR 0032 §2–§3 replace steps 2 and 3;
 //! THREAT_MODEL §5.8, INV-59).
 //!

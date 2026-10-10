@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The account endpoints of password and Secret Key change, settings, self-revocation,
 //! suspension, recovery and TOTP (CRYPTO.md §11 "Replacing credentials", §11.5, §11.8 step 0,
 //! §11.9, §11.15): routing, session gating before the body, strict bodies, and the recovery

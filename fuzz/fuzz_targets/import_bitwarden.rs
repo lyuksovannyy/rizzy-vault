@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the Bitwarden JSON importer (ADR 0002 point 2; threat model A16: malicious import
 //! files) and the JSON reader under it. Neither may panic, whatever the input, and every item
 //! that comes out keeps the importer's guarantees ([`import_common::check`]): it passes

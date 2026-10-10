@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Field keys: the ADR 0018 §7 grammar, its parser and the key builders.
 //!
 //! ```text

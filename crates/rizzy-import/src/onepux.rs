@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! 1Password's 1PUX export (ADR 0002 point 2): a zip archive whose `export.data` member is a
 //! JSON document. Only that member is read ([`crate::zip`]); attached files under `files/` are
 //! never decompressed.

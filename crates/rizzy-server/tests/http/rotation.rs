@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Key rotation end to end over HTTP ([ADR 0025]; CRYPTO.md §11.6, §11.8): real clients
 //! (`rizzy-client`, the dev-only edge ADR 0016 §4 owner decision 4 admits) sign up, log in,
 //! enrol, authenticate their devices, write items, sync, and rotate through the router, over the

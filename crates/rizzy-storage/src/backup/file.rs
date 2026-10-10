@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The logical backup file, format version 1 ([ADR 0023]): the canonical writer and the strict
 //! parser of the bytes `rizzy-vault backup` writes and `rizzy-vault restore` reads.
 //!

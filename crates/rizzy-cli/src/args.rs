@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `rv` command line.
 //!
 //! No argument is ever a secret (threat model INV-56): passwords, the Secret Key, recovery

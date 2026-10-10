@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The generate button and settings popover next to a password-type field (the login password,
 // or a hidden custom field): "Generate" fills the field with the current options at once; the
 // gear opens a popover with the same character/word options the generator page offers, and

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `encodings.json`: the Secret Key and recovery-code format (CRYPTO.md §7, §4.3 check
 //! characters, §11.9) and Padmé framing (§8.5), with accepted and rejected inputs.
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Named scenarios: the examples the ADRs name, and the merge spike's named regression cases
 //! (`tests/model.rs`, `tests/families.rs`) ported to whole-system runs. Each ends with the
 //! quiescent checks of [`World::check_quiescent`], so each also checks properties 1–4, 6 and 7.

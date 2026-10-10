@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Upload and Fetch: round trips, "Already stored", conflicts, chain gaps, forged authors,
 //! stale epochs, and the author rules (ADR 0012 §7 "Upload" as ADR 0021 §9 supersedes it).
 

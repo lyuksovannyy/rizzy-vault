@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // @rizzy-vault/ui — the web design system (ADR 0014 §5), minimal in M1. The token CSS is
 // imported by path (`@rizzy-vault/ui/tokens.css`).
 export { PasswordGenerateSlot } from "./PasswordGenerateSlot.tsx";

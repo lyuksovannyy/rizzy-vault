@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Password and passphrase generator (CRYPTO.md §12.1 "Password generator (M1)", §12.3).
 //!
 //! Two modes. [`generate_password`] draws `length` characters from the alphabet that the

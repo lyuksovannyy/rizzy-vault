@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the 1PUX importer (ADR 0002 point 2; threat model A16: zip bombs, malicious import
 //! files): the zip reader, the DEFLATE decoder with its size cap, and the item mapping of
 //! `export.data`. None may panic, and every item that comes out keeps the importer's

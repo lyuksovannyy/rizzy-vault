@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The one `onMessage` listener both the offscreen document and the Firefox background page
 // register (ADR 0036 §2, §4). On Chromium, a real content-script message (`sender.tab` set) is
 // ignored here: the service worker is the only Chromium context that accepts those

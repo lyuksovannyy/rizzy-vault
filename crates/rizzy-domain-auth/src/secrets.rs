@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The server secrets (CRYPTO.md §5.8, §5.11; ADR 0010 §4; threat model INV-50, INV-69).
 //!
 //! CRYPTO.md §5.11 is "the single normative list" of the secrets file's contents, in a

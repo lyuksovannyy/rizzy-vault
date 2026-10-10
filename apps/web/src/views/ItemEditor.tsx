@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Creating and editing an item. An edit writes only the keys the user changed, as one op
 // (ADR 0018 §11; `fixedChanges`). Concealed values are never fetched to prefill the form: a
 // concealed field's input starts empty, an empty input keeps the value, and "Clear" removes it.

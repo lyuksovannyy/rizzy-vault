@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-core`'s committed known-answer vectors (CRYPTO.md §15 item 1), read by this crate's
 //! header parser.
 //!

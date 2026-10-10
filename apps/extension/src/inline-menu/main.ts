@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The inline-menu iframe's own script (ADR 0036 §4/§5; ADR 0014 §2-style — framework-free,
 // like the content script, since this is a few buttons with no state worth a framework). Runs
 // at the extension's own origin, inside an iframe `content-script.ts` injects into an untrusted

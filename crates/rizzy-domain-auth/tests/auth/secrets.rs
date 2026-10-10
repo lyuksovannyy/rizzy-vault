@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The server secrets' startup checks (CRYPTO.md §5.8, §5.11) and what the database never
 //! holds (INV-8, INV-50).
 

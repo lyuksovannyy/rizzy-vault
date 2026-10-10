@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Generator bounds, defaults and refusal wording, mirrored from `@rizzy-vault/core`'s
 // `GENERATOR_LIMITS` / `DEFAULT_PASSWORD_OPTIONS` / `DEFAULT_PASSPHRASE_OPTIONS` /
 // `GENERATOR_ERROR_MESSAGES`.

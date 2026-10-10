@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The HTTP transport of `rv`: the `/api/v1` conventions of [ADR 0028] over hyper's HTTP/1.1
 //! client connection (ADR 0013 §2: "HTTP transport … Rust HTTP client, rustls"), over TLS 1.3
 //! for `https://` origins ([ADR 0030]; the configuration and trust store are [`crate::tls`]'s).

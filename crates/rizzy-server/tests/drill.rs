@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The operator's backup → wipe → restore drill, in its fast form ([docs/self-hosting.md] §8–§10;
 //! ADR 0011 "Backups"; the threat model §5.8, INV-50, INV-59; ADR 0021 §2).
 //!

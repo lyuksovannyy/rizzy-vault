@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The core Worker: the one context of the web vault that holds the wasm instance, every handle
 // and every key (ADR 0013 §4 "Where the core lives"). It runs the KDF, does the HTTP transport
 // to its own origin (`/api/v1`, ADR 0028) through packages/core's `fetchTransport`, and answers

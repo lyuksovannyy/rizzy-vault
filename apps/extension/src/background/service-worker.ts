@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The MV3 service worker (ADR 0036 §2, §4): message-routing only. It never imports
 // `@rizzy-vault/core` and holds no key material — it is only ever woken to relay a
 // content-script message to the long-lived context (an offscreen document on Chromium) and

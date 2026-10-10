@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+
 /* The M1 token set (ADR 0014 §5): hand-written CSS custom properties, light and dark. M3
    replaces this file with CSS generated from the platform-neutral token source, keeping the
    property names where possible. Components use only these properties, in the declared

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The Emergency Kit as the web vault shows and saves it (CRYPTO.md §7 "Emergency Kit"): the
 // server URL, the login name, the Secret Key, the recovery code if one was issued, and a blank
 // line for the master password, with the two warnings CRYPTO.md §7 requires in plain words.

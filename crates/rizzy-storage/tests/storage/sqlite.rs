@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-storage` on real SQLite files.
 
 use std::path::Path;

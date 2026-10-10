@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Starts the real `rizzy-vault` binary for the end-to-end tests: a loopback port, a temporary
 // SQLite database and a fresh secrets file, as packages/core's and `rv`'s end-to-end tests do.
 //

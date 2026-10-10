@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `installCoreContextListener`'s `acceptContentScripts` routing (`core-host/listener.ts`):
 // `false` (Chromium: the service worker owns content-script validation) must ignore a raw
 // content-script sender outright; `true` (Firefox: no service worker exists) must validate and

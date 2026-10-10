@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // @rizzy-vault/core — the only way UI code reaches the Rust core (ADR 0013 §4 "One entry point
 // for UI code"; ADR 0014 §2, §4). This file is the set to review when the boundary changes.
 //

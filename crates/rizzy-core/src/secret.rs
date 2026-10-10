@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Secret types (CRYPTO.md §12.2, ADR 0009 "Memory hygiene").
 //!
 //! Every type here:

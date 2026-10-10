@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The CSV importers: Chrome's and Firefox's password exports, and generic CSV.
 //!
 //! Every CSV import reads a header row first; columns are found by name, so their order does

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes `rizzy-sync`'s per-item merge (ADR 0012 §4–§5, ADR 0018 §3, §10) with records a
 //! faulty or hostile author can sign: ops and snapshots that pass every ADR 0018 §5 parse rule
 //! but carry any header context, HLC, claim, value, tombstone or `item_key_id`, delivered in

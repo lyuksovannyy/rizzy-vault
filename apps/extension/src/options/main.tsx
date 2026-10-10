@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The options page (ADR 0036 §3: auto-lock default 15 minutes, "user-configurable"). The stored
 // value is read by the long-lived context at startup, validated and bounded
 // (`core-host/core-context.ts`'s `startCoreContext` → `lifecycle.ts`'s `readAutoLockMs`), not

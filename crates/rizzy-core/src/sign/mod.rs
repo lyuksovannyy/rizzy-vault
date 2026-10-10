@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Ed25519 signatures and signed statements (CRYPTO.md §9.3, §9.6, §10.2; ADR 0006 decision 10).
 //!
 //! This module is the one place in `rizzy-core` that makes or checks an Ed25519 signature. It

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Signup in Server mode (CRYPTO.md §11.1), as a sans-I/O state machine.
 //!
 //! ```text

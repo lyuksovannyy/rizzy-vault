@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `api` role's endpoints: every M1 message of `rizzy-proto`, over the two domains
 //! ([ADR 0002] point 3; [ADR 0010] §1; [ADR 0028]; CRYPTO.md §5.10, §11).
 //!

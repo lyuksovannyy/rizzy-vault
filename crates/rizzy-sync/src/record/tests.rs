@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Record unit tests.
 //!
 //! - The kind and offset each rejection reports, on representative inputs (the negative

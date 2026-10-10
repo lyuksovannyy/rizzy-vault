@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The password and passphrase generator (ROADMAP §4.2). The core generates (rizzy-core
 // `generator`, OS randomness in the Worker) and computes the entropy of a set of options
 // without generating anything (`passwordEntropy`/`passphraseEntropy`); this view only collects

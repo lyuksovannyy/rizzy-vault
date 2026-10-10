@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The one error type of the client flows (ADR 0013 §3 rule 4: "Errors are typed and carry no
 //! secrets. They cross as enums with stable codes, never with key bytes, plaintext or
 //! passwords"; threat model INV-21).

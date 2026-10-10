@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! What an exported item displays: the readings of one item's merged state (an ADR 0018 §3
 //! live snapshot) that the payload import and both plaintext writers share, so that the three
 //! agree on every displayed value, conflict and time (ADR 0027 §2 step 3, §3, §4).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The simulated system: devices, the server, the scenario actions and the quiescence drain.
 
 use std::collections::{BTreeMap, BTreeSet};

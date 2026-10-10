@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the envelope parsers (CRYPTO.md §9.5 rule 5): never panics, never allocates in
 //! proportion to a length field, and a successful parse re-serialises to the same bytes.
 //!

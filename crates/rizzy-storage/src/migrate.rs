@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Embedded, forward-only migrations, one ordered sequence per engine (ADR 0011 points 8-10).
 //!
 //! The SQL lives in `migrations/sqlite/` and `migrations/postgres/`, one file per version in

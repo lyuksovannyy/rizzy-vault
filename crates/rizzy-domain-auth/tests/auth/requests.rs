@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `rizzy-proto` entry points (`*_request`) that the server's account endpoints call:
 //! password change, settings, self-revocation, suspension, recovery and TOTP, each built from
 //! the wire request type and checked end to end with `rizzy-core`'s client side. The HTTP

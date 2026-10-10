@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The export and import steps (owner decision 2026-10-05): no export without a fresh
 // re-authentication, the file's password typed twice, and the import format recognised.
 import { describe, expect, it } from "vitest";

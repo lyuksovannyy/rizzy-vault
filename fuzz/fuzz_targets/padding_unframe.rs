@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the Padmé frame reader (CRYPTO.md §8.5): never panics, and an accepted frame is the
 //! canonical frame of its data.
 //!

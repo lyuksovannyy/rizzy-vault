@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Key derivation: the `kdf_id` table (CRYPTO.md §6), Argon2id (§2, §12.2), password
 //! normalisation (§2, ADR 0004) and the crate-private HKDF-SHA-256 helper (§2, §4.3).
 //!

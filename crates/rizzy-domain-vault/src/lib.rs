@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-domain-vault` — the server's `vault` domain (roadmap M1 step 3; [ADR 0016] §3 row
 //! `rizzy-domain-vault`): Server-mode op records and retained headers, snapshots, compaction,
 //! restore healing, item-key wraps and vault self-grants. It verifies each uploaded op and

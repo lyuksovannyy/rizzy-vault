@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Version-1 record vectors (ADR 0018 §12, CRYPTO.md §15 item 1): the layout level.
 //!
 //! **Where they live.** CRYPTO.md §15 item 1(A) counts these vectors among the normative

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The messaging-backed client the popup and options page use to reach the long-lived context
 // (ADR 0036 §4: "they reach the core only through packages/core's messaging-backed client").
 //

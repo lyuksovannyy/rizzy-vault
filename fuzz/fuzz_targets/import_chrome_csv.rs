@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the Chrome CSV importer (ADR 0002 point 2; threat model A16). It may not panic, and
 //! every item that comes out keeps the importer's guarantees ([`import_common::check`]).
 //!

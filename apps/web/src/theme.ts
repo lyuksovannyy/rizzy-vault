@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The Appearance theme choice (redesign slice 2, item 5 / item 7 of the first slice's "Not yet
 // done" list): "system" (the default), "light" or "dark".
 //

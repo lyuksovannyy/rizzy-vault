@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Header tests.
 //!
 //! - Known answers for both layouts (ADR 0012 §3), spelled out field by field, and their

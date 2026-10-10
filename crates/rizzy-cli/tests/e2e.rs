@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rv` end to end against a real `rizzy-vault` server: signup → login on a second device →
 //! items → sync on two devices → a conflict → export → import → TOTP and the generator →
 //! offline reads and queued writes → key rotation and its follower → device revocation with a

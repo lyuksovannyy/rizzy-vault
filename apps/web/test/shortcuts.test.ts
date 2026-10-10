@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `shortcuts.ts`'s pure dispatch logic (module docs there: no DOM in this workspace's Vitest).
 import { describe, expect, it } from "vitest";
 

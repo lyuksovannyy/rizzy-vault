@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Conversions between `rizzy-core` values and the bounded `rizzy-proto` wire types.
 //!
 //! The wire types bound every length; building one from a value this crate made can only fail

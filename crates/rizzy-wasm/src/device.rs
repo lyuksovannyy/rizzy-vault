@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The browser extension's durable device (ADR 0036 §1: device kind 2; CRYPTO.md §11.2 new
 //! device, §11.3 unlock, §5.10 device authentication).
 //!

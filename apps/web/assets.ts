@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The files of the built web vault, by path under `dist/` (ADR 0010 §4, THREAT_MODEL §7.7).
 //
 // The names are fixed, with no content hash, because `rizzy-server` embeds exactly these files

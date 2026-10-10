@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Auto-lock after inactivity (THREAT_MODEL §7.1 "I"); input restarts the timer.
 import { afterEach, describe, expect, it, vi } from "vitest";
 

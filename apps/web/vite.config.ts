@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Vite build of the web vault (ADR 0014 §3). The output (`dist/`) is what `rizzy-server`
 // embeds with its `embed-web` feature (ADR 0010 §4), so it is shaped for that:
 // - fixed file names (`assets.ts`), checked after every build;

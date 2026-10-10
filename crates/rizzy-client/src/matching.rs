@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! URL matching for autofill (ADR 0037, ADR 0038), over `rizzy-match`.
 //!
 //! [ADR 0016] §3's row for `rizzy-client` plans `rizzy-match` as an internal dependency, and

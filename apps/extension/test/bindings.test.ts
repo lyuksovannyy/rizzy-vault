@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `selectUpdateCandidate` is the save-vs-update decision core of `findItemForUpdate`
 // (gap 33 in the M2 gap audit): "same host, same username -> update" vs. "same host, different
 // username -> save as a new item" vs. "a look-alike host is never an update target". Pure and

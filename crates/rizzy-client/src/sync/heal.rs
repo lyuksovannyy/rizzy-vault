@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Restore healing of one vault: the client's half of ADR 0021 §9 "Server behind", "Healing
 //! request" and "Stale epoch" (which replace ADR 0012 §7 "Healing a server rollback" step 4,
 //! its read-only condition and "Leaving read-only"), with the persistence steps of ADR 0026

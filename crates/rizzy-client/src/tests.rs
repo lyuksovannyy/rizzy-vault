@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Flow tests against an in-memory fake server built from `rizzy-core` and `rizzy-sync`
 //! (ADR 0013 §6: "The `rizzy-client` flows run against a simulated server in plain Rust
 //! tests"). The fake plays the server's half of each flow with the real crypto (OPAQUE,

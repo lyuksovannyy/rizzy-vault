@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The sync step driver of a web-vault session: the steps `rv sync` takes (ADR 0012 §7; ADR
 //! 0021 §9; `rizzy-cli`'s `Device::sync`), one request at a time, for JavaScript to carry.
 //!

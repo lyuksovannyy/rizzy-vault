@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Key rotation by an enrolled device (CRYPTO.md §11.6; the revocation of §11.8 steps 1–3;
 //! [ADR 0025] §2), as a sans-I/O state machine.
 //!

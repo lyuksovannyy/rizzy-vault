@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Timestamps in import files, turned into the Unix milliseconds of `import.created_ms` and
 //! `pwhist/<id>/ms` (ADR 0018 §7). Nothing here reads a clock (ADR 0016 R1).
 //!

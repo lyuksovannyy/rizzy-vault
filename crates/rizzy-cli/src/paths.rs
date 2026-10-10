@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Where `rv` keeps its files, and how it writes files it hands to the user ([ADR 0026] §3,
 //! owner decision on open question 4; [ADR 0027] §5; threat model INV-56, INV-61).
 //!

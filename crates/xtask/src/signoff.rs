@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The DCO sign-off check of ADR 0017 Decision 4, run by `cargo xtask check-signoff`.
 //!
 //! ADR 0017 §4 asks CI for two things: that the commits of a pull request carry the

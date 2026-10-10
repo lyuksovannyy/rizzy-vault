@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `/api/v1` conventions of [ADR 0028] on the Rust side of a JavaScript `fetch` (ADR 0013
 //! §2: "Transport … stays in the host").
 //!

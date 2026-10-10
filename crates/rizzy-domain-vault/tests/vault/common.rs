@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The test harness: a migrated SQLite database with one account and one vault, an in-memory
 //! device directory, devices that sign real `op` and `snapshot` statements, and Fetch helpers
 //! that check what a client checks.

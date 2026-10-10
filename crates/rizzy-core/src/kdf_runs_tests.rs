@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Threat model INV-6: "no path from the master password to a key or an authenticator is
 //! cheaper than one Argon2id evaluation at an allowed `kdf_id`. Each flow runs a fixed number of
 //! evaluations", counted here with the `cfg(test)` counter of [`crate::kdf::argon2id`]

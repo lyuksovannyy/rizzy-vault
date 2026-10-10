@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Faulty-client snapshots (answer 4: ADR 0018 "Settled by the merge spike" item 4; ADR 0021
 //! "Faulty-client snapshots"): unit checks of the evidence merge and two-author covers, and the
 //! impossibility result.

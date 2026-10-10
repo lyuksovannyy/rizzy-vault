@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Integration tests of `rizzy-storage` against real databases.
 //!
 //! - [`sqlite`]: real SQLite files in a temporary directory, always run.

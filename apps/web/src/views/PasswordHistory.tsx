@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // An item's password history (gap 01; ADR 0012 §5 "Password history is the history of
 // `login.password`"; ADR 0018 §7 for history imported from another manager), in a collapsed
 // section of the item view.

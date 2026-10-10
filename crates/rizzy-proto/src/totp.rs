@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Server-side 2FA with TOTP: enrolment and removal (CRYPTO.md §5.10 "Server-side 2FA",
 //! §5.11, §11.15). The code at login travels in
 //! [`LoginFinishRequest::totp`](crate::auth::LoginFinishRequest::totp).

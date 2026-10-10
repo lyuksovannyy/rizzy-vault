@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Starts the real `rizzy-vault` binary for the extension's end-to-end tests, the same way
 // `apps/web/e2e/server.ts` does for the web vault's: a loopback port, a temporary SQLite
 // database and a fresh secrets file. Duplicated here (not imported from `apps/web/e2e`) rather

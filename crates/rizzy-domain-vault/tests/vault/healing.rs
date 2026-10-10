@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Restore healing (ADR 0021 §9 "Healing request", "Server acceptance"; ADR 0012 §7 "Healing a
 //! server rollback" step 4 as §9 replaces it), after a real `rizzy-storage` backup and restore.
 

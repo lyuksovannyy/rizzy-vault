@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-proto` — the `/api/v1` request and response types of rizzy-vault (roadmap M1,
 //! [ADR 0002] point 3, [ADR 0016] §3).
 //!
