@@ -19,14 +19,11 @@ Delete or rewrite this file when its next steps are done.
 | 13, 25, 37, 44–49 | `docs: fix docs that contradict the code` | README, SECURITY, CONTRIBUTING, docs/README, docs/rv.md, rizzy-cli crate docs, CLAUDE.md status list. |
 | 01, 02 (rest) | `feat(web,cli): password history view and late-edit notices` | Web vault password-history section: dates only from the Worker, one value per reveal; imported `pwhist` rows no longer cross through `itemFields`. Late-edit and concurrent-trash notices in `rv sync` and the web vault, with restore as a new item (`rv item restore-late`, web type picker). "Already shown" marks in session memory only, so `rv` repeats them each sync. The extension (`DeviceSession`) has no history view or notices yet. A reveal names the date the list showed, so a sync in between cannot reveal a different entry. |
 | 04/21, 09, X1, X5; X2 in part | `test: invariant tests for INV-1, INV-6, INV-15/INV-48, INV-63 and ETH class tags` | INV-15/INV-48 canary over HTTP, server DB, debug logs and backups (rv e2e), and a key-byte canary in rizzy-client through a `cfg(test)` accessor. INV-1 request-shape capture. ETH class tags on 21 malicious-server tests. INV-63 Playwright storage dump after unlock and a service-worker restart. Limits: X2 counts Argon2id runs only for flows rebuilt in rizzy-core, not rizzy-client's own (needs a rizzy-core feature or accessor: owner's call). Private keys and unlock keys are not in the canary for the same reason. The INV-63 test does not search for key bytes and does not cover content-script-readable storage. |
+| 36 | `docs: community equivalence-list PR process (gap 36)` | Community equivalence-list PR process under ADR 0038 §4: `.github/ISSUE_TEMPLATE/equivalence-group.yml` (an issue form asking for the domains, per-domain and per-ccTLD-variant ownership evidence, the third-party-hostable flag, and the next re-check; applies the `equivalence-list` label), `.github/PULL_REQUEST_TEMPLATE/equivalence-list.md`, and an "Equivalence list contributions" section in CONTRIBUTING.md stating the §4 rules and how the owner signs and ships a new list version. `docs/equivalence-list.md` §2 links both templates. Docs only, no code. The owner still has to create the `equivalence-list` label in the repository's Settings → Labels; the templates name it and say so. |
 
 ## Next work: cleared by an Accepted ADR or needing no ADR
 
 Recheck each gap's evidence before you implement it: the audit's verifiers refuted nothing, so treat it as weak evidence. Read each gap's `verdict.corrected_adr_gate` in the audit too: several carry a stop condition.
-
-### Product
-
-- **36** Community equivalence-list PR process: templates and a CONTRIBUTING section (ADR 0038). The owner creates the GitHub label.
 
 ### Tests and verification that CLAUDE.md, CRYPTO.md or THREAT_MODEL.md require
 
