@@ -17,7 +17,8 @@ Delete or rewrite this file when its next steps are done.
 | 00–03 | `feat(client,cli,web): trash auto-purge, password history, late-edit API` | Client trash auto-purge after sync (rv, web vault, extension), with the ADR 0018 §12 "no purge over an unapplied record" test. Password-history API, shown by `rv item show`. Late-edit API. Web permanent-delete tests. |
 | 27 (a), 30–33, 35 | `feat(match,extension): HANDOFF M2 gaps 27a, 30-33, 35` | PSL snapshot pinned by SHA-256 and checked in `cargo xtask check-deps`. Global list wired into the equivalence view (empty until a list is signed). Fill UI names the page host and the saved host. Generator in the page's password field. Save vs. update uses the matcher and the username. Passkey `userHandle` and `allowCredentials`. |
 | 13, 25, 37, 44–49 | `docs: fix docs that contradict the code` | README, SECURITY, CONTRIBUTING, docs/README, docs/rv.md, rizzy-cli crate docs, CLAUDE.md status list. |
-| 01, 02 (rest) | `feat(web,cli): password history view and late-edit notices` | Web vault password-history section: dates only from the Worker, one value per reveal; imported `pwhist` rows no longer cross through `itemFields`. Late-edit and concurrent-trash notices in `rv sync` and the web vault, with restore as a new item (`rv item restore-late`, web type picker). "Already shown" marks in session memory only, so `rv` repeats them each sync. The extension (`DeviceSession`) has no history view or notices yet. |
+| 01, 02 (rest) | `feat(web,cli): password history view and late-edit notices` | Web vault password-history section: dates only from the Worker, one value per reveal; imported `pwhist` rows no longer cross through `itemFields`. Late-edit and concurrent-trash notices in `rv sync` and the web vault, with restore as a new item (`rv item restore-late`, web type picker). "Already shown" marks in session memory only, so `rv` repeats them each sync. The extension (`DeviceSession`) has no history view or notices yet. A reveal names the date the list showed, so a sync in between cannot reveal a different entry. |
+| 04/21, 09, X1, X5; X2 in part | `test: invariant tests for INV-1, INV-6, INV-15/INV-48, INV-63 and ETH class tags` | INV-15/INV-48 canary over HTTP, server DB, debug logs and backups (rv e2e), and a key-byte canary in rizzy-client through a `cfg(test)` accessor. INV-1 request-shape capture. ETH class tags on 21 malicious-server tests. INV-63 Playwright storage dump after unlock and a service-worker restart. Limits: X2 counts Argon2id runs only for flows rebuilt in rizzy-core, not rizzy-client's own (needs a rizzy-core feature or accessor: owner's call). Private keys and unlock keys are not in the canary for the same reason. The INV-63 test does not search for key bytes and does not cover content-script-readable storage. |
 
 ## Next work: cleared by an Accepted ADR or needing no ADR
 
@@ -29,10 +30,7 @@ Recheck each gap's evidence before you implement it: the audit's verifiers refut
 
 ### Tests and verification that CLAUDE.md, CRYPTO.md or THREAT_MODEL.md require
 
-- **09** Tag each malicious-server test with its ETH attack class (CRYPTO.md §15 item 5).
-- **04/21** INV-15 canary test, extended to logs at the most verbose level by INV-48. Stop if the test cannot reach key bytes without a new public API or a key export: that touches a security boundary.
-- **X1** INV-1 request-capture test. **X2** INV-6 per-flow Argon2id count test.
-- **X3** INV-37 adversarial-page e2e tests. **X4** INV-40 manifest check (an xtask; its CI wiring is blocked below). **X5** INV-63 storage-inspection test.
+- **X3** INV-37 adversarial-page e2e tests. **X4** INV-40 manifest check (an xtask; its CI wiring is blocked below).
 - **16** Convergence harness: key rotation (property 6), stale-epoch answers, re-issued ops, kind-4 authors, two or more faulty devices (ADR 0012 §12, ADR 0021 §8). It may reproduce gap 14; if it does, report the failing property, do not weaken the test.
 
 ### Licensing
@@ -54,6 +52,7 @@ Recheck each gap's evidence before you implement it: the audit's verifiers refut
 - **24:** with `embed-web`, the `web` role serves more than `/` and `/index.html`, which contradicts ADR 0028 item 15. The code or the ADR must change.
 - **08:** normative item-record vectors through real envelopes (ADR 0018 §12) need an owner decision.
 - **05/42** Wycheproof suites (CRYPTO.md §15 item 3): XChaCha20-Poly1305, ChaCha20-Poly1305, HKDF-SHA-256, HMAC-SHA-256, HMAC-SHA-1, X25519, Ed25519. Needs the owner's go-ahead to download the Apache-2.0 vector files, and a check of attribution against ADR 0017 if whole suite files are committed.
+- **X2 (rest), 04 (private and unlock keys):** counting rizzy-client's Argon2id runs per flow, and searching for private-key bytes, need a test-only feature or accessor in rizzy-core visible across crates. That widens rizzy-core's surface, so the owner decides.
 - **06** RFC 9807 OPAQUE vectors need opaque-ke's Identity KSF. The owner decided on 2026-09-26 that no weakened KSF path may exist in rizzy-core; whether an integration test under `crates/rizzy-core/tests/` is acceptable is the owner's call.
 - **07/43** KAT vectors as wasm32 under Node (ADR 0019 §10) need `wasm-bindgen-test` (a new dev-dependency the owner approves) and a CI job.
 - **19** `cargo xtask check-tables` (ADR 0011 point 7, ADR 0016 R4): ADR 0011 point 5 does not cover rizzy-storage's `storage_*` tables or its backup queries that read every domain (ADR 0023). The owner confirms that rule before the check is written.
