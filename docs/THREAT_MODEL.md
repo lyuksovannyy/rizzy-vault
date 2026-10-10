@@ -419,7 +419,7 @@ The admin may be a family member (M9) or an employer (M10). The social context m
 **Equivalence list governance** ([ROADMAP §6.4](ROADMAP.md#6-risks--hard-truths)):
 - Every entry needs proof of common ownership and review by two maintainers.
 - The list is signed with a dedicated key, versioned, and shipped inside client releases. A change to the list goes through the release process.
-- Clients reject an unsigned list or an older version ([INV-39](#8-security-invariants)). Users can disable any global group.
+- Clients reject an unsigned list, or a list whose version is not strictly higher than the last one they accepted ([INV-39](#8-security-invariants)). Users can disable any global group.
 - Rules for entries, aimed at over-broad groups:
   1. No domain where third parties can host content, unless the PSL already splits it.
   2. For ccTLD variants (`brand.tld`), ownership is proven per variant, not assumed for the whole family.
@@ -1153,7 +1153,7 @@ Each line is a testable statement that every later milestone must keep. "From" i
 | INV-36 | Nothing is filled without a trusted user gesture. | M2 | Extension end-to-end tests. |
 | INV-37 | No HTTPS-saved credential is filled into an HTTP page. Nothing is filled into cross-origin iframes by default. Nothing is filled into hidden or invisible fields. | M2 | End-to-end tests with adversarial pages. |
 | INV-38 | Matching runs on normalized A-label hosts against the PSL. A host with a different registrable domain matches only through a signed global group or a user group, and the fill UI marks such matches. This registrable-domain check runs before every match mode, *Starts with* and *Regex* included; a mode can only narrow the match. Regexes are matched against the full normalised URL. | M2 | Table-driven tests, including `evil-youtube.com`, IDN homographs, PSL private suffixes, *Starts with* `https://bank.com` against `https://bank.com.evil.example/`, and an unanchored regex against a foreign host. |
-| INV-39 | Clients accept a global equivalence list only with a valid signature from the list key and a version no lower than the last one accepted. | M2 | Tests with an unsigned list, a list signed with the wrong key, and an older list. |
+| INV-39 | Clients accept a global equivalence list only with a valid signature from the list key and a version strictly higher than the last one accepted. | M2 | Tests with an unsigned list, a list signed with the wrong key, an older list, and a list with the same version. |
 | INV-40 | The extension never asks for the master password or Secret Key in page-injected UI. UI that triggers a fill runs in an extension-origin context. There is no `externally_connectable` for web origins. The background treats every content-script message as untrusted. | M2 | Manifest check in CI; review checklist. |
 | INV-41 | Mobile clients fill web credentials into a native app only if the app is verified for that domain, or after the user confirms a warning. | M7 | Test with an unverified app. |
 | INV-42 | Clients open or fill only `http` and `https` URLs taken from item fields. `javascript:`, `data:`, `file:` and similar schemes are never opened. | M1 | Unit test. |
