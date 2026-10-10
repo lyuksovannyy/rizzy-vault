@@ -937,8 +937,14 @@ describe.skipIf(binary === undefined)("against a real server", () => {
       kind: "concurrent-trash",
       item: kept,
       devices: [first.deviceId, second.deviceId],
+      conflictId: expect.any(String),
     });
-    expect(notices).toContainEqual({ kind: "late-edit", item: gone, devices: [second.deviceId] });
+    expect(notices).toContainEqual({
+      kind: "late-edit",
+      item: gone,
+      devices: [second.deviceId],
+      conflictId: undefined,
+    });
     // Handed over once in this session, even after another sync.
     expect(first.takeNotices()).toEqual([]);
     await first.sync();
@@ -974,11 +980,14 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     second.editItem(raced, [{ op: "set", key: "item.notes", value: "round one" }]);
     await second.sync();
     await first.sync();
-    expect(first.takeNotices()).toContainEqual({
+    const roundOne = first.takeNotices();
+    expect(roundOne).toContainEqual({
       kind: "concurrent-trash",
       item: raced,
       devices: [first.deviceId, second.deviceId],
+      conflictId: expect.any(String),
     });
+    const roundOneId = roundOne.find((n) => n.item === raced)?.conflictId;
     // Handed over once already, same as any other notice.
     expect(first.takeNotices()).toEqual([]);
 
@@ -996,11 +1005,18 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     second.editItem(raced, [{ op: "set", key: "item.notes", value: "round two" }]);
     await second.sync();
     await first.sync();
-    expect(first.takeNotices()).toContainEqual({
+    const roundTwo = first.takeNotices();
+    expect(roundTwo).toContainEqual({
       kind: "concurrent-trash",
       item: raced,
       devices: [first.deviceId, second.deviceId],
+      conflictId: expect.any(String),
     });
+    // Finding 3b (re-review of finding 3): this second race is a genuinely distinct conflict,
+    // not a repeat of the first, so its `conflictId` differs -- a host-side dedup keyed on it
+    // (the web vault's `noticeKey`) must not mistake it for the one already shown.
+    const roundTwoId = roundTwo.find((n) => n.item === raced)?.conflictId;
+    expect(roundTwoId).not.toBe(roundOneId);
     expect(first.takeNotices()).toEqual([]);
 
     // Session memory only: lock, then unlock again (the web vault's unlock is a fresh login

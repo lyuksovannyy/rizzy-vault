@@ -15103,8 +15103,9 @@ pub mod items {
     pub const HISTORY_IMPORTED: &str = "imported";
     /// Hex encoding of a dot's canonical bytes (`device_id ‖ seq`, [`Dot::encode`]): a merge
     /// history entry's identity, stable across a sync that only reorders the list (ADR 0012 §2).
+    /// Also [`crate::session`]'s building block for a concurrent-trash notice's own identity.
     /// Not a persistent or wire format: computed fresh for one in-memory host call, never stored.
-    fn dot_hex(dot: Dot) -> String {
+    pub(crate) fn dot_hex(dot: Dot) -> String {
         let mut buf = Vec::with_capacity(Dot::ENCODED_LEN);
         dot.encode(&mut buf);
         hex(&buf)
@@ -28759,7 +28760,11 @@ pub mod session {
         #[doc =
         " [`Session::restore_late_as_new`]), and an item deleted on one device while it was being"]
         #[doc =
-        " edited on another (ADR 0012 §5 \"Active wins\"). Device ids only; the host names them from"]
+        " edited on another (ADR 0012 §5 \"Active wins\"), with [`Notice::conflict_id`] set so a"]
+        #[doc =
+        " second, genuinely distinct race between the same two devices on the same item is not"]
+        #[doc =
+        " mistaken for a repeat of the first. Device ids only; the host names them from"]
         #[doc = " [`Session::devices`]. The host calls this after each sync."]
         #[doc = ""]
         #[doc =
@@ -28782,7 +28787,11 @@ pub mod session {
                     #[doc =
                     " [`Session::restore_late_as_new`]), and an item deleted on one device while it was being"]
                     #[doc =
-                    " edited on another (ADR 0012 §5 \"Active wins\"). Device ids only; the host names them from"]
+                    " edited on another (ADR 0012 §5 \"Active wins\"), with [`Notice::conflict_id`] set so a"]
+                    #[doc =
+                    " second, genuinely distinct race between the same two devices on the same item is not"]
+                    #[doc =
+                    " mistaken for a repeat of the first. Device ids only; the host names them from"]
                     #[doc =
                     " [`Session::devices`]. The host calls this after each sync."]
                     #[doc = ""]
@@ -28831,7 +28840,11 @@ pub mod session {
                     #[doc =
                     " [`Session::restore_late_as_new`]), and an item deleted on one device while it was being"]
                     #[doc =
-                    " edited on another (ADR 0012 §5 \"Active wins\"). Device ids only; the host names them from"]
+                    " edited on another (ADR 0012 §5 \"Active wins\"), with [`Notice::conflict_id`] set so a"]
+                    #[doc =
+                    " second, genuinely distinct race between the same two devices on the same item is not"]
+                    #[doc =
+                    " mistaken for a repeat of the first. Device ids only; the host names them from"]
                     #[doc =
                     " [`Session::devices`]. The host calls this after each sync."]
                     #[doc = ""]
@@ -28866,7 +28879,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\x0cY The notices not yet handed over in this session (gap 02), each handed over once: an editX that arrived for an item deleted permanently (ADR 0018 \xc2\xa73 \"Surfacing\"; the host offersX [`Session::restore_late_as_new`]), and an item deleted on one device while it was beingZ edited on another (ADR 0012 \xc2\xa75 \"Active wins\"). Device ids only; the host names them from; [`Session::devices`]. The host calls this after each sync.\0T \"Handed over once\" lasts this session only: the marks live in memory (the late-editY marks in the vault's merge, the trash notices in this session), so the next unlock showsP the notices again. Persisting them is an ADR 0026 cache-format change (gap 02).\0\t # Errors\n `locked`.\0\0\0\0\x0btakeNotices\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\x0eY The notices not yet handed over in this session (gap 02), each handed over once: an editX that arrived for an item deleted permanently (ADR 0018 \xc2\xa73 \"Surfacing\"; the host offersX [`Session::restore_late_as_new`]), and an item deleted on one device while it was beingV edited on another (ADR 0012 \xc2\xa75 \"Active wins\"), with [`Notice::conflict_id`] set so aU second, genuinely distinct race between the same two devices on the same item is notN mistaken for a repeat of the first. Device ids only; the host names them from; [`Session::devices`]. The host calls this after each sync.\0T \"Handed over once\" lasts this session only: the marks live in memory (the late-editY marks in the vault's merge, the trash notices in this session), so the next unlock showsP the notices again. Persisting them is an ADR 0026 cache-format change (gap 02).\0\t # Errors\n `locked`.\0\0\0\0\x0btakeNotices\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -28902,6 +28915,7 @@ pub mod session {
                             kind: NOTICE_LATE_EDIT,
                             item: hex(item.as_bytes()),
                             devices: late.iter().map(|d| hex(d.as_bytes())).collect(),
+                            conflict_id: None,
                         });
                 }
                 if let Some(trash) = inner.vault.concurrent_trash(item) &&
@@ -28912,6 +28926,8 @@ pub mod session {
                             item: hex(item.as_bytes()),
                             devices: <[_]>::into_vec(::alloc::boxed::box_new([hex(trash.trashed_by.as_bytes()),
                                             hex(trash.edited_by.as_bytes())])),
+                            conflict_id: Some(concurrent_trash_conflict_id(trash.trashed_dot,
+                                    trash.edited_dot)),
                         });
                 }
             }
@@ -34804,6 +34820,17 @@ pub mod session {
             static _GENERATED: [u8; _LEN] =
                 flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
         };
+    /// [`Notice::conflict_id`] for a concurrent trash: the hex of both dots, joined, so two
+    /// distinct conflicts between the same device pair and item (two different races, or the same
+    /// race re-read) compare equal only when both dots match. Not a persistent or wire format
+    /// (ADR 0018 §3 "Surfacing"): computed fresh for one in-memory host call, never stored.
+    fn concurrent_trash_conflict_id(trashed_dot: Dot, edited_dot: Dot)
+        -> String {
+        ::alloc::__export::must_use({
+                ::alloc::fmt::format(format_args!("{0}:{1}",
+                        items::dot_hex(trashed_dot), items::dot_hex(edited_dot)))
+            })
+    }
     /// [`Notice::kind`] of "An edit from `<device>` arrived for an item you deleted permanently.
     /// Restore it as a new item?" (ADR 0018 §3 "Surfacing").
     pub const NOTICE_LATE_EDIT: &str = "late-edit";
@@ -34823,6 +34850,20 @@ pub mod session {
         #[doc =
         " X (the device that deleted it) then Y (the device whose edit kept it). Hex."]
         devices: Vec<String>,
+        #[doc =
+        " For a concurrent trash, this one conflict\'s own identity: the two dots, not just the"]
+        #[doc =
+        " device pair, so a host-side dedup (the web vault\'s `noticeKey`) can tell a second,"]
+        #[doc =
+        " genuinely distinct race between the same two devices on the same item apart from the"]
+        #[doc =
+        " first instead of mistaking it for a duplicate (`ConcurrentTrash` docs, ADR 0012 §2)."]
+        #[doc =
+        " `None` for a late edit, which has no per-conflict identity: `late_edit_devices` names"]
+        #[doc =
+        " devices, not one op. Not a persistent or wire format (ADR 0018 §3 \"Surfacing\"):"]
+        #[doc = " computed fresh for one in-memory host call, never stored."]
+        conflict_id: Option<String>,
     }
     #[automatically_derived]
     impl ::core::clone::Clone for Notice {
@@ -34832,6 +34873,7 @@ pub mod session {
                 kind: ::core::clone::Clone::clone(&self.kind),
                 item: ::core::clone::Clone::clone(&self.item),
                 devices: ::core::clone::Clone::clone(&self.devices),
+                conflict_id: ::core::clone::Clone::clone(&self.conflict_id),
             }
         }
     }
@@ -34839,9 +34881,9 @@ pub mod session {
     impl ::core::fmt::Debug for Notice {
         #[inline]
         fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-            ::core::fmt::Formatter::debug_struct_field3_finish(f, "Notice",
+            ::core::fmt::Formatter::debug_struct_field4_finish(f, "Notice",
                 "kind", &self.kind, "item", &self.item, "devices",
-                &&self.devices)
+                &self.devices, "conflict_id", &&self.conflict_id)
         }
     }
     #[automatically_derived]
@@ -35377,6 +35419,115 @@ pub mod session {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             self.devices.clone()
+        }
+        #[doc =
+        " This one conflict\'s own identity, for `concurrent-trash` only (`undefined` for"]
+        #[doc =
+        " `late-edit`): fold it into a host-side dedup key alongside `item` and `devices`, so a"]
+        #[doc =
+        " second race between the same two devices on the same item is kept, not dropped as a"]
+        #[doc = " duplicate of the first."]
+        #[must_use]
+        pub fn conflict_id(&self) -> Option<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " This one conflict\'s own identity, for `concurrent-trash` only (`undefined` for"]
+                    #[doc =
+                    " `late-edit`): fold it into a host-side dedup key alongside `item` and `devices`, so a"]
+                    #[doc =
+                    " second race between the same two devices on the same item is kept, not dropped as a"]
+                    #[doc = " duplicate of the first."]
+                    #[must_use]
+                    #[export_name = "notice_conflictId_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Notice_conflictId(me:
+                            <Notice as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<Notice>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Notice>();
+                                            let me =
+                                                unsafe {
+                                                    <Notice as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.conflict_id();
+                                            _ret
+                                        }
+                                    });
+                        <Option<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " This one conflict\'s own identity, for `concurrent-trash` only (`undefined` for"]
+                    #[doc =
+                    " `late-edit`): fold it into a host-side dedup key alongside `item` and `devices`, so a"]
+                    #[doc =
+                    " second race between the same two devices on the same item is kept, not dropped as a"]
+                    #[doc = " duplicate of the first."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_notice_conflictId_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<String> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x06Notice\x04O This one conflict's own identity, for `concurrent-trash` only (`undefined` forV `late-edit`): fold it into a host-side dedup key alongside `item` and `devices`, so aT second race between the same two devices on the same item is kept, not dropped as a\x18 duplicate of the first.\0\0\0\0\nconflictId\x01\x01\0\0\0\0\x01\0\x02\nconflictId\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.conflict_id.clone()
         }
     }
     #[automatically_derived]

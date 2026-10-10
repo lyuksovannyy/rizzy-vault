@@ -670,12 +670,17 @@ export interface HistoryEntry {
  * A notice of {@link VaultSession.takeNotices}: ids only. `late-edit`: "An edit from
  * `<devices>` arrived for an item you deleted permanently. Restore it as a new item?" (ADR 0018
  * §3). `concurrent-trash`: "deleted on `devices[0]` while it was being edited on `devices[1]`"
- * (ADR 0012 §5). Name the devices from {@link VaultSession.devices}.
+ * (ADR 0012 §5). Name the devices from {@link VaultSession.devices}. `conflictId` is this one
+ * conflict's own identity for `concurrent-trash` (`undefined` for `late-edit`, which has none):
+ * fold it into a host-side dedup key alongside `item` and `devices`, so a second, genuinely
+ * distinct race between the same two devices on the same item is not dropped as a repeat of
+ * the first.
  */
 export interface Notice {
   readonly kind: "late-edit" | "concurrent-trash";
   readonly item: string;
   readonly devices: readonly string[];
+  readonly conflictId: string | undefined;
 }
 
 /** A current TOTP code. */
@@ -1166,7 +1171,12 @@ export class VaultSession {
   takeNotices(): Notice[] {
     return mapFree(
       call(() => this.#s().takeNotices()),
-      (n) => ({ kind: n.kind as Notice["kind"], item: n.item, devices: n.devices }),
+      (n) => ({
+        kind: n.kind as Notice["kind"],
+        item: n.item,
+        devices: n.devices,
+        conflictId: n.conflictId,
+      }),
     );
   }
 

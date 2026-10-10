@@ -67,9 +67,14 @@ export function noticeText(notice: Notice, label: (id: string) => string, title:
   return `${name} was deleted on ${label(deletedOn)} while it was being edited on ${label(editedOn)}. The edit kept it.`;
 }
 
-/** A stable key for one notice: its kind, item and devices. */
+/**
+ * A stable key for one notice: its kind, item, devices and (for `concurrent-trash`) its own
+ * conflict id. The id tells a second, genuinely distinct race between the same two devices on
+ * the same item apart from the first, so it is not merged away as a duplicate; `late-edit` has
+ * no conflict id, so its key is unchanged (kind, item and devices only).
+ */
 export function noticeKey(notice: Notice): string {
-  return `${notice.kind}:${notice.item}:${notice.devices.join(",")}`;
+  return `${notice.kind}:${notice.item}:${notice.devices.join(",")}:${notice.conflictId ?? ""}`;
 }
 
 /** `current` with `fresh` appended, without a notice already held (same `noticeKey`). */

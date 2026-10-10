@@ -588,8 +588,9 @@ pub const HISTORY_IMPORTED: &str = "imported";
 
 /// Hex encoding of a dot's canonical bytes (`device_id ‖ seq`, [`Dot::encode`]): a merge
 /// history entry's identity, stable across a sync that only reorders the list (ADR 0012 §2).
+/// Also [`crate::session`]'s building block for a concurrent-trash notice's own identity.
 /// Not a persistent or wire format: computed fresh for one in-memory host call, never stored.
-fn dot_hex(dot: Dot) -> String {
+pub(crate) fn dot_hex(dot: Dot) -> String {
     let mut buf = Vec::with_capacity(Dot::ENCODED_LEN);
     dot.encode(&mut buf);
     hex(&buf)
