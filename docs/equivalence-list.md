@@ -68,6 +68,16 @@ the format reference. Each change needs, in the pull request that makes it (ADR 
 4. **Per-ccTLD-variant proof.** `brand.com` and `brand.co.uk` each need their own evidence.
 5. **A note of the next scheduled re-check** (at minimum every release cycle).
 
+**Start here, before editing the file.** File the proposal as a GitHub issue using the
+[`equivalence-group`](../.github/ISSUE_TEMPLATE/equivalence-group.yml) template — it asks for
+every point above. Once the evidence stands up to review, open the PR with the
+[`equivalence-list`](../.github/PULL_REQUEST_TEMPLATE/equivalence-list.md) pull request
+template, linking the issue. Both carry the `equivalence-list` label (the project owner
+creates it in the repository's Settings → Labels; the issue template applies it
+automatically once it exists), which is the review queue for this process. See
+[CONTRIBUTING.md § Equivalence list contributions](../CONTRIBUTING.md#equivalence-list-contributions)
+for the full path.
+
 A new group gets a freshly generated, random 16-byte id (never derived from its domains):
 
 ```sh
