@@ -69,7 +69,7 @@ const PR_CASES: u32 = 1_000;
 const PR_GAP_CASES: u32 = 1_000;
 
 /// Fixed seeds that once failed, run on every PR: `(family, seed)`.
-const REGRESSIONS: [(usize, u64); 5] = [
+const REGRESSIONS: [(usize, u64); 6] = [
     // A restore to an empty backup: own acknowledged ops without bodies need a fresh snapshot
     // that covers own unacknowledged ops too (the healing closure in `device`).
     (4, 11_895_903_307_134_407_466),
@@ -84,6 +84,13 @@ const REGRESSIONS: [(usize, u64); 5] = [
     // each rotation.
     (9, 11_249_547_759_304_926_993),
     (9, 11_582_194_142_707_026_397),
+    // `World::upload` detected a healing-worthy rollback (`heal_epoch`, `server_behind`) without
+    // first adopting the epoch `World::offer` had just given the device, unlike `World::fetch`.
+    // The device then healed under its own stale epoch belief, sealing a fresh item key wrapped
+    // at that stale epoch; once other devices adopted straight to the newest epoch, skipping the
+    // stale one, the wrap became permanently unreadable and the item never converged. Fixed by
+    // adopting the offered epoch in `World::upload` too, before the heal check.
+    (9, 2_496_824_634_378_026_050),
 ];
 
 /// The step kinds a family weights.

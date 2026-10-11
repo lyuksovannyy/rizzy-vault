@@ -666,6 +666,14 @@ impl World {
         let Some(dev) = self.devices.get_mut(d) else {
             return;
         };
+        // Process the offered account state (CRYPTO.md §11.3 steps 3-4) before detecting a
+        // rollback and healing (ADR 0032 §1), as `World::fetch` already does: otherwise this
+        // device heals under its own stale epoch, sealing a fresh item key wrapped at an epoch
+        // other devices skip past when they adopt straight to the newest one, which leaves that
+        // wrap permanently unreadable (regression, family 9 seed 0x22a680c6b68bfc42).
+        if let Some(epoch) = dev.offered {
+            dev.adopt(epoch);
+        }
         Self::heal_epoch(dev, &mut self.server);
         if dev.server_behind(&self.server) {
             dev.read_only = true;
