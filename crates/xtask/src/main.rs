@@ -12,6 +12,7 @@
 //! cargo xtask check-js
 //! cargo xtask check-manifest
 //! cargo xtask check-spdx [--fix]
+//! cargo xtask generate-tokens [--check]
 //! ```
 //!
 //! `check-deps` enforces the crate-boundary rules of ADR 0016 (R1–R8) and the dependency rules
@@ -94,6 +95,12 @@
 //! it. Wiring it into CI (`.github/workflows/ci.yml`) is a separate change the owner has not
 //! asked for yet.
 //!
+//! `generate-tokens` generates the web CSS and the per-toolkit design-token files from the one
+//! platform-neutral source, and checks every declared colour pair for WCAG AA contrast
+//! ([`mod@tokens`], ADR 0014 §5, ADR 0019 §13, ROADMAP §4.5). `--check` reports a stale generated
+//! file instead of writing it; wiring either mode into CI is, as with `check-spdx`, a separate
+//! change the owner has not asked for yet.
+//!
 //! # How `check-deps` works
 //!
 //! 1. [`load`] gathers every input: `cargo metadata --all-features --locked` three times (all
@@ -135,6 +142,7 @@ mod psl_check;
 mod rules;
 mod signoff;
 mod spdx;
+mod tokens;
 mod unsafe_scan;
 
 use std::collections::BTreeSet;
@@ -189,6 +197,13 @@ COMMANDS:
                     equivalence list (ADR 0038 §3) and write its wire bytes to stdout.
                     <key-file> is the raw 32-byte Ed25519 seed; redirect stdout to a .bin
                     file, e.g. > data/equivalence/list.bin
+    generate-tokens Generate the web CSS (packages/ui/src/tokens.css) and the per-toolkit
+                    design-token files from packages/ui/tokens/tokens.json, after checking
+                    every declared colour pair for WCAG AA contrast (ADR 0014 §5,
+                    ADR 0019 §13)
+    generate-tokens --check
+                    Check that every generated file already matches the token source,
+                    without writing; fails if any is stale or a contrast pair fails
 ";
 
 /// The second target the getrandom rule is checked on, besides the host (ADR 0016 R1).
@@ -229,6 +244,8 @@ fn main() -> ExitCode {
             Some(list_version),
             Some(published_at_ms),
         ] => equivalence_list_command(source, key, list_version, published_at_ms),
+        [Some("generate-tokens")] => report(tokens::run(&workspace_root(), true)),
+        [Some("generate-tokens"), Some("--check")] => report(tokens::run(&workspace_root(), false)),
         [Some("-h" | "--help")] => {
             let _ = write!(io::stdout().lock(), "{USAGE}");
             ExitCode::SUCCESS
