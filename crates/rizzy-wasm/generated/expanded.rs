@@ -12337,6 +12337,14 @@ pub mod items {
     //!   the Worker never sends the whole history to the UI thread (ADR 0013 §3 rule 3). The host
     //!   names the entry's identity, not its date, on that call, so a sync that only reorders the
     //!   list between the listing and the reveal still reveals the entry the user asked for.
+    //! - **Item history** ([`FieldHistoryView`]; ROADMAP §4.2 "Item revision history (restore old
+    //!   versions)", M3) generalizes password history to every field: one entry list per field
+    //!   that has history, the same `(index, id)` identity, the same values-only-on-request rule
+    //!   through [`crate::Session::reveal_field_history`]. A dot is not unique across different
+    //!   fields (one op writing two fields shares a dot between their histories), so a listing's
+    //!   entries are only ever read, revealed or restored under the field they were listed under.
+    //!   [`crate::Session::restore_field_history`] writes an entry back as its field's current
+    //!   value, an ordinary edit (`rizzy-client`'s `restore_field_history`).
     //! - **An edit** ([`ItemDraft`]) is built in Rust from the user's input, call by call, and
     //!   written as one op by [`crate::Session::create_item`] or [`crate::Session::edit_item`],
     //!   where every write passes the schema checks. The draft holds the typed values in zeroizing
@@ -15893,6 +15901,591 @@ pub mod items {
                         }.filter(|v|
                             !v.is_cleared()).ok_or(ClientError::UnknownItem)?;
         kind_and_text(&value).1.ok_or(ClientError::InvalidInput.into())
+    }
+    #[wasm_bindgen()]
+    #[__wasm_bindgen_retried]
+    #[doc =
+    " One field\'s merge history, without values (ROADMAP §4.2 \"Item revision history (restore"]
+    #[doc =
+    " old versions)\", M3): generalizes [`HistoryEntryView`]/[`password_history`] to every field."]
+    #[doc =
+    " Every entry\'s `source` is [`HISTORY_MERGE`]: imported `pwhist` history stays"]
+    #[doc =
+    " `login.password`-only and out of this listing ([`VaultSync::item_history`]\'s own doc)."]
+    pub struct FieldHistoryView {
+        #[doc = " The field\'s final key (ADR 0018 §7)."]
+        key: String,
+        #[doc = " Its history entries, newest first."]
+        entries: Vec<HistoryEntryView>,
+    }
+    #[automatically_derived]
+    impl ::core::clone::Clone for FieldHistoryView {
+        #[inline]
+        fn clone(&self) -> FieldHistoryView {
+            FieldHistoryView {
+                key: ::core::clone::Clone::clone(&self.key),
+                entries: ::core::clone::Clone::clone(&self.entries),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl ::core::fmt::Debug for FieldHistoryView {
+        #[inline]
+        fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+            ::core::fmt::Formatter::debug_struct_field2_finish(f,
+                "FieldHistoryView", "key", &self.key, "entries",
+                &&self.entries)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsConstructor for FieldHistoryView
+        {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for
+        FieldHistoryView {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsStaticProperty for
+        FieldHistoryView {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribe for FieldHistoryView {
+        fn describe() {
+            use wasm_bindgen::describe::*;
+            inform(RUST_STRUCT);
+            inform(16u32);
+            inform(70u32);
+            inform(105u32);
+            inform(101u32);
+            inform(108u32);
+            inform(100u32);
+            inform(72u32);
+            inform(105u32);
+            inform(115u32);
+            inform(116u32);
+            inform(111u32);
+            inform(114u32);
+            inform(121u32);
+            inform(86u32);
+            inform(105u32);
+            inform(101u32);
+            inform(119u32);
+            inform(27u32);
+            inform(114u32);
+            inform(105u32);
+            inform(122u32);
+            inform(122u32);
+            inform(121u32);
+            inform(45u32);
+            inform(119u32);
+            inform(97u32);
+            inform(115u32);
+            inform(109u32);
+            inform(45u32);
+            inform(101u32);
+            inform(48u32);
+            inform(57u32);
+            inform(99u32);
+            inform(99u32);
+            inform(48u32);
+            inform(101u32);
+            inform(98u32);
+            inform(51u32);
+            inform(53u32);
+            inform(102u32);
+            inform(56u32);
+            inform(98u32);
+            inform(53u32);
+            inform(56u32);
+            inform(51u32);
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::IntoWasmAbi for FieldHistoryView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<FieldHistoryView>>;
+        fn into_abi(self) -> Self::Abi {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+            WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self))) as
+                    *mut WasmRefCell<FieldHistoryView>)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::FromWasmAbi for FieldHistoryView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<FieldHistoryView>>;
+        unsafe fn from_abi(js: Self::Abi) -> Self {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+            use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+            let ptr = js.into_ptr();
+            assert_not_null(ptr);
+            let rc = Rc::from_raw(ptr);
+            match Rc::try_unwrap(rc) {
+                Ok(cell) => cell.into_inner(),
+                Err(_) =>
+                    wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::core::convert::From<FieldHistoryView> for
+        wasm_bindgen::JsValue {
+        fn from(value: FieldHistoryView) -> Self {
+            let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_fieldhistoryview_new_e09cc0eb35f8b583"]
+                fn __wbg_fieldhistoryview_new(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<FieldHistoryView>>)
+                -> u32;
+            }
+            unsafe {
+                <wasm_bindgen::JsValue as
+                        wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_fieldhistoryview_new(ptr))
+            }
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[export_name = "__wbg_fieldhistoryview_free_e09cc0eb35f8b583"]
+            #[doc(hidden)]
+            pub unsafe extern "C-unwind" fn __wbg_fieldhistoryview_free(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<FieldHistoryView>>,
+                allow_delayed: u32) {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                if allow_delayed != 0 {
+                    let ptr = ptr.into_ptr();
+                    wasm_bindgen::__rt::assert_not_null(ptr);
+                    drop(Rc::from_raw(ptr));
+                } else {
+                    let _ =
+                        <FieldHistoryView as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                }
+            }
+        };
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefFromWasmAbi for FieldHistoryView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<FieldHistoryView>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<FieldHistoryView>;
+        unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRef::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefMutFromWasmAbi for FieldHistoryView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<FieldHistoryView>>;
+        type Anchor = wasm_bindgen::__rt::RcRefMut<FieldHistoryView>;
+        unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRefMut::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::LongRefFromWasmAbi for FieldHistoryView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<FieldHistoryView>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<FieldHistoryView>;
+        unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            <Self as wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionIntoWasmAbi for FieldHistoryView {
+        #[inline]
+        fn none() -> Self::Abi {
+            <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<FieldHistoryView>>>::null()
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionFromWasmAbi for FieldHistoryView {
+        #[inline]
+        fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::TryFromJsValue for FieldHistoryView {
+        fn try_from_js_value(value: wasm_bindgen::JsValue)
+            ->
+                wasm_bindgen::__rt::core::result::Result<Self,
+                wasm_bindgen::JsValue> {
+            Self::try_from_js_value_ref(&value).ok_or(value)
+        }
+        fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+            -> wasm_bindgen::__rt::core::option::Option<Self> {
+            let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name =
+                "__wbg_fieldhistoryview_unwrap_e09cc0eb35f8b583"]
+                fn __wbg_fieldhistoryview_unwrap(ptr: u32)
+                ->
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<FieldHistoryView>>;
+            }
+            let ptr = unsafe { __wbg_fieldhistoryview_unwrap(idx) };
+            if ptr.is_null() {
+                wasm_bindgen::__rt::core::option::Option::None
+            } else {
+                unsafe {
+                    wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                }
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribeVector for FieldHistoryView {
+        fn describe_vector() {
+            use wasm_bindgen::describe::*;
+            inform(VECTOR);
+            <FieldHistoryView as
+                    wasm_bindgen::describe::WasmDescribe>::describe();
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorIntoWasmAbi for FieldHistoryView {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::IntoWasmAbi>::Abi;
+        fn vector_into_abi(vector:
+                wasm_bindgen::__rt::alloc::boxed::Box<[FieldHistoryView]>)
+            -> Self::Abi {
+            wasm_bindgen::convert::js_value_vector_into_abi(vector)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorFromWasmAbi for FieldHistoryView {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::FromWasmAbi>::Abi;
+        unsafe fn vector_from_abi(js: Self::Abi)
+            -> wasm_bindgen::__rt::alloc::boxed::Box<[FieldHistoryView]> {
+            wasm_bindgen::convert::js_value_vector_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\x01\x10FieldHistoryView\0\x04Y One field's merge history, without values (ROADMAP \xc2\xa74.2 \"Item revision history (restore[ old versions)\", M3): generalizes [`HistoryEntryView`]/[`password_history`] to every field.M Every entry's `source` is [`HISTORY_MERGE`]: imported `pwhist` history staysW `login.password`-only and out of this listing ([`VaultSync::item_history`]'s own doc).\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    impl FieldHistoryView {
+        #[doc = " The field\'s final key."]
+        #[must_use]
+        pub fn key(&self) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The field\'s final key."]
+                    #[must_use]
+                    #[export_name = "fieldhistoryview_key_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_FieldHistoryView_key(me:
+                            <FieldHistoryView as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<FieldHistoryView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<FieldHistoryView>();
+                                            let me =
+                                                unsafe {
+                                                    <FieldHistoryView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.key();
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The field\'s final key."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_fieldhistoryview_key_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x10FieldHistoryView\x01\x17 The field's final key.\0\0\0\0\x03key\x01\x01\0\0\0\0\x01\0\x02\x03key\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.key.clone()
+        }
+        #[doc =
+        " Its history entries, newest first; each `source` is [`HISTORY_MERGE`]."]
+        #[must_use]
+        pub fn entries(&self) -> Vec<HistoryEntryView> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Its history entries, newest first; each `source` is [`HISTORY_MERGE`]."]
+                    #[must_use]
+                    #[export_name = "fieldhistoryview_entries_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_FieldHistoryView_entries(me:
+                            <FieldHistoryView as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Vec<HistoryEntryView> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<FieldHistoryView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<FieldHistoryView>();
+                                            let me =
+                                                unsafe {
+                                                    <FieldHistoryView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.entries();
+                                            _ret
+                                        }
+                                    });
+                        <Vec<HistoryEntryView> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Its history entries, newest first; each `source` is [`HISTORY_MERGE`]."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_fieldhistoryview_entries_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Vec<HistoryEntryView> as WasmDescribe>::describe();
+                        <Vec<HistoryEntryView> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x10FieldHistoryView\x01G Its history entries, newest first; each `source` is [`HISTORY_MERGE`].\0\0\0\0\x07entries\x01\x01\0\0\0\0\x01\0\x02\x07entries\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.entries.clone()
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    /// Every field's history, without values (module docs; [`VaultSync::item_history`]): one
+    /// [`FieldHistoryView`] per field that has at least one entry, in the item's field order.
+    /// Empty when the item has none.
+    pub(crate) fn item_history(vault: &VaultSync, item: ItemId)
+        -> Vec<FieldHistoryView> {
+        vault.item_history(item).into_iter().map(|field|
+                    FieldHistoryView {
+                        key: field.key.as_str().to_owned(),
+                        entries: field.entries.into_iter().enumerate().map(|(index,
+                                        entry)|
+                                    HistoryEntryView {
+                                        source: HISTORY_MERGE,
+                                        index,
+                                        changed_ms: Some(entry.changed_ms),
+                                        id: dot_hex(entry.dot),
+                                    }).collect(),
+                    }).collect()
+    }
+    /// The value of one field-history entry as text: call it only on the user's request (ADR 0013
+    /// §3 rule 3). As [`reveal_history`], generalized to any field: the history is read again here
+    /// and the (position, id) pair checked against it, so a stale listing never reveals a value
+    /// under another entry's identity, and an id from one field's listing never reveals another
+    /// field's value even when the two share a dot ([`VaultSync::field_history`]'s own doc: a dot
+    /// is not unique across different fields).
+    ///
+    /// # Errors
+    /// `unknown_item` for an index past the end or an id that does not match; `invalid_input` for a
+    /// value with no text form.
+    pub(crate) fn reveal_field_history(vault: &VaultSync, item: ItemId,
+        key: &str, index: usize, entry_id: &str)
+        -> CoreResult<Zeroizing<String>> {
+        let value = history_entry(vault, item, key, index, entry_id)?.value;
+        kind_and_text(&value).1.ok_or(ClientError::InvalidInput.into())
+    }
+    /// The dot `index`/`entry_id` name within `key`'s history, checked the same way as
+    /// [`reveal_field_history`] (module docs): [`crate::Session::restore_field_history`]'s
+    /// building block, so a restore resolves the exact entry a listing showed, never a stale one.
+    ///
+    /// # Errors
+    /// `unknown_item` for an index past the end or an id that does not match.
+    pub(crate) fn restore_field_history_dot(vault: &VaultSync, item: ItemId,
+        key: &str, index: usize, entry_id: &str) -> CoreResult<Dot> {
+        Ok(history_entry(vault, item, key, index, entry_id)?.dot)
+    }
+    /// `key`'s history entry at `index`, checked against `entry_id` ([`reveal_history`]'s own
+    /// doc): shared by [`reveal_field_history`] and [`restore_field_history_dot`].
+    ///
+    /// # Errors
+    /// `unknown_item` for an index past the end, an id that does not match, or a Cleared value.
+    fn history_entry(vault: &VaultSync, item: ItemId, key: &str, index: usize,
+        entry_id: &str) -> CoreResult<rizzy_client::items::HistoryEntry> {
+        vault.field_history(item,
+                                key).into_iter().nth(index).filter(|entry|
+                        dot_hex(entry.dot) ==
+                            entry_id).filter(|entry|
+                    !entry.value.is_cleared()).ok_or(ClientError::UnknownItem.into())
     }
     /// A custom field's kind, as the draft names it.
     enum CustomKind {
@@ -25477,6 +26070,7 @@ pub mod session {
     //! | Save | [`Session::create_item`], [`Session::edit_item`] with an [`ItemDraft`] |
     //! | Trash, restore, purge | [`Session::trash_item`], [`Session::restore_item`], [`Session::purge_item`] |
     //! | Password history | [`Session::password_history`] (dates only), [`Session::reveal_password_history`] (one value) |
+    //! | Item history | [`Session::item_history`] (dates only, every field), [`Session::reveal_field_history`] (one value), [`Session::restore_field_history`] |
     //! | Late-edit and trash notices | [`Session::take_notices`] after a sync; [`Session::restore_late_as_new`] |
     //! | TOTP code | [`Session::totp`] |
     //! | Passkey assertion | [`Session::passkey_assertion`] ([`create_passkey`](crate::passkey::create_passkey) is stateless, module docs) |
@@ -25545,8 +26139,8 @@ pub mod session {
     };
     use crate::http::{self, HttpRequest};
     use crate::items::{
-        self, FieldView, HistoryEntryView, ItemDraft, ItemSummary, hex,
-        type_from_name, visible_item,
+        self, FieldHistoryView, FieldView, HistoryEntryView, ItemDraft,
+        ItemSummary, hex, type_from_name, visible_item,
     };
     use crate::login::{Credentials, LoginFlow, Purpose};
     use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
@@ -29004,6 +29598,615 @@ pub mod session {
             let item = visible_item(vault, id)?;
             Ok(items::reveal_history(vault, item, source, index,
                                 entry_id)?.as_str().to_owned())
+        }
+        #[doc =
+        " Every field\'s history without values (gap \"item history\"; [`crate::items`] module docs;"]
+        #[doc =
+        " ROADMAP §4.2 \"Item revision history (restore old versions)\", M3): generalizes"]
+        #[doc =
+        " [`Session::password_history`] to every field. Empty when the item has none."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " As [`Session::item`]."]
+        pub fn item_history(&self, id: &str)
+            -> Result<Vec<FieldHistoryView>, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Every field\'s history without values (gap \"item history\"; [`crate::items`] module docs;"]
+                    #[doc =
+                    " ROADMAP §4.2 \"Item revision history (restore old versions)\", M3): generalizes"]
+                    #[doc =
+                    " [`Session::password_history`] to every field. Empty when the item has none."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " As [`Session::item`]."]
+                    #[export_name = "session_itemHistory_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_itemHistory(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<Vec<FieldHistoryView>,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            let _ret = me.item_history(arg1);
+                                            _ret
+                                        }
+                                    });
+                        <Result<Vec<FieldHistoryView>, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Every field\'s history without values (gap \"item history\"; [`crate::items`] module docs;"]
+                    #[doc =
+                    " ROADMAP §4.2 \"Item revision history (restore old versions)\", M3): generalizes"]
+                    #[doc =
+                    " [`Session::password_history`] to every field. Empty when the item has none."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " As [`Session::item`]."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_itemHistory_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(1u32);
+                        <&str as WasmDescribe>::describe();
+                        <Result<Vec<FieldHistoryView>, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<Vec<FieldHistoryView>, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x06X Every field's history without values (gap \"item history\"; [`crate::items`] module docs;O ROADMAP \xc2\xa74.2 \"Item revision history (restore old versions)\", M3): generalizesL [`Session::password_history`] to every field. Empty when the item has none.\0\t # Errors\x16 As [`Session::item`].\0\x01\x02id\0\0\0\0\0\x0bitemHistory\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let vault = &self.inner()?.vault;
+            let item = visible_item(vault, id)?;
+            Ok(items::item_history(vault, item))
+        }
+        #[doc =
+        " The value of one field-history entry, as [`Session::item_history`] listed it: call it"]
+        #[doc =
+        " only on the user\'s request (ADR 0013 §3 rule 3). As [`Session::reveal_password_history`],"]
+        #[doc =
+        " generalized to any field; `key` scopes `index`/`entry_id`, so an id from one field\'s"]
+        #[doc =
+        " listing never reveals another field\'s value even when the two share a dot"]
+        #[doc = " ([`crate::items`] module docs)."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " As [`Session::item`]; `unknown_item` for an entry that is not there (any more) or whose"]
+        #[doc = " id differs; `invalid_input` for a value with no text form."]
+        pub fn reveal_field_history(&self, id: &str, key: &str, index: usize,
+            entry_id: &str) -> Result<String, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The value of one field-history entry, as [`Session::item_history`] listed it: call it"]
+                    #[doc =
+                    " only on the user\'s request (ADR 0013 §3 rule 3). As [`Session::reveal_password_history`],"]
+                    #[doc =
+                    " generalized to any field; `key` scopes `index`/`entry_id`, so an id from one field\'s"]
+                    #[doc =
+                    " listing never reveals another field\'s value even when the two share a dot"]
+                    #[doc = " ([`crate::items`] module docs)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " As [`Session::item`]; `unknown_item` for an entry that is not there (any more) or whose"]
+                    #[doc =
+                    " id differs; `invalid_input` for a value with no text form."]
+                    #[export_name =
+                    "session_revealFieldHistory_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_revealFieldHistory(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg3_1:
+                            <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg3_2:
+                            <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg3_3:
+                            <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg3_4:
+                            <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg4_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg4_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg4_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg4_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<String, CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let arg2 = &*arg2;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<usize>();
+                                            let arg3 =
+                                                unsafe {
+                                                    <usize as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<usize as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg4 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                            arg4_3, arg4_4))
+                                                };
+                                            let arg4 = &*arg4;
+                                            let _ret = me.reveal_field_history(arg1, arg2, arg3, arg4);
+                                            _ret
+                                        }
+                                    });
+                        <Result<String, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The value of one field-history entry, as [`Session::item_history`] listed it: call it"]
+                    #[doc =
+                    " only on the user\'s request (ADR 0013 §3 rule 3). As [`Session::reveal_password_history`],"]
+                    #[doc =
+                    " generalized to any field; `key` scopes `index`/`entry_id`, so an id from one field\'s"]
+                    #[doc =
+                    " listing never reveals another field\'s value even when the two share a dot"]
+                    #[doc = " ([`crate::items`] module docs)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " As [`Session::item`]; `unknown_item` for an entry that is not there (any more) or whose"]
+                    #[doc =
+                    " id differs; `invalid_input` for a value with no text form."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_revealFieldHistory_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(4u32);
+                        <&str as WasmDescribe>::describe();
+                        <&str as WasmDescribe>::describe();
+                        <usize as WasmDescribe>::describe();
+                        <&str as WasmDescribe>::describe();
+                        <Result<String, CoreError> as WasmDescribe>::describe();
+                        <Result<String, CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\tV The value of one field-history entry, as [`Session::item_history`] listed it: call it[ only on the user's request (ADR 0013 \xc2\xa73 rule 3). As [`Session::reveal_password_history`],U generalized to any field; `key` scopes `index`/`entry_id`, so an id from one field'sJ listing never reveals another field's value even when the two share a dot  ([`crate::items`] module docs).\0\t # ErrorsX As [`Session::item`]; `unknown_item` for an entry that is not there (any more) or whose; id differs; `invalid_input` for a value with no text form.\0\x04\x02id\0\0\0\x03key\0\0\0\x05index\0\0\0\x08entry_id\0\0\0\0\0\x12revealFieldHistory\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let vault = &self.inner()?.vault;
+            let item = visible_item(vault, id)?;
+            Ok(items::reveal_field_history(vault, item, key, index,
+                                entry_id)?.as_str().to_owned())
+        }
+        #[doc =
+        " Restores one field-history entry as the field\'s current value (ROADMAP §4.2): an"]
+        #[doc =
+        " ordinary edit (`rizzy_client::items::VaultSync::restore_field_history`), so it syncs and"]
+        #[doc =
+        " merges like any other. `key`, `index` and `entry_id` name the entry exactly as"]
+        #[doc = " [`Session::item_history`] listed it, checked the same way"]
+        #[doc =
+        " [`Session::reveal_field_history`] is, so a sync between the listing and this call never"]
+        #[doc = " restores a value under the wrong identity."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " As [`Session::edit_item`]; `unknown_item` for an entry that is not there (any more) or"]
+        #[doc = " whose id differs."]
+        pub fn restore_field_history(&mut self, id: &str, key: &str,
+            index: usize, entry_id: &str, now_ms: u64)
+            -> Result<(), CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Restores one field-history entry as the field\'s current value (ROADMAP §4.2): an"]
+                    #[doc =
+                    " ordinary edit (`rizzy_client::items::VaultSync::restore_field_history`), so it syncs and"]
+                    #[doc =
+                    " merges like any other. `key`, `index` and `entry_id` name the entry exactly as"]
+                    #[doc =
+                    " [`Session::item_history`] listed it, checked the same way"]
+                    #[doc =
+                    " [`Session::reveal_field_history`] is, so a sync between the listing and this call never"]
+                    #[doc = " restores a value under the wrong identity."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " As [`Session::edit_item`]; `unknown_item` for an entry that is not there (any more) or"]
+                    #[doc = " whose id differs."]
+                    #[export_name =
+                    "session_restoreFieldHistory_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_restoreFieldHistory(me:
+                            <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg3_1:
+                            <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg3_2:
+                            <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg3_3:
+                            <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg3_4:
+                            <<usize as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg4_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg4_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg4_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg4_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg5_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg5_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg5_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg5_4:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let mut me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let arg2 = &*arg2;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<usize>();
+                                            let arg3 =
+                                                unsafe {
+                                                    <usize as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<usize as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg4 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                            arg4_3, arg4_4))
+                                                };
+                                            let arg4 = &*arg4;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg5 =
+                                                unsafe {
+                                                    <u64 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg5_1, arg5_2,
+                                                            arg5_3, arg5_4))
+                                                };
+                                            let _ret =
+                                                me.restore_field_history(arg1, arg2, arg3, arg4, arg5);
+                                            _ret
+                                        }
+                                    });
+                        <Result<(), CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Restores one field-history entry as the field\'s current value (ROADMAP §4.2): an"]
+                    #[doc =
+                    " ordinary edit (`rizzy_client::items::VaultSync::restore_field_history`), so it syncs and"]
+                    #[doc =
+                    " merges like any other. `key`, `index` and `entry_id` name the entry exactly as"]
+                    #[doc =
+                    " [`Session::item_history`] listed it, checked the same way"]
+                    #[doc =
+                    " [`Session::reveal_field_history`] is, so a sync between the listing and this call never"]
+                    #[doc = " restores a value under the wrong identity."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " As [`Session::edit_item`]; `unknown_item` for an entry that is not there (any more) or"]
+                    #[doc = " whose id differs."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_restoreFieldHistory_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(5u32);
+                        <&str as WasmDescribe>::describe();
+                        <&str as WasmDescribe>::describe();
+                        <usize as WasmDescribe>::describe();
+                        <&str as WasmDescribe>::describe();
+                        <u64 as WasmDescribe>::describe();
+                        <Result<(), CoreError> as WasmDescribe>::describe();
+                        <Result<(), CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\nR Restores one field-history entry as the field's current value (ROADMAP \xc2\xa74.2): anY ordinary edit (`rizzy_client::items::VaultSync::restore_field_history`), so it syncs andO merges like any other. `key`, `index` and `entry_id` name the entry exactly as: [`Session::item_history`] listed it, checked the same wayX [`Session::reveal_field_history`] is, so a sync between the listing and this call never+ restores a value under the wrong identity.\0\t # ErrorsW As [`Session::edit_item`]; `unknown_item` for an entry that is not there (any more) or\x12 whose id differs.\0\x05\x02id\0\0\0\x03key\0\0\0\x05index\0\0\0\x08entry_id\0\0\0\x06now_ms\0\0\0\0\0\x13restoreFieldHistory\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let inner = self.writable()?;
+            let item = items::item_id(id)?;
+            let dot =
+                items::restore_field_history_dot(&inner.vault, item, key,
+                        index, entry_id)?;
+            inner.vault.restore_field_history(&mut inner.rng, &inner.unlocked,
+                    item, key, dot, now_ms)?;
+            Ok(())
         }
         #[doc =
         " The notices not yet handed over in this session (gap 02), each handed over once: an edit"]

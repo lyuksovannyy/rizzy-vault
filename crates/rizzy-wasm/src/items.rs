@@ -22,6 +22,14 @@
 //!   the Worker never sends the whole history to the UI thread (ADR 0013 §3 rule 3). The host
 //!   names the entry's identity, not its date, on that call, so a sync that only reorders the
 //!   list between the listing and the reveal still reveals the entry the user asked for.
+//! - **Item history** ([`FieldHistoryView`]; ROADMAP §4.2 "Item revision history (restore old
+//!   versions)", M3) generalizes password history to every field: one entry list per field
+//!   that has history, the same `(index, id)` identity, the same values-only-on-request rule
+//!   through [`crate::Session::reveal_field_history`]. A dot is not unique across different
+//!   fields (one op writing two fields shares a dot between their histories), so a listing's
+//!   entries are only ever read, revealed or restored under the field they were listed under.
+//!   [`crate::Session::restore_field_history`] writes an entry back as its field's current
+//!   value, an ordinary edit (`rizzy-client`'s `restore_field_history`).
 //! - **An edit** ([`ItemDraft`]) is built in Rust from the user's input, call by call, and
 //!   written as one op by [`crate::Session::create_item`] or [`crate::Session::edit_item`],
 //!   where every write passes the schema checks. The draft holds the typed values in zeroizing
@@ -712,6 +720,120 @@ pub(crate) fn reveal_history(
     kind_and_text(&value)
         .1
         .ok_or(ClientError::InvalidInput.into())
+}
+
+/// One field's merge history, without values (ROADMAP §4.2 "Item revision history (restore
+/// old versions)", M3): generalizes [`HistoryEntryView`]/[`password_history`] to every field.
+/// Every entry's `source` is [`HISTORY_MERGE`]: imported `pwhist` history stays
+/// `login.password`-only and out of this listing ([`VaultSync::item_history`]'s own doc).
+#[wasm_bindgen]
+#[derive(Clone, Debug)]
+pub struct FieldHistoryView {
+    /// The field's final key (ADR 0018 §7).
+    key: String,
+    /// Its history entries, newest first.
+    entries: Vec<HistoryEntryView>,
+}
+
+#[wasm_bindgen]
+impl FieldHistoryView {
+    /// The field's final key.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn key(&self) -> String {
+        self.key.clone()
+    }
+
+    /// Its history entries, newest first; each `source` is [`HISTORY_MERGE`].
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn entries(&self) -> Vec<HistoryEntryView> {
+        self.entries.clone()
+    }
+}
+
+/// Every field's history, without values (module docs; [`VaultSync::item_history`]): one
+/// [`FieldHistoryView`] per field that has at least one entry, in the item's field order.
+/// Empty when the item has none.
+pub(crate) fn item_history(vault: &VaultSync, item: ItemId) -> Vec<FieldHistoryView> {
+    vault
+        .item_history(item)
+        .into_iter()
+        .map(|field| FieldHistoryView {
+            key: field.key.as_str().to_owned(),
+            entries: field
+                .entries
+                .into_iter()
+                .enumerate()
+                .map(|(index, entry)| HistoryEntryView {
+                    source: HISTORY_MERGE,
+                    index,
+                    changed_ms: Some(entry.changed_ms),
+                    id: dot_hex(entry.dot),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// The value of one field-history entry as text: call it only on the user's request (ADR 0013
+/// §3 rule 3). As [`reveal_history`], generalized to any field: the history is read again here
+/// and the (position, id) pair checked against it, so a stale listing never reveals a value
+/// under another entry's identity, and an id from one field's listing never reveals another
+/// field's value even when the two share a dot ([`VaultSync::field_history`]'s own doc: a dot
+/// is not unique across different fields).
+///
+/// # Errors
+/// `unknown_item` for an index past the end or an id that does not match; `invalid_input` for a
+/// value with no text form.
+pub(crate) fn reveal_field_history(
+    vault: &VaultSync,
+    item: ItemId,
+    key: &str,
+    index: usize,
+    entry_id: &str,
+) -> CoreResult<Zeroizing<String>> {
+    let value = history_entry(vault, item, key, index, entry_id)?.value;
+    kind_and_text(&value)
+        .1
+        .ok_or(ClientError::InvalidInput.into())
+}
+
+/// The dot `index`/`entry_id` name within `key`'s history, checked the same way as
+/// [`reveal_field_history`] (module docs): [`crate::Session::restore_field_history`]'s
+/// building block, so a restore resolves the exact entry a listing showed, never a stale one.
+///
+/// # Errors
+/// `unknown_item` for an index past the end or an id that does not match.
+pub(crate) fn restore_field_history_dot(
+    vault: &VaultSync,
+    item: ItemId,
+    key: &str,
+    index: usize,
+    entry_id: &str,
+) -> CoreResult<Dot> {
+    Ok(history_entry(vault, item, key, index, entry_id)?.dot)
+}
+
+/// `key`'s history entry at `index`, checked against `entry_id` ([`reveal_history`]'s own
+/// doc): shared by [`reveal_field_history`] and [`restore_field_history_dot`].
+///
+/// # Errors
+/// `unknown_item` for an index past the end, an id that does not match, or a Cleared value.
+fn history_entry(
+    vault: &VaultSync,
+    item: ItemId,
+    key: &str,
+    index: usize,
+    entry_id: &str,
+) -> CoreResult<rizzy_client::items::HistoryEntry> {
+    vault
+        .field_history(item, key)
+        .into_iter()
+        .nth(index)
+        .filter(|entry| dot_hex(entry.dot) == entry_id)
+        .filter(|entry| !entry.value.is_cleared())
+        .ok_or(ClientError::UnknownItem.into())
 }
 
 /// A custom field's kind, as the draft names it.
