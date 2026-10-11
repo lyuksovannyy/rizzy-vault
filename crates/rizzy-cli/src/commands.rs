@@ -57,13 +57,14 @@ use rizzy_client::export::gate::{ExportGate, PLAINTEXT_EXPORT_HOLD_MS, check_exp
 use rizzy_client::export::plaintext::{
     PLAINTEXT_EXPORT_PHRASE, PLAINTEXT_EXPORT_WARNING, PlaintextExportAck, csv_export_warning,
 };
-use rizzy_client::items::{FieldEdit, FieldKey, ItemId, ItemLifecycle, ItemType, Value};
+use rizzy_client::items::{Dot, FieldEdit, FieldKey, ItemId, ItemLifecycle, ItemType, Value};
 use rizzy_client::lists::split_order_ops;
 use rizzy_client::rizzy_import::{self, Format};
 use rizzy_client::rotation::RotationLevel;
 use rizzy_client::signup::DeviceKind;
 use rizzy_client::store::rows::Alarm;
 use rizzy_client::sync::VaultSync;
+use rizzy_core::encoding::Reader;
 use rizzy_core::generator::{
     CharClass, CharacterOptions, ClassRule, GeneratorError, MAX_LENGTH, MAX_WORDS, MIN_LENGTH,
     MIN_WORDS, PassphraseOptions, generate_passphrase, generate_password,
@@ -183,6 +184,13 @@ pub async fn run(invocation: Invocation, env: &mut Env<'_>) -> Result<(), CliErr
         }
         Command::ItemRestoreLate { item, item_type } => {
             Box::pin(item_restore_late(env, &item, &item_type)).await
+        }
+        Command::ItemHistory { item, reveal } => {
+            let device = Device::open(env).await?;
+            item_history(&device, env.ui, &item, reveal)
+        }
+        Command::ItemRestoreHistory { item, field, entry } => {
+            Box::pin(item_restore_history(env, &item, &field, &entry)).await
         }
         Command::Generate(options) => generate(env.ui, options),
         Command::Totp(item) => {
@@ -527,6 +535,84 @@ fn print_password_history(
         }
     }
     Ok(())
+}
+
+/// Lower-case hex of a dot's canonical encoding (`device_id ‖ seq`, ADR 0012 §2): a history
+/// entry's identity, stable across a sync that only reorders the list. Not a persistent or
+/// wire format: computed fresh for one `item history` listing.
+fn dot_hex(dot: Dot) -> String {
+    let mut buf = Vec::with_capacity(Dot::ENCODED_LEN);
+    dot.encode(&mut buf);
+    hex(&buf)
+}
+
+/// The dot `item restore-history --entry` names, as [`dot_hex`] printed it.
+fn parse_dot(text: &str) -> Result<Dot, CliError> {
+    let bad = || CliError::BadInput("not a valid history entry id");
+    let bytes = unhex::<{ Dot::ENCODED_LEN }>(text).ok_or_else(bad)?;
+    Dot::read(&mut Reader::new(&bytes)).map_err(|_| bad())
+}
+
+/// `item history` (ROADMAP §4.2 "Item revision history (restore old versions)", M3):
+/// generalizes `item show`'s password-history section ([`print_password_history`]) to every
+/// field. Concealed unless `--reveal`, newest first per field, each entry printed with the id
+/// `item restore-history --entry` takes.
+fn item_history(
+    device: &Device,
+    ui: &mut dyn Ui,
+    item: &str,
+    reveal: bool,
+) -> Result<(), CliError> {
+    let vault = device.vault();
+    let item = resolve_item(vault, item)?;
+    let history = vault.item_history(item);
+    if history.is_empty() {
+        ui.print("no field history")?;
+        return Ok(());
+    }
+    for field in &history {
+        let plural = if field.entries.len() == 1 { "" } else { "s" };
+        ui.print(&format!(
+            "{} ({} older value{plural}, newest first):",
+            field.key.as_str(),
+            field.entries.len()
+        ))?;
+        for entry in &field.entries {
+            let shown = if reveal {
+                show_value(&entry.value)
+            } else {
+                Zeroizing::new(CONCEALED.to_owned())
+            };
+            let line = Zeroizing::new(format!(
+                "  {}  {} ms: {}",
+                dot_hex(entry.dot),
+                entry.changed_ms,
+                shown.as_str()
+            ));
+            ui.print(&line)?;
+        }
+    }
+    Ok(())
+}
+
+/// `item restore-history`: writes one history entry back as its field's current value
+/// (ROADMAP §4.2), through [`rizzy_client::items::VaultSync::restore_field_history`] -- "an
+/// ordinary carried edit" (ADR 0018 §2 "Flow"), so it syncs and merges like any other edit.
+async fn item_restore_history(
+    env: &mut Env<'_>,
+    item: &str,
+    field: &str,
+    entry: &str,
+) -> Result<(), CliError> {
+    let mut device = Device::open(env).await?;
+    let item = resolve_item(device.vault(), item)?;
+    let dot = parse_dot(entry)?;
+    device
+        .edit(|vault, rng, unlocked, now| {
+            vault.restore_field_history(rng, unlocked, item, field, dot, now)
+        })
+        .await?;
+    sync_after_write(&mut device, env.ui).await
 }
 
 /// The encoded value of `text` for `key`, as the schema expects it.
