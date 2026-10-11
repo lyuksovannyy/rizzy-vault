@@ -1446,6 +1446,10 @@ fn one_dot_in_two_versions_keeps_the_lower_value_in_any_order() {
 
 #[test]
 fn an_honest_ungapped_bound_leaves_the_state_unchanged() {
+    // Guards a non-restrictive `bound` over-capping honest traffic, not the regression in
+    // `a_bound_past_a_value_keeps_it_as_evidence_and_converges_once_the_gap_closes` /
+    // `a_bound_past_a_purge_is_refused_not_silently_absorbed`: `bound` here is never tighter
+    // than the per-item evidence, so it would pass unchanged even without the second cut.
     let (a, mut b, s) = two_writers();
     record_headers(&mut b.merge, &a.ops());
     // `bound` covers everything the per-item evidence already covers: on an honest, ungapped
@@ -1465,6 +1469,12 @@ fn an_honest_ungapped_bound_leaves_the_state_unchanged() {
 
 #[test]
 fn a_contradiction_past_the_bound_is_still_refused() {
+    // Guards the evidence checks reading past `bound` (ADR 0018 §3 points 2-3), not the
+    // bound-capped join itself: this is refused by the first, unbounded cut's contradiction
+    // check, before `bound` is ever consulted, so it would pass unchanged even with the
+    // second cut and `bound` parameter removed entirely. See
+    // `a_bound_past_a_purge_is_refused_not_silently_absorbed` for that regression.
+    //
     // The same dishonest cover as `a_snapshot_contradicting_a_held_body_is_refused`: a value at
     // B's own dot that B's body did not write.
     let (a, mut b, s) = two_writers();
@@ -1556,6 +1566,46 @@ fn a_bound_past_a_value_keeps_it_as_evidence_and_converges_once_the_gap_closes()
         state_bytes(&me),
         state_bytes(&reference(&[a.ops(), b.ops()].concat()))
     );
+}
+
+#[test]
+fn a_bound_past_a_purge_is_refused_not_silently_absorbed() {
+    // A writes item.name, trashes, then purges: A:1, A:2, A:3 (the purge dot). The per-item
+    // evidence alone (every header and body recorded, as `with` always does) would cut and
+    // take the tombstone -- the unbounded cut succeeds -- but the causal layer's chain walk
+    // on *another* item left a gap after A:2, so the cover's own cut, `bound`, stops there.
+    let mut a = Device::new(1, 0);
+    a.write(&Edit::write(&[("item.name", &text("n"))]));
+    a.write(&Edit::Trash);
+    a.write(&Edit::Purge);
+    let s = a.snapshot().unwrap();
+    assert_eq!(s.header.covered, vv(&[(1, 3)]));
+
+    let mut me = ItemMerge::new(item());
+    me.add_item_key(key_id(0x40));
+    let before = state_bytes(&me);
+    let bound = vv(&[(1, 2)]);
+    let absorption = absorb_bounded(&mut me, &s, &a.ops(), &bound);
+    // The purge dot (A:3) sits past `bound`, so the second, bound-capped cut refuses the
+    // tombstone exactly as the unbounded case already does when the purge header itself is
+    // unverified (`a_tombstone_resting_on_an_unverified_purge_is_refused`): nothing of this
+    // response may settle on this item yet, and that must be visible in the outcome, not a
+    // no-op `Absorbed` that reports as if it had.
+    assert_eq!(refused(&absorption), Refusal::PurgeAboveCut);
+    assert_eq!(me.covered(), &VersionVector::default());
+    assert_eq!(state_bytes(&me), before);
+    assert_coverage_consistent(&me);
+
+    // The gap closes: the causal layer settles A:3 too. Re-absorbing the same claim with the
+    // wider bound lets it fully settle, matching ordinary delivery. The headers and bodies
+    // recorded by the first, refused attempt stay usable: `record_header` is idempotent on an
+    // identical header, and the bodies are inserted unconditionally either way.
+    let bound = vv(&[(1, 3)]);
+    let absorption = absorb_bounded(&mut me, &s, &a.ops(), &bound);
+    assert!(matches!(absorption.outcome, AbsorbOutcome::Absorbed(_)));
+    assert_eq!(me.covered(), &vv(&[(1, 3)]));
+    assert_coverage_consistent(&me);
+    assert_eq!(state_bytes(&me), state_bytes(&reference(&a.ops())));
 }
 
 // ---------------------------------------------------------------------------------------------
