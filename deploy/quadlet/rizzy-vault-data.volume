@@ -1,0 +1,10 @@
+# The SQLite database volume. Mirrors compose.yaml's `data` volume (named `rizzy-vault-data`;
+# ADR 0010 §4). Back it up with your data backups ([§8](self-hosting.md#8-backup)) — never
+# together with rizzy-vault-secrets.volume, see docs/self-hosting.md §1 and §5.
+#
+# Unverified: the minimum Podman version VolumeName= needs (docs/self-hosting.md §13). Without
+# it the volume would be named "systemd-rizzy-vault-data" instead, which breaks the `podman
+# volume` commands this guide gives by the compose.yaml name.
+
+[Volume]
+VolumeName=rizzy-vault-data
