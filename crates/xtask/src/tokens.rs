@@ -629,6 +629,7 @@ pub(crate) fn render_swift(tokens: &Tokens) -> String {
     let _ = writeln!(out);
     let _ = write!(out, "{}", generated_header(|l| format!("// {l}")));
     let _ = writeln!(out);
+    let _ = writeln!(out, "import Foundation");
     let _ = writeln!(out, "import SwiftUI");
     let _ = writeln!(out);
     let _ = writeln!(
@@ -955,10 +956,16 @@ pub(crate) fn render_qml(tokens: &Tokens) -> String {
     out
 }
 
-/// Renders the one output at `path` (one of [`OUTPUTS`]) from `tokens`.
+/// Renders the one output at `path` from `tokens`, matching `path` against the five named
+/// constants (`str` supports constant patterns).
 ///
-/// `path` is always one of the five named constants, matched by value: `str` supports constant
-/// patterns, so this is exhaustive over [`OUTPUTS`] without an `_` arm hiding a typo.
+/// The `_` arm is unreachable in practice, never in principle: every caller in this module only
+/// ever passes a path from [`OUTPUTS`], which is built from exactly these five constants, but the
+/// compiler cannot prove a `match` on `&str` exhaustive over an arbitrary set of constants, so an
+/// arm is required to compile. `tests::render_output_covers_every_outputs_path` is the actual
+/// exhaustiveness guarantee: it fails loudly (an empty file, asserted non-empty) if a future
+/// `OUTPUTS` entry is added here without a matching arm, rather than writing that empty file
+/// silently the way `run`'s `write` branch would otherwise do.
 fn render_one(path: &str, tokens: &Tokens) -> String {
     match path {
         CSS_OUTPUT => render_css(tokens),
@@ -1246,22 +1253,68 @@ mod tests {
     }
 
     #[test]
-    fn render_css_contains_every_custom_property_name() {
+    fn render_css_keeps_every_m1_custom_property_name() {
+        // The exact 25 names the M1 hand-written file declared (ADR 0014 §5's "keeping the
+        // property names where possible"), written out as literals rather than derived from
+        // `COLOR_KEYS`/`SPACING_KEYS`/`TYPE_KEYS`/`RADIUS_KEYS`: a future rename of one of those
+        // constants must not make this test silently track it. apps/web and apps/extension read
+        // these by name, so a rename here is the exact drift this generator must never produce.
+        const M1_NAMES: &[&str] = &[
+            "--color-bg",
+            "--color-surface",
+            "--color-border",
+            "--color-text",
+            "--color-text-muted",
+            "--color-accent",
+            "--color-on-accent",
+            "--color-danger",
+            "--color-on-danger",
+            "--color-warning-bg",
+            "--color-warning-text",
+            "--color-focus",
+            "--space-1",
+            "--space-2",
+            "--space-3",
+            "--space-4",
+            "--space-6",
+            "--space-8",
+            "--font-body",
+            "--font-mono",
+            "--font-size-small",
+            "--font-size-body",
+            "--font-size-title",
+            "--radius-1",
+            "--radius-2",
+        ];
         let tokens = parse(&valid_json().to_string()).unwrap();
         let css = render_css(&tokens);
         assert!(css.starts_with("/* SPDX-License-Identifier: AGPL-3.0-only */\n"));
-        for key in COLOR_KEYS {
-            assert!(css.contains(&format!("--color-{key}:")), "{key}\n{css}");
+        for name in M1_NAMES {
+            assert!(css.contains(&format!("{name}:")), "{name}\n{css}");
         }
-        for key in SHADOW_KEYS {
-            assert!(css.contains(&format!("--shadow-{key}:")), "{key}\n{css}");
-        }
+        assert_eq!(M1_NAMES.len(), 25);
+        // The new, additive shadow tokens (ROADMAP §4.5): not part of the M1 contract above, but
+        // still generated.
+        assert!(css.contains("--shadow-1:"));
+        assert!(css.contains("--shadow-2:"));
         assert!(css.contains("--space-1: 0.25rem;"));
         assert!(css.contains("--radius-1: 4px;"));
         assert!(css.contains("--font-body: system-ui;"));
         assert!(css.contains(":root {"));
         assert!(css.contains("@media (prefers-color-scheme: dark) {"));
         assert!(css.contains(":root[data-theme=\"dark\"] {"));
+    }
+
+    #[test]
+    fn render_output_covers_every_outputs_path() {
+        // The actual exhaustiveness guarantee for `render_one`'s match (module docs there): every
+        // path `OUTPUTS` can hand it renders to something non-empty, so a future output added to
+        // `OUTPUTS` without a matching arm fails this test instead of silently writing an empty
+        // file.
+        let tokens = parse(&valid_json().to_string()).unwrap();
+        for path in OUTPUTS {
+            assert!(!render_one(path, &tokens).is_empty(), "{path}");
+        }
     }
 
     #[test]

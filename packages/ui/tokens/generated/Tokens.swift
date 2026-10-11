@@ -7,6 +7,7 @@
 // the release workflow can ship it in the token bundle (ADR 0019 §7) once that
 // client repository exists.
 
+import Foundation
 import SwiftUI
 
 /// Design tokens generated from the platform-neutral source (ADR 0014 §5).
