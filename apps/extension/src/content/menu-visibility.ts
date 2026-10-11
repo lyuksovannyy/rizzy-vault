@@ -154,20 +154,118 @@ export function isVisibilityChainOk(chain: readonly ChainStyleSample[]): boolean
 }
 
 /**
- * Explicit rect-intersection of the expected rect against the browser's top layer (every
- * `document.fullscreenElement`, `dialog[open]`, and `:popover-open` element's own rect) — not
- * `elementFromPoint`. The frame's `zIndex: 2147483647` is the maximum possible value and the
- * frame is appended directly to `document.body`, so nothing in ordinary DOM stacking (z-index,
- * DOM order) can ever render above it; only the browser's top layer, which renders above all
- * z-index by spec, can.
+ * Explicit rect-intersection of the expected rect against a set of occlusion candidates — not
+ * `elementFromPoint`, which by spec cannot see a `pointer-events: none` element at all (A7
+ * bypass-2 residual, THREAT_MODEL.md's own note on `elementsFromPoint()` sharing the same blind
+ * spot) and never reflects paint that escapes an element's own border box (A7 bypass-1/3: a
+ * `box-shadow`/`filter` can paint far outside `getBoundingClientRect()`). `content-script.ts`
+ * feeds this two independent rect sources, both expanded or substituted conservatively by the
+ * caller before reaching here (never narrowed): the browser's top layer (every
+ * `document.fullscreenElement`, `dialog[open]`, and `:popover-open` element, widened by
+ * {@link parseBoxShadowMarginPx}/a non-`none` `filter`) and any body-level sibling tying the
+ * frame's own maximum `z-index` (`2147483647`) that comes after it in document order (the one
+ * other way, besides the top layer, that ordinary DOM stacking could ever render something above
+ * a `zIndex: 2147483647` element — a strictly LOWER z-index, or an earlier document position at
+ * the same z-index, cannot). Nothing in ordinary DOM stacking can otherwise out-rank the frame.
  */
-export function isTopLayerClear(expected: Rect, topLayerRects: readonly Rect[]): boolean {
-  return !topLayerRects.some((rect) => rectsIntersect(expected, rect));
+export function isTopLayerClear(expected: Rect, occlusionRects: readonly Rect[]): boolean {
+  return !occlusionRects.some((rect) => rectsIntersect(expected, rect));
 }
 
 function rectsIntersect(a: Rect, b: Rect): boolean {
   return a.left < b.left + b.width && a.left + a.width > b.left && a.top < b.top + b.height && a.top + a.height > b.top;
 }
+
+/**
+ * The largest per-side margin any NON-`inset` component of a CSSOM-computed `box-shadow` value
+ * can paint beyond its element's own border box (A7 bypass-1/3: a 1×1 top-layer popover with
+ * `box-shadow: 0 0 0 3000px <opaque>` blankets the viewport while `getBoundingClientRect()` stays
+ * 1×1 and box-shadow never participates in hit-testing — confirmed by direct probe against the
+ * real built extension). `getComputedStyle().boxShadow` always normalises every shadow to
+ * `<color> Xpx Ypx BLURpx SPREADpx [inset]` (lengths in `px`, color as `rgb()`/`rgba()`) in every
+ * browser this extension targets, so this never has to parse another CSS length unit. `inset`
+ * shadows paint INSIDE the border box and contribute nothing. Multiple comma-separated shadows
+ * (split on top-level commas only — an `rgba(...)` color can itself contain commas) contribute
+ * their own maximum. Deliberately returns one uniform margin, not a per-side one: a shadow can be
+ * offset asymmetrically (`10px 0 0 3000px` spreads 3000px one way, roughly 2990px the other), but
+ * the frame's expected rect can sit anywhere the attacker likes relative to the top-layer element
+ * regardless, so a tighter per-side margin buys nothing against a motivated attacker and only
+ * adds parsing surface — `|offsetX| + |offsetY| + spread + 2×blur` is a deliberately generous
+ * (never-under-estimating) bound: CSS does not give blur's visible extent an exact pixel formula,
+ * and over-estimating it only ever refuses MORE, never less.
+ *
+ * Returns `undefined`, never a small number, for anything this cannot confidently parse (an
+ * unexpected computed-style shape from a future browser quirk) — the caller must then widen its
+ * own fallback (today: substitute the full viewport rect), never narrow it, matching this
+ * module's "only ever refuse more" contract.
+ */
+export function parseBoxShadowMarginPx(boxShadow: string): number | undefined {
+  const trimmed = boxShadow.trim();
+  if (trimmed === "" || trimmed === "none") {
+    return 0;
+  }
+  let max = 0;
+  for (const shadow of splitTopLevelCommas(trimmed)) {
+    const margin = parseOneBoxShadow(shadow.trim());
+    if (margin === undefined) {
+      return undefined;
+    }
+    max = Math.max(max, margin);
+  }
+  return max;
+}
+
+function splitTopLevelCommas(value: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    const ch = value[i];
+    if (ch === "(") {
+      depth += 1;
+    } else if (ch === ")") {
+      depth -= 1;
+    } else if (ch === "," && depth === 0) {
+      parts.push(value.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(value.slice(start));
+  return parts;
+}
+
+const SHADOW_LENGTH_PX = /(-?\d+(?:\.\d+)?)px/g;
+
+function parseOneBoxShadow(shadow: string): number | undefined {
+  if (/\binset\b/.test(shadow)) {
+    return 0;
+  }
+  // Strips the colour function (`rgb(...)`/`rgba(...)`) so only the length list remains — every
+  // colour this computed style can contain is parenthesised, so removing any parenthesised group
+  // removes it cleanly with no colour-keyword list to maintain.
+  const withoutColor = shadow.replace(/[a-zA-Z-]+\([^)]*\)/g, "");
+  const lengths = [...withoutColor.matchAll(SHADOW_LENGTH_PX)].map((m) => Number(m[1]));
+  // `<offset-x> <offset-y> [<blur-radius>] [<spread-radius>]` — 2 to 4 lengths; anything else is
+  // a shape this parser does not recognise.
+  if (lengths.length < 2 || lengths.length > 4 || lengths.some((n) => Number.isNaN(n))) {
+    return undefined;
+  }
+  const [offsetX, offsetY, blur = 0, spread = 0] = lengths;
+  // `offsetX`/`offsetY` cannot actually be `undefined` (the length check above guarantees at
+  // least 2 entries) — this guard is only to satisfy `number[]` destructuring's own type, which
+  // cannot express that guarantee; `blur < 0` is a real, meaningful rejection of a shape this
+  // parser does not expect.
+  if (offsetX === undefined || offsetY === undefined || blur < 0) {
+    return undefined;
+  }
+  return Math.abs(offsetX) + Math.abs(offsetY) + spread + blur * 2;
+}
+
+/** The maximum CSS `z-index` value: the frame's own `zIndex: 2147483647` (`content-script.ts`),
+ * the largest value the property can hold, so nothing in ordinary DOM stacking can exceed it —
+ * only an EQUAL value, combined with a later document position, can paint above it. Shared here
+ * (not re-declared in `content-script.ts`) so the one number stays a single source of truth. */
+export const MAX_Z_INDEX = 2147483647;
 
 /** The result of `document.elementFromPoint` at the expected rect's center, already classified
  * by the caller: `"frame"` when the element returned is the menu's own `<iframe>`, `"other"` for

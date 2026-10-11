@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   DEFAULT_MENU_VISIBILITY_WINDOW_MS,
+  MAX_Z_INDEX,
   computeExpectedRect,
   initMenuVisibilityState,
   isChainNodeOk,
@@ -14,6 +15,7 @@ import {
   isPointHitOk,
   isTopLayerClear,
   isVisibilityChainOk,
+  parseBoxShadowMarginPx,
   recordSample,
   rectsMatch,
   type ChainStyleSample,
@@ -167,6 +169,59 @@ describe("isTopLayerClear", () => {
 
   it("is not clear on a partial overlap", () => {
     expect(isTopLayerClear(expected, [{ left: 150, top: 150, width: 50, height: 50 }])).toBe(false);
+  });
+});
+
+// A7 bypass-1/3 fix: a 1x1 top-layer popover with a huge box-shadow blankets the viewport while
+// its own rect stays tiny (`isTopLayerClear`'s own doc). `parseBoxShadowMarginPx` is what lets
+// `content-script.ts` widen a top-layer element's rect to account for that before it ever reaches
+// `isTopLayerClear`.
+describe("parseBoxShadowMarginPx", () => {
+  it("returns 0 for 'none'", () => {
+    expect(parseBoxShadowMarginPx("none")).toBe(0);
+  });
+
+  it("returns 0 for an empty string", () => {
+    expect(parseBoxShadowMarginPx("")).toBe(0);
+  });
+
+  it("parses a single shadow's offset+blur+spread (the reported attack: huge spread, no blur)", () => {
+    // Chromium's computed-style form: `<color> Xpx Ypx BLURpx SPREADpx`.
+    expect(parseBoxShadowMarginPx("rgba(20, 20, 20, 0.98) 0px 0px 0px 3000px")).toBe(3000);
+  });
+
+  it("includes offset and doubles blur (a deliberately generous, never-under-estimating bound)", () => {
+    expect(parseBoxShadowMarginPx("rgb(0, 0, 0) 10px 5px 8px 2px")).toBe(10 + 5 + 2 + 8 * 2);
+  });
+
+  it("an ordinary small modal drop-shadow stays small (no false-refusal blast radius)", () => {
+    expect(parseBoxShadowMarginPx("rgba(0, 0, 0, 0.15) 0px 4px 12px 0px")).toBeLessThan(40);
+  });
+
+  it("inset shadows never paint outside the border box and contribute nothing", () => {
+    expect(parseBoxShadowMarginPx("rgb(0, 0, 0) 0px 0px 0px 3000px inset")).toBe(0);
+  });
+
+  it("takes the maximum across multiple comma-separated shadows (commas inside rgba() are not boundaries)", () => {
+    expect(parseBoxShadowMarginPx("rgba(0, 0, 0, 0.1) 0px 1px 2px 0px, rgba(0, 0, 0, 0.9) 0px 0px 0px 500px")).toBe(500);
+  });
+
+  it("an inset shadow alongside a real one still reports the real one's margin", () => {
+    expect(parseBoxShadowMarginPx("rgb(0, 0, 0) 0px 0px 0px 10px inset, rgba(20, 20, 20, 0.98) 0px 0px 0px 3000px")).toBe(3000);
+  });
+
+  it("returns undefined (never a small number) for a shape this parser does not recognise — the caller must widen its fallback, not narrow it", () => {
+    expect(parseBoxShadowMarginPx("something-unparseable")).toBeUndefined();
+  });
+
+  it("returns undefined for a negative blur radius (not a valid computed value)", () => {
+    expect(parseBoxShadowMarginPx("rgb(0, 0, 0) 0px 0px -5px 0px")).toBeUndefined();
+  });
+});
+
+describe("MAX_Z_INDEX", () => {
+  it("is the largest value the CSS z-index property can hold (matches content-script.ts's own frame.style.zIndex)", () => {
+    expect(MAX_Z_INDEX).toBe(2147483647);
   });
 });
 
