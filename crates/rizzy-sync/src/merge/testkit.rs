@@ -185,6 +185,39 @@ pub(super) fn absorb(merge: &mut ItemMerge, snap: &Snap, with: &[Op]) -> Absorpt
                 data: &data,
             },
             &inputs,
+            // This harness has no causal-layer plan concept; preserve pre-fix behavior.
+            None,
+        )
+        .unwrap()
+}
+
+/// Absorbs `snap` into `merge` with the bodies `with` of the same response, bounded by `bound`
+/// (a stand-in for the causal layer's [`crate::causal::CoverPlan::cut`]).
+pub(super) fn absorb_bounded(
+    merge: &mut ItemMerge,
+    snap: &Snap,
+    with: &[Op],
+    bound: &VersionVector,
+) -> Absorption {
+    let datas: Vec<OpData<'_>> = with.iter().map(|o| parse_op(&o.data).unwrap()).collect();
+    let inputs: Vec<OpInput<'_>> = with
+        .iter()
+        .zip(&datas)
+        .map(|(o, d)| OpInput {
+            header: &o.header,
+            key_id: o.key_id,
+            data: d,
+        })
+        .collect();
+    let data = snap.parsed();
+    merge
+        .absorb_snapshot(
+            SnapshotInput {
+                header: &snap.header,
+                data: &data,
+            },
+            &inputs,
+            Some(bound),
         )
         .unwrap()
 }
@@ -381,6 +414,43 @@ pub(super) fn state_bytes(merge: &ItemMerge) -> Vec<u8> {
         .unwrap()
         .map(|b| b.expose_secret().to_vec())
         .unwrap_or_default()
+}
+
+/// Asserts the ADR 0018 §4 "Coverage" invariant on `merge`'s own state: every dot its snapshot
+/// data would carry -- current and history values, the recorded purge, late values -- is
+/// covered by `merge.covered()`. A merge that only caps its covered VV without also bounding
+/// what it joins can hold a value past its own VV; [`ItemMerge::write_snapshot`] would then
+/// produce a header every other replica's parser rejects (ADR 0018 §5 rule 6).
+pub(super) fn assert_coverage_consistent(merge: &ItemMerge) {
+    let covered = merge.covered();
+    let Some(data) = merge.snapshot_data().unwrap() else {
+        return;
+    };
+    match data {
+        SnapshotData::Live(l) => {
+            for reg in l.registers().iter().chain(l.history()) {
+                for e in reg.entries() {
+                    assert!(
+                        covered.covers(e.dot()),
+                        "{:?} not covered by {covered:?}",
+                        e.dot()
+                    );
+                }
+            }
+        }
+        SnapshotData::Tombstone(t) => {
+            assert!(covered.covers(t.purge_dot()), "purge dot not covered");
+            for reg in t.late() {
+                for e in reg.entries() {
+                    assert!(
+                        covered.covers(e.dot()),
+                        "{:?} not covered by {covered:?}",
+                        e.dot()
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// A fresh replica fed `ops` alone, in dot order, causally.
