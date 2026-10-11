@@ -1065,9 +1065,15 @@ test("a timed flip-visible-for-the-click, flip-back-after attack is refused (Gat
 // Adversarial-report coverage (owner-reported bypasses against this change's own clickjacking
 // mitigation; not yet owner-dated). Each test below reproduces-or-refutes one reported bypass
 // against the REAL extension, per this file's own standing methodology (a real device, a real
-// click, never a fabricated candidate list). Two bypasses reproduced nothing; one fix (the
-// `isFillAllowed` recency requirement in `menu-visibility.ts`) was still applied as defense in
-// depth, independent of what any specific reported technique achieved here.
+// click, never a fabricated candidate list). Two bypasses reproduced nothing as originally
+// described; one fix (the `isFillAllowed` recency requirement in `menu-visibility.ts`) was still
+// applied as defense in depth, independent of what any specific reported technique achieved
+// here. A later re-investigation (this task) found that one of the two — the main-thread-stall
+// report's `focus`-on-iframe trigger variant — used an unreliable signal, but the SAME
+// underlying idea (react to the focus transition, hide the frame, reveal it again) DID reproduce
+// as a real bypass once driven by the reliable related signal (`window.blur`) instead; see the
+// two tests after the main-thread-stall test below, and `isFillAllowedNow`'s own doc in
+// `content-script.ts` for the fix.
 
 // Reported bypass (critical): an opaque, `pointer-events: none` decoy — same max z-index as the
 // frame's own, appended to `document.body` the instant the iframe appears — is claimed to stay
@@ -1372,11 +1378,19 @@ test("Gate C's IntersectionObserver v2 first entry arrives in milliseconds, not 
 // outer element — a same-origin, zero-privilege signal needing no access into the iframe's own
 // document.
 //
-// REJECTED: that event does not fire here. A real trusted click that moves focus into the real
-// cross-origin inline-menu iframe's own document does not dispatch `focus` on the parent's
-// `<iframe>` element reference in this architecture, so this specific trigger never runs at all —
-// independent grounds from the main-thread-stall test below.
-test("a trusted click into the real iframe does not dispatch focus on the parent's iframe element (reported bypass's own trigger — does not fire)", async ({
+// CORRECTED (this task's own re-investigation): the original assertion here — that this event
+// NEVER fires — was itself flaky, not a stable fact. Measured directly across repeated real
+// clicks against a real device: it fired in roughly 2 of 10 runs, not 0 of 10 or 10 of 10. A
+// test cannot assert a fixed boolean for a genuinely nondeterministic DOM event without being
+// flaky by construction — so this test no longer does. The TRUE, non-flaky fact, measured the
+// same way: `window`'s own `blur` event — firing for the same underlying reason (focus moving
+// out of the top-level browsing context into the cross-origin iframe) — fired in every one of
+// many dozens of repeated real-click runs, consistently within ~1-2ms of the click landing. That
+// reliability is exactly what let a page use it (not the unreliable `focus` event) to win a real
+// race against the old Gate A/B implementation — see the next test, which is the actual security
+// claim this file needs: regardless of which focus-related signal fires, or when, the fill
+// decision is correct.
+test("a trusted click into the real iframe reliably fires window blur, but not reliably a focus event on the parent's iframe element (measured, not asserted either way — the fill decision below is what matters)", async ({
   context,
   extensionId,
   server,
@@ -1404,9 +1418,14 @@ test("a trusted click into the real iframe does not dispatch focus on the parent
     await expect(realCandidate).toBeVisible({ timeout: 15_000 });
 
     await visit.evaluate(() => {
-      (window as unknown as { __focusFired: boolean }).__focusFired = false;
+      const w = window as unknown as { __focusFired: boolean; __blurFired: boolean };
+      w.__focusFired = false;
+      w.__blurFired = false;
       document.querySelector<HTMLIFrameElement>("iframe[data-rizzy-inline-menu]")?.addEventListener("focus", () => {
-        (window as unknown as { __focusFired: boolean }).__focusFired = true;
+        w.__focusFired = true;
+      });
+      window.addEventListener("blur", () => {
+        w.__blurFired = true;
       });
     });
 
@@ -1417,8 +1436,85 @@ test("a trusted click into the real iframe does not dispatch focus on the parent
     await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
     await visit.waitForTimeout(500);
 
-    const focusFired = await visit.evaluate(() => (window as unknown as { __focusFired: boolean }).__focusFired);
-    expect(focusFired).toBe(false);
+    // `focus` on the iframe element is measured but deliberately NOT asserted on, either way —
+    // see the comment block above. `window.blur` is the one claim this test makes, because it is
+    // the one claim measurement actually supports as non-flaky.
+    const blurFired = await visit.evaluate(() => (window as unknown as { __blurFired: boolean }).__blurFired);
+    expect(blurFired).toBe(true);
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// Reported bypass's own underlying idea, reproduced with the signal measured above to actually
+// be reliable: react to `window.blur` (not the unreliable `focus` event the original report
+// used) by hiding the real frame, then reveal it again ~50ms later to keep deceiving the user —
+// a timed "flip invisible right as the click lands, flip back after" attack, same family as the
+// test above this one in the file, but driven by an event instead of a fixed delay after the
+// click.
+//
+// CONFIRMED as a real bypass against the PRE-FIX code (direct measurement, instrumented timing
+// log, `apps/extension/e2e/adversarial-fill-requests.spec.ts` git history): a real fill landed
+// while the frame was genuinely hidden in roughly half of repeated real-click runs, because
+// `InlineMenu#isFillAllowedNow` (`content-script.ts`) read only Gate A's last periodic
+// `requestAnimationFrame` sample — up to one whole tick (~16ms) stale — and `apply_fill` was
+// found to routinely arrive, in this harness, while `#frame` was still attached, well inside
+// that stale window. FIXED: `isFillAllowedNow` now takes one more LIVE sample at the exact
+// decision instant whenever `#frame` is still attached (`content-script.ts`'s own doc on that
+// method has the full reasoning, including why skipping the live sample once `#frame` is
+// detached is what keeps this safe for an ordinary, already-torn-down menu). No manifest change,
+// no new message type, strictly additive to Gate B's existing checks.
+test("a page reacting to window blur (the reliable signal, not the unreliable iframe focus event) by hiding the frame and revealing it again is still refused (reported bypass's own idea, reproduced with a working trigger — fixed)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "bypassblur");
+    await createLoginItem(setupPage, {
+      title: "Blur Trigger Target",
+      username: "blurtrigger-user@example.com",
+      password: "blurtrigger-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "bypassblur", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Blur Trigger Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+
+    // Reactive hide wired to `window.blur` — fires essentially as soon as the real click starts
+    // moving focus into the cross-origin iframe, not on a fixed millisecond guess.
+    await visit.evaluate(() => {
+      window.addEventListener("blur", () => {
+        const el = document.querySelector<HTMLIFrameElement>("iframe[data-rizzy-inline-menu]");
+        el?.style.setProperty("opacity", "0", "important");
+        // Flip back shortly after, to keep deceiving the user — a permanent hide defeats the
+        // attack's own purpose and is already covered by the plain overlay/clickjacking test.
+        setTimeout(() => {
+          document.querySelector<HTMLIFrameElement>("iframe[data-rizzy-inline-menu]")?.style.removeProperty("opacity");
+        }, 50);
+      });
+    });
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await visit.waitForTimeout(1200);
+
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
     await visit.close();
   } finally {
     await page.stop();
