@@ -110,7 +110,7 @@ fn render_host(host: &GenHost) -> String {
     match host {
         GenHost::Domain {
             labels,
-            trailing_dot,
+            trailing_dot_count,
             upper_mask,
         } => {
             let mut s = labels
@@ -125,12 +125,12 @@ fn render_host(host: &GenHost) -> String {
                 })
                 .collect::<Vec<_>>()
                 .join(".");
-            if *trailing_dot {
-                s.push('.');
-            }
+            s.push_str(&".".repeat(*trailing_dot_count));
             s
         }
-        GenHost::Ipv4(a, b, c, d) => format!("{a}.{b}.{c}.{d}"),
+        GenHost::Ipv4(a, b, c, d, trailing_dot_count) => {
+            format!("{a}.{b}.{c}.{d}{}", ".".repeat(*trailing_dot_count))
+        }
     }
 }
 
@@ -429,7 +429,7 @@ fn regression_duplicate_domain_in_an_equivalence_group_spec_builds_no_group() {
             scheme: oracle::SchemeKind::Http,
             host: oracle::GenHost::Domain {
                 labels: vec!["co".to_owned()],
-                trailing_dot: false,
+                trailing_dot_count: 0,
                 upper_mask: 139,
             },
             port: oracle::PortKind::ExplicitOtherSchemeDefault,
@@ -440,7 +440,7 @@ fn regression_duplicate_domain_in_an_equivalence_group_spec_builds_no_group() {
             scheme: oracle::SchemeKind::Http,
             host: oracle::GenHost::Domain {
                 labels: vec!["shop".to_owned()],
-                trailing_dot: true,
+                trailing_dot_count: 1,
                 upper_mask: 0,
             },
             port: oracle::PortKind::ExplicitDefaultForScheme,

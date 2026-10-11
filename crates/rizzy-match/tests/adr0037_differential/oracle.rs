@@ -32,10 +32,20 @@ use rizzy_match::MatchMode;
 pub(crate) enum GenHost {
     Domain {
         labels: Vec<String>,
-        trailing_dot: bool,
+        /// A trailing run of 0..=3 dots on the rendered host (mirrors
+        /// `rizzy_match::normalize`'s own `registrable_domain_is_invariant_under_trailing_dot_runs`
+        /// and `normalize_domain_output_is_idempotent` proptests): a plain `bool` could only
+        /// ever render zero or one dot, so this generator could never have reached the
+        /// two-or-more shape the ADR 0037 trailing-dot-run fix exists for.
+        trailing_dot_count: usize,
         upper_mask: u8,
     },
-    Ipv4(u8, u8, u8, u8),
+    /// The fourth field is the same trailing-dot-run count as [`GenHost::Domain`]'s: without it,
+    /// this generator could never reach an IP-literal host with 2+ trailing dots — exactly the
+    /// shape `rizzy_match::normalize`'s `ip_literal_registrable_domain_does_not_collide_across_trailing_dot_runs`
+    /// regression test pins at the unit level, but this independent-oracle layer would stay
+    /// blind to on its own.
+    Ipv4(u8, u8, u8, u8, usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,7 +179,7 @@ fn host_and_domain(host: &GenHost) -> (String, Option<String>) {
             let domain = registrable_domain_of_named(&norm);
             (norm, domain)
         }
-        GenHost::Ipv4(a, b, c, d) => {
+        GenHost::Ipv4(a, b, c, d, _) => {
             let norm = format!("{a}.{b}.{c}.{d}");
             (norm.clone(), Some(norm))
         }
@@ -352,19 +362,25 @@ fn label_strategy() -> impl Strategy<Value = String> {
 fn domain_host_strategy() -> impl Strategy<Value = GenHost> {
     (
         prop::collection::vec(label_strategy(), 1..=4),
-        any::<bool>(),
+        0usize..=3,
         any::<u8>(),
     )
-        .prop_map(|(labels, trailing_dot, upper_mask)| GenHost::Domain {
+        .prop_map(|(labels, trailing_dot_count, upper_mask)| GenHost::Domain {
             labels,
-            trailing_dot,
+            trailing_dot_count,
             upper_mask,
         })
 }
 
 fn ipv4_host_strategy() -> impl Strategy<Value = GenHost> {
-    (any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>())
-        .prop_map(|(a, b, c, d)| GenHost::Ipv4(a, b, c, d))
+    (
+        any::<u8>(),
+        any::<u8>(),
+        any::<u8>(),
+        any::<u8>(),
+        0usize..=3,
+    )
+        .prop_map(|(a, b, c, d, trailing_dot_count)| GenHost::Ipv4(a, b, c, d, trailing_dot_count))
 }
 
 fn host_strategy() -> impl Strategy<Value = GenHost> {

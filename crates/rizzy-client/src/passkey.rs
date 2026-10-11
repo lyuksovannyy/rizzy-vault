@@ -416,10 +416,16 @@ mod tests {
     }
 
     /// `rp_id` itself may carry a run of trailing dots too, normalised by `normalize_domain`
-    /// before the INV-64 comparison runs (module docs' `VerifiedRp` doc comment).
+    /// before the INV-64 comparison runs (module docs' `VerifiedRp` doc comment). A non-ASCII
+    /// idna label separator (U+3002 here), not an ASCII dot, pins this diff's own change:
+    /// `normalize_domain`'s ASCII trailing-dot handling was already correct before this diff
+    /// (confirmed against the parent commit, 9b76cf4, which already trimmed every ASCII
+    /// trailing dot off its raw input before calling `idna`); only the trim of dots `idna`
+    /// itself renders into its *output* for the three non-ASCII separators is new here, so an
+    /// ASCII-dot `rp_id` would pass this test identically even with this diff fully reverted.
     #[test]
-    fn rp_id_with_a_trailing_dot_run_is_accepted_the_same_as_without_one() {
-        assert!(verify_rp_id("https://example.com", "example.com...").is_ok());
+    fn rp_id_with_a_trailing_non_ascii_separator_run_is_accepted_the_same_as_without_one() {
+        assert!(verify_rp_id("https://example.com", "example.com\u{3002}\u{3002}").is_ok());
     }
 }
 
