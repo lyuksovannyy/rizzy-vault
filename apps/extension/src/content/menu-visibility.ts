@@ -113,9 +113,8 @@ export interface ChainStyleSample {
   readonly mask: string;
   readonly mixBlendMode: string;
   readonly contentVisibility: string;
+  readonly isolation: string;
 }
-
-const OPACITY_TOLERANCE = 0.01;
 
 /**
  * One chain node is "ok" when every property below is at its CSS-default/neutral value.
@@ -127,22 +126,42 @@ const OPACITY_TOLERANCE = 0.01;
  * frame itself, so checking each ancestor's own computed value here is what actually catches a
  * `body`/`html` rule the frame's override cannot reach from outside itself.
  *
+ * `opacity` is compared EXACTLY against `1`, with no tolerance (sixth adversarial round; an
+ * earlier version of this check used a `0.01` "looks the same" tolerance that had no relationship
+ * to the question this check actually has to answer): per spec, ANY `opacity` other than exactly
+ * `1` unconditionally creates a new CSS stacking context, regardless of how visually close to `1`
+ * it is — `body { opacity: 0.995 }` passed the old tolerance comfortably while still collapsing
+ * `body`'s entire subtree (the frame included, however large its own `z-index`) to `body`'s own
+ * single position in the ROOT stacking context, letting a sibling of `<body>` with a trivially
+ * low `z-index` paint above the whole subtree (reported bypass, confirmed by direct probe and by
+ * reverting the fix — see the e2e test). `isolation !== "isolate"` is the same reasoning applied
+ * to the OTHER property that creates a stacking context with no other side effect at all (unlike
+ * `filter`/`transform`/`contain`/`will-change`, `isolation` never changes geometry or visible
+ * paint by itself, so {@link rectsMatch} can never catch an attack that relies on it the way the
+ * excluded properties below are reasoned to be already caught). A transient animation/transition
+ * settling at a near-1, non-`isolate`-vs-`isolate` value is already covered by the existing,
+ * accepted "ancestor CSS transition refuses for the transition's own duration" trade-off
+ * (THREAT_MODEL.md A7 residual risk) — this closes a PERMANENT gap, not a new transient one.
+ *
  * Deliberately excludes `will-change`/`contain`: real pages use `contain: layout`/
  * `will-change: transform` for ordinary scroll/virtualization performance, and any attack that
  * actually relies on them to break `position: fixed`'s containing block already shows up as a
- * geometry mismatch in {@link rectsMatch}. Adding them as a separate hard gate would cost real
- * false-refusal risk for little additional attack coverage.
+ * geometry mismatch in {@link rectsMatch} (confirmed directly: either property on `body`/
+ * `documentElement` already refuses a real fill today, for that reason, independent of this
+ * function). Adding them as a separate hard gate would cost real false-refusal risk for little
+ * additional attack coverage.
  */
 export function isChainNodeOk(sample: ChainStyleSample): boolean {
   return (
-    Math.abs(sample.opacity - 1) <= OPACITY_TOLERANCE &&
+    sample.opacity === 1 &&
     sample.visibility !== "hidden" &&
     sample.display !== "none" &&
     isFilterVisibilityPreserving(sample.filter) &&
     sample.clipPath === "none" &&
     sample.mask === "none" &&
     sample.mixBlendMode === "normal" &&
-    sample.contentVisibility !== "hidden"
+    sample.contentVisibility !== "hidden" &&
+    sample.isolation !== "isolate"
   );
 }
 
