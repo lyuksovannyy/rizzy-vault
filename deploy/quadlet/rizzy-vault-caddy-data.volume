@@ -1,0 +1,7 @@
+# Caddy's own state (certificates, ACME account). Mirrors compose.yaml's `caddy-data` volume
+# (named `rizzy-vault-caddy-data`).
+#
+# Unverified: the minimum Podman version VolumeName= needs (docs/self-hosting.md §13).
+
+[Volume]
+VolumeName=rizzy-vault-caddy-data
