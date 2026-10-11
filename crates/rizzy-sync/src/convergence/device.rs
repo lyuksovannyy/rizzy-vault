@@ -965,7 +965,17 @@ impl Device {
                         self.snapshot(record.header.item_id);
                     }
                 }
-                SnapAnswer::Refused(_) => self.stats.snapshots_refused += 1,
+                SnapAnswer::Refused(_) => {
+                    self.stats.snapshots_refused += 1;
+                    // "Any answer to a sent snapshot ends it: a refusal 'only discards' it"
+                    // (this function's own docs, ADR 0021 §9): the server never stored this
+                    // record, so it must not survive as something this device still "holds"
+                    // and could serve as a cover. The `StaleEpoch` branch already does this;
+                    // a plain refusal was missing it, which let a never-accepted snapshot
+                    // outlive the dots it claims and reach the property 3 replay as if it
+                    // were an honest, delivered record.
+                    self.held_snaps.retain(|s| *s != record);
+                }
                 SnapAnswer::BadData => self
                     .errors
                     .push("the server refused an honest snapshot's data".to_owned()),
