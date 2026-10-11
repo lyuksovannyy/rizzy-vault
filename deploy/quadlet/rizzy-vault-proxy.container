@@ -50,7 +50,9 @@ EnvironmentFile=%h/.config/containers/systemd/rizzy-vault-proxy.env
 
 [Service]
 # compose.yaml's `restart: unless-stopped` for this service too; see rizzy-vault.container's
-# comment on the Restart= vs. unless-stopped difference.
+# comment on the Restart= vs. unless-stopped difference. The same boot-time divergence applies
+# here: this unit is enabled too ([Install] below), so disable it as well if rizzy-vault.service
+# is disabled to keep the pair down across a reboot.
 Restart=always
 
 [Install]
