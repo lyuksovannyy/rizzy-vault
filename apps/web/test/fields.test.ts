@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   FIXED_FIELDS,
+  compareFavoriteFirst,
   fixedChanges,
   group,
   labelOf,
@@ -138,6 +139,37 @@ describe("layout", () => {
     expect(matches(item, "finance")).toBe(true);
     expect(matches(item, "personal")).toBe(false);
     expect(matches({ title: "x", username: undefined }, "y")).toBe(false);
+  });
+});
+
+// The item list's and the command palette's shared ordering (ItemsPane.tsx, CommandPalette.tsx;
+// ROADMAP §4.2/§4.5 "favorites first").
+describe("compareFavoriteFirst", () => {
+  it("puts every favorite before every non-favorite, regardless of input order", () => {
+    const items = [
+      { favorite: false, title: "Bravo" },
+      { favorite: true, title: "Zulu" },
+      { favorite: false, title: "Alpha" },
+      { favorite: true, title: "Yankee" },
+    ];
+    expect(items.sort(compareFavoriteFirst).map((i) => i.title)).toEqual([
+      "Yankee",
+      "Zulu",
+      "Alpha",
+      "Bravo",
+    ]);
+  });
+
+  it("breaks ties within a group by title, case-insensitively", () => {
+    const items = [{ favorite: false, title: "bravo" }, { favorite: false, title: "Alpha" }];
+    expect(items.sort(compareFavoriteFirst).map((i) => i.title)).toEqual(["Alpha", "bravo"]);
+  });
+
+  it("is a no-op on an already-sorted single-item or empty list", () => {
+    expect([].sort(compareFavoriteFirst)).toEqual([]);
+    expect([{ favorite: true, title: "Solo" }].sort(compareFavoriteFirst)).toEqual([
+      { favorite: true, title: "Solo" },
+    ]);
   });
 });
 
