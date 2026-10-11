@@ -16,6 +16,7 @@ fn help_prints_every_command() {
     assert!(stdout.contains("check-clippy"), "{stdout}");
     assert!(stdout.contains("check-signoff"), "{stdout}");
     assert!(stdout.contains("check-spdx"), "{stdout}");
+    assert!(stdout.contains("generate-tokens"), "{stdout}");
 }
 
 #[test]
@@ -36,6 +37,9 @@ fn unknown_or_missing_command_exits_with_usage_error() {
         &["check-spdx", "extra"][..],
         &["check-spdx", "--other"][..],
         &["check-spdx", "--fix", "extra"][..],
+        &["generate-tokens", "extra"][..],
+        &["generate-tokens", "--other"][..],
+        &["generate-tokens", "--check", "extra"][..],
     ] {
         let out = Command::new(BIN).args(args).output().unwrap();
         assert_eq!(out.status.code(), Some(2), "args: {args:?}");
