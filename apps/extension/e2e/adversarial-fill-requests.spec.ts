@@ -1465,7 +1465,28 @@ test("a trusted click into the real iframe reliably fires window blur, but not r
 // method has the full reasoning, including why skipping the live sample once `#frame` is
 // detached is what keeps this safe for an ordinary, already-torn-down menu). No manifest change,
 // no new message type, strictly additive to Gate B's existing checks.
-test("a page reacting to window blur (the reliable signal, not the unreliable iframe focus event) by hiding the frame and revealing it again is still refused (reported bypass's own idea, reproduced with a working trigger — fixed)", async ({
+//
+// Loops instead of one click: the race this attack exploits is genuinely non-deterministic
+// (measured above at roughly half of runs, not 0 or 10 of 10). Re-running the PRE-FIX code
+// against this exact single click caught the regression in only 9/16 runs in one measurement and
+// 6/36 in another (this test's own `page.reload()`-based repeats, pre-fix, logged by attempt
+// index — fills landed at scattered, non-first indices, confirming each `reload()` is a genuine
+// independent attempt and not a loop that quietly stops re-arming) — a single-shot permanent
+// regression test, in a suite with `retries: 0` (`playwright.config.ts`), is somewhere between a
+// coin flip and a long-shot for catching a reintroduced bug, and exactly where in that range
+// depends on machine load and harness (`content-script.ts`'s own doc on this method already
+// notes `apply_fill` arrival timing itself "varying with machine load"). Each attempt below uses
+// a FRESH `InlineMenu` instance (`page.reload()` — the menu tears itself down after one click,
+// and only a DOM mutation or a fresh navigation makes `report()` in `content-script.ts` run
+// again; re-clicking the torn-down menu would not be a second attempt at all), so the attempts
+// are independent, and `ATTEMPTS` is picked generously against the LOWER of the two measured
+// rates (even at that rate, missing a reintroduced bug across all of them is under 1%) rather
+// than tuned to either single point estimate. Every attempt's own trigger firing is checked too
+// (`blurFiredCount`), so a loop that silently stopped re-arming the attack fails loudly instead
+// of passing vacuously.
+const ATTEMPTS = 30;
+
+test("a page reacting to window blur (the reliable signal, not the unreliable iframe focus event) by hiding the frame and revealing it again is still refused, across repeated independent attempts (reported bypass's own idea, reproduced with a working trigger — fixed; looped because the underlying race is non-deterministic)", async ({
   context,
   extensionId,
   server,
@@ -1487,34 +1508,62 @@ test("a page reacting to window blur (the reliable signal, not the unreliable if
     await popup.close();
 
     const visit = await context.newPage();
-    await visit.goto(`http://127.0.0.1:${page.port}/`);
     const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
     const realCandidate = menu.getByRole("button", { name: "Blur Trigger Target", exact: false });
-    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
 
-    // Reactive hide wired to `window.blur` — fires essentially as soon as the real click starts
-    // moving focus into the cross-origin iframe, not on a fixed millisecond guess.
-    await visit.evaluate(() => {
-      window.addEventListener("blur", () => {
-        const el = document.querySelector<HTMLIFrameElement>("iframe[data-rizzy-inline-menu]");
-        el?.style.setProperty("opacity", "0", "important");
-        // Flip back shortly after, to keep deceiving the user — a permanent hide defeats the
-        // attack's own purpose and is already covered by the plain overlay/clickjacking test.
-        setTimeout(() => {
-          document.querySelector<HTMLIFrameElement>("iframe[data-rizzy-inline-menu]")?.style.removeProperty("opacity");
-        }, 50);
+    let blurFiredCount = 0;
+    let fillCount = 0;
+
+    for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+      if (attempt === 0) {
+        await visit.goto(`http://127.0.0.1:${page.port}/`);
+      } else {
+        // A full reload, not a second click against the same menu — see the comment above this
+        // test for why only a reload gives this attempt a genuinely fresh `InlineMenu`.
+        await visit.reload();
+      }
+      await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+
+      // Reactive hide wired to `window.blur` — fires essentially as soon as the real click starts
+      // moving focus into the cross-origin iframe, not on a fixed millisecond guess. Re-armed on
+      // every attempt: a fresh document after `reload()` keeps none of the last one's listeners.
+      await visit.evaluate(() => {
+        (window as unknown as { __rizzyBlurFired: boolean }).__rizzyBlurFired = false;
+        window.addEventListener("blur", () => {
+          (window as unknown as { __rizzyBlurFired: boolean }).__rizzyBlurFired = true;
+          const el = document.querySelector<HTMLIFrameElement>("iframe[data-rizzy-inline-menu]");
+          el?.style.setProperty("opacity", "0", "important");
+          // Flip back shortly after, to keep deceiving the user — a permanent hide defeats the
+          // attack's own purpose and is already covered by the plain overlay/clickjacking test.
+          setTimeout(() => {
+            document.querySelector<HTMLIFrameElement>("iframe[data-rizzy-inline-menu]")?.style.removeProperty("opacity");
+          }, 50);
+        });
       });
-    });
 
-    const box = await realCandidate.boundingBox();
-    if (box === null) {
-      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+      const box = await realCandidate.boundingBox();
+      if (box === null) {
+        throw new Error(`adversarial test setup: could not read the real candidate's bounding box on attempt ${attempt}`);
+      }
+      await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      await visit.waitForTimeout(1200);
+
+      const blurFired = await visit.evaluate(() => (window as unknown as { __rizzyBlurFired: boolean }).__rizzyBlurFired);
+      if (blurFired) {
+        blurFiredCount++;
+      }
+      const userValue = await visit.locator("#user").inputValue();
+      const passValue = await visit.locator("#pass").inputValue();
+      if (userValue !== "" || passValue !== "") {
+        fillCount++;
+      }
     }
-    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-    await visit.waitForTimeout(1200);
 
-    await expect(visit.locator("#user")).toHaveValue("");
-    await expect(visit.locator("#pass")).toHaveValue("");
+    // Every attempt must actually have exercised the attack, or a loop that silently stopped
+    // re-arming it would pass vacuously instead of deterministically — the one failure mode that
+    // would make this test worse than the single-shot one it replaces.
+    expect(blurFiredCount, "window.blur must fire on every attempt for this test to mean anything").toBe(ATTEMPTS);
+    expect(fillCount, `${fillCount}/${ATTEMPTS} attempts filled while the frame was hidden`).toBe(0);
     await visit.close();
   } finally {
     await page.stop();
