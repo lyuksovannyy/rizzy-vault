@@ -1,0 +1,7 @@
+# Caddy's autosaved configuration. Mirrors compose.yaml's `caddy-config` volume (named
+# `rizzy-vault-caddy-config`).
+#
+# Unverified: the minimum Podman version VolumeName= needs (docs/self-hosting.md §13).
+
+[Volume]
+VolumeName=rizzy-vault-caddy-config
