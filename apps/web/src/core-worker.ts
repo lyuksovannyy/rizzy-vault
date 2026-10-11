@@ -253,6 +253,12 @@ async function run(m: CallMessage): Promise<unknown> {
     passwordHistory: () => current().passwordHistory(str(a[0])),
     revealPasswordHistory: () =>
       current().revealPasswordHistory(str(a[0]), str(a[1]) as never, index(a[2]), str(a[3])),
+    // ROADMAP §4.2: the same dates-only/one-value-per-reveal rule, generalized to every field.
+    itemHistory: () => current().itemHistory(str(a[0])),
+    revealFieldHistory: () =>
+      current().revealFieldHistory(str(a[0]), str(a[1]), index(a[2]), str(a[3])),
+    restoreFieldHistory: () =>
+      current().restoreFieldHistory(str(a[0]), str(a[1]), index(a[2]), str(a[3])),
     takeNotices: () => current().takeNotices(),
     restoreLateAsNew: () => current().restoreLateAsNew(str(a[0]), str(a[1]) as never),
     totp: () => current().totp(str(a[0])),
