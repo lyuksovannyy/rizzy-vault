@@ -788,6 +788,76 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     // entry's value under the old entry's identity.
     expect(capped[0]?.id).not.toBe(newer.id);
     refused("merge", 0, newer.id);
+
+    // ROADMAP §4.2 "Item revision history (restore old versions)", M3: itemHistory
+    // generalizes passwordHistory to every field, on the same session and item (no extra
+    // signup: the auth rate limiter's signup bucket is shared across this whole file).
+    // ADR 0018 §4 "Uniqueness" is per field key, not across fields, so one op writing both
+    // `login.username` and `login.password` puts the very same dot in both histories; that
+    // is forced here to prove an id from one field's listing is read and restored only
+    // under that field's name.
+    expect(s.itemHistory(bare)).toEqual([]);
+    // A history entry's dot is the write it came from, not the edit that later superseded
+    // it (same storage for a current value and a history one, module docs above): to share
+    // one dot between the two fields' history, the *same* op must first write both ("dave0"
+    // and "shared-pw"), and a *later* op then supersede both at once.
+    s.editItem(id, [
+      { op: "set", key: "login.username", value: "dave0" },
+      { op: "set", key: "login.password", value: "shared-pw" },
+    ]);
+    s.editItem(id, [
+      { op: "set", key: "login.username", value: "dave1" },
+      { op: "set", key: "login.password", value: "final-password" },
+    ]);
+    await s.sync();
+    const history = s.itemHistory(id);
+    const byKey = new Map(history.map((f) => [f.key, f.entries]));
+    expect([...byKey.keys()].sort()).toEqual(["login.password", "login.username"]);
+    const usernameEntries = byKey.get("login.username") ?? [];
+    const passwordEntries = byKey.get("login.password") ?? [];
+    expect(usernameEntries).toHaveLength(1);
+    // Dates only, never a value, same shape as passwordHistory's entries.
+    for (const entry of [...usernameEntries, ...passwordEntries]) {
+      expect(Object.keys(entry).sort()).toEqual(["changedMs", "id", "index", "source"]);
+      expect(entry.source).toBe("merge");
+    }
+    expect(JSON.stringify(history)).not.toContain("final-password");
+    expect(JSON.stringify(history)).not.toContain("shared-pw");
+    expect(JSON.stringify(history)).not.toContain("dave0");
+
+    const sharedDot = usernameEntries[0] as HistoryEntry;
+    expect(passwordEntries[0]?.id).toBe(sharedDot.id);
+    expect(s.revealFieldHistory(id, "login.password", 0, sharedDot.id)).toBe("shared-pw");
+    expect(s.revealFieldHistory(id, "login.username", 0, sharedDot.id)).toBe("dave0");
+    // The id from one field's listing never reveals a value under a different field's name
+    // just because it happens to resolve there too: each call above named its own field
+    // explicitly, and each got that field's own value, never the other's.
+
+    // A stale index, or an id read under the wrong field, is refused.
+    expect(() => s.revealFieldHistory(id, "login.password", 1, sharedDot.id)).toThrowError(
+      expect.objectContaining({ code: "unknown_item" }),
+    );
+    expect(() => s.revealFieldHistory(id, "login.password", 0, "not-a-real-id")).toThrowError(
+      expect.objectContaining({ code: "unknown_item" }),
+    );
+
+    // Restoring under "login.password" writes "shared-pw" back as current, and only
+    // touches that field: the username is untouched.
+    s.restoreFieldHistory(id, "login.password", 0, sharedDot.id);
+    expect(s.reveal(id, "login.password")).toBe("shared-pw");
+    expect(s.reveal(id, "login.username")).toBe("dave1");
+    // A restored entry is an ordinary edit: it neither removes nor dedupes the entry it
+    // copied (still capped at 50, the merge's history limit, module docs above), and
+    // pushes the value it displaced ("final-password") to the top of history.
+    const after = s.itemHistory(id).find((f) => f.key === "login.password")?.entries ?? [];
+    expect(after).toHaveLength(50);
+    expect(s.revealFieldHistory(id, "login.password", 0, after[0]?.id ?? "")).toBe(
+      "final-password",
+    );
+
+    expect(() => s.restoreFieldHistory(id, "login.password", 0, "not-a-real-id")).toThrowError(
+      expect.objectContaining({ code: "unknown_item" }),
+    );
     s.lock();
   });
 
