@@ -1563,6 +1563,7 @@ version = "0.0.0"
 dependencies = [
  "chacha20",
  "proptest",
+ "psl",
  "rand_core 0.10.1",
  "rizzy-core",
  "rizzy-import",
@@ -1645,6 +1646,7 @@ dependencies = [
 name = "rizzy-match"
 version = "0.0.0"
 dependencies = [
+ "ed25519-dalek",
  "idna",
  "proptest",
  "psl",
