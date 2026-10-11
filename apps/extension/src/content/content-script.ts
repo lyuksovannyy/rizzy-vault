@@ -37,6 +37,7 @@ import {
   type Rect,
   computeExpectedRect,
   initMenuVisibilityState,
+  isBackdropOccluding,
   isFillAllowed,
   isPointHitOk,
   isTopLayerClear,
@@ -428,9 +429,47 @@ class InlineMenu {
   readonly #expectedRect: Rect;
   #visibilityState: MenuVisibilityState;
   #rafId: number | undefined;
+  // A7 nested-decoy fix: measured directly, 20 warmed-up iterations of one full
+  // `#scanElementForDeepOccluders` walk on a synthetic page (5000 plain "chrome" elements, 3
+  // nodes deep each, BEFORE the frame; the frame; 5 trailing elements AFTER it plus one genuine
+  // occluder nested inside an open Shadow DOM) — avg 103ms, max 114ms (not re-measured with a
+  // per-call breakdown, so this does not attribute the cost to any one step;
+  // `getBoundingClientRect()` itself is called exactly once in this scenario, on the single
+  // matching occluder, which the probe source confirms): too expensive to re-run on every Gate-A
+  // `requestAnimationFrame` tick (a real jank risk, confirming the performance objection the
+  // second adversarial round raised, unbenchmarked, was correct). Re-run only when something could
+  // plausibly have changed, tracked by this dedicated observer (separate from
+  // `installContentScript`'s own, narrower `childList`-only one, so this does not also widen THAT
+  // observer's debounced field-redetection to fire on every attribute change on the page): any
+  // `childList` mutation anywhere in the subtree (an inserted decoy), any ATTRIBUTE change
+  // anywhere (deliberately unfiltered, not just `style`/`class` — a decoy's z-index can equally be
+  // keyed by an `id` or a `data-*` attribute a stylesheet rule selects on; a z-index raised by a
+  // LATER, non-insertion attribute write is the exact gap a one-shot, insertion-only scan missed
+  // in an earlier version of this fix, confirmed by review and by
+  // `adversarial-fill-requests.spec.ts`'s own regression test), or any character-data change (a
+  // `<style>` tag's `textContent` rewritten in place) — EXCLUDING this content script's own
+  // overlay elements (`isOwnOverlayElement`, reused from `own-overlay-mutation.ts`): without this
+  // exclusion, Gate A's own per-tick `frame.style.setProperty("pointer-events", ...)` write
+  // (`tick()`, `#pointHitResult()`) would itself be an attribute mutation on `#frame`, self-
+  // triggering a dirty flag that never clears while the frame's own pointer-events keeps toggling
+  // — a review finding, not empirically confirmed to reproduce today (Chromium appears to suppress
+  // a mutation record when the serialized attribute value does not actually change, which is most
+  // ticks), but excluding our own marked elements costs nothing, filters no attacker-relevant
+  // signal (a decoy is never one of our own marked elements), and removes the possibility
+  // entirely rather than relying on an unspecified browser optimisation. Residual, named rather
+  // than silently unclosed: `CSSStyleSheet.insertRule`/`deleteRule`/`replace()` changes a rule's
+  // effective z-index with NO corresponding DOM mutation of any kind, observable by nothing a
+  // `MutationObserver` can report. A page with heavy, unrelated attribute/class churn elsewhere
+  // (common on a highly interactive page) re-triggers the full rebuild often, so this check's own
+  // cost is bounded by page ACTIVITY, not fixed — accepted, since it is still event-driven rather
+  // than the unconditional per-frame cost the second round rejected.
+  #deepOccludersDirty = true;
+  #deepOccluderCandidates: Element[] = [];
+  readonly #deepOccluderObserver: MutationObserver;
 
   constructor(anchor: HTMLInputElement, candidates: CandidatesMessage["candidates"], pageHost: string) {
     const frame = document.createElement("iframe");
+    this.#frame = frame;
     frame.setAttribute("data-rizzy-inline-menu", "");
     const anchorRect = anchor.getBoundingClientRect();
     // Frozen once, here, never re-derived from `anchor` again (`menu-visibility.ts`'s own doc on
@@ -544,12 +583,143 @@ class InlineMenu {
     frame.src = inlineMenuUrl();
     document.body.appendChild(frame);
 
-    this.#frame = frame;
+    // A7 nested-decoy fix: dedicated to this instance, disconnected in `destroy()` — separate from
+    // `installContentScript`'s own `childList`-only observer so widening what THIS one watches
+    // (attributes, character data) never also widens that one's debounced field-redetection to
+    // fire on every attribute change a page makes (`#deepOccludersDirty`'s own doc has the full
+    // reasoning for why this is dirty-flagged rather than re-scanned unconditionally every tick,
+    // and for why every record whose `target` is one of this script's own overlay elements is
+    // skipped — Gate A's own per-tick `pointer-events` write on `#frame` is exactly such a
+    // record). `isOwnOverlayElement` duck-types `hasAttribute`, so a `characterData` mutation's
+    // `target` (a `Text` node, which has no `hasAttribute`) is correctly never treated as "our
+    // own" and never filtered.
+    this.#deepOccluderObserver = new MutationObserver((records) => {
+      for (const record of records) {
+        if (!isOwnOverlayElement(record.target)) {
+          this.#deepOccludersDirty = true;
+          return;
+        }
+      }
+    });
+    this.#deepOccluderObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      characterData: true,
+    });
+
     this.#onBlur = () => this.destroy();
     anchor.addEventListener("blur", this.#onBlur);
   }
 
+  /**
+   * A7 nested-decoy fix: {@link #deepOccluderRects} rebuilds {@link #deepOccluderCandidates} from
+   * scratch whenever {@link #deepOccludersDirty}, never unconditionally on every Gate-A tick —
+   * measured directly (see {@link #deepOccludersDirty}'s own doc) to cost ~103ms on average on a
+   * synthetic 5000-element page, far too slow for a 16ms tick budget. A deliberate change from an
+   * earlier version of this fix, which cached a decoy's own `Element` the first time a
+   * `MutationObserver` callback saw it INSERTED and never re-examined it again — a bypassable gap
+   * of its own (a review finding, not a report): a page can insert a decoy at a LOW `z-index` (no
+   * reason to be flagged at insertion time) and raise it to {@link MAX_Z_INDEX} later via a plain
+   * style write, which the dirty-flag observer (unlike a `childList`-only one) DOES see and react
+   * to. `#deepOccludersDirty` starts `true` unconditionally, so the FIRST tick after construction
+   * always does a full scan — covering a decoy already on the page before this menu was even
+   * built, which a purely insertion-triggered design would never see at all.
+   *
+   * Recursively checks `el` itself, then every light-DOM descendant and — critically, the exact
+   * gap the narrower, direct-siblings-only `#occludingSiblingRects` this replaces could not see —
+   * every descendant reachable through an open (`mode: "open"`) Shadow DOM root at any depth,
+   * collecting the rect of each one whose own computed `z-index` ties {@link MAX_Z_INDEX} when it
+   * also comes AFTER this instance's own `#frame` in tree order.
+   *
+   * `afterFrame`, once resolved for a node, is reused UNCHANGED for every descendant rather than
+   * re-derived (`undefined` means "not yet known — derive it now"): if a node follows `#frame` in
+   * tree order, so does every one of its descendants, and if it precedes `#frame`, so does every
+   * one of its descendants — tree order is transitive this way, so one `compareDocumentPosition`
+   * call per LIGHT-DOM boundary crossing is both correct and all this needs, never one per node.
+   * This is also what makes crossing a Shadow DOM boundary safe despite `compareDocumentPosition`
+   * itself being unreliable across one (two nodes rooted in different trees compare as
+   * disconnected, per spec): a shadow root's entire rendered content paints exactly at its own
+   * HOST element's position in the composed tree, so once the host's own `afterFrame` is known
+   * (computed while the host was still being visited as a plain light-DOM element), every node
+   * inside that host's shadow tree — and any shadow root nested further within it — inherits that
+   * SAME value, with no further cross-boundary comparison ever attempted.
+   *
+   * CORRECTNESS REQUIREMENT, found in review (an earlier version of this fix called this with
+   * `document.documentElement` itself as the first `el`, which is silently wrong): `el` must never
+   * be an ANCESTOR of `#frame` — `compareDocumentPosition` reports an ancestor as PRECEDING its
+   * descendant (the same flag a genuinely-earlier SIBLING gets), so resolving `html`/`body`
+   * themselves this way yields `false` for the wrong reason, and that `false` then propagates to
+   * EVERY descendant, including real siblings that come after `#frame`. {@link #deepOccluderRects}
+   * avoids this by only ever calling this on `#frame`'s own SIBLINGS (`#frame.parentElement`'s
+   * children), never on an ancestor.
+   *
+   * `getComputedStyle` (the one real cost here) is only ever called for a node already known to
+   * follow `#frame` — in practice almost always a small minority of the page, since ordinary page
+   * chrome (headers, nav, footers) is already in the DOM, and therefore precedes a freshly
+   * constructed `#frame` the content script always appends LAST, before this scan ever runs.
+   *
+   * `mode: "closed"` Shadow DOM is a named, left-open gap, not a silent one: `element.shadowRoot`
+   * returns `null` for it by spec, with no API anywhere, in any browser, for an extension content
+   * script (or any other same-process, non-devtools code) to read a closed shadow tree's content
+   * — there is nothing here to close without a capability the web platform does not expose.
+   */
+  #scanElementForDeepOccluders(el: Element, afterFrame: boolean | undefined, candidates: Element[]): void {
+    if (isOwnOverlayElement(el)) {
+      return;
+    }
+    const resolved = afterFrame ?? (this.#frame.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+    if (resolved) {
+      const zIndex = Number(getComputedStyle(el).zIndex);
+      if (Number.isFinite(zIndex) && zIndex >= MAX_Z_INDEX) {
+        candidates.push(el);
+      }
+    }
+    for (const child of el.children) {
+      this.#scanElementForDeepOccluders(child, resolved, candidates);
+    }
+    if (el.shadowRoot !== null) {
+      for (const child of el.shadowRoot.children) {
+        this.#scanElementForDeepOccluders(child, resolved, candidates);
+      }
+    }
+  }
+
+  /** Rebuilds {@link #deepOccluderCandidates} from scratch, walking `#frame`'s own siblings
+   * (never `#frame`'s ancestors — see {@link #scanElementForDeepOccluders}'s own correctness
+   * requirement) under its parent, only when {@link #deepOccludersDirty}; otherwise re-reads the
+   * live rect — and re-checks the live `z-index` still ties {@link MAX_Z_INDEX}, so an element
+   * that stops qualifying self-heals even between two dirty-triggered rebuilds, e.g. the
+   * `CSSStyleSheet.insertRule` residual this class's own doc names — for each candidate already
+   * found, which stays cheap regardless of page size because this SET, not the page, bounds it. */
+  #deepOccluderRects(): Rect[] {
+    if (this.#deepOccludersDirty) {
+      this.#deepOccludersDirty = false;
+      const candidates: Element[] = [];
+      const parent = this.#frame.parentElement;
+      if (parent !== null) {
+        for (const child of parent.children) {
+          this.#scanElementForDeepOccluders(child, undefined, candidates);
+        }
+      }
+      this.#deepOccluderCandidates = candidates;
+    }
+    const rects: Rect[] = [];
+    for (const el of this.#deepOccluderCandidates) {
+      if (!el.isConnected) {
+        continue;
+      }
+      const zIndex = Number(getComputedStyle(el).zIndex);
+      if (!Number.isFinite(zIndex) || zIndex < MAX_Z_INDEX) {
+        continue;
+      }
+      rects.push(toRect(el.getBoundingClientRect()));
+    }
+    return rects;
+  }
+
   destroy(): void {
+    this.#deepOccluderObserver.disconnect();
     if (this.#rafId !== undefined) {
       cancelAnimationFrame(this.#rafId);
     }
@@ -577,13 +747,14 @@ class InlineMenu {
       return false;
     }
     // Two independent occlusion sources fed into the same rect-intersection check
-    // (`isTopLayerClear`'s own doc): the browser's top layer, and (A7 bypass-2 fix) any
-    // body-level sibling tying the frame's own maximum z-index that comes after it in document
-    // order — the only other route ordinary DOM stacking has to paint above a
-    // `zIndex: MAX_Z_INDEX` element, and one `elementFromPoint`-based hit-testing can never catch
-    // on its own when the sibling is `pointer-events: none` (this method's own point-hit check,
-    // below, is blind to exactly this).
-    if (!isTopLayerClear(this.#expectedRect, [...this.#topLayerRects(), ...this.#occludingSiblingRects()])) {
+    // (`isTopLayerClear`'s own doc): the browser's top layer (including each top-layer element's
+    // own `::backdrop`, A7 bypass fix), and (A7 bypass-2/nested-decoy fix) any element anywhere in
+    // the document — light DOM at any depth, or an open Shadow DOM root — tying the frame's own
+    // maximum z-index that comes after it in tree order (`#deepOccluderRects`) — the only other
+    // route ordinary DOM stacking has to paint above a `zIndex: MAX_Z_INDEX` element, and one
+    // `elementFromPoint`-based hit-testing can never catch on its own when the occluder is
+    // `pointer-events: none` (this method's own point-hit check, below, is blind to exactly this).
+    if (!isTopLayerClear(this.#expectedRect, [...this.#topLayerRects(), ...this.#deepOccluderRects()])) {
       return false;
     }
     return isPointHitOk(this.#pointHitResult());
@@ -623,58 +794,32 @@ class InlineMenu {
    * 1×1 top-layer popover with a 3000px box-shadow blankets the viewport while its own rect
    * stays 1×1, and box-shadow never participates in hit-testing) and non-`none` `filter` can both
    * paint a top-layer element's visible extent far outside its own border box, so taking the raw
-   * rect at face value here was the exact gap those reports used. */
+   * rect at face value here was the exact gap those reports used.
+   *
+   * A7 `::backdrop` bypass fix: {@link pushBackdropOcclusionRect} additionally checks each
+   * element's own `::backdrop` pseudo-element — a browser-painted box with no corresponding
+   * `Element`/`Node` at all, so `pushOcclusionRect` above, which only ever reads an ELEMENT's own
+   * rect/filter/box-shadow, cannot see it regardless of how it is widened. A top-layer backdrop is
+   * always sized to the full viewport by the browser itself (never shrunk by author CSS, only
+   * made transparent or not), so there is nothing to bound more precisely than "does it paint
+   * something, yes or no." */
   #topLayerRects(): Rect[] {
     const rects: Rect[] = [];
     if (document.fullscreenElement !== null) {
       pushOcclusionRect(rects, document.fullscreenElement);
+      pushBackdropOcclusionRect(rects, document.fullscreenElement);
     }
     for (const dialog of document.querySelectorAll("dialog[open]")) {
       pushOcclusionRect(rects, dialog);
+      pushBackdropOcclusionRect(rects, dialog);
     }
     try {
       for (const popover of document.querySelectorAll(":popover-open")) {
         pushOcclusionRect(rects, popover);
+        pushBackdropOcclusionRect(rects, popover);
       }
     } catch {
       // No Popover API support: nothing can be `:popover-open` either.
-    }
-    return rects;
-  }
-
-  /** A7 bypass-2 fix: siblings of the frame, under its own parent, that come AFTER it in
-   * document order and whose own computed `z-index` ties {@link MAX_Z_INDEX} — the structural
-   * precondition an opaque, `pointer-events: none` decoy needs to visually cover the frame while
-   * staying invisible to `elementFromPoint`/`elementsFromPoint` (both exclude `pointer-events:
-   * none` targets from hit-testing by spec — confirmed by direct probe, matching
-   * THREAT_MODEL.md's own residual-risk note on exactly this). Detected from the DOM structure
-   * itself, not from paint or hit-testing, so it closes the gap regardless of `pointer-events`,
-   * regardless of whether the content script's own rebuild-on-mutation has had a chance to run
-   * yet, and regardless of a concurrent main-thread stall (a reported bypass combined a decoy
-   * with a synchronous busy-loop specifically to deny that rebuild a chance to re-win the
-   * DOM-order tie before the next real sample; this check does not depend on the rebuild at all).
-   * `isOwnOverlayElement` excludes this frame's own later overlays (there are none today, but a
-   * generic walk stays correct if that changes) from counting against itself. */
-  #occludingSiblingRects(): Rect[] {
-    const parent = this.#frame.parentElement;
-    if (parent === null) {
-      return [];
-    }
-    const rects: Rect[] = [];
-    let passedFrame = false;
-    for (const child of parent.children) {
-      if (child === this.#frame) {
-        passedFrame = true;
-        continue;
-      }
-      if (!passedFrame || isOwnOverlayElement(child)) {
-        continue;
-      }
-      const zIndex = Number(getComputedStyle(child).zIndex);
-      if (!Number.isFinite(zIndex) || zIndex < MAX_Z_INDEX) {
-        continue;
-      }
-      rects.push(toRect(child.getBoundingClientRect()));
     }
     return rects;
   }
@@ -801,4 +946,23 @@ function pushOcclusionRect(rects: Rect[], el: Element): void {
     return;
   }
   rects.push({ left: rect.left - margin, top: rect.top - margin, width: rect.width + margin * 2, height: rect.height + margin * 2 });
+}
+
+/** Pushes a full-viewport occlusion rect when `el`'s own `::backdrop` pseudo-element is occluding
+ * (A7 bypass fix, `InlineMenu#topLayerRects`'s own doc): a `popover`/`dialog`/fullscreen
+ * element's rendered backdrop has no corresponding `Element`/`Node` for {@link pushOcclusionRect}
+ * above to find — `getComputedStyle(el, "::backdrop")`, the two-argument pseudo-element form, is
+ * the only way to read it. Guarded in a `try`: an older browser can throw on an unsupported
+ * pseudo-element argument rather than returning initial values, and "only ever refuse more" means
+ * that failure must widen this to the full viewport too, never silently skip it — the one
+ * behaviour this function must NEVER have is "an exception here quietly drops a real occluder." */
+function pushBackdropOcclusionRect(rects: Rect[], el: Element): void {
+  try {
+    const style = getComputedStyle(el, "::backdrop");
+    if (isBackdropOccluding(style.backgroundColor, style.backgroundImage)) {
+      rects.push({ left: 0, top: 0, width: window.innerWidth, height: window.innerHeight });
+    }
+  } catch {
+    rects.push({ left: 0, top: 0, width: window.innerWidth, height: window.innerHeight });
+  }
 }
