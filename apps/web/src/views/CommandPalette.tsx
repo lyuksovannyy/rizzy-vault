@@ -17,6 +17,16 @@
 // closes. Tab/Shift+Tab are swallowed rather than left to move focus to the backdrop's Cancel
 // button: that button stays mouse-only, the same trade-off a browser's own address bar makes,
 // so the combobox never loses focus to an element outside it while open.
+//
+// `CommandPalette` itself is a thin wrapper that mounts `Dialog` fresh on every open, rather
+// than keeping one instance mounted and resetting its state through an effect keyed on `open`:
+// a fresh mount's `useState("")` starts clean by construction, with nothing to race against a
+// fast reopen-then-type. The effect version had exactly that race — opening and immediately
+// filling the search box, back to back with no yield in between (a fast real typist, or a
+// Playwright `fill()` right after `press("Control+k")`), could have the open transition's own
+// state-reset effect run *after* the keystroke's `onChange`, silently discarding it — found via
+// this component's own Playwright coverage (`e2e/command-palette.spec.ts`), fixed by removing
+// the reset instead of trying to win the race.
 import type { ItemSummary } from "@rizzy-vault/core";
 import { IconSearch, TypeIcon, useToast } from "@rizzy-vault/ui";
 import { type KeyboardEvent, type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
@@ -49,8 +59,8 @@ function itemSub(item: ItemSummary): string {
   return item.username ?? item.itemType;
 }
 
-/** The command palette (module docs). Renders nothing while `open` is false — a caller can
- * mount it unconditionally and flip `open`, the same shape as `ConfirmDialog`. */
+/** The command palette (module docs). Renders nothing while `open` is false; mounts a fresh
+ * {@link Dialog} instance each time it becomes true. */
 export function CommandPalette(props: {
   readonly open: boolean;
   readonly onClose: () => void;
@@ -58,7 +68,28 @@ export function CommandPalette(props: {
   readonly navCommands: readonly PaletteNavCommand[];
   readonly onOpenItem: (id: string) => void;
 }) {
-  const { open, onClose, ctx, navCommands, onOpenItem } = props;
+  if (!props.open) {
+    return null;
+  }
+  return (
+    <Dialog
+      onClose={props.onClose}
+      ctx={props.ctx}
+      navCommands={props.navCommands}
+      onOpenItem={props.onOpenItem}
+    />
+  );
+}
+
+/** The palette's actual content (module docs above `CommandPalette`): a fresh instance per
+ * open, so its `query`/`activeIndex`/`items` state always starts clean with no reset effect. */
+function Dialog(props: {
+  readonly onClose: () => void;
+  readonly ctx: VaultContext;
+  readonly navCommands: readonly PaletteNavCommand[];
+  readonly onOpenItem: (id: string) => void;
+}) {
+  const { onClose, ctx, navCommands, onOpenItem } = props;
   const [query, setQuery] = useState("");
   const [items, setItems] = useState<readonly ItemSummary[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -69,12 +100,7 @@ export function CommandPalette(props: {
   const listboxId = useId();
 
   useEffect(() => {
-    if (!open) {
-      return;
-    }
     previouslyFocused.current = document.activeElement;
-    setQuery("");
-    setActiveIndex(0);
     let live = true;
     // Active items only (module docs): a trashed item's "open" would land on a view with no
     // edit/copy path of its own worth surfacing here, and `palette.ts`'s own trash filter would
@@ -101,7 +127,10 @@ export function CommandPalette(props: {
         previouslyFocused.current.focus();
       }
     };
-  }, [open, ctx.client]);
+    // Runs exactly once, for this instance's one mount/unmount (module docs above `Dialog`):
+    // `ctx.client` is stable for the component's lifetime, so an empty dependency array would
+    // behave the same; it is listed anyway so a future `ctx` prop change is not silently missed.
+  }, [ctx.client]);
 
   const navRows: readonly Row[] = useMemo(
     () =>
@@ -128,10 +157,6 @@ export function CommandPalette(props: {
   // narrows the results) in the same render that would otherwise leave `activeIndex` pointing
   // past the end.
   const safeActiveIndex = rows.length === 0 ? -1 : Math.min(activeIndex, rows.length - 1);
-
-  if (!open) {
-    return null;
-  }
 
   const runRow = (row: Row | undefined) => {
     if (row === undefined) {
@@ -258,10 +283,10 @@ function itemRow(
     }
   };
   // `run` itself calls `onClose()` only on its own success path (above); a rejection propagates
-  // to `CommandPalette`'s `useAction.run` uncaught, which records the code and leaves the
-  // palette open (`ErrorText` then shows it, the same `codeOf`/`messageFor` convention every
-  // other failed action in this app uses) — so the user sees what failed and can try another
-  // row, rather than the palette vanishing on a reveal or clipboard failure.
+  // to `Dialog`'s `useAction.run` uncaught, which records the code and leaves the palette open
+  // (`ErrorText` then shows it, the same `codeOf`/`messageFor` convention every other failed
+  // action in this app uses) — so the user sees what failed and can try another row, rather
+  // than the palette vanishing on a reveal or clipboard failure.
   return {
     id: `item-${action}-${item.id}`,
     label,
