@@ -69,7 +69,7 @@ const PR_CASES: u32 = 1_000;
 const PR_GAP_CASES: u32 = 1_000;
 
 /// Fixed seeds that once failed, run on every PR: `(family, seed)`.
-const REGRESSIONS: [(usize, u64); 7] = [
+const REGRESSIONS: [(usize, u64); 8] = [
     // A restore to an empty backup: own acknowledged ops without bodies need a fresh snapshot
     // that covers own unacknowledged ops too (the healing closure in `device`).
     (4, 11_895_903_307_134_407_466),
@@ -101,6 +101,14 @@ const REGRESSIONS: [(usize, u64); 7] = [
     // discards' it") already said, and as `rizzy-client`'s `reissue_stale`/upload-answer
     // handling already does for every rejected snapshot.
     (9, 0x9fac_02de_4abc_7398),
+    // The same `held_snaps` defect the entry above pins, reached by a different path: here the
+    // stale, never-stored own snapshot's contradiction with the later same-dot reissue is
+    // reported by `merge::absorb_snapshot` as `Absorbed` with a disagreement rather than a
+    // refusal, so it surfaces in property 3's replay as "an honest snapshot ... disagrees at"
+    // instead of "was refused". Already fixed by the same `held_snaps` discard above; pinned
+    // separately because the two seeds exercise the two different merge outcomes of one root
+    // cause.
+    (9, 0xa362_c750_02c3_3d4d),
 ];
 
 /// The step kinds a family weights.
