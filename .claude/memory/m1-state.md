@@ -36,3 +36,6 @@ Disk: macOS update snapshots (MSUPrepareUpdate) eat space; workflow output files
 ## 2026-10-06: merged. Owner ran git rebase --signoff; main and branch pushed at 31a1579 (content = dd037d3). CI on main runs from now; first image/web/fuzz results pending.
 
 ## 2026-10-06 owner tried the web vault: not daily-usable (UI, generator options, no URI/custom-field editing, no AliasVault import, no passkeys); guesses M3 is needed for daily use. d561a5c adds AliasVault import to M1. Usability workflow wf_dc4a1991-115 running (wt15-rust: generator options then AliasVault; wt15-web: redesign + item editor, then generator UI). Mistake: I once ran git commit -s by accident (4a85bd6), undone with reset before push; never use -s.
+
+## 2026-10-09 HANDOFF gap work (03c1db2, pushed to branch, not main; 1508 tests, extension e2e 13/13)
+4bf1f1c gaps 00-03, 427ecf5 gaps 27a/30-33/35, 52db537 docs gaps, 03c1db2 HANDOFF rewritten. Next: gaps 01/02 host UI, 36, test gaps (Wycheproof, RFC 9807, wasm KATs, INV tests), check-tables, SPDX. Blocked on owner: ADR 0042, Regex ADR+crate, new ADRs listed in HANDOFF, CI edits, list signing. Main needs owner rebase --signoff.
