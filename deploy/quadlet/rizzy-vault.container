@@ -56,9 +56,10 @@ Environment=RIZZY_LISTEN=0.0.0.0:8080
 # in your Podman version (self-hosting.md §13) — replace %h with your home directory if not.
 EnvironmentFile=%h/.config/containers/systemd/rizzy-vault.env
 
-# podman auto-update (ROADMAP §4.9) is OFF by default. THREAT_MODEL.md Q-17/AR-22: before M8
-# ships signed images (ADR 0073, Proposed) and a verifying policy.json, a tag-following update
-# trusts whoever controls the registry tag completely, with no signature check. Also, the
+# podman auto-update (ROADMAP §4.9) is OFF by default. THREAT_MODEL.md Q-17/AR-22: before
+# signed images and a verifying policy.json exist (ROADMAP §4.9, M8; no Accepted ADR covers
+# the mechanism yet), a tag-following update trusts whoever controls the registry tag
+# completely, with no signature check. Also, the
 # default image above (localhost/rizzy-vault:dev) is a local build with no registry behind it,
 # so this key is a no-op until Image= names a real, signed-eventually registry tag. Uncommenting
 # this is the operator's own opt-in, not this change's default — see docs/self-hosting.md §13
