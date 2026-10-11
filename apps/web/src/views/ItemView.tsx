@@ -8,13 +8,14 @@
 // §3 rule 3), and a revealed value is shown in the secret-field component (INV-68). The
 // large-type password display (`LargeType.tsx`) reveals nothing beyond that same path: its
 // "Large type" trigger below only renders a value `FieldValue` already fetched for Reveal/Copy.
-import type { FieldView, ItemSummary, TotpCode } from "@rizzy-vault/core";
+import type { FieldView, HistoryEntry, ItemSummary, TotpCode } from "@rizzy-vault/core";
 import { ConfirmDialog, IconStarFilled, IconStarOutline, SecretField, TypeIcon, useToast } from "@rizzy-vault/ui";
 import { useEffect, useId, useState } from "react";
 
 import { codeOf } from "../core-client.ts";
 import { type Element, type Grouped, group, labelOf, matchModeLabel } from "../fields.ts";
 import { SafeLink, SafeOpenButton } from "../SafeLink.tsx";
+import { ItemHistory } from "./ItemHistory.tsx";
 import { LargeType } from "./LargeType.tsx";
 import { PasswordHistory } from "./PasswordHistory.tsx";
 import type { VaultContext } from "./VaultView.tsx";
@@ -271,6 +272,17 @@ export function ItemView(props: {
       false,
     );
 
+  /** `ItemHistory`'s write path: restoring an entry is an ordinary edit (ROADMAP §4.2). Unlike
+   * `act` (used for a button's own `onClick`), this returns the write's own promise, so
+   * `ItemHistory` can tell a refused restore from a successful one; `run` still gives it the
+   * same shared busy/error state trash, purge and favorite use. */
+  const restoreHistoryEntry = (fieldKey: string, entry: HistoryEntry): Promise<void> =>
+    run(async () => {
+      await ctx.client.call("restoreFieldHistory", id, fieldKey, entry.index, entry.id);
+      await props.onWritten(false);
+      notify("success", "Value restored.");
+    }).then(() => undefined);
+
   return (
     <article className="panel item" aria-labelledby="item-title">
       <div className="item-header">
@@ -337,6 +349,7 @@ export function ItemView(props: {
         <FieldValue key={f.key} ctx={ctx} id={id} field={f} label={f.key} />
       ))}
       <PasswordHistory ctx={ctx} id={id} />
+      <ItemHistory ctx={ctx} id={id} onRestore={restoreHistoryEntry} />
       {grouped.tags.length > 0 && (
         <p className="tags">
           {grouped.tags.map((t) => (
