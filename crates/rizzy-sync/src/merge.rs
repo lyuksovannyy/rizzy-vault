@@ -794,15 +794,28 @@ impl ItemMerge {
 
     /// Absorbs a verified snapshot of the item under "Snapshots are claims" (ADR 0018 §3,
     /// owner decision 14), with `with`, the op bodies of the item that came in the same Fetch
-    /// response (their headers are recorded, and what they are is kept).
+    /// response (their headers are recorded, and what they are is kept), and `bound`, the
+    /// `cut` field of the causal layer's [`CoverPlan`](crate::causal::CoverPlan), or `None`
+    /// when the caller has no causal-layer plan to bound by (the merge's own tests, and the
+    /// convergence harness's independent, ADR-text-only checker).
     ///
     /// In Server-mode sync a replica absorbs a snapshot only as the cover of a bodiless header
-    /// (ADR 0021 §4); the causal layer decides which. The snapshot is cut to the item's
-    /// verified headers, checked against every op body the replica knows, `with` included, and joined
-    /// into the state. On every honest state the result is the join of the two states: what
-    /// applying every op either covers would give. The covered VV becomes the entrywise
-    /// maximum, and a dominated honest snapshot changes nothing. After a concurrent one, the
-    /// merged snapshot is due at [`ItemMerge::end_fetch`].
+    /// (ADR 0021 §4); the causal layer decides which. The snapshot is cut to the item's own
+    /// verified headers and checked against every op body the replica knows, `with` included --
+    /// that full, per-item cut is what contradiction and disagreement detection reads (ADR 0018
+    /// §3 points 2-3), so a header past `bound` still counts as evidence. But the item's own
+    /// headers cannot see a same-device gap on *another* item, which only the causal layer's
+    /// chain walk can (reading 7); nothing past that gap is applied (ADR 0012 §7). So a second,
+    /// `bound`-cut view of the same claim is what actually joins into the state: the covered VV
+    /// this returns ([`ItemMerge::covered`]) can never exceed `bound`. Headers and bodies past
+    /// `bound` stay recorded regardless, ready for the ordinary `apply_op` delivery once the gap
+    /// closes.
+    ///
+    /// On every honest, ungapped response `bound` already covers everything the per-item cut
+    /// covers, so the second cut changes nothing: the result is the join of the two states, what
+    /// applying every op either covers would give. The covered VV becomes the entrywise maximum,
+    /// and a dominated honest snapshot changes nothing. After a concurrent one, the merged
+    /// snapshot is due at [`ItemMerge::end_fetch`].
     ///
     /// # Errors
     /// [`MergeError::WrongItem`], [`MergeError::UnsupportedSchema`], or
@@ -812,6 +825,7 @@ impl ItemMerge {
         &mut self,
         snapshot: SnapshotInput<'_>,
         with: &[OpInput<'_>],
+        bound: Option<&VersionVector>,
     ) -> Result<Absorption, MergeError> {
         let header = snapshot.header;
         self.check_record(header.item_id, header.item_schema_version)?;
@@ -831,6 +845,8 @@ impl ItemMerge {
             outcome: AbsorbOutcome::Refused(refusal),
             claim_cuts: claim_cuts.clone(),
         };
+        // The full, per-item cut: what contradiction and disagreement detection reads, so a
+        // header past `bound` still counts as evidence (ADR 0018 §3 points 2-3).
         let cut = match evidence::cut(&offered, &heads, ev) {
             Ok(cut) => cut,
             Err(refusal) => return Ok(refused(refusal)),
@@ -839,22 +855,45 @@ impl ItemMerge {
             return Ok(refused(refusal));
         }
         let disagreements = evidence::disagreements(&self.state, &cut.state, &self.bodies, ev);
+        // From the unbounded claim, not from what `bound` lets settle below: a concurrent
+        // claim this device cannot yet fully take still schedules the merged-snapshot trigger
+        // (`end_fetch`), which only ever encodes `self.state` as it actually stands, so this
+        // can trigger on no real local change but never on an inconsistent one.
         let relation = cut.state.vv.compare(&self.state.vv);
         let receive_hlc = cut.state.max_hlc();
-        let taken = normalize(&cut.state, ev);
-        join_into(&mut self.state, &taken, ev);
-        // The newest snapshot (ADR 0018 §10): the previous basis joined with the taken part;
-        // the retained ops the new basis covers are folded into it before they are dropped.
-        join_into(&mut self.base, &taken, ev);
-        let folded: Vec<Dot> = self
-            .retained
-            .keys()
-            .filter(|dot| self.base.vv.covers(**dot))
-            .copied()
-            .collect();
-        for dot in folded {
-            if let Some(op) = self.retained.remove(&dot) {
-                join_into(&mut self.base, &singleton(&op), ev);
+        // The part that actually settles: the same claim, cut a second time to `heads` met
+        // with `bound`, when there is one (`None` keeps `bounded_heads == heads`, so this
+        // second cut repeats the first exactly, as a caller with no causal-layer plan needs).
+        // Re-cutting (rather than filtering `cut.state` after the fact) keeps the result
+        // well-formed: `evidence::cut`'s own per-key `take` drops values by dot and `normalize`
+        // then recomputes current-vs-history from exactly what is left, so a value that was
+        // history only because an above-`bound` value superseded it is correctly promoted back
+        // to current, and no key is left with an orphaned, empty register (ADR 0018 §4, §5
+        // rule 6). `Err` means even the cut claim's tombstone purge sits past `bound`
+        // (`Refusal::PurgeAboveCut`): nothing of this response settles on this item yet, though
+        // its headers and bodies, recorded above, remain usable once the gap closes and the
+        // causal layer's chain walk reaches them.
+        let mut bounded_heads = heads;
+        if let Some(bound) = bound {
+            bounded_heads.meet(bound);
+        }
+        if let Ok(settled) = evidence::cut(&offered, &bounded_heads, ev) {
+            let taken = normalize(&settled.state, ev);
+            join_into(&mut self.state, &taken, ev);
+            // The newest snapshot (ADR 0018 §10): the previous basis joined with the taken
+            // part; the retained ops the new basis covers are folded into it before they are
+            // dropped.
+            join_into(&mut self.base, &taken, ev);
+            let folded: Vec<Dot> = self
+                .retained
+                .keys()
+                .filter(|dot| self.base.vv.covers(**dot))
+                .copied()
+                .collect();
+            for dot in folded {
+                if let Some(op) = self.retained.remove(&dot) {
+                    join_into(&mut self.base, &singleton(&op), ev);
+                }
             }
         }
         self.unresolved.extend(disagreements.iter().copied());
