@@ -63,4 +63,26 @@ describe("charCells", () => {
       { ch: "b", kind: "letter" },
     ]);
   });
+
+  it("normalizes an NFD (decomposed) accented letter to its single NFC code point, not two cells", () => {
+    // "e" + U+0301 COMBINING ACUTE ACCENT: two code points under NFD, one visual character.
+    const nfd = "é";
+    expect(nfd.normalize("NFC")).toBe("é");
+    const cells = charCells(`a${nfd}b`);
+    expect(cells).toEqual([
+      { ch: "a", kind: "letter" },
+      { ch: "é", kind: "letter" },
+      { ch: "b", kind: "letter" },
+    ]);
+  });
+
+  it("still splits a base letter plus a combining mark with no precomposed form into two cells (NFC is best-effort)", () => {
+    // U+0325 COMBINING RING BELOW has no precomposed form with "k"; NFC leaves it as two code
+    // points, so this still renders as a bare letter cell and a separate mark cell.
+    const cells = charCells("k̥");
+    expect(cells).toEqual([
+      { ch: "k", kind: "letter" },
+      { ch: "̥", kind: "symbol" },
+    ]);
+  });
 });

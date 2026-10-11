@@ -32,7 +32,7 @@ export {
   TypeIcon,
 } from "./icons.tsx";
 export { ConfirmDialog, type ConfirmDialogProps, nextFocusIndex } from "./ConfirmDialog.tsx";
-export { isAnyModalOpen } from "./modalRegistry.ts";
+export { isAnyModalOpen, setModalOpen } from "./modalRegistry.ts";
 export {
   TOAST_DURATION_MS,
   ToastProvider,

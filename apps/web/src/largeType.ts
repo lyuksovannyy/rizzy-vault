@@ -38,9 +38,15 @@ export interface CharCell {
   readonly kind: CharKind;
 }
 
-/** Splits `value` into its large-type cells, in order (module docs). Iterates by Unicode code
- * point — not by UTF-16 code unit (`value.split("")` or indexing would split a surrogate-pair
- * character, such as most emoji, into two cells) — so every character is exactly one cell. */
+/** Splits `value` into its large-type cells, in order (module docs). Normalizes to NFC first,
+ * so a decomposed accented letter — e.g. an imported password holding "e" + U+0301 COMBINING
+ * ACUTE ACCENT as two separate code points — becomes its single precomposed code point ("é")
+ * before splitting, rather than a bare base letter and a lone, cell-less combining mark (review
+ * finding). Best-effort: a combining mark with no precomposed form (there is no single code
+ * point for every base+mark pair) still lands in its own cell after normalizing, same as before.
+ * Then iterates by Unicode code point — not by UTF-16 code unit (`value.split("")` or indexing
+ * would split a surrogate-pair character, such as most emoji, into two cells) — so every
+ * character is exactly one cell. */
 export function charCells(value: string): readonly CharCell[] {
-  return [...value].map((ch) => ({ ch, kind: charKind(ch) }));
+  return [...value.normalize("NFC")].map((ch) => ({ ch, kind: charKind(ch) }));
 }
