@@ -833,18 +833,57 @@ class InlineMenu {
     if (!isVisibilityChainOk(this.#chainSamples())) {
       return false;
     }
-    // Two independent occlusion sources fed into the same rect-intersection check
+    // Three independent occlusion sources fed into the same rect-intersection check
     // (`isTopLayerClear`'s own doc): the browser's top layer (including each top-layer element's
-    // own `::backdrop`, A7 bypass fix), and (A7 bypass-2/nested-decoy fix) any element anywhere in
-    // the document — light DOM at any depth, or an open Shadow DOM root — tying the frame's own
-    // maximum z-index that comes after it in tree order (`#deepOccluderRects`) — the only other
-    // route ordinary DOM stacking has to paint above a `zIndex: MAX_Z_INDEX` element, and one
-    // `elementFromPoint`-based hit-testing can never catch on its own when the occluder is
+    // own `::backdrop`, A7 bypass fix), any element anywhere in the document — light DOM at any
+    // depth, or an open Shadow DOM root — tying the frame's own maximum z-index that comes after
+    // it in tree order (A7 bypass-2/nested-decoy fix, `#deepOccluderRects`), and (sixth
+    // adversarial round) each ANCESTOR's own `::before`/`::after` tying the frame's maximum
+    // z-index (`#ancestorPseudoOcclusionRects` — deliberately separate from `#deepOccluderRects`,
+    // which by its own correctness requirement never visits an ancestor itself) — together the
+    // only routes ordinary DOM stacking has to paint above a `zIndex: MAX_Z_INDEX` element, and
+    // one `elementFromPoint`-based hit-testing can never catch on its own when the occluder is
     // `pointer-events: none` (this method's own point-hit check, below, is blind to exactly this).
-    if (!isTopLayerClear(this.#expectedRect, [...this.#topLayerRects(), ...this.#deepOccluderRects()])) {
+    if (!isTopLayerClear(this.#expectedRect, [...this.#topLayerRects(), ...this.#deepOccluderRects(), ...this.#ancestorPseudoOcclusionRects()])) {
       return false;
     }
     return isPointHitOk(this.#pointHitResult());
+  }
+
+  /**
+   * Sixth adversarial round. Reported bypass: `body::after { position: fixed; inset: 0; z-index:
+   * 2147483647; ... }` — one CSS rule, no JavaScript. `body` is the frame's own ANCESTOR
+   * (`document.body.appendChild(frame)` in this constructor), never a sibling
+   * `#scanElementForDeepOccluders` would visit — that method's own correctness requirement is
+   * that `el` must never be a node on the frame's ancestor path, so `#deepOccluderRects`
+   * deliberately never passes `body`/`documentElement` themselves to the pseudo-element check it
+   * already runs on every SIBLING candidate (`pushPseudoOcclusionRect`/`pseudoElementTiesMaxZIndex`).
+   * That correctness requirement does not apply here: this checks each ancestor's OWN generated
+   * content, never a sibling, and needs no `compareDocumentPosition` tree-order reasoning at all
+   * — per CSS2.1 Appendix E, `::after` is generated as the LAST box in its own host's paint
+   * order, UNCONDITIONALLY, regardless of when real children were inserted, so an ancestor's own
+   * `::after` always follows the frame (one of that ancestor's real descendants) in paint order;
+   * only a TIE at the frame's own maximum z-index (never a strictly lower one) lets it win, which
+   * {@link pseudoElementTiesMaxZIndex} already encodes. Walks `parentElement` from the frame's
+   * immediate parent up to and including `documentElement` (today, `{body, documentElement}`),
+   * mirroring `#chainSamples`'s own walk one level narrower (never the frame itself — pseudo-
+   * elements of the frame's own iframe box are not a thing this needs to reason about).
+   */
+  #ancestorPseudoOcclusionRects(): Rect[] {
+    const rects: Rect[] = [];
+    let node = this.#frame.parentElement;
+    while (node !== null) {
+      const before = getComputedStyle(node, "::before");
+      if (pseudoElementTiesMaxZIndex(before.content, before.position, before.zIndex)) {
+        rects.push(fullViewportRect());
+      }
+      const after = getComputedStyle(node, "::after");
+      if (pseudoElementTiesMaxZIndex(after.content, after.position, after.zIndex)) {
+        rects.push(fullViewportRect());
+      }
+      node = node.parentElement;
+    }
+    return rects;
   }
 
   /** Walks `parentElement` generically from the frame up to (and including) `documentElement` —
@@ -865,6 +904,7 @@ class InlineMenu {
         mask: style.getPropertyValue("mask") || style.getPropertyValue("-webkit-mask") || "none",
         mixBlendMode: style.mixBlendMode,
         contentVisibility: style.getPropertyValue("content-visibility") || "visible",
+        isolation: style.getPropertyValue("isolation") || "auto",
       });
       node = node.parentElement;
     }
