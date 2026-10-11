@@ -165,6 +165,25 @@ impl fmt::Debug for HistoryEntry {
     }
 }
 
+/// One field's merge history (ROADMAP §4.2 "Item revision history (restore old versions)",
+/// M3): [`VaultSync::item_history`] generalizes [`VaultSync::password_history`] to every field,
+/// not only `login.password`. A secret: the key is user content (a tag name is part of its
+/// key, §7), and the entries reveal only on the user's request (ADR 0013 §3 rule 3). `Debug`
+/// redacts both fields.
+pub struct FieldHistory {
+    /// The field's key, in the §7 grammar.
+    pub key: Zeroizing<String>,
+    /// Its history, newest first ([`VaultSync::field_history`]). Never empty: [`VaultSync::item_history`]
+    /// leaves out a field with none.
+    pub entries: Vec<HistoryEntry>,
+}
+
+impl fmt::Debug for FieldHistory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("FieldHistory([REDACTED])")
+    }
+}
+
 /// One `login.password` entry imported from another manager (ADR 0018 §7, `pwhist/<id>/value`
 /// · `/ms`), kept separate from [`HistoryEntry`]: the ADR defines no order across the two
 /// sources, and `pwhist` elements carry no `order` attribute of their own (module docs,
@@ -710,35 +729,37 @@ impl VaultSync {
             .collect()
     }
 
-    /// How many [`VaultSync::password_history`] entries the item holds, without revealing any
-    /// of them (ADR 0013 §3 rule 3): cheaply, without decoding a value, since Cleared is
-    /// encoded as 0 bytes ([`Value::is_cleared`] is exactly `expose_secret().is_empty()`). 0
-    /// for a tombstone or an item with no `login.password` history. The same count
-    /// [`VaultSync::password_history`] lists (a Cleared value is never one of them: it is a
-    /// blank, never a revealable former password).
+    /// How many [`VaultSync::field_history`] entries `key` holds, without revealing any of
+    /// them (ADR 0013 §3 rule 3): cheaply, without decoding a value, since Cleared is encoded
+    /// as 0 bytes ([`Value::is_cleared`] is exactly `expose_secret().is_empty()`). 0 for a
+    /// tombstone or a field with no history. The same count [`VaultSync::field_history`] lists
+    /// (a Cleared value is never one of them: it is a blank, never a revealable former value).
     #[must_use]
-    pub fn password_history_len(&self, item: ItemId) -> usize {
-        self.merge(item)
-            .and_then(|m| m.field(LOGIN_PASSWORD))
-            .map_or(0, |v| {
-                v.history
-                    .iter()
-                    .filter(|e| !e.value().expose_secret().is_empty())
-                    .count()
-            })
+    pub fn field_history_len(&self, item: ItemId, key: &str) -> usize {
+        self.merge(item).and_then(|m| m.field(key)).map_or(0, |v| {
+            v.history
+                .iter()
+                .filter(|e| !e.value().expose_secret().is_empty())
+                .count()
+        })
     }
 
-    /// The history of `login.password` (module docs; ADR 0012 §5 "Password history is the
-    /// history of `login.password`"), newest first (the pruning order of ADR 0012 §5: highest
-    /// `(hlc, device_id, seq)` first). Never includes the current value, nor a Cleared one: a
-    /// cleared field pushes a blank into the history (ADR 0012 §5 "every value removed from a
-    /// register goes into the item's history"), but a blank is never a former password to show
-    /// or reveal, so it is left out here rather than listed only to fail every reveal of it.
-    /// Empty for a tombstone or an item with no history. A secret: reveal entries only on the
-    /// user's request.
+    /// The history of one field (ADR 0018 §3 "History"; ROADMAP §4.2 "Item revision history"),
+    /// newest first (the pruning order of ADR 0012 §5: highest `(hlc, device_id, seq)` first).
+    /// Never includes the current value, nor a Cleared one: a cleared field pushes a blank into
+    /// the history ("every value removed from a register goes into the item's history"), but a
+    /// blank is never a former value to show or reveal, so it is left out here rather than
+    /// listed only to fail every reveal of it. Empty for a tombstone or a field with no history.
+    /// A secret: reveal entries only on the user's request.
+    ///
+    /// A dot is unique within one field's register and history (ADR 0018 §4 "Uniqueness"), but
+    /// *not* across different fields: one op writing two fields puts the same dot in both
+    /// fields' histories. A host naming an entry by its dot (to reveal or
+    /// [`VaultSync::restore_field_history`] it) must also name the field: `(key, dot)` is the
+    /// entry's identity, `dot` alone is not.
     #[must_use]
-    pub fn password_history(&self, item: ItemId) -> Vec<HistoryEntry> {
-        let Some(view) = self.merge(item).and_then(|m| m.field(LOGIN_PASSWORD)) else {
+    pub fn field_history(&self, item: ItemId, key: &str) -> Vec<HistoryEntry> {
+        let Some(view) = self.merge(item).and_then(|m| m.field(key)) else {
             return Vec::new();
         };
         let mut entries = view.history;
@@ -757,6 +778,86 @@ impl VaultSync {
                 })
             })
             .collect()
+    }
+
+    /// How many [`VaultSync::password_history`] entries the item holds (module docs;
+    /// [`VaultSync::field_history_len`] of `login.password`).
+    #[must_use]
+    pub fn password_history_len(&self, item: ItemId) -> usize {
+        self.field_history_len(item, LOGIN_PASSWORD)
+    }
+
+    /// The history of `login.password` (ADR 0012 §5 "Password history is the history of
+    /// `login.password`"; [`VaultSync::field_history`] of `login.password`).
+    #[must_use]
+    pub fn password_history(&self, item: ItemId) -> Vec<HistoryEntry> {
+        self.field_history(item, LOGIN_PASSWORD)
+    }
+
+    /// Every field that has history (ROADMAP §4.2 "Item revision history (restore old
+    /// versions)", M3), in the item's field order ([`VaultSync::field_keys`], so `@lifecycle`
+    /// and a tombstone's late values are left out): generalizes [`VaultSync::password_history`]
+    /// to every field, reusing the same merge metadata and the same Cleared/current exclusions
+    /// ([`VaultSync::field_history`]). A field with no history (or only a Cleared one) is left
+    /// out rather than listed empty. Imported `login.password` history
+    /// ([`VaultSync::imported_password_history`]) is a different mechanism (a list, not merge
+    /// history, with no dot) and is never part of this listing.
+    #[must_use]
+    pub fn item_history(&self, item: ItemId) -> Vec<FieldHistory> {
+        self.field_keys(item)
+            .into_iter()
+            .filter_map(|key| {
+                let entries = self.field_history(item, &key);
+                if entries.is_empty() {
+                    None
+                } else {
+                    Some(FieldHistory { key, entries })
+                }
+            })
+            .collect()
+    }
+
+    /// Restores one history entry of `key` as the field's current value (ROADMAP §4.2): writes
+    /// it back through [`VaultSync::edit_item`], "an ordinary carried edit" (ADR 0018 §2
+    /// "Flow") of the exact bytes the entry holds, so it passes the same [`check_write`] as any
+    /// other edit, syncs and merges by the normal rules, and pushes the value it replaces into
+    /// history in turn. `dot` is the entry's identity, scoped to `key`
+    /// ([`VaultSync::field_history`]'s module doc: a dot is not unique across different
+    /// fields), as [`VaultSync::field_history`] gave it; the host re-reads the history and
+    /// resolves `dot` within it rather than trusting a cached value, so a sync between a
+    /// listing and this call cannot restore a value under the wrong identity.
+    ///
+    /// # Errors
+    /// [`ClientError::UnknownItem`] when `key` holds no history entry of that `dot` (including
+    /// a tombstone, which holds no history); [`ClientError::InvalidEdit`] when `key` is not a
+    /// valid field key; the errors of [`VaultSync::edit_item`] otherwise (in particular,
+    /// `UnknownItem` when the item is not Active).
+    pub fn restore_field_history<R: CryptoRng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+        unlocked: &UnlockedDevice,
+        item: ItemId,
+        key: &str,
+        dot: Dot,
+        now_ms: u64,
+    ) -> Result<(), ClientError> {
+        let value = self
+            .field_history(item, key)
+            .into_iter()
+            .find(|entry| entry.dot == dot)
+            .map(|entry| entry.value)
+            .ok_or(ClientError::UnknownItem)?;
+        let parsed = SchemaKey::parse(key.as_bytes()).map_err(|_| ClientError::InvalidEdit)?;
+        self.edit_item(
+            rng,
+            unlocked,
+            item,
+            &[FieldEdit {
+                key: &parsed,
+                value: &value,
+            }],
+            now_ms,
+        )
     }
 
     /// `login.password` history imported from another manager (ADR 0018 §7, `pwhist/<id>/value`
