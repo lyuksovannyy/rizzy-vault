@@ -10,11 +10,11 @@
 //! Every op goes through the real record encoder and parser ([`super::testkit`]).
 
 use super::testkit::{
-    Device, Edit, Op, Snap, absorb, deliver, device, dot, item, key_id, record_headers, reference,
-    state_bytes, text, vv,
+    Device, Edit, Op, Snap, absorb, absorb_bounded, assert_coverage_consistent, deliver, device,
+    dot, item, key_id, record_headers, reference, state_bytes, text, vv,
 };
 use super::*;
-use crate::record::{Entry, LiveSnapshot, Register, Tombstone, Value};
+use crate::record::{Entry, LiveSnapshot, Register, Tombstone, Value, parse_snapshot};
 
 /// Every permutation of `0..n` (Heap's algorithm), for small `n`.
 fn permutations(n: usize) -> Vec<Vec<usize>> {
@@ -1435,6 +1435,126 @@ fn one_dot_in_two_versions_keeps_the_lower_value_in_any_order() {
     assert_eq!(
         refused(&absorb(&mut x, &faulty, &[])),
         Refusal::ValueNotInBody { dot: op.dot() }
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// `absorb_snapshot`'s `bound`: the causal layer's cut on a same-device gap on another item
+// (ADR 0012 §7, ADR 0018 §3; the regression in `causal::tests`,
+// `an_own_write_is_never_blocked_by_a_cover_absorbed_past_a_gap_on_another_item`).
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn an_honest_ungapped_bound_leaves_the_state_unchanged() {
+    let (a, mut b, s) = two_writers();
+    record_headers(&mut b.merge, &a.ops());
+    // `bound` covers everything the per-item evidence already covers: on an honest, ungapped
+    // response the causal layer's cut is never tighter than the claim it is itself built from.
+    // Two independent replicas, one bounded and one not, must reach the same `Absorption` and
+    // the same resulting state -- not just an equal `Absorption` (its fields all derive from
+    // the unbounded per-item cut regardless of `bound`, so that alone would not test the join).
+    let mut unbounded_merge = b.merge.clone();
+    let unbounded = absorb(&mut unbounded_merge, &s, &[]);
+    let bound = s.header.covered.clone();
+    let bounded = absorb_bounded(&mut b.merge, &s, &[], &bound);
+    assert_eq!(unbounded, bounded);
+    assert_eq!(state_bytes(&unbounded_merge), state_bytes(&b.merge));
+    assert_eq!(unbounded_merge.covered(), b.merge.covered());
+    assert_coverage_consistent(&b.merge);
+}
+
+#[test]
+fn a_contradiction_past_the_bound_is_still_refused() {
+    // The same dishonest cover as `a_snapshot_contradicting_a_held_body_is_refused`: a value at
+    // B's own dot that B's body did not write.
+    let (a, mut b, s) = two_writers();
+    let (regs, hist) = live_parts(&s);
+    let bogus = text("not what B wrote");
+    let regs: Vec<Register<'_>> = regs
+        .into_iter()
+        .map(|r| {
+            if r.key().expose_secret() == "item.notes" {
+                let e = r.entries()[0];
+                Register::new(
+                    r.key(),
+                    vec![Entry::new(e.dot(), e.hlc(), Value::new(&bogus))],
+                )
+            } else {
+                r
+            }
+        })
+        .collect();
+    let faulty = Snap::build(
+        1,
+        7,
+        s.header.covered.clone(),
+        &SnapshotData::Live(LiveSnapshot::new(regs, hist)),
+    );
+    record_headers(&mut b.merge, &a.ops());
+    let before = state_bytes(&b.merge);
+    // A bound that excludes B's device entirely, as if a same-device gap on another item left
+    // B's chain unsettled at the causal layer: the contradicting value sits past it. Bodies
+    // past the gap must still count as evidence (ADR 0018 §3 points 2-3), so this must still
+    // be refused, exactly as the unbounded case is.
+    let bound = vv(&[(1, 2)]);
+    let held = absorb_bounded(&mut b.merge, &faulty, &[], &bound);
+    assert_eq!(refused(&held), Refusal::ValueNotInBody { dot: dot(2, 1) });
+    assert_eq!(state_bytes(&b.merge), before);
+}
+
+#[test]
+fn a_bound_past_a_value_keeps_it_as_evidence_and_converges_once_the_gap_closes() {
+    // B writes item.name twice in a row: B:1, then B:2 over it.
+    let mut a = Device::new(1, 0);
+    let mut b = Device::new(2, 0);
+    a.write(&Edit::write(&[("item.name", &text("n"))]));
+    b.receive(&a.ops());
+    let b1 = b.write(&Edit::write(&[("item.name", &text("b1"))]));
+    let b2 = b.write(&Edit::write(&[("item.name", &text("b2"))]));
+    let s = b.snapshot().unwrap();
+    assert_eq!(s.header.covered, vv(&[(1, 1), (2, 2)]));
+
+    let mut me = ItemMerge::new(item());
+    me.add_item_key(key_id(0x40));
+    record_headers(&mut me, &a.ops());
+    record_headers(&mut me, &b.ops());
+    // The causal layer settled only up to B:1 (a gap on another item sits between B:1 and
+    // B:2); both bodies are in `with`, as a Fetch response that serves B:2's body alongside
+    // the cover would carry them.
+    let bound = vv(&[(1, 1), (2, 1)]);
+    let absorption = absorb_bounded(&mut me, &s, &[b1.clone(), b2.clone()], &bound);
+    assert!(matches!(absorption.outcome, AbsorbOutcome::Absorbed(_)));
+    // Capped: B:2 does not settle yet, so it is not the causal context of this device's next
+    // write (ADR 0012 §2, ADR 0012 §7 "nothing past the gap is applied").
+    assert_eq!(me.covered(), &vv(&[(1, 1), (2, 1)]));
+    assert_eq!(current(&me, "item.name"), [(b1.dot(), text("b1"))]);
+    // B:2's header is still recorded -- `record_header` is idempotent on an identical header,
+    // never a fresh one -- and its body stays held, ready once the gap closes.
+    me.record_header(&b2.header).unwrap();
+    // The write this device would produce now stays well-formed: every dot it would snapshot
+    // is covered by its own covered VV (ADR 0018 §4 "Coverage"; §5 rule 6 is what a peer's
+    // parser would otherwise reject it under). This is the case a bound that only capped
+    // `state.vv`, without also bounding what is joined, would violate: the claim carries B:2's
+    // value for `item.name`, which would stay the "current" value even after `state.vv` was
+    // capped back to {B:1}, a dot the written header would not cover.
+    assert_coverage_consistent(&me);
+    let written = me.write_snapshot().unwrap();
+    assert_eq!(&written.covered, me.covered());
+    parse_snapshot(&written.covered, written.data.expose_secret())
+        .expect("a written snapshot parses");
+
+    // The gap closes: the causal layer settles B:2 too (a later Fetch filled it). Re-absorbing
+    // the same claim with the wider bound lets it fully settle, matching ordinary delivery.
+    let bound = vv(&[(1, 1), (2, 2)]);
+    let absorption = absorb_bounded(&mut me, &s, &[b1, b2.clone()], &bound);
+    assert!(matches!(absorption.outcome, AbsorbOutcome::Absorbed(_)));
+    assert_eq!(me.covered(), &vv(&[(1, 1), (2, 2)]));
+    assert_eq!(current(&me, "item.name"), [(b2.dot(), text("b2"))]);
+    assert_coverage_consistent(&me);
+    // Converges with a fresh replica that applied the ops directly.
+    assert_eq!(
+        state_bytes(&me),
+        state_bytes(&reference(&[a.ops(), b.ops()].concat()))
     );
 }
 

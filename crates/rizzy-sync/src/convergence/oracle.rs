@@ -450,6 +450,10 @@ fn absorb(
                 data: &data,
             },
             &with,
+            // Written from ADR 0012 §2-§4 and ADR 0018 §3 directly, not from `causal.rs`'s
+            // cut logic (ADR 0021 §8), so this independent checker has no causal-layer plan
+            // to bound by.
+            None,
         )
         .map_err(|e| format!("absorb_snapshot: {e:?}"))?;
     match absorption.outcome {
