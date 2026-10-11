@@ -37,6 +37,7 @@ import {
   type Rect,
   computeExpectedRect,
   initMenuVisibilityState,
+  isAllZeroLengths,
   isBackdropOccluding,
   isFillAllowed,
   isPointHitOk,
@@ -650,12 +651,17 @@ class InlineMenu {
    *
    * CORRECTNESS REQUIREMENT, found in review (an earlier version of this fix called this with
    * `document.documentElement` itself as the first `el`, which is silently wrong): `el` must never
-   * be an ANCESTOR of `#frame` — `compareDocumentPosition` reports an ancestor as PRECEDING its
-   * descendant (the same flag a genuinely-earlier SIBLING gets), so resolving `html`/`body`
-   * themselves this way yields `false` for the wrong reason, and that `false` then propagates to
-   * EVERY descendant, including real siblings that come after `#frame`. {@link #deepOccluderRects}
-   * avoids this by only ever calling this on `#frame`'s own SIBLINGS (`#frame.parentElement`'s
-   * children), never on an ancestor.
+   * be a node on `#frame`'s own ANCESTOR PATH (`html`, `body`, or anything else between them and
+   * `#frame`) — `compareDocumentPosition` reports an ancestor as PRECEDING its descendant (the
+   * same flag a genuinely-earlier SIBLING gets), so resolving one of them this way yields `false`
+   * for the wrong reason, and that `false` then propagates to EVERY descendant, including real
+   * siblings that come after `#frame`. {@link #deepOccluderRects} avoids this by walking the
+   * ancestor path one level at a time and calling this only on each level's SIBLINGS (fifth
+   * adversarial round: originally scanned only `#frame.parentElement`'s children — i.e. only
+   * `document.body`'s own children — which is the scan-SCOPE gap a decoy appended directly to
+   * `document.documentElement`, a sibling of `<body>` rather than a descendant of it, exploited;
+   * walking every ancestor level up to and including `documentElement` closes that without ever
+   * passing an ancestor of `#frame` itself as `el`).
    *
    * `getComputedStyle` (the one real cost here) is only ever called for a node already known to
    * follow `#frame` — in practice almost always a small minority of the page, since ordinary page
@@ -735,16 +741,50 @@ class InlineMenu {
    * same round) has no `Element`/`Node` and no `getBoundingClientRect()` to widen in the first
    * place — the same structural gap {@link pushBackdropOcclusionRect} already closes for
    * `::backdrop` — so that case conservatively occludes the full viewport instead, never
-   * narrower. */
+   * narrower.
+   *
+   * A7 own-z-index-qualifying-element's-own-pseudo-element fix (fifth adversarial round): the
+   * `"own"` branch below now ALSO checks `el`'s own `::before`/`::after` via
+   * {@link pushPseudoOcclusionRect}, unconditionally, exactly as {@link #topLayerRects} already
+   * does for every top-layer element — closing a gap `#deepOccluderQualification` itself left open
+   * by returning only `"own"` (never also `"pseudo"`) the instant an element's OWN z-index already
+   * ties the maximum: an element that qualifies that way got ONLY {@link pushOcclusionRect}'s
+   * widening of its OWN rect, so a `::before`/`::after` that independently declares
+   * `position: fixed; inset: 0` on that SAME element — a real, Node-less overlay, structurally
+   * identical to the case {@link pushPseudoOcclusionRect} already exists to close for a
+   * `"pseudo"`-only qualification — was never looked at. Two extra pseudo-element reads per
+   * candidate, same cost shape already accepted for the top-layer path. */
   #deepOccluderRects(): Rect[] {
     if (this.#deepOccludersDirty) {
       this.#deepOccludersDirty = false;
       const candidates: Element[] = [];
-      const parent = this.#frame.parentElement;
-      if (parent !== null) {
-        for (const child of parent.children) {
-          this.#scanElementForDeepOccluders(child, undefined, candidates);
+      // Fifth adversarial round (scan-scope fix): walks `#frame`'s ANCESTOR PATH one level at a
+      // time — `#frame`'s own parent (today, `document.body`), then THAT element's parent, and so
+      // on up to and including `document.documentElement` — scanning each level's SIBLINGS (every
+      // child of that level except the one continuing the chain toward `#frame`, which is itself
+      // an ancestor of `#frame` and must never be passed to `#scanElementForDeepOccluders` as `el`
+      // — see that method's own correctness requirement). The previous version only ever scanned
+      // `#frame.parentElement.children` (`document.body`'s own children), which missed a decoy
+      // appended directly to `document.documentElement` — a SIBLING of `<body>`, not a descendant
+      // of it, so never reachable from inside `body`'s subtree at all, regardless of how deep or
+      // how the walk inside `body` was extended. Terminates when `parentElement` is `null` (the
+      // node IS `documentElement`, which has no element parent). Each level's own subtree, besides
+      // the one child that continues the chain, is covered exactly once, by the iteration at THAT
+      // level — never re-walked by a later, higher iteration. The one-time extra cost over the
+      // previous version is `<head>`'s own subtree plus any other `documentElement`-level sibling
+      // of `<body>` — negligible next to the existing bound (this SET, built once per dirty flag,
+      // not the whole page re-walked every tick) and not re-benchmarked, since it adds at most one
+      // more sibling subtree, of ordinary page-chrome size, to a walk whose own cost already scales
+      // with page size regardless.
+      let node: Element = this.#frame;
+      while (node.parentElement !== null) {
+        const parent: Element = node.parentElement;
+        for (const sibling of parent.children) {
+          if (sibling !== node) {
+            this.#scanElementForDeepOccluders(sibling, undefined, candidates);
+          }
         }
+        node = parent;
       }
       this.#deepOccluderCandidates = candidates;
     }
@@ -756,6 +796,8 @@ class InlineMenu {
       const qualification = this.#deepOccluderQualification(el);
       if (qualification === "own") {
         pushOcclusionRect(rects, el);
+        pushPseudoOcclusionRect(rects, el, "::before");
+        pushPseudoOcclusionRect(rects, el, "::after");
       } else if (qualification === "pseudo") {
         rects.push(fullViewportRect());
       }
@@ -990,9 +1032,61 @@ function fullViewportRect(): Rect {
   return { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
 }
 
+/** Bound on how many descendant nodes {@link collectUnclippedDescendantRects} will ever visit for
+ * one `pushOcclusionRect` call (fifth adversarial round). Chosen to sit comfortably below the
+ * third adversarial round's own measured-too-slow figure (~103ms average walking 5000 plain
+ * elements with a `getComputedStyle` read per node, `#deepOccludersDirty`'s own doc) while staying
+ * generous enough that an ordinary, legitimately content-rich `<dialog>` (a form with a few dozen
+ * fields, say) does not trip the full-viewport fallback — not independently re-benchmarked for
+ * this narrower, `getBoundingClientRect()`-only walk (cheaper per node than `getComputedStyle`,
+ * and always confined to one element's own subtree, never the whole page), so this is a
+ * conservative starting point, not a measured ceiling. */
+const MAX_UNCLIPPED_DESCENDANTS = 256;
+
+/** Collects every descendant's own `getBoundingClientRect()` under `el`, following light-DOM
+ * children AND every open (`mode: "open"`) Shadow DOM root at any depth — the same traversal
+ * shape {@link InlineMenu}'s own `#scanElementForDeepOccluders` already uses for the deep-occluder
+ * candidate set, reused here so an escaping descendant nested inside an open shadow root is
+ * covered the same way a light-DOM one is (`pushOcclusionRect`'s own doc has the full reasoning
+ * for why this exists and why it is bounded). Returns `undefined`, never a partial list, once more
+ * than {@link MAX_UNCLIPPED_DESCENDANTS} nodes have been visited — the caller must then widen its
+ * own fallback to the full viewport rather than settle for an under-counted, narrower union
+ * ("only ever refuse more," the same contract {@link parseBoxShadowMarginPx} and every other
+ * unboundable-shape fallback in this file already follow). `mode: "closed"` Shadow DOM is the
+ * same already-named, structurally unreachable residual `#scanElementForDeepOccluders` names —
+ * not a new gap this function reopens. */
+function collectUnclippedDescendantRects(el: Element): DOMRect[] | undefined {
+  const rects: DOMRect[] = [];
+  const stack: Element[] = [el];
+  let visited = 0;
+  let node: Element | undefined;
+  while ((node = stack.pop()) !== undefined) {
+    for (const child of node.children) {
+      visited += 1;
+      if (visited > MAX_UNCLIPPED_DESCENDANTS) {
+        return undefined;
+      }
+      rects.push(child.getBoundingClientRect());
+      stack.push(child);
+    }
+    if (node.shadowRoot !== null) {
+      for (const shadowChild of node.shadowRoot.children) {
+        visited += 1;
+        if (visited > MAX_UNCLIPPED_DESCENDANTS) {
+          return undefined;
+        }
+        rects.push(shadowChild.getBoundingClientRect());
+        stack.push(shadowChild);
+      }
+    }
+  }
+  return rects;
+}
+
 /** Pushes `el`'s occlusion rect onto `rects`, widened for any paint that can escape its own
  * border box (A7 bypass-1/3 fix, `InlineMenu#topLayerRects`'s own doc; A7 outline-escape fix,
- * fourth adversarial round). A non-`none` `filter` (e.g. `drop-shadow`) is rare on a top-layer
+ * fourth adversarial round; A7 text-shadow/border-image/unclipped-descendant fixes, fifth
+ * adversarial round). A non-`none` `filter` (e.g. `drop-shadow`) is rare on a top-layer
  * element and not reliably boundable from computed style alone, so it conservatively substitutes
  * the full viewport rect rather than attempting to parse `filter`'s own shorthand;
  * `parseBoxShadowMarginPx`/`parseOutlineMarginPx` returning `undefined` (a computed shape either
@@ -1002,11 +1096,79 @@ function fullViewportRect(): Rect {
  * participates in hit-testing) — the two margins are independent properties of the same element,
  * so the wider of the two bounds the combined painted extent (a uniform single margin is already
  * this function's own, pre-existing simplification; see `parseBoxShadowMarginPx`'s own doc on
- * why a single margin, not a per-side one, is deliberate). */
+ * why a single margin, not a per-side one, is deliberate).
+ *
+ * `text-shadow` (fifth adversarial round): unlike `box-shadow`/`outline`, this function does not
+ * attempt to derive a margin from `el`'s own rect at all — confirmed by direct probe, a 1×1,
+ * `overflow: visible` element with an oversized `font-size` and `color: transparent` already
+ * renders its own (invisible) glyph far outside its border box BEFORE any `text-shadow` offset is
+ * even applied, so a margin computed from `el.getBoundingClientRect()` would under-estimate the
+ * painted extent regardless of how the shadow offset itself were parsed — the one shape in this
+ * function where "only ever refuse more" rules out attempting a margin at all. Any non-`"none"`
+ * `text-shadow` therefore substitutes the full viewport rect directly, the same conservative
+ * answer `filter` already gets.
+ *
+ * `border-image` (fifth adversarial round): a `border-image-source` other than `"none"` paints
+ * the border-image area, which `border-image-outset` can extend beyond the border box by an
+ * author-controlled amount with no corresponding change to `getBoundingClientRect()` and no
+ * participation in hit-testing — the identical shape `box-shadow`/`outline` already have a margin
+ * carve-out for, except `border-image-outset`'s two possible value shapes (an outset `<number>`
+ * multiplies the corresponding `border-width`, which this function has no reliable access to)
+ * make a precise margin unsound to compute here ({@link isAllZeroLengths}'s own doc); gated on
+ * `border-image-outset` rather than on `border-image-source` alone, so an ordinary decorative
+ * border-image with no outset (overwhelmingly the common case) is never falsely widened.
+ *
+ * Unclipped-descendant escape (fifth adversarial round): `el.getBoundingClientRect()` only ever
+ * reflects `el`'s OWN layout box — an `overflow: visible` element (the default for most elements,
+ * and for the outermost `<svg>` specifically, confirmed by direct probe: the UA stylesheet only
+ * forces `overflow: hidden` on a NESTED `svg`/`symbol`/`image`/`marker`/`pattern`/`foreignObject`/
+ * `clipPath`/`mask`, never on the document's outermost one) whose descendant is positioned, or an
+ * SVG descendant drawn, outside that box paints there regardless — confirmed by direct probe for
+ * both an `<svg>` host with an out-of-viewBox `<rect>`/`<foreignObject>` child and the identical
+ * HTML analogue (a plain `position: absolute` descendant placed outside its unclipped ancestor).
+ * Scoped to an element that does NOT clip on BOTH axes (`overflow-x`/`overflow-y` both `hidden`/
+ * `clip`): a genuinely clipping container cannot let a descendant paint outside it, so this union
+ * is skipped entirely for the common case of an ordinary clipped widget, and for a childless
+ * element (the union of zero rects changes nothing). Widens by UNIONING every descendant's own raw
+ * rect into the result, not by substituting the full viewport: an ordinary top-layer
+ * `<dialog>`/popover's own content almost always renders INSIDE its own visual box regardless of
+ * its `overflow` value, so the union equals the already-widened rect in that common case (no added
+ * false-refusal cost), while a descendant genuinely painted outside the host's box — the attack
+ * this closes — still widens the result exactly as far as that descendant's own rect requires. A
+ * descendant hidden behind a nested clipping container of its own is still unioned in (its rect is
+ * read directly, not checked against further ancestors between it and `el`) — strictly wider than
+ * necessary in that case, never narrower, the same "only ever refuse more" direction as every
+ * other fallback in this function.
+ *
+ * {@link collectUnclippedDescendantRects} does the actual walk, bounded by
+ * {@link MAX_UNCLIPPED_DESCENDANTS} and crossing into every open (`mode: "open"`) Shadow DOM root
+ * it finds, the same traversal shape {@link InlineMenu}'s own `#scanElementForDeepOccluders`
+ * already uses — reused here so an escaping descendant nested inside an open shadow root is
+ * covered the same way a light-DOM one is, rather than reopening that exact gap one boundary over.
+ * UNLIKE {@link InlineMenu}'s deep-occluder candidate set, this walk cannot be deferred behind a
+ * dirty flag: this function runs for a handful of top-layer/deep-occluder elements, not the whole
+ * page, but it still runs on every Gate-A tick for each one, and a widened rect has to reflect the
+ * CURRENT render, which no mutation needs to have changed at all (a descendant's position can move
+ * via an ongoing CSS animation with no corresponding `MutationObserver` record). Bounding the
+ * traversal by node count, rather than leaving it unconditional, is what keeps this affordable: the
+ * third adversarial round measured an unconditional, unbounded walk at ~103ms average on a
+ * 5000-element page (`#deepOccludersDirty`'s own doc), far too slow for a 16ms tick budget — this
+ * walk is always confined to one element's own subtree, not the whole page, but an ordinary
+ * `<dialog>`'s content could still be arbitrarily large, so it is capped the same "only ever refuse
+ * more" way as every other unboundable shape here: past the cap, {@link
+ * collectUnclippedDescendantRects} returns `undefined` and this substitutes the full viewport
+ * rather than return an under-counted, narrower union. */
 function pushOcclusionRect(rects: Rect[], el: Element): void {
-  const rect = toRect(el.getBoundingClientRect());
   const style = getComputedStyle(el);
   if (style.filter !== "none") {
+    rects.push(fullViewportRect());
+    return;
+  }
+  if (style.textShadow !== "none") {
+    rects.push(fullViewportRect());
+    return;
+  }
+  if (style.borderImageSource !== "none" && !isAllZeroLengths(style.borderImageOutset)) {
     rects.push(fullViewportRect());
     return;
   }
@@ -1021,7 +1183,31 @@ function pushOcclusionRect(rects: Rect[], el: Element): void {
     return;
   }
   const margin = Math.max(shadowMargin, outlineMargin);
-  rects.push({ left: rect.left - margin, top: rect.top - margin, width: rect.width + margin * 2, height: rect.height + margin * 2 });
+  const rect = toRect(el.getBoundingClientRect());
+  let left = rect.left - margin;
+  let top = rect.top - margin;
+  let right = rect.left + rect.width + margin;
+  let bottom = rect.top + rect.height + margin;
+
+  const clipsX = style.overflowX === "hidden" || style.overflowX === "clip";
+  const clipsY = style.overflowY === "hidden" || style.overflowY === "clip";
+  if (!clipsX || !clipsY) {
+    const descendantRects = collectUnclippedDescendantRects(el);
+    if (descendantRects === undefined) {
+      rects.push(fullViewportRect());
+      return;
+    }
+    for (const dRect of descendantRects) {
+      if (dRect.width === 0 && dRect.height === 0) {
+        continue;
+      }
+      left = Math.min(left, dRect.left);
+      top = Math.min(top, dRect.top);
+      right = Math.max(right, dRect.left + dRect.width);
+      bottom = Math.max(bottom, dRect.top + dRect.height);
+    }
+  }
+  rects.push({ left, top, width: right - left, height: bottom - top });
 }
 
 /** Pushes a full-viewport occlusion rect when `el`'s `::before` or `::after` pseudo-element is
