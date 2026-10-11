@@ -667,6 +667,22 @@ export interface HistoryEntry {
 }
 
 /**
+ * One field's history, without values (ADR 0013 §3 rule 3; ROADMAP §4.2 "Item revision history
+ * (restore old versions)", M3): generalizes {@link HistoryEntry} to every field, not only
+ * `login.password`. `key` is the field's final key ({@link FieldView.key}); `entries` is
+ * newest first, each `source` always `"merge"` (imported `login.password` history stays
+ * {@link VaultSession.passwordHistory}-only and is never part of this listing). Pass an
+ * entry's own `id`, scoped to `key`, to {@link VaultSession.revealFieldHistory} or
+ * {@link VaultSession.restoreFieldHistory}: the same dot can appear in two different fields'
+ * histories when one edit wrote both, so an id from one field's listing is never read or
+ * restored under another field's name.
+ */
+export interface FieldHistory {
+  readonly key: string;
+  readonly entries: readonly HistoryEntry[];
+}
+
+/**
  * A notice of {@link VaultSession.takeNotices}: ids only. `late-edit`: "An edit from
  * `<devices>` arrived for an item you deleted permanently. Restore it as a new item?" (ADR 0018
  * §3). `concurrent-trash`: "deleted on `devices[0]` while it was being edited on `devices[1]`"
@@ -1160,6 +1176,43 @@ export class VaultSession {
     entryId: string,
   ): string {
     return call(() => this.#s().revealPasswordHistory(id, source, index, entryId));
+  }
+
+  /**
+   * Every field's history, without values ({@link FieldHistory}'s own doc; ROADMAP §4.2 "Item
+   * revision history (restore old versions)", M3): generalizes {@link passwordHistory} to
+   * every field. List it again after every sync: a sync can shift the entries.
+   */
+  itemHistory(id: string): FieldHistory[] {
+    return mapFree(call(() => this.#s().itemHistory(id)), (field) => ({
+      key: field.key,
+      entries: mapFree(field.entries, (h) => ({
+        source: h.source as HistoryEntry["source"],
+        index: h.index,
+        changedMs: h.changedMs === undefined ? undefined : Number(h.changedMs),
+        id: h.id,
+      })),
+    }));
+  }
+
+  /**
+   * One field-history entry's value, as {@link itemHistory} listed it, on the user's request
+   * only. `key` scopes `index`/`entryId` ({@link FieldHistory}'s own doc): when a sync has
+   * since moved another entry to that position, or the id was listed under a different field,
+   * the core refuses (`unknown_item`) instead of revealing it.
+   */
+  revealFieldHistory(id: string, key: string, index: number, entryId: string): string {
+    return call(() => this.#s().revealFieldHistory(id, key, index, entryId));
+  }
+
+  /**
+   * Restores one field-history entry as the field's current value (ROADMAP §4.2): an ordinary
+   * edit, which syncs and merges like any other. `key`, `index` and `entryId` name the entry
+   * exactly as {@link itemHistory} listed it, checked the same way {@link revealFieldHistory}
+   * is.
+   */
+  restoreFieldHistory(id: string, key: string, index: number, entryId: string): void {
+    call(() => this.#s().restoreFieldHistory(id, key, index, entryId, this.#now()));
   }
 
   /**
