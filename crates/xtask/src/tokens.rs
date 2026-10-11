@@ -531,24 +531,133 @@ fn push_theme_vars(out: &mut String, colors: &Props, shadows: &Props, indent: &s
     }
 }
 
+/// Joins `items` as English prose: `"a"`, `"a and b"` or `"a, b and c"` (no Oxford comma, matching
+/// this module's hand-written prose). Empty input yields `""`.
+fn and_join(items: &[String]) -> String {
+    match items.len() {
+        0 => String::new(),
+        1 => items[0].clone(),
+        _ => {
+            let last = &items[items.len() - 1];
+            let rest = &items[..items.len() - 1];
+            format!("{} and {last}", rest.join(", "))
+        }
+    }
+}
+
+/// Splits `text` on spaces, like [`str::split_whitespace`], except a space inside a parenthesised
+/// group (`(--color-x, --color-y)`) never splits: the whole group, including the space after its
+/// internal comma, comes back as one token. [`wrap_comment`] uses this so word-wrap can never
+/// break a contrast pair across two lines, which would make it unfindable as one substring.
+fn atomic_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut depth = 0i32;
+    let mut current = String::new();
+    for ch in text.chars() {
+        match ch {
+            ' ' if depth == 0 => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                current.push(ch);
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+/// Greedy word-wrap: breaks `text` into lines of at most `width` columns ([`atomic_words`]'
+/// tokens, so a parenthesised contrast pair is never split across lines — a single token longer
+/// than `width` still gets its own line), joined by `"\n   "` to match this file's existing
+/// three-space continuation-line style. Deterministic for a given `text`/`width`, so the
+/// generated file's bytes are stable and `--check` round-trips.
+fn wrap_comment(text: &str, width: usize) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in atomic_words(text) {
+        let candidate_len = if current.is_empty() {
+            word.len()
+        } else {
+            current.len() + 1 + word.len()
+        };
+        if !current.is_empty() && candidate_len > width {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(&word);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines.join("\n   ")
+}
+
+/// Builds the generated CSS header's "Colour: ..." paragraph from `tokens.contrast_pairs` itself
+/// (never a string literal — the SSOT violation a review found: the paragraph used to be a fixed
+/// literal with no connection to the data `check_contrast` actually validates, so it silently
+/// went stale the moment `contrast-pairs` changed, and nothing — not `--check`, not CI — could
+/// catch it, since the same literal text was reproduced identically on every run). Every
+/// [`COLOR_KEYS`] entry absent from every pair's `fg`/`bg` is named as undeclared, also derived,
+/// for the same reason.
+fn contrast_pairs_paragraph(tokens: &Tokens) -> String {
+    let pairs: Vec<String> = tokens
+        .contrast_pairs
+        .iter()
+        .map(|p| format!("(--color-{}, --color-{})", p.fg, p.bg))
+        .collect();
+    let declared: BTreeSet<&str> = tokens
+        .contrast_pairs
+        .iter()
+        .flat_map(|p| [p.fg.as_str(), p.bg.as_str()])
+        .collect();
+    let undeclared: Vec<String> = COLOR_KEYS
+        .iter()
+        .filter(|key| !declared.contains(*key))
+        .map(|key| format!("--color-{key}"))
+        .collect();
+    let undeclared_sentence = if undeclared.is_empty() {
+        "Every colour key appears in at least one declared pair.".to_owned()
+    } else {
+        let verb = if undeclared.len() == 1 { "is" } else { "are" };
+        format!(
+            "{} {verb} not declared and not checked.",
+            and_join(&undeclared)
+        )
+    };
+    format!(
+        "Colour: the WCAG AA pairs `cargo xtask generate-tokens` checks (ADR 0014 §5; it covers \
+         the declared pairs only) are {}. {undeclared_sentence}",
+        and_join(&pairs)
+    )
+}
+
 /// Renders [`CSS_OUTPUT`] from `tokens`: the same selectors and custom property names as the M1
 /// hand-written file (ADR 0014 §5), plus the new `--shadow-*` properties.
 pub(crate) fn render_css(tokens: &Tokens) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "/* SPDX-License-Identifier: AGPL-3.0-only */");
     let _ = writeln!(out);
+    let colour_paragraph = wrap_comment(&contrast_pairs_paragraph(tokens), 88);
     let _ = writeln!(
         out,
         "/* GENERATED FILE — do not edit by hand. Source: {SOURCE}; regenerate with\n   \
          `cargo xtask generate-tokens` (ADR 0014 §5, ADR 0019 §13). `cargo xtask\n   \
          generate-tokens --check` fails CI if this file is stale. Every custom property name is\n   \
          kept from the M1 hand-written set, so nothing that reads this file changes.\n\n   \
-         Colour: the WCAG AA pairs `cargo xtask generate-tokens` checks (ADR 0014 §5; it covers\n   \
-         the declared pairs only) are (--color-text, --color-bg), (--color-text,\n   \
-         --color-surface), (--color-text-muted, --color-bg), (--color-on-accent,\n   \
-         --color-accent), (--color-on-danger, --color-danger), (--color-warning-text,\n   \
-         --color-warning-bg), (--color-focus, --color-bg) and (--color-focus, --color-surface).\n   \
-         --color-border is not declared and is not checked. */"
+         {colour_paragraph} */"
     );
     let _ = writeln!(out);
     let _ = writeln!(out, ":root {{");
@@ -1303,6 +1412,53 @@ mod tests {
         assert!(css.contains(":root {"));
         assert!(css.contains("@media (prefers-color-scheme: dark) {"));
         assert!(css.contains(":root[data-theme=\"dark\"] {"));
+    }
+
+    #[test]
+    fn render_css_header_lists_every_real_contrast_pair() {
+        // Regression guard for the SSOT violation review found: the header's "WCAG AA pairs"
+        // sentence used to be a string literal, completely disconnected from
+        // `tokens.contrast_pairs`. This reads the real, committed source and checks every pair it
+        // declares is actually named in the generated header, so a future edit to
+        // `contrast-pairs` that the header's text does not follow fails here instead of the
+        // generated file silently going stale forever (the bug `--check` could never catch,
+        // because the same literal text was reproduced identically on every run).
+        let tokens = parse(&include_source_fixture()).unwrap();
+        let css = render_css(&tokens);
+        for pair in &tokens.contrast_pairs {
+            assert!(
+                css.contains(&format!("--color-{}, --color-{}", pair.fg, pair.bg)),
+                "{pair:?}\n{css}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_css_header_contrast_list_tracks_declared_pairs_not_a_literal() {
+        // `valid_json()` declares only (text, bg) and (focus, bg) — fewer, and different, pairs
+        // than the real tokens.json's set. Asserting both the presence of what IS declared and
+        // the absence of a pair that is NOT is the asymmetry that catches a hardcoded literal: a
+        // literal copy of the real file's header would contain the absent pair too.
+        let tokens = parse(&valid_json().to_string()).unwrap();
+        let css = render_css(&tokens);
+        assert!(css.contains("--color-text, --color-bg"), "{css}");
+        assert!(css.contains("--color-focus, --color-bg"), "{css}");
+        assert!(!css.contains("--color-on-accent, --color-accent"), "{css}");
+        assert!(!css.contains("--color-on-danger, --color-danger"), "{css}");
+    }
+
+    #[test]
+    fn render_css_header_names_undeclared_color_keys_not_a_literal() {
+        // The sentence naming which colour keys are undeclared (originally
+        // "--color-border is not declared and is not checked.", also a literal) must be derived
+        // from the same data: every `COLOR_KEYS` entry absent from every pair's `fg`/`bg`.
+        // `valid_json()` only declares `text`, `bg` and `focus`, so `danger` (declared in the
+        // real file, not here) must be named as undeclared here, which a literal copy of the real
+        // file's sentence would not do.
+        let tokens = parse(&valid_json().to_string()).unwrap();
+        let css = render_css(&tokens);
+        assert!(css.contains("--color-danger"), "{css}");
+        assert!(css.contains("--color-border"), "{css}");
     }
 
     #[test]
