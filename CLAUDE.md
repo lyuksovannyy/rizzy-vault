@@ -10,7 +10,7 @@ rizzy-vault is a self-hostable, end-to-end encrypted, zero-knowledge password ma
    - If there is no row, the task is out of scope. Ask.
 2. Read [docs/adr/README.md](docs/adr/README.md), then every ADR your task touches. For security work, also read the relevant parts of [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and [docs/CRYPTO.md](docs/CRYPTO.md).
 3. Check the ADR's **Status** line. Only `Accepted` is binding, and so are the parts of a `Partially superseded` ADR that no later Accepted ADR names ([ADR 0020](docs/adr/0020-partial-supersession.md) point 9).
-   - As of 2026-10-11, ADRs 0001–0014, 0016–0032 and 0034–0041 are Accepted (0020 carries 0001 forward), several of them Partially superseded, as their status lines say; 0015 is Superseded by 0019. 0033 (protobuf), 0042 (account-settings layout for website matching), 0043 (a per-instance token for the inline-menu and passkey-consent iframes) and 0044 (equivalence-group member rules) are Proposed; 0033's recommendation, JSON only for now, is the owner's current call.
+   - As of 2026-10-11, ADRs 0001–0014, 0016–0032 and 0034–0041 are Accepted (0020 carries 0001 forward), several of them Partially superseded, as their status lines say; 0015 is Superseded by 0019. 0033 (protobuf), 0042 (account-settings layout for website matching), 0043 (a per-instance token for the inline-menu and passkey-consent iframes), 0044 (equivalence-group member rules) and 0045–0074 (the 2026-10-11 batch for the blocked M1/M2 gaps, M3, M5, M6 and M8; titles in [docs/adr/README.md](docs/adr/README.md)) are Proposed; 0033's recommendation, JSON only for now, is the owner's current call.
 4. Do not recreate `docs/ARCHITECTURE.md`. It was deliberately removed; do not link to it either.
 
 ## The ADR gate (hard stop)
