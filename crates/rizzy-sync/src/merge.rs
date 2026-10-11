@@ -870,30 +870,33 @@ impl ItemMerge {
         // history only because an above-`bound` value superseded it is correctly promoted back
         // to current, and no key is left with an orphaned, empty register (ADR 0018 §4, §5
         // rule 6). `Err` means even the cut claim's tombstone purge sits past `bound`
-        // (`Refusal::PurgeAboveCut`): nothing of this response settles on this item yet, though
-        // its headers and bodies, recorded above, remain usable once the gap closes and the
-        // causal layer's chain walk reaches them.
+        // (`Refusal::PurgeAboveCut`): nothing of this response may settle on this item yet, so
+        // it is reported exactly as the unbounded refusal above already is, not as a
+        // no-op `Absorbed` -- its headers and bodies, recorded above, remain usable once the
+        // gap closes and the causal layer's chain walk reaches them.
         let mut bounded_heads = heads;
         if let Some(bound) = bound {
             bounded_heads.meet(bound);
         }
-        if let Ok(settled) = evidence::cut(&offered, &bounded_heads, ev) {
-            let taken = normalize(&settled.state, ev);
-            join_into(&mut self.state, &taken, ev);
-            // The newest snapshot (ADR 0018 §10): the previous basis joined with the taken
-            // part; the retained ops the new basis covers are folded into it before they are
-            // dropped.
-            join_into(&mut self.base, &taken, ev);
-            let folded: Vec<Dot> = self
-                .retained
-                .keys()
-                .filter(|dot| self.base.vv.covers(**dot))
-                .copied()
-                .collect();
-            for dot in folded {
-                if let Some(op) = self.retained.remove(&dot) {
-                    join_into(&mut self.base, &singleton(&op), ev);
-                }
+        let settled = match evidence::cut(&offered, &bounded_heads, ev) {
+            Ok(settled) => settled,
+            Err(refusal) => return Ok(refused(refusal)),
+        };
+        let taken = normalize(&settled.state, ev);
+        join_into(&mut self.state, &taken, ev);
+        // The newest snapshot (ADR 0018 §10): the previous basis joined with the taken
+        // part; the retained ops the new basis covers are folded into it before they are
+        // dropped.
+        join_into(&mut self.base, &taken, ev);
+        let folded: Vec<Dot> = self
+            .retained
+            .keys()
+            .filter(|dot| self.base.vv.covers(**dot))
+            .copied()
+            .collect();
+        for dot in folded {
+            if let Some(op) = self.retained.remove(&dot) {
+                join_into(&mut self.base, &singleton(&op), ev);
             }
         }
         self.unresolved.extend(disagreements.iter().copied());
