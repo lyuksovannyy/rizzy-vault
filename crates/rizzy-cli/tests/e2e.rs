@@ -3038,6 +3038,152 @@ fn item_show_lists_password_history() {
     assert_eq!(a.field(&item, "login.password"), "third-password");
 }
 
+/// `item history` and `item restore-history` (ROADMAP §4.2 "Item revision history (restore old
+/// versions)", M3): every field's history, not only `login.password`, concealed unless
+/// `--reveal`; restoring an entry writes it back as the field's current value, an ordinary
+/// edit that syncs normally.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one item through history listing, restore and both refusals"
+)]
+fn item_history_lists_every_field_and_restore_writes_the_old_value_back() {
+    let server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("item-history");
+    sign_up(&a, &origin, "alice");
+    let item = a
+        .ok(
+            &[
+                "item",
+                "create",
+                "--type",
+                "login",
+                "--field",
+                "item.name=Mail",
+                "--field",
+                "login.username=alice",
+                "--secret",
+                "login.password",
+            ],
+            &["first-password"],
+        )
+        .out[0]
+        .clone();
+
+    // No history yet.
+    let shown = a.ok(&["item", "history", &item], &[]);
+    assert_eq!(shown.out, vec!["no field history".to_owned()]);
+
+    a.ok(
+        &["item", "edit", &item, "--field", "login.username=alice2"],
+        &[],
+    );
+    a.ok(
+        &["item", "edit", &item, "--secret", "login.password"],
+        &["second-password"],
+    );
+
+    // Concealed without --reveal, one section per field.
+    let hidden = a.ok(&["item", "history", &item], &[]);
+    assert!(
+        hidden
+            .out
+            .iter()
+            .any(|l| l == "login.username (1 older value, newest first):"),
+        "{:?}",
+        hidden.out
+    );
+    assert!(
+        hidden
+            .out
+            .iter()
+            .any(|l| l == "login.password (1 older value, newest first):"),
+        "{:?}",
+        hidden.out
+    );
+    assert!(!hidden.out.iter().any(|l| l.contains("first-password")));
+    assert!(!hidden.out.iter().any(|l| l.contains("alice\"")));
+    assert!(hidden.out.iter().any(|l| l.ends_with(": ********")));
+
+    // Revealed: each field's entry, with the id `restore-history --entry` takes.
+    let revealed = a.ok(&["item", "history", &item, "--reveal"], &[]);
+    let password_line = revealed
+        .out
+        .iter()
+        .skip_while(|l| !l.starts_with("login.password ("))
+        .nth(1)
+        .unwrap();
+    assert!(
+        password_line.ends_with(": first-password"),
+        "{password_line:?}"
+    );
+    let entry_id = password_line.split_whitespace().next().unwrap();
+
+    a.ok(
+        &[
+            "item",
+            "restore-history",
+            &item,
+            "--field",
+            "login.password",
+            "--entry",
+            entry_id,
+        ],
+        &[],
+    );
+    assert_eq!(a.field(&item, "login.password"), "first-password");
+    // The displaced value ("second-password") is now history, and so is the restored
+    // entry's own original ("first-password" again, under the entry's original dot): a
+    // restore neither removes nor deduplicates, it is an ordinary edit (module docs).
+    let after = a.ok(&["item", "history", &item, "--reveal"], &[]);
+    assert!(after.out.iter().any(|l| l.ends_with(": second-password")));
+
+    // A malformed entry id is refused before any write.
+    let (outcome, _) = a.try_run(
+        &[
+            "item",
+            "restore-history",
+            &item,
+            "--field",
+            "login.password",
+            "--entry",
+            "ab12",
+        ],
+        &[PASSWORD],
+        &[],
+        &[],
+    );
+    assert!(matches!(outcome, Err(CliError::BadInput(_))), "{outcome:?}");
+
+    // A well-formed id naming no device that ever wrote this vault is refused too (flip the
+    // leading byte of a real entry id: `entry_id` is 16 bytes of device id then an 8-byte
+    // seq, so this keeps the encoding valid while naming a device that does not exist).
+    let bogus_entry = format!(
+        "{:02x}{}",
+        !u8::from_str_radix(&entry_id[0..2], 16).unwrap(),
+        &entry_id[2..]
+    );
+    let (outcome, _) = a.try_run(
+        &[
+            "item",
+            "restore-history",
+            &item,
+            "--field",
+            "login.password",
+            "--entry",
+            &bogus_entry,
+        ],
+        &[PASSWORD],
+        &[],
+        &[],
+    );
+    assert!(
+        matches!(outcome, Err(CliError::Client(ClientError::UnknownItem))),
+        "{outcome:?}"
+    );
+}
+
 /// The first 16 hex digits of the id of the device `rv` runs as, from `device list`: the
 /// length `rv sync`'s notices use (`device_label`'s `DEVICE_LABEL_HEX_LEN`), a prefix of the
 /// full id this line prints.
