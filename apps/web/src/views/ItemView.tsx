@@ -5,7 +5,9 @@
 // trash, restore and purge.
 //
 // A concealed value crosses from the Worker only when the user asks (reveal or copy; ADR 0013
-// §3 rule 3), and a revealed value is shown in the secret-field component (INV-68).
+// §3 rule 3), and a revealed value is shown in the secret-field component (INV-68). The
+// large-type password display (`LargeType.tsx`) reveals nothing beyond that same path: its
+// "Large type" trigger below only renders a value `FieldValue` already fetched for Reveal/Copy.
 import type { FieldView, ItemSummary, TotpCode } from "@rizzy-vault/core";
 import { ConfirmDialog, IconStarFilled, IconStarOutline, SecretField, TypeIcon, useToast } from "@rizzy-vault/ui";
 import { useEffect, useId, useState } from "react";
@@ -13,17 +15,21 @@ import { useEffect, useId, useState } from "react";
 import { codeOf } from "../core-client.ts";
 import { type Element, type Grouped, group, labelOf, matchModeLabel } from "../fields.ts";
 import { SafeLink, SafeOpenButton } from "../SafeLink.tsx";
+import { LargeType } from "./LargeType.tsx";
 import { PasswordHistory } from "./PasswordHistory.tsx";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText, useAction } from "./common.tsx";
 
-/** The value line of one field: plain, or masked with reveal and copy. */
+/** The value line of one field: plain, or masked with reveal and copy. `onLargeType`, when
+ * given, adds a "Large type" button once the field is revealed, calling back with the already-
+ * revealed value (never fetching it again: `LargeType.tsx`'s module docs). */
 function FieldValue(props: {
   readonly ctx: VaultContext;
   readonly id: string;
   readonly field: FieldView;
   readonly label: string;
   readonly link?: boolean;
+  readonly onLargeType?: ((value: string) => void) | undefined;
 }) {
   const { ctx, id, field, label } = props;
   const [revealed, setRevealed] = useState<string | undefined>();
@@ -73,6 +79,11 @@ function FieldValue(props: {
             }
           >
             {revealed !== undefined ? "Hide" : "Reveal"}
+          </button>
+        )}
+        {revealed !== undefined && props.onLargeType !== undefined && (
+          <button type="button" className="secondary small" onClick={() => props.onLargeType?.(revealed)}>
+            Large type
           </button>
         )}
         <button type="button" className="secondary small" onClick={copy}>
@@ -213,6 +224,8 @@ export function ItemView(props: {
    * `window.confirm`). `{ kind: "deletePasskey", element }` names which `passkey/<element>/…`
    * row a "Delete" click targets (ADR 0039's own write path has no other way to identify one). */
   const [confirming, setConfirming] = useState<{ readonly kind: "trash" | "purge" } | { readonly kind: "deletePasskey"; readonly element: string } | undefined>();
+  /** The large-type overlay's value (module docs, `LargeType.tsx`), `undefined` while closed. */
+  const [largeType, setLargeType] = useState<string | undefined>();
 
   useEffect(() => {
     let live = true;
@@ -282,7 +295,14 @@ export function ItemView(props: {
       {grouped.fixed
         .filter((f) => f.key !== "item.name")
         .map((f) => (
-          <FieldValue key={f.key} ctx={ctx} id={id} field={f} label={labelOf(f.key)} />
+          <FieldValue
+            key={f.key}
+            ctx={ctx}
+            id={id}
+            field={f}
+            label={labelOf(f.key)}
+            onLargeType={f.key === "login.password" ? setLargeType : undefined}
+          />
         ))}
       {summary.hasTotp && !summary.trashed && <TotpLine ctx={ctx} id={id} />}
       {grouped.uris.map((u) => {
@@ -400,6 +420,7 @@ export function ItemView(props: {
         }}
         onCancel={() => setConfirming(undefined)}
       />
+      <LargeType label="Password" value={largeType} onClose={() => setLargeType(undefined)} />
     </article>
   );
 }

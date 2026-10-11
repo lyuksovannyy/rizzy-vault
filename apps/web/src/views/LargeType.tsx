@@ -1,0 +1,88 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+// The large-type password display (ROADMAP §4.5 "large-type password display"): an
+// already-revealed value shown one character per cell, large enough and with digits, letters
+// and symbols coloured apart (`largeType.ts`'s `charCells`) to read unambiguously at a glance —
+// the same job 1Password's "Large Type" window does, useful for typing a password into another
+// device by eye.
+//
+// Revealing nothing new beyond the existing reveal path (`ItemView.tsx`'s module docs, ADR 0013
+// §3 rule 3): this component only renders a string its caller already holds. It never calls
+// into the core itself, and its own "Large type" trigger (`ItemView.tsx`'s `FieldValue`)
+// appears only once that field's existing Reveal/Copy `value()` has already crossed the value
+// from the Worker — never a second, independent crossing.
+import { useEffect, useId, useRef } from "react";
+
+import { charCells } from "../largeType.ts";
+
+/** The large-type overlay (module docs). Renders nothing while `value` is `undefined`, so a
+ * caller can mount it unconditionally and set `value` only once it has one, the same shape as
+ * `ConfirmDialog`. */
+export function LargeType(props: { readonly label: string; readonly value: string | undefined; readonly onClose: () => void }) {
+  const { value, onClose } = props;
+  const titleId = useId();
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const previouslyFocused = useRef<Element | null>(null);
+
+  useEffect(() => {
+    if (value === undefined) {
+      return;
+    }
+    previouslyFocused.current = document.activeElement;
+    closeRef.current?.focus();
+    return () => {
+      if (previouslyFocused.current instanceof HTMLElement) {
+        previouslyFocused.current.focus();
+      }
+    };
+  }, [value]);
+
+  if (value === undefined) {
+    return null;
+  }
+
+  const cells = charCells(value);
+
+  return (
+    <div className="overlay">
+      <button type="button" className="dialog-backdrop" aria-label="Close" onClick={onClose} />
+      <div
+        className="panel dialog large-type"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={`${titleId}-value`}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            onClose();
+          }
+        }}
+      >
+        <h2 id={titleId}>{props.label}</h2>
+        {/* Decorative: each cell is `aria-hidden`, and the paragraph below carries the same
+            text once, as a single screen-reader announcement, rather than this grid announcing
+            every cell on its own (module docs). */}
+        <div className="large-type-grid" aria-hidden="true">
+          {cells.length === 0 ? (
+            <span className="large-type-cell large-type-symbol">&nbsp;</span>
+          ) : (
+            cells.map((c, i) => (
+              <span key={i} className={`large-type-cell large-type-${c.kind}`}>
+                {c.ch}
+              </span>
+            ))
+          )}
+        </div>
+        <p id={`${titleId}-value`} className="sr-only">
+          {value === "" ? "Empty." : value}
+        </p>
+        <div className="actions">
+          <button type="button" ref={closeRef} className="secondary" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
