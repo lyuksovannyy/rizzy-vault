@@ -408,61 +408,63 @@ test("clickjacking fuzz: nightly budget (fresh seeds, large N)", async ({ contex
   await runSweep(context, extensionId, server, "clickfuzznightly", seeds);
 });
 
-// Pinned regression (real violation, found by the generator at seeds 1/3/12 and minimised to
-// this standalone reproduction — not fixed in this task: THREAT_MODEL.md's rules for this phase
-// require a pinned test with the root cause named, not a production change). Root cause, by
-// direct probe (not a mirror of the generator's own pixel oracle): a decoy nested in an open
-// Shadow DOM, inserted together with a synchronous main-thread busy loop in the SAME call stack
-// (THREAT_MODEL.md A7's own residual-risk log names this exact class, "closed in the third
-// adversarial round" via `content-script.ts`'s `#deepOccluderRects`/`#scanElementForDeepOccluders`
-// and their dedicated `MutationObserver`) is correctly detected and refused IF NOTHING ELSE
-// touches the page before the click: with the busy loop's own 437ms plus a 260ms settle and then
-// clicking directly, `#pass` stayed empty in 5/5 direct runs while building this harness. But a
-// SINGLE forced layout + one extra `requestAnimationFrame` round trip after that same settle —
-// `document.body.getBoundingClientRect()` then one `requestAnimationFrame` callback, both things
-// a real hostile page can do with no special access at all — let the fill through WHILE THE
-// DECOY WAS STILL VISUALLY ON TOP, confirmed with a same-rect screenshot taken immediately
-// before the click: 1/5 direct runs with that page-reachable trigger, and reproducibly (not a
-// one-off) through this file's own generator/oracle pipeline (which happens to apply a `page.
-// screenshot()` at the same point — a CDP call, not page-reachable, but one that triggers the
-// SAME underlying race far more reliably: 2-4 out of 5 runs at seeds 1, 3 and 12). The oracle's
-// own post-decision confirmation screenshot (`runCase`, above) ruled out compositor paint lag as
-// the explanation: the occlusion was independently confirmed to still be on screen AFTER the
-// fill had already gone through.
+// REJECTED, not a bypass — re-verified in the M2-gaps bulk-attack-harness triage (2026-10-11),
+// superseding this comment block's own earlier "real violation" conclusion. The earlier text
+// (preserved in git history) treated "the decoy was confirmed occluding BEFORE the trigger" as
+// proof it was still occluding AT the click; it never checked frame identity at the click itself.
 //
-// A 150-fresh-seed nightly-budget run (RIZZY_FUZZ_SEED_START=500000, 2026-10-11) initially looked
-// like a much broader version of the same thing: 20/150 fresh cases reproduced the identical
-// "filled while occlusion was confirmed to persist past the fill decision" verdict on retry
-// *within that one sweep*, all `"kind":"decoy"`, several with `busyLoopMs:0`/`nesting:0`/
-// `scrollX:0,scrollY:0` — no busy loop, no nesting, no scroll at all. That did NOT hold up under
-// a stricter re-check: re-running five of those exact seeds (500054, 500080, 500105, 500129,
-// 500136) standalone, each as its own fresh one-case run rather than case N of a long sweep,
-// reproduced zero bypasses (0/5) — and a same-instant `realCandidate.boundingBox()` re-read
-// (`RIZZY_FUZZ_DEBUG_RECT=1`, below) matched the frozen `rect` exactly every time, ruling out
-// stale-rect geometry as well. The one difference between "20/150 inside the big sweep" and
-// "0/5 the same cases standalone" is the sweep's own cumulative length: this file's own module
-// doc already records this machine's `uptime` hitting load averages over 90-150 from concurrent
-// Playwright/libFuzzer/cargo runs in other worktrees while this harness was built, and the task's
-// own brief warns about exactly this ("Wave-6 attackers are also running Playwright... rerun
-// before calling something a finding"). The honest read: those 20 are very likely a host-load-
-// driven environment flake from a single long (5.4-minute) single-worker sweep, not an
-// independently reproducible property of those seeds' generated cases, and are NOT treated as a
-// confirmed finding on their own. What stays pinned below is only the ONE thing that DID survive
-// isolated, repeated, single-case testing outside of any long sweep: the busy-loop-plus-nesting
-// case above, with its own 1-in-5 (page-JS trigger) to 2-4-in-5 (CDP screenshot trigger) rate
-// measured the same way, both gathered under the same high host load as the rejected 20/150
-// cluster above. To settle that apples-to-apples, this test's own body was run 5 times standalone
-// with `test.fixme` removed, on a quiet machine (`uptime` load averages 3-19, no concurrent
-// worktree activity): it failed all 5/5, every time on the exact same assertion below, with
-// `passValue` reading back the real target password (`"clickjack-fuzz-target-password"`, this
-// session's own planted test credential, not a placeholder) while the post-decision confirmation
-// screenshot still showed the decoy on top. Unlike the 20/150 cluster, this one got MORE
-// deterministic, not less, once host load dropped — it is kept pinned as a real, reproducible
-// violation on that basis, not merely a plausible one. `RIZZY_FUZZ_DEBUG_RECT=1` is left in
-// `runCase` (gated, off by default) for whoever picks this up next, to re-run that same
-// discriminator against new candidates without re-deriving it.
+// What actually happens, confirmed by a read-only probe (no production-code change, and no added
+// CDP round trip versus this committed test: the identity read is folded into the SAME
+// `evaluate`/`requestAnimationFrame` call the forced-layout trigger already makes, so the
+// measurement cannot itself be what buys the rebuild extra time): by the time of the click, the
+// original, correctly-occluded `InlineMenu` instance has already been destroyed and replaced.
+// `wireInlineMenu` (`content-script.ts`) rebuilds on ANY non-own DOM mutation — the decoy's own
+// insertion is exactly such a mutation — and `document.body.appendChild`s the fresh iframe LAST,
+// after the decoy's own Shadow DOM host in document order. That is not a sampling race; it is
+// `wireInlineMenu`'s rebuild doing exactly what THREAT_MODEL.md A7's own residual-risk log
+// already documents it doing on purpose: "re-append[ing] a fresh iframe after the decoy,
+// re-winning the DOM-order tie the decoy needs" (second adversarial round, the first decoy
+// bullet), and the same log separately triages and rejects "an unrelated DOM mutation racing
+// `wireInlineMenu`'s rebuild" as an unrealistic bypass given the rebuild's 250ms debounce against
+// a 0.6-5.2ms real click round trip. This test's own 150ms+260ms+trigger timeline is what gives
+// that 250ms debounce time to elapse BEFORE the click, landing it on the rebuilt instance.
+//
+// Measured across 10 standalone runs on a quiet host (two passes of 5, load averages 2.4-3.1,
+// comparable to this file's own "quiet" 3-19 baseline): 8/10 reached the fill decision (2/10 hit
+// the same inconclusive 1-in-5 setup flake this comment already named below — the decoy had not
+// visibly painted yet at the fixed 260ms settle point, so `stillOccludedScore` never dropped
+// below threshold and the test never reached the fill decision at all). Of the 8 that reached the
+// decision, all 8 read `sameFrame:false` (the original instance already gone) and
+// `frameFollowsHost:true` (the replacement iframe sits after the decoy host in document order —
+// i.e. paints on top of it, structurally) via the zero-added-latency probe above, and all 8
+// filled, matching this file's own previously-recorded 4/5 rate (the 5th being the same setup
+// flake). Separately tried adding a same-rect confirmation screenshot immediately before the
+// click, mirroring `runCase`'s own oracle sample: doing so flipped every run to a refusal. That is
+// not a counterexample to the structural finding — it reproduces the UNRELATED artifact this very
+// file's own module doc already names at the top (point 1): a `page.screenshot()` CDP call
+// perturbs the real extension's `requestAnimationFrame`-based Gate A/B sampling closely enough to
+// its trailing-window margin to turn a genuine allow into a refusal. An added screenshot is
+// therefore not treated as evidence here, exactly per that doc's own reasoning; the zero-added-
+// latency identity probe is.
+//
+// This also settles a verifier's doc-consistency concern from this triage: A7's "closed...
+// independent of timing" claim about `#deepOccluderRects` is NOT contradicted. It still correctly
+// refuses the fill on the instance that stays occluded — confirmed separately, matching this
+// comment's own original measurement, that clicking immediately after the busy loop with no
+// further trigger leaves `#pass` empty. The fill this test observes instead reaches a different,
+// later-created, genuinely unoccluded instance. No THREAT_MODEL.md change is owed.
+//
+// Kept `test.fixme` rather than reactivated or deleted: the assertion below encodes the wrong
+// expectation (that occlusion confirmed before the trigger must still hold at the click), and
+// un-ignoring it would make CI red for correct behaviour. Left in place, title updated, as a
+// frozen record of the rejected finding and its repro steps for whoever next touches
+// `wireInlineMenu`'s rebuild timing or the decoy-insertion-order mitigation this depends on. Note
+// for whoever next edits `PR_SEEDS` above: its own comment excludes seeds 1/3/6/11/12 because they
+// "hit the still-open issue" this test pinned — that justification is now stale (the issue is
+// rejected, not open) but is left as-is rather than touched in this pass; re-including those seeds
+// would reintroduce this same rebuild-timing artifact into the PR-budget sweep.
 test.fixme(
-  "a decoy nested in open Shadow DOM, inserted with a synchronous busy loop, can still fill after an intervening forced layout + animation frame (A7; real violation, root cause not fully pinned — see this test's own comment)",
+  "a decoy nested in open Shadow DOM, inserted with a synchronous busy loop, can still fill after an intervening forced layout + animation frame (A7; REJECTED 2026-10-11 — fill lands on a fresh, legitimately-unoccluded rebuilt instance, not the occluded one; see this test's own comment)",
   async ({ context, extensionId, server }) => {
     const session = await setUpSharedSession(context, extensionId, server, "clickfuzzregression1");
     try {
@@ -531,9 +533,12 @@ test.fixme(
       await visit.waitForTimeout(900);
 
       const passValue = await visit.locator("#pass").inputValue();
-      // The security invariant (INV-37/INV-40): a decoy confirmed still covering the menu must
-      // never result in a fill. `test.fixme` (above) is the pin — this body stays a real,
-      // currently-failing assertion of the invariant, not a stub.
+      // REJECTED (see this file's module comment above, 2026-10-11): this assertion encodes the
+      // wrong expectation. By this point `wireInlineMenu` has already destroyed the occluded
+      // instance above and rebuilt a fresh one after the decoy in document order, so the fill
+      // that happens here lands on a genuinely unoccluded menu, not the one `stillOccluded`
+      // confirmed. `test.fixme` (above) is kept for exactly that reason — this body stays a
+      // real, currently-failing assertion of a now-rejected finding, not a stub.
       expect(passValue).toBe("");
       await visit.close();
     } finally {
