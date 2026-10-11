@@ -637,11 +637,18 @@ fn contrast_pairs_paragraph(tokens: &Tokens) -> String {
             and_join(&undeclared)
         )
     };
-    format!(
-        "Colour: the WCAG AA pairs `cargo xtask generate-tokens` checks (ADR 0014 §5; it covers \
-         the declared pairs only) are {}. {undeclared_sentence}",
-        and_join(&pairs)
-    )
+    if pairs.is_empty() {
+        format!(
+            "Colour: no WCAG AA pairs are declared, so `cargo xtask generate-tokens` checks \
+             none (ADR 0014 §5; it covers the declared pairs only). {undeclared_sentence}"
+        )
+    } else {
+        format!(
+            "Colour: the WCAG AA pairs `cargo xtask generate-tokens` checks (ADR 0014 §5; it \
+             covers the declared pairs only) are {}. {undeclared_sentence}",
+            and_join(&pairs)
+        )
+    }
 }
 
 /// Renders [`CSS_OUTPUT`] from `tokens`: the same selectors and custom property names as the M1
@@ -1448,17 +1455,41 @@ mod tests {
     }
 
     #[test]
-    fn render_css_header_names_undeclared_color_keys_not_a_literal() {
-        // The sentence naming which colour keys are undeclared (originally
-        // "--color-border is not declared and is not checked.", also a literal) must be derived
-        // from the same data: every `COLOR_KEYS` entry absent from every pair's `fg`/`bg`.
-        // `valid_json()` only declares `text`, `bg` and `focus`, so `danger` (declared in the
-        // real file, not here) must be named as undeclared here, which a literal copy of the real
-        // file's sentence would not do.
+    fn contrast_pairs_paragraph_handles_zero_declared_pairs() {
+        // `parse_contrast_pairs` accepts an empty array, so `and_join(&[])` (`""`) is reachable
+        // here, not just a theoretical input. Naively formatting "...only) are {list}." would
+        // render "...only) are ." with a dangling "are" and no object — this is the edge case
+        // that must read as a sentence instead.
+        let mut doc = valid_json();
+        doc["contrast-pairs"] = serde_json::json!([]);
+        let tokens = parse(&doc.to_string()).unwrap();
+        let paragraph = contrast_pairs_paragraph(&tokens);
+        assert!(!paragraph.contains("are ."), "{paragraph}");
+        assert!(
+            paragraph.contains("no WCAG AA pairs are declared"),
+            "{paragraph}"
+        );
+    }
+
+    #[test]
+    fn contrast_pairs_paragraph_is_built_from_the_declared_pairs() {
+        // Exact match, pinning the helper's whole output (this file's own idiom: see
+        // `render_css_keeps_every_m1_custom_property_name`'s literal `M1_NAMES`). A substring
+        // check against the *rendered CSS* can pass vacuously — `--color-danger` and
+        // `--color-border` both already appear in the file's `:root` block regardless of what
+        // this paragraph says — so this asserts directly against [`contrast_pairs_paragraph`]'s
+        // return value, where no `:root` block can make the assertion pass by accident.
+        // `valid_json()` declares only (text, bg) and (focus, bg), so every other `COLOR_KEYS`
+        // entry, in `COLOR_KEYS`' own order, must be named as undeclared.
         let tokens = parse(&valid_json().to_string()).unwrap();
-        let css = render_css(&tokens);
-        assert!(css.contains("--color-danger"), "{css}");
-        assert!(css.contains("--color-border"), "{css}");
+        assert_eq!(
+            contrast_pairs_paragraph(&tokens),
+            "Colour: the WCAG AA pairs `cargo xtask generate-tokens` checks (ADR 0014 §5; it \
+             covers the declared pairs only) are (--color-text, --color-bg) and (--color-focus, \
+             --color-bg). --color-surface, --color-border, --color-text-muted, --color-accent, \
+             --color-on-accent, --color-danger, --color-on-danger, --color-warning-bg and \
+             --color-warning-text are not declared and not checked."
+        );
     }
 
     #[test]
