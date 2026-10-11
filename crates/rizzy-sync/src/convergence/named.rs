@@ -18,6 +18,7 @@
 //! | [`an_oversize_item_across_compaction_and_a_restore`] | ADR 0021 §5 "Oversize items", §8; ADR 0018 owner decision 12 |
 //! | [`a_lost_answer_across_a_restore`] | ADR 0021 §2 "Restore generation", §9; spike `stale_sent_resolution` |
 //! | [`finding_a_paged_tombstone_cover_split_from_its_purge_stalls`] | a finding: ADR 0021 §4 paging against ADR 0018 §3 "Snapshots are claims" |
+//! | [`gap14_audit_14_g1_mixed_family_seed_hits_the_same_paged_purge_split`] | gap 14, audit uid "14-G1": a generated `mixed`-family seed hitting the same finding |
 //! | [`a_claimed_dot_never_swallows_the_genuine_op`] | ADR 0018 §3 "Snapshots are claims"; ADR 0021 §8 claims of unheld dots; spike `tests/faulty.rs` test of the same name |
 //! | [`an_omitting_snapshot_never_removes_a_held_value`] | ADR 0018 §3 "The absence of a value is never evidence"; spike `tests/faulty.rs` test of the same name |
 //! | [`a_tombstone_that_records_a_known_write_is_refused`] | ADR 0018 §3 "refuses ... a snapshot that contradicts an op body it holds"; spike `tests/faulty.rs` test of the same name |
@@ -556,6 +557,39 @@ fn finding_a_paged_tombstone_cover_split_from_its_purge_stalls() {
     assert!(
         w.verdict().is_err(),
         "the stall no longer happens: settle the finding"
+    );
+}
+
+/// **Finding** (gap 14, audit uid "14-G1", pinned not fixed): a *generated* `mixed`-family
+/// history (`super::generate::run`) hits the same gap as
+/// [`finding_a_paged_tombstone_cover_split_from_its_purge_stalls`] above, found on fresh seeds
+/// at 10x the PR budget. Device 0 fetches device 1's item-0 tombstone cover (covered VV
+/// `{device 1: 3, device 2: 2}`, device 1's own purge dot) in one 3-page response
+/// (`Faults::page_len` for this seed); confirmed with a temporary probe, the cover's bodiless
+/// headers and enough of their own evidence land split across that response's pages so the
+/// *unbounded* per-item cut (`merge/evidence.rs`'s `cut`, not the bound-capped path
+/// `absorb_snapshot` added for the lag-repair fix) refuses the cover `PurgeAboveCut` twice:
+/// once on page 1 of 3 (`page.partial` true) and again on page 3 of 3, the response's own last
+/// page (`page.partial` false) -- the same single page-split, re-tried against the same
+/// still-incomplete evidence, not two separate incidents. That is exactly the mechanism the
+/// finding above pins (ADR 0021 §4, "Each page of a paged response carries its own covers"),
+/// just landing its second, unexempted refusal on a last page instead of a later Fetch. The
+/// harness's `paged_refused` exemption (`device::Device::process_page`: `kind ==
+/// "PurgeAboveCut" && page.partial`) only recognises the first of the two, so
+/// `World::check_quiescent` still counts the second as a refusal on an untainted record.
+/// Unlike the hand-built finding above, this device does not stall for good: several Fetches
+/// later (confirmed with the same probe) device 0's `log.head` of device 1 reaches its full
+/// chain head and item 0's covered VV passes device 1's purge dot with no unresolved
+/// disagreements, so the gap closes here on its own. Widening the exemption to swallow a
+/// last-page `PurgeAboveCut` would also hide the hand-built finding's permanently-stalling
+/// case if it ever lands on a last page, so nothing in the harness or production code changes
+/// here; pending the owner's ADR for gap 14, this seed is pinned as its own regression instead.
+#[test]
+#[ignore = "gap 14: a paged Fetch splits a tombstone cover from its purge (ADR 0021 §4); audit uid 14-G1"]
+fn gap14_audit_14_g1_mixed_family_seed_hits_the_same_paged_purge_split() {
+    assert!(
+        super::generate::run(7, 0x4da9_6853_5bc3_084a).is_err(),
+        "the gap closed on this seed: settle gap 14 and move it to generate::REGRESSIONS"
     );
 }
 
