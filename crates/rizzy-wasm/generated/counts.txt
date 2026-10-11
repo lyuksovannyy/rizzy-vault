@@ -3,9 +3,9 @@
 # Counts are keyword tokens and attribute names outside comments and literals.
 wasm-bindgen = 0.2.129
 rustc = rustc 1.94.1 (e408947bf 2026-03-25)
-sources = fnv1a64:020f38d7c0c59991
+sources = fnv1a64:f56b6a4ce09ce76d
 target = wasm32-unknown-unknown
-unsafe = 916
-extern = 556
-no_mangle = 231
-export_name = 262
+unsafe = 945
+extern = 569
+no_mangle = 236
+export_name = 268

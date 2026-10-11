@@ -19,6 +19,7 @@
 //! | Save | [`Session::create_item`], [`Session::edit_item`] with an [`ItemDraft`] |
 //! | Trash, restore, purge | [`Session::trash_item`], [`Session::restore_item`], [`Session::purge_item`] |
 //! | Password history | [`Session::password_history`] (dates only), [`Session::reveal_password_history`] (one value) |
+//! | Item history | [`Session::item_history`] (dates only, every field), [`Session::reveal_field_history`] (one value), [`Session::restore_field_history`] |
 //! | Late-edit and trash notices | [`Session::take_notices`] after a sync; [`Session::restore_late_as_new`] |
 //! | TOTP code | [`Session::totp`] |
 //! | Passkey assertion | [`Session::passkey_assertion`] ([`create_passkey`](crate::passkey::create_passkey) is stateless, module docs) |
@@ -86,7 +87,8 @@ use zeroize::Zeroizing;
 use crate::error::{CoreError, CoreResult, IMPORT_FAILED, LOCKED, UNKNOWN_FORMAT, WRONG_STATE};
 use crate::http::{self, HttpRequest};
 use crate::items::{
-    self, FieldView, HistoryEntryView, ItemDraft, ItemSummary, hex, type_from_name, visible_item,
+    self, FieldHistoryView, FieldView, HistoryEntryView, ItemDraft, ItemSummary, hex,
+    type_from_name, visible_item,
 };
 use crate::login::{Credentials, LoginFlow, Purpose};
 use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
@@ -542,6 +544,78 @@ impl Session {
         Ok(items::reveal_history(vault, item, source, index, entry_id)?
             .as_str()
             .to_owned())
+    }
+
+    /// Every field's history without values (gap "item history"; [`crate::items`] module docs;
+    /// ROADMAP §4.2 "Item revision history (restore old versions)", M3): generalizes
+    /// [`Session::password_history`] to every field. Empty when the item has none.
+    ///
+    /// # Errors
+    /// As [`Session::item`].
+    #[wasm_bindgen(js_name = itemHistory)]
+    pub fn item_history(&self, id: &str) -> Result<Vec<FieldHistoryView>, CoreError> {
+        let vault = &self.inner()?.vault;
+        let item = visible_item(vault, id)?;
+        Ok(items::item_history(vault, item))
+    }
+
+    /// The value of one field-history entry, as [`Session::item_history`] listed it: call it
+    /// only on the user's request (ADR 0013 §3 rule 3). As [`Session::reveal_password_history`],
+    /// generalized to any field; `key` scopes `index`/`entry_id`, so an id from one field's
+    /// listing never reveals another field's value even when the two share a dot
+    /// ([`crate::items`] module docs).
+    ///
+    /// # Errors
+    /// As [`Session::item`]; `unknown_item` for an entry that is not there (any more) or whose
+    /// id differs; `invalid_input` for a value with no text form.
+    #[wasm_bindgen(js_name = revealFieldHistory)]
+    pub fn reveal_field_history(
+        &self,
+        id: &str,
+        key: &str,
+        index: usize,
+        entry_id: &str,
+    ) -> Result<String, CoreError> {
+        let vault = &self.inner()?.vault;
+        let item = visible_item(vault, id)?;
+        Ok(
+            items::reveal_field_history(vault, item, key, index, entry_id)?
+                .as_str()
+                .to_owned(),
+        )
+    }
+
+    /// Restores one field-history entry as the field's current value (ROADMAP §4.2): an
+    /// ordinary edit (`rizzy_client::items::VaultSync::restore_field_history`), so it syncs and
+    /// merges like any other. `key`, `index` and `entry_id` name the entry exactly as
+    /// [`Session::item_history`] listed it, checked the same way
+    /// [`Session::reveal_field_history`] is, so a sync between the listing and this call never
+    /// restores a value under the wrong identity.
+    ///
+    /// # Errors
+    /// As [`Session::edit_item`]; `unknown_item` for an entry that is not there (any more) or
+    /// whose id differs.
+    #[wasm_bindgen(js_name = restoreFieldHistory)]
+    pub fn restore_field_history(
+        &mut self,
+        id: &str,
+        key: &str,
+        index: usize,
+        entry_id: &str,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let inner = self.writable()?;
+        let item = items::item_id(id)?;
+        let dot = items::restore_field_history_dot(&inner.vault, item, key, index, entry_id)?;
+        inner.vault.restore_field_history(
+            &mut inner.rng,
+            &inner.unlocked,
+            item,
+            key,
+            dot,
+            now_ms,
+        )?;
+        Ok(())
     }
 
     /// The notices not yet handed over in this session (gap 02), each handed over once: an edit
