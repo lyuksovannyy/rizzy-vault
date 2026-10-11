@@ -43,6 +43,9 @@ import {
   isTopLayerClear,
   isVisibilityChainOk,
   parseBoxShadowMarginPx,
+  parseOutlineMarginPx,
+  pseudoElementPaintsFixedOverlay,
+  pseudoElementTiesMaxZIndex,
   rectsMatch,
   recordSample,
 } from "./menu-visibility.ts";
@@ -669,11 +672,8 @@ class InlineMenu {
       return;
     }
     const resolved = afterFrame ?? (this.#frame.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
-    if (resolved) {
-      const zIndex = Number(getComputedStyle(el).zIndex);
-      if (Number.isFinite(zIndex) && zIndex >= MAX_Z_INDEX) {
-        candidates.push(el);
-      }
+    if (resolved && this.#deepOccluderQualification(el) !== false) {
+      candidates.push(el);
     }
     for (const child of el.children) {
       this.#scanElementForDeepOccluders(child, resolved, candidates);
@@ -685,13 +685,57 @@ class InlineMenu {
     }
   }
 
+  /** Whether `el` itself, or a `::before`/`::after` pseudo-element it generates, independently
+   * ties the frame's own maximum z-index — and if so, which: `"own"` when `el`'s OWN computed
+   * z-index already ties it (the pre-existing check), `"pseudo"` only when a generated-content
+   * pseudo-element does while `el` itself does not (A7 pseudo-element deep-occluder fix, fourth
+   * adversarial round: a host whose own `z-index` stays `"auto"` can still win the document-order
+   * tie if its generated content declares its own `position`/`z-index` —
+   * {@link pseudoElementTiesMaxZIndex}'s own doc has the full reasoning). Returning which one
+   * qualified, not just whether, is what lets {@link #deepOccluderRects} pick the right occlusion
+   * rect for each (tight, widened `getBoundingClientRect()` for `"own"`; conservative full
+   * viewport for `"pseudo"`, which has no `Element`/`Node` of its own to read a rect from at all)
+   * from the SAME style reads, rather than reading `el`'s own z-index a second time.
+   *
+   * The two extra `getComputedStyle` pseudo-element reads only ever run for an element the caller
+   * already knows follows `#frame` in tree order — the same bound
+   * {@link #scanElementForDeepOccluders}'s own doc already relies on to keep that walk affordable
+   * (an already-small minority of the page in the common case), and the same bound
+   * {@link #deepOccluderRects}'s own per-tick re-check relies on (the candidate SET, not the page,
+   * bounds that cost). */
+  #deepOccluderQualification(el: Element): "own" | "pseudo" | false {
+    const zIndex = Number(getComputedStyle(el).zIndex);
+    if (Number.isFinite(zIndex) && zIndex >= MAX_Z_INDEX) {
+      return "own";
+    }
+    const before = getComputedStyle(el, "::before");
+    if (pseudoElementTiesMaxZIndex(before.content, before.position, before.zIndex)) {
+      return "pseudo";
+    }
+    const after = getComputedStyle(el, "::after");
+    return pseudoElementTiesMaxZIndex(after.content, after.position, after.zIndex) ? "pseudo" : false;
+  }
+
   /** Rebuilds {@link #deepOccluderCandidates} from scratch, walking `#frame`'s own siblings
    * (never `#frame`'s ancestors — see {@link #scanElementForDeepOccluders}'s own correctness
    * requirement) under its parent, only when {@link #deepOccludersDirty}; otherwise re-reads the
-   * live rect — and re-checks the live `z-index` still ties {@link MAX_Z_INDEX}, so an element
-   * that stops qualifying self-heals even between two dirty-triggered rebuilds, e.g. the
+   * live rect — and re-checks {@link #deepOccluderQualification} still holds, so an element that
+   * stops qualifying self-heals even between two dirty-triggered rebuilds, e.g. the
    * `CSSStyleSheet.insertRule` residual this class's own doc names — for each candidate already
-   * found, which stays cheap regardless of page size because this SET, not the page, bounds it. */
+   * found, which stays cheap regardless of page size because this SET, not the page, bounds it.
+   *
+   * A7 box-shadow/outline-escape fix (fourth adversarial round): an element that qualifies through
+   * its OWN z-index (`"own"`) gets its occlusion rect from {@link pushOcclusionRect} — the same
+   * box-shadow/outline/filter widening the top-layer path already uses — rather than its raw
+   * `getBoundingClientRect()`, closing the identical "paints outside the border box, never
+   * hit-tested" gap this path had and the top-layer path did not (confirmed by direct probe: a
+   * 1×1, far-away decoy tying the frame's z-index with a 3000px box-shadow or outline blanketed
+   * the viewport while its own rect never intersected the menu's). A qualification that comes ONLY
+   * from a `::before`/`::after` pseudo-element (`"pseudo"`, A7 pseudo-element deep-occluder fix,
+   * same round) has no `Element`/`Node` and no `getBoundingClientRect()` to widen in the first
+   * place — the same structural gap {@link pushBackdropOcclusionRect} already closes for
+   * `::backdrop` — so that case conservatively occludes the full viewport instead, never
+   * narrower. */
   #deepOccluderRects(): Rect[] {
     if (this.#deepOccludersDirty) {
       this.#deepOccludersDirty = false;
@@ -709,11 +753,12 @@ class InlineMenu {
       if (!el.isConnected) {
         continue;
       }
-      const zIndex = Number(getComputedStyle(el).zIndex);
-      if (!Number.isFinite(zIndex) || zIndex < MAX_Z_INDEX) {
-        continue;
+      const qualification = this.#deepOccluderQualification(el);
+      if (qualification === "own") {
+        pushOcclusionRect(rects, el);
+      } else if (qualification === "pseudo") {
+        rects.push(fullViewportRect());
       }
-      rects.push(toRect(el.getBoundingClientRect()));
     }
     return rects;
   }
@@ -792,31 +837,44 @@ class InlineMenu {
    * A7 bypass-1/3 fix: each element's own `getBoundingClientRect()` is widened by
    * {@link pushOcclusionRect} before being used here — box-shadow (confirmed by direct probe: a
    * 1×1 top-layer popover with a 3000px box-shadow blankets the viewport while its own rect
-   * stays 1×1, and box-shadow never participates in hit-testing) and non-`none` `filter` can both
+   * stays 1×1, and box-shadow never participates in hit-testing), `outline` (same paint-outside-
+   * the-box, never-hit-tested shape, fourth adversarial round), and non-`none` `filter` can all
    * paint a top-layer element's visible extent far outside its own border box, so taking the raw
    * rect at face value here was the exact gap those reports used.
    *
    * A7 `::backdrop` bypass fix: {@link pushBackdropOcclusionRect} additionally checks each
    * element's own `::backdrop` pseudo-element — a browser-painted box with no corresponding
    * `Element`/`Node` at all, so `pushOcclusionRect` above, which only ever reads an ELEMENT's own
-   * rect/filter/box-shadow, cannot see it regardless of how it is widened. A top-layer backdrop is
-   * always sized to the full viewport by the browser itself (never shrunk by author CSS, only
-   * made transparent or not), so there is nothing to bound more precisely than "does it paint
-   * something, yes or no." */
+   * rect/filter/box-shadow/outline, cannot see it regardless of how it is widened. A top-layer
+   * backdrop is always sized to the full viewport by the browser itself (never shrunk by author
+   * CSS, only made transparent or not), so there is nothing to bound more precisely than "does it
+   * paint something, yes or no."
+   *
+   * A7 pseudo-element bypass fix (fourth adversarial round): {@link pushPseudoOcclusionRect}
+   * additionally checks each element's `::before`/`::after` — also a browser-painted box with no
+   * `Element`/`Node` of its own, closing the same structural gap for generated content that
+   * independently declares `position: fixed` and paints (its own doc has the full reasoning and
+   * the stated, narrower-than-`position:absolute` scope). */
   #topLayerRects(): Rect[] {
     const rects: Rect[] = [];
     if (document.fullscreenElement !== null) {
       pushOcclusionRect(rects, document.fullscreenElement);
       pushBackdropOcclusionRect(rects, document.fullscreenElement);
+      pushPseudoOcclusionRect(rects, document.fullscreenElement, "::before");
+      pushPseudoOcclusionRect(rects, document.fullscreenElement, "::after");
     }
     for (const dialog of document.querySelectorAll("dialog[open]")) {
       pushOcclusionRect(rects, dialog);
       pushBackdropOcclusionRect(rects, dialog);
+      pushPseudoOcclusionRect(rects, dialog, "::before");
+      pushPseudoOcclusionRect(rects, dialog, "::after");
     }
     try {
       for (const popover of document.querySelectorAll(":popover-open")) {
         pushOcclusionRect(rects, popover);
         pushBackdropOcclusionRect(rects, popover);
+        pushPseudoOcclusionRect(rects, popover, "::before");
+        pushPseudoOcclusionRect(rects, popover, "::after");
       }
     } catch {
       // No Popover API support: nothing can be `:popover-open` either.
@@ -926,26 +984,62 @@ function toRect(rect: DOMRect): Rect {
   return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
 }
 
+/** A full-viewport occlusion rect — the conservative substitute every "cannot confidently bound
+ * this" path below uses, never a narrower guess ("only ever refuse more"). */
+function fullViewportRect(): Rect {
+  return { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+}
+
 /** Pushes `el`'s occlusion rect onto `rects`, widened for any paint that can escape its own
- * border box (A7 bypass-1/3 fix, `InlineMenu#topLayerRects`'s own doc). A non-`none` `filter`
- * (e.g. `drop-shadow`) is rare on a top-layer element and not reliably boundable from computed
- * style alone, so it conservatively substitutes the full viewport rect rather than attempting to
- * parse `filter`'s own shorthand; `parseBoxShadowMarginPx` returning `undefined` (a computed
- * `box-shadow` shape this parser does not recognise) does the same — "only ever refuse more"
- * means a value this cannot confidently bound must widen the fallback, never narrow it. */
+ * border box (A7 bypass-1/3 fix, `InlineMenu#topLayerRects`'s own doc; A7 outline-escape fix,
+ * fourth adversarial round). A non-`none` `filter` (e.g. `drop-shadow`) is rare on a top-layer
+ * element and not reliably boundable from computed style alone, so it conservatively substitutes
+ * the full viewport rect rather than attempting to parse `filter`'s own shorthand;
+ * `parseBoxShadowMarginPx`/`parseOutlineMarginPx` returning `undefined` (a computed shape either
+ * parser does not recognise) does the same — "only ever refuse more" means a value this cannot
+ * confidently bound must widen the fallback, never narrow it. `outline` paints a uniform ring
+ * around the border box exactly like `box-shadow` (never changes `getBoundingClientRect()`, never
+ * participates in hit-testing) — the two margins are independent properties of the same element,
+ * so the wider of the two bounds the combined painted extent (a uniform single margin is already
+ * this function's own, pre-existing simplification; see `parseBoxShadowMarginPx`'s own doc on
+ * why a single margin, not a per-side one, is deliberate). */
 function pushOcclusionRect(rects: Rect[], el: Element): void {
   const rect = toRect(el.getBoundingClientRect());
   const style = getComputedStyle(el);
   if (style.filter !== "none") {
-    rects.push({ left: 0, top: 0, width: window.innerWidth, height: window.innerHeight });
+    rects.push(fullViewportRect());
     return;
   }
-  const margin = parseBoxShadowMarginPx(style.boxShadow);
-  if (margin === undefined) {
-    rects.push({ left: 0, top: 0, width: window.innerWidth, height: window.innerHeight });
+  const shadowMargin = parseBoxShadowMarginPx(style.boxShadow);
+  if (shadowMargin === undefined) {
+    rects.push(fullViewportRect());
     return;
   }
+  const outlineMargin = parseOutlineMarginPx(style.outlineStyle, style.outlineWidth, style.outlineOffset);
+  if (outlineMargin === undefined) {
+    rects.push(fullViewportRect());
+    return;
+  }
+  const margin = Math.max(shadowMargin, outlineMargin);
   rects.push({ left: rect.left - margin, top: rect.top - margin, width: rect.width + margin * 2, height: rect.height + margin * 2 });
+}
+
+/** Pushes a full-viewport occlusion rect when `el`'s `::before` or `::after` pseudo-element is
+ * independently painting a `position: fixed` overlay (A7 pseudo-element top-layer fix, fourth
+ * adversarial round; {@link pseudoElementPaintsFixedOverlay}'s own doc has the full reasoning and
+ * the stated, narrower-than-`position:absolute` scope). Guarded in a `try`, same "only ever refuse
+ * more" contract as {@link pushBackdropOcclusionRect}: an older browser can throw on the
+ * two-argument pseudo-element form rather than returning initial values, and that failure must
+ * widen this to the full viewport too, never silently skip it. */
+function pushPseudoOcclusionRect(rects: Rect[], el: Element, pseudo: "::before" | "::after"): void {
+  try {
+    const style = getComputedStyle(el, pseudo);
+    if (pseudoElementPaintsFixedOverlay(style.content, style.position, style.backgroundColor, style.backgroundImage, style.boxShadow)) {
+      rects.push(fullViewportRect());
+    }
+  } catch {
+    rects.push(fullViewportRect());
+  }
 }
 
 /** Pushes a full-viewport occlusion rect when `el`'s own `::backdrop` pseudo-element is occluding
@@ -960,9 +1054,9 @@ function pushBackdropOcclusionRect(rects: Rect[], el: Element): void {
   try {
     const style = getComputedStyle(el, "::backdrop");
     if (isBackdropOccluding(style.backgroundColor, style.backgroundImage)) {
-      rects.push({ left: 0, top: 0, width: window.innerWidth, height: window.innerHeight });
+      rects.push(fullViewportRect());
     }
   } catch {
-    rects.push({ left: 0, top: 0, width: window.innerWidth, height: window.innerHeight });
+    rects.push(fullViewportRect());
   }
 }
