@@ -9,8 +9,8 @@ import { Fragment, useEffect, useId, useRef } from "react";
 
 const SHORTCUTS: readonly { readonly keys: string; readonly does: string }[] = [
   { keys: "/", does: "Focus the search box" },
-  { keys: "Ctrl/Cmd+K", does: "Focus the search box" },
-  { keys: "↑ / ↓", does: "Move the item-list selection" },
+  { keys: "Ctrl/Cmd+K", does: "Open the command palette" },
+  { keys: "↑ / ↓", does: "Move the item-list selection, or the palette's selection" },
   { keys: "Enter", does: "Open the selected item" },
   { keys: "Esc", does: "Close a dialog or popover" },
   { keys: "N", does: "New item" },

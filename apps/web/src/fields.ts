@@ -236,6 +236,17 @@ export function matches(
   );
 }
 
+/** Sorts favorites before non-favorites, then by title (case-insensitive, locale-aware).
+ * Shared by the item list (`ItemsPane.tsx`) and the command palette's item results
+ * (`palette.ts`, ROADMAP §4.2/§4.5 "favorites first"), so the two places items are ranked in
+ * this vault never drift apart. */
+export function compareFavoriteFirst(
+  a: { readonly favorite: boolean; readonly title: string },
+  b: { readonly favorite: boolean; readonly title: string },
+): number {
+  return Number(b.favorite) - Number(a.favorite) || a.title.localeCompare(b.title);
+}
+
 /** Every distinct tag over `items`, with how many items carry it, most-used first and
  * alphabetical among ties. Used for the sidebar's Tags section (item 6). */
 export function tagCounts(items: readonly { readonly tags: readonly string[] }[]): readonly {

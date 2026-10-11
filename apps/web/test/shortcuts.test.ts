@@ -41,11 +41,15 @@ describe("shortcutFor", () => {
     expect(shortcutFor(event({ key: "Escape", target: { tagName: "INPUT" } }))).toBe("escape");
   });
 
-  it("Ctrl/Cmd+K focuses search even while typing", () => {
+  it("Ctrl/Cmd+K opens the command palette even while typing", () => {
     expect(shortcutFor(event({ key: "k", ctrlKey: true, target: { tagName: "INPUT" } }))).toBe(
-      "focus-search",
+      "command-palette",
     );
-    expect(shortcutFor(event({ key: "K", metaKey: true }))).toBe("focus-search");
+    expect(shortcutFor(event({ key: "K", metaKey: true }))).toBe("command-palette");
+  });
+
+  it("the Ctrl/Cmd+K chord with Shift held is still the palette (Shift is not a chord-breaking modifier here)", () => {
+    expect(shortcutFor(event({ key: "k", ctrlKey: true, shiftKey: true }))).toBe("command-palette");
   });
 
   it("'/' focuses search, but only outside a typing target", () => {
