@@ -131,16 +131,42 @@ impl NormalizedUrl {
             return Err(NormalizeError::HostTooLong);
         }
         let port = parsed.port().filter(|p| *p != scheme.default_port());
-        // `url::Host` (not `host_str`) decides whether `host` is a domain name at all: the `psl`
-        // crate's eTLD+1 algorithm has no concept of an IP address, and on one it silently
-        // degenerates to "last two dot-separated components", colliding `192.168.1.1` and
-        // `10.0.1.1` on the bogus "registrable domain" `1.1` (confirmed against the pinned `psl`
-        // `=2.1.240`). An IP-literal host is therefore never passed to `psl::domain_str` at all:
-        // it is its own "registrable domain" below, so the gate (`modes::registrable_gate`,
+        // The `psl` crate's eTLD+1 algorithm has no concept of an IP address, and on one it
+        // silently degenerates to "last two dot-separated components", colliding `192.168.1.1`
+        // and `10.0.1.1` on the bogus "registrable domain" `1.1` (confirmed against the pinned
+        // `psl` `=2.1.240`). An IP-literal host is therefore never passed to `psl::domain_str` at
+        // all: it is its own "registrable domain" below, so the gate (`modes::registrable_gate`,
         // INV-38) degenerates to exact-IP equality instead of a PSL lookup, closing that
         // collision while still letting *Host*/*Exact* mode work for a self-hosted/intranet
         // login reached by IP literal.
-        let is_ip_literal = matches!(parsed.host(), Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)));
+        //
+        // Classify the TRIMMED `host`, not `parsed.host()`'s classification of the untrimmed
+        // `raw_host`: `url` 2.5.8's own host parser only recognises a dotted-decimal-looking
+        // host as `Host::Ipv4` when it carries at most one trailing dot, and falls back to
+        // `Host::Domain` for a run of two or more (confirmed against the pinned version).
+        // Trusting that classification after trimming every trailing dot off `host` let an
+        // IP-literal host with 2+ trailing dots reach `suffix::registrable_domain` below instead
+        // of this branch, reopening the exact collision this comment describes for
+        // `"192.168.1.1../"` and `"10.0.1.1../"` alike. Parsing `host` itself as an `IpAddr` is
+        // trailing-dot-count-independent, so it stays correct for any run length.
+        //
+        // `host_str()` keeps an IPv6 literal's `[` `]` brackets (`"[::1]"`, confirmed against
+        // the pinned version), which `IpAddr` never parses, so strip them first. Note this is
+        // *not* merely cosmetic: without the strip, every IPv6 literal would misclassify as
+        // non-IP here and fall through to the branches below instead of this one — it would
+        // still land on the same final `Some(host)` only because `url`'s own WHATWG host
+        // serializer (what actually produces `host_str()`, not `std`'s `Ipv6Addr::Display`,
+        // which does special-case IPv4-mapped/-compatible addresses into dotted-quad form) never
+        // renders an IPv6 host with a literal `.`, so `suffix::registrable_domain` below always
+        // returns `None` for one and the dotless-hostname carve-out fires instead. Stripping the
+        // brackets keeps every IPv6 literal on the IP-literal branch it was always on
+        // (`matches!(parsed.host(), Some(url::Host::Ipv6(_)))`, pre-dating this diff) rather than
+        // depending on that three-step coincidence to reach the same place.
+        let ip_candidate = host
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(host);
+        let is_ip_literal = ip_candidate.parse::<core::net::IpAddr>().is_ok();
         let registrable_domain = if is_ip_literal {
             Some(host.to_owned())
         } else {
@@ -464,6 +490,29 @@ mod tests {
         assert_eq!(example.registrable_domain(), Some("example.com"));
         assert_eq!(evil.registrable_domain(), Some("evil.com"));
         assert_ne!(example.registrable_domain(), evil.registrable_domain());
+    }
+
+    #[test]
+    fn ip_literal_registrable_domain_does_not_collide_across_trailing_dot_runs() {
+        // Regression: `is_ip_literal` was derived from `parsed.host()`'s classification of the
+        // UNTRIMMED `raw_host`, and `url` 2.5.8 only classifies a dotted-decimal-looking host as
+        // `Host::Ipv4` when it carries at most one trailing dot; with two or more it falls back
+        // to `Host::Domain`. The trimmed `host` string then reached `suffix::registrable_domain`
+        // instead of the IP-literal branch, so two different IP-literal hosts each carrying a
+        // run of two or more trailing dots degenerated to the same bogus `psl`-on-an-IP
+        // registrable domain — the exact collision the IP-literal carve-out above exists to
+        // close, reopened for this one shape.
+        let a = NormalizedUrl::parse("https://192.168.1.1../").unwrap();
+        let b = NormalizedUrl::parse("https://10.0.1.1../").unwrap();
+        assert_ne!(a.registrable_domain(), b.registrable_domain());
+        assert_eq!(a.registrable_domain(), Some("192.168.1.1"));
+        assert_eq!(b.registrable_domain(), Some("10.0.1.1"));
+        assert_eq!(
+            a.registrable_domain(),
+            NormalizedUrl::parse("https://192.168.1.1/")
+                .unwrap()
+                .registrable_domain()
+        );
     }
 
     #[test]
