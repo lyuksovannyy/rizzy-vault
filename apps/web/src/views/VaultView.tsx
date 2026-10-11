@@ -42,6 +42,7 @@ import { type GeneratorMemory, useGeneratorMemory } from "../generator-memory.ts
 import { mergeNotices, noticeKey } from "../notices.ts";
 import type { SessionInfo } from "../protocol.ts";
 import { shortcutFor } from "../shortcuts.ts";
+import { CommandPalette, type PaletteNavCommand } from "./CommandPalette.tsx";
 import { GeneratorPane } from "./GeneratorPane.tsx";
 import { ItemsPane, type Scope } from "./ItemsPane.tsx";
 import { NoticesPanel } from "./NoticesPanel.tsx";
@@ -238,12 +239,30 @@ export function VaultView(props: {
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [newItemSignal, setNewItemSignal] = useState(0);
+  /** The command palette (Ctrl/Cmd+K; `CommandPalette.tsx`, ROADMAP §4.2/§4.5), and the
+   * one-shot "open this item" signal (mirroring `newItemSignal`'s shape) it sends `ItemsPane`
+   * when the user runs its "Open" command for an item the pane's own scope or search might not
+   * currently show (`ItemsPane.tsx`'s `openItemId`/`openItemNonce` module docs). */
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [openItemId, setOpenItemId] = useState<string | undefined>();
+  const [openItemNonce, setOpenItemNonce] = useState(0);
   const accountMenuAnchorRef = useRef<HTMLSpanElement>(null);
   const accountMenuTriggerRef = useRef<HTMLButtonElement>(null);
   const closeAccountMenu = useCallback(() => setAccountMenuOpen(false), []);
   // Outside-click dismissal (Escape is already handled by the global shortcut switch below,
   // which also returns focus — this hook only adds the outside-click half for this menu).
   useDismissableMenu(accountMenuOpen, closeAccountMenu, accountMenuAnchorRef, accountMenuTriggerRef, false);
+
+  /** Switches to the item list and asks it to show `id`'s detail view, resetting the scope to
+   * "all" first so the palette can always open a match the pane's current filter would
+   * otherwise hide. Passed to `CommandPalette`'s "Open" command. */
+  const openItemFromPalette = useCallback((id: string) => {
+    setScope(ALL_SCOPE);
+    setSection("items");
+    setSidebarOpen(false);
+    setOpenItemId(id);
+    setOpenItemNonce((n) => n + 1);
+  }, []);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -252,8 +271,11 @@ export function VaultView(props: {
       // none of which this view can see directly. While one is open, global shortcuts must stay
       // silent: `N` must not mount a new-item editor behind it, `?` must not open the shortcuts
       // dialog on top of it, and plain navigation shortcuts must not steal focus away from it.
-      // The dialog handles its own Escape and focus trap.
-      if (isAnyModalOpen()) {
+      // The dialog handles its own Escape and focus trap. The command palette is this view's
+      // own `paletteOpen` state, checked the same way: it has its own Escape handling
+      // (`CommandPalette.tsx`, like `ShortcutsHelp`), so nothing here needs to close it, but
+      // `N`/`?`/Ctrl+K-again must not fire behind it either.
+      if (isAnyModalOpen() || paletteOpen) {
         return;
       }
       const target = e.target;
@@ -282,6 +304,10 @@ export function VaultView(props: {
             document.querySelector<HTMLInputElement>(".item-list-toolbar input[type='search']")?.focus();
           });
           break;
+        case "command-palette":
+          e.preventDefault();
+          setPaletteOpen(true);
+          break;
         case "new-item":
           if (section === "items" && !session.readOnly) {
             e.preventDefault();
@@ -305,7 +331,7 @@ export function VaultView(props: {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [section, session.readOnly, shortcutsOpen, accountMenuOpen, sidebarOpen]);
+  }, [section, session.readOnly, shortcutsOpen, accountMenuOpen, sidebarOpen, paletteOpen]);
 
   const ctx: VaultContext = { client, clipboard, session, afterWrite: sync, revision, generator };
 
@@ -320,6 +346,23 @@ export function VaultView(props: {
     setSection(next);
     setSidebarOpen(false);
   };
+
+  /** The command palette's "jump to a view" commands (module docs above `CommandPalette`
+   * import): built from this same `ITEM_FILTERS`/`OTHER_SECTIONS` the sidebar renders, plus
+   * Trash and Settings, so the palette never lists a view the sidebar does not also offer, and
+   * never drifts from it. Recomputed each render (cheap: a dozen entries) rather than memoized,
+   * since `chooseScope`/`chooseSection` above are plain closures, not `useCallback`s. */
+  const paletteNavCommands: readonly PaletteNavCommand[] = [
+    ...ITEM_FILTERS.map((f) => ({
+      id: `scope-${f.label}`,
+      label: f.label,
+      icon: f.icon === "all" ? <IconAllItems /> : f.icon === "favorites" ? <IconStarFilled /> : <TypeIcon type={f.icon} />,
+      run: () => chooseScope(f.scope),
+    })),
+    { id: "section-trash", label: "Trash", icon: <IconTrash />, run: () => chooseSection("trash") },
+    ...OTHER_SECTIONS.map((s) => ({ id: `section-${s.id}`, label: s.label, icon: s.icon, run: () => chooseSection(s.id) })),
+    { id: "section-settings", label: "Settings", icon: <IconSettings />, run: () => chooseSection("settings") },
+  ];
 
   return (
     <div className={sidebarOpen ? "shell sidebar-open" : "shell"}>
@@ -474,7 +517,14 @@ export function VaultView(props: {
         />
         <section className="vault-body">
           {section === "items" && (
-            <ItemsPane ctx={ctx} trash={false} scope={scope} newItemSignal={newItemSignal} />
+            <ItemsPane
+              ctx={ctx}
+              trash={false}
+              scope={scope}
+              newItemSignal={newItemSignal}
+              openItemId={openItemId}
+              openItemNonce={openItemNonce}
+            />
           )}
           {section === "trash" && <ItemsPane ctx={ctx} trash scope={ALL_SCOPE} newItemSignal={0} />}
           {section === "generator" && <GeneratorPane ctx={ctx} />}
@@ -496,6 +546,13 @@ export function VaultView(props: {
         onCancel={() => setConfirmLock(false)}
       />
       <ShortcutsHelp open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        ctx={ctx}
+        navCommands={paletteNavCommands}
+        onOpenItem={openItemFromPalette}
+      />
     </div>
   );
 }
