@@ -171,12 +171,61 @@ async function enrol(context: BrowserContext, extensionId: string, server: Runni
 }
 
 /** Opens `rp.origin` and waits for the page-world shim to install (module docs on the race this
- * guards: `<script src>` injection is asynchronous) before returning. */
+ * guards: `<script src>` injection is asynchronous) before returning. Bounded explicitly (default
+ * `waitForFunction` has no timeout of its own, per the Playwright API) so a genuinely broken
+ * injection fails in seconds with its own clear error, not silently as part of this test's outer
+ * `test.setTimeout(120_000)`. */
 async function openTestRpPage(context: BrowserContext, rpOrigin: string): Promise<Page> {
   const page = await context.newPage();
   await page.goto(rpOrigin);
-  await page.waitForFunction(() => (navigator.credentials as unknown as { __rizzyVaultPasskeyShimReady?: boolean }).__rizzyVaultPasskeyShimReady === true);
+  await page.waitForFunction(
+    () => (navigator.credentials as unknown as { __rizzyVaultPasskeyShimReady?: boolean }).__rizzyVaultPasskeyShimReady === true,
+    undefined,
+    { timeout: 10_000 },
+  );
   return page;
+}
+
+/**
+ * Registers a CDP `WebAuthn` virtual authenticator on `page`, with no credentials enrolled on it
+ * — called once, right after {@link openTestRpPage}, before any ceremony runs.
+ *
+ * Root cause of the load-triggered flake this fixes: every ceremony in this file goes through
+ * the extension's own shim first (`passkey-page-shim.ts`'s `send`), which arms its own
+ * `timeoutMs`-bounded timer and falls back to the browser's *real* `navigator.credentials` if
+ * the extension's round trip (content script -> background -> consent offer -> click -> approval
+ * -> result push) does not answer in time. This project already knew, and documented at the
+ * decline step below, that headless Chromium's native WebAuthn never rejects a call when no
+ * authenticator is registered at all — it waits forever for a transport that can never arrive —
+ * but that virtual authenticator used to be registered only right before the decline case,
+ * leaving the *registration* and *sign-in* ceremonies above it with no such safety net. Under a
+ * heavily loaded machine (many parallel Playwright suites, a high load average), that same
+ * extension round trip can legitimately take long enough to lose the race against the shim's own
+ * timer; when it does, the create/get call used to fall back to a native call with nothing to
+ * answer it, hanging the awaiting `page.evaluate` call until this test's own `test.setTimeout`,
+ * at which point Playwright tears the context down out from under the still-pending call and
+ * reports "Target page, context or browser has been closed" — a confusing, two-minute-late
+ * symptom for what is really just this missing authenticator. Installing it up front, before any
+ * ceremony, means a slow-CI fallback during registration or sign-in now settles immediately too
+ * (resolving with a native, non-rizzy-vault credential that fails this test's own assertions, or
+ * rejecting), exactly as the decline case already relied on — a fast, clear test failure instead
+ * of a two-minute hang. It has no effect on the normal, fast path: the shim only ever reaches the
+ * real native call on its own fallback branch, never while its extension round trip is still
+ * winning the race, so a correctly-timed run behaves identically with or without this call.
+ */
+async function installVirtualAuthenticator(context: BrowserContext, page: Page): Promise<void> {
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("WebAuthn.enable");
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: {
+      protocol: "ctap2",
+      transport: "internal",
+      hasResidentKey: true,
+      hasUserVerification: true,
+      isUserVerified: true,
+      automaticPresenceSimulation: true,
+    },
+  });
 }
 
 test.setTimeout(120_000);
@@ -189,6 +238,7 @@ test("registers a passkey through consent, verifies the attestation, signs in wi
 }) => {
   await enrol(context, extensionId, server, "pkuser");
   const page = await openTestRpPage(context, rp.origin);
+  await installVirtualAuthenticator(context, page);
 
   // --- Registration: the consent UI shows "Test RP" (create ceremony), a trusted click
   // approves it.
@@ -249,23 +299,13 @@ test("registers a passkey through consent, verifies the attestation, signs in wi
   // hang and never fabricate a result. Found while writing this test: with no CDP virtual
   // authenticator registered, headless Chromium's native WebAuthn `get()` does not reject — it
   // waits forever for a transport/device that can never arrive in this environment, which hung
-  // this exact test for a full 120s before this fix. A CDP `WebAuthn` virtual authenticator with
-  // no credentials enrolled on it gives the native call something real to ask and fail against
-  // (`NotAllowedError`, no matching credential), so this assertion can require the promise to
-  // *settle* within a bounded time, proving the native path was actually taken rather than this
-  // shim's own code looping or hanging on the decline.
-  const cdp = await context.newCDPSession(page);
-  await cdp.send("WebAuthn.enable");
-  await cdp.send("WebAuthn.addVirtualAuthenticator", {
-    options: {
-      protocol: "ctap2",
-      transport: "internal",
-      hasResidentKey: true,
-      hasUserVerification: true,
-      isUserVerified: true,
-      automaticPresenceSimulation: true,
-    },
-  });
+  // this exact test for a full 120s before this fix. The virtual authenticator this relies on is
+  // now installed once, right after `openTestRpPage` above (`installVirtualAuthenticator`'s own
+  // doc explains why every ceremony needs it, not only this one): a CDP `WebAuthn` virtual
+  // authenticator with no credentials enrolled on it gives the native call something real to ask
+  // and fail against (`NotAllowedError`, no matching credential), so this assertion can require
+  // the promise to *settle* within a bounded time, proving the native path was actually taken
+  // rather than this shim's own code looping or hanging on the decline.
   const declinePromise = page
     .evaluate((opts) => window.rizzyTestGet(opts), { challengeB64: b64("get-challenge-2"), timeoutMs: 5_000 })
     .then(
@@ -296,6 +336,7 @@ test("navigator.credentials.get() with allowCredentials narrows the consent UI t
   // actually names, not by distinct button text).
   await enrol(context, extensionId, server, "pkallow");
   const page = await openTestRpPage(context, rp.origin);
+  await installVirtualAuthenticator(context, page);
   const consentFrame = page.frameLocator("iframe[data-rizzy-passkey-consent]");
 
   async function createOne(userIdB64: string, userName: string, challengeB64: string): Promise<CreateResult> {
@@ -352,6 +393,7 @@ test("a passkey the extension created shows up in the web vault, with no private
 }) => {
   const secretKey = await enrol(context, extensionId, server, "webuser");
   const page = await openTestRpPage(context, rp.origin);
+  await installVirtualAuthenticator(context, page);
   const createPromise = page.evaluate(
     (opts) => window.rizzyTestCreate(opts),
     {
@@ -392,4 +434,48 @@ test("a passkey the extension created shows up in the web vault, with no private
   await vault.getByRole("dialog", { name: "Delete this passkey?" }).getByRole("button", { name: "Delete passkey" }).click();
   await expect(vault.getByText("Passkey deleted.")).toBeVisible();
   await expect(vault.locator("[data-passkey]")).toHaveCount(0);
+});
+
+test("a ceremony whose own timeout fires before the extension answers falls back and settles, never hangs (regression: the load-triggered 120s hang)", async ({
+  context,
+  extensionId,
+  server,
+  rp,
+}) => {
+  // Deterministic stand-in for the nondeterministic failure a heavily loaded machine produced
+  // (load average 25-60, other Playwright suites running): rather than relying on real load to
+  // make the extension's own round trip (content script -> background -> consent offer) lose
+  // the race against the page-world shim's `timeoutMs` timer, this test gives that timer an
+  // impossibly short budget (`timeoutMs: 1`) so the shim falls back to native `navigator.
+  // credentials.create` on every run, not just an unlucky one. Before this change
+  // (`installVirtualAuthenticator` called only right before the decline step above, not here),
+  // that native fallback had no authenticator to ask and never settled at all, hanging this
+  // test's own `page.evaluate` call until Playwright's test timeout tore the context down —
+  // exactly the "Target page, context or browser has been closed" symptom, just forced instead
+  // of waited for. This test's own short `test.setTimeout` below is the actual regression check:
+  // it fails loudly, in seconds, if that hang ever comes back.
+  test.setTimeout(20_000);
+  await enrol(context, extensionId, server, "pktimeout");
+  const page = await openTestRpPage(context, rp.origin);
+  await installVirtualAuthenticator(context, page);
+
+  const createPromise = page.evaluate(
+    (opts) => window.rizzyTestCreate(opts),
+    {
+      rpName: "Test RP",
+      userIdB64: b64("user-timeout"),
+      userName: "carol",
+      userDisplayName: "Carol",
+      challengeB64: b64("create-challenge-timeout"),
+      timeoutMs: 1,
+    },
+  );
+  // No click: `timeoutMs: 1` guarantees the shim's own timer fires long before any consent offer
+  // could arrive, so there is nothing to click — the point is that `createPromise` settles on
+  // its own, one way or the other, well inside this test's 20s bound.
+  const outcome = await createPromise.then(
+    () => "resolved" as const,
+    () => "rejected" as const,
+  );
+  expect(["resolved", "rejected"]).toContain(outcome);
 });
