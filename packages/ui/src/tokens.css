@@ -5,12 +5,13 @@
    generate-tokens --check` fails CI if this file is stale. Every custom property name is
    kept from the M1 hand-written set, so nothing that reads this file changes.
 
-   Colour: the WCAG AA pairs `cargo xtask generate-tokens` checks (ADR 0014 §5; it covers
-   the declared pairs only) are (--color-text, --color-bg), (--color-text,
-   --color-surface), (--color-text-muted, --color-bg), (--color-on-accent,
-   --color-accent), (--color-on-danger, --color-danger), (--color-warning-text,
-   --color-warning-bg), (--color-focus, --color-bg) and (--color-focus, --color-surface).
-   --color-border is not declared and is not checked. */
+   Colour: the WCAG AA pairs `cargo xtask generate-tokens` checks
+   (ADR 0014 §5; it covers the declared pairs only) are (--color-text, --color-bg),
+   (--color-text, --color-surface), (--color-text-muted, --color-bg),
+   (--color-on-accent, --color-accent), (--color-on-danger, --color-danger),
+   (--color-danger, --color-bg), (--color-danger, --color-surface),
+   (--color-warning-text, --color-warning-bg), (--color-focus, --color-bg) and
+   (--color-focus, --color-surface). --color-border is not declared and not checked. */
 
 :root {
   color-scheme: light dark;
