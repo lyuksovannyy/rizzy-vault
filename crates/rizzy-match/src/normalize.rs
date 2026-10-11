@@ -220,7 +220,12 @@ pub fn normalize_domain(raw: &str) -> Result<String, DomainError> {
     if raw.len() > MAX_HOST_LEN {
         return Err(DomainError::TooLong);
     }
-    let trimmed = raw.strip_suffix('.').unwrap_or(raw);
+    // Strip *every* trailing dot, not just one: a run of bare dots ("..") must normalise
+    // the same way a single dot does (`Empty`), never to a shorter-but-still-dotted,
+    // non-empty intermediate value — `strip_suffix` only ever removes one, which broke
+    // both this function's own "no trailing dot" postcondition and its idempotence
+    // (regression: `normalize_domain_rejects_dot_only_input_regardless_of_run_length`).
+    let trimmed = raw.trim_end_matches('.');
     let ascii = idna::domain_to_ascii_cow(trimmed.as_bytes(), AsciiDenyList::URL)
         .map_err(|_| DomainError::Invalid)?;
     if ascii.is_empty() {
@@ -411,6 +416,42 @@ mod tests {
         assert_ne!(homograph.registrable_domain(), real.registrable_domain());
     }
 
+    #[test]
+    fn normalize_domain_rejects_dot_only_input_regardless_of_run_length() {
+        // Regression: `normalize_domain` used to strip only one trailing dot
+        // (`strip_suffix`), so a run of two or more dots left one dot behind ("..": one dot
+        // left after stripping one), which `idna` happily accepts as the non-empty domain
+        // ".". That broke the function's own documented postcondition ("no trailing dot")
+        // on the very first call, and made it non-idempotent: re-normalising "." (the
+        // output of normalizing "..") hits the single-dot path and correctly returns
+        // `Empty`, so `f(f("..")) != f("..")`. Every run of bare dots must normalise the
+        // same way a single dot does: `Empty`, not a degenerate non-empty domain.
+        assert_eq!(normalize_domain(".").unwrap_err(), DomainError::Empty);
+        assert_eq!(normalize_domain("..").unwrap_err(), DomainError::Empty);
+        assert_eq!(normalize_domain("...").unwrap_err(), DomainError::Empty);
+        assert_eq!(normalize_domain(".....").unwrap_err(), DomainError::Empty);
+    }
+
+    #[test]
+    fn normalize_domain_is_idempotent_on_a_concrete_regression_case() {
+        // Companion to `normalized_string_is_idempotent` below (which only covers
+        // `NormalizedUrl`, not `normalize_domain`): normalising `normalize_domain`'s own
+        // output again must give the same value back, the property the fuzz target
+        // `url_normalize` checks and the one this exact input ("..") used to break.
+        for raw in [
+            ".",
+            "..",
+            "...",
+            "example.com",
+            "example.com.",
+            "EXAMPLE.COM..",
+        ] {
+            if let Ok(first) = normalize_domain(raw) {
+                assert_eq!(normalize_domain(&first).as_deref(), Ok(first.as_str()));
+            }
+        }
+    }
+
     proptest::proptest! {
         #[test]
         fn parse_never_panics(bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..512)) {
@@ -427,6 +468,16 @@ mod tests {
                 let again = NormalizedUrl::parse(&first.normalized_string()).unwrap();
                 assert_eq!(first, again);
                 assert_eq!(first.normalized_string(), again.normalized_string());
+            }
+        }
+
+        #[test]
+        fn normalize_domain_output_is_idempotent(dots in 0usize..6, host in "[a-z0-9]{0,10}") {
+            // `host` with a trailing run of 0..=5 dots: covers the whole family the
+            // regression above pins concrete cases for.
+            let raw = format!("{host}{}", ".".repeat(dots));
+            if let Ok(first) = normalize_domain(&raw) {
+                assert_eq!(normalize_domain(&first).as_deref(), Ok(first.as_str()));
             }
         }
     }
