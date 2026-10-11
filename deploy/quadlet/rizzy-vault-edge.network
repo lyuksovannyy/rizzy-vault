@@ -1,0 +1,14 @@
+# The network rizzy-vault.container and rizzy-vault-proxy.container share. Mirrors
+# compose.yaml's `edge` network (ADR 0010 §4 lists the networks a fuller profile would add;
+# profile A needs only this one).
+#
+# Edit the subnet if it collides with another network on this host — same reason
+# RIZZY_EDGE_SUBNET exists in deploy/.env; there is no ${VAR:-default} substitution here, so
+# this file is the one place to change it. It must still cover the proxy's IP=
+# (rizzy-vault-proxy.container) and RIZZY_TRUSTED_PROXIES (rizzy-vault.env).
+#
+# Unverified: the minimum Podman version NetworkName= needs (docs/self-hosting.md §13).
+
+[Network]
+NetworkName=rizzy-vault-edge
+Subnet=172.30.87.0/24

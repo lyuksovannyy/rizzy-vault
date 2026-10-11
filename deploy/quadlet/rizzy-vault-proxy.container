@@ -1,0 +1,57 @@
+# rizzy-vault, profile A (solo), Podman Quadlet unit for the TLS reverse proxy. Mirrors the
+# `proxy` service of ../compose.yaml (ADR 0010 §4, owner decision 3: a Caddy example).
+# Operator guide: docs/self-hosting.md §13.
+#
+# Not hardened like rizzy-vault.container: compose.yaml's `proxy` service does not use its
+# `x-hardening` anchor either (only `rizzy-vault` and the one-off admin services do), so this
+# mirrors that as written rather than hardening something compose.yaml leaves alone.
+#
+# This file was written without a Podman install to test it against in this environment; see
+# docs/self-hosting.md §13 "Unverified".
+
+[Unit]
+Description=rizzy-vault TLS reverse proxy (Caddy)
+# Order only, like compose.yaml's plain `depends_on: [rizzy-vault]` (no health condition):
+# After= without Requires=, so a stopped rizzy-vault.service does not pull this one down too,
+# same as compose.yaml's default depends_on behaviour.
+After=rizzy-vault.service
+
+[Container]
+ContainerName=rizzy-vault-proxy
+Image=docker.io/library/caddy:2-alpine
+
+Network=rizzy-vault-edge.network
+# compose.yaml's fixed address for this proxy (RIZZY_PROXY_IP), believed by rizzy-vault's
+# RIZZY_TRUSTED_PROXIES (self-hosting.md §6). Must match rizzy-vault.env's
+# RIZZY_TRUSTED_PROXIES and the Subnet= in rizzy-vault-edge.network. Unverified: IP= alongside
+# a referenced .network file, in your Podman version (self-hosting.md §13).
+IP=172.30.87.10
+
+# compose.yaml's ${RIZZY_HTTP_PORT:-8080}:80 and ${RIZZY_HTTPS_PORT:-8443}:443 — high host
+# ports so rootless Podman needs no sysctl (ADR 0010 §4). Edit both lines to change them; no
+# ${VAR:-default} substitution here.
+PublishPort=8080:80
+PublishPort=8443:443
+
+# The same Caddyfile as compose.yaml, unmodified: copy deploy/Caddyfile next to this unit.
+# Unverified: whether %h expands inside a Quadlet Volume= path in your Podman version
+# (self-hosting.md §13) — replace %h with your home directory if not.
+Volume=%h/.config/containers/systemd/Caddyfile:/etc/caddy/Caddyfile:ro
+Volume=rizzy-vault-caddy-data.volume:/data
+Volume=rizzy-vault-caddy-config.volume:/config
+
+EnvironmentFile=%h/.config/containers/systemd/rizzy-vault-proxy.env
+
+# podman auto-update is OFF by default, consistent with rizzy-vault.container. This image is
+# a real registry image (unlike rizzy-vault's dev build), so the key would not be a no-op if
+# enabled, which is exactly why it stays commented out here too: see docs/self-hosting.md §13
+# "Auto-update" before opting in.
+# AutoUpdate=registry
+
+[Service]
+# compose.yaml's `restart: unless-stopped` for this service too; see rizzy-vault.container's
+# comment on the Restart= vs. unless-stopped difference.
+Restart=always
+
+[Install]
+WantedBy=default.target
