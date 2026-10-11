@@ -2,7 +2,9 @@
 
 // The item view's large-type password display end to end (ROADMAP §4.5; `src/views/LargeType.tsx`,
 // `src/largeType.ts`): appears once the password field is revealed, shows one cell per
-// character with digits/letters/symbols told apart, and Escape dismisses it and returns focus.
+// character with digits/letters/symbols told apart, Escape dismisses it and returns focus, and
+// — like every other dialog in the vault — it suppresses the global keyboard shortcuts while
+// it is open (`VaultView.tsx`'s modal gate, `packages/ui/src/modalRegistry.ts`).
 import { expect, test } from "@playwright/test";
 
 import { newItem, signUp, watch } from "./helpers.ts";
@@ -48,8 +50,26 @@ test("large type: one cell per character, classed by kind, Escape dismisses", as
   await expect(dialog.locator(".large-type-cell.large-type-digit")).toHaveCount(2); // "3", "9"
   await expect(dialog.locator(".large-type-cell.large-type-symbol")).toHaveCount(3); // "!", "-", "-"
 
+  // Global shortcuts must stay silent while the overlay is open, the same invariant
+  // `ConfirmDialog` gets `VaultView.tsx`'s modal gate to enforce — checked with focus on the
+  // overlay's own Close button (a `<button>`, which `shortcuts.ts`'s `isTypingTarget` does not
+  // treat as a typing target), so nothing but the modal gate itself can be suppressing these.
+  await expect(dialog.getByRole("button", { name: "Close" })).toBeFocused();
+  await page.keyboard.press("Control+k");
+  await expect(page.getByRole("combobox", { name: "Command palette" })).toBeHidden();
+  await expect(dialog).toBeVisible();
+
+  await page.keyboard.press("?");
+  await expect(page.getByRole("dialog", { name: "Keyboard shortcuts" })).toBeHidden();
+  await expect(dialog).toBeVisible();
+
+  await page.keyboard.press("n");
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
+  // If `N` had fired behind the overlay, the detail pane would now show a blank new-item draft
+  // (`ItemsPane.tsx`'s `newItemSignal` effect) instead of the item being read.
+  await expect(page.getByRole("heading", { name: "Large Co" })).toBeVisible();
+  await expect(page.getByLabel("Title")).toHaveCount(0);
   // Focus returns to whatever opened it, like every other dialog in this app (`ConfirmDialog`,
   // `ShortcutsHelp`): the "Large type" button itself.
   await expect(passwordRow.getByRole("button", { name: "Large type" })).toBeFocused();

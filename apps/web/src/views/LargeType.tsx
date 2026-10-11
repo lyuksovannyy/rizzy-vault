@@ -11,6 +11,15 @@
 // into the core itself, and its own "Large type" trigger (`ItemView.tsx`'s `FieldValue`)
 // appears only once that field's existing Reveal/Copy `value()` has already crossed the value
 // from the Worker — never a second, independent crossing.
+//
+// Registers with the shared modal registry (`setModalOpen`, `packages/ui/src/modalRegistry.ts`)
+// exactly like `ConfirmDialog` does, so `VaultView.tsx`'s global keyboard-shortcut gate
+// (`isAnyModalOpen()`) suppresses `N`/`?`/Ctrl+K while this overlay is open (review finding):
+// without it, those shortcuts fired right through the overlay whenever focus sat on its own
+// Close button, since a `<button>` is not a typing target (`shortcuts.ts`'s `isTypingTarget`) —
+// `N` silently swapped the item detail pane to a blank draft mid-read, and `?`/Ctrl+K opened
+// another dialog stacked on top.
+import { setModalOpen } from "@rizzy-vault/ui";
 import { useEffect, useId, useRef } from "react";
 
 import { charCells } from "../largeType.ts";
@@ -30,7 +39,12 @@ export function LargeType(props: { readonly label: string; readonly value: strin
     }
     previouslyFocused.current = document.activeElement;
     closeRef.current?.focus();
+    // Registers this overlay in the shared "a modal is open" count (`modalRegistry.ts`, module
+    // docs above) so the app-wide keyboard-shortcut handler suppresses global shortcuts while
+    // it is showing, exactly like `ConfirmDialog` does.
+    setModalOpen(true);
     return () => {
+      setModalOpen(false);
       if (previouslyFocused.current instanceof HTMLElement) {
         previouslyFocused.current.focus();
       }
