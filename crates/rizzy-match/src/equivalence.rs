@@ -482,6 +482,20 @@ mod tests {
     }
 
     #[test]
+    fn group_rejects_a_dot_only_member() {
+        // Regression: before `normalize_domain` stripped every trailing dot instead of just
+        // one, `normalize_domain("..")` returned `Ok(".")` — a degenerate, non-registrable
+        // "domain" that `new` happily stored as a group member (no round-trip check here),
+        // while `decode`'s stricter round-trip check (line below this block) would reject
+        // that same stored member as `Malformed` on every future load. `new` and `decode`
+        // must agree: a dot-only input is never a valid member, at either entry point.
+        assert_eq!(
+            EquivalenceGroup::new(gid(1), ["..", "example.com"], false).unwrap_err(),
+            EquivalenceListError::Malformed
+        );
+    }
+
+    #[test]
     fn group_rejects_fewer_than_two_domains() {
         assert_eq!(
             EquivalenceGroup::new(gid(1), ["only.example"], false).unwrap_err(),
