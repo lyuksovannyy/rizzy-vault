@@ -2146,6 +2146,7 @@ mod credentials;
 mod durable_device;
 mod export;
 mod healing;
+mod item_history;
 mod late_edits;
 mod lists;
 mod mutation;
