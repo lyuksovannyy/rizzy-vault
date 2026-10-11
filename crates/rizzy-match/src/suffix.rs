@@ -120,4 +120,21 @@ mod tests {
             Some("example.doesnotexist".into())
         );
     }
+
+    /// Garbage in, garbage out — pinned deliberately, not as a bug report. This function's own
+    /// doc comment states its precondition: `host` must already be normalised (no trailing
+    /// dot). Feed it one anyway and `psl::domain_str` degenerates on the leftover empty
+    /// label(s), producing a bogus registrable domain that would collide unrelated hosts
+    /// (`crates/rizzy-match/src/normalize.rs`'s `registrable_domain_does_not_collide_across_hosts_with_trailing_dot_runs`
+    /// is the regression this precondition exists to prevent, by never handing this function a
+    /// host that violates it). This function does not defend against that itself — unlike
+    /// `rizzy-core`'s decoders, it is not a wire-format boundary, and both of its callers
+    /// ([`crate::normalize::NormalizedUrl::parse`], `rizzy_client::passkey::verify_rp_id` via
+    /// [`crate::normalize::normalize_domain`]) now normalise first, so a defensive trim here
+    /// would be dead code duplicating a guarantee the caller already gives.
+    #[test]
+    fn a_host_that_violates_the_no_trailing_dot_precondition_is_garbage_in_garbage_out() {
+        assert_eq!(registrable_domain("example.com.."), Some("com.".into()));
+        assert_eq!(registrable_domain("co.uk.."), Some("uk.".into()));
+    }
 }
