@@ -61,9 +61,9 @@ EnvironmentFile=%h/.config/containers/systemd/rizzy-vault.env
 # the mechanism yet), a tag-following update trusts whoever controls the registry tag
 # completely, with no signature check. Also, the
 # default image above (localhost/rizzy-vault:dev) is a local build with no registry behind it,
-# so this key is a no-op until Image= names a real, signed-eventually registry tag. Uncommenting
-# this is the operator's own opt-in, not this change's default — see docs/self-hosting.md §13
-# "Auto-update" for the trade-off before you turn it on.
+# so this key is a no-op until Image= names a real registry tag. Uncommenting this is the
+# operator's own opt-in, not this change's default — see docs/self-hosting.md §13 "Auto-update"
+# for the trade-off before you turn it on.
 # AutoUpdate=registry
 
 # No HealthCmd=: compose.yaml defines no healthcheck either, because the distroless image has

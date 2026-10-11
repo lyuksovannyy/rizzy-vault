@@ -499,8 +499,11 @@ $EDITOR ~/.config/containers/systemd/rizzy-vault.env ~/.config/containers/system
 systemctl --user daemon-reload
 loginctl enable-linger "$USER"      # so the units run without an active login session
 systemctl --user start rizzy-vault-data-volume.service rizzy-vault-secrets-volume.service
-# Create the secrets once, the same as compose.yaml's secrets-init (ADR 0010 §4):
-podman run --rm -v rizzy-vault-secrets:/run/rizzy-secrets --user 65532:65532 \
+# Create the secrets once, the same as compose.yaml's secrets-init (ADR 0010 §4). The flags
+# repeat compose.yaml's `x-hardening` anchor, which every one-off service uses too (see "Admin
+# one-offs" below for the rest of them, with the same flags):
+podman run --rm --network=none -v rizzy-vault-secrets:/run/rizzy-secrets \
+  --user 65532:65532 --read-only --cap-drop=all --security-opt=no-new-privileges:true \
   localhost/rizzy-vault:dev secrets init
 systemctl --user enable --now rizzy-vault.service rizzy-vault-proxy.service
 journalctl --user -u rizzy-vault.service -f
@@ -543,32 +546,39 @@ A `.env` file (not `.example`) under `~/.config/containers/systemd/` is already 
 
 Also: `rizzy-vault.container`'s default `Image=localhost/rizzy-vault:dev` is a local build with no registry behind it at all ([§2](#2-install): "There is no published image yet"). `AutoUpdate=registry` has nothing to check against for that tag, so it is a no-op there regardless of the timer, until `Image=` names a real registry reference. The Caddy proxy's image is already a real registry reference, so its own `AutoUpdate=registry` line would do something the moment it is enabled — which is exactly why it stays commented out by the same default, not left on because "it's just Caddy."
 
-**Admin one-offs.** Systemd units are the wrong shape for a command meant to run once and exit; these stay `podman run --rm`, matching each `compose.yaml` one-off service ([§4](#4-configuration-reference) "Commands") with the matching volumes:
+**Admin one-offs.** Systemd units are the wrong shape for a command meant to run once and exit; these stay `podman run --rm`, matching each `compose.yaml` one-off service ([§4](#4-configuration-reference) "Commands") with the matching volumes. Every one of them carries `--network=none` and the same `--read-only --cap-drop=all --security-opt=no-new-privileges:true --user 65532:65532` flags `compose.yaml`'s `x-hardening` anchor gives every one-off service there — including `secrets init` above — not only the one shown with them spelled out below:
 
 ```sh
-# secrets init — see "Install" above. secrets rotate / retire-setups (server stopped first):
+# secrets rotate / retire-setups (server stopped first; swap the trailing command for either):
 systemctl --user stop rizzy-vault.service
-podman run --rm -v rizzy-vault-data:/data -v rizzy-vault-secrets:/run/rizzy-secrets \
+podman run --rm --network=none -v rizzy-vault-data:/data -v rizzy-vault-secrets:/run/rizzy-secrets \
   --user 65532:65532 --read-only --cap-drop=all --security-opt=no-new-privileges:true \
   localhost/rizzy-vault:dev secrets rotate
 systemctl --user start rizzy-vault.service
 
-# migrate (server stopped first), same flags, command "migrate"
-# backup-secrets, with the passphrase on stdin, secrets volume read-only is enough:
-podman run --rm -i -v rizzy-vault-secrets:/run/rizzy-secrets:ro \
-  -v "$HOME/rizzy-backup-secrets:/backup" --user 65532:65532 \
-  localhost/rizzy-vault:dev backup-secrets --out /backup/rizzy-secrets-backup.json \
-  --passphrase-file - < ~/rizzy-backup-passphrase
+# migrate (server stopped first), same shape as secrets rotate above, command "migrate".
 
-# backup (server running): podman exec <container-name> rizzy-vault backup --out -
+# backup-secrets, with the passphrase on stdin, secrets volume read-only is enough. The
+# staging directory needs the same owner and mode as §5's rootful example, done the rootless
+# way (§5 already shows `podman unshare chown` for this):
+mkdir -p ~/rizzy-backup-secrets
+podman unshare chown 65532:65532 ~/rizzy-backup-secrets && chmod 0700 ~/rizzy-backup-secrets
+podman run --rm -i --network=none -v rizzy-vault-secrets:/run/rizzy-secrets:ro \
+  -v ~/rizzy-backup-secrets:/backup --user 65532:65532 --read-only --cap-drop=all \
+  --security-opt=no-new-privileges:true localhost/rizzy-vault:dev backup-secrets \
+  --out /backup/rizzy-secrets-backup.json --passphrase-file - < ~/rizzy-backup-passphrase
+mv ~/rizzy-backup-secrets/rizzy-secrets-backup.json /somewhere/safe/rizzy-secrets-$(date +%F).json
+
+# backup (server running): no one-off, it runs next to the server, as §8 already does.
 podman exec rizzy-vault rizzy-vault backup --out - > "rizzy-data-$(date +%Y%m%dT%H%M%S).rvbackup"
 
 # restore (server stopped first), reading from stdin, as compose.yaml's `restore` service:
-podman run --rm -i -v rizzy-vault-data:/data -v rizzy-vault-secrets:/run/rizzy-secrets:ro \
-  --user 65532:65532 localhost/rizzy-vault:dev restore --in -
+podman run --rm -i --network=none -v rizzy-vault-data:/data -v rizzy-vault-secrets:/run/rizzy-secrets:ro \
+  --user 65532:65532 --read-only --cap-drop=all --security-opt=no-new-privileges:true \
+  localhost/rizzy-vault:dev restore --in -
 ```
 
-None of these take `--network none` the way the matching compose services' `network_mode: none` does, because plain `podman run` outside a Quadlet-managed network needs the equivalent spelled as `--network=none`; add it to every line above except `backup` (which runs inside the already-networked `rizzy-vault` container via `exec`, so there is nothing to isolate further there).
+`backup` needs none of this: it runs inside the already-networked, already-hardened `rizzy-vault` container through `exec`, the same as under `compose.yaml`.
 
 **Rootful.** The system-wide path is `/etc/containers/systemd/` instead of `~/.config/containers/systemd/`, `systemctl` instead of `systemctl --user`, `[Install] WantedBy=multi-user.target` instead of `default.target`, no `loginctl enable-linger`, and `podman run` as root for the admin one-offs. Not tested here either way; the rootless path above is what [ROADMAP §4.9](ROADMAP.md#49-server-self-hosting--ops-m1-onward) actually asks for.
 
