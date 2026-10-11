@@ -3937,6 +3937,59 @@ test("an opaque body::after tying the frame's own maximum z-index cannot interce
   }
 });
 
+// False-refusal check (not a reported bypass): `#ancestorPseudoOcclusionRects` must not flag an
+// ORDINARY decorative `::after`/`::before` on `body`/`documentElement` — only one that is both
+// `position: fixed`/`absolute` (never `static`, per `pseudoElementTiesMaxZIndex`) AND ties the
+// frame's own exact maximum z-index. A modest, everyday z-index (page decoration, a themed
+// background accent) must keep filling normally, the same "only ever refuse more" scoping round
+// four's structurally identical `pushPseudoOcclusionRect` positive control confirmed (line 2861).
+test("an ordinary decorative body::after (position: absolute, modest z-index) does not break autofill (false-refusal check)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "ordinarybodyafter");
+    await createLoginItem(setupPage, {
+      title: "Ordinary Body After Target",
+      username: "ordinarybodyafter-user@example.com",
+      password: "ordinarybodyafter-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "ordinarybodyafter", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    await visit.evaluate(() => {
+      const style = document.createElement("style");
+      style.textContent =
+        "body::after { content: \"\"; position: absolute; top: 0; left: 0; width: 20px; height: 20px; z-index: 5; background: rgba(0, 100, 200, 0.6); pointer-events: none; }";
+      document.head.appendChild(style);
+    });
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Ordinary Body After Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(150);
+
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(visit.locator("#user")).toHaveValue("ordinarybodyafter-user@example.com", { timeout: 15_000 });
+    await expect(visit.locator("#pass")).toHaveValue("ordinarybodyafter-target-password", { timeout: 15_000 });
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
 // Sixth adversarial round. Reported bypass (critical) — NOT a Gate A/B/C occlusion gap, and NOT
 // fixed here. `src/inline-menu/index.html` is `web_accessible_resources` to ANY http(s) origin
 // (`manifest.chromium.json`), with no instance/frame identity check of any kind: the background's
@@ -3982,6 +4035,13 @@ test("an opaque body::after tying the frame's own maximum z-index cannot interce
 // sender class on identical terms (`core-host/listener.ts`'s own comment on reusing it "as-is").
 // Fixing the root cause fixes all three; none of the three is fixable piecemeal within this
 // task's ADR gate.
+//
+// Verified green (this test body runs and the attack succeeds, i.e. the assertions below pass)
+// by temporarily changing `test.fixme` to `test` and running it alone, as of this commit. If a
+// future run of it this way FAILS, re-read this comment before assuming the bug is fixed: a
+// failure here could equally mean the test itself bit-rotted (selector/button name/helper
+// signature drift) rather than the sender model changing — confirm which by reproducing the
+// mechanism fresh against whatever code exists then, not by trusting this test's pass/fail alone.
 test.fixme(
   "a cloned iframe pointing at the extension's own inline-menu resource can trigger password generation into the real page field — blocked on an ADR (isInlineMenuSender has no frame-identity concept; ADR 0040 would need to change)",
   async ({ context, extensionId, server }) => {
