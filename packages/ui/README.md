@@ -1,10 +1,17 @@
 # @rizzy-vault/ui
 
-The web design system of [ADR 0014](../../docs/adr/0014-ui-stack.md) §5, minimal in M1:
+The web design system of [ADR 0014](../../docs/adr/0014-ui-stack.md) §5
+([ADR 0019](../../docs/adr/0019-native-clients.md) §13 for the other toolkits):
 
-- `src/tokens.css`: the hand-written M1 token set as CSS custom properties (colour, spacing,
-  type, radius; light and dark). M3 replaces it with the platform-neutral token source and
-  generated CSS, keeping the property names where possible.
+- `tokens/tokens.json`: the one platform-neutral token source (colour incl. light/dark, spacing,
+  type, radius, shadow) and its declared WCAG AA contrast pairs.
+- `src/tokens.css`: generated from `tokens/tokens.json` by `cargo xtask generate-tokens`, as CSS
+  custom properties. Every M1 property name is kept, so nothing that reads this file changed.
+  `cargo xtask generate-tokens --check` fails if it (or any file below) is stale.
+- `tokens/generated/Tokens.{swift,kt,xaml,qml}`: the same source, generated for the other
+  toolkits ADR 0019 §13 names. No client in this repository consumes them yet (the native clients
+  live in their own repositories, ADR 0019 §6); they exist for the release workflow's token
+  bundle (ADR 0019 §7) and so `--check` catches drift today.
 - `SecretField`: the **one** component that renders a secret input (master password, Secret
   Key, recovery code, export password, revealed secret fields), as ADR 0014 §2 and INV-68
   require. It sets `spellcheck="false"` and `autocomplete="off"` (plus `autocorrect` and
