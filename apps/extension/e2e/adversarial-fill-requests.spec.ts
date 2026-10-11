@@ -2369,4 +2369,545 @@ test("a permanent ancestor filter: grayscale (dark-mode theming) no longer refus
   }
 });
 
+// Fourth adversarial round (five reports — three bypasses plus a dedupe, and one false refusal;
+// checked the same way, a live device and a real click). Dedupe: of the nine reports triaged in
+// this round, three are each a single mechanism reported more than once (the outline top-layer
+// escape, reported twice; the deep-occluder box-shadow escape, reported three times — twice as a
+// probe against the built extension, once as a standalone attacker-page script that is the same
+// primitive; and the deep-occluder pseudo-element escape, reported twice), matching this file's
+// own "one test per attack class" precedent (line 1563). Four distinct defects, all reproduced and
+// fixed; one false refusal, confirmed and fixed.
 
+// Reported bypass (critical; reported twice, independently — same mechanism, one test): a 1×1
+// `popover="manual"` element, promoted to the top layer by `showPopover()` (no user gesture
+// needed), styled `outline-style: solid; outline-color: <opaque>; outline-width: 3000px` instead
+// of `box-shadow`. `outline` paints a uniform ring outside the border box, never changes
+// `getBoundingClientRect()`, and never participates in hit-testing — the exact same shape as the
+// already-fixed box-shadow bypass (line 1583), on the exact same code path that fix touched.
+//
+// REPRODUCED against Gates A/B alone (confirmed by direct probe against the real built extension,
+// IOv2 disabled): the pre-fix `pushOcclusionRect` (`content-script.ts`) widened a top-layer
+// element's rect for `filter` and `box-shadow` only — it never read `outline` at all, so a popover
+// whose own border box stays 1×1 could blanket the viewport via `outline` alone, unnoticed.
+//
+// FIXED: `pushOcclusionRect` now also widens by `parseOutlineMarginPx`'s parsed outline extent
+// (`menu-visibility.ts`, unit-tested directly), taking the larger of the box-shadow and outline
+// margins — closing this without blocking an ordinary small `:focus-visible` ring.
+test("a 1x1 top-layer popover with an oversized outline cannot blanket-hide the menu while it stays clickable (reported bypass, critical, duplicate reports)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "bypassoutline");
+    await createLoginItem(setupPage, {
+      title: "Outline Bypass Target",
+      username: "outline-user@example.com",
+      password: "outline-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "bypassoutline", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await disableIov2(visit);
+    // Planted before the page even loads, exactly as reported: `showPopover()` needs no gesture,
+    // and no box-shadow or filter is set at all — only `outline`.
+    await visit.addInitScript(() => {
+      window.addEventListener("DOMContentLoaded", () => {
+        const pop = document.createElement("div");
+        (pop as unknown as { popover: string }).popover = "manual";
+        Object.assign(pop.style, {
+          position: "fixed",
+          left: "0px",
+          top: "0px",
+          width: "1px",
+          height: "1px",
+          outlineStyle: "solid",
+          outlineColor: "rgba(20, 20, 20, 0.98)",
+          outlineWidth: "3000px",
+        });
+        document.body.appendChild(pop);
+        (pop as unknown as { showPopover: () => void }).showPopover();
+      });
+    });
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Outline Bypass Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    await expectIov2Disabled(visit);
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(300);
+
+    // Discriminator: confirms the popover's own border box stays tiny (the outline, not the box
+    // itself, would do the blanketing), the outline is really set, and the fix is refusing for
+    // the stated reason (Gate A's `pointer-events: none` toggle) rather than something else.
+    const diag = await visit.evaluate(() => {
+      const pop = document.querySelector("div[popover]");
+      const frame = document.querySelector("iframe[data-rizzy-inline-menu]");
+      return {
+        popoverExists: pop !== null,
+        popoverOutlineWidth: pop !== null ? getComputedStyle(pop).outlineWidth : null,
+        popoverOutlineStyle: pop !== null ? getComputedStyle(pop).outlineStyle : null,
+        popoverRectTiny: pop !== null ? pop.getBoundingClientRect().width <= 20 : false,
+        framePointerEvents: frame !== null ? getComputedStyle(frame).pointerEvents : null,
+      };
+    });
+    expect(diag.popoverExists).toBe(true);
+    expect(diag.popoverOutlineStyle).toBe("solid");
+    expect(diag.popoverOutlineWidth).toBe("3000px");
+    expect(diag.popoverRectTiny).toBe(true);
+    expect(diag.framePointerEvents).toBe("none");
+
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await visit.waitForTimeout(1000);
+
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// Reported bypass (critical): a top-layer `popover="manual"` host stays 1×1 while its `::before`
+// pseudo-element independently declares `position: fixed; inset: 0` plus an opaque background —
+// `pushOcclusionRect` only ever reads the HOST element's own rect/filter/box-shadow/outline, which
+// structurally cannot see a pseudo-element at all (it has no `Element`/`Node` of its own), the
+// same class of gap already closed for `::backdrop` (line 2179) but for `::before`/`::after`
+// generated content instead.
+//
+// REPRODUCED against Gates A/B alone (confirmed by direct probe against the real built extension,
+// IOv2 disabled): the host's own `getBoundingClientRect()` stayed 1×1 throughout, raw hit-testing
+// at the real candidate's centre still resolved to the real frame, and the real click filled both
+// fields.
+//
+// FIXED: `pushPseudoOcclusionRect` (`content-script.ts`) reads `getComputedStyle(el, "::before")`/
+// `"::after"` for every top-layer element and substitutes the full viewport whenever the pseudo
+// generates a box, declares `position: fixed`, and paints (`pseudoElementPaintsFixedOverlay`,
+// `menu-visibility.ts`, unit-tested directly) — scoped to `position: fixed` specifically (not
+// `absolute`, whose containing block this cannot resolve without over-refusing on ordinary
+// decorative pseudo-elements; see that function's own doc and the positive-control test below).
+test("an opaque position:fixed ::before on a top-layer popover host cannot blanket the menu while the host itself stays tiny and clickable (reported bypass, critical)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "bypasspseudotop");
+    await createLoginItem(setupPage, {
+      title: "Pseudo Top Layer Target",
+      username: "pseudotop-user@example.com",
+      password: "pseudotop-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "bypasspseudotop", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await disableIov2(visit);
+    await visit.addInitScript(() => {
+      window.addEventListener("DOMContentLoaded", () => {
+        const style = document.createElement("style");
+        style.textContent =
+          "#rizzy-test-pseudo-top-host::before { content: \"\"; position: fixed; inset: 0; background: rgba(20, 20, 20, 0.95); pointer-events: none; }";
+        document.head.appendChild(style);
+        const host = document.createElement("div");
+        host.id = "rizzy-test-pseudo-top-host";
+        (host as unknown as { popover: string }).popover = "manual";
+        Object.assign(host.style, { position: "fixed", left: "0px", top: "0px", width: "1px", height: "1px" });
+        document.body.appendChild(host);
+        (host as unknown as { showPopover: () => void }).showPopover();
+      });
+    });
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Pseudo Top Layer Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    await expectIov2Disabled(visit);
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(300);
+
+    const diag = await visit.evaluate((rect) => {
+      const host = document.getElementById("rizzy-test-pseudo-top-host");
+      const frame = document.querySelector<HTMLIFrameElement>("iframe[data-rizzy-inline-menu]");
+      const previous = frame?.style.getPropertyValue("pointer-events") ?? "";
+      frame?.style.setProperty("pointer-events", "auto", "important");
+      const hitEl = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+      frame?.style.setProperty("pointer-events", previous === "" ? "none" : previous, "important");
+      return {
+        hostExists: host !== null,
+        hostRectTiny: host !== null ? host.getBoundingClientRect().width <= 20 : false,
+        hostOwnZIndex: host !== null ? getComputedStyle(host).zIndex : null,
+        rawHitIsFrame: frame !== null && hitEl === frame,
+      };
+    }, box);
+    expect(diag.hostExists).toBe(true);
+    expect(diag.hostRectTiny).toBe(true);
+    expect(diag.rawHitIsFrame).toBe(true);
+
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await visit.waitForTimeout(1000);
+
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// Reported bypass (critical; reported three times — twice as a direct probe against the built
+// extension, once as a standalone attacker-page script; one mechanism, one test): a plain,
+// NON-top-layer `position: fixed` decoy tying the frame's own maximum z-index (`MAX_Z_INDEX`),
+// appended as a body-level sibling AFTER the frame, far from the menu's own rect, with
+// `box-shadow: 0 0 0 3000px <opaque>`. Two of the three reports claimed a ~700ms main-thread stall
+// was a necessary precondition; the third claimed tight (~80ms) timing was sufficient — both are
+// consistent: 80ms is well under the content script's own 250ms `schedule()` debounce
+// (`content-script.ts`), so the rebuild that would otherwise re-win the DOM-order tie has not run
+// yet either way. This test uses the tight-timing form (no busy-loop), matching
+// `plantNestedDecoy`'s own established margin (line 1950) and far less flaky than a synchronous
+// stall.
+//
+// REPRODUCED against Gates A/B alone (confirmed by direct probe against the real built extension,
+// IOv2 disabled): `#deepOccluderRects` (`content-script.ts`) — unlike `#topLayerRects`, which
+// already widens for box-shadow/outline/filter via `pushOcclusionRect` — pushed the decoy's RAW,
+// unwidened `getBoundingClientRect()`, which never intersected the menu's expected rect, so
+// `isTopLayerClear` reported "clear" even though the decoy's box-shadow visually blanketed the
+// menu. Raw hit-testing still resolved to the real frame, and the real click filled both fields.
+//
+// FIXED: `#deepOccluderRects` now routes an element that qualifies through its OWN z-index
+// through `pushOcclusionRect` — the exact same widening the top-layer path already had — instead
+// of its raw rect (`content-script.ts`'s own doc on `#deepOccluderQualification`).
+test("a far-away, non-top-layer decoy tying the frame's max z-index with an oversized box-shadow cannot blanket the menu while it stays clickable (reported bypass, critical, triplicate reports)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "bypassdeepshadow");
+    await createLoginItem(setupPage, {
+      title: "Deep Shadow Bypass Target",
+      username: "deepshadow-user@example.com",
+      password: "deepshadow-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "bypassdeepshadow", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await disableIov2(visit);
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Deep Shadow Bypass Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    await expectIov2Disabled(visit);
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(150); // let Gate A record a real good sample first
+
+    const diag = await visit.evaluate((menuBox) => {
+      // Placed in the viewport's opposite corner from the real menu (so its own tiny,
+      // UNWIDENED rect never geometrically overlaps the menu's) — the report's own methodology
+      // for proving the pre-fix rect-intersection check structurally could not see this.
+      const decoy = document.createElement("div");
+      decoy.id = "rizzy-test-deep-shadow-decoy";
+      Object.assign(decoy.style, {
+        position: "fixed",
+        left: `${window.innerWidth - 1}px`,
+        top: `${window.innerHeight - 1}px`,
+        width: "1px",
+        height: "1px",
+        zIndex: "2147483647",
+        boxShadow: "0 0 0 3000px rgba(20, 20, 20, 0.98)",
+        pointerEvents: "none",
+      });
+      document.body.appendChild(decoy); // after the frame, a direct body-level sibling
+      const frame = document.querySelector<HTMLIFrameElement>("iframe[data-rizzy-inline-menu]");
+      const decoyRect = decoy.getBoundingClientRect();
+      const intersects = decoyRect.left < menuBox.x + menuBox.width && decoyRect.left + decoyRect.width > menuBox.x && decoyRect.top < menuBox.y + menuBox.height && decoyRect.top + decoyRect.height > menuBox.y;
+      return {
+        decoyRectIntersectsMenu: intersects,
+        framePointerEventsAtInsert: frame !== null ? getComputedStyle(frame).pointerEvents : null,
+      };
+    }, box);
+    expect(diag.decoyRectIntersectsMenu).toBe(false);
+    expect(diag.framePointerEventsAtInsert).toBe("auto");
+
+    // Deliberately short — under the 250ms `schedule()` debounce, so the content script's own
+    // field-redetection rebuild has not had a chance to re-append a fresh frame after the decoy.
+    await visit.waitForTimeout(80);
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await visit.waitForTimeout(500);
+
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// Reported bypass (critical; reported twice — one mechanism, one test): a body-level sibling
+// host, appended AFTER the frame, whose OWN `z-index` stays `"auto"` (so the pre-fix
+// `#scanElementForDeepOccluders` never even considers it a candidate), while its `::before`
+// pseudo-element independently declares `position: fixed; inset: 0; z-index: 2147483647`. Per
+// CSS2.1 Appendix E step 6 (equal z-index within the same stacking context paints in tree order,
+// later wins), the pseudo-element's own stacking context ties the frame's and comes after it —
+// the host's own (irrelevant) z-index was never the thing that mattered.
+//
+// REPRODUCED against Gates A/B alone (confirmed by direct probe against the real built extension,
+// IOv2 disabled, tight ~80ms timing — no stall needed): the host's own computed z-index stayed
+// `"auto"` throughout, confirming the pre-fix scan would never have flagged it by any means, while
+// raw hit-testing at the real candidate's centre still resolved to the real frame.
+//
+// FIXED: `#deepOccluderQualification` (`content-script.ts`) now also checks whether a
+// `::before`/`::after` pseudo-element ties the max z-index (`pseudoElementTiesMaxZIndex`,
+// `menu-visibility.ts`, unit-tested directly) — only for an element already known to follow the
+// frame in tree order, the same bound that keeps the existing host-only check affordable. A
+// qualification via a pseudo-element has no rect of its own to widen, so it conservatively
+// occludes the full viewport, same as the `::backdrop`/top-layer-pseudo cases.
+test("a decoy whose own z-index stays auto but whose ::before ties the frame's max z-index still cannot intercept the real click (reported bypass, critical, duplicate reports)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "bypassdeeppseudo");
+    await createLoginItem(setupPage, {
+      title: "Deep Pseudo Bypass Target",
+      username: "deeppseudo-user@example.com",
+      password: "deeppseudo-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "bypassdeeppseudo", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await disableIov2(visit);
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Deep Pseudo Bypass Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    await expectIov2Disabled(visit);
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(150); // let Gate A record a real good sample first
+
+    const diag = await visit.evaluate(() => {
+      const style = document.createElement("style");
+      style.textContent =
+        "#rizzy-test-deep-pseudo-host::before { content: \"\"; position: fixed; inset: 0; z-index: 2147483647; background: rgba(20, 20, 20, 0.95); pointer-events: none; }";
+      document.head.appendChild(style);
+      const host = document.createElement("div");
+      host.id = "rizzy-test-deep-pseudo-host";
+      document.body.appendChild(host); // after the frame, a direct body-level sibling
+      return { hostOwnZIndex: getComputedStyle(host).zIndex };
+    });
+    expect(diag.hostOwnZIndex).toBe("auto");
+
+    // Deliberately short — under the 250ms `schedule()` debounce, matching the direct-sibling
+    // box-shadow test above.
+    await visit.waitForTimeout(80);
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await visit.waitForTimeout(500);
+
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// False-refusal report (not a credential leak — a denial of autofill availability): an open
+// popover's `::backdrop` styled with a CSS Color 4 functional notation (`oklch()`/`lab()`/
+// `color(display-p3 ...)`) and a near-zero alpha — e.g. Tailwind v4's default palette, which ships
+// entirely in `oklch()`. Confirmed by direct probe against real Chromium (not merely against the
+// shipped function): `getComputedStyle(el).backgroundColor` for a `background-color` authored in
+// `oklch()`/`lab()`/`color(...)` is serialised back in that SAME function notation, never
+// converted to `rgb()`, even fully inside the sRGB gamut — unlike `hsl()`, which Chromium does
+// convert to `rgba()`. The pre-fix `isBackdropOccluding` (`menu-visibility.ts`) only matched
+// `rgb()`/`rgba()`, so every one of these was treated as "unparseable" and refused unconditionally
+// ("only ever refuse more" — but the CORRECT value here, after parsing the alpha, is "not
+// occluding").
+//
+// FIXED: `isBackdropOccluding` now also matches `oklch()`/`oklab()`/`lab()`/`lch()`/`hwb()`/
+// `color()` (and the modern space/slash form of `rgb()`/`hsl()`), extracting the same trailing
+// CSS Color 4 `/ <alpha>` slash syntax (`menu-visibility.test.ts` exercises the parser directly).
+// This test also confirms the fix stays a parser, not a loosening: a near-OPAQUE backdrop
+// authored the same way still refuses, on the SAME page.
+test("a near-transparent oklch() popover::backdrop no longer refuses the fill forever, but a near-opaque one still does (false-refusal fix, scoped)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "oklchbackdropuser");
+    await createLoginItem(setupPage, {
+      title: "Oklch Backdrop Target",
+      username: "oklchbackdrop-user@example.com",
+      password: "oklchbackdrop-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "oklchbackdropuser", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await disableIov2(visit);
+    await visit.addInitScript(() => {
+      window.addEventListener("DOMContentLoaded", () => {
+        const style = document.createElement("style");
+        style.id = "rizzy-test-oklch-backdrop-style";
+        style.textContent = "#rizzy-test-oklch-popover::backdrop { background: oklch(0 0 0 / 0.01); }";
+        document.head.appendChild(style);
+        const pop = document.createElement("div");
+        pop.id = "rizzy-test-oklch-popover";
+        (pop as unknown as { popover: string }).popover = "manual";
+        Object.assign(pop.style, { position: "fixed", left: "0px", top: "0px", width: "1px", height: "1px" });
+        document.body.appendChild(pop);
+        (pop as unknown as { showPopover: () => void }).showPopover();
+      });
+    });
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Oklch Backdrop Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    await expectIov2Disabled(visit);
+
+    // Confirms the real Chromium serialisation this fix depends on, not merely the test's own
+    // intent — the whole report hinges on the browser NOT converting this to rgb().
+    const backdropBg = await visit.evaluate(() => {
+      const pop = document.getElementById("rizzy-test-oklch-popover");
+      return pop !== null ? getComputedStyle(pop, "::backdrop").backgroundColor : null;
+    });
+    expect(backdropBg).toMatch(/^oklch\(/);
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(500);
+
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(visit.locator("#user")).toHaveValue("oklchbackdrop-user@example.com", { timeout: 15_000 });
+    await expect(visit.locator("#pass")).toHaveValue("oklchbackdrop-target-password", { timeout: 15_000 });
+
+    // Negative control, same page, same mechanism: a near-OPAQUE oklch() backdrop must still
+    // refuse — proves this is a parser fix, not "stop checking backdrop alpha."
+    await visit.evaluate(() => {
+      const style = document.getElementById("rizzy-test-oklch-backdrop-style");
+      if (style !== null) {
+        style.textContent = "#rizzy-test-oklch-popover::backdrop { background: oklch(0 0 0 / 0.95); }";
+      }
+    });
+    await visit.waitForTimeout(500);
+    const pointerEventsIsNone = () => visit.locator("iframe[data-rizzy-inline-menu]").evaluate((el) => getComputedStyle(el).pointerEvents === "none");
+    await expect.poll(pointerEventsIsNone, { timeout: 5_000 }).toBe(true);
+
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// Positive control (false-refusal check, not a reported bypass): an ORDINARY, honestly-coded page
+// with a common decorative pattern — a cookie-consent-style widget whose `::before` is a small
+// `position: absolute` caret/badge with its own background and a plain (non-`MAX_Z_INDEX`)
+// `z-index` — must still fill normally. This is exactly the shape the fourth round's two
+// pseudo-element fixes (top-layer and deep-occluder) are deliberately narrow about NOT flagging:
+// `pseudoElementPaintsFixedOverlay` requires `position: fixed` (not `absolute`), and
+// `pseudoElementTiesMaxZIndex` requires an EXACT tie to `MAX_Z_INDEX` (`2147483647`), never merely
+// "high" — real pages essentially never use that exact value by accident.
+test("an ordinary decorative ::before (position: absolute, modest z-index) on an unrelated widget does not break autofill (false-refusal check)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "decorativepseudouser");
+    await createLoginItem(setupPage, {
+      title: "Decorative Pseudo Target",
+      username: "decorativepseudo-user@example.com",
+      password: "decorativepseudo-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "decorativepseudouser", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await visit.addInitScript(() => {
+      window.addEventListener("DOMContentLoaded", () => {
+        const style = document.createElement("style");
+        style.textContent =
+          "#rizzy-test-decorative-widget { position: fixed; right: 8px; bottom: 8px; z-index: 5; background: #eee; padding: 4px; }" +
+          '#rizzy-test-decorative-widget::before { content: "\\25B2"; position: absolute; top: -6px; left: 4px; width: 8px; height: 6px; background: red; z-index: 5; }';
+        document.head.appendChild(style);
+        const widget = document.createElement("div");
+        widget.id = "rizzy-test-decorative-widget";
+        widget.textContent = "Cookie settings";
+        document.body.appendChild(widget);
+      });
+    });
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Decorative Pseudo Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(500);
+
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(visit.locator("#user")).toHaveValue("decorativepseudo-user@example.com", { timeout: 15_000 });
+    await expect(visit.locator("#pass")).toHaveValue("decorativepseudo-target-password", { timeout: 15_000 });
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});

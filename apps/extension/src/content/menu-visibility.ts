@@ -309,6 +309,119 @@ function parseOneBoxShadow(shadow: string): number | undefined {
   return Math.abs(offsetX) + Math.abs(offsetY) + spread + blur * 2;
 }
 
+/**
+ * The margin an element's own CSS `outline` can paint beyond its border box (A7 outline-escape
+ * fix, fourth adversarial round: a 1×1 top-layer popover with `outline-style: solid;
+ * outline-width: 3000px` blankets the viewport exactly like the already-fixed box-shadow case —
+ * `outline` paints a uniform ring around the border box, offset outward by `outline-offset` (a
+ * NEGATIVE offset pulls the ring inward and contributes nothing extra — this never subtracts,
+ * matching {@link parseBoxShadowMarginPx}'s own "only ever refuse more" contract), and like
+ * `box-shadow`, never changes `getBoundingClientRect()` and never participates in hit-testing
+ * (spec).
+ *
+ * Zero whenever `outlineStyle` is `"none"` — the one value that means nothing is actually painted
+ * regardless of `outline-width` (spec: `outline-width`'s own computed value does not depend on
+ * `outline-style`, so a browser can report a non-zero width even for a `none` outline; reading
+ * width alone without this check would widen for an outline that paints nothing at all, a
+ * needless false-refusal risk on the overwhelming majority of elements, which have some leftover
+ * `outline-width` from the UA stylesheet but no visible outline).
+ *
+ * Returns `undefined`, never a small number, for a width or offset this cannot parse as a plain
+ * `px` length (an unexpected computed-style shape from a future browser quirk) — the caller must
+ * then widen its own fallback, never narrow it, matching {@link parseBoxShadowMarginPx}'s own
+ * contract.
+ */
+export function parseOutlineMarginPx(outlineStyle: string, outlineWidthPx: string, outlineOffsetPx: string): number | undefined {
+  if (outlineStyle.trim() === "none") {
+    return 0;
+  }
+  const width = parsePxLength(outlineWidthPx);
+  const offset = parsePxLength(outlineOffsetPx);
+  if (width === undefined || offset === undefined) {
+    return undefined;
+  }
+  return Math.max(0, width + offset);
+}
+
+const PX_LENGTH = /^(-?\d+(?:\.\d+)?)px$/;
+
+function parsePxLength(value: string): number | undefined {
+  const match = PX_LENGTH.exec(value.trim());
+  if (match === null) {
+    return undefined;
+  }
+  return Number(match[1]);
+}
+
+/**
+ * Whether a `::before`/`::after` pseudo-element's own computed style indicates it independently
+ * ties the frame's maximum z-index in a way that can actually affect paint ORDER (A7
+ * pseudo-element deep-occluder fix, fourth adversarial round): a host element whose own z-index
+ * stays `"auto"` can still win the document-order tie against the frame if its generated content
+ * declares its OWN `position`/`z-index` — CSS2.1 Appendix E step 6 (equal z-index within the same
+ * stacking context paints in tree order, later wins) applies to the pseudo-element's own
+ * independently-established stacking context exactly as it would to a real sibling element, and
+ * `#scanElementForDeepOccluders` (`content-script.ts`) previously only ever read the HOST
+ * element's own computed z-index, never its pseudo-elements'.
+ *
+ * Two conditions, both required, matching spec precisely rather than over-flagging: `content` must
+ * generate a real box (`"none"`/`"normal"` renders nothing at all, regardless of any other
+ * declared property — the whole stacking-context question is moot with no box to paint), and
+ * `position` must not be `"static"` (per spec, `z-index` has no effect on a statically positioned
+ * box — only a positioned element, or a flex/grid item, participates in z-index stacking at all,
+ * so a static pseudo-element's `z-index` is inert regardless of its value; checking this costs
+ * nothing and only ever REDUCES false-refusal risk, never security coverage, since a static
+ * pseudo-element genuinely cannot escalate above the frame this way in any browser).
+ */
+export function pseudoElementTiesMaxZIndex(content: string, position: string, zIndex: string): boolean {
+  if (content === "none" || content === "normal") {
+    return false;
+  }
+  if (position === "static") {
+    return false;
+  }
+  const z = Number(zIndex);
+  return Number.isFinite(z) && z >= MAX_Z_INDEX;
+}
+
+/**
+ * Whether a `::before`/`::after` pseudo-element visually paints an overlay that can occlude the
+ * menu while escaping its HOST element's own (possibly 1×1) border box (A7 pseudo-element
+ * top-layer fix, fourth adversarial round): a top-layer host (a `popover`/`dialog`/fullscreen
+ * element `#topLayerRects` already finds) can stay genuinely tiny while its generated content
+ * independently declares `position: fixed; inset: 0` plus a background — `pushOcclusionRect`
+ * (`content-script.ts`) only ever reads the HOST element's own rect/filter/box-shadow, which never
+ * sees this: a pseudo-element has no `Element`/`Node` of its own and no `getBoundingClientRect()`
+ * to read, the same structural gap {@link isBackdropOccluding} already closes for `::backdrop`.
+ *
+ * Scoped to exactly `position: "fixed"` — the one case whose containing block is, in the ordinary
+ * case (no transformed/filtered/contained ancestor establishing a different one), the viewport
+ * itself, so there is nothing ambiguous to bound. `position: "absolute"` is deliberately NOT
+ * treated the same way: its containing block is whichever positioned ancestor is nearest, which
+ * this function cannot resolve without replicating CSS containing-block resolution, and
+ * `position: absolute` generated content (badges, carets, tooltips) is common, ordinary,
+ * decorative CSS — treating every one of those as a full-viewport occluder would be a real,
+ * unbounded false-refusal regression, not a narrow fix. Left as a named, narrower scope than this
+ * closes, not a silently unclosed gap.
+ *
+ * Reuses {@link isBackdropOccluding} and {@link parseBoxShadowMarginPx} — the same fail-closed
+ * "only ever refuse more" parsers this module already uses for the element-level and `::backdrop`
+ * cases — rather than inventing a third paint-opacity classifier.
+ */
+export function pseudoElementPaintsFixedOverlay(content: string, position: string, backgroundColor: string, backgroundImage: string, boxShadow: string): boolean {
+  if (content === "none" || content === "normal") {
+    return false;
+  }
+  if (position !== "fixed") {
+    return false;
+  }
+  if (isBackdropOccluding(backgroundColor, backgroundImage)) {
+    return true;
+  }
+  const shadowMargin = parseBoxShadowMarginPx(boxShadow);
+  return shadowMargin === undefined || shadowMargin > 0;
+}
+
 /** How opaque a top-layer element's own `::backdrop` pseudo-element's `background-color` must be
  * (its alpha channel) before it counts as occluding (A7 bypass fix: an opaque,
  * `pointer-events: none` `popover::backdrop` blankets the viewport while the popover element
@@ -325,12 +438,37 @@ function parseOneBoxShadow(shadow: string): number | undefined {
  * never trips this. */
 const BACKDROP_ALPHA_THRESHOLD = 0.05;
 
+/** Legacy comma-separated `rgb()`/`rgba()` — Chromium's own normal serialisation for a
+ * `background-color` authored in that notation, or in `hsl()`/`hsla()` (confirmed by direct
+ * probe: Chromium converts `hsl()`/`hsla()` back to `rgba()` in computed style, in-gamut or not).
+ * The alpha group is optional; its absence means fully opaque (alpha 1), same convention as an
+ * omitted 4th channel in the CSS spec itself. */
+const LEGACY_RGB_FUNCTION = /^rgba?\(\s*[\d.]+%?\s*,\s*[\d.]+%?\s*,\s*[\d.]+%?\s*(?:,\s*([\d.]+%?)\s*)?\)$/;
+
+/** A CSS Color 4 functional notation — `oklch()`, `oklab()`, `lab()`, `lch()`, `hwb()`,
+ * `color(...)`, or the modern space/slash form of `rgb()`/`hsl()` (A7 false-refusal fix, fourth
+ * adversarial round: confirmed by direct probe against real Chromium — a `background-color`
+ * authored in `oklch()`/`lab()`/`color(display-p3 ...)` is serialised back in that SAME function
+ * notation, never converted to `rgb()`, even for a colour fully inside the sRGB gamut; Tailwind
+ * v4's entire default palette, and any design-system token authored this way, trips this). The
+ * only thing this module needs from any of these is the trailing `/ <alpha>` CSS Color 4 slash
+ * syntax — every one of these functions can end in `/ <alpha-value>` right before the closing
+ * paren, and every component before it (`L`/`C`/`H`, a colour-space keyword, `none` for a missing
+ * component) is irrelevant to occlusion, which only ever cares about alpha. An explicit `none`
+ * alpha component is deliberately NOT matched by the capture group below — a rare, exotic shape
+ * whose actually-rendered alpha this module has not verified, so per "only ever refuse more" it
+ * falls through unmatched and refuses, rather than guessing at a value it is not sure of. No
+ * alpha segment at all (no `/`) means fully opaque, same convention as {@link LEGACY_RGB_FUNCTION}
+ * and the CSS spec's own default. */
+const MODERN_COLOR_FUNCTION = /^(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\([^/)]*(?:\/\s*([\d.]+%?)\s*)?\)$/i;
+
 /**
  * Whether a top-layer element's own `::backdrop` pseudo-element visually occludes whatever is
  * behind it: `backgroundImage` anything other than `"none"` (an image backdrop; conservatively
  * always occluding, since this cannot know the image's own transparency), or `backgroundColor`'s
- * alpha channel above {@link BACKDROP_ALPHA_THRESHOLD}. A value this cannot parse as `rgb()`/
- * `rgba()`/`transparent` refuses rather than guesses ("only ever refuse more," matching
+ * alpha channel above {@link BACKDROP_ALPHA_THRESHOLD}. `backgroundColor` is matched against
+ * {@link LEGACY_RGB_FUNCTION} first, then {@link MODERN_COLOR_FUNCTION} — a value neither
+ * recognises refuses rather than guesses ("only ever refuse more," matching
  * {@link parseBoxShadowMarginPx}'s own contract) — the one case this does NOT refuse on is the
  * empty string a pseudo-element query can return in a browser/version with no support for the
  * two-argument `getComputedStyle` form, which the caller already treats the same as "transparent"
@@ -345,7 +483,7 @@ export function isBackdropOccluding(backgroundColor: string, backgroundImage: st
   if (bg === "" || bg === "transparent") {
     return false;
   }
-  const match = /^rgba?\(\s*[\d.]+%?\s*,\s*[\d.]+%?\s*,\s*[\d.]+%?\s*(?:,\s*([\d.]+%?)\s*)?\)$/.exec(bg);
+  const match = LEGACY_RGB_FUNCTION.exec(bg) ?? MODERN_COLOR_FUNCTION.exec(bg);
   if (match === null) {
     return true;
   }

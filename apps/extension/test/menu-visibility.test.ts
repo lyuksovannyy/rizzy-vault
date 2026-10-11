@@ -18,6 +18,9 @@ import {
   isTopLayerClear,
   isVisibilityChainOk,
   parseBoxShadowMarginPx,
+  parseOutlineMarginPx,
+  pseudoElementPaintsFixedOverlay,
+  pseudoElementTiesMaxZIndex,
   recordSample,
   rectsMatch,
   type ChainStyleSample,
@@ -321,6 +324,145 @@ describe("isBackdropOccluding", () => {
 
   it("is occluding on an unparseable backgroundColor (only ever refuse more)", () => {
     expect(isBackdropOccluding("some-future-color-syntax(1 2 3)", "none")).toBe(true);
+  });
+
+  // A7 false-refusal fix, fourth adversarial round: confirmed by direct probe against real
+  // Chromium — a `background-color` authored in `oklch()`/`lab()`/`color(display-p3 ...)` is
+  // serialised back in that SAME function notation, never converted to `rgb()`, even fully inside
+  // the sRGB gamut (Tailwind v4's default palette ships entirely in `oklch()`). The pre-fix
+  // rgb()-only regex treated every one of these as unparseable and refused unconditionally,
+  // disabling autofill on any page with an open, near-transparent popover backdrop authored this
+  // way — a false refusal, not a security leak, but one `isBackdropOccluding`'s own doc commits
+  // to fixing ("only ever refuse more" cuts both ways: never refuse on a value this CAN parse).
+  it("is not occluding for a near-transparent oklch() backdrop (the measured false refusal)", () => {
+    expect(isBackdropOccluding("oklch(0 0 0 / 0.01)", "none")).toBe(false);
+  });
+
+  it("is not occluding for a near-transparent lab() or color(display-p3 ...) backdrop (same gap, different CSS Color 4 function)", () => {
+    expect(isBackdropOccluding("lab(0 0 0 / 0.01)", "none")).toBe(false);
+    expect(isBackdropOccluding("color(display-p3 0 0 0 / 0.01)", "none")).toBe(false);
+  });
+
+  it("still refuses a near-opaque oklch()/lab() backdrop — the fix parses alpha, it does not stop checking it", () => {
+    expect(isBackdropOccluding("oklch(0 0 0 / 0.95)", "none")).toBe(true);
+    expect(isBackdropOccluding("lab(0 0 0 / 0.95)", "none")).toBe(true);
+  });
+
+  it("defaults to opaque (occluding) for a CSS Color 4 function with no alpha segment at all, same convention as a bare rgb()", () => {
+    expect(isBackdropOccluding("oklch(0 0 0)", "none")).toBe(true);
+  });
+
+  it("still refuses an explicit 'none' alpha component — an exotic shape this module has not verified the real rendered alpha of (only ever refuse more)", () => {
+    expect(isBackdropOccluding("oklch(0 0 0 / none)", "none")).toBe(true);
+  });
+
+  // Regression check for the modern-function regex itself (not a realistic getComputedStyle
+  // output — a real browser never serialises an empty colour-function body): confirms the
+  // broadened regex cannot turn a value that already refused (true) into one that now allows a
+  // fill (false), the one direction that would be a security regression rather than a parser
+  // improvement. An empty body has no slash, so this defaults to alpha 1 (opaque), same as the
+  // bare-function-no-alpha case above — still occluding, same verdict as before this fix (the
+  // legacy regex also rejected these, with the same "unparseable → true" result).
+  it("still refuses an empty-body modern colour function (regex safety: broadening the match never weakens the alpha default)", () => {
+    expect(isBackdropOccluding("rgb()", "none")).toBe(true);
+    expect(isBackdropOccluding("color()", "none")).toBe(true);
+  });
+});
+
+// A7 outline-escape fix, fourth adversarial round: a 1x1 top-layer popover with
+// `outline-style: solid; outline-width: 3000px` blankets the viewport exactly like the
+// already-fixed box-shadow case — `outline` paints outside the border box and is excluded from
+// hit-testing, by spec, same as box-shadow.
+describe("parseOutlineMarginPx", () => {
+  it("returns 0 when outline-style is 'none', regardless of a leftover outline-width (the UA-stylesheet default on most elements)", () => {
+    expect(parseOutlineMarginPx("none", "3px", "0px")).toBe(0);
+  });
+
+  it("parses the reported attack's own shape: a 3000px outline, no offset", () => {
+    expect(parseOutlineMarginPx("solid", "3000px", "0px")).toBe(3000);
+  });
+
+  it("adds a positive outline-offset to the width", () => {
+    expect(parseOutlineMarginPx("solid", "10px", "5px")).toBe(15);
+  });
+
+  it("a negative offset never subtracts below zero (only ever refuse more)", () => {
+    expect(parseOutlineMarginPx("solid", "2px", "-100px")).toBe(0);
+  });
+
+  it("an ordinary small focus-ring outline stays small (no false-refusal blast radius)", () => {
+    expect(parseOutlineMarginPx("solid", "2px", "2px")).toBeLessThan(10);
+  });
+
+  it("treats outline-style: auto (the UA default focus ring) as painting, not as 'none'", () => {
+    expect(parseOutlineMarginPx("auto", "3px", "0px")).toBe(3);
+  });
+
+  it("returns undefined for a width or offset this cannot parse as a plain px length", () => {
+    expect(parseOutlineMarginPx("solid", "thick", "0px")).toBeUndefined();
+    expect(parseOutlineMarginPx("solid", "3000px", "unparseable")).toBeUndefined();
+  });
+});
+
+// A7 pseudo-element deep-occluder fix, fourth adversarial round: a host whose OWN z-index stays
+// "auto" can still win the document-order tie against the frame if its `::before`/`::after`
+// independently declares a positioned, max-z-index stacking context.
+describe("pseudoElementTiesMaxZIndex", () => {
+  it("ties when content generates a box, position is non-static, and z-index equals the max", () => {
+    expect(pseudoElementTiesMaxZIndex('""', "fixed", String(MAX_Z_INDEX))).toBe(true);
+  });
+
+  it("does not tie when content is 'none' (no box is generated at all, regardless of z-index)", () => {
+    expect(pseudoElementTiesMaxZIndex("none", "fixed", String(MAX_Z_INDEX))).toBe(false);
+  });
+
+  it("does not tie when content is 'normal' (the default: no pseudo-element rule at all)", () => {
+    expect(pseudoElementTiesMaxZIndex("normal", "fixed", String(MAX_Z_INDEX))).toBe(false);
+  });
+
+  it("does not tie when position is 'static' (z-index has no effect on a static box, by spec)", () => {
+    expect(pseudoElementTiesMaxZIndex('""', "static", String(MAX_Z_INDEX))).toBe(false);
+  });
+
+  it("does not tie on a z-index below the max", () => {
+    expect(pseudoElementTiesMaxZIndex('""', "fixed", "9999")).toBe(false);
+  });
+
+  it("ties for position: absolute too (ordinary DOM stacking, not the top-layer paint question)", () => {
+    expect(pseudoElementTiesMaxZIndex('""', "absolute", String(MAX_Z_INDEX))).toBe(true);
+  });
+});
+
+// A7 pseudo-element top-layer fix, fourth adversarial round: a top-layer host (popover/dialog/
+// fullscreen) can stay genuinely tiny while its `::before`/`::after` independently paints a
+// `position: fixed` overlay — `pushOcclusionRect` only ever reads the HOST element's own rect.
+describe("pseudoElementPaintsFixedOverlay", () => {
+  it("paints when content generates a box, position is fixed, and the background is opaque (the reported attack's own shape)", () => {
+    expect(pseudoElementPaintsFixedOverlay('""', "fixed", "rgba(0, 0, 0, 1)", "none", "none")).toBe(true);
+  });
+
+  it("does not paint when content is 'none'", () => {
+    expect(pseudoElementPaintsFixedOverlay("none", "fixed", "rgba(0, 0, 0, 1)", "none", "none")).toBe(false);
+  });
+
+  it("does not paint when content is 'normal' (no pseudo-element rule at all)", () => {
+    expect(pseudoElementPaintsFixedOverlay("normal", "fixed", "rgba(0, 0, 0, 1)", "none", "none")).toBe(false);
+  });
+
+  it("does NOT paint for position: absolute, deliberately — a common, ordinary decorative shape (named, narrower scope than this fix closes, not a silent gap)", () => {
+    expect(pseudoElementPaintsFixedOverlay('""', "absolute", "rgba(0, 0, 0, 1)", "none", "none")).toBe(false);
+  });
+
+  it("does not paint when fixed but fully transparent and no box-shadow (an ordinary, harmless fixed pseudo-element)", () => {
+    expect(pseudoElementPaintsFixedOverlay('""', "fixed", "rgba(0, 0, 0, 0)", "none", "none")).toBe(false);
+  });
+
+  it("paints via an oversized box-shadow alone, even with a transparent background", () => {
+    expect(pseudoElementPaintsFixedOverlay('""', "fixed", "rgba(0, 0, 0, 0)", "none", "rgba(0, 0, 0, 0.9) 0px 0px 0px 3000px")).toBe(true);
+  });
+
+  it("paints via a background-image, conservatively, regardless of backgroundColor", () => {
+    expect(pseudoElementPaintsFixedOverlay('""', "fixed", "rgba(0, 0, 0, 0)", "url(cover.png)", "none")).toBe(true);
   });
 });
 
