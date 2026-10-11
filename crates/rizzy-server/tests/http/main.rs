@@ -23,6 +23,7 @@
 )]
 
 mod account;
+mod attack;
 mod common;
 mod conventions;
 mod headers;

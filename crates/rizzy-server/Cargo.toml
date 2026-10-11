@@ -71,6 +71,12 @@ rizzy-client.workspace = true
 # `ServiceExt::oneshot`: drives the router in-process in `tests/http`. Already in the graph
 # through axum.
 tower.workspace = true
+# The deterministic/fresh-seed case generator of the bulk attack harness
+# (`tests/http/attack.rs`), following `rizzy-sync`'s `convergence/generate.rs` pattern
+# (`Seeds::Fixed` for the PR budget, `Seeds::Fresh` for nightly). Already a workspace
+# dev-dependency of `rizzy-client`, `rizzy-core`, `rizzy-import`, `rizzy-match` and `rizzy-sync`;
+# no new crate.
+proptest.workspace = true
 # The seeded ChaCha20Rng of the test clients (ADR 0009 test RNG). Test-only.
 chacha20.workspace = true
 
