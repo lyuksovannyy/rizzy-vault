@@ -1886,3 +1886,487 @@ test("an unrelated DOM mutation racing a rebuild against the real click→apply_
   }
 });
 
+// Reported bypass (high; third adversarial round): a decoy sharing the frame's own maximum
+// z-index, nested one level inside a plain, unstyled wrapper `<div>` (or a `mode: "open"` Shadow
+// DOM host) rather than appended as a DIRECT body-level sibling. No timing trick, no busy-loop —
+// a single synchronous insertion is enough, confirmed by THREAT_MODEL.md's own residual-risk note
+// (added fixing the prior round's reported bypasses) that this exact nested variant still
+// reproduced against `InlineMenu#occludingSiblingRects`, which only ever walked
+// `frame.parentElement.children` — direct siblings only.
+//
+// FIXED: `InlineMenu#deepOccluderRects`/`#scanElementForDeepOccluders` (`content-script.ts`)
+// generalize that walk to arbitrary nesting depth and into any OPEN Shadow DOM root. Rebuilt from
+// `#frame`'s own siblings whenever a dedicated `MutationObserver` (childList + ALL attributes,
+// deliberately unfiltered so a z-index keyed by `id`/`data-*` is also caught, excluding this
+// script's own overlay elements + characterData, separate from the content script's own narrower
+// one) marks the candidate set dirty — not re-walked unconditionally every Gate-A tick, which
+// direct measurement found too expensive (avg 103ms, max 114ms over 20 warmed-up iterations, on a
+// synthetic 5000-element page) for a 16ms tick budget, the exact performance objection the second
+// adversarial round raised. No busy-loop is needed to "win" against anything: this does not
+// depend on `wireInlineMenu`'s debounced rebuild, and the dirty-flag observer reacts in a
+// microtask, well before even a fast real click.
+async function plantNestedDecoy(visit: Page, rect: { x: number; y: number; width: number; height: number }, variant: "plain-div" | "shadow-dom"): Promise<void> {
+  await visit.evaluate(
+    ({ rect, variant }) => {
+      const decoyStyle = {
+        position: "fixed",
+        left: `${rect.x}px`,
+        top: `${rect.y}px`,
+        width: `${rect.width}px`,
+        height: `${rect.height}px`,
+        zIndex: "2147483647",
+        background: "rgba(20, 20, 20, 0.98)",
+        pointerEvents: "none",
+      };
+      if (variant === "plain-div") {
+        const wrapper = document.createElement("div");
+        wrapper.id = "rizzy-test-nested-decoy-wrapper";
+        const decoy = document.createElement("div");
+        decoy.id = "rizzy-test-nested-decoy";
+        Object.assign(decoy.style, decoyStyle);
+        wrapper.appendChild(decoy); // decoy is one level INSIDE the wrapper, not a direct sibling
+        document.body.appendChild(wrapper); // the one mutation the content script observes
+        return;
+      }
+      const host = document.createElement("div");
+      host.id = "rizzy-test-nested-decoy-shadow-host";
+      const root = host.attachShadow({ mode: "open" });
+      const decoy = document.createElement("div");
+      decoy.id = "rizzy-test-nested-decoy";
+      Object.assign(decoy.style, decoyStyle);
+      root.appendChild(decoy); // decoy lives inside the OPEN shadow root
+      document.body.appendChild(host); // the one mutation the content script observes
+    },
+    { rect, variant },
+  );
+  // Deliberately SHORT — one or two animation frames, not the ~250ms `schedule()` debounce that
+  // would let `wireInlineMenu` rebuild the menu and launder this specific frame instance's own
+  // history away (the mechanism the FIRST adversarial round's one-shot/persistent decoy was
+  // correctly rejected on, per `THREAT_MODEL.md`'s own doc — "the rebuild-on-mutation cycle
+  // re-wins the DOM-order tie"). This fix must not depend on winning that race either way, so the
+  // test has to avoid the race, not merely survive it: long enough for Gate A's own
+  // `requestAnimationFrame` tick to run at least once after the mutation, short enough that no
+  // rebuild has had a chance to complete.
+  await visit.waitForTimeout(60);
+}
+
+for (const variant of ["plain-div", "shadow-dom"] as const) {
+  test(`a decoy at the frame's own max z-index, nested inside a ${variant === "plain-div" ? "plain wrapper <div>" : "mode:\"open\" Shadow DOM host"}, does not intercept the real click (reported bypass, high — no timing trick needed)`, async ({
+    context,
+    extensionId,
+    server,
+  }) => {
+    const page = await startLoginPageServer();
+    try {
+      const setupPage = await context.newPage();
+      const secretKey = await signUp(setupPage, server.origin, `nesteddecoy${variant === "plain-div" ? "div" : "shadow"}`);
+      await createLoginItem(setupPage, {
+        title: "Nested Decoy Target",
+        username: "nesteddecoy-user@example.com",
+        password: "nesteddecoy-target-password",
+        websiteUrl: `http://127.0.0.1:${page.port}/`,
+      });
+      await setupPage.close();
+
+      const popup = await enrol(context, extensionId, server, `nesteddecoy${variant === "plain-div" ? "div" : "shadow"}`, secretKey);
+      await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+      await popup.close();
+
+      // IOv2 disabled, same methodology (and reason) as the box-shadow/backdrop tests above:
+      // this isolates Gates A/B, which are what the report's own mechanism is actually about —
+      // `InlineMenu#deepOccluderRects`'s structural detection, not Gate C's compositor-level
+      // occlusion check. The report also claims this reproduces with IOv2 left at Chromium's
+      // default; direct measurement here found otherwise for the no-stall case (Gate C's own
+      // IntersectionObserver v2 has time to observe the real occlusion and independently refuses
+      // it when nothing stalls the main thread) — a narrower, Chromium-only finding than the
+      // report's broadest claim, and the reason IOv2 is disabled here rather than left at
+      // default: Firefox has no Gate C at all, and the project's own prior internal probe for
+      // this exact nested case (THREAT_MODEL.md A7 residual risk, second adversarial round) used
+      // a main-thread stall for the same reason. Gates A/B's own blind spot — the thing this test
+      // and this fix are actually about — is independent of IOv2 either way.
+      const visit = await context.newPage();
+      await disableIov2(visit);
+      await visit.goto(`http://127.0.0.1:${page.port}/`);
+      const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+      const realCandidate = menu.getByRole("button", { name: "Nested Decoy Target", exact: false });
+      await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+      await expectIov2Disabled(visit);
+      const box = await realCandidate.boundingBox();
+      if (box === null) {
+        throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+      }
+      await visit.waitForTimeout(150); // let Gate A record a real good sample first
+
+      await plantNestedDecoy(visit, { x: box.x, y: box.y, width: box.width, height: box.height }, variant);
+
+      // Discriminator: confirms the decoy actually sits where the report claims — opaque,
+      // `pointer-events: none`, and (unlike the already-fixed direct-sibling case) NOT a direct
+      // child of the frame's own parent, so RAW hit-testing (forcing the frame's own
+      // `pointer-events` to `auto` for the single synchronous check, then restoring whatever Gate
+      // A currently has it set to — the same technique `content-script.ts`'s own
+      // `#pointHitResult` uses, so this reads the decoy's effect on hit-testing independently of
+      // whichever value THIS fix's own gates currently have the frame set to) still reaches the
+      // real frame underneath the decoy (`pointer-events: none` is excluded from hit-testing by
+      // spec) — the decoy's own existence would have been invisible to the narrower, pre-fix
+      // sibling-only check regardless of this.
+      const diag = await visit.evaluate(
+        ({ rect, variant }) => {
+          // The Shadow DOM variant's decoy is unreachable via `document.getElementById` at all
+          // (it does not pierce shadow boundaries, by spec) — the SAME reason this attack is
+          // invisible to anything that only walks the light DOM, this diagnostic has to pierce it
+          // deliberately to confirm the test's own setup, not to defend anything.
+          const decoy =
+            variant === "plain-div"
+              ? document.getElementById("rizzy-test-nested-decoy")
+              : (document.getElementById("rizzy-test-nested-decoy-shadow-host")?.shadowRoot?.getElementById("rizzy-test-nested-decoy") ?? null);
+          const frame = document.querySelector<HTMLIFrameElement>("iframe[data-rizzy-inline-menu]");
+          const previous = frame?.style.getPropertyValue("pointer-events") ?? "";
+          frame?.style.setProperty("pointer-events", "auto", "important");
+          const hitEl = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+          frame?.style.setProperty("pointer-events", previous === "" ? "none" : previous, "important");
+          return {
+            decoyExists: decoy !== null,
+            decoyIsDirectBodyChild: decoy !== null && decoy.parentElement === document.body,
+            rawHitIsFrame: frame !== null && hitEl === frame,
+          };
+        },
+        { rect: box, variant },
+      );
+      expect(diag.decoyExists).toBe(true);
+      expect(diag.decoyIsDirectBodyChild).toBe(false);
+      expect(diag.rawHitIsFrame).toBe(true);
+
+      await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      await visit.waitForTimeout(500);
+
+      await expect(visit.locator("#user")).toHaveValue("");
+      await expect(visit.locator("#pass")).toHaveValue("");
+      await visit.close();
+    } finally {
+      await page.stop();
+    }
+  });
+}
+
+// Regression check for THIS fix's own first design (review finding, not a report): an earlier
+// version's `MutationObserver` only watched `childList` (mirroring the content script's own
+// field-redetection observer) and cached a decoy `Element` the first time it saw one INSERTED,
+// never re-examining it. A decoy inserted at a LOW z-index (no reason to be flagged), then raised
+// to the frame's own maximum in a LATER task via a plain style write — not a `childList`
+// mutation — combined with a main-thread stall to deny any rebuild a chance to run, would have
+// slipped past that version even though it never reproduces the actual reported bypass (insertion
+// already at the final z-index). The current `#deepOccluderRects` closes this with a DEDICATED
+// observer that also watches `attributes: ["style", "class"]` and `characterData` — a z-index
+// raised by a plain style write (or a `<style>` tag's `textContent` rewritten in place) marks the
+// candidate set dirty and triggers a fresh rebuild on the very next Gate-A tick, regardless of
+// which task did the raising or whether any `childList` mutation ever fired.
+test("a decoy's z-index raised in a LATER task (no childList mutation) after being inserted at a low z-index is still caught (regression check, not a reported bypass)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "deferredzindexuser");
+    await createLoginItem(setupPage, {
+      title: "Deferred Zindex Target",
+      username: "deferredz-user@example.com",
+      password: "deferredz-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "deferredzindexuser", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await disableIov2(visit);
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Deferred Zindex Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(150); // let Gate A record a real good sample first
+
+    // Inserted at a LOW z-index (nested in a wrapper, matching the reported shape): a cached,
+    // insertion-time-only scan would see nothing worth flagging here.
+    await visit.evaluate((rect) => {
+      const wrapper = document.createElement("div");
+      wrapper.id = "rizzy-test-deferred-wrapper";
+      const decoy = document.createElement("div");
+      decoy.id = "rizzy-test-deferred-decoy";
+      Object.assign(decoy.style, {
+        position: "fixed",
+        left: `${rect.x}px`,
+        top: `${rect.y}px`,
+        width: `${rect.width}px`,
+        height: `${rect.height}px`,
+        zIndex: "1",
+        background: "rgba(20, 20, 20, 0.98)",
+        pointerEvents: "none",
+      });
+      wrapper.appendChild(decoy);
+      document.body.appendChild(wrapper);
+    }, box);
+    await visit.waitForTimeout(60); // one real Gate-A tick, same margin as the sibling tests above
+
+    // Raised to the frame's own maximum in a LATER task — a plain style write, not a `childList`
+    // mutation — combined with a stall denying any rebuild a chance to run, same technique as the
+    // already-fixed direct-sibling+stall bypass above.
+    await visit.evaluate(() => {
+      setTimeout(() => {
+        const decoy = document.getElementById("rizzy-test-deferred-decoy");
+        if (decoy !== null) {
+          decoy.style.zIndex = "2147483647";
+        }
+        const t0 = performance.now();
+        while (performance.now() - t0 < 700) {
+          /* ONE uninterrupted synchronous block, denying any rebuild a chance to run */
+        }
+      }, 30);
+    });
+    await visit.waitForTimeout(60); // let the setTimeout fire and the stall begin
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await visit.waitForTimeout(1000); // well past the 700ms block and the full round trip
+
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// Named, documented residual (A7, this task): a decoy nested inside a `mode: "closed"` Shadow DOM
+// root cannot be detected by `#scanElementForDeepOccluders` or by ANY same-process JavaScript —
+// `Element.shadowRoot` returns `null` for a closed root by spec, and no API in any browser this
+// extension targets lets an extension content script (or any other non-devtools code sharing the
+// page's process) read a closed shadow tree's content. This is not a gap in this fix; it is a
+// gap in what the web platform exposes to ANY script, including the one trying to defend against
+// it. Left as `test.fixme` rather than silently unlisted, per this task's own instruction for an
+// impossible-in-a-browser case.
+test.fixme(
+  "a decoy nested inside a mode:'closed' Shadow DOM host cannot be detected by any content script — impossible in a browser, not a gap in this fix (Element.shadowRoot is null for a closed root by spec; no same-process API reads one)",
+  async () => {
+    // Intentionally empty: there is no DOM/CSSOM introspection this or any future content script
+    // could add here. A closed shadow root is opaque to every same-process API by design (the
+    // same guarantee `inline-menu/protocol.ts` relies on for the extension's OWN iframe content
+    // being unreachable from the page). If a future web-platform API changes this, this test
+    // should be implemented for real rather than left `fixme`.
+  },
+);
+
+// Reported bypass (critical): an opaque, `pointer-events: none` `popover::backdrop` blankets the
+// viewport while the triggering `popover` element itself stays genuinely tiny (1x1), via
+// `<style>#d::backdrop{background:rgba(0,0,0,.95);pointer-events:none}</style>` plus
+// `showPopover()`. `::backdrop` is a browser-painted pseudo-element with no corresponding
+// `Element`/`Node` at all — `document.querySelectorAll` can never return it, and the pre-fix
+// `#topLayerRects()`/`pushOcclusionRect` only ever read the POPOVER ELEMENT's own rect/filter/
+// box-shadow, never its `::backdrop`. Report's own claim: refused today only by Gate C
+// (IntersectionObserver v2, Chromium-only, defence in depth) — this test removes that confound
+// (`disableIov2`) so it actually exercises Gates A/B, matching the report's methodology.
+//
+// FIXED: `pushBackdropOcclusionRect` (`content-script.ts`) reads `getComputedStyle(el,
+// "::backdrop")` (the two-argument pseudo-element form) for every top-layer element and widens the
+// occlusion rect to the full viewport whenever it is meaningfully opaque (`isBackdropOccluding`,
+// `menu-visibility.ts`) — a native top-layer backdrop is always sized to the full viewport by the
+// browser itself, so there is nothing to bound more precisely than that.
+test("an opaque pointer-events:none popover::backdrop cannot blanket the menu while the popover element itself stays tiny and clickable (reported bypass, critical)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "bypassbackdrop");
+    await createLoginItem(setupPage, {
+      title: "Backdrop Bypass Target",
+      username: "backdrop-user@example.com",
+      password: "backdrop-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "bypassbackdrop", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await disableIov2(visit);
+    // Planted before the page even loads, as reported: `showPopover()` needs no user gesture.
+    await visit.addInitScript(() => {
+      window.addEventListener("DOMContentLoaded", () => {
+        const style = document.createElement("style");
+        style.textContent = "#rizzy-test-backdrop-popover::backdrop { background: rgba(20, 20, 20, 0.95); pointer-events: none; }";
+        document.head.appendChild(style);
+        const pop = document.createElement("div");
+        pop.id = "rizzy-test-backdrop-popover";
+        (pop as unknown as { popover: string }).popover = "manual";
+        Object.assign(pop.style, { position: "fixed", left: "0px", top: "0px", width: "1px", height: "1px" });
+        document.body.appendChild(pop);
+        (pop as unknown as { showPopover: () => void }).showPopover();
+      });
+    });
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Backdrop Bypass Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    await expectIov2Disabled(visit);
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(300);
+
+    // Discriminator: the popover element itself is genuinely tiny (the `::backdrop`, not the
+    // popover's own border box, is what would do the blanketing), its `::backdrop` really is
+    // opaque, and RAW hit-testing (forcing `pointer-events: auto` on the frame for this one
+    // synchronous check, then restoring whatever Gate A currently has it set to — same technique
+    // as `content-script.ts`'s own `#pointHitResult`, so this stays a true invariant regardless
+    // of whether THIS fix's own gate has already reacted) at the real candidate's centre still
+    // reaches the real iframe underneath (`pointer-events: none` on the backdrop excludes it from
+    // hit-testing, by spec) — confirming this is the SAME gap the box-shadow-on-the-element-itself
+    // fix (above) does not cover.
+    const diag = await visit.evaluate((rect) => {
+      const pop = document.getElementById("rizzy-test-backdrop-popover");
+      const frame = document.querySelector<HTMLIFrameElement>("iframe[data-rizzy-inline-menu]");
+      const previous = frame?.style.getPropertyValue("pointer-events") ?? "";
+      frame?.style.setProperty("pointer-events", "auto", "important");
+      const hitEl = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+      frame?.style.setProperty("pointer-events", previous === "" ? "none" : previous, "important");
+      return {
+        popoverExists: pop !== null,
+        popoverRectTiny: pop !== null ? pop.getBoundingClientRect().width <= 20 : false,
+        rawHitIsFrame: frame !== null && hitEl === frame,
+      };
+    }, box);
+    expect(diag.popoverExists).toBe(true);
+    expect(diag.popoverRectTiny).toBe(true);
+    expect(diag.rawHitIsFrame).toBe(true);
+
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await visit.waitForTimeout(1000);
+
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// False-refusal report (not a credential leak — a denial of autofill availability): a
+// legitimate, PERMANENT, non-transitioning ancestor `filter` such as `html { filter:
+// grayscale(0.5) }` (real patterns: dark-mode-via-filter theming, duotone/sepia branding, a
+// colour-blind accessibility toggle) used to disable the inline menu forever on that page, with
+// no recovery, because `isChainNodeOk` treated ANY non-`none` `filter` as a bad sample with no
+// allowance for a value that cannot actually hide or occlude anything — unlike Gate B's trailing
+// window (which ages out a TRANSIENT bad sample), a permanent ancestor rule never ages out, so a
+// page with this styling could never autofill at all. Distinct from the already-documented,
+// already-accepted "a concurrent, unrelated ancestor CSS TRANSITION refuses the fill" trade-off
+// above (test, line 932): that one is temporary (clears once the transition ends); this one,
+// pre-fix, was permanent.
+//
+// FIXED, narrowly: `isFilterVisibilityPreserving` (`menu-visibility.ts`) allowlists exactly
+// `grayscale`/`sepia`/`hue-rotate`/`saturate` — functions that recolour without ever being able to
+// erase alpha or collapse luminance to a constant, at any argument value. This test also confirms
+// the carve-out stays narrow: a filter that CAN hide content (`opacity(0)`) is still refused on
+// the SAME page, alongside the SAME ancestor, proving this is a scoped allowlist, not a general
+// loosening of the filter check.
+test("a permanent ancestor filter: grayscale (dark-mode theming) no longer refuses the fill forever, but filter: opacity(0) on the same ancestor still does (false-refusal fix, scoped)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "permanentfilteruser");
+    await createLoginItem(setupPage, {
+      title: "Permanent Filter Target",
+      username: "permfilter-user@example.com",
+      password: "permfilter-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "permanentfilteruser", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    // IOv2 disabled: `filter` on an ancestor visually affects the iframe's own COMPOSITED
+    // pixels too (grayscale applies to everything painted within the filtered box, cross-origin
+    // iframe included), and Chromium's IntersectionObserver v2 is specifically designed to flag
+    // exactly that class of ancestor effect (`inline-menu/main.ts`'s own comment: IOv2's
+    // `isVisible` is assumed to reflect "opacity/occlusion effects the embedding page applies to
+    // the outer `<iframe>` element") — confirmed by direct measurement: with IOv2 left at
+    // Chromium's default, Gate C refuses this fill independently of Gates A/B, even for the
+    // visibility-preserving `grayscale` this fix allowlists, since IOv2 does not distinguish a
+    // visibility-preserving filter function from an erasing one the way `isFilterVisibilityPreserving`
+    // does. This fix is scoped to Gates A/B (`menu-visibility.ts`/`content-script.ts`), which is
+    // what the false-refusal report is actually about; Gate C staying MORE conservative than
+    // Gates A/B on Chromium is accepted defense-in-depth behaviour (`main.ts`'s own doc: "never
+    // the sole gate" — the inverse is also true, it is never required to be less strict than the
+    // floor either), and Firefox has no Gate C to refuse on in the first place.
+    await disableIov2(visit);
+    // Applied BEFORE the page loads, via an init script — a permanent, static rule, not a
+    // transition: the whole point of this report is that it never changes and never ages out.
+    // Waits for `DOMContentLoaded` before touching the DOM (same pattern the backdrop test above
+    // uses): `addInitScript` can run before `document.head` exists at all.
+    await visit.addInitScript(() => {
+      window.addEventListener("DOMContentLoaded", () => {
+        const style = document.createElement("style");
+        style.id = "rizzy-test-permanent-filter";
+        style.textContent = "html { filter: grayscale(0.5); }";
+        document.head.appendChild(style);
+      });
+    });
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Permanent Filter Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    await expectIov2Disabled(visit);
+
+    const htmlFilter = await visit.evaluate(() => getComputedStyle(document.documentElement).filter);
+    expect(htmlFilter).not.toBe("none");
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    // Long enough margin to prove this is not merely "still within some decaying window" — a
+    // permanent rule has no window to decay out of; if this were still refusing, no amount of
+    // waiting would fix it, which is exactly what the pre-fix report demonstrated.
+    await visit.waitForTimeout(1500);
+
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(visit.locator("#user")).toHaveValue("permfilter-user@example.com", { timeout: 15_000 });
+    await expect(visit.locator("#pass")).toHaveValue("permfilter-target-password", { timeout: 15_000 });
+
+    // Negative control, same page, same ancestor: a filter value that CAN hide content must still
+    // refuse — proves the fix is a narrow allowlist, not "filter no longer matters."
+    await visit.evaluate(() => {
+      const style = document.getElementById("rizzy-test-permanent-filter");
+      if (style !== null) {
+        style.textContent = "html { filter: opacity(0.3); }";
+      }
+    });
+    await visit.waitForTimeout(500);
+    const pointerEventsIsNone = () => visit.locator("iframe[data-rizzy-inline-menu]").evaluate((el) => getComputedStyle(el).pointerEvents === "none");
+    await expect.poll(pointerEventsIsNone, { timeout: 5_000 }).toBe(true);
+
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+

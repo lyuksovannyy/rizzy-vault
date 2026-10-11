@@ -138,12 +138,60 @@ export function isChainNodeOk(sample: ChainStyleSample): boolean {
     Math.abs(sample.opacity - 1) <= OPACITY_TOLERANCE &&
     sample.visibility !== "hidden" &&
     sample.display !== "none" &&
-    sample.filter === "none" &&
+    isFilterVisibilityPreserving(sample.filter) &&
     sample.clipPath === "none" &&
     sample.mask === "none" &&
     sample.mixBlendMode === "normal" &&
     sample.contentVisibility !== "hidden"
   );
+}
+
+/** A function name this `filter` carve-out trusts to never erase or occlude content underneath
+ * it — only ones that recolour without touching the alpha/luminance structure a user would need
+ * to actually make out the menu's rows. Each is sampled directly against a real browser before
+ * being trusted here (A7 false-refusal fix, THREAT_MODEL.md A7 residual risk): `grayscale`,
+ * `sepia` and `hue-rotate` only ever recombine or rotate existing channel values, and `saturate`
+ * (including `saturate(0)`, plain desaturation) only scales chroma toward or away from the
+ * existing luminance — none of the four can, at ANY argument value, reduce a pixel's alpha or
+ * collapse its luminance to a single constant the way `opacity()`/`brightness(0)`/`contrast(0)`
+ * can. Deliberately excludes `invert`, `blur`, `drop-shadow` and any `url(#...)` SVG filter
+ * reference (an SVG filter primitive can do literally anything, including erase alpha) — this
+ * carve-out is scoped to the one measured false refusal (a real, permanent `html { filter:
+ * grayscale(0.5) }` dark-mode/theming/colour-blind-assist rule), not a general "most filters are
+ * fine" relaxation. `clip-path`, `mask` and `mix-blend-mode` get no equivalent carve-out: both
+ * can occlude or erase content at some value with no comparably narrow, provably-safe subset
+ * (`mix-blend-mode: difference` against a matched backdrop is already an occlusion primitive by
+ * itself), and no permanent, whole-page legitimate use case was reported or measured for them the
+ * way dark-mode/theming filters were — "only ever refuse more" stays the default; this is a
+ * narrow, stated exception for `filter` alone. */
+const VISIBILITY_PRESERVING_FILTER_FUNCTIONS = new Set(["grayscale", "sepia", "hue-rotate", "saturate"]);
+
+const FILTER_FUNCTION = /([a-zA-Z-]+)\([^)]*\)/g;
+
+/**
+ * `true` for `"none"`, and for a filter value that consists ONLY of calls to functions in
+ * {@link VISIBILITY_PRESERVING_FILTER_FUNCTIONS} (any count, any argument, any order) — `false`
+ * for anything else, including a filter this cannot confidently parse into a clean function list
+ * (matching {@link parseBoxShadowMarginPx}'s own "only ever refuse more" contract: an unrecognised
+ * shape refuses, it is never given the benefit of the doubt). A single disallowed function
+ * anywhere in the list (e.g. `grayscale(1) blur(2px)`) fails the whole value — there is no partial
+ * credit, since the disallowed function alone is already enough to hide content regardless of
+ * what else is chained with it.
+ */
+export function isFilterVisibilityPreserving(filter: string): boolean {
+  const trimmed = filter.trim();
+  if (trimmed === "" || trimmed === "none") {
+    return true;
+  }
+  const matches = [...trimmed.matchAll(FILTER_FUNCTION)];
+  // The parsed function calls must reconstitute the ENTIRE trimmed value (joined by a single
+  // space, `getComputedStyle().filter`'s own normalised separator) — anything left over (a bare
+  // `url(#x)` reference, a keyword, stray text) means this did not fully understand the value,
+  // which must refuse, not pass by accident of a partial match.
+  if (matches.length === 0 || matches.map((m) => m[0]).join(" ") !== trimmed) {
+    return false;
+  }
+  return matches.every((m) => VISIBILITY_PRESERVING_FILTER_FUNCTIONS.has(m[1] ?? ""));
 }
 
 /** Fail-closed, binary: the whole chain is ok only when every node's own sample passes
@@ -259,6 +307,51 @@ function parseOneBoxShadow(shadow: string): number | undefined {
     return undefined;
   }
   return Math.abs(offsetX) + Math.abs(offsetY) + spread + blur * 2;
+}
+
+/** How opaque a top-layer element's own `::backdrop` pseudo-element's `background-color` must be
+ * (its alpha channel) before it counts as occluding (A7 bypass fix: an opaque,
+ * `pointer-events: none` `popover::backdrop` blankets the viewport while the popover element
+ * itself stays 1×1 — `::backdrop` is a browser-painted box with no corresponding `Element`/`Node`
+ * at all, so `content-script.ts`'s own `pushOcclusionRect`, which only ever reads an ELEMENT's own
+ * rect/filter/box-shadow, structurally cannot see it; this is checked separately, against
+ * `getComputedStyle(el, "::backdrop")`, the two-argument form the pre-fix code never called).
+ * Chromium's own UA stylesheet gives an unstyled, author-untouched `dialog::backdrop` a default
+ * `rgba(0, 0, 0, 0.1)` (confirmed by direct probe) and an unstyled `popover::backdrop`
+ * `rgba(0, 0, 0, 0)` (fully transparent) — set below that default dialog dimming (a real native
+ * modal dialog already makes the rest of the page `inert`, independent of these gates, so
+ * flagging it too costs no ADDITIONAL false refusal in practice) but clearly above zero, so an
+ * untouched popover backdrop (today's overwhelmingly common case: no custom backdrop at all)
+ * never trips this. */
+const BACKDROP_ALPHA_THRESHOLD = 0.05;
+
+/**
+ * Whether a top-layer element's own `::backdrop` pseudo-element visually occludes whatever is
+ * behind it: `backgroundImage` anything other than `"none"` (an image backdrop; conservatively
+ * always occluding, since this cannot know the image's own transparency), or `backgroundColor`'s
+ * alpha channel above {@link BACKDROP_ALPHA_THRESHOLD}. A value this cannot parse as `rgb()`/
+ * `rgba()`/`transparent` refuses rather than guesses ("only ever refuse more," matching
+ * {@link parseBoxShadowMarginPx}'s own contract) — the one case this does NOT refuse on is the
+ * empty string a pseudo-element query can return in a browser/version with no support for the
+ * two-argument `getComputedStyle` form, which the caller already treats the same as "transparent"
+ * (no backdrop this module can see is not evidence of an occluding one).
+ */
+export function isBackdropOccluding(backgroundColor: string, backgroundImage: string): boolean {
+  const bg = backgroundColor.trim();
+  const img = backgroundImage.trim();
+  if (img !== "" && img !== "none") {
+    return true;
+  }
+  if (bg === "" || bg === "transparent") {
+    return false;
+  }
+  const match = /^rgba?\(\s*[\d.]+%?\s*,\s*[\d.]+%?\s*,\s*[\d.]+%?\s*(?:,\s*([\d.]+%?)\s*)?\)$/.exec(bg);
+  if (match === null) {
+    return true;
+  }
+  const rawAlpha = match[1];
+  const alpha = rawAlpha === undefined ? 1 : Number(rawAlpha.endsWith("%") ? Number(rawAlpha.slice(0, -1)) / 100 : rawAlpha);
+  return !Number.isFinite(alpha) || alpha > BACKDROP_ALPHA_THRESHOLD;
 }
 
 /** The maximum CSS `z-index` value: the frame's own `zIndex: 2147483647` (`content-script.ts`),
