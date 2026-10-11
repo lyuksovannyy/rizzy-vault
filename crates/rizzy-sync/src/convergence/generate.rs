@@ -69,7 +69,7 @@ const PR_CASES: u32 = 1_000;
 const PR_GAP_CASES: u32 = 1_000;
 
 /// Fixed seeds that once failed, run on every PR: `(family, seed)`.
-const REGRESSIONS: [(usize, u64); 6] = [
+const REGRESSIONS: [(usize, u64); 7] = [
     // A restore to an empty backup: own acknowledged ops without bodies need a fresh snapshot
     // that covers own unacknowledged ops too (the healing closure in `device`).
     (4, 11_895_903_307_134_407_466),
@@ -91,6 +91,16 @@ const REGRESSIONS: [(usize, u64); 6] = [
     // stale one, the wrap became permanently unreadable and the item never converged. Fixed by
     // adopting the offered epoch in `World::upload` too, before the heal check.
     (9, 2_496_824_634_378_026_050),
+    // `Device::upload_snapshots`'s `SnapAnswer::Refused` branch counted the refusal but, unlike
+    // the `StaleEpoch` branch beside it, left the record in `held_snaps`: a snapshot the server
+    // never stored (an early `AfterPurge` snapshot racing its own uncovered dot, ADR 0021 §9)
+    // stayed "held" forever under its now-superseded `item_key_id`, which a later same-dot
+    // reissue (ADR 0018 §3) made it contradict. Property 3 then fed this never-delivered,
+    // honest-looking record to the replay, which correctly refused it. Fixed by discarding it
+    // from `held_snaps` too, as the function's own docs and ADR 0021 §9 ("a refusal 'only
+    // discards' it") already said, and as `rizzy-client`'s `reissue_stale`/upload-answer
+    // handling already does for every rejected snapshot.
+    (9, 0x9fac_02de_4abc_7398),
 ];
 
 /// The step kinds a family weights.
