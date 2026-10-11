@@ -2911,3 +2911,773 @@ test("an ordinary decorative ::before (position: absolute, modest z-index) on an
     await page.stop();
   }
 });
+
+// Fifth adversarial round. Reported bypass (critical; reported three times, independently, under
+// three different test methodologies — one mechanism, one test, per this file's own "one
+// mechanism, one test" precedent, line 1563): a decoy appended directly to
+// `document.documentElement` — a SIBLING of `<body>`, never a descendant of it — opaque,
+// `pointer-events: none`, tying the frame's own maximum z-index, sized to cover the real menu (or
+// the whole viewport). No timing trick: the reports' own methodology clicked at both 100ms and
+// 600ms after insertion (well past any rebuild debounce) with the same result, since the gap is
+// structural, not timing-based.
+//
+// REPRODUCED against Gates A/B alone (confirmed by direct probe against the real built extension,
+// IOv2 disabled, and by reverting the fix below): `#deepOccluderRects` (`content-script.ts`)
+// hardcoded its scan root to `#frame.parentElement.children` — `#frame.parentElement` is always
+// `document.body` — so a decoy appended to `document.documentElement` itself was never visited by
+// `#scanElementForDeepOccluders` on any scan, first or rebuilt: the gap was in the scan's SCOPE,
+// not its timing or its content checks. Raw hit-testing still resolved to the real frame
+// throughout, since the decoy's own `pointer-events: none` excludes it from hit-testing
+// regardless of where it sits in the tree.
+//
+// FIXED: `#deepOccluderRects` now walks `#frame`'s own ANCESTOR PATH one level at a time —
+// `document.body`, then `document.documentElement` — scanning each level's SIBLINGS (never the
+// ancestor itself, preserving the pre-existing correctness requirement that `el` must never be a
+// node on `#frame`'s own ancestor path), which closes this without special-casing
+// `document.documentElement`.
+//
+// Accepted trade-off (named here, matching this section's own precedent for every prior fix):
+// the second round's "self-limiting false-refusal" argument for a body-level sibling — a
+// legitimate near-max-z-index widget self-heals because `wireInlineMenu`'s rebuild re-appends the
+// frame LAST, under `document.body` — does NOT hold for an `documentElement`-level sibling, since
+// every rebuild still only re-appends to `body`, never past a sibling of `body` itself. A
+// legitimate widget some page genuinely appends to `document.documentElement` at the frame's own
+// exact maximum z-index would now refuse permanently, not merely until the next rebuild — accepted
+// given how vanishingly rare that combination is (no ordinary widget is appended as a sibling of
+// `<body>` rather than inside it, let alone at this exact z-index) next to the critical bypass it
+// closes.
+test("a decoy appended to document.documentElement (a sibling of <body>, never a descendant of it) cannot intercept the real click (reported bypass, critical, triplicate reports)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "bypasshtmlsibling");
+    await createLoginItem(setupPage, {
+      title: "Html Sibling Bypass Target",
+      username: "htmlsibling-user@example.com",
+      password: "htmlsibling-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "bypasshtmlsibling", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await disableIov2(visit);
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Html Sibling Bypass Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    await expectIov2Disabled(visit);
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(150); // let Gate A record a real good sample first
+
+    const diag = await visit.evaluate(() => {
+      const decoy = document.createElement("div");
+      decoy.id = "rizzy-test-html-sibling-decoy";
+      Object.assign(decoy.style, {
+        position: "fixed",
+        inset: "0",
+        zIndex: "2147483647",
+        background: "rgba(10, 10, 10, 0.98)",
+        pointerEvents: "none",
+      });
+      document.documentElement.appendChild(decoy); // NOT document.body — a sibling of <body>
+      return {
+        decoyParentIsHtml: decoy.parentElement === document.documentElement,
+        decoyParentIsNotBody: decoy.parentElement !== document.body,
+      };
+    });
+    expect(diag.decoyParentIsHtml).toBe(true);
+    expect(diag.decoyParentIsNotBody).toBe(true);
+
+    // No timing trick needed — the gap is structural. Waits comfortably past any rebuild
+    // debounce, matching the reports' own "100ms and 600ms, same result" methodology.
+    await visit.waitForTimeout(600);
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await visit.waitForTimeout(500);
+
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// Fifth adversarial round. Reported bypass (critical): a decoy whose OWN `z-index` already ties
+// the frame's maximum (qualifying `#deepOccluderQualification` as `"own"`, the pre-existing
+// check) while its `::before` independently declares `position: fixed; inset: 0` plus an opaque
+// background — a DIFFERENT host shape from the already-fixed "own z-index stays auto, only
+// `::before` ties it" case (fourth round): here the host's OWN z-index already qualifies, which
+// is exactly what made the pre-fix `#deepOccluderQualification` short-circuit to `"own"` and
+// never reach the `::before`/`::after` reads at all.
+//
+// REPRODUCED against Gates A/B alone (confirmed by direct probe and by reverting the fix):
+// `#deepOccluderQualification` returned `"own"` as soon as the host's own z-index tied the
+// maximum, and the pre-fix `#deepOccluderRects`'s `"own"` branch called only
+// `pushOcclusionRect` — which reads only the HOST's own rect/filter/box-shadow/outline, never a
+// pseudo-element's paint — so a `::before` that independently blankets the viewport on that SAME
+// element was never checked.
+//
+// FIXED: the `"own"` branch in `#deepOccluderRects` now ALSO calls `pushPseudoOcclusionRect` for
+// `::before` and `::after`, unconditionally, exactly as `#topLayerRects` already does for every
+// top-layer element.
+test("a decoy whose own z-index already ties the frame's max z-index, AND whose ::before independently blankets the viewport, still cannot intercept the real click (reported bypass, critical)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "bypassownpseudo");
+    await createLoginItem(setupPage, {
+      title: "Own Pseudo Bypass Target",
+      username: "ownpseudo-user@example.com",
+      password: "ownpseudo-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "bypassownpseudo", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await disableIov2(visit);
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Own Pseudo Bypass Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    await expectIov2Disabled(visit);
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(150);
+
+    const diag = await visit.evaluate(() => {
+      const style = document.createElement("style");
+      style.textContent =
+        "#rizzy-test-own-pseudo-host::before { content: \"\"; position: fixed; inset: 0; background: rgba(20, 20, 20, 0.95); pointer-events: none; }";
+      document.head.appendChild(style);
+      const host = document.createElement("div");
+      host.id = "rizzy-test-own-pseudo-host";
+      Object.assign(host.style, {
+        position: "fixed",
+        left: `${window.innerWidth - 1}px`,
+        top: `${window.innerHeight - 1}px`,
+        width: "1px",
+        height: "1px",
+        zIndex: "2147483647",
+        pointerEvents: "none",
+      });
+      document.body.appendChild(host); // after the frame, a direct body-level sibling
+      return { hostOwnZIndex: getComputedStyle(host).zIndex };
+    });
+    expect(diag.hostOwnZIndex).toBe("2147483647");
+
+    // Tight timing, matching the other far-corner/body-sibling decoy tests above (e.g. the "own
+    // z-index stays auto" test, line 2745): under the content script's own 250ms field-
+    // redetection debounce, so a REBUILD does not re-append a fresh frame AFTER this decoy before
+    // the click — which would self-heal this specific instance by an accident of insertion order
+    // (the already-documented, already-accepted self-limiting property for an ORDINARY widget),
+    // not by this fix, and would defeat the point of this test either way.
+    await visit.waitForTimeout(80);
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await visit.waitForTimeout(500);
+
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// Fifth adversarial round. Reported bypass (high): a 1×1, off-screen, `pointer-events: none`
+// carrier with an oversized `font-size` and `color: transparent` (so its own glyph is invisible)
+// whose `text-shadow` paints a solid glyph copy far from the carrier's own border box — tying the
+// frame's own maximum z-index so it qualifies as a deep-occluder candidate via
+// `#deepOccluderQualification`'s `"own"` branch.
+//
+// REPRODUCED against Gates A/B alone (confirmed by direct probe and by reverting the fix):
+// `pushOcclusionRect` (pre-fix) widened an element's rect for `box-shadow`/`outline`/`filter`,
+// never `text-shadow` — a carrier whose own rect never intersects the menu therefore left
+// `isTopLayerClear` reporting "clear" while the text-shadow visually painted over the real
+// candidate.
+//
+// FIXED: `pushOcclusionRect` now substitutes the full viewport rect for any non-`"none"`
+// `text-shadow`, the same conservative answer `filter` already gets — deriving a precise margin
+// from the carrier's own rect would be unsound here (the glyph itself already overflows the
+// border box via `overflow: visible` plus an oversized `font-size`, before any shadow offset is
+// even applied), so this is the one shape in `pushOcclusionRect` that does not attempt a margin at
+// all.
+test("a text-shadow decoy painting a solid glyph far from its own tiny, off-screen carrier cannot intercept the real click (reported bypass, high)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "bypasstextshadow");
+    await createLoginItem(setupPage, {
+      title: "Text Shadow Bypass Target",
+      username: "textshadow-user@example.com",
+      password: "textshadow-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "bypasstextshadow", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await disableIov2(visit);
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Text Shadow Bypass Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    await expectIov2Disabled(visit);
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(150);
+
+    const diag = await visit.evaluate((menuBox) => {
+      const decoy = document.createElement("div");
+      decoy.id = "rizzy-test-text-shadow-decoy";
+      decoy.textContent = "█";
+      Object.assign(decoy.style, {
+        position: "fixed",
+        left: "-400px",
+        top: "60px",
+        width: "1px",
+        height: "1px",
+        overflow: "visible",
+        font: "900 400px/1 monospace",
+        color: "transparent",
+        whiteSpace: "nowrap",
+        pointerEvents: "none",
+        textShadow: "500px 40px 0 rgba(0, 0, 0, 0.95)",
+        zIndex: "2147483647",
+      });
+      document.body.appendChild(decoy); // after the frame, a direct body-level sibling
+      const decoyRect = decoy.getBoundingClientRect();
+      const intersects =
+        decoyRect.left < menuBox.x + menuBox.width &&
+        decoyRect.left + decoyRect.width > menuBox.x &&
+        decoyRect.top < menuBox.y + menuBox.height &&
+        decoyRect.top + decoyRect.height > menuBox.y;
+      return { decoyRectIntersectsMenu: intersects, textShadow: getComputedStyle(decoy).textShadow };
+    }, box);
+    expect(diag.decoyRectIntersectsMenu).toBe(false);
+    expect(diag.textShadow).not.toBe("none");
+
+    // Tight timing, matching the other far-corner/body-sibling decoy tests (e.g. the deep-shadow
+    // test, line 2667): under the content script's own 250ms field-redetection debounce, so a
+    // REBUILD does not re-append a fresh frame AFTER this decoy before the click.
+    await visit.waitForTimeout(80);
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await visit.waitForTimeout(500);
+
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// Fifth adversarial round. Reported bypass (high): a far-away, 1×1-content (3×3 border box)
+// decoy with `border-image-outset: 300px` and a matching `border-image-width`, tying the frame's
+// own maximum z-index — the border-image area paints a solid block far outside the element's own
+// border box without ever changing `getBoundingClientRect()` or participating in hit-testing, the
+// identical shape `box-shadow`/`outline` already have a carve-out for in `pushOcclusionRect`.
+//
+// REPRODUCED against Gates A/B alone (confirmed by direct probe and by reverting the fix):
+// `pushOcclusionRect` (pre-fix) never read `border-image-source`/`border-image-outset` at all.
+//
+// FIXED: `pushOcclusionRect` now substitutes the full viewport rect whenever `border-image-source`
+// is set and `border-image-outset` is not all-zero (`isAllZeroLengths`, `menu-visibility.ts`,
+// unit-tested directly) — gated on OUTSET, not merely on the presence of a border-image, so an
+// ordinary decorative border-image with no outset is never falsely widened.
+test("a far-away border-image-outset decoy painting a solid block outside its own tiny border box cannot intercept the real click (reported bypass, high)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "bypassborderimage");
+    await createLoginItem(setupPage, {
+      title: "Border Image Bypass Target",
+      username: "borderimage-user@example.com",
+      password: "borderimage-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "bypassborderimage", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await disableIov2(visit);
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Border Image Bypass Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    await expectIov2Disabled(visit);
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(150);
+
+    const diag = await visit.evaluate((menuBox) => {
+      // Placed in the viewport's opposite corner from the real menu (so its own tiny, UNWIDENED
+      // rect never geometrically overlaps the menu's), matching `plantNestedDecoy`'s/the deep
+      // shadow test's own established pattern.
+      const decoy = document.createElement("div");
+      decoy.id = "rizzy-test-border-image-decoy";
+      Object.assign(decoy.style, {
+        position: "fixed",
+        left: `${window.innerWidth - 1}px`,
+        top: `${window.innerHeight - 1}px`,
+        width: "1px",
+        height: "1px",
+        borderStyle: "solid",
+        borderWidth: "1px",
+        borderImageSource: "linear-gradient(#000, #000)",
+        borderImageSlice: "1 fill",
+        borderImageWidth: "3000px",
+        borderImageOutset: "3000px",
+        pointerEvents: "none",
+        zIndex: "2147483647",
+      });
+      document.body.appendChild(decoy); // after the frame, a direct body-level sibling
+      const decoyRect = decoy.getBoundingClientRect();
+      const intersects =
+        decoyRect.left < menuBox.x + menuBox.width &&
+        decoyRect.left + decoyRect.width > menuBox.x &&
+        decoyRect.top < menuBox.y + menuBox.height &&
+        decoyRect.top + decoyRect.height > menuBox.y;
+      return { decoyRectIntersectsMenu: intersects, borderImageOutset: getComputedStyle(decoy).borderImageOutset };
+    }, box);
+    expect(diag.decoyRectIntersectsMenu).toBe(false);
+    expect(diag.borderImageOutset).not.toMatch(/^0(?:px)?( 0(?:px)?){0,3}$/);
+
+    await visit.waitForTimeout(80); // tight timing, matching the deep-shadow test's own margin
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await visit.waitForTimeout(500);
+
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// Fifth adversarial round. Reported bypass (high; the `<foreignObject>` variant of the same
+// primitive lets the decoy carry arbitrary HTML/CSS instead of a flat fill, not independently
+// tested here): a far-away, 1×1 `<svg>` host with `overflow: visible` (the UA-stylesheet default
+// for the document's OUTERMOST `svg` specifically — only a NESTED `svg`/`symbol`/etc. defaults to
+// `hidden`), tying the frame's own maximum z-index, whose child `<rect>` paints a solid block far
+// outside the host's own 1×1 box. An SVG child does not carry a meaningful CSS `z-index` of its
+// own the way a sibling HTML element would, so the child itself never independently qualifies as
+// a deep-occluder candidate — only the HOST's own (tiny) rect was ever checked.
+//
+// REPRODUCED against Gates A/B alone (confirmed by direct probe and by reverting the fix):
+// `pushOcclusionRect` (pre-fix) only ever read the HOST element's own rect/filter/box-shadow/
+// outline — none of which sees an `overflow: visible` descendant's paint.
+//
+// FIXED: `pushOcclusionRect` now unions every descendant's own rect into the result whenever `el`
+// does not clip on BOTH axes (`overflow-x`/`overflow-y` not both `hidden`/`clip`) — covering this
+// SVG case and the identical HTML analogue (a plain `position: absolute` descendant placed outside
+// its unclipped ancestor) in one rule, without blanket-refusing an ordinary clipped widget or a
+// childless element. See the next test for the matching false-refusal check.
+test("an <svg> host with overflow:visible, whose child paints far outside its own 1x1 box, cannot intercept the real click (reported bypass, high)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "bypasssvgoverflow");
+    await createLoginItem(setupPage, {
+      title: "Svg Overflow Bypass Target",
+      username: "svgoverflow-user@example.com",
+      password: "svgoverflow-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "bypasssvgoverflow", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await disableIov2(visit);
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Svg Overflow Bypass Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    await expectIov2Disabled(visit);
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(150);
+
+    const diag = await visit.evaluate((menuBox) => {
+      const svgNs = "http://www.w3.org/2000/svg";
+      const decoy = document.createElementNS(svgNs, "svg") as unknown as SVGSVGElement;
+      decoy.id = "rizzy-test-svg-overflow-decoy";
+      decoy.setAttribute("width", "1");
+      decoy.setAttribute("height", "1");
+      Object.assign(decoy.style, {
+        position: "fixed",
+        left: `${window.innerWidth - 1}px`,
+        top: `${window.innerHeight - 1}px`,
+        overflow: "visible",
+        pointerEvents: "none",
+        zIndex: "2147483647",
+      });
+      const rect = document.createElementNS(svgNs, "rect");
+      rect.setAttribute("x", "-3000");
+      rect.setAttribute("y", "-3000");
+      rect.setAttribute("width", "6000");
+      rect.setAttribute("height", "6000");
+      rect.setAttribute("fill", "#000");
+      decoy.appendChild(rect);
+      document.body.appendChild(decoy); // after the frame, a direct body-level sibling
+      const hostRect = decoy.getBoundingClientRect();
+      const hostRectIntersectsMenu =
+        hostRect.left < menuBox.x + menuBox.width &&
+        hostRect.left + hostRect.width > menuBox.x &&
+        hostRect.top < menuBox.y + menuBox.height &&
+        hostRect.top + hostRect.height > menuBox.y;
+      return { hostRectTiny: hostRect.width <= 2 && hostRect.height <= 2, hostRectIntersectsMenu, overflow: getComputedStyle(decoy).overflow };
+    }, box);
+    expect(diag.hostRectTiny).toBe(true);
+    expect(diag.hostRectIntersectsMenu).toBe(false);
+
+    await visit.waitForTimeout(80); // tight timing, matching the other far-corner decoy tests
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await visit.waitForTimeout(500);
+
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// False-refusal check (not a reported bypass) for the unclipped-descendant-union fix above: an
+// ORDINARY, honestly-coded `<dialog>` — open but non-modal (`.show()`, so it does not make the
+// rest of the page `inert` the way `.showModal()` would, which would confound this check with
+// ordinary browser behaviour rather than this extension's own code), positioned far from the real
+// menu, with normal in-bounds content (a text node and a `<button>`) and `overflow`'s UA-default
+// `visible` on at least one axis — must still fill normally. The new descendant-union logic in
+// `pushOcclusionRect` widens `el`'s rect to cover every descendant's own rect whenever `el` does
+// not clip on both axes; for an ordinary dialog, every descendant renders INSIDE the dialog's own
+// visual box regardless of its `overflow` value, so the union equals the dialog's own (already
+// correctly-positioned, non-overlapping) rect — no added false-refusal cost.
+test("an ordinary, non-modal open <dialog> elsewhere on screen, with overflow:visible and normal in-bounds content, does not break autofill (false-refusal check)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "ordinarydialoguser");
+    await createLoginItem(setupPage, {
+      title: "Ordinary Dialog Target",
+      username: "ordinarydialog-user@example.com",
+      password: "ordinarydialog-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "ordinarydialoguser", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await visit.addInitScript(() => {
+      window.addEventListener("DOMContentLoaded", () => {
+        const dialog = document.createElement("dialog");
+        dialog.id = "rizzy-test-ordinary-dialog";
+        Object.assign(dialog.style, { position: "fixed", right: "8px", bottom: "8px", margin: "0" });
+        dialog.textContent = "An ordinary dialog, far from the login form. ";
+        const closeButton = document.createElement("button");
+        closeButton.type = "button";
+        closeButton.textContent = "Close";
+        dialog.appendChild(closeButton);
+        document.body.appendChild(dialog);
+        (dialog as unknown as { show: () => void }).show();
+      });
+    });
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Ordinary Dialog Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+
+    const dialogOverflow = await visit.evaluate(() => {
+      const dialog = document.getElementById("rizzy-test-ordinary-dialog");
+      return dialog !== null ? { open: dialog.hasAttribute("open"), overflow: getComputedStyle(dialog).overflow } : null;
+    });
+    expect(dialogOverflow?.open).toBe(true);
+    expect(dialogOverflow?.overflow).not.toMatch(/^(hidden|clip)$/);
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(500);
+
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(visit.locator("#user")).toHaveValue("ordinarydialog-user@example.com", { timeout: 15_000 });
+    await expect(visit.locator("#pass")).toHaveValue("ordinarydialog-target-password", { timeout: 15_000 });
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// Fifth adversarial round. Reported bypass (medium; the report's own methodology could not
+// confirm real-world exploitability against the actual iframe that session — Gate C observed a
+// transient, non-sustained `isVisible: false` in that configuration, so this task re-ran the
+// check empirically with IOv2 disabled rather than taking the report's uncertainty at face
+// value): a same-document View Transition's own generated pseudo-element tree
+// (`::view-transition-group(...)`/`::view-transition-old(...)`/`::view-transition-new(...)`)
+// renders above ALL ordinary z-index stacking, including this frame's own `MAX_Z_INDEX`, and has
+// no corresponding `Element`/`Node` at all — not reachable by `#topLayerRects`'s enumeration
+// (`document.fullscreenElement`/`dialog[open]`/`:popover-open`, none of which this is) or by
+// `#deepOccluderRects`'s DOM walk (the decoy element this test uses is `remove()`d inside the
+// transition's own callback, so it is not even a connected node once the pseudo-element tree is
+// actually painting). Structurally, this reasoning is correct: neither enumeration-based check
+// can see this pseudo-element tree.
+//
+// DOES NOT REPRODUCE against Gates A/B on Chromium, on the facts — confirmed by direct
+// instrumentation of the real built extension (IOv2 disabled), not by taking the report's
+// uncertainty at face value: `#pointHitResult`'s own `document.elementFromPoint` call, UNCHANGED
+// by any fix, already resolves to `document.documentElement` — not the frame, not `null` — for
+// every point in the viewport for the whole duration of ANY active same-document View Transition
+// on this Chromium build, regardless of where the transition's own named element is positioned.
+// Confirmed with a decoy shrunk to 5×5px in the viewport's opposite corner from the real
+// candidate (so nothing the attacker controls visually overlaps the target at all) and with
+// `pointer-events: none !important` forced on every `::view-transition-*` pseudo-element (so the
+// attacker cannot make the overlay "transparent" to hits either): `elementFromPoint` at the real
+// candidate's own center still returned `<html>` for the whole transition window in both cases.
+// `isPointHitOk` (`menu-visibility.ts`) therefore already reports a bad sample for the whole
+// transition — not through any transition-specific logic, but as a side effect of how Chromium's
+// own implementation of View Transitions affects hit-testing document-wide while one is active.
+// A real OS-level click is refused for the identical reason (`#sampleOk`'s point-hit check is the
+// authoritative measurement Gate A's `pointer-events` toggle acts on). An earlier version of this
+// task's own work added a dedicated `document.getAnimations`-based check for this case before
+// this empirical pass was run; removed once the pass showed the existing, unmodified point-hit
+// check already closes it — per CLAUDE.md's DRY/KISS/YAGNI, redundant code for a non-reproducing
+// report is not kept "just in case."
+//
+// NOT independently confirmed for a hypothetical browser whose View Transitions implementation
+// does NOT suppress document-wide hit-testing this way (Firefox has no same-document View
+// Transitions support at all today, so this is moot there for now; if/when it ships one, this
+// specific protection is a Chromium implementation detail, not a web-platform guarantee, and
+// would need re-checking against that implementation rather than assumed to carry over).
+test("a same-document View Transition's own pseudo-element overlay does not intercept the real click while active (reported bypass, medium — rejected: Chromium's own hit-testing already refuses it, independent of this codebase)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "bypassviewtransition");
+    await createLoginItem(setupPage, {
+      title: "View Transition Bypass Target",
+      username: "viewtransition-user@example.com",
+      password: "viewtransition-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "bypassviewtransition", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await disableIov2(visit);
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "View Transition Bypass Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    await expectIov2Disabled(visit);
+
+    const supported = await visit.evaluate(() => typeof document.startViewTransition === "function");
+    if (!supported) {
+      test.skip(true, "this Chromium build has no document.startViewTransition to exercise");
+      return;
+    }
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(150); // let Gate A record a real good sample first
+
+    await visit.evaluate(() => {
+      const style = document.createElement("style");
+      style.id = "rizzy-test-view-transition-style";
+      // `pointer-events: none` on the pseudo-elements themselves: if the attacker's own theory
+      // (clicks pass through to the live frame underneath while the overlay merely occludes it
+      // visually, exactly like every other decoy in this file) were correct, this would be what
+      // lets the click reach the real candidate. It does not change the outcome below.
+      style.textContent =
+        "::view-transition-group(decoy), ::view-transition-old(decoy), ::view-transition-new(decoy) { animation-duration: 3s !important; pointer-events: none !important; }";
+      document.head.appendChild(style);
+      // Deliberately tiny (5x5px) and in the viewport's opposite corner from the real candidate —
+      // nothing the attacker controls visually overlaps the target at all, isolating whether the
+      // refusal below comes from occluding the target or from the transition itself.
+      const decoy = document.createElement("div");
+      decoy.id = "rizzy-test-view-transition-decoy";
+      Object.assign(decoy.style, { position: "fixed", left: "0px", top: "0px", width: "5px", height: "5px", background: "#fff" });
+      decoy.style.setProperty("view-transition-name", "decoy");
+      document.body.appendChild(decoy);
+      document.startViewTransition(() => {
+        decoy.remove();
+      });
+    });
+    await visit.waitForTimeout(200); // let the transition's own pseudo-element tree start animating
+
+    const diag = await visit.evaluate((menuBox) => {
+      const getAnimationsWithSubtree = document.getAnimations as unknown as (options?: { readonly subtree?: boolean }) => readonly Animation[];
+      const transitioning = getAnimationsWithSubtree.call(document, { subtree: true }).some((a) => {
+        const effect = a.effect as unknown as { pseudoElement?: string | null } | null;
+        return effect !== null && typeof effect.pseudoElement === "string" && effect.pseudoElement.startsWith("::view-transition");
+      });
+      // The SAME measurement `#pointHitResult` makes: force the frame's own `pointer-events` to
+      // `auto` for this one synchronous check, matching that method's own methodology exactly.
+      const frame = document.querySelector<HTMLIFrameElement>("iframe[data-rizzy-inline-menu]");
+      const previous = frame?.style.getPropertyValue("pointer-events") ?? "";
+      frame?.style.setProperty("pointer-events", "auto", "important");
+      const hitEl = document.elementFromPoint(menuBox.x + menuBox.width / 2, menuBox.y + menuBox.height / 2);
+      frame?.style.setProperty("pointer-events", previous === "" ? "none" : previous, "important");
+      return { transitioning, hitIsFrame: hitEl === frame, hitTagName: hitEl?.tagName ?? null };
+    }, box);
+    expect(diag.transitioning).toBe(true);
+    // The load-bearing assertion: even forcing the frame clickable and measuring at the real
+    // candidate's own center, `elementFromPoint` does not resolve to the frame while the
+    // transition is active — confirming the refusal below is NOT this codebase refusing a click
+    // that would otherwise land correctly.
+    expect(diag.hitIsFrame).toBe(false);
+    expect(diag.hitTagName).toBe("HTML");
+
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await visit.waitForTimeout(500);
+
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// False-refusal check (not a reported bypass; see the rejected report above): an ORDINARY,
+// brief, unrelated same-document View Transition (default duration, not extended) must not
+// permanently disable autofill — Chromium's own document-wide hit-testing suppression while a
+// transition is active must age out once the transition itself ends, the same accepted shape as
+// the already-documented concurrent-ancestor-CSS-transition trade-off.
+test("an ordinary, brief, unrelated View Transition elsewhere on the page does not permanently disable autofill (false-refusal check)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "ordinaryviewtransition");
+    await createLoginItem(setupPage, {
+      title: "Ordinary View Transition Target",
+      username: "ordinaryvt-user@example.com",
+      password: "ordinaryvt-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "ordinaryviewtransition", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Ordinary View Transition Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+
+    const supported = await visit.evaluate(() => typeof document.startViewTransition === "function");
+    if (!supported) {
+      test.skip(true, "this Chromium build has no document.startViewTransition to exercise");
+      return;
+    }
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(150);
+
+    // An ordinary, short-lived transition on unrelated, ALREADY-PRESENT content — default
+    // duration (~250ms), no override — well finished by the time this test clicks. Deliberately
+    // a STYLE change on an existing node, not a new node inserted/removed: an insertion would
+    // also be a `childList` mutation under `document.documentElement`, which would trigger the
+    // content script's own, SEPARATE field-redetection debounce (`installContentScript`'s own
+    // `MutationObserver`, `schedule()`) and rebuild the `InlineMenu` instance entirely — a second,
+    // unrelated mechanism this test is not about exercising.
+    await visit.evaluate(() => {
+      document.body.style.setProperty("view-transition-name", "ordinary-body");
+      document.startViewTransition(() => {
+        document.body.style.setProperty("background-color", "rgb(240, 240, 240)");
+      });
+    });
+    // Past the default transition duration (~250ms) AND, from there, past the full 1s Gate-B
+    // trailing window (`DEFAULT_MENU_VISIBILITY_WINDOW_MS`) — `#pointHitResult`'s own
+    // `elementFromPoint` call (unchanged, pre-existing) keeps resolving to `document.documentElement`
+    // document-wide for as long as this transition is active (see the rejected report above), so
+    // the transition's own last BAD sample lands around the 250ms mark, and Gate B refuses until
+    // `now - lastBadSampleAt >= windowMs`; the click must land at least `250ms + windowMs` after
+    // the transition started, plus margin for jitter.
+    await visit.waitForTimeout(2000);
+
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(visit.locator("#user")).toHaveValue("ordinaryvt-user@example.com", { timeout: 15_000 });
+    await expect(visit.locator("#pass")).toHaveValue("ordinaryvt-target-password", { timeout: 15_000 });
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});

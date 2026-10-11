@@ -210,11 +210,17 @@ export function isVisibilityChainOk(chain: readonly ChainStyleSample[]): boolean
  * feeds this two independent rect sources, both expanded or substituted conservatively by the
  * caller before reaching here (never narrowed): the browser's top layer (every
  * `document.fullscreenElement`, `dialog[open]`, and `:popover-open` element, widened by
- * {@link parseBoxShadowMarginPx}/a non-`none` `filter`) and any body-level sibling tying the
- * frame's own maximum `z-index` (`2147483647`) that comes after it in document order (the one
- * other way, besides the top layer, that ordinary DOM stacking could ever render something above
- * a `zIndex: 2147483647` element — a strictly LOWER z-index, or an earlier document position at
- * the same z-index, cannot). Nothing in ordinary DOM stacking can otherwise out-rank the frame.
+ * {@link parseBoxShadowMarginPx}/a non-`none` `filter`) and any element ANYWHERE in the document
+ * tying the frame's own maximum `z-index` (`2147483647`) that comes after it in document order —
+ * not only a direct sibling of `<body>` (fifth adversarial round: a decoy appended directly to
+ * `document.documentElement`, a SIBLING of `<body>` rather than a descendant of it, is exactly as
+ * reachable this way as one appended to `<body>` itself — see `content-script.ts`'s
+ * `#deepOccluderRects`' own doc on walking the frame's whole ancestor path, not merely its
+ * immediate parent's children), and not only a light-DOM descendant (an open, `mode: "open"`
+ * Shadow DOM root at any depth is reachable the same way) — the one other way, besides the top
+ * layer, that ordinary DOM stacking could ever render something above a `zIndex: 2147483647`
+ * element (a strictly LOWER z-index, or an earlier document position at the same z-index,
+ * cannot). Nothing in ordinary DOM stacking can otherwise out-rank the frame.
  */
 export function isTopLayerClear(expected: Rect, occlusionRects: readonly Rect[]): boolean {
   return !occlusionRects.some((rect) => rectsIntersect(expected, rect));
@@ -351,6 +357,36 @@ function parsePxLength(value: string): number | undefined {
     return undefined;
   }
   return Number(match[1]);
+}
+
+/**
+ * Whether every whitespace-separated token in a CSSOM-computed `border-image-outset` value is
+ * zero (A7 border-image fix, fifth adversarial round: a `border-image-source` with a nonzero
+ * `border-image-outset` extends the painted border-image area outward from the border box by an
+ * author-controlled amount — `getBoundingClientRect()` never reflects this, and like `box-shadow`/
+ * `outline`, it never participates in hit-testing — confirmed by direct probe: a 1×1-content
+ * element with `border-image-outset: 300px` and a matching `border-image-width` painted a solid
+ * ~600×600px block centred on its own tiny box). `border-image-outset` accepts 1–4 values
+ * (top/right/bottom/left, CSS's usual shorthand expansion), each either a `<number>` (a multiplier
+ * of the corresponding border-width — computed style normalises a zero multiplier to the bare
+ * token `"0"`) or a `<length>` (normalised to `"0px"` for zero) — this module does not attempt to
+ * compute the actual painted margin from either shape (unlike {@link parseBoxShadowMarginPx}'s
+ * `px`-only lengths, a `<number>` multiplier's effective margin depends on `border-width`, which
+ * this function is not given), only whether every token is one of the two zero shapes. Anything
+ * else — a nonzero number or length in any position — means the border-image area extends beyond
+ * the border box by an amount this cannot bound, so the caller must widen its own fallback, never
+ * narrow it ("only ever refuse more," matching {@link parseBoxShadowMarginPx}'s own contract); so
+ * does a value this cannot recognise as a token list of this shape at all.
+ */
+export function isAllZeroLengths(value: string): boolean {
+  const tokens = value
+    .trim()
+    .split(/\s+/)
+    .filter((token) => token !== "");
+  if (tokens.length === 0) {
+    return true;
+  }
+  return tokens.every((token) => /^0(?:\.0+)?(?:px)?$/.test(token));
 }
 
 /**
