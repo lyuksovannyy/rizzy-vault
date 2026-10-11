@@ -496,6 +496,29 @@ mod tests {
     }
 
     #[test]
+    fn group_member_normalised_from_an_idna_separator_round_trips_through_encode_and_decode() {
+        // Regression: `normalize_domain` used to leave the dots idna's own domain-to-ASCII
+        // processing produces from U+3002/U+FF0E/U+FF61 in its output (it only trimmed ASCII
+        // dots from the *input*), so `new` would normalise "a\u{3002}\u{3002}" to "a.." and
+        // store that as a member — a value `decode`'s own round-trip check,
+        // `normalize_domain(domain) == domain`, then rejects, because re-normalising "a.."
+        // hits the ASCII-only path and returns "a" instead. `new` and `decode` must agree:
+        // whatever `new` accepts and stores must also survive `decode`'s self-check, for
+        // every raw spelling, not only ASCII ones.
+        let built = EquivalenceGroup::new(gid(1), ["a\u{3002}\u{3002}", "example.com"], false)
+            .expect("the ideographic-full-stop spelling normalises to a valid member");
+        assert!(built.domains().contains(&"a".to_owned()));
+        let mut out = Vec::new();
+        built.encode(&mut out).unwrap();
+        let mut reader = Reader::new(&out);
+        let decoded = EquivalenceGroup::decode(&mut reader).expect(
+            "a member `new` just normalised and stored must not be rejected by decode's own \
+             round-trip check",
+        );
+        assert_eq!(built, decoded);
+    }
+
+    #[test]
     fn group_rejects_fewer_than_two_domains() {
         assert_eq!(
             EquivalenceGroup::new(gid(1), ["only.example"], false).unwrap_err(),

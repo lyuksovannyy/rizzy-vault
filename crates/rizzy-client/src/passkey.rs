@@ -406,6 +406,21 @@ mod tests {
             Err(ClientError::InvalidInput)
         );
     }
+
+    /// A run of trailing dots on the origin's host folds the same way exactly one does
+    /// (ADR 0037 §2 point 3): `verify_rp_id` must accept it against the plain `rp_id`, not
+    /// reject it for carrying leftover dots `NormalizedUrl::parse` already promises to strip.
+    #[test]
+    fn origin_with_a_trailing_dot_run_is_accepted_the_same_as_without_one() {
+        assert!(verify_rp_id("https://example.com.../", "example.com").is_ok());
+    }
+
+    /// `rp_id` itself may carry a run of trailing dots too, normalised by `normalize_domain`
+    /// before the INV-64 comparison runs (module docs' `VerifiedRp` doc comment).
+    #[test]
+    fn rp_id_with_a_trailing_dot_run_is_accepted_the_same_as_without_one() {
+        assert!(verify_rp_id("https://example.com", "example.com...").is_ok());
+    }
 }
 
 #[cfg(test)]
@@ -504,25 +519,33 @@ mod ceremony_tests {
         let created = create_credential(&mut rng, "https://example.com", "EXAMPLE.COM", b"reg")
             .expect("EXAMPLE.COM folds to the origin's own host");
 
-        let assertion = get_assertion(
-            &created.signing_key,
-            &created.credential_id,
-            b"user-handle",
-            "https://example.com",
-            "example.com.",
-            b"c",
-        )
-        .expect("a trailing dot folds the same way");
-
         // The registration's rpIdHash is the first 32 bytes of the authenticatorData the CBOR
         // attestationObject wraps; recomputing it directly (rather than decoding CBOR back out,
         // which this crate deliberately never does) is the simplest independent check.
         let registration_rp_id_hash =
             rizzy_core::passkey::rp_id_hash(&normalize_rp_id_for_test("EXAMPLE.COM"));
-        assert_eq!(
-            assertion.authenticator_data.get(..32),
-            Some(registration_rp_id_hash.as_slice())
-        );
+
+        // A single trailing dot, a run of them, and the non-ASCII idna separator
+        // (U+3002 IDEOGRAPHIC FULL STOP) `idna` itself renders as a literal `.` in its
+        // output — all three must fold to the same `rpIdHash` as the plain spelling, because
+        // `normalize_domain` (not a hand-rolled ASCII-only trim) normalises `rp_id` before it
+        // is ever hashed.
+        for rp_id in ["example.com.", "example.com...", "example.com\u{3002}"] {
+            let assertion = get_assertion(
+                &created.signing_key,
+                &created.credential_id,
+                b"user-handle",
+                "https://example.com",
+                rp_id,
+                b"c",
+            )
+            .unwrap_or_else(|e| panic!("{rp_id:?} must fold the same way as example.com: {e:?}"));
+            assert_eq!(
+                assertion.authenticator_data.get(..32),
+                Some(registration_rp_id_hash.as_slice()),
+                "{rp_id:?} produced a different rpIdHash"
+            );
+        }
     }
 
     /// Mirrors exactly what [`super::verify_rp_id`] does to `rp_id`, so the test above asserts
