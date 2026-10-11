@@ -882,6 +882,95 @@ a.icon-button:focus-visible {
   background: none;
 }
 
+/* The large-type password display (ROADMAP §4.5; `views/LargeType.tsx`): each character of an
+   already-revealed value in its own bordered cell, monospace and oversized so it reads
+   unambiguously at a glance, digits and symbols given a distinct colour from plain letters (the
+   grid itself is `aria-hidden`; `LargeType.tsx`'s own module docs explain why). */
+.large-type {
+  width: min(40rem, 92vw);
+}
+
+.large-type-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: var(--space-4) 0;
+  font-family: var(--font-mono);
+  font-size: 1.75rem;
+}
+
+.large-type-cell {
+  min-width: 2.25rem;
+  text-align: center;
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+  background: var(--color-bg);
+}
+
+.large-type-digit {
+  color: var(--color-accent);
+}
+
+.large-type-symbol {
+  color: var(--color-danger);
+}
+
+/* The command palette (Ctrl/Cmd+K; `views/CommandPalette.tsx`): the same overlay/dialog shell
+   as every other dialog, widened for its search box and results list. Its options
+   (`<li role="option">`) reuse `.row`/`.row-icon`/`.row-text`/`.row-title`/`.row-sub` from the
+   item list for a consistent look, with their own selector here since they are not
+   `button.row` (module docs: a combobox's options are not separately focusable). */
+.command-palette {
+  width: min(34rem, 92vw);
+  display: flex;
+  flex-direction: column;
+  max-height: 80vh;
+}
+
+.command-palette-combobox {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+  padding: 0 var(--space-2);
+}
+
+.command-palette-combobox svg {
+  flex: none;
+  color: var(--color-text-muted);
+}
+
+.command-palette-combobox input {
+  flex: 1;
+  border: none;
+  padding: var(--space-2) 0;
+}
+
+.command-palette ul {
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  overflow-y: auto;
+}
+
+.command-palette li.row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-1);
+  cursor: pointer;
+}
+
+.command-palette li.row.selected {
+  background: var(--color-bg);
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+}
+
 /* The Tags sidebar section (item 6). */
 .settings-view {
   display: flex;
