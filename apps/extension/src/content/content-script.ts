@@ -28,8 +28,9 @@ import {
   type ToContentScript,
 } from "../messaging/contract.ts";
 import { INLINE_MENU_SHOW, isInlineMenuPickMessage } from "../inline-menu/protocol.ts";
-import { isOwnOverlayMutation } from "./own-overlay-mutation.ts";
+import { isOwnOverlayElement, isOwnOverlayMutation } from "./own-overlay-mutation.ts";
 import {
+  MAX_Z_INDEX,
   type ChainStyleSample,
   type MenuVisibilityState,
   type PointHitResult,
@@ -40,6 +41,7 @@ import {
   isPointHitOk,
   isTopLayerClear,
   isVisibilityChainOk,
+  parseBoxShadowMarginPx,
   rectsMatch,
   recordSample,
 } from "./menu-visibility.ts";
@@ -443,7 +445,7 @@ class InlineMenu {
     frame.style.width = `${expectedRect.width}px`;
     frame.style.height = `${expectedRect.height}px`;
     frame.style.border = "0";
-    frame.style.zIndex = "2147483647";
+    frame.style.zIndex = String(MAX_Z_INDEX);
     // Set *before* `frame.src` is assigned below, closing the gap between iframe creation and
     // the first animation frame: inline `!important` outranks any author-stylesheet rule in the
     // same bucket by specificity, including one that is itself `!important` — this is what
@@ -574,7 +576,14 @@ class InlineMenu {
     if (!isVisibilityChainOk(this.#chainSamples())) {
       return false;
     }
-    if (!isTopLayerClear(this.#expectedRect, this.#topLayerRects())) {
+    // Two independent occlusion sources fed into the same rect-intersection check
+    // (`isTopLayerClear`'s own doc): the browser's top layer, and (A7 bypass-2 fix) any
+    // body-level sibling tying the frame's own maximum z-index that comes after it in document
+    // order — the only other route ordinary DOM stacking has to paint above a
+    // `zIndex: MAX_Z_INDEX` element, and one `elementFromPoint`-based hit-testing can never catch
+    // on its own when the sibling is `pointer-events: none` (this method's own point-hit check,
+    // below, is blind to exactly this).
+    if (!isTopLayerClear(this.#expectedRect, [...this.#topLayerRects(), ...this.#occludingSiblingRects()])) {
       return false;
     }
     return isPointHitOk(this.#pointHitResult());
@@ -607,21 +616,65 @@ class InlineMenu {
   /** The rects of every element the browser's top layer can render above all z-index (spec):
    * `document.fullscreenElement`, every open `<dialog>`, and every open popover. The `:popover-
    * open` selector throws in a browser/version without the Popover API — caught and treated as
-   * "no open popovers," which matches reality (nothing can be a popover there either). */
+   * "no open popovers," which matches reality (nothing can be a popover there either).
+   *
+   * A7 bypass-1/3 fix: each element's own `getBoundingClientRect()` is widened by
+   * {@link pushOcclusionRect} before being used here — box-shadow (confirmed by direct probe: a
+   * 1×1 top-layer popover with a 3000px box-shadow blankets the viewport while its own rect
+   * stays 1×1, and box-shadow never participates in hit-testing) and non-`none` `filter` can both
+   * paint a top-layer element's visible extent far outside its own border box, so taking the raw
+   * rect at face value here was the exact gap those reports used. */
   #topLayerRects(): Rect[] {
     const rects: Rect[] = [];
     if (document.fullscreenElement !== null) {
-      rects.push(toRect(document.fullscreenElement.getBoundingClientRect()));
+      pushOcclusionRect(rects, document.fullscreenElement);
     }
     for (const dialog of document.querySelectorAll("dialog[open]")) {
-      rects.push(toRect(dialog.getBoundingClientRect()));
+      pushOcclusionRect(rects, dialog);
     }
     try {
       for (const popover of document.querySelectorAll(":popover-open")) {
-        rects.push(toRect(popover.getBoundingClientRect()));
+        pushOcclusionRect(rects, popover);
       }
     } catch {
       // No Popover API support: nothing can be `:popover-open` either.
+    }
+    return rects;
+  }
+
+  /** A7 bypass-2 fix: siblings of the frame, under its own parent, that come AFTER it in
+   * document order and whose own computed `z-index` ties {@link MAX_Z_INDEX} — the structural
+   * precondition an opaque, `pointer-events: none` decoy needs to visually cover the frame while
+   * staying invisible to `elementFromPoint`/`elementsFromPoint` (both exclude `pointer-events:
+   * none` targets from hit-testing by spec — confirmed by direct probe, matching
+   * THREAT_MODEL.md's own residual-risk note on exactly this). Detected from the DOM structure
+   * itself, not from paint or hit-testing, so it closes the gap regardless of `pointer-events`,
+   * regardless of whether the content script's own rebuild-on-mutation has had a chance to run
+   * yet, and regardless of a concurrent main-thread stall (a reported bypass combined a decoy
+   * with a synchronous busy-loop specifically to deny that rebuild a chance to re-win the
+   * DOM-order tie before the next real sample; this check does not depend on the rebuild at all).
+   * `isOwnOverlayElement` excludes this frame's own later overlays (there are none today, but a
+   * generic walk stays correct if that changes) from counting against itself. */
+  #occludingSiblingRects(): Rect[] {
+    const parent = this.#frame.parentElement;
+    if (parent === null) {
+      return [];
+    }
+    const rects: Rect[] = [];
+    let passedFrame = false;
+    for (const child of parent.children) {
+      if (child === this.#frame) {
+        passedFrame = true;
+        continue;
+      }
+      if (!passedFrame || isOwnOverlayElement(child)) {
+        continue;
+      }
+      const zIndex = Number(getComputedStyle(child).zIndex);
+      if (!Number.isFinite(zIndex) || zIndex < MAX_Z_INDEX) {
+        continue;
+      }
+      rects.push(toRect(child.getBoundingClientRect()));
     }
     return rects;
   }
@@ -726,4 +779,26 @@ function inlineMenuOrigin(): string {
  * never take a DOM type directly. */
 function toRect(rect: DOMRect): Rect {
   return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+}
+
+/** Pushes `el`'s occlusion rect onto `rects`, widened for any paint that can escape its own
+ * border box (A7 bypass-1/3 fix, `InlineMenu#topLayerRects`'s own doc). A non-`none` `filter`
+ * (e.g. `drop-shadow`) is rare on a top-layer element and not reliably boundable from computed
+ * style alone, so it conservatively substitutes the full viewport rect rather than attempting to
+ * parse `filter`'s own shorthand; `parseBoxShadowMarginPx` returning `undefined` (a computed
+ * `box-shadow` shape this parser does not recognise) does the same — "only ever refuse more"
+ * means a value this cannot confidently bound must widen the fallback, never narrow it. */
+function pushOcclusionRect(rects: Rect[], el: Element): void {
+  const rect = toRect(el.getBoundingClientRect());
+  const style = getComputedStyle(el);
+  if (style.filter !== "none") {
+    rects.push({ left: 0, top: 0, width: window.innerWidth, height: window.innerHeight });
+    return;
+  }
+  const margin = parseBoxShadowMarginPx(style.boxShadow);
+  if (margin === undefined) {
+    rects.push({ left: 0, top: 0, width: window.innerWidth, height: window.innerHeight });
+    return;
+  }
+  rects.push({ left: rect.left - margin, top: rect.top - margin, width: rect.width + margin * 2, height: rect.height + margin * 2 });
 }

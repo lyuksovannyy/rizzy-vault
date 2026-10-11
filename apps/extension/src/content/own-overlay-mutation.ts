@@ -10,7 +10,12 @@
 // stand-in interface): TypeScript's "weak type" check rejects a real `Node` against an
 // interface whose only property is optional, since the two share no required property at all —
 // casting inside {@link isOwn} instead avoids that without widening the public API.
-function isOwn(node: unknown): boolean {
+/** Exported so `content-script.ts`'s own max-z-index-sibling occlusion check (A7 bypass-2 fix)
+ * can reuse the exact same "is this one of OUR overlay elements" test — the one other place in
+ * this codebase that needs to tell our own overlay apart from anything else on the page, for the
+ * same underlying reason: a decoy sharing the frame's own insertion point is exactly what both
+ * checks must not mistake for the frame's own, legitimate sibling. */
+export function isOwnOverlayElement(node: unknown): boolean {
   const el = node as { hasAttribute?: (name: string) => boolean };
   return typeof el.hasAttribute === "function" && (el.hasAttribute("data-rizzy-inline-menu") || el.hasAttribute("data-rizzy-save-prompt"));
 }
@@ -26,12 +31,12 @@ function isOwn(node: unknown): boolean {
 export function isOwnOverlayMutation(records: readonly { addedNodes: Iterable<unknown>; removedNodes: Iterable<unknown> }[]): boolean {
   for (const record of records) {
     for (const node of record.addedNodes) {
-      if (!isOwn(node)) {
+      if (!isOwnOverlayElement(node)) {
         return false;
       }
     }
     for (const node of record.removedNodes) {
-      if (!isOwn(node)) {
+      if (!isOwnOverlayElement(node)) {
         return false;
       }
     }

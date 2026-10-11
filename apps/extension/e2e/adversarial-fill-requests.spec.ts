@@ -1528,3 +1528,361 @@ test("a genuine (uninterrupted) main-thread stall while the frame is hidden stil
   }
 });
 
+// Third adversarial-report round (THREAT_MODEL.md A7 Residual risk; HANDOFF X6 follow-up #2):
+// 4 more reported bypasses. Two reproduced against Gates A/B alone and are now fixed
+// (`content-script.ts`/`menu-visibility.ts`, below); one does not reproduce under this
+// extension's own real, measured click→apply_fill timing and is rejected with evidence.
+//
+// Disables IntersectionObserver v2 context-wide — simulating Firefox's total lack of it
+// (`inline-menu/main.ts`'s own `IOV2_SUPPORTED` feature-detect reads exactly this absence) — so
+// these tests isolate Gates A/B's own floor from Gate C's Chromium-only backstop.
+// Chromium-with-IOv2-disabled is a PROXY for Firefox, not Firefox itself: no Firefox Playwright
+// harness exists here (HANDOFF, this file's own header comment / `playwright.config.ts`).
+async function disableIov2(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    if (typeof IntersectionObserverEntry !== "undefined") {
+      delete (IntersectionObserverEntry.prototype as unknown as Record<string, unknown>)["isVisible"];
+    }
+  });
+}
+
+/** Methodology guard: confirms IOv2 really is off INSIDE the real cross-origin inline-menu
+ * document (not merely in the top frame, which never had it to begin with) — without this, a
+ * test that "passes" could be passing only because Gate C silently caught the attack, the exact
+ * confound disabling IOv2 exists to remove. */
+async function expectIov2Disabled(visit: Page): Promise<void> {
+  const inlineMenuFrame = visit.frames().find((f) => f.url().includes("inline-menu"));
+  if (inlineMenuFrame === undefined) {
+    throw new Error("adversarial test setup: could not find the inline-menu frame");
+  }
+  const disabled = await inlineMenuFrame.evaluate(() => !("isVisible" in IntersectionObserverEntry.prototype));
+  expect(disabled).toBe(true);
+}
+
+// Reported bypass (critical; reported twice, independently — one mechanism, consolidated into
+// one test per this file's own "one test per attack class" precedent, line 543): a 1×1
+// `popover="manual"` element, promoted to the top layer by `showPopover()` (no user gesture
+// needed), with `box-shadow: 0 0 0 3000px <opaque>`. `box-shadow` paints far outside its own
+// border box but never participates in hit-testing and never changes `getBoundingClientRect()`.
+//
+// REPRODUCED against Gates A/B alone (confirmed by direct probe against the real built
+// extension, IOv2 disabled: `elementFromPoint` at the menu's own centre kept returning the real
+// iframe throughout, `pointer-events` stayed `auto`, and the real click filled both fields) — the
+// pre-fix `#topLayerRects()`/`isTopLayerClear` compared only each top-layer element's OWN rect,
+// never its painted area, so a popover whose rect never changes could blanket the viewport
+// unnoticed. With IOv2 left enabled, Chromium's own Gate C backstop already caught this
+// (confirmed by the same probe) — exactly the case THREAT_MODEL.md's A7 section's "floor on both
+// browsers regardless of Gate C" claim did not actually hold for.
+//
+// FIXED: `#topLayerRects()` now widens each top-layer element's rect by
+// `parseBoxShadowMarginPx`'s parsed box-shadow extent (or substitutes the full viewport rect for
+// a non-`none` `filter`, or for a box-shadow shape the parser does not recognise) before it ever
+// reaches `isTopLayerClear` — closing the exact demonstrated vector without blocking an ordinary
+// `<dialog>`'s small drop shadow (`menu-visibility.test.ts` exercises the parser directly; a
+// 0–~16px shadow never reaches a real menu's rect, a 3000px one always does).
+test("a 1x1 top-layer popover with an oversized box-shadow cannot blanket-hide the menu while it stays clickable (reported bypass, critical, duplicate reports)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "bypassboxshadow");
+    await createLoginItem(setupPage, {
+      title: "Box Shadow Bypass Target",
+      username: "boxshadow-user@example.com",
+      password: "boxshadow-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "bypassboxshadow", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await disableIov2(visit);
+    // Planted before the page even loads (`showPopover()` needs no user gesture), exactly as
+    // reported: the attacker's page shows this cover unconditionally on load, before the real
+    // inline-menu iframe even exists.
+    await visit.addInitScript(() => {
+      window.addEventListener("DOMContentLoaded", () => {
+        const pop = document.createElement("div");
+        (pop as unknown as { popover: string }).popover = "manual";
+        Object.assign(pop.style, {
+          position: "fixed",
+          left: "0px",
+          top: "0px",
+          width: "1px",
+          height: "1px",
+          boxShadow: "0 0 0 3000px rgba(20, 20, 20, 0.98)",
+        });
+        document.body.appendChild(pop);
+        (pop as unknown as { showPopover: () => void }).showPopover();
+      });
+    });
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Box Shadow Bypass Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    await expectIov2Disabled(visit);
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+
+    // A short margin before reading anything geometry/visibility-dependent: Gate A's rAF loop
+    // needs at least one tick to have sampled the popover at all.
+    await visit.waitForTimeout(300);
+
+    // The discriminator: confirms the attack setup actually took effect (the popover is really
+    // promoted to the top layer, really has the oversized shadow, and its own border box is
+    // genuinely tiny — the box-shadow, not the box itself, is what would do the blanketing), and
+    // that the FIX is refusing for the reason this test exists to prove — Gate A's own
+    // `pointer-events: none` toggle (`InlineMenu`'s own module doc) — not for some unrelated
+    // reason. A raw `elementFromPoint` hit test is NOT part of this discriminator: it would
+    // itself respect this same `pointer-events: none`, once set, and so cannot distinguish "the
+    // fix caught the box-shadow" from "something else refused" — this file's own probe work
+    // against the UNFIXED code already established that raw hit-testing alone reaches the real
+    // iframe here (box-shadow never participates in hit-testing, by spec).
+    const diag = await visit.evaluate(() => {
+      const pop = document.querySelector("div[popover]");
+      const frame = document.querySelector("iframe[data-rizzy-inline-menu]");
+      return {
+        popoverExists: pop !== null,
+        popoverBoxShadow: pop !== null ? getComputedStyle(pop).boxShadow : null,
+        popoverRectTiny: pop !== null ? pop.getBoundingClientRect().width <= 20 : false,
+        framePointerEvents: frame !== null ? getComputedStyle(frame).pointerEvents : null,
+      };
+    });
+    expect(diag.popoverExists).toBe(true);
+    expect(diag.popoverBoxShadow).not.toBeNull();
+    expect(diag.popoverBoxShadow).not.toBe("none");
+    expect(diag.popoverRectTiny).toBe(true);
+    expect(diag.framePointerEvents).toBe("none");
+
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await visit.waitForTimeout(1000);
+
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// Reported bypass (critical): an opaque, `pointer-events: none` decoy sharing the frame's own
+// maximum z-index, appended as a LATER sibling, with a synchronous main-thread busy-loop run in
+// the SAME call stack as the decoy's own insertion. `document.elementFromPoint` (and
+// `elementsFromPoint`, matching THREAT_MODEL.md's own residual-risk note on this exact exclusion)
+// skips `pointer-events: none` targets entirely by spec, so neither Gate A's hit test nor a real
+// click's own hit-testing ever sees this decoy; the busy-loop is aimed at denying the content
+// script's `MutationObserver`-debounced rebuild (the thing that already defeats the plain,
+// one-shot/persistent decoy above by re-winning the DOM-order tie) any chance to run until the
+// loop returns, since a microtask/macrotask cannot preempt a running synchronous script.
+//
+// REPRODUCED (confirmed by direct probe against the real built extension, IOv2 left at its
+// default EITHER WAY — this one did not even need IOv2 disabled to go through, a stronger result
+// than the report itself claimed for Chromium): a real click dispatched during the 700ms stall
+// filled both fields 3/3 runs, deterministically. Nothing about the frame's OWN rect/style/hit
+// test ever changed (the decoy never touches the frame itself), so the pre-fix Gate A had no
+// signal AT ALL to react to regardless of the stall or Gate A's own `requestAnimationFrame`
+// cadence — this is a different, independent gap from the already-closed `isFillAllowed` recency
+// issue (that one needed a stall to EXCEED the 1-second trailing window; this decoy's 700ms stall
+// sits comfortably under it, and still worked, because the defect here is that the decoy is
+// invisible to Gate A's checks, not that a sample went stale).
+//
+// FIXED, cross-browser and independent of timing: `InlineMenu#occludingSiblingRects` detects the
+// attack's structural PRECONDITION instead of its paint — any body-level sibling, later than the
+// frame in document order, whose own computed `z-index` ties the frame's maximum
+// (`MAX_Z_INDEX`) — regardless of `pointer-events`, regardless of whether a rebuild has run yet,
+// and regardless of a concurrent main-thread stall (the check only has to run ONCE the main
+// thread is free again, at which point the decoy, until a rebuild removes it, is still
+// detectable from the DOM alone). Confirmed by direct probe (post-fix, 4 runs, IOv2 both on and
+// off) that this closes it without needing to win any tick-ordering race.
+test("an opaque pointer-events:none decoy at the frame's own max z-index, inserted together with an uninterrupted main-thread stall, cannot blanket the menu while it stays clickable (reported bypass, critical)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  test.setTimeout(60_000);
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "bypassdecoystall");
+    await createLoginItem(setupPage, {
+      title: "Decoy Stall Target",
+      username: "decoystall-user@example.com",
+      password: "decoystall-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "bypassdecoystall", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await disableIov2(visit);
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Decoy Stall Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    await expectIov2Disabled(visit);
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(150); // let Gate A record a real good sample first
+
+    // Scheduled via `setTimeout` so this `evaluate()` call returns immediately and the real click
+    // below is free to fire while the page's main thread is actually busy — same technique as
+    // the existing main-thread-stall test above, with a `pointer-events: none` DECOY instead of
+    // hiding the frame itself.
+    await visit.evaluate((rect) => {
+      (window as unknown as { __diag: Record<string, unknown> }).__diag = {};
+      setTimeout(() => {
+        const d = (window as unknown as { __diag: Record<string, unknown> }).__diag;
+        const frame = document.querySelector<HTMLIFrameElement>("iframe[data-rizzy-inline-menu]");
+        if (frame === null) {
+          d["noFrame"] = true;
+          return;
+        }
+        const decoy = document.createElement("div");
+        decoy.id = "rizzy-test-decoy-stall";
+        Object.assign(decoy.style, {
+          position: "fixed",
+          left: `${rect.x}px`,
+          top: `${rect.y}px`,
+          width: `${rect.width}px`,
+          height: `${rect.height}px`,
+          zIndex: "2147483647",
+          background: "rgba(20, 20, 20, 0.98)",
+          pointerEvents: "none",
+        });
+        document.body.appendChild(decoy); // SAME call stack as the busy loop below
+        d["pointerEventsAtStallStart"] = getComputedStyle(frame).pointerEvents;
+        const hitEl = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+        d["hitAtStallStart"] = hitEl === frame ? "frame" : hitEl ? hitEl.tagName : "none";
+        const t0 = performance.now();
+        while (performance.now() - t0 < 700) {
+          /* ONE uninterrupted synchronous block, in the SAME call stack as the decoy insertion */
+        }
+        d["blockRanMs"] = performance.now() - t0;
+      }, 30);
+    }, box);
+    await visit.waitForTimeout(60); // let the setTimeout fire and the stall begin
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await visit.waitForTimeout(2000); // well past the 700ms block and the full round trip
+
+    const diag = await visit.evaluate(() => (window as unknown as { __diag: Record<string, unknown> }).__diag);
+    // Confirms the attack's own preconditions actually held (pointer-events frozen `auto`, raw
+    // hit-testing targeting the real frame despite the decoy, the block ran uninterrupted) — a
+    // genuine attempt, not a no-op that happens to pass.
+    expect(diag["pointerEventsAtStallStart"]).toBe("auto");
+    expect(diag["hitAtStallStart"]).toBe("frame");
+    expect(diag["blockRanMs"] as number).toBeGreaterThanOrEqual(700);
+
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// Reported bypass (high; two severities claimed depending on browser — see this test's own
+// verdict): an unrelated DOM mutation (e.g. a third-party script appending an empty `<span>`)
+// anywhere on the page triggers `wireInlineMenu`'s unconditional rebuild, which replaces the
+// closure's `menu`/`activeFillTargets` with a brand-new `InlineMenu` instance. Gate B's
+// `apply_fill` listener (`content-script.ts`) checks whichever instance `menu` CURRENTLY is, with
+// no check that it is the one instance the user's actual click happened on — so if a rebuild runs
+// between the click and `apply_fill`'s arrival, a poisoned (correctly-refusing) instance's history
+// is discarded in favour of a fresh, clean one.
+//
+// REJECTED as a REALISTIC bypass, on the facts, confirmed by direct probe against the real built
+// extension (3/3 runs, no artificial delay of any kind): the mechanism depends on a rebuild
+// actually completing and replacing `menu` BEFORE `apply_fill` arrives. A rebuild needs (1) an
+// unrelated mutation to be observed by the content script's own `MutationObserver`, then (2) its
+// debounced `schedule()` to wait a full 250ms before even calling `wireInlineMenu` — at least
+// 250ms end to end. `menu-visibility.ts`'s own doc already measured the real click→apply_fill
+// round trip directly against this extension's positive-control e2e test at 0.6–5.2ms — roughly
+// 50–400× faster than the 250ms floor a rebuild needs. The report's own methodology concedes
+// this: it reproduces the mechanism only by ARTIFICIALLY DELAYING `apply_fill`'s delivery inside
+// the extension's own internals ("not a measured real-world figure"), which is not a capability a
+// hostile WEB PAGE has (THREAT_MODEL.md A7's own "Capabilities" list is page-side JavaScript
+// only — nothing about reaching into the extension's own background↔content-script message
+// timing). With NO such artificial delay — hiding the page via `opacity: 0` (poisoning the
+// current instance; a real click still lands, since opacity never blocks hit-testing),
+// clicking, and firing the unrelated mutation (plus un-hiding) immediately afterward, exactly as
+// fast as a real page could — the real, fast round trip always wins the race: `menu` is still the
+// original, correctly-refusing instance by the time `apply_fill` arrives, every run.
+//
+// Not fixed (nothing here reproduces under this extension's own real timing, and the fix the
+// mechanism would otherwise call for — threading the clicked instance's identity through the
+// `apply_fill` message — would change ADR 0040's message shape, which needs an Accepted ADR this
+// task does not have). Kept as a regression test: if a future change widens the rebuild debounce,
+// speeds up nothing, or otherwise changes this timing relationship, this test is what would catch
+// a bypass that starts reproducing for real.
+test("an unrelated DOM mutation racing a rebuild against the real click→apply_fill round trip does not reproduce under real timing (reported bypass, high — rejected on the facts)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "bypassswap");
+    await createLoginItem(setupPage, {
+      title: "Swap Bypass Target",
+      username: "swapbypass-user@example.com",
+      password: "swapbypass-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "bypassswap", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Swap Bypass Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(150);
+
+    // Poisons the CURRENT instance's Gate A/B history (a real click still lands: opacity never
+    // blocks hit-testing).
+    await visit.evaluate(() => {
+      document.body.style.opacity = "0";
+    });
+    await visit.waitForTimeout(100); // let a few real bad samples land first
+
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    // As fast as a real hostile page could react — no artificial delay of the extension's own
+    // message passing, only ordinary synchronous page script immediately after the click.
+    await visit.evaluate(() => {
+      document.body.style.opacity = "1"; // un-hide, so a rebuilt instance would start clean
+      const span = document.createElement("span");
+      span.textContent = "unrelated";
+      document.body.appendChild(span); // the unrelated mutation that could trigger a rebuild
+    });
+
+    await visit.waitForTimeout(1000);
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
