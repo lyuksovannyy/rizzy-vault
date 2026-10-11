@@ -546,7 +546,7 @@ A `.env` file (not `.example`) under `~/.config/containers/systemd/` is already 
 
 Also: `rizzy-vault.container`'s default `Image=localhost/rizzy-vault:dev` is a local build with no registry behind it at all ([§2](#2-install): "There is no published image yet"). `AutoUpdate=registry` has nothing to check against for that tag, so it is a no-op there regardless of the timer, until `Image=` names a real registry reference. The Caddy proxy's image is already a real registry reference, so its own `AutoUpdate=registry` line would do something the moment it is enabled — which is exactly why it stays commented out by the same default, not left on because "it's just Caddy."
 
-**Admin one-offs.** Systemd units are the wrong shape for a command meant to run once and exit; these stay `podman run --rm`, matching each `compose.yaml` one-off service ([§4](#4-configuration-reference) "Commands") with the matching volumes. Every one of them carries `--network=none` and the same `--read-only --cap-drop=all --security-opt=no-new-privileges:true --user 65532:65532` flags `compose.yaml`'s `x-hardening` anchor gives every one-off service there — including `secrets init` above — not only the one shown with them spelled out below:
+**Admin one-offs.** Systemd units are the wrong shape for a command meant to run once and exit; these stay `podman run --rm`, matching each `compose.yaml` one-off service ([§4](#4-configuration-reference) "Commands") with the matching volumes. Every one of them carries `--network=none` and the same `--read-only --cap-drop=all --security-opt=no-new-privileges:true --user 65532:65532` flags `compose.yaml`'s `x-hardening` anchor gives every one-off service there — including `secrets init` above — not only the one shown with them spelled out below. `migrate` and `restore` also carry `--tmpfs /tmp:size=64m,mode=1777`, matching the `tmpfs:` `compose.yaml` gives those two services only; the rest have no tmpfs, matching `compose.yaml` too:
 
 ```sh
 # secrets rotate / retire-setups (server stopped first; swap the trailing command for either):
@@ -556,7 +556,13 @@ podman run --rm --network=none -v rizzy-vault-data:/data -v rizzy-vault-secrets:
   localhost/rizzy-vault:dev secrets rotate
 systemctl --user start rizzy-vault.service
 
-# migrate (server stopped first), same shape as secrets rotate above, command "migrate".
+# migrate (server stopped first). Unlike secrets rotate, compose.yaml's `migrate` service
+# mounts no secrets volume, and does carry --tmpfs:
+systemctl --user stop rizzy-vault.service
+podman run --rm --network=none -v rizzy-vault-data:/data --tmpfs /tmp:size=64m,mode=1777 \
+  --user 65532:65532 --read-only --cap-drop=all --security-opt=no-new-privileges:true \
+  localhost/rizzy-vault:dev migrate
+systemctl --user start rizzy-vault.service
 
 # backup-secrets, with the passphrase on stdin, secrets volume read-only is enough. The
 # staging directory needs the same owner and mode as §5's rootful example, done the rootless
@@ -574,8 +580,8 @@ podman exec rizzy-vault rizzy-vault backup --out - > "rizzy-data-$(date +%Y%m%dT
 
 # restore (server stopped first), reading from stdin, as compose.yaml's `restore` service:
 podman run --rm -i --network=none -v rizzy-vault-data:/data -v rizzy-vault-secrets:/run/rizzy-secrets:ro \
-  --user 65532:65532 --read-only --cap-drop=all --security-opt=no-new-privileges:true \
-  localhost/rizzy-vault:dev restore --in -
+  --tmpfs /tmp:size=64m,mode=1777 --user 65532:65532 --read-only --cap-drop=all \
+  --security-opt=no-new-privileges:true localhost/rizzy-vault:dev restore --in -
 ```
 
 `backup` needs none of this: it runs inside the already-networked, already-hardened `rizzy-vault` container through `exec`, the same as under `compose.yaml`.
