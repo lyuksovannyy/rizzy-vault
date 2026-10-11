@@ -40,18 +40,24 @@ iframe; every message in the "inline-menu sender class" must then carry a token 
 can still vouch for.
 
 1. **Mint.** `InlineMenu`'s constructor and `passkey-relay.ts`'s consent-iframe builder each
-   generate one token (`crypto.randomUUID()`, ≥128 random bits) before setting the iframe's `src`.
+   generate one token (`crypto.randomUUID()`, 122 random bits — a v4 UUID's 128 bits minus the 4
+   version bits and 2 variant bits RFC 4122 fixes) before setting the iframe's `src`.
 2. **Register over the already-trusted content-script channel.** A new `FromContentScript`
    message, `register_iframe_instance { instanceToken }`, goes through the exact path
    `fields_detected` already uses — `isContentScriptSender`/`trustedOriginOf`, never
    `isInlineMenuSender` — through `parseFromContentScript`/`validate.ts`'s byte budget like any
    other content-script message. The background binds the token to `(sender.tab.id,
-   sender.frameId, trustedOrigin)` and a TTL (recommend 30 min; Open questions), in a bounded
-   store shaped like `passkeyCeremonies`. `frameId` scopes the registration to the exact
-   content-script instance that minted it (a tab can run the content script, and build an
-   `InlineMenu`, in more than one frame); it is never re-checked against the *iframe's* own
-   `frameId`/`documentId` at use time (Alternative 1) — the token is what use-time validation
-   checks.
+   trustedOrigin)` and a TTL (recommend 30 min; Open questions), in a bounded store shaped like
+   `passkeyCeremonies`. No `frameId`: both minting content scripts gate on `window.top === window`
+   today (`content-script.ts:54`, `passkey-relay.ts:34`), so a tab cannot yet run more than one
+   instance that mints a token, and neither validated content-script path carries one to bind to
+   either (`core-host/listener.ts:113`'s `sender.tab?.id` on Firefox; `ContentScriptForward`,
+   handled at `listener.ts:171`, on Chromium) — add `frameId`, and plumb it through both, only if
+   a later change lets the content script run in a non-top frame. `trustedOrigin` is recorded for
+   the store's own bookkeeping (and future use, Open questions point 3); point 4's use-time check
+   is deliberately tab-scoped only, `sender.tab.id` alone, not also re-checking `trustedOrigin`.
+   The registration is never re-checked against the *iframe's* own `frameId`/`documentId` at use
+   time (Alternative 1) — the token is what use-time validation checks.
 3. **Deliver to the iframe only over the existing targeted `postMessage`.**
    `InlineMenuShowMessage`/`PasskeyConsentShowMessage` gain one field, `instanceToken`, delivered
    exactly as `candidates`/the ceremony offer already are — never via `src`, an attribute, or any
@@ -68,19 +74,27 @@ can still vouch for.
 5. **Single-instance lifetime.** `InlineMenu#destroy()`/the consent-iframe's teardown send
    `revoke_iframe_instance { instanceToken }` over the same channel, deleted immediately —
    covering a pick, a blur, and `wireInlineMenu`'s destroy-and-rebuild; a rebuild mints a fresh
-   token. `destroy()` still runs only after `requestFill`/`respond` settles (the existing
-   ordering fix), so revocation never strands an in-flight request: the measured
-   click→`apply_fill` round trip is 0.6–5.2 ms (THREAT_MODEL.md A7), 50–400× faster than the
-   250 ms rebuild debounce. This also closes the second adversarial round's "unrelated DOM
-   mutation racing a rebuild" residual, left open there precisely because closing it needed this
-   protocol change.
+   token. Today only the iframe-initiated pick path defers to settlement — `inline-menu/main.ts`
+   posts the pick message that triggers `destroy()` only inside `requestFill(...).finally(...)`,
+   measured at a 0.6–5.2 ms click→`apply_fill` round trip (THREAT_MODEL.md A7). The blur
+   (`content-script.ts:615–616`) and rebuild (`content-script.ts:104`) paths call `destroy()`
+   unconditionally, with no such wait — and a click into the iframe is itself a plausible cause of
+   that same blur, racing the token's own revocation against the very click it was minted for
+   (open question 4 below; whether this strands a real click is unverified, U). Whether blur- and
+   rebuild-triggered revocation must also defer to settlement, and how `content-script.ts` would
+   detect "in flight" to do so, is a new requirement this ADR raises, not one "the existing
+   ordering fix" already resolves — that fix exists only for the pick path. This point does not
+   close the second adversarial round's "unrelated DOM mutation racing a rebuild" residual
+   (THREAT_MODEL.md:477): closing that needs threading the clicked instance's identity through
+   `apply_fill`, a separate [ADR 0040](0040-extension-fill-request-from-inline-menu.md)
+   message-shape change this ADR does not make.
 6. **`ceremonyToken` is unchanged, an independent second layer** — `instanceToken` sits beside it,
    never in place of it.
 7. **Tests required** (`adversarial-fill-requests.spec.ts`): the `test.fixme` at line 4045 becomes
    a passing `test`; a clone nested in an unrelated third-party subframe is refused the same way;
    a replayed token from an already-destroyed instance, an expired token, and a token registered
    for a different tab are each refused; teardown revokes before a later message can use that
-   token; a real click still fills during a concurrent rebuild (point 5's race). The store itself
+   token; a real click still fills during a concurrent rebuild (point 5, open question 4). The store itself
    needs unit tests mirroring `passkey-ceremony.test.ts`. Firefox and Chromium already use
    `runtime.sendMessage`/`onMessage` and targeted `postMessage` identically today (V) — no new,
    version-gated API, so no separate support spike is needed.
@@ -99,6 +113,8 @@ can still vouch for.
 ### Risks
 - A future sender class that forgets to require `instanceToken` reopens this gap for itself
   (mitigation: one shared check); the 30-minute TTL (point 2) is unverified (U).
+- A blur- or rebuild-triggered `destroy()` revoking a token while a legitimate pick using it is
+  still in flight at the background (point 5, open question 4) is unverified (U).
 
 ## What this ADR supersedes
 
@@ -107,13 +123,22 @@ status lines at acceptance, not now.
 
 | Part, quoted | Replaced by |
 |---|---|
-| [ADR 0040](0040-extension-fill-request-from-inline-menu.md)'s own replacement of [ADR 0036](0036-browser-extension-architecture-and-key-custody.md) §4, first bullet (currently binding): "sends only: detected-field reports and submitted-credential reports. The chosen fill request comes from the inline-menu iframe (ADR 0040)." | "…and a per-instance registration/revocation message for an inline-menu or passkey-consent iframe it is about to build or tear down (ADR 0043). The chosen fill request comes from the inline-menu iframe (ADR 0040)." |
-| [ADR 0040](0040-extension-fill-request-from-inline-menu.md) point 1, sentence: "The iframe is an extension page, so the long-lived context identifies it from the browser's sender information (`sender.origin` is the extension's own origin and `sender.tab` is the tab it is embedded in), never from message fields." | Unchanged, plus: "and the message must carry an `instanceToken` matching a live registration for that sender's own tab (ADR 0043), since sender information alone cannot tell two extension-origin documents in the same tab apart." |
-| [ADR 0040](0040-extension-fill-request-from-inline-menu.md) point 3, sentence: "The long-lived context runs the matcher again for the browser-vouched top-frame URL of the sender's tab and requires the requested item to be among the candidates." | Unchanged, plus: "and requires the message's `instanceToken` to match a live registration for that same tab (ADR 0043); a mismatch is refused before the matcher result is used." |
+| [ADR 0040](0040-extension-fill-request-from-inline-menu.md)'s own replacement of [ADR 0036](0036-browser-extension-architecture-and-key-custody.md) §4, first bullet (currently binding): "sends only: detected-field reports and submitted-credential reports. The chosen fill request comes from the inline-menu iframe (ADR 0040)." | "sends only: detected-field reports, submitted-credential reports, and a per-instance registration/revocation message for an inline-menu or passkey-consent iframe it is about to build or tear down (ADR 0043). The chosen fill request comes from the inline-menu iframe (ADR 0040)." |
+| [ADR 0040](0040-extension-fill-request-from-inline-menu.md) point 1, sentence: "The iframe is an extension page, so the long-lived context identifies it from the browser's sender information (`sender.origin` is the extension's own origin and `sender.tab` is the tab it is embedded in), never from message fields." | "The iframe is an extension page, so the long-lived context identifies it from the browser's sender information (`sender.origin` is the extension's own origin and `sender.tab` is the tab it is embedded in), never from message fields, and the message must carry an `instanceToken` matching a live registration for that sender's own tab (ADR 0043), since sender information alone cannot tell two extension-origin documents in the same tab apart." |
+| [ADR 0040](0040-extension-fill-request-from-inline-menu.md) point 3, sentence: "The long-lived context runs the matcher again for the browser-vouched top-frame URL of the sender's tab and requires the requested item to be among the candidates." | "The long-lived context runs the matcher again for the browser-vouched top-frame URL of the sender's tab and requires the requested item to be among the candidates, and requires the message's `instanceToken` to match a live registration for that same tab (ADR 0043); a mismatch is refused before the matcher result is used." |
 
-Everything else in ADR 0036 and ADR 0040 stays binding. Replaced share of ADR 0040's Decision: two
-sentences and one row's first-cell text out of 216 words (`## Decision` to `## Consequences`,
-`awk`+`wc -w`, 2026-10-11, V) — under half, so a partial supersession applies.
+Everything else in ADR 0036 and ADR 0040 stays binding. Row 1 supersedes a part of
+[ADR 0036](0036-browser-extension-architecture-and-key-custody.md)'s Decision, not ADR 0040's: the
+quoted text is ADR 0040's own replacement for ADR 0036 §4's first bullet, written in ADR 0040's
+"What this ADR supersedes" section — after ADR 0040's own `## Consequences`, so outside the span
+`wc -w` counts for ADR 0040, even though it binds as ADR 0036 §4's current text. Replaced share of
+ADR 0036's Decision (row 1): one bullet, 64 words of 1,441 (`## Decision` to `## Consequences`,
+`awk`+`wc -w`, 2026-10-11, V) — under half. ADR 0040's existing partial supersession of ADR 0036
+names this same bullet, so with both supersessions in force (ADR 0020 point 9's Limit) the
+cumulative replaced share of ADR 0036's Decision stays those same 64 words, not two separate
+bullets' worth. Replaced share of ADR 0040's Decision (rows 2–3): two sentences, 62 words of 214
+(same method, same date, V) — under half. Both stay under the point-9 limit, so a partial
+supersession applies to each.
 
 ## Alternatives considered
 
@@ -138,6 +163,16 @@ sentences and one row's first-cell text out of 216 words (`## Decision` to `## C
    show/hide is already bounded by the existing 250 ms detection debounce.
 3. **Scope.** Covers exactly the three message kinds in point 4. *Recommendation:* any future
    extension-origin-iframe sender class added later uses the same check from the start.
+4. **Blur/rebuild revocation timing (point 5).** Must a blur- or rebuild-triggered
+   `revoke_iframe_instance` defer to an in-flight pick's settlement the way the pick path's own
+   teardown already does, and what would `content-script.ts` check to know one is in flight,
+   since it only learns a pick happened — the deferred `INLINE_MENU_PICK` message — after that
+   pick has already settled? *Recommendation:* yes, conservatively — a `revoke_iframe_instance`
+   takes effect at the background only once any in-flight request bearing that token has settled
+   (same "only ever refuse more" shape as THREAT_MODEL.md's other timing trade-offs), even though
+   today's `content-script.ts` has no signal to gate *sending* it on. Revisit once a measurement
+   of real click→blur ordering across the iframe boundary shows whether the race is reachable at
+   all; that measurement could relax this to immediate revocation instead.
 
 ## References
 
