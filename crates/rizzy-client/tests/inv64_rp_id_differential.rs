@@ -62,9 +62,12 @@ enum Verdict {
 
 /// ADR 0037 §2 point 3 applied to a bare domain string (ADR 0038 §1's own normalisation
 /// contract, minus the full IDNA table this oracle deliberately does not re-derive — see module
-/// docs): lower-case, trailing dot stripped, empty after that is invalid.
+/// docs): lower-case, every trailing dot stripped (not just one — a run of two or more must
+/// collapse the same way a single dot does, the same invariant
+/// `rizzy_match::normalize::normalize_domain` fixes for the real implementation), empty after
+/// that is invalid.
 fn oracle_normalize_bare(raw: &str) -> Option<String> {
-    let s = raw.strip_suffix('.').unwrap_or(raw).to_ascii_lowercase();
+    let s = raw.trim_end_matches('.').to_ascii_lowercase();
     if s.is_empty() { None } else { Some(s) }
 }
 
@@ -169,7 +172,13 @@ struct Case {
     host: HostShape,
     rp_id: RpIdChoice,
     rp_id_uppercase: bool,
-    rp_id_trailing_dot: bool,
+    /// A trailing run of 0..=3 dots on the rendered `rp_id` (mirrors
+    /// `rizzy_match::normalize`'s own `registrable_domain_is_invariant_under_trailing_dot_runs`
+    /// and `normalize_domain_output_is_idempotent` proptests, which cover a run of this length):
+    /// a plain `bool` could only ever render zero or one dot, so this generator could never have
+    /// reached the two-or-more-trailing-dot shape the ADR 0037/0039 trailing-dot-run fix exists
+    /// for.
+    rp_id_trailing_dot_count: usize,
 }
 
 const LABELS: &[&str] = &[
@@ -222,15 +231,15 @@ fn case_strategy() -> impl Strategy<Value = Case> {
         host_strategy(),
         rp_id_choice_strategy(),
         any::<bool>(),
-        any::<bool>(),
+        0usize..=3,
     )
         .prop_map(
-            |(scheme, host, rp_id, rp_id_uppercase, rp_id_trailing_dot)| Case {
+            |(scheme, host, rp_id, rp_id_uppercase, rp_id_trailing_dot_count)| Case {
                 scheme,
                 host,
                 rp_id,
                 rp_id_uppercase,
-                rp_id_trailing_dot,
+                rp_id_trailing_dot_count,
             },
         )
 }
@@ -261,11 +270,7 @@ fn render_rp_id(case: &Case, origin_host: &str, origin_is_ip: bool) -> String {
     } else {
         base
     };
-    if case.rp_id_trailing_dot {
-        format!("{base}.")
-    } else {
-        base
-    }
+    format!("{base}{}", ".".repeat(case.rp_id_trailing_dot_count))
 }
 
 fn render_origin(scheme: SchemeKind, host: &str) -> String {
