@@ -336,6 +336,8 @@ fuzz_target!(|data: &[u8]| {
                         data: &parsed,
                     },
                     with.get(..take).unwrap_or_default(),
+                    // No causal layer here: this target fuzzes `ItemMerge` alone.
+                    None,
                 );
             }
             5 => {

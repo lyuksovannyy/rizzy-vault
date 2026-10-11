@@ -1498,6 +1498,7 @@ impl Device {
                     data: &data,
                 },
                 &with,
+                Some(&plan.cut),
             ) {
                 Ok(absorption) => match absorption.outcome {
                     AbsorbOutcome::Absorbed(absorbed) => {
