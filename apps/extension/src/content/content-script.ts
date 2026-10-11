@@ -816,10 +816,47 @@ class InlineMenu {
 
   /** GATE B (`menu-visibility.ts`'s own module doc): the authoritative, causally-after-click
    * check `installContentScript`'s `apply_fill` listener runs before ever writing a value into
-   * the page. Reads whatever Gate A's rAF loop last recorded — frozen at its last sample once
-   * {@link destroy} has cancelled that loop, which is exactly the informative state for a push
-   * that arrives shortly after the normal post-click teardown. */
+   * the page.
+   *
+   * Takes one more LIVE sample, HERE, when `#frame` is still attached — closing a gap found by
+   * direct measurement (A7, HANDOFF X6 bypass triage), reproducing a reported bypass's own
+   * underlying idea with a different, reliable trigger. The reported trigger itself (`focus` on
+   * the parent's `<iframe>` element) does not reliably fire for a real trusted click in this
+   * architecture — measured directly across repeated real-click runs, it fires in roughly 2 of
+   * 10, not 10 of 10 or 0 of 10 — so the original report's own mechanism is correctly rejected
+   * (kept as a non-flaky test, `adversarial-fill-requests.spec.ts`). But `window`'s own `blur`
+   * event, firing for the same underlying reason (focus moving into the cross-origin iframe),
+   * fired in every run measured, within ~1-2ms of the click landing. A page with a
+   * `window.blur` listener that hides the frame (`opacity: 0 !important`) and reveals it again
+   * ~50ms later got a real fill through the OLD code in roughly half of repeated live-click
+   * runs — not because Gate A's `requestAnimationFrame` loop was ever fooled by a well-timed
+   * flip (that race is already closed, see the trailing-window doc below), but because this
+   * method read ONLY the rolling history that loop had last written, up to one whole tick
+   * (~16ms) stale, while `#frame` is routinely STILL attached when `apply_fill` arrives
+   * (instrumented directly: ~15-120ms after the click in this harness, varying with machine
+   * load) — `pick`'s own teardown (`destroy`, triggered by the iframe's `postMessage`) is a
+   * later, independent task that in direct measurement usually lands AFTER this method already
+   * ran, not before, so the "frozen since teardown" framing this method's own history assumed
+   * was simply wrong for the common case. A hide landing in the gap between Gate A's last
+   * periodic tick and this call had, until now, zero chance of ever being recorded. Querying
+   * `#frame.isConnected` rather than sampling unconditionally is what keeps this safe for the
+   * OTHER case — `destroy` already ran, `#frame` is detached, `getBoundingClientRect()` on it
+   * would read an all-zero rect, always a bad sample, which would spuriously refuse a fill
+   * arriving after an ordinary, already-completed teardown; skipping the live sample there
+   * leaves that case exactly as before, reading only the frozen history.
+   *
+   * Residual, named rather than silently unclosed (THREAT_MODEL.md A7 has the full text): in
+   * that SAME "already detached" case, the decision is back to resting purely on history up to
+   * one tick stale — a page that could reliably win the ordering race the other way (make its
+   * own hide land, and `destroy` finish, inside the SAME gap before this call) would not be
+   * caught by the live sample above, because there would be no live sample to take. Not
+   * reproduced as a working trigger here — the page has no way to control exactly when
+   * `destroy`'s own async `postMessage` resolves relative to `apply_fill` — but not proven
+   * impossible either. */
   isFillAllowedNow(now: number): boolean {
+    if (this.#frame.isConnected) {
+      this.#visibilityState = recordSample(this.#visibilityState, now, this.#sampleOk());
+    }
     return isFillAllowed(this.#visibilityState, now);
   }
 
