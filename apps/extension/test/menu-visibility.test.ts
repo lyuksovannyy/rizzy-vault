@@ -10,6 +10,7 @@ import {
   MAX_Z_INDEX,
   computeExpectedRect,
   initMenuVisibilityState,
+  isAllZeroLengths,
   isBackdropOccluding,
   isChainNodeOk,
   isFillAllowed,
@@ -463,6 +464,44 @@ describe("pseudoElementPaintsFixedOverlay", () => {
 
   it("paints via a background-image, conservatively, regardless of backgroundColor", () => {
     expect(pseudoElementPaintsFixedOverlay('""', "fixed", "rgba(0, 0, 0, 0)", "url(cover.png)", "none")).toBe(true);
+  });
+});
+
+// A7 border-image fix, fifth adversarial round: `border-image-outset` can extend the painted
+// border-image area beyond the border box without changing `getBoundingClientRect()` or
+// participating in hit-testing, the identical shape box-shadow/outline already have a margin
+// carve-out for — gated on this parser so an ordinary, zero-outset border-image is never widened.
+describe("isAllZeroLengths", () => {
+  it("is true for the single-value zero number shape", () => {
+    expect(isAllZeroLengths("0")).toBe(true);
+  });
+
+  it("is true for the single-value zero length shape", () => {
+    expect(isAllZeroLengths("0px")).toBe(true);
+  });
+
+  it("is true for the 4-value shorthand, all zero", () => {
+    expect(isAllZeroLengths("0px 0px 0px 0px")).toBe(true);
+  });
+
+  it("is true for a mix of the zero number and zero length shapes", () => {
+    expect(isAllZeroLengths("0 0px 0 0px")).toBe(true);
+  });
+
+  it("is false when any one of several values is nonzero (the reported attack's own shape: outset 300px)", () => {
+    expect(isAllZeroLengths("300px")).toBe(false);
+  });
+
+  it("is false for a nonzero bare-number multiplier", () => {
+    expect(isAllZeroLengths("1")).toBe(false);
+  });
+
+  it("is false when only one of four values is nonzero", () => {
+    expect(isAllZeroLengths("0px 0px 300px 0px")).toBe(false);
+  });
+
+  it("is false for a shape this cannot recognise (only ever refuse more, never guess)", () => {
+    expect(isAllZeroLengths("calc(1px + 1px)")).toBe(false);
   });
 });
 
