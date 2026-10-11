@@ -40,8 +40,17 @@ describe("message checks", () => {
     expect(isToWorker(null)).toBe(false);
     expect(isToWorker("call")).toBe(false);
     expect(METHODS).toContain("login");
-    // Gaps 01 and 02: the password history and the notices are calls the Worker serves.
-    for (const m of ["passwordHistory", "revealPasswordHistory", "takeNotices", "restoreLateAsNew"]) {
+    // Gaps 01 and 02, and ROADMAP §4.2: the password history, the item history and the
+    // notices are calls the Worker serves.
+    for (const m of [
+      "passwordHistory",
+      "revealPasswordHistory",
+      "itemHistory",
+      "revealFieldHistory",
+      "restoreFieldHistory",
+      "takeNotices",
+      "restoreLateAsNew",
+    ]) {
       expect(METHODS).toContain(m);
       expect(isToWorker({ kind: "call", id: 1, method: m, args: [] })).toBe(true);
     }

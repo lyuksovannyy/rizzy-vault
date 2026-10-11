@@ -14,6 +14,7 @@ import type {
   DetectedImportFormat,
   DeviceView,
   EncryptedExport,
+  FieldHistory,
   FieldView,
   Generated,
   GeneratorLimits,
@@ -91,6 +92,12 @@ export interface CoreApi {
     index: number,
     entryId: string,
   ): string;
+  /** Every field's history: positions and dates per field, never a value (ROADMAP §4.2). */
+  itemHistory(id: string): FieldHistory[];
+  /** One field-history entry's value, on the user's request only. */
+  revealFieldHistory(id: string, key: string, index: number, entryId: string): string;
+  /** Restores one field-history entry as the field's current value, an ordinary edit. */
+  restoreFieldHistory(id: string, key: string, index: number, entryId: string): void;
   /** The late-edit and trash notices not yet handed over in this session (gap 02). */
   takeNotices(): Notice[];
   /** Restores the late edits of an item deleted permanently as a new item; returns its id. */
@@ -148,6 +155,9 @@ export const METHODS: readonly Method[] = [
   "purgeItem",
   "passwordHistory",
   "revealPasswordHistory",
+  "itemHistory",
+  "revealFieldHistory",
+  "restoreFieldHistory",
   "takeNotices",
   "restoreLateAsNew",
   "totp",
