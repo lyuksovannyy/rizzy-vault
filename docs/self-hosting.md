@@ -525,12 +525,14 @@ A `.env` file (not `.example`) under `~/.config/containers/systemd/` is already 
 | `user: "65532:65532"` | `User=65532` + `Group=65532` |
 | `ulimits: core: 0` | `[Service] LimitCORE=0` (already named by this guide's [§1](#1-what-you-run), for "under systemd") |
 | `tmpfs: [/tmp:size=64m,mode=1777]` | `Tmpfs=/tmp:size=64m,mode=1777`, with `ReadOnlyTmpfs=false` so nothing else gets an implicit tmpfs |
-| `restart: unless-stopped` | `[Service] Restart=always` (an explicit `systemctl stop` does not trigger it either, so the two match; a crash or reboot restarts both) |
+| `restart: unless-stopped` | `[Service] Restart=always` (covers crashes the same way `unless-stopped` does, and an explicit stop doesn't trigger either; diverges on a reboot after that stop — see the note below the table) |
 | `stop_grace_period: 40s` | `[Service] TimeoutStopSec=40` |
 | `expose: ["8080"]`, no host port | no `PublishPort=` |
 | `volumes: data:/data`, `secrets:/run/rizzy-secrets:ro` | `Volume=rizzy-vault-data.volume:/data`, `Volume=rizzy-vault-secrets.volume:/run/rizzy-secrets:ro` |
 | `networks: edge:` | `Network=rizzy-vault-edge.network` |
 | healthcheck | none either way — see below |
+
+**`Restart=always` does not keep a deliberately stopped service down across a reboot, unlike `unless-stopped`.** Within one boot the two match: neither restarts after an operator's own stop (`docker stop` / `systemctl --user stop`). They diverge at the next reboot or login: Docker remembers that an `unless-stopped` container was manually stopped and leaves it stopped across a daemon restart, but systemd's `Restart=` only governs what happens after the *service's own* exit (a crash or kill), not whether an *enabled* unit starts at the next boot — `rizzy-vault.service` is enabled (`[Install] WantedBy=default.target`, started with `systemctl --user enable --now` above), so it starts again at the next boot or login regardless of a prior manual stop. An operator who wants it to stay down after a reboot must also `systemctl --user disable rizzy-vault.service` (and `rizzy-vault-proxy.service`), not just stop it.
 
 `proxy` is **not** under `compose.yaml`'s `x-hardening` anchor, so `rizzy-vault-proxy.container` carries none of the hardening keys above either; that mirrors the file, it is not an oversight. Its own mapping: `ports: 8080:80, 8443:443` → two `PublishPort=` lines; `networks.edge.ipam_address` (the fixed proxy address `compose.yaml` gives `RIZZY_TRUSTED_PROXIES` something to name) → `IP=172.30.87.10` on a `.network` file carrying the matching `Subnet=`; the bind-mounted `Caddyfile` → a `Volume=` line to the same unmodified file; `caddy-data`/`caddy-config` → their own `.volume` files; `depends_on: [rizzy-vault]` → `[Unit] After=rizzy-vault.service` with no `Requires=`, so a stopped `rizzy-vault.service` does not pull the proxy down too, matching compose's plain (conditionless) `depends_on`.
 
@@ -589,6 +591,7 @@ podman run --rm -i --network=none -v rizzy-vault-data:/data -v rizzy-vault-secre
 **Rootful.** The system-wide path is `/etc/containers/systemd/` instead of `~/.config/containers/systemd/`, `systemctl` instead of `systemctl --user`, `[Install] WantedBy=multi-user.target` instead of `default.target`, no `loginctl enable-linger`, and `podman run` as root for the admin one-offs. Not tested here either way; the rootless path above is what [ROADMAP §4.9](ROADMAP.md#49-server-self-hosting--ops-m1-onward) actually asks for.
 
 **Unverified** (no Podman available in this environment to confirm any of it — check each against `man 5 podman-systemd.unit` on your host before depending on it):
+- Whether `systemctl --user disable` on a Quadlet-generated `.service` behaves like disabling an ordinary unit — clearing the boot-time want so it does not start again at the next boot or login — or whether Quadlet's generator re-establishes that want on the next `daemon-reload`/generator run regardless of the disable.
 - The minimum Podman version for `VolumeName=` and `NetworkName=`; without them the generated volume/network names would be `systemd-<unit-name>` instead of the `rizzy-vault-*` names this guide and its backup commands use by name.
 - Whether `%h` expands inside a Quadlet `Volume=`/`EnvironmentFile=` path value, as used above, or needs to be replaced with a literal home-directory path.
 - `IP=` used together with a `Network=` reference to a `.network` file that itself sets `Subnet=` — the exact supported combination.
