@@ -374,6 +374,76 @@ test("navigator.credentials.get() with allowCredentials narrows the consent UI t
   expect(Buffer.from(assertion.userHandleB64 as string, "base64").toString("utf8")).toBe("user-A");
 });
 
+/** The "click Log in/Unlock" step alone, factored out of {@link logInToWebVault} so a regression
+ * test can force the exact adversarial timing — this extension's own inline menu already settled
+ * over the button before the click is ever attempted — without that forcing also being masked by
+ * {@link logInToWebVault}'s own field fills (each is a real, trusted click under the hood, and a
+ * click on "Login name" or "Secret Key" blurs whatever had focus before it, which can
+ * incidentally tear the menu down as a side effect — not a fix, just luck that happens to depend
+ * on fill order).
+ *
+ * Adapted from the identical fix already shipped in `account.ts`'s own `logIn` (commit
+ * `97619bf`, "gate the inline-menu iframe's own visibility and topmost state") — this file's own
+ * inlined copy (same tsconfig-separation reason `account.ts`'s module doc gives for not sharing
+ * `signUp`/`logIn` here at all) was never updated to match, which is the regression this test
+ * guards: this extension's own inline menu (`content-script.ts`'s `InlineMenu`) anchors to a
+ * password-shaped input on this page (Gap 32's "show for ANY password field") and can
+ * geometrically overlap the Log in/Unlock button directly below it. A real click there lands a
+ * `mousedown` on the page first, which blurs the field and tears the menu down (`InlineMenu`'s
+ * `#onBlur`); a Playwright locator click runs its actionability check — including "not
+ * obscured" — before dispatching any mouse event at all, so that blur never happens and the click
+ * retries against the menu forever (confirmed by direct probe: unpatched, this reliably
+ * reproduces Playwright's own "<iframe data-rizzy-inline-menu> intercepts pointer events" and
+ * ultimately the test's own timeout, independent of machine load — load only changes how often
+ * the menu is still there, settled, at the moment a single unprotected click is attempted).
+ *
+ * Diverges from `account.ts`'s own version in which field(s) it blurs, a second thing a direct
+ * probe found while reproducing this: `wireInlineMenu` (`content-script.ts`) anchors the menu to
+ * `document.querySelector('input[data-rizzy-field="password"]')` — the FIRST password-shaped
+ * input in document order, not necessarily "Master password". On this page, "Secret Key" is
+ * ALSO rendered as a masked, password-shaped input (sensible for a secret users don't want
+ * shoulder-surfed) and sits earlier in the DOM, so it is the one the extension's classifier
+ * actually matches first — confirmed directly: blurring "Master password" alone (`account.ts`'s
+ * own fix, ported here unchanged at first) left the menu's iframe in place every time; blurring
+ * "Secret Key" tore it down immediately. `account.ts`'s own `logIn` happens to avoid ever needing
+ * this in practice only because its OWN fill order (Secret Key, then Master password) already
+ * blurs Secret Key as an ordinary side effect of focusing the next field — which only ever helps
+ * against a menu that is already live DURING the fills, never one that arrives afterward, so that
+ * helper has the same latent gap, just harder to trigger. Noted here, not fixed there — out of
+ * scope for this file; no tracked issue exists for it yet, so a reader relying on one to exist
+ * will not find it. Blur BOTH fields, in sequence, on every attempt: whichever one is the live
+ * anchor at the time gets torn down regardless of which it turns out to be.
+ *
+ * Blurs by field LABEL, not by `wireInlineMenu`'s own `input[data-rizzy-field="password"]`
+ * marker, even though reusing that marker would look like the more "DRY" choice: the attribute is
+ * only ever written once `detectFields()` has actually run on this page, so on a page where
+ * detection has not fired yet (or candidates were refused) no element carries it at all, and a
+ * Playwright locator action against zero matches WAITS for one to appear rather than no-op-ing —
+ * turning the ordinary, menu-free case into a hang instead of a harmless skip. The field labels
+ * are a fixed, known part of this page's own form regardless of the extension's internal state.
+ *
+ * Worse still, `wireInlineMenu` rebuilds the menu on *any* qualifying DOM mutation regardless of
+ * current focus (`content-script.ts`'s `report`/`schedule`), so even blurring the right field
+ * once can lose a race against a menu that reappears a moment later from an unrelated page
+ * re-render. Retry the whole blur-both → wait-absent → click sequence (`toPass`) rather than doing
+ * it once: each attempt forces fresh blur events (destroying whatever menu is currently live) and
+ * then races the click against the next possible recreation, so it only fails for good if the
+ * menu keeps winning that race for the full ten seconds — a real anomaly, not routine flake. */
+async function submitWebVaultLogin(page: import("@playwright/test").Page): Promise<void> {
+  const secretKey = page.getByLabel("Secret Key", { exact: true });
+  const masterPassword = page.getByLabel("Master password", { exact: true });
+  const loginButton = page.getByRole("button", { name: /^(Log in|Unlock)$/ });
+  await expect(async () => {
+    await secretKey.focus();
+    await secretKey.blur();
+    await masterPassword.focus();
+    await masterPassword.blur();
+    await expect(page.locator("iframe[data-rizzy-inline-menu]")).toHaveCount(0, { timeout: 500 });
+    await loginButton.click({ timeout: 500 });
+  }).toPass({ timeout: 10_000 });
+  await expect(page.getByRole("button", { name: "Account menu" })).toBeVisible();
+}
+
 /** Logs in to the web vault (`apps/web/e2e/helpers.ts`'s own `logIn`, inlined rather than
  * imported: the two apps keep separate `tsconfig.json`/dependency trees, same reason
  * `account.ts`'s own module doc gives for not sharing `signUp` either). */
@@ -381,8 +451,7 @@ async function logInToWebVault(page: import("@playwright/test").Page, loginName:
   await page.getByLabel("Login name").fill(loginName);
   await page.getByLabel("Secret Key", { exact: true }).fill(secretKey);
   await page.getByLabel("Master password", { exact: true }).fill(TEST_ACCOUNT_PASSWORD);
-  await page.getByRole("button", { name: /^(Log in|Unlock)$/ }).click();
-  await expect(page.getByRole("button", { name: "Account menu" })).toBeVisible();
+  await submitWebVaultLogin(page);
 }
 
 test("a passkey the extension created shows up in the web vault, with no private key reveal, and can be deleted", async ({
@@ -478,4 +547,68 @@ test("a ceremony whose own timeout fires before the extension answers falls back
     () => "rejected" as const,
   );
   expect(["resolved", "rejected"]).toContain(outcome);
+});
+
+test("a sign-in ceremony whose own timeout fires before the extension answers also falls back and settles, never hangs (regression: the get() side of the same race)", async ({
+  context,
+  extensionId,
+  server,
+  rp,
+}) => {
+  // The `get()` (sign-in) analog of the regression test just above: the same fallback race
+  // exists on `passkey-page-shim.ts`'s `get()` path as on its `create()` path, and the
+  // production fix (`installVirtualAuthenticator` called once, up front, before any ceremony) is
+  // meant to cover both — but until now nothing forced `get()`'s own fallback branch
+  // deterministically; the only existing `get()` coverage either lets the extension answer in
+  // time (the first test's sign-in step) or exercises the user-decline path (also the first
+  // test), never a timed-out `get()` racing the shim's own timer. `timeoutMs: 1` forces that
+  // branch on every run, exactly as the `create()` version above does.
+  test.setTimeout(20_000);
+  await enrol(context, extensionId, server, "pktimeoutget");
+  const page = await openTestRpPage(context, rp.origin);
+  await installVirtualAuthenticator(context, page);
+
+  const getPromise = page.evaluate((opts) => window.rizzyTestGet(opts), { challengeB64: b64("get-challenge-timeout"), timeoutMs: 1 });
+  // No click: `timeoutMs: 1` guarantees the shim's own timer fires long before any consent offer
+  // could arrive, so there is nothing to click — the point is that `getPromise` settles on its
+  // own, one way or the other, well inside this test's 20s bound, exactly like the `create()`
+  // regression test above.
+  const outcome = await getPromise.then(
+    () => "resolved" as const,
+    () => "rejected" as const,
+  );
+  expect(["resolved", "rejected"]).toContain(outcome);
+});
+
+test("logging in to the web vault settles even when the extension's own inline menu is already covering the Log in button (regression: a second, distinct cause of the identical load-triggered 120s hang)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  // Deterministic stand-in for a SEPARATE load-triggered flake a review found while verifying
+  // the native-WebAuthn-fallback fix above, reproducing the identical "Target page, context or
+  // browser has been closed" symptom through an entirely different, pre-existing mechanism: this
+  // extension's own inline menu (`content-script.ts`'s page-load field detection, armed
+  // independently of any fill below — Gap 32 shows it for ANY password field, candidates or not)
+  // anchors to a password-shaped field on this page (`submitWebVaultLogin`'s own doc has which
+  // one, and why it is not the one it looks like) and can geometrically overlap the Log in button
+  // directly below it (confirmed by direct probe: `document.elementFromPoint` at the button's own
+  // center resolves to the menu's `<iframe>`, not the button, once the menu has settled). Rather
+  // than relying on real CPU load to keep that menu alive long enough to still be covering the
+  // button at click time, fill the fields once (exactly as `logInToWebVault` does) and then wait
+  // for the menu to actually settle visible BEFORE ever attempting the click —
+  // `submitWebVaultLogin` below is the real click-retry logic under test; this only forces the
+  // race it has to win on every run, rather than an unlucky one under load. (Calling
+  // `logInToWebVault` itself here instead would re-run the same three fills a second time, each
+  // of which is a real, trusted click that can blur-and-destroy the menu as an unrelated side
+  // effect — masking exactly the bug this test exists to catch, not exercising a fix.)
+  test.setTimeout(20_000);
+  const secretKey = await enrol(context, extensionId, server, "pkvaultmenu");
+  const vault = await context.newPage();
+  await vault.goto(server.origin);
+  await vault.getByLabel("Login name").fill("pkvaultmenu");
+  await vault.getByLabel("Secret Key", { exact: true }).fill(secretKey);
+  await vault.getByLabel("Master password", { exact: true }).fill(TEST_ACCOUNT_PASSWORD);
+  await expect(vault.locator("iframe[data-rizzy-inline-menu]")).toBeVisible({ timeout: 10_000 });
+  await submitWebVaultLogin(vault);
 });
