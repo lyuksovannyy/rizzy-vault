@@ -3681,3 +3681,360 @@ test("an ordinary, brief, unrelated View Transition elsewhere on the page does n
     await page.stop();
   }
 });
+
+// Sixth adversarial round (five reports, three distinct mechanisms after dedupe; checked the
+// same way, a live device, a real click, Chromium with IntersectionObserver v2 disabled
+// context-wide as a PROXY for Firefox's total lack of it). Two bypasses reproduced and are now
+// fixed; one (the cloned-resource sender bypass, and its two same-root-cause variants) reproduced
+// but is NOT fixed here — see the dedicated comment above that test.
+//
+// A stacking-context-escaping ancestor (`isolation: isolate`, or `opacity` anything other than
+// EXACTLY 1) plus a low-`z-index` decoy appended as a sibling of `<body>` (reported critical,
+// two variants of one mechanism): REPRODUCED against Gates A/B alone (confirmed by direct probe
+// against the real built extension and by reverting the fix) — every occlusion check this module
+// has (`#deepOccluderQualification`'s own z-index tie, `isChainNodeOk`'s opacity/visibility/
+// filter/etc. chain) assumes z-index is compared GLOBALLY against the frame's own
+// `MAX_Z_INDEX`. That assumption silently breaks the instant ANY ancestor between the frame and
+// `documentElement` establishes its own CSS stacking context (per spec: `isolation: isolate`,
+// or ANY `opacity` other than exactly `1`, does this unconditionally) — the ancestor's entire
+// subtree, including the frame and its enormous z-index, then collapses to that ancestor's own
+// single position in the ROOT stacking context, so a sibling of the ancestor needs only a
+// trivially low z-index (not `MAX_Z_INDEX`) to paint above the whole subtree. Neither
+// `ChainStyleSample`/`isChainNodeOk` (`menu-visibility.ts`) ever read `isolation` at all, and the
+// existing `OPACITY_TOLERANCE` (0.01, there for the VISUAL "looks the same as 1" question) was
+// being relied on, with no actual relationship, to also answer the BINARY "did this trigger a
+// new stacking context" question — `body { opacity: 0.995 }` passes the 0.01 tolerance
+// comfortably while still unconditionally creating a new stacking context per spec.
+//
+// FIXED: `isChainNodeOk` now also requires `sample.isolation !== "isolate"`, and requires
+// `sample.opacity === 1` EXACTLY for this chain check specifically — `OPACITY_TOLERANCE` is
+// removed; a transient animation/transition settling at a near-1, non-1 value already falls
+// inside the existing, documented, ACCEPTED "ancestor CSS transition refuses for the
+// transition's own duration" trade-off (THREAT_MODEL.md A7 residual risk), so this closes a
+// permanent, not-yet-covered gap rather than opening a new false-refusal class. Deliberately
+// scoped to exactly the two reported triggers: `contain`/`will-change` keep their existing,
+// documented exclusion (`isChainNodeOk`'s own doc) untouched — neither of those reported bypasses
+// used either property, and reversing that exclusion was not needed to close them.
+test("a body{isolation:isolate} ancestor plus a low-z-index decoy appended to document.documentElement cannot intercept the real click (reported bypass, critical)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "bypassisolation");
+    await createLoginItem(setupPage, {
+      title: "Isolation Bypass Target",
+      username: "isolation-user@example.com",
+      password: "isolation-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "bypassisolation", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await disableIov2(visit);
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Isolation Bypass Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    await expectIov2Disabled(visit);
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(150); // let Gate A record a real good sample first
+
+    const diag = await visit.evaluate(() => {
+      document.body.style.isolation = "isolate";
+      const decoy = document.createElement("div");
+      decoy.id = "rizzy-test-isolation-decoy";
+      Object.assign(decoy.style, {
+        position: "fixed",
+        inset: "0",
+        zIndex: "1", // far below MAX_Z_INDEX — only needs to beat <body>'s OWN stacking slot
+        background: "rgba(10, 10, 10, 0.98)",
+        pointerEvents: "none",
+      });
+      document.documentElement.appendChild(decoy); // a sibling of <body>, not a descendant
+      return { bodyIsolation: getComputedStyle(document.body).isolation, decoyZIndex: getComputedStyle(decoy).zIndex };
+    });
+    expect(diag.bodyIsolation).toBe("isolate");
+    expect(diag.decoyZIndex).toBe("1");
+
+    await visit.waitForTimeout(600); // comfortably past any rebuild debounce
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await visit.waitForTimeout(500);
+
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+test("a body{opacity:0.995} ancestor (within the chain check's own visual tolerance) plus a low-z-index decoy appended to document.documentElement cannot intercept the real click (reported bypass, critical)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "bypassopacitytie");
+    await createLoginItem(setupPage, {
+      title: "Opacity Tie Bypass Target",
+      username: "opacitytie-user@example.com",
+      password: "opacitytie-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "bypassopacitytie", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await disableIov2(visit);
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Opacity Tie Bypass Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    await expectIov2Disabled(visit);
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(150);
+
+    const diag = await visit.evaluate(() => {
+      document.body.style.opacity = "0.995"; // within OPACITY_TOLERANCE's old 0.01 visual slack
+      const decoy = document.createElement("div");
+      decoy.id = "rizzy-test-opacity-tie-decoy";
+      Object.assign(decoy.style, {
+        position: "fixed",
+        inset: "0",
+        zIndex: "1",
+        background: "rgba(10, 10, 10, 0.98)",
+        pointerEvents: "none",
+      });
+      document.documentElement.appendChild(decoy);
+      return { bodyOpacity: getComputedStyle(document.body).opacity };
+    });
+    expect(diag.bodyOpacity).toBe("0.995");
+
+    await visit.waitForTimeout(600);
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await visit.waitForTimeout(500);
+
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// Note on false-refusal scope for the isolation/exact-opacity fix below: `contain`/`will-change`
+// on `body`/`documentElement` are deliberately NOT touched by this round (see the fix's own
+// comment) — and are not usable as a "fill still works" positive control either, since BOTH
+// independently make their element a containing block for `position: fixed` descendants (CSS
+// Containment / `will-change`'s own spec note, same family as `transform`/`filter`/`perspective`),
+// which moves the frame's real rendered position and already fails `rectsMatch` on its own,
+// unconditionally, before this round and after it alike (confirmed by direct probe: pre-fix code
+// already refuses a real fill against `body{contain:layout}`/`documentElement{will-change:
+// transform}`, for a reason that has nothing to do with isolation/opacity). `isolation: isolate`
+// has no such side effect (it creates a stacking context only — never a containing block), which
+// is exactly why the two sixth-round tests above can isolate the stacking-context question from
+// geometry at all. See THREAT_MODEL.md A7 Residual risk for the accepted cost: a page that sets
+// `isolation: isolate` or ANY non-1 `opacity` permanently (not transiently) on `body`/`html` for
+// an unrelated reason now loses autofill on that page, the same shape as the already-accepted
+// permanent-ancestor-property trade-offs documented there.
+
+// Sixth adversarial round. Reported bypass (critical): one CSS rule, no JavaScript DOM
+// manipulation — `body::after { content:''; position:fixed; inset:0; z-index:2147483647;
+// background:rgba(10,10,10,.95); pointer-events:none; }`. `body` is the frame's own ANCESTOR
+// (`document.body.appendChild(frame)`), not a sibling the deep-occluder sibling-walk would ever
+// visit — `#scanElementForDeepOccluders`'s own correctness requirement is that `el` must NEVER be
+// a node on the frame's ancestor path (an ancestor's `compareDocumentPosition` flag is
+// indistinguishable from an earlier sibling's), so `#deepOccluderRects` deliberately never passes
+// `body`/`documentElement` themselves to the pseudo-element check it already runs on every
+// SIBLING candidate. Per CSS2.1 Appendix E, `::after` is generated as the LAST box in its own
+// host's paint order — unconditionally, regardless of when real children were inserted — so
+// `body::after`, at a TIED z-index with the frame (`body`'s own real last child), always paints
+// above it. Confirmed by direct probe against the real built extension (IOv2 disabled): the real
+// click still lands on the hidden menu underneath.
+//
+// FIXED: a new `#ancestorPseudoOcclusionRects` (`content-script.ts`) checks each ancestor's OWN
+// `::before`/`::after` (never a sibling — that walk is unchanged) via the existing
+// `pseudoElementTiesMaxZIndex` (`menu-visibility.ts`), substituting the full viewport whenever one
+// ties the frame's maximum z-index. This needs no tree-order reasoning the way the sibling walk
+// does: an ancestor's own generated content is unconditionally last in THAT ancestor's own paint
+// order, so it always follows the frame (one of its real descendants) regardless of insertion
+// order — only a TIE (never a strictly lower z-index) lets it win, which `pseudoElementTiesMaxZIndex`
+// already encodes.
+test("an opaque body::after tying the frame's own maximum z-index cannot intercept the real click (reported bypass, critical)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const setupPage = await context.newPage();
+    const secretKey = await signUp(setupPage, server.origin, "bypassbodyafter");
+    await createLoginItem(setupPage, {
+      title: "Body After Bypass Target",
+      username: "bodyafter-user@example.com",
+      password: "bodyafter-target-password",
+      websiteUrl: `http://127.0.0.1:${page.port}/`,
+    });
+    await setupPage.close();
+
+    const popup = await enrol(context, extensionId, server, "bypassbodyafter", secretKey);
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.close();
+
+    const visit = await context.newPage();
+    await disableIov2(visit);
+    await visit.goto(`http://127.0.0.1:${page.port}/`);
+    const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
+    const realCandidate = menu.getByRole("button", { name: "Body After Bypass Target", exact: false });
+    await expect(realCandidate).toBeVisible({ timeout: 15_000 });
+    await expectIov2Disabled(visit);
+
+    const box = await realCandidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    await visit.waitForTimeout(150);
+
+    const diag = await visit.evaluate(() => {
+      const style = document.createElement("style");
+      style.textContent =
+        "body::after { content: \"\"; position: fixed; inset: 0; z-index: 2147483647; background: rgba(10, 10, 10, 0.95); pointer-events: none; }";
+      document.head.appendChild(style);
+      const after = getComputedStyle(document.body, "::after");
+      return { afterZIndex: after.zIndex };
+    });
+    expect(diag.afterZIndex).toBe("2147483647");
+
+    await visit.waitForTimeout(600);
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await visit.waitForTimeout(500);
+
+    await expect(visit.locator("#user")).toHaveValue("");
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+// Sixth adversarial round. Reported bypass (critical) — NOT a Gate A/B/C occlusion gap, and NOT
+// fixed here. `src/inline-menu/index.html` is `web_accessible_resources` to ANY http(s) origin
+// (`manifest.chromium.json`), with no instance/frame identity check of any kind: the background's
+// `isInlineMenuSender` (`messaging/sender.ts:120-123`) authorizes a privileged request (reveal a
+// credential, generate a password) from ANY document whose `sender.id`/`sender.origin` are this
+// extension's own — never checking WHICH `<iframe>` sent it, or whether it is the one
+// `content-script.ts` itself constructed. A hostile page can embed a SECOND, attacker-controlled
+// iframe pointing at that exact same resource; its "Generate password" button
+// (`inline-menu/main.ts`, built unconditionally, independent of any `postMessage` from a real
+// content script) needs one ordinary trusted click — the attacker's OWN iframe, styled however
+// they like, so none of Gates A/B/C (which only ever instrument the ONE iframe
+// `content-script.ts`'s own `InlineMenu` constructor builds) are even in play. The generated
+// value is pushed to the TAB's content script as `apply_fill`
+// (`content-handler.ts`'s `handleInlineMenuGeneratePasswordRequest`) and written into whatever
+// field the REAL `InlineMenu` instance is anchored to (`activeFillTargets.passwordField`) —
+// gated only on THAT instance's own Gate B (`content-script.ts`'s `apply_fill` listener), which
+// is trivially satisfied whenever the real menu is just sitting on the page unattacked (the
+// ordinary case: any page with a password field shows the real menu and its "Generate password"
+// button unconditionally, `wireInlineMenu`'s own doc, "gap 32").
+//
+// REPRODUCED against the real built extension (confirmed by direct probe, Chromium, Gates A/B/C
+// all left at their default/fixed post-sixth-round state — this path never touches any of them):
+// a real trusted Playwright click on the CLONED iframe's own "Generate password" button caused a
+// freshly generated password to land in the page's own `#pass` field, with no interaction with
+// the real inline-menu iframe at all.
+//
+// NOT FIXED: closing this needs the background to tell the real inline-menu iframe apart from an
+// attacker's clone of the same extension-origin resource — a frame-identity or per-instance-token
+// concept `isInlineMenuSender`/ADR 0040's message shape does not have today. That is an
+// authentication/protocol change (CLAUDE.md's ADR gate: "Never implement … authentication,
+// protocol … without [an Accepted ADR]"), which is the owner's call, not a bypass-triage fix —
+// the exact same reasoning this file already applied to the second adversarial round's
+// "unrelated DOM mutation racing a rebuild" report ("threading the clicked instance's identity
+// through `apply_fill` would change ADR 0040's message shape, which needs an Accepted ADR
+// change, not a bypass triage"). Left as `test.fixme`, with the full reproduction kept (not
+// emptied out) for whoever picks up the ADR work, and reported to the owner as BLOCKED rather
+// than silently left out. Two related reports ride the identical root cause and are not given
+// their own test: `inline_menu_fill_chosen`'s informational fields (title/username/savedHost/
+// pageHost) are equally forgeable from the same cloned iframe for a genuinely-matching itemId on
+// the attacker's own domain (the mechanical two-click/itemId-membership gate is unaffected,
+// matching this file's own existing analysis, but the cross-domain warning TEXT the user is
+// shown is not), and `src/passkey-consent/index.html` reaches the exact same `isInlineMenuSender`
+// sender class on identical terms (`core-host/listener.ts`'s own comment on reusing it "as-is").
+// Fixing the root cause fixes all three; none of the three is fixable piecemeal within this
+// task's ADR gate.
+test.fixme(
+  "a cloned iframe pointing at the extension's own inline-menu resource can trigger password generation into the real page field — blocked on an ADR (isInlineMenuSender has no frame-identity concept; ADR 0040 would need to change)",
+  async ({ context, extensionId, server }) => {
+    const page = await startLoginPageServer();
+    try {
+      const setupPage = await context.newPage();
+      const secretKey = await signUp(setupPage, server.origin, "bypassclonediframe");
+      await setupPage.close(); // no saved item needed — the generator works with zero candidates
+
+      const popup = await enrol(context, extensionId, server, "bypassclonediframe", secretKey);
+      await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+      await popup.close();
+
+      const visit = await context.newPage();
+      await visit.goto(`http://127.0.0.1:${page.port}/`);
+      // The REAL menu renders unconditionally for any detected password field, even with zero
+      // saved candidates (`wireInlineMenu`'s own doc, "gap 32") — no click or focus needed, just
+      // like every other test in this file that waits for `iframe[data-rizzy-inline-menu]`.
+      await expect(visit.locator("iframe[data-rizzy-inline-menu]")).toHaveCount(1, { timeout: 15_000 });
+      await visit.waitForTimeout(150);
+
+      // The attacker's OWN iframe, pointing at the exact same extension resource, visible and
+      // clickable (no occlusion trick needed — Gates A/B/C never run against this iframe at all).
+      // Positioned away from the real target field on purpose: overlapping it would make this
+      // test's OWN clone trip `content-script.ts`'s unrelated, legitimate `isTopmost` occlusion
+      // check on the FIELD itself (ADR 0037 §5's "no hidden/invisible field fill"), which would
+      // make the real menu fail to rebuild for a reason that has nothing to do with the
+      // sender-identity bug this test is about — confirmed by direct probe: an overlapping clone
+      // position breaks reproduction via that confound, not via any fix.
+      await visit.evaluate((extId) => {
+        const clone = document.createElement("iframe");
+        clone.id = "rizzy-test-hostile-clone";
+        clone.src = `chrome-extension://${extId}/src/inline-menu/index.html`;
+        Object.assign(clone.style, { position: "fixed", right: "0", bottom: "0", width: "320px", height: "160px", zIndex: "1" });
+        document.body.appendChild(clone);
+      }, extensionId);
+
+      // The clone's own insertion is a real (non-"own-overlay") DOM mutation, so
+      // `content-script.ts`'s field-redetection debounce (250ms) tears down and rebuilds the
+      // REAL menu once before settling — confirmed by direct probe (see the comment above this
+      // test) — so this waits past that rebuild, not just past the click round trip.
+      const clone = visit.frameLocator("iframe#rizzy-test-hostile-clone");
+      const generateButton = clone.getByRole("button", { name: "Generate password" });
+      await expect(generateButton).toBeVisible({ timeout: 15_000 });
+      await visit.waitForTimeout(600);
+      await generateButton.click();
+      await visit.waitForTimeout(800);
+
+      const generated = await visit.locator("#pass").inputValue();
+      expect(generated.length).toBeGreaterThan(8);
+      await visit.close();
+    } finally {
+      await page.stop();
+    }
+  },
+);

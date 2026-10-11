@@ -40,6 +40,7 @@ function okSample(): ChainStyleSample {
     mask: "none",
     mixBlendMode: "normal",
     contentVisibility: "visible",
+    isolation: "auto",
   };
 }
 
@@ -113,8 +114,30 @@ describe("isChainNodeOk / isVisibilityChainOk", () => {
     expect(isChainNodeOk({ ...okSample(), opacity: 0 })).toBe(false);
   });
 
-  it("tolerates opacity within the ~0.01 tolerance", () => {
-    expect(isChainNodeOk({ ...okSample(), opacity: 0.995 })).toBe(true);
+  // Sixth adversarial round: a stale `~0.01` "looks the same" tolerance had no relationship to
+  // the BINARY question this check actually answers (did this node create a CSS stacking
+  // context) — per spec, ANY opacity other than EXACTLY `1` creates one unconditionally, which a
+  // reported bypass exploited (`body { opacity: 0.995 }` plus a low-z-index sibling-of-`<body>`
+  // decoy; see the e2e test). `opacity` is now compared exactly.
+  it("no longer tolerates a near-1, non-1 opacity (closed: this used to be a stacking-context escape)", () => {
+    expect(isChainNodeOk({ ...okSample(), opacity: 0.995 })).toBe(false);
+    expect(isChainNodeOk({ ...okSample(), opacity: 0.9999 })).toBe(false);
+  });
+
+  it("still passes at exactly opacity: 1 (no regression from the tolerance removal)", () => {
+    expect(isChainNodeOk({ ...okSample(), opacity: 1 })).toBe(true);
+  });
+
+  // Sixth adversarial round: `isolation: isolate` creates a CSS stacking context with no other
+  // side effect at all (unlike `filter`/`transform`/`contain`/`will-change`, it never changes
+  // geometry or visible paint by itself) — a reported bypass exploited exactly this (`body {
+  // isolation: isolate }` plus a low-z-index sibling-of-`<body>` decoy; see the e2e test).
+  it("fails on isolation: isolate (closed: this used to be a stacking-context escape)", () => {
+    expect(isChainNodeOk({ ...okSample(), isolation: "isolate" })).toBe(false);
+  });
+
+  it("passes on isolation: auto (the CSS default — no regression)", () => {
+    expect(isChainNodeOk({ ...okSample(), isolation: "auto" })).toBe(true);
   });
 
   it("fails on visibility: hidden", () => {
