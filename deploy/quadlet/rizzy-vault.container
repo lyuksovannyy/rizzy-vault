@@ -71,9 +71,12 @@ EnvironmentFile=%h/.config/containers/systemd/rizzy-vault.env
 # Monitor `GET https://<domain>/api/meta` from outside the container instead.
 
 [Service]
-# compose.yaml's `restart: unless-stopped`. Not identical: `systemctl stop` does not trigger
-# Restart=, so an explicit operator stop behaves the same as "unless-stopped"; a reboot or a
-# crash does restart it, also the same.
+# compose.yaml's `restart: unless-stopped`. `systemctl stop` does not trigger Restart=, so an
+# explicit operator stop behaves the same as "unless-stopped" within this boot. They diverge
+# across a reboot: this unit is enabled ([Install] below), so it starts again at the next boot
+# or login even after a prior manual stop, unlike Docker, which remembers that stop. To keep it
+# down across a reboot, `systemctl --user disable` it too (self-hosting.md §13; Unverified:
+# whether disable on a Quadlet-generated unit sticks across a generator re-run).
 Restart=always
 # compose.yaml's `stop_grace_period: 40s`.
 TimeoutStopSec=40
