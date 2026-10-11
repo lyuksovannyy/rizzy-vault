@@ -10,8 +10,10 @@ import {
   MAX_Z_INDEX,
   computeExpectedRect,
   initMenuVisibilityState,
+  isBackdropOccluding,
   isChainNodeOk,
   isFillAllowed,
+  isFilterVisibilityPreserving,
   isPointHitOk,
   isTopLayerClear,
   isVisibilityChainOk,
@@ -119,8 +121,15 @@ describe("isChainNodeOk / isVisibilityChainOk", () => {
     expect(isChainNodeOk({ ...okSample(), display: "none" })).toBe(false);
   });
 
-  it("fails on a non-none filter", () => {
+  it("fails on a non-none, non-visibility-preserving filter", () => {
     expect(isChainNodeOk({ ...okSample(), filter: "opacity(0)" })).toBe(false);
+  });
+
+  // A7 false-refusal fix: a permanent, non-malicious ancestor `filter` (dark-mode/theming,
+  // colour-blind assist) must not refuse forever — but only for the narrow, measured
+  // visibility-preserving subset `isFilterVisibilityPreserving` allowlists.
+  it("still passes on a permanent, visibility-preserving ancestor filter (the measured false refusal: dark-mode grayscale theming)", () => {
+    expect(isChainNodeOk({ ...okSample(), filter: "grayscale(0.5)" })).toBe(true);
   });
 
   it("fails on a non-none clip-path", () => {
@@ -216,6 +225,102 @@ describe("parseBoxShadowMarginPx", () => {
 
   it("returns undefined for a negative blur radius (not a valid computed value)", () => {
     expect(parseBoxShadowMarginPx("rgb(0, 0, 0) 0px 0px -5px 0px")).toBeUndefined();
+  });
+});
+
+// A7 false-refusal fix (reported bypass: a real, permanent `html { filter: grayscale(0.5) }`
+// dark-mode/theming/colour-blind-assist rule disabled autofill on that page forever, with no
+// recovery, because the pre-fix `isChainNodeOk` treated ANY non-`none` `filter` as bad with no
+// allowance for a value that cannot actually hide anything).
+describe("isFilterVisibilityPreserving", () => {
+  it("passes 'none'", () => {
+    expect(isFilterVisibilityPreserving("none")).toBe(true);
+  });
+
+  it("passes an empty string", () => {
+    expect(isFilterVisibilityPreserving("")).toBe(true);
+  });
+
+  it("passes the measured false refusal itself (grayscale theming)", () => {
+    expect(isFilterVisibilityPreserving("grayscale(0.5)")).toBe(true);
+  });
+
+  it("passes sepia, hue-rotate and saturate at any argument, individually", () => {
+    expect(isFilterVisibilityPreserving("sepia(1)")).toBe(true);
+    expect(isFilterVisibilityPreserving("hue-rotate(90deg)")).toBe(true);
+    expect(isFilterVisibilityPreserving("saturate(0)")).toBe(true);
+    expect(isFilterVisibilityPreserving("saturate(5)")).toBe(true);
+  });
+
+  it("passes a combination of only allowlisted functions, in any order", () => {
+    expect(isFilterVisibilityPreserving("grayscale(0.3) sepia(0.2) hue-rotate(10deg) saturate(1.1)")).toBe(true);
+  });
+
+  it("fails on opacity() (the erasure primitive this gate exists to catch)", () => {
+    expect(isFilterVisibilityPreserving("opacity(0)")).toBe(false);
+  });
+
+  it("fails on brightness(0) and contrast(0) (both collapse every pixel to one constant)", () => {
+    expect(isFilterVisibilityPreserving("brightness(0)")).toBe(false);
+    expect(isFilterVisibilityPreserving("contrast(0)")).toBe(false);
+  });
+
+  it("fails on blur() (can make small text illegible without changing geometry/hit-testing)", () => {
+    expect(isFilterVisibilityPreserving("blur(20px)")).toBe(false);
+  });
+
+  it("fails on drop-shadow() (an occlusion primitive, same rationale as box-shadow)", () => {
+    expect(isFilterVisibilityPreserving("drop-shadow(rgba(0, 0, 0, 0.9) 0px 0px 40px)")).toBe(false);
+  });
+
+  it("fails on a url(#...) SVG filter reference (can do anything, including erase alpha)", () => {
+    expect(isFilterVisibilityPreserving("url(#custom)")).toBe(false);
+  });
+
+  it("fails on invert() (deliberately not in the allowlist — not the measured case)", () => {
+    expect(isFilterVisibilityPreserving("invert(1)")).toBe(false);
+  });
+
+  it("one disallowed function fails the WHOLE value, even mixed with allowlisted ones", () => {
+    expect(isFilterVisibilityPreserving("grayscale(1) blur(2px)")).toBe(false);
+  });
+
+  it("fails on an unparseable shape rather than guessing (matches parseBoxShadowMarginPx's own contract)", () => {
+    expect(isFilterVisibilityPreserving("something-unparseable")).toBe(false);
+  });
+});
+
+// A7 bypass fix: a top-layer element's own `::backdrop` pseudo-element has no corresponding
+// `Element`/`Node`, so nothing that only reads an Element's own rect/style can see it —
+// `isBackdropOccluding` is the pure classifier `content-script.ts`'s `pushBackdropOcclusionRect`
+// feeds the already-read `getComputedStyle(el, "::backdrop")` values into.
+describe("isBackdropOccluding", () => {
+  it("is not occluding when fully transparent (Chromium's own unstyled popover::backdrop default, confirmed by direct probe)", () => {
+    expect(isBackdropOccluding("rgba(0, 0, 0, 0)", "none")).toBe(false);
+  });
+
+  it("is not occluding for the bare 'transparent' keyword", () => {
+    expect(isBackdropOccluding("transparent", "none")).toBe(false);
+  });
+
+  it("IS occluding for Chromium's own unstyled dialog::backdrop default (0.1 alpha, confirmed by direct probe) — accepted, since a real native modal dialog already makes the rest of the page inert regardless, so this costs no additional false refusal in practice", () => {
+    expect(isBackdropOccluding("rgba(0, 0, 0, 0.1)", "none")).toBe(true);
+  });
+
+  it("is occluding for the reported attack's own near-opaque backdrop", () => {
+    expect(isBackdropOccluding("rgba(20, 20, 20, 0.95)", "none")).toBe(true);
+  });
+
+  it("is occluding for a fully opaque rgb() with no alpha channel at all", () => {
+    expect(isBackdropOccluding("rgb(0, 0, 0)", "none")).toBe(true);
+  });
+
+  it("is occluding for any backgroundImage, conservatively, regardless of backgroundColor", () => {
+    expect(isBackdropOccluding("rgba(0, 0, 0, 0)", "url(cover.png)")).toBe(true);
+  });
+
+  it("is occluding on an unparseable backgroundColor (only ever refuse more)", () => {
+    expect(isBackdropOccluding("some-future-color-syntax(1 2 3)", "none")).toBe(true);
   });
 });
 
