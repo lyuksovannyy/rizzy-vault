@@ -51,11 +51,11 @@ p256 = { version = "=0.14.0", default-features = false, features = ["ecdsa", "al
 poly1305 = { version = "=0.9.1", default-features = false, features = ["zeroize"] }
 rand_core = { version = "=0.10.1", default-features = false }
 sha1 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
-sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
+sha2 = { version = "=0.11.1", default-features = false, features = ["zeroize"] }
 sha2_010 = { package = "sha2", version = "=0.10.9", default-features = false }
 subtle = { version = "=2.6.1", default-features = false }
 unicode-normalization = { version = "=0.1.25", default-features = false }
-zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
+zeroize = { version = "=1.9.1", default-features = false, features = ["alloc"] }
 
 # URL parsing and matching for `rizzy-match` (ADR 0037, ADR 0038). Not cryptography: ordinary
 # `cargo deny` review, not ADR 0009's checklist (ADR 0037 §2 point 1).
@@ -80,7 +80,7 @@ idna = { version = "=1.1.0", default-features = false, features = ["alloc", "com
 #   (https://github.com/addr-rs/psl), `MIT OR Apache-2.0`. `helpers` only, for `domain_str`/
 #   `suffix_str`; depends only on `psl-types` (no further dependencies, `#![no_std]`,
 #   `forbid(unsafe_code)`).
-psl = { version = "=2.1.240", default-features = false, features = ["helpers"] }
+psl = { version = "=2.1.241", default-features = false, features = ["helpers"] }
 
 # Wire types. Not cryptography.
 # serde: the `/api/v1` request and response types of `rizzy-proto` (ADR 0002 point 3; ADR 0016
