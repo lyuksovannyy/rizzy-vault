@@ -27,6 +27,15 @@ describe("isInlineMenuShowMessage", () => {
     expect(isInlineMenuShowMessage(message)).toBe(true);
   });
 
+  // Multi-step login pages (ROADMAP §4.4 M3): the step's one field, passed on to the fill request.
+  it("accepts only: username or password, and refuses any other value", () => {
+    const base = { type: INLINE_MENU_SHOW, pageOrigin: "https://example.com", pageHost: "example.com", candidates: [] };
+    expect(isInlineMenuShowMessage({ ...base, only: "username" })).toBe(true);
+    expect(isInlineMenuShowMessage({ ...base, only: "password" })).toBe(true);
+    expect(isInlineMenuShowMessage({ ...base, only: "email" })).toBe(false);
+    expect(isInlineMenuShowMessage({ ...base, only: 1 })).toBe(false);
+  });
+
   it("refuses a candidate missing needsWarning", () => {
     const message = {
       type: INLINE_MENU_SHOW,
