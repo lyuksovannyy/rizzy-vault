@@ -19,6 +19,7 @@ import { readFile } from "node:fs/promises";
 
 import { type Locator, type Page, expect, test } from "@playwright/test";
 
+import { closeGuide } from "./helpers.ts";
 import { type RunningServer, startServer } from "./server.ts";
 
 const PASSWORD = "correct horse battery staple";
@@ -158,6 +159,8 @@ test("signup, item, reload, login, lock, unlock", async ({ page }) => {
   await page.getByLabel(/last group of your Secret Key/).fill(lastGroup);
   await page.getByRole("button", { name: "Create the account" }).click();
   await expect(page.getByRole("button", { name: "Account menu" })).toBeVisible();
+  // The getting-started guide opens after signup (onboarding.spec.ts walks it).
+  await closeGuide(page);
   await expect(page.getByText("No items yet.")).toBeVisible();
 
   // Create a login item.
@@ -481,6 +484,7 @@ async function signUp(page: Page, name: string): Promise<string> {
   await page.getByLabel(/last group of your Secret Key/).fill(secretKey.split("-").at(-1) ?? "");
   await page.getByRole("button", { name: "Create the account" }).click();
   await expect(page.getByRole("button", { name: "Account menu" })).toBeVisible();
+  await closeGuide(page);
   return secretKey;
 }
 

@@ -10,9 +10,9 @@ import { type Page, expect } from "@playwright/test";
 
 export const TEST_ACCOUNT_PASSWORD = "correct horse battery staple";
 
-/** Signs up `loginName` on the server at `origin` and confirms the Emergency Kit. Returns the
- * Secret Key, the one value besides the login name and password that enrolling a device needs
- * (CRYPTO.md §11.2). */
+/** Signs up `loginName` on the server at `origin`, confirms the Emergency Kit and closes the
+ * getting-started guide the web vault opens after signup. Returns the Secret Key, the one value
+ * besides the login name and password that enrolling a device needs (CRYPTO.md §11.2). */
 export async function signUp(page: Page, origin: string, loginName: string): Promise<string> {
   await page.goto(origin);
   await page.getByRole("button", { name: "Create an account" }).click();
@@ -25,6 +25,9 @@ export async function signUp(page: Page, origin: string, loginName: string): Pro
   await page.getByLabel(/last group of your Secret Key/).fill(secretKey.split("-").at(-1) ?? "");
   await page.getByRole("button", { name: "Create the account" }).click();
   await expect(page.getByRole("button", { name: "Account menu" })).toBeVisible();
+  const guide = page.getByRole("region", { name: "Get started" });
+  await guide.getByRole("button", { name: "Close the guide" }).click();
+  await expect(guide).toHaveCount(0);
   return secretKey;
 }
 

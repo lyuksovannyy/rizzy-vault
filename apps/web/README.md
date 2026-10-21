@@ -176,8 +176,8 @@ detail side by side, unchanged. Covered by `e2e/phone.spec.ts` at 375×812.
   action — every M1 session is an OPAQUE login with no durable session to sign out of beyond
   locking (module docs above).
 - **Settings** (`SettingsView.tsx`): one sidebar entry grouping Two-factor (`TwoFactorPane.tsx`,
-  unchanged), Devices (`DevicesPane.tsx`, unchanged), a new Appearance group (below) and
-  "What the server stores" (below).
+  unchanged), Devices (`DevicesPane.tsx`, unchanged), a new Appearance group (below),
+  "What the server stores" (below) and "Getting started", which re-opens the guide below.
 
 ### What the server stores (transparency, ROADMAP §4.5)
 
@@ -190,6 +190,30 @@ fetched. The counts are labelled as the browser's own, not a server report. Ther
 byte sizes and no server call of its own: no Accepted ADR defines a transparency endpoint
 (ADR 0028 item 1 lists `GET /api/v1/devices/grants` as the only `GET`, and item 14's
 `/api/meta` holds nothing about any account), and ADR 0048's `bytes_used` is Proposed.
+
+### The getting-started guide (onboarding, ROADMAP §4.5)
+
+`src/views/OnboardingView.tsx`, with its steps in `src/onboarding.ts`. It opens right after
+signup, in place of the item list, and Settings' "Getting started" group opens it again. Three
+steps, each with "Skip this step", and "Close the guide" at any step:
+
+1. **Keep your Emergency Kit safe.** A confirmation only: the kit is shown once, at signup (ADR
+   0008 point 1, CRYPTO.md §7), and the core refuses a second showing (`already_shown`), so the
+   guide never displays the Secret Key or the recovery code. It says plainly that without a copy
+   the account cannot be opened once the session ends. "Continue" waits for the box to be ticked.
+2. **Import from another password manager.** The import form of "Export and import"
+   (`TransferPane.tsx` `ImportForm`, unchanged), with the list of formats it reads.
+3. **Install the browser extension.** Static instructions (load the unpacked Chromium build, or
+   the Firefox build as a temporary add-on; the extension is not in the stores yet) and the
+   values its "Set up this device" form asks for, with this server's origin and the login name
+   filled in. No link, no request.
+
+Then a summary of how each step ended. Each new step moves the focus to its heading, and the
+step list marks the current step with `aria-current="step"`. The guide adds no endpoint, wire
+field or stored value: CRYPTO.md §11.4 lets the web vault keep only the opted-in Secret Key and
+the theme choice in browser storage, so "the guide is done" is remembered nowhere. The guide
+shows after signup only, never after a login. Covered by `test/onboarding.test.ts` and
+`e2e/onboarding.spec.ts`.
 
 ### Appearance (theme)
 

@@ -47,8 +47,26 @@ export async function logIn(page: Page, loginName: string | undefined, secretKey
   await expect(page.getByRole("button", { name: "Account menu" })).toBeVisible();
 }
 
-/** Signs up `name` and confirms the Emergency Kit; returns the Secret Key. */
+/** Signs up `name`, confirms the Emergency Kit and closes the getting-started guide that opens
+ * after signup; returns the Secret Key. */
 export async function signUp(page: Page, origin: string, name: string): Promise<string> {
+  const secretKey = await signUpToGuide(page, origin, name);
+  await closeGuide(page);
+  return secretKey;
+}
+
+/** Leaves the getting-started guide (`src/views/OnboardingView.tsx`) through its "Close the
+ * guide" button. */
+export async function closeGuide(page: Page): Promise<void> {
+  const guide = page.getByRole("region", { name: "Get started" });
+  await expect(guide).toBeVisible();
+  await guide.getByRole("button", { name: "Close the guide" }).click();
+  await expect(guide).toHaveCount(0);
+}
+
+/** Signs up `name` and confirms the Emergency Kit, leaving the getting-started guide open;
+ * returns the Secret Key. */
+export async function signUpToGuide(page: Page, origin: string, name: string): Promise<string> {
   await page.goto(origin);
   await page.getByRole("button", { name: "Create an account" }).click();
   await page.getByLabel("Login name").fill(name);
