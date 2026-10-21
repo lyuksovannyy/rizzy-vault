@@ -2,7 +2,9 @@
 
 // One item: its fields, masked where the core conceals them, with reveal and copy; its URIs as
 // safe links (INV-42); its TOTP code; its password history (`PasswordHistory.tsx`) and every
-// field's history with restore (`ItemHistory.tsx`); edit, trash, restore and purge.
+// field's history with restore (`ItemHistory.tsx`); edit, trash, restore and purge. A field two
+// devices edited at once carries a "conflict" badge and a "Resolve conflict" chooser
+// (`ConflictChooser.tsx`: keep both / pick one, ROADMAP §4.5), the name included.
 //
 // A concealed value crosses from the Worker only when the user asks (reveal or copy; ADR 0013
 // §3 rule 3), and a revealed value is shown in the secret-field component (INV-68). The
@@ -15,6 +17,7 @@ import { useEffect, useId, useState } from "react";
 import { codeOf } from "../core-client.ts";
 import { type Element, type Grouped, group, labelOf, matchModeLabel } from "../fields.ts";
 import { SafeLink, SafeOpenButton } from "../SafeLink.tsx";
+import { ConflictChooser } from "./ConflictChooser.tsx";
 import { ItemHistory } from "./ItemHistory.tsx";
 import { LargeType } from "./LargeType.tsx";
 import { PasswordHistory } from "./PasswordHistory.tsx";
@@ -31,9 +34,13 @@ function FieldValue(props: {
   readonly label: string;
   readonly link?: boolean;
   readonly onLargeType?: ((value: string) => void) | undefined;
+  /** The refresh after a conflict resolution (`ConflictChooser.tsx`); `undefined` when the
+   * item cannot be written (read-only vault, trashed item), so the chooser only shows. */
+  readonly onResolved?: ((message: string) => Promise<void>) | undefined;
 }) {
   const { ctx, id, field, label } = props;
   const [revealed, setRevealed] = useState<string | undefined>();
+  const [choosing, setChoosing] = useState(false);
   const [copied, setCopied] = useState(false);
   const { error, run } = useAction();
 
@@ -90,8 +97,21 @@ function FieldValue(props: {
         <button type="button" className="secondary small" onClick={copy}>
           {copied ? "Copied" : "Copy"}
         </button>
+        {field.conflict && (
+          <button
+            type="button"
+            className="secondary small"
+            aria-expanded={choosing}
+            onClick={() => setChoosing((c) => !c)}
+          >
+            {choosing ? "Close conflict" : "Resolve conflict"}
+          </button>
+        )}
       </span>
       <ErrorText code={error} />
+      {field.conflict && choosing && (
+        <ConflictChooser ctx={ctx} id={id} field={field} label={label} onResolved={props.onResolved} />
+      )}
     </div>
   );
 }
@@ -283,6 +303,16 @@ export function ItemView(props: {
       notify("success", "Value restored.");
     }).then(() => undefined);
 
+  /** `ConflictChooser`'s refresh after a resolution, an ordinary edit (ROADMAP §4.5): like
+   * `restoreHistoryEntry`, the view syncs and reloads; only a writable, active item gets it. */
+  const resolved =
+    writable && !summary.trashed
+      ? async (message: string): Promise<void> => {
+          await props.onWritten(false);
+          notify("success", message);
+        }
+      : undefined;
+
   return (
     <article className="panel item" aria-labelledby="item-title">
       <div className="item-header">
@@ -305,7 +335,8 @@ export function ItemView(props: {
       </div>
       <p className="muted">{summary.itemType}</p>
       {grouped.fixed
-        .filter((f) => f.key !== "item.name")
+        // The name is the title; it gets a row of its own only to resolve a conflict.
+        .filter((f) => f.key !== "item.name" || f.conflict)
         .map((f) => (
           <FieldValue
             key={f.key}
@@ -314,6 +345,7 @@ export function ItemView(props: {
             field={f}
             label={labelOf(f.key)}
             onLargeType={f.key === "login.password" ? setLargeType : undefined}
+            onResolved={resolved}
           />
         ))}
       {summary.hasTotp && !summary.trashed && <TotpLine ctx={ctx} id={id} />}
@@ -324,7 +356,7 @@ export function ItemView(props: {
         }
         return (
           <div key={v.key}>
-            <FieldValue ctx={ctx} id={id} field={v} label="Website" link />
+            <FieldValue ctx={ctx} id={id} field={v} label="Website" link onResolved={resolved} />
             <p className="muted small" data-field={`${v.key.replace(/\/value$/, "/match")}`}>
               Match: {matchModeLabel(u.attributes.get("match")?.value)}
             </p>
@@ -334,7 +366,9 @@ export function ItemView(props: {
       {grouped.custom.map((c) => {
         const v = c.attributes.get("value");
         const label = c.attributes.get("label")?.value ?? "Field";
-        return v === undefined ? null : <FieldValue key={v.key} ctx={ctx} id={id} field={v} label={label} />;
+        return v === undefined ? null : (
+          <FieldValue key={v.key} ctx={ctx} id={id} field={v} label={label} onResolved={resolved} />
+        );
       })}
       {grouped.passkeys.map((p) => (
         <PasskeyLine
@@ -346,7 +380,7 @@ export function ItemView(props: {
         />
       ))}
       {grouped.other.map((f) => (
-        <FieldValue key={f.key} ctx={ctx} id={id} field={f} label={f.key} />
+        <FieldValue key={f.key} ctx={ctx} id={id} field={f} label={f.key} onResolved={resolved} />
       ))}
       <PasswordHistory ctx={ctx} id={id} />
       <ItemHistory ctx={ctx} id={id} onRestore={writable && !summary.trashed ? restoreHistoryEntry : undefined} />
