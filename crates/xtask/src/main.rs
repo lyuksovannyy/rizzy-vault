@@ -12,6 +12,7 @@
 //! cargo xtask check-js
 //! cargo xtask check-manifest
 //! cargo xtask check-spdx [--fix]
+//! cargo xtask check-tables [--root <dir>]
 //! cargo xtask generate-tokens [--check]
 //! ```
 //!
@@ -95,6 +96,13 @@
 //! it. Wiring it into CI (`.github/workflows/ci.yml`) is a separate change the owner has not
 //! asked for yet.
 //!
+//! `check-tables` checks the table ownership of ADR 0011 points 5–7 and ADR 0016 R4 on the
+//! domain crates' `queries/` files and the migrations ([`mod@tables`]): every table name after
+//! `FROM`, `JOIN`, `INTO`, `UPDATE`, `TABLE` and `REFERENCES` carries its owner's prefix, apart
+//! from the one foreign key to `auth_accounts (id)` with `ON DELETE CASCADE`. `--root` checks
+//! another tree instead of this workspace. Wiring it into CI (`.github/workflows/ci.yml`) is a
+//! separate change the owner has not asked for yet.
+//!
 //! `generate-tokens` generates the web CSS and the per-toolkit design-token files from the one
 //! platform-neutral source, and checks every declared colour pair for WCAG AA contrast
 //! ([`mod@tokens`], ADR 0014 §5, ADR 0019 §13, ROADMAP §4.5). `--check` reports a stale generated
@@ -142,6 +150,7 @@ mod psl_check;
 mod rules;
 mod signoff;
 mod spdx;
+mod tables;
 mod tokens;
 mod unsafe_scan;
 
@@ -192,6 +201,13 @@ COMMANDS:
                     (ADR 0017 Decision 6)
     check-spdx --fix
                     Insert or correct the SPDX header on every covered first-party file
+    check-tables [--root <dir>]
+                    Check that every table name after FROM/JOIN/INTO/UPDATE/TABLE/REFERENCES
+                    in the domain crates' queries/ and the migrations carries its owning
+                    domain's prefix (auth_, vault_), apart from the one foreign key to
+                    auth_accounts (id) ON DELETE CASCADE (ADR 0011 points 5-7, ADR 0016 R4).
+                    storage_ tables and backup queries are not checked. --root checks
+                    another tree instead of this workspace
     equivalence-list <source> <key-file> <list-version> <published-at-ms>
                     Compile data/equivalence/groups.txt-style source into the signed
                     equivalence list (ADR 0038 §3) and write its wire bytes to stdout.
@@ -237,6 +253,8 @@ fn main() -> ExitCode {
         [Some("check-manifest")] => report(ext_manifest::check_built_manifests(&workspace_root())),
         [Some("check-spdx")] => check_spdx(false),
         [Some("check-spdx"), Some("--fix")] => check_spdx(true),
+        [Some("check-tables")] => report(tables::run(&workspace_root())),
+        [Some("check-tables"), Some("--root"), Some(root)] => report(tables::run(Path::new(root))),
         [
             Some("equivalence-list"),
             Some(source),
