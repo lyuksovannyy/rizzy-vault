@@ -64,7 +64,7 @@ function isInOwnOverlay(node: unknown): boolean {
  * - `"structure"`: some record added or removed a node that is not ours — a full re-detection
  *   and re-report, exactly as before attributes were observed ({@link isOwnOverlayMutation});
  * - `"attributes"`: only attribute changes, at least one on a page element — re-detect, and
- *   re-report only if the login step changed;
+ *   re-report only if that reveals a field the current login step did not have;
  * - `"none"`: everything touched was our own overlay (the inline menu restyles its own iframe
  *   on every animation frame, which must never count as the page changing).
  */
