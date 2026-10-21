@@ -259,6 +259,21 @@ async function run(m: CallMessage): Promise<unknown> {
       current().revealFieldHistory(str(a[0]), str(a[1]), index(a[2]), str(a[3])),
     restoreFieldHistory: () =>
       current().restoreFieldHistory(str(a[0]), str(a[1]), index(a[2]), str(a[3])),
+    // ROADMAP §4.5 "keep both / pick one": the listing withholds concealed values; one value
+    // crosses per reveal; a resolution names the value by its listed index and id.
+    fieldConflict: () => current().fieldConflict(str(a[0]), str(a[1])),
+    revealConflictValue: () =>
+      current().revealConflictValue(str(a[0]), str(a[1]), index(a[2]), str(a[3])),
+    resolveConflictPick: () =>
+      current().resolveConflictPick(str(a[0]), str(a[1]), index(a[2]), str(a[3])),
+    resolveConflictKeepBoth: () =>
+      current().resolveConflictKeepBoth(
+        str(a[0]),
+        str(a[1]),
+        index(a[2]),
+        str(a[3]),
+        a[4] === undefined ? undefined : str(a[4]),
+      ),
     takeNotices: () => current().takeNotices(),
     restoreLateAsNew: () => current().restoreLateAsNew(str(a[0]), str(a[1]) as never),
     totp: () => current().totp(str(a[0])),
