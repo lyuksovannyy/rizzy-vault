@@ -76,10 +76,14 @@ function installContentScript(): void {
   // is per document).
   let activeFillTargets: FillTargets | undefined;
 
-  // The step the latest detection pass found, compared on attribute-only mutations so a page
-  // that merely restyles itself (animations, focus classes) does not re-ask the background and
-  // re-create the menu on every change; a step that appears, changes or goes away (a password
-  // field revealed by "Next", say) does.
+  // The step the latest accepted detection pass found. An attribute-only mutation batch is
+  // accepted only if it reveals a field this step did not have (`revealsField`: a password field
+  // shown in place by "Next", say); one that merely restyles the page, or makes a field fail
+  // the visibility/topmost gate for a moment (a View Transition, an animation, an overlay
+  // passing by), changes nothing — neither the menu nor the `data-rizzy-field` tags — exactly as
+  // before attributes were observed at all. A found real bug: tearing the menu down on such a
+  // transient left the page with no menu once it passed (`adversarial-fill-requests.spec.ts`'s
+  // ordinary-View-Transition false-refusal check).
   let currentStep: DetectedStep | undefined;
   // Bumped per report: only the answer to the latest report wires a menu, so a slow answer for
   // a step the page has already left never anchors a menu to that old step's fields.
@@ -87,10 +91,11 @@ function installContentScript(): void {
 
   const report = (force: boolean) => {
     const step = detectStep();
-    if (!force && sameStep(step, currentStep)) {
+    if (!force && !revealsField(step, currentStep)) {
       return;
     }
     currentStep = step;
+    tagStep(step);
     reportSeq += 1;
     const seq = reportSeq;
     if (step === undefined) {
@@ -212,7 +217,8 @@ function installContentScript(): void {
   // `force`: re-report even if the detected step did not change (the first pass, and any batch
   // with a `childList` change — the behaviour before multi-step support, kept as it was). An
   // attribute-only batch (`style`, `class`, `hidden`, …: how a same-page identifier-first form
-  // usually reveals its password field) re-reports only when the step itself changed.
+  // usually reveals its password field) re-reports only when it reveals a field the current
+  // step did not have (`revealsField`).
   let pending: number | undefined;
   let pendingForce = false;
   const schedule = (force: boolean) => {
@@ -301,17 +307,38 @@ interface DetectedStep extends FillTargets {
   readonly fields: readonly FieldDescriptor[];
 }
 
-function sameStep(a: DetectedStep | undefined, b: DetectedStep | undefined): boolean {
-  if (a === undefined || b === undefined) {
-    return a === b;
+/** Whether `next` has a field `prev` did not: the one kind of change an attribute-only mutation
+ * batch acts on (`report`'s own comment on `currentStep`). */
+function revealsField(next: DetectedStep | undefined, prev: DetectedStep | undefined): boolean {
+  if (next === undefined) {
+    return false;
   }
-  return a.usernameField === b.usernameField && a.passwordField === b.passwordField;
+  const before = prev === undefined ? [] : [prev.usernameField, prev.passwordField];
+  return [next.usernameField, next.passwordField].some((field) => field !== null && !before.includes(field));
 }
 
-/** Upper bound on `<input>` elements one detection pass reads, so a page with a pathological
- * number of inputs costs a bounded amount of layout work per pass. A login form is at the top of
- * any realistic page's inputs; past this bound the page gets no offer (fail closed: no menu, no
- * fill), never a wrong one. */
+/** Tags the accepted step's field(s) with `data-rizzy-field` (`username`/`password`; the submit
+ * listener and the e2e suite read the tag), clearing the tag from every other input. */
+function tagStep(step: DetectedStep | undefined): void {
+  const usernameField = step?.usernameField ?? null;
+  const passwordField = step?.passwordField ?? null;
+  for (const el of document.querySelectorAll<HTMLInputElement>("input[data-rizzy-field]")) {
+    if (el !== usernameField && el !== passwordField) {
+      delete el.dataset["rizzyField"];
+    }
+  }
+  if (usernameField !== null) {
+    usernameField.dataset["rizzyField"] = "username";
+  }
+  if (passwordField !== null) {
+    passwordField.dataset["rizzyField"] = "password";
+  }
+}
+
+/** Upper bound on `<input>` elements one detection pass reads, in document order, so a page with
+ * a pathological number of inputs costs a bounded amount of layout work per pass. Inputs past
+ * the bound are never considered, so a login form buried behind a thousand other inputs simply
+ * gets no offer; every gate still applies to whatever is chosen among the first ones. */
 const MAX_INPUTS_SCANNED = 1000;
 /** Upper bound on each hint string (`login-step.ts`'s `InputFacts.hints`, a form's hint text). */
 const MAX_HINT_LEN = 512;
@@ -331,9 +358,8 @@ function submitControlText(el: Element): string {
 }
 
 /**
- * Runs `login-step.ts`'s heuristic over this document and tags the chosen field(s) with
- * `data-rizzy-field` (`username`/`password`; the submit listener and the e2e suite read the
- * tag), clearing the tag from every other input. Only inputs that pass the visibility and
+ * Runs `login-step.ts`'s heuristic over this document ({@link tagStep} tags the result once
+ * `report` accepts it). Only inputs that pass the visibility and
  * topmost gate (THREAT_MODEL A7, INV-37) are ever chosen — the gate runs here, before the
  * heuristic, and again at fill time in {@link applyFill}. Reads this frame's own document only:
  * fields inside any iframe, cross-origin or not, are never seen (ADR 0037 §5).
@@ -376,16 +402,11 @@ function detectStep(): DetectedStep | undefined {
     ]);
   };
   const step = detectLoginStep(facts, formHint);
-  const usernameField = step !== undefined && "username" in step ? (elements[step.username] ?? null) : null;
-  const passwordField = step !== undefined && "password" in step ? (elements[step.password] ?? null) : null;
-  for (const el of document.querySelectorAll<HTMLInputElement>("input[data-rizzy-field]")) {
-    if (el !== usernameField && el !== passwordField) {
-      delete el.dataset["rizzyField"];
-    }
-  }
   if (step === undefined) {
     return undefined;
   }
+  const usernameField = "username" in step ? (elements[step.username] ?? null) : null;
+  const passwordField = "password" in step ? (elements[step.password] ?? null) : null;
   const fields: FieldDescriptor[] = [];
   for (const [el, kind] of [
     [usernameField, "username"],
@@ -395,7 +416,6 @@ function detectStep(): DetectedStep | undefined {
       continue;
     }
     const fieldId = stableFieldId(el);
-    el.dataset["rizzyField"] = kind;
     el.dataset["rizzyFieldId"] = fieldId;
     fields.push({
       fieldId,
