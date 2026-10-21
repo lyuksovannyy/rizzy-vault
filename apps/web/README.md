@@ -31,6 +31,11 @@ TypeScript ([ADR 0014](../../docs/adr/0014-ui-stack.md)), served by the `web` ro
   policy (`src/trusted-types.ts`), which admits only that URL.
 - **Fixed output names** (`assets.ts`): the server embeds exactly these files; the build fails
   on any other.
+- **User-facing text** comes from the typed English catalogue of `@rizzy-vault/i18n`
+  ([its README](../../packages/i18n/README.md): how to add a key, how a locale would be added).
+  So far that is every error code's wording (`src/messages.ts` looks up `errors.<code>`), the
+  login and unlock screen (`LoginView.tsx`) and the two-factor prompt (`TotpDialog.tsx`); the
+  other views still hold literal English, and move over view by view.
 
 ## The item editor
 
