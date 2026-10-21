@@ -855,18 +855,7 @@ impl VaultSync {
             .map(|entry| entry.value)
             .ok_or(ClientError::UnknownItem)?;
         let parsed = SchemaKey::parse(key.as_bytes()).map_err(|_| ClientError::InvalidEdit)?;
-        let parts = parsed.as_key();
-        if let (Some(LIST_FIELD), Some(element), Some(ATTR_VALUE)) =
-            (parts.list(), parts.element(), parts.attribute())
-        {
-            let kind_key = format!("{LIST_FIELD}/{element}/{ATTR_KIND}");
-            let kind_value = self.field_value(item, &kind_key);
-            let kind =
-                CustomFieldKind::from_displayed(kind_value.as_ref().and_then(|v| v.decode().ok()));
-            if !value.decode().is_ok_and(|v| kind.accepts(&v)) {
-                return Err(ClientError::InvalidEdit);
-            }
-        }
+        self.check_custom_field_kind(item, &parsed, &value)?;
         self.edit_item(
             rng,
             unlocked,
@@ -877,6 +866,37 @@ impl VaultSync {
             }],
             now_ms,
         )
+    }
+
+    /// The kind custom field `element` of `item` displays (ADR 0018 §7): an unknown kind,
+    /// or none, reads as [`CustomFieldKind::Unknown`], which displays as hidden.
+    pub(crate) fn custom_field_kind(&self, item: ItemId, element: &str) -> CustomFieldKind {
+        let kind_value = self.field_value(item, &format!("{LIST_FIELD}/{element}/{ATTR_KIND}"));
+        CustomFieldKind::from_displayed(kind_value.as_ref().and_then(|v| v.decode().ok()))
+    }
+
+    /// For a custom field's value (`field/<id>/value`), that `value` fits the kind the field
+    /// displays now ([`CustomFieldKind::accepts`]): [`check_write`] accepts Text or Bool there
+    /// and leaves that check to the caller. Any other key passes.
+    ///
+    /// # Errors
+    /// [`ClientError::InvalidEdit`] when the value does not fit.
+    pub(crate) fn check_custom_field_kind(
+        &self,
+        item: ItemId,
+        key: &SchemaKey,
+        value: &Value,
+    ) -> Result<(), ClientError> {
+        let parts = key.as_key();
+        if let (Some(LIST_FIELD), Some(element), Some(ATTR_VALUE)) =
+            (parts.list(), parts.element(), parts.attribute())
+        {
+            let kind = self.custom_field_kind(item, element);
+            if !value.decode().is_ok_and(|v| kind.accepts(&v)) {
+                return Err(ClientError::InvalidEdit);
+            }
+        }
+        Ok(())
     }
 
     /// `login.password` history imported from another manager (ADR 0018 §7, `pwhist/<id>/value`
