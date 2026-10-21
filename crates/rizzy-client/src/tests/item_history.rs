@@ -5,7 +5,7 @@
 //! versions)", M3): the generic, per-field counterpart of `tests/password_history.rs`, which
 //! these tests use as their template. ADR 0018 §3 "History" is the history of every field, not
 //! only `login.password` (ADR 0012 §5 names `login.password` only as an example); the restore
-//! writes the old value back through `VaultSync::edit_item`, "an ordinary carried edit" (ADR
+//! writes the old value back through `VaultSync::edit_item` as an ordinary entered write (ADR
 //! 0018 §2 "Flow"), so it syncs and merges exactly like any other edit.
 
 use rizzy_core::item::schema::LOGIN_USERNAME;
@@ -156,6 +156,12 @@ fn item_history_lists_every_field_that_has_history_and_leaves_out_the_rest() {
         .unwrap();
     assert_eq!(username.entries.len(), 1);
     assert_eq!(text_of(&username.entries[0].value), "u1");
+
+    // A listing is a secret (the key is user content, the entries decrypted values): its
+    // `Debug` prints neither.
+    for field in &history {
+        assert_eq!(format!("{field:?}"), "FieldHistory([REDACTED])");
+    }
 }
 
 #[test]
@@ -326,6 +332,82 @@ fn restore_on_a_trashed_item_is_refused() {
         .restore_field_history(&mut rng, &unlocked, item, LOGIN_PASSWORD, dot, T0 + 30)
         .unwrap_err();
     assert_eq!(err, ClientError::UnknownItem);
+}
+
+/// `check_write` accepts Text or Bool for any `field/<id>/value` and leaves the kind check to
+/// its caller: a restore makes it against the kind the field displays now, so an old Text value
+/// never lands in a field that has become a boolean one, and lands again once the field is a
+/// text kind once more.
+#[test]
+fn a_custom_fields_old_value_is_restored_only_into_a_kind_it_fits() {
+    use rizzy_core::item::schema::{
+        ATTR_KIND, ATTR_VALUE, CUSTOM_KIND_BOOLEAN, CUSTOM_KIND_HIDDEN, LIST_FIELD,
+    };
+
+    let (_server, mut rng, mut vault, unlocked, item) = one_item(409);
+    let mut now = T0 + 10;
+    let mut write =
+        |vault: &mut VaultSync, rng: &mut ChaCha20Rng, writes: &[(SchemaKey, Value)]| {
+            let edits: Vec<FieldEdit<'_>> = writes
+                .iter()
+                .map(|(key, value)| FieldEdit { key, value })
+                .collect();
+            now += 10;
+            vault.edit_item(rng, &unlocked, item, &edits, now).unwrap();
+        };
+    let orders = vault.append_orders(Some(item), LIST_FIELD, 1).unwrap();
+    let (element, new) = VaultSync::new_element_writes(
+        &mut rng,
+        LIST_FIELD,
+        vec![
+            (ATTR_KIND, Value::enumeration(CUSTOM_KIND_HIDDEN)),
+            (ATTR_VALUE, Value::text("old-pin").unwrap()),
+        ],
+        Some(&orders[0]),
+    )
+    .unwrap();
+    write(&mut vault, &mut rng, &new);
+    let element = hex_of(element.as_bytes());
+    let kind_key = format!("{LIST_FIELD}/{element}/{ATTR_KIND}");
+    let value_key = format!("{LIST_FIELD}/{element}/{ATTR_VALUE}");
+    let key = |k: &str| SchemaKey::parse(k.as_bytes()).unwrap();
+
+    // The field becomes a boolean one: "old-pin" (Text) goes into its value's history.
+    write(
+        &mut vault,
+        &mut rng,
+        &[
+            (key(&kind_key), Value::enumeration(CUSTOM_KIND_BOOLEAN)),
+            (key(&value_key), Value::bool(true)),
+        ],
+    );
+    let entry = vault.field_history(item, &value_key);
+    assert_eq!(entry.len(), 1);
+    assert_eq!(text_of(&entry[0].value), "old-pin");
+    let dot = entry[0].dot;
+
+    let err = vault
+        .restore_field_history(&mut rng, &unlocked, item, &value_key, dot, T0 + 100)
+        .unwrap_err();
+    assert_eq!(err, ClientError::InvalidEdit);
+    assert!(matches!(
+        vault.field_value(item, &value_key).unwrap().decode(),
+        Ok(ValueRef::Bool(true))
+    ));
+
+    // A hidden field again: the same entry now fits, and the restore writes it back.
+    write(
+        &mut vault,
+        &mut rng,
+        &[(key(&kind_key), Value::enumeration(CUSTOM_KIND_HIDDEN))],
+    );
+    vault
+        .restore_field_history(&mut rng, &unlocked, item, &value_key, dot, T0 + 200)
+        .unwrap();
+    assert_eq!(
+        text_of(&vault.field_value(item, &value_key).unwrap()),
+        "old-pin"
+    );
 }
 
 #[test]
