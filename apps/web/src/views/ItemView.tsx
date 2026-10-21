@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 // One item: its fields, masked where the core conceals them, with reveal and copy; its URIs as
-// safe links (INV-42); its TOTP code; its password history (`PasswordHistory.tsx`); edit,
-// trash, restore and purge.
+// safe links (INV-42); its TOTP code; its password history (`PasswordHistory.tsx`) and every
+// field's history with restore (`ItemHistory.tsx`); edit, trash, restore and purge.
 //
 // A concealed value crosses from the Worker only when the user asks (reveal or copy; ADR 0013
 // §3 rule 3), and a revealed value is shown in the secret-field component (INV-68). The
@@ -273,9 +273,9 @@ export function ItemView(props: {
     );
 
   /** `ItemHistory`'s write path: restoring an entry is an ordinary edit (ROADMAP §4.2). Unlike
-   * `act` (used for a button's own `onClick`), this returns the write's own promise, so
-   * `ItemHistory` can tell a refused restore from a successful one; `run` still gives it the
-   * same shared busy/error state trash, purge and favorite use. */
+   * `act` (used for a button's own `onClick`), this returns a promise that settles when the
+   * write has, so the row stays busy until then; a refused restore shows through `run`'s
+   * shared error state (the one trash, purge and favorite use), not in the row. */
   const restoreHistoryEntry = (fieldKey: string, entry: HistoryEntry): Promise<void> =>
     run(async () => {
       await ctx.client.call("restoreFieldHistory", id, fieldKey, entry.index, entry.id);
@@ -349,7 +349,7 @@ export function ItemView(props: {
         <FieldValue key={f.key} ctx={ctx} id={id} field={f} label={f.key} />
       ))}
       <PasswordHistory ctx={ctx} id={id} />
-      <ItemHistory ctx={ctx} id={id} onRestore={restoreHistoryEntry} />
+      <ItemHistory ctx={ctx} id={id} onRestore={writable && !summary.trashed ? restoreHistoryEntry : undefined} />
       {grouped.tags.length > 0 && (
         <p className="tags">
           {grouped.tags.map((t) => (
