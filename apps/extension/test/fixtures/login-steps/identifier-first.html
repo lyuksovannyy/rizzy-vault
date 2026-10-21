@@ -1,0 +1,18 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Identifier-first, step 1</title>
+  </head>
+  <body>
+    <!-- Step 1 of a two-page sign-in: the email alone; the password is on the next page.
+         Step: username (strong signal, autocomplete="username"). Submitting navigates to
+         password-step.html (Playwright serves both). -->
+    <form id="identifier" action="/password-step.html" method="get">
+      <label for="user">Email</label>
+      <input id="user" name="username" type="email" autocomplete="username" />
+      <button id="next" type="submit">Next</button>
+    </form>
+  </body>
+</html>
