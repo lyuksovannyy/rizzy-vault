@@ -1,21 +1,23 @@
-# Handoff — 2026-10-11 (ADR drafting session)
+# Handoff — 2026-10-21 (M3 fleet integration session)
 
-State at the end of the 2026-10-11 session: what was done, and what comes next.
-Delete or rewrite this file when its next steps are done.
+State at the end of the 2026-10-21 session: what was done, and what comes next.
+Delete or rewrite this file when its next steps are done. §2–§7 are carried over from the
+2026-10-11 session unchanged except where §1 says otherwise.
 
 ## 1. Where things stand
 
-- Branch `claude/password-manager-planning-2gg9yc` is pushed to origin at `cc07afd` (matches `origin/claude/password-manager-planning-2gg9yc`). Last full gate green on `a446deb`: Rust 1655 tests, web e2e 14, extension Playwright 65 passed / 4 skipped, `check-spdx`, `expand-bindings`. `cc07afd` only touched `.claude/memory/*`, so that gate still describes HEAD.
-- `origin/main` is still `5922c1d` (ADR 0042 proposed).
-- No commit in `origin/main..HEAD` (66 commits) carries `Signed-off-by`. Before `main` is fast-forwarded, the owner runs `git rebase --signoff origin/main` so CI's DCO job passes (ADR 0017 Decision 4).
-- The 30 new ADR drafts `docs/adr/0045-*.md` … `0074-*.md`, their `docs/adr/README.md` rows and the `CLAUDE.md` status-line edit are committed together with this file (`docs(adr): propose ADRs 0045-0074 …`). They went through one blockers-only review each, one cross-batch consistency pass and one shared-number allocation pass.
-- M3 fleet (rows Accepted ADRs already clear, §6), all based on `cc07afd`, each verified per track and reviewed once, **not yet integrated or full-gated**. Pushed as branches; cherry-pick onto this branch, run the full gate (`rizzy-wt/gate-full.sh`), then push:
-  - `wip/m3-tokens` (4 commits): neutral token source, `cargo xtask generate-tokens [--check]`, WCAG AA contrast check (ADR 0014 §5, ADR 0019 §13). Review fixes applied.
-  - `wip/m3-palette` (4): Ctrl/Cmd+K command palette, large-type password display. Review fixes applied. Favorites UI not confirmed done: check before closing the row.
-  - `wip/m3-history` (6): per-field item history + restore in rizzy-client, wasm, web, `rv item history` / `restore-history`. **Not reviewed**: the agent was cut off by an account-access error after committing.
-  - `wip/m3-quadlet` (8): Podman Quadlet units for profile A + docs/self-hosting.md §13. Unverified: podman not available here.
-  - Not started (agents failed on the same access error): force logout (m3-sessions), transparency page, conflict chooser, onboarding, `cargo xtask check-tables`. Re-run them.
-- The gap-numbered audit (`docs/handoff/gap-audit.json`) that older gap ids below trace back to still lives only on branch `wip/client-m1`. Keep that branch; its code is superseded by the commits in §2.
+- **Machine moved.** Work now runs on a Linux host (Ubuntu 24.04, 20 cores, 8 GB RAM), not the earlier macOS box. Parallel work uses git worktrees under `~/rizzy-wt/`: `integration/` holds this branch and each track is `~/rizzy-wt/<track>` on branch `wip/<track>`. Tracks are cut from integration HEAD and cherry-picked back. Helper `~/rizzy-wt/bin/wt` (`new`, `adopt`, `list`, `sync`, `integrate`, `gate`, `rm`), `bin/gate.sh [--full]` (the CLAUDE.md list, plus check-tables, the JS/e2e list, both Playwright suites and `RUSTC_BOOTSTRAP=1 expand-bindings` as in CI), and `bin/bg` / `bin/bg-status` to run long commands detached from the agent session. Local tool setup: Node 24 and corepack pnpm in `~/.local/opt/node24`; Chromium's missing system libraries unpacked into `~/.local/opt/pw-libs` (no sudo); sccache. See `~/rizzy-wt/README.md`.
+- **Gate.** The full gate (`~/rizzy-wt/bin/gate.sh --full`) is green on `a286537` except rustdoc: Rust 1713 tests passed / 21 ignored, check-tables, web e2e 17 passed / 2 skipped, extension Playwright 66 passed / 4 skipped, `check-js`, `check-manifest`, `expand-bindings`. `67d1c6f` fixed the rustdoc failure (a private intra-doc link in `rizzy-wasm`). It was re-checked with fmt, `cargo lint`, `check-wasm`, `cargo doc -D warnings`, `expand-bindings` and the `rizzy-wasm` tests, all green. Pushed to `origin/claude/password-manager-planning-2gg9yc`.
+- `origin/main` is still `5922c1d`. No commit in `origin/main..HEAD` carries `Signed-off-by`. Before `main` is fast-forwarded, the owner runs `git rebase --signoff origin/main` so CI's DCO job passes (ADR 0017 Decision 4).
+- **M3 fleet integrated** onto this branch with `cherry-pick -x`: `wip/m3-tokens`, `wip/m3-quadlet`, `wip/m3-palette` and `wip/m3-history`.
+  - `m3-history` got its missing review. Fixes are committed: a restored custom field value is checked against the field's current kind; wasm `FieldHistoryView` keys are zeroized and its `Debug` is redacted; the CLI header line is zeroized; web hides Restore when read-only or trashed and remounts rows on sync. The wasm-bindgen expansion baseline was regenerated with identical `unsafe`/`extern`/`no_mangle`/`export_name` counts (945/569/236/268).
+  - Favorites UI (§1's old open question for the palette row) exists: the detail-header star, the sidebar Favorites filter and favorites-first ranking in the palette, each covered by e2e (`vault.spec.ts`, `command-palette.spec.ts`).
+  - Quadlet is still unverified on a real Podman host (podman is not installed here either).
+- **New this session:**
+  - `cargo xtask check-tables` (the M1 row, §6), `auth_`/`vault_` only. `storage_*` is skipped and counted, pending the owner (§5 gap 19). It is in CLAUDE.md's and CONTRIBUTING.md's push lists, but not in CI (an owner decision, §5).
+  - **Advisory bumps** (the gate was red on `main` too): `rustls` =0.23.46 (RUSTSEC-2026-0346/0347), `webpki-roots` =1.0.10 (RUSTSEC-2026-0381), `rustls-webpki` 0.103.16 in the lockfile (RUSTSEC-2026-0382), and `vite` 8.3.5 (six pnpm audit advisories, check-js). These are patch bumps of exact pins, so **the owner reviews them as ADR 0009 asks** ("a patch release needs a human PR"). CRYPTO.md §3 is updated to the new pins; ADR 0009's own amendment table still names the old versions, because it is Accepted and only the owner edits it.
+- **Still not started** (re-run them, one worktree each): force logout (m3-sessions), transparency page, conflict chooser, onboarding. The other §6 rows are unordered.
+- The gap-numbered audit (`docs/handoff/gap-audit.json`), which older gap ids below trace back to, still lives only on branch `wip/client-m1`. Keep that branch; its code is superseded by the commits in §2. `wip/match-core` (one unfinished commit off `main`) is likewise superseded and kept only for reference.
 
 ## 2. Done since the last rewrite
 
