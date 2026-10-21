@@ -68,7 +68,10 @@ export const RETENTION: readonly string[] = [
   "The server's own logs never hold IP addresses, login names or request contents. Your server operator's reverse proxy may log IP addresses, and the operator's backups keep deleted data until they expire.",
 ];
 
-/** The counts this browser computed from the vault it fetched. */
+/**
+ * The counts this browser computed from the vault it fetched. `devices` counts every device
+ * certificate, revoked ones too: the server keeps both the certificate and its revocation.
+ */
 export interface LocalCounts {
   readonly items: number;
   readonly trashed: number;
@@ -86,6 +89,6 @@ export function countRows(counts: LocalCounts): CountRow[] {
   return [
     { label: "Items", value: counts.items },
     { label: "Items in the Trash", value: counts.trashed },
-    { label: "Enrolled devices", value: counts.devices },
+    { label: "Enrolled devices, active or revoked", value: counts.devices },
   ];
 }
