@@ -36,7 +36,7 @@ test("settings: what the server stores, with this browser's counts", async ({ pa
   const counts = pane.getByRole("table", { name: "Counts of your vault" });
   await expect(counts.getByRole("row", { name: "Items 1" })).toBeVisible();
   await expect(counts.getByRole("row", { name: "Items in the Trash 0" })).toBeVisible();
-  await expect(counts.getByRole("row", { name: "Enrolled devices 0" })).toBeVisible();
+  await expect(counts.getByRole("row", { name: "Enrolled devices, active or revoked 0" })).toBeVisible();
 
   // The counts follow the vault: trash the item and come back.
   await page.getByRole("button", { name: "All items", exact: true }).click();

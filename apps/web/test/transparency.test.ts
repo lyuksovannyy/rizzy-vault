@@ -11,7 +11,7 @@ describe("countRows", () => {
     expect(countRows({ items: 3, trashed: 1, devices: 0 })).toEqual([
       { label: "Items", value: 3 },
       { label: "Items in the Trash", value: 1 },
-      { label: "Enrolled devices", value: 0 },
+      { label: "Enrolled devices, active or revoked", value: 0 },
     ]);
   });
 });
