@@ -317,6 +317,50 @@ Firefox: not automated, same reason as the rest of this file (no Playwright-auto
 unpacked-extension flow) — the create/get interception and the consent UI are plain
 `postMessage`/DOM code with nothing Chromium-specific in it, but that is untested, not proven.
 
+### M3: multi-step login forms (ROADMAP §4.4)
+
+The inline menu is offered on each step of a login split across steps, and each step's fill
+writes only that step's own field(s):
+
+| Step | Looks like | The menu fills |
+|---|---|---|
+| One-page form | a visible password field, with its form's username field before it | both |
+| Identifier-first | a username or email field alone; the password is on the next page, or hidden until the page reveals it | the username only ("Fills the username only."; no generator) |
+| Password-only | a visible password field with no username field of its own (the username was on an earlier page) | the password only ("Fills the password only.") |
+
+- **Detection** is [`src/content/login-step.ts`](src/content/login-step.ts): a pure,
+  deterministic heuristic over facts the content script reads from the top frame's own
+  document — `autocomplete` tokens (`username` and `webauthn` are strong signals; `email` is a
+  weak one), input types, `name`/`id`/`placeholder`/`aria-label`/label hints, and form
+  structure (a username is paired only with a password of the same form; a weakly signalled
+  identifier alone needs a sign-in form: a concealed password field in it, or "Next"/"Sign in"-
+  style hints and no search/newsletter/sign-up ones). Unit tested in Node against the HTML
+  fixtures in [`test/fixtures/login-steps/`](test/fixtures/login-steps) (`test/login-step.test.ts`),
+  which `e2e/multistep.spec.ts` also loads into real Chromium.
+- **Every step is its own gesture.** A pick on the identifier step never fills the password
+  step; the password step's menu appears on its own and nothing is written until the user clicks
+  a candidate in it (INV-36; ADR 0037 §5; ADR 0040). Nothing is remembered between steps or
+  across a navigation: there is no state for it to live in, and the e2e suite checks that the
+  next step stays empty without a new click.
+- **Only the step's own value crosses.** The inline menu's existing `inline_menu_fill_chosen`
+  request carries an optional `only: "username" | "password"`, and the long-lived context
+  narrows what it pushes to the content script to that one value (`content-handler.ts`'s
+  `narrowFillValues`; ADR 0036 §4, nothing "beyond what the user is filling"). `apply_fill` can
+  therefore carry a username alone. No new message type.
+- **The A7 gates apply to every field of every step**: hidden, `opacity: 0`, zero-size,
+  off-screen (entirely left of or above the document) and covered fields are never chosen, and
+  each target is re-checked when the fill lands, as are read-only and disabled fields. A password
+  field inside an iframe is never seen at all: the content script runs in the top frame only.
+- **Same-page reveal.** The content script's `MutationObserver` now also watches `style`,
+  `class`, `hidden`, `disabled` and `readonly`, since a revealed password field is usually an
+  attribute change rather than a new node. An attribute-only change re-asks the background only
+  if the detected step changed; the menu's own per-frame restyling of its iframe never counts.
+  A field whose `type` attribute flips (`hidden` → `password`) is not watched, so such a reveal
+  is picked up only at the next structural change: a known gap.
+- **Not done:** save/update-on-submit still needs a password field and the username on the same
+  page, so a two-page sign-in is not offered for saving (the password page has no username to
+  save with it); Firefox is not automated (as everywhere in this file).
+
 ## Architecture
 
 ```
