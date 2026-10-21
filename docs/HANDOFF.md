@@ -121,20 +121,19 @@ Implementable now (status partial or not_started, no Proposed ADR in the way). `
 | Row | MS | Governing ADR |
 |---|---|---|
 | `cargo xtask check-tables` (`auth_`/`vault_` prefixes only — `storage_*` scope is open, §5 gap 19) | M1 | ADR 0011 pt.7 + ADR 0016 R4 (Accepted) |
-| Session/device management — force logout (storage primitives exist; endpoint + UI missing) | M3 | ADR 0028 + CRYPTO §5.10 (Accepted) |
 | Heuristic multi-step login form support | M3 | ADR 0036/0037/0040 (Accepted) |
 | Design-system cross-toolkit token generator | M3 | ADR 0014 §5 / 0019 §13 (Accepted) |
 | Command palette (Cmd/Ctrl+K) | M3 | ADR 0014 (Accepted) |
 | Item detail view polish (large-type password display) | M3 | ADR 0014 (Accepted) |
 | Accessibility CI checks (contrast, screen reader, native toolkits) | M3 | ADR 0014 §5 / 0019 §13 (Accepted) |
-| Transparency page (new additive GET endpoint) | M3 | ADR 0028 items 1/14 (Accepted) |
+| Transparency page (built client-side from data existing endpoints already return; no new endpoint) | M3 | None governs it; ADR 0028 items 1/14 (Accepted) only constrain it. A server-reported variant would need a new endpoint and so a new ADR (ADR 0048 is Proposed) |
 | Onboarding flow (import wizard, Emergency Kit, extension install) | M3 | ADR 0008 / 0014 (Accepted) |
 | i18n scaffold (English only) | M3 | ADR 0014 §4 (Accepted) |
 | Conflict UI — explicit "keep both / pick one" chooser | M3 | ADR 0012/0018/0021 (Accepted) |
 | PostgreSQL support itself (migrations, instance lock exist; only its CI job is blocked, §5) | M3 | ADR 0011 (Accepted) |
 | Podman Quadlet units + auto-update | M3 | ADR 0010 §4 (Accepted) |
 
-**Excluded on purpose** because their real dependency is a Proposed ADR, not an Accepted one: every M5 sharing row (0063–0067), every M6 mail/alias row (0068–0070 — including the mailbox-UI and OTP-extraction rows that look `implementable_now` on their own but need the mail pipeline those ADRs build), M3 favicon proxying (0052), Watchtower/HIBP (0053), attachments (0054), the 5 new M3 item types (0055), the local index (0056), OS-keystore unlock (0057), WebAuthn 2FA (0058/0059), the admin panel (0060), push/live sync (0061), Markdown notes (0062), and M8's backup/signing/CXF rows (0071–0074). `rizzy-ffi`/`uniffi` is also excluded: gated on Spike S1, which has not run, not only on a dependency add.
+**Excluded on purpose** because their real dependency is a Proposed ADR, not an Accepted one: every M5 sharing row (0063–0067), every M6 mail/alias row (0068–0070 — including the mailbox-UI and OTP-extraction rows that look `implementable_now` on their own but need the mail pipeline those ADRs build), M3 favicon proxying (0052), Watchtower/HIBP (0053), attachments (0054), the 5 new M3 item types (0055), the local index (0056), OS-keystore unlock (0057), WebAuthn 2FA (0058/0059), the admin panel (0060), push/live sync (0061), Markdown notes (0062), session/device management — force logout (0075: ADR 0028 + CRYPTO §5.10 do not govern it, because item 1 freezes 27 endpoints and none lists or ends sessions, and §5.10 covers only token issuance, device auth and request signing), and M8's backup/signing/CXF rows (0071–0074). `rizzy-ffi`/`uniffi` is also excluded: gated on Spike S1, which has not run, not only on a dependency add.
 
 ## 7. Known residuals
 
