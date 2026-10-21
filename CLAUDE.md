@@ -63,12 +63,13 @@ cargo check-wasm
 cargo deny check
 cargo xtask check-deps
 cargo xtask check-clippy
+cargo xtask check-tables
 cargo check --manifest-path fuzz/Cargo.toml --locked --bins
 cargo deny --manifest-path fuzz/Cargo.toml check
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 ```
 
-CI runs the same list; [CONTRIBUTING.md](CONTRIBUTING.md#checks-to-run-before-every-push) says what each command checks.
+CI runs the same list, except `cargo xtask check-tables`, which is not wired into CI yet; [CONTRIBUTING.md](CONTRIBUTING.md#checks-to-run-before-every-push) says what each command checks.
 
 ## Process
 
