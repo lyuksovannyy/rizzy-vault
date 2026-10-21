@@ -325,8 +325,9 @@ function Export(props: { readonly ctx: VaultContext }) {
   );
 }
 
-/** The import form. */
-function Import(props: { readonly ctx: VaultContext }) {
+/** The import form. The getting-started guide (`OnboardingView.tsx`) shows it as its import
+ * step; the two are never on screen together, so its element ids stay unique. */
+export function ImportForm(props: { readonly ctx: VaultContext }) {
   const { ctx } = props;
   const [file, setFile] = useState<File | undefined>();
   const [detected, setDetected] = useState<DetectedImportFormat | undefined>();
@@ -441,7 +442,7 @@ export function TransferPane(props: { readonly ctx: VaultContext }) {
       <h2>Export and import</h2>
       <Export ctx={props.ctx} />
       <hr />
-      <Import ctx={props.ctx} />
+      <ImportForm ctx={props.ctx} />
     </div>
   );
 }

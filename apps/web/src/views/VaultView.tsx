@@ -46,6 +46,7 @@ import { CommandPalette, type PaletteNavCommand } from "./CommandPalette.tsx";
 import { GeneratorPane } from "./GeneratorPane.tsx";
 import { ItemsPane, type Scope } from "./ItemsPane.tsx";
 import { NoticesPanel } from "./NoticesPanel.tsx";
+import { OnboardingView } from "./OnboardingView.tsx";
 import { SettingsView } from "./SettingsView.tsx";
 import { ShortcutsHelp } from "./ShortcutsHelp.tsx";
 import { TransferPane } from "./TransferPane.tsx";
@@ -80,7 +81,9 @@ const OTHER_SECTIONS = [
   { id: "transfer", label: "Export and import", icon: <IconTransfer /> },
 ] as const;
 
-type Section = "items" | "trash" | "settings" | (typeof OTHER_SECTIONS)[number]["id"];
+/** "guide" is the getting-started guide (`OnboardingView.tsx`): opened after signup and from
+ * Settings, with no sidebar entry of its own. */
+type Section = "items" | "trash" | "settings" | "guide" | (typeof OTHER_SECTIONS)[number]["id"];
 
 /** What the views below the header use. */
 export interface VaultContext {
@@ -101,10 +104,12 @@ export function VaultView(props: {
   readonly loginName: string;
   readonly initialSession: SessionInfo;
   readonly onLocked: (notice?: string) => void;
+  /** Opens the getting-started guide first: true right after signup only (`onboarding.ts`). */
+  readonly startWithGuide?: boolean;
 }) {
   const { client, onLocked } = props;
   const [session, setSession] = useState(props.initialSession);
-  const [section, setSection] = useState<Section>("items");
+  const [section, setSection] = useState<Section>(props.startWithGuide === true ? "guide" : "items");
   const [scope, setScope] = useState<Scope>(ALL_SCOPE);
   /** Narrow screens: the sidebar is a slide-over, closed by default (item 1, module docs). */
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -529,7 +534,10 @@ export function VaultView(props: {
           {section === "trash" && <ItemsPane ctx={ctx} trash scope={ALL_SCOPE} newItemSignal={0} />}
           {section === "generator" && <GeneratorPane ctx={ctx} />}
           {section === "transfer" && <TransferPane ctx={ctx} />}
-          {section === "settings" && <SettingsView ctx={ctx} />}
+          {section === "settings" && <SettingsView ctx={ctx} onOpenGuide={() => chooseSection("guide")} />}
+          {section === "guide" && (
+            <OnboardingView ctx={ctx} loginName={props.loginName} onClose={() => chooseSection("items")} />
+          )}
         </section>
       </div>
       <ConfirmDialog
