@@ -572,11 +572,14 @@ fn item_history(
     }
     for field in &history {
         let plural = if field.entries.len() == 1 { "" } else { "s" };
-        ui.print(&format!(
+        // The key is user content (a tag key holds the tag's name, ADR 0018 §2), so the line
+        // that carries it is wiped like `item show`'s labels.
+        let header = Zeroizing::new(format!(
             "{} ({} older value{plural}, newest first):",
             field.key.as_str(),
             field.entries.len()
-        ))?;
+        ));
+        ui.print(&header)?;
         for entry in &field.entries {
             let shown = if reveal {
                 show_value(&entry.value)
@@ -596,8 +599,8 @@ fn item_history(
 }
 
 /// `item restore-history`: writes one history entry back as its field's current value
-/// (ROADMAP §4.2), through [`rizzy_client::items::VaultSync::restore_field_history`] -- "an
-/// ordinary carried edit" (ADR 0018 §2 "Flow"), so it syncs and merges like any other edit.
+/// (ROADMAP §4.2), through [`rizzy_client::items::VaultSync::restore_field_history`]: an
+/// ordinary entered write (ADR 0018 §2 "Flow"), so it syncs and merges like any other edit.
 async fn item_restore_history(
     env: &mut Env<'_>,
     item: &str,
