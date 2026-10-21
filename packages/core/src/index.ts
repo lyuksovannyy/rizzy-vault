@@ -683,6 +683,28 @@ export interface FieldHistory {
 }
 
 /**
+ * One distinct value of a conflicting field (ROADMAP §4.5 "edited on Phone and Laptop at the
+ * same time — keep both / pick one"; ADR 0012 §4 step 5, ADR 0018 §6), as
+ * {@link VaultSession.fieldConflict} lists them: the displayed value first. `device` wrote it
+ * ("edited on X"; name it from {@link VaultSession.devices}), at `writtenMs` (display only).
+ * `cleared` is "cleared on X". `value` is absent while `concealed` (ADR 0013 §3 rule 3): reveal
+ * it with {@link VaultSession.revealConflictValue}. Pass `index` and `id` back as listed to
+ * reveal or resolve: when a sync has since changed the listing, the core refuses
+ * (`unknown_item`) instead of acting on another value.
+ */
+export interface ConflictValue {
+  readonly index: number;
+  readonly id: string;
+  readonly device: string;
+  readonly writtenMs: number;
+  readonly displayed: boolean;
+  readonly cleared: boolean;
+  readonly kind: FieldView["kind"];
+  readonly concealed: boolean;
+  readonly value: string | undefined;
+}
+
+/**
  * A notice of {@link VaultSession.takeNotices}: ids only. `late-edit`: "An edit from
  * `<devices>` arrived for an item you deleted permanently. Restore it as a new item?" (ADR 0018
  * §3). `concurrent-trash`: "deleted on `devices[0]` while it was being edited on `devices[1]`"
@@ -1213,6 +1235,57 @@ export class VaultSession {
    */
   restoreFieldHistory(id: string, key: string, index: number, entryId: string): void {
     call(() => this.#s().restoreFieldHistory(id, key, index, entryId, this.#now()));
+  }
+
+  /**
+   * A conflicting field's distinct values ({@link ConflictValue}'s own doc), the displayed one
+   * first, concealed values withheld. Empty when the field does not conflict. List it again
+   * after every sync: a sync can resolve the conflict or add a value.
+   */
+  fieldConflict(id: string, key: string): ConflictValue[] {
+    return mapFree(call(() => this.#s().fieldConflict(id, key)), (v) => ({
+      index: v.index,
+      id: v.id,
+      device: v.device,
+      writtenMs: Number(v.writtenMs),
+      displayed: v.displayed,
+      cleared: v.cleared,
+      kind: v.kind as FieldView["kind"],
+      concealed: v.concealed,
+      value: v.value,
+    }));
+  }
+
+  /** One conflicting value, as {@link fieldConflict} listed it, on the user's request only. */
+  revealConflictValue(id: string, key: string, index: number, valueId: string): string {
+    return call(() => this.#s().revealConflictValue(id, key, index, valueId));
+  }
+
+  /**
+   * "Pick one": writes the named value back to the field, an ordinary edit whose context
+   * covers every conflicting value, so the conflict ends on every device once it syncs.
+   */
+  resolveConflictPick(id: string, key: string, index: number, valueId: string): void {
+    call(() => this.#s().resolveConflictPick(id, key, index, valueId, this.#now()));
+  }
+
+  /**
+   * "Keep both": keeps the named value in the field and moves every other non-empty value into
+   * a new website (for a website) or a new custom field, hidden when the field is concealed,
+   * labelled `label` (required for a fixed field such as the password; a custom field's copies
+   * take its own label without one). Returns the new elements' ids. A field that is not text,
+   * or has no second value to keep, is refused (`invalid_edit`): "pick one" resolves it.
+   */
+  resolveConflictKeepBoth(
+    id: string,
+    key: string,
+    index: number,
+    valueId: string,
+    label: string | undefined,
+  ): string[] {
+    return call(() =>
+      this.#s().resolveConflictKeepBoth(id, key, index, valueId, label, this.#now()),
+    );
   }
 
   /**

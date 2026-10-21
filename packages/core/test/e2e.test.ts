@@ -1106,6 +1106,84 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     expect(unlocked.takeNotices()).toEqual([]);
     await unlocked.sync();
     expect(unlocked.takeNotices()).toEqual([]);
+
+    // ROADMAP §4.5 "keep both / pick one" (ADR 0012 §4 step 5, ADR 0018 §6), on two of these
+    // sessions (the signup bucket is shared across this file): each edits the password before
+    // it has heard of the other's edit, so both values stay and the field conflicts.
+    await unlocked.sync();
+    await second.sync();
+    const login1 = unlocked.createItem("login", [
+      { op: "set", key: "item.name", value: "Shared" },
+      { op: "set", key: "login.password", value: "base" },
+    ]);
+    await unlocked.sync();
+    await second.sync();
+    unlocked.editItem(login1, [{ op: "set", key: "login.password", value: "from-first" }]);
+    second.editItem(login1, [{ op: "set", key: "login.password", value: "from-second" }]);
+    await unlocked.sync();
+    await second.sync();
+    await unlocked.sync();
+    for (const s of [unlocked, second]) {
+      expect(s.fields(login1).find((f) => f.key === "login.password")?.conflict).toBe(true);
+    }
+    // A concealed field: values withheld from the listing, one reveal per value.
+    const listed = unlocked.fieldConflict(login1, "login.password");
+    expect(listed).toHaveLength(2);
+    expect(listed[0]?.displayed).toBe(true);
+    expect(listed.every((v) => v.concealed && v.value === undefined && !v.cleared)).toBe(true);
+    expect(new Set(listed.map((v) => v.device))).toEqual(new Set([unlocked.deviceId, second.deviceId]));
+    const fromSecond = listed.find((v) => v.device === second.deviceId);
+    if (fromSecond === undefined) {
+      throw new Error("no value from the second session");
+    }
+    expect(unlocked.revealConflictValue(login1, "login.password", fromSecond.index, fromSecond.id)).toBe(
+      "from-second",
+    );
+    // A stale identity is refused, never resolved to another value.
+    expect(() => unlocked.resolveConflictPick(login1, "login.password", fromSecond.index, "00")).toThrowError(
+      expect.objectContaining({ code: "unknown_item" }),
+    );
+    // Pick one: an ordinary edit; a repeat finds no conflict and writes nothing.
+    unlocked.resolveConflictPick(login1, "login.password", fromSecond.index, fromSecond.id);
+    expect(unlocked.fieldConflict(login1, "login.password")).toEqual([]);
+    expect(() =>
+      unlocked.resolveConflictPick(login1, "login.password", fromSecond.index, fromSecond.id),
+    ).toThrowError(expect.objectContaining({ code: "unknown_item" }));
+    await unlocked.sync();
+    await second.sync();
+    for (const s of [unlocked, second]) {
+      expect(s.fieldConflict(login1, "login.password")).toEqual([]);
+      expect(s.reveal(login1, "login.password")).toBe("from-second");
+    }
+
+    // Keep both, on a shown field: the values cross in the listing; the other value becomes a
+    // text custom field with the host's label, on both sessions.
+    unlocked.editItem(login1, [{ op: "set", key: "item.name", value: "Name A" }]);
+    second.editItem(login1, [{ op: "set", key: "item.name", value: "Name B" }]);
+    await unlocked.sync();
+    await second.sync();
+    await unlocked.sync();
+    const names = second.fieldConflict(login1, "item.name");
+    expect(names.map((v) => v.value).sort()).toEqual(["Name A", "Name B"]);
+    const keep = names[0];
+    const other = names[1];
+    if (keep === undefined || other === undefined) {
+      throw new Error("two names expected");
+    }
+    expect(() =>
+      second.resolveConflictKeepBoth(login1, "item.name", keep.index, keep.id, undefined),
+    ).toThrowError(expect.objectContaining({ code: "invalid_input" }));
+    const added = second.resolveConflictKeepBoth(login1, "item.name", keep.index, keep.id, "Other name");
+    expect(added).toHaveLength(1);
+    await second.sync();
+    await unlocked.sync();
+    for (const s of [unlocked, second]) {
+      const fields = s.fields(login1);
+      expect(fields.find((f) => f.key === "item.name")).toMatchObject({ value: keep.value, conflict: false });
+      expect(fields.find((f) => f.key === `field/${added[0]}/label`)?.value).toBe("Other name");
+      expect(s.reveal(login1, `field/${added[0]}/value`)).toBe(other.value);
+      expect(fields.some((f) => f.conflict)).toBe(false);
+    }
     lockAll(first, second, unlocked);
   });
 });
