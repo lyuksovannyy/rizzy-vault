@@ -1,7 +1,7 @@
 {
   "name": "rizzy-vault-js",
   "private": true,
-  "description": "The JavaScript workspace of rizzy-vault (ADR 0014 §3–§4): packages/core, packages/ui and apps/web.",
+  "description": "The JavaScript workspace of rizzy-vault (ADR 0014 §3–§4): packages/core, packages/ui, packages/i18n, apps/web and apps/extension.",
   "license": "AGPL-3.0-only",
   "packageManager": "pnpm@10.30.2",
   "engines": {
