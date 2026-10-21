@@ -11,6 +11,7 @@
 //
 // This module is types and pure checks only; it imports no wasm.
 import type {
+  ConflictValue,
   DetectedImportFormat,
   DeviceView,
   EncryptedExport,
@@ -98,6 +99,20 @@ export interface CoreApi {
   revealFieldHistory(id: string, key: string, index: number, entryId: string): string;
   /** Restores one field-history entry as the field's current value, an ordinary edit. */
   restoreFieldHistory(id: string, key: string, index: number, entryId: string): void;
+  /** A conflicting field's distinct values, concealed ones withheld (ROADMAP §4.5 "keep both / pick one"). */
+  fieldConflict(id: string, key: string): ConflictValue[];
+  /** One conflicting value, on the user's request only (ADR 0013 §3 rule 3). */
+  revealConflictValue(id: string, key: string, index: number, valueId: string): string;
+  /** "Pick one": writes the named value back to the field, an ordinary edit. */
+  resolveConflictPick(id: string, key: string, index: number, valueId: string): void;
+  /** "Keep both": keeps the named value; the others become new fields (or websites). */
+  resolveConflictKeepBoth(
+    id: string,
+    key: string,
+    index: number,
+    valueId: string,
+    label: string | undefined,
+  ): string[];
   /** The late-edit and trash notices not yet handed over in this session (gap 02). */
   takeNotices(): Notice[];
   /** Restores the late edits of an item deleted permanently as a new item; returns its id. */
@@ -158,6 +173,10 @@ export const METHODS: readonly Method[] = [
   "itemHistory",
   "revealFieldHistory",
   "restoreFieldHistory",
+  "fieldConflict",
+  "revealConflictValue",
+  "resolveConflictPick",
+  "resolveConflictKeepBoth",
   "takeNotices",
   "restoreLateAsNew",
   "totp",
