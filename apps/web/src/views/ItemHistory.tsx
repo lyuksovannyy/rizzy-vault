@@ -14,7 +14,10 @@
 // The same two guards as `PasswordHistory.tsx` keep a row from acting on the wrong identity:
 // Reveal, Copy and Restore stay disabled until the list read after the latest sync has arrived
 // (`canReveal`), and each call carries the row's own id, which the core checks against the
-// entry it finds at that (field, position) pair (`unknown_item` when they differ).
+// entry it finds at that (field, position) pair (`unknown_item` when they differ). A third
+// guard, again `PasswordHistory.tsx`'s, keeps a value already revealed from staying on screen
+// next to another entry's date: each row is keyed by the sync revision as well as its position,
+// so a sync (a restore included) remounts every row and drops what it revealed.
 import type { FieldHistory, HistoryEntry } from "@rizzy-vault/core";
 import { SecretField } from "@rizzy-vault/ui";
 import { useEffect, useState } from "react";
@@ -39,9 +42,9 @@ function FieldHistoryRow(props: {
   readonly fieldKey: string;
   readonly entry: HistoryEntry;
   readonly ready: boolean;
-  readonly onRestore: (fieldKey: string, entry: HistoryEntry) => Promise<void>;
+  readonly onRestore?: ((fieldKey: string, entry: HistoryEntry) => Promise<void>) | undefined;
 }) {
-  const { ctx, id, fieldKey, entry } = props;
+  const { ctx, id, fieldKey, entry, onRestore } = props;
   const [revealed, setRevealed] = useState<string | undefined>();
   const [copied, setCopied] = useState(false);
   const { busy, error, run } = useAction();
@@ -57,8 +60,6 @@ function FieldHistoryRow(props: {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     });
-
-  const restore = () => void run(() => props.onRestore(fieldKey, entry));
 
   return (
     <div className="field" data-history={`${fieldKey}/${entry.index}`}>
@@ -91,9 +92,16 @@ function FieldHistoryRow(props: {
         <button type="button" className="secondary small" disabled={disabled} onClick={copy}>
           {copied ? "Copied" : "Copy"}
         </button>
-        <button type="button" className="secondary small" disabled={disabled} onClick={restore}>
-          Restore
-        </button>
+        {onRestore !== undefined && (
+          <button
+            type="button"
+            className="secondary small"
+            disabled={disabled}
+            onClick={() => void run(() => onRestore(fieldKey, entry))}
+          >
+            Restore
+          </button>
+        )}
       </span>
       <ErrorText code={error} />
     </div>
@@ -106,7 +114,7 @@ function FieldSection(props: {
   readonly id: string;
   readonly field: FieldHistory;
   readonly ready: boolean;
-  readonly onRestore: (fieldKey: string, entry: HistoryEntry) => Promise<void>;
+  readonly onRestore?: ((fieldKey: string, entry: HistoryEntry) => Promise<void>) | undefined;
 }) {
   const { field } = props;
   const count = field.entries.length;
@@ -121,7 +129,7 @@ function FieldSection(props: {
       <p className="muted small">Each stays hidden until you reveal or copy it.</p>
       {field.entries.map((e) => (
         <FieldHistoryRow
-          key={`${field.key}:${e.index}`}
+          key={`${props.ctx.revision}:${field.key}:${e.index}`}
           ctx={props.ctx}
           id={props.id}
           fieldKey={field.key}
@@ -137,13 +145,15 @@ function FieldSection(props: {
 /**
  * The item-history section (module docs): one collapsed sub-section per field that has
  * history, nothing when the item has none. `onRestore` is the host's write path (ItemView's
- * `act`, so a restore's error and busy state show the same way trash/purge do); it is called
+ * `run`, so a restore's error and busy state show the same way trash/purge do); it is called
  * only after this component has already checked the entry is still the one last listed.
+ * `undefined` (a read-only session, or an item in the trash, which no edit may write) leaves
+ * the Restore action out: the rows still reveal and copy.
  */
 export function ItemHistory(props: {
   readonly ctx: VaultContext;
   readonly id: string;
-  readonly onRestore: (fieldKey: string, entry: HistoryEntry) => Promise<void>;
+  readonly onRestore?: ((fieldKey: string, entry: HistoryEntry) => Promise<void>) | undefined;
 }) {
   const { ctx, id } = props;
   const [listed, setListed] = useState<Listed | undefined>();
