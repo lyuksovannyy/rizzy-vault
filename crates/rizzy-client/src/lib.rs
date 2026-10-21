@@ -54,6 +54,7 @@
 //! | [`sync`] | ADR 0012 §4, §7; ADR 0018 §3, §10; ADR 0021 §2, §4, §9 | The sync driver of one vault |
 //! | [`items`] | ADR 0018 §2, §6–§9; ADR 0012 §5; ADR 0027 §2 steps 3–5 | Item create, edit, trash, restore, purge and reads; the import path, which splits an item over a create op and the ops that follow |
 //! | [`lists`] | ADR 0018 §6 "List elements", "List order" | The writes that add, edit and remove URIs, custom fields, password-history entries and tags of an item |
+//! | [`conflicts`] | ADR 0012 §4 step 5; ADR 0018 §6 "Display"; ROADMAP §4.5 | A conflicting field's values, and its resolution as an ordinary edit: "pick one" or "keep both" |
 //! | [`export`] | CRYPTO.md §11.14 | The encrypted export file writer and bounded reader |
 //! | [`export::payload`] | ADR 0027 §1–§2 | The export payload: encoding, bounded reader, import of our own export as new items |
 //! | [`export::plaintext`] | ADR 0027 §3–§5 | Plaintext JSON and CSV behind the typed acknowledgement; the frozen warning texts |
@@ -100,6 +101,7 @@
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
 pub mod account;
+pub mod conflicts;
 pub mod credentials;
 pub mod device;
 pub mod error;
