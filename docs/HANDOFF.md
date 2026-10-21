@@ -16,7 +16,11 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
 - **New this session:**
   - `cargo xtask check-tables` (the M1 row, §6), `auth_`/`vault_` only. `storage_*` is skipped and counted, pending the owner (§5 gap 19). It is in CLAUDE.md's and CONTRIBUTING.md's push lists, but not in CI (an owner decision, §5).
   - **Advisory bumps** (the gate was red on `main` too): `rustls` =0.23.46 (RUSTSEC-2026-0346/0347), `webpki-roots` =1.0.10 (RUSTSEC-2026-0381), `rustls-webpki` 0.103.16 in the lockfile (RUSTSEC-2026-0382), and `vite` 8.3.5 (six pnpm audit advisories, check-js). These are patch bumps of exact pins, so **the owner reviews them as ADR 0009 asks** ("a patch release needs a human PR"). CRYPTO.md §3 is updated to the new pins; ADR 0009's own amendment table still names the old versions, because it is Accepted and only the owner edits it.
-- **Still not started** (re-run them, one worktree each): force logout (m3-sessions), transparency page, conflict chooser, onboarding. The other §6 rows are unordered.
+- **Second wave (2026-10-21).**
+  - **Transparency page:** integrated as a client-only Settings group, "What the server stores" (`dae02d6`…`3e4ee56`). Its server-reported byte sizes are blocked: no Accepted ADR defines an endpoint, and ADR 0048 is Proposed.
+  - **Force logout:** blocked at the ADR gate. ADR 0075 (Proposed) now drafts it, so it waits for the owner (§3).
+  - **Conflict chooser:** running in `wip/m3-conflicts`.
+  - **Onboarding:** not started.
 - The gap-numbered audit (`docs/handoff/gap-audit.json`), which older gap ids below trace back to, still lives only on branch `wip/client-m1`. Keep that branch; its code is superseded by the commits in §2. `wip/match-core` (one unfinished commit off `main`) is likewise superseded and kept only for reference.
 
 ## 2. Done since the last rewrite
