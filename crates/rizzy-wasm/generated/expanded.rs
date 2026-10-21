@@ -15906,8 +15906,9 @@ pub mod items {
     #[__wasm_bindgen_retried]
     #[doc =
     " One field\'s merge history, without values (ROADMAP §4.2 \"Item revision history (restore"]
+    #[doc = " old versions)\", M3): generalizes [`HistoryEntryView`] and"]
     #[doc =
-    " old versions)\", M3): generalizes [`HistoryEntryView`]/[`password_history`] to every field."]
+    " [`Session::password_history`](crate::session::Session::password_history) to every field."]
     #[doc =
     " Every entry\'s `source` is [`HISTORY_MERGE`]: imported `pwhist` history stays"]
     #[doc =
@@ -16172,7 +16173,7 @@ pub mod items {
             const _ENCODED_BYTES: &[u8] =
                 {
                     const _CHUNK_SLICES: [&[u8]; 1usize] =
-                        [b"\0\0\0\x01\x10FieldHistoryView\0\x08Y One field's merge history, without values (ROADMAP \xc2\xa74.2 \"Item revision history (restore[ old versions)\", M3): generalizes [`HistoryEntryView`]/[`password_history`] to every field.M Every entry's `source` is [`HISTORY_MERGE`]: imported `pwhist` history staysW `login.password`-only and out of this listing ([`VaultSync::item_history`]'s own doc).\0Z Wiped when freed, and `Debug` prints only the entry count, never the key: the key is userZ content (a tag key holds the tag's name, ADR 0018 \xc2\xa72 \"Keys are user content too\"), as in\x0f [`FieldView`].\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        [b"\0\0\0\x01\x10FieldHistoryView\0\tY One field's merge history, without values (ROADMAP \xc2\xa74.2 \"Item revision history (restore: old versions)\", M3): generalizes [`HistoryEntryView`] andY [`Session::password_history`](crate::session::Session::password_history) to every field.M Every entry's `source` is [`HISTORY_MERGE`]: imported `pwhist` history staysW `login.password`-only and out of this listing ([`VaultSync::item_history`]'s own doc).\0Z Wiped when freed, and `Debug` prints only the entry count, never the key: the key is userZ content (a tag key holds the tag's name, ADR 0018 \xc2\xa72 \"Keys are user content too\"), as in\x0f [`FieldView`].\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                     #[allow(long_running_const_eval)]
                     const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                     #[allow(long_running_const_eval)]

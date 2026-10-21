@@ -723,7 +723,8 @@ pub(crate) fn reveal_history(
 }
 
 /// One field's merge history, without values (ROADMAP §4.2 "Item revision history (restore
-/// old versions)", M3): generalizes [`HistoryEntryView`]/[`password_history`] to every field.
+/// old versions)", M3): generalizes [`HistoryEntryView`] and
+/// [`Session::password_history`](crate::session::Session::password_history) to every field.
 /// Every entry's `source` is [`HISTORY_MERGE`]: imported `pwhist` history stays
 /// `login.password`-only and out of this listing ([`VaultSync::item_history`]'s own doc).
 ///
