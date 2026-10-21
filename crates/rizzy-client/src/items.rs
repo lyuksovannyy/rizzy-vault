@@ -77,7 +77,8 @@ pub use rizzy_core::item::key::FieldKey;
 /// [`ItemType`]).
 pub use rizzy_core::item::schema::WriteSource;
 use rizzy_core::item::schema::{
-    IMPORT_CREATED_MS, ITEM_TYPE, LIST_PWHIST, LOGIN_PASSWORD, WriteMode, check_create, check_write,
+    ATTR_KIND, ATTR_VALUE, CustomFieldKind, IMPORT_CREATED_MS, ITEM_TYPE, LIST_FIELD, LIST_PWHIST,
+    LOGIN_PASSWORD, WriteMode, check_create, check_write,
 };
 /// The item type of [`VaultSync::create_item`], re-exported so a host that links only this crate
 /// (a binding, or `rizzy-server`'s end-to-end tests, ADR 0016 §4 owner decision 4) can name it.
@@ -818,7 +819,7 @@ impl VaultSync {
     }
 
     /// Restores one history entry of `key` as the field's current value (ROADMAP §4.2): writes
-    /// it back through [`VaultSync::edit_item`], "an ordinary carried edit" (ADR 0018 §2
+    /// it back through [`VaultSync::edit_item`] as an ordinary entered write (ADR 0018 §2
     /// "Flow") of the exact bytes the entry holds, so it passes the same [`check_write`] as any
     /// other edit, syncs and merges by the normal rules, and pushes the value it replaces into
     /// history in turn. `dot` is the entry's identity, scoped to `key`
@@ -827,11 +828,17 @@ impl VaultSync {
     /// resolves `dot` within it rather than trusting a cached value, so a sync between a
     /// listing and this call cannot restore a value under the wrong identity.
     ///
+    /// A custom field's value (`field/<id>/value`) must also fit the kind the field displays
+    /// now ([`CustomFieldKind::accepts`]): [`check_write`] accepts Text or Bool there and leaves
+    /// that check to the caller, so an old Text value is never restored into a field that has
+    /// since become a boolean one, nor the reverse.
+    ///
     /// # Errors
     /// [`ClientError::UnknownItem`] when `key` holds no history entry of that `dot` (including
     /// a tombstone, which holds no history); [`ClientError::InvalidEdit`] when `key` is not a
-    /// valid field key; the errors of [`VaultSync::edit_item`] otherwise (in particular,
-    /// `UnknownItem` when the item is not Active).
+    /// valid field key, or the value no longer fits the custom field's kind; the errors of
+    /// [`VaultSync::edit_item`] otherwise (in particular, `UnknownItem` when the item is not
+    /// Active).
     pub fn restore_field_history<R: CryptoRng + ?Sized>(
         &mut self,
         rng: &mut R,
@@ -848,6 +855,18 @@ impl VaultSync {
             .map(|entry| entry.value)
             .ok_or(ClientError::UnknownItem)?;
         let parsed = SchemaKey::parse(key.as_bytes()).map_err(|_| ClientError::InvalidEdit)?;
+        let parts = parsed.as_key();
+        if let (Some(LIST_FIELD), Some(element), Some(ATTR_VALUE)) =
+            (parts.list(), parts.element(), parts.attribute())
+        {
+            let kind_key = format!("{LIST_FIELD}/{element}/{ATTR_KIND}");
+            let kind_value = self.field_value(item, &kind_key);
+            let kind =
+                CustomFieldKind::from_displayed(kind_value.as_ref().and_then(|v| v.decode().ok()));
+            if !value.decode().is_ok_and(|v| kind.accepts(&v)) {
+                return Err(ClientError::InvalidEdit);
+            }
+        }
         self.edit_item(
             rng,
             unlocked,
