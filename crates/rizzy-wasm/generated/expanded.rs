@@ -15912,30 +15912,17 @@ pub mod items {
     " Every entry\'s `source` is [`HISTORY_MERGE`]: imported `pwhist` history stays"]
     #[doc =
     " `login.password`-only and out of this listing ([`VaultSync::item_history`]\'s own doc)."]
+    #[doc = ""]
+    #[doc =
+    " Wiped when freed, and `Debug` prints only the entry count, never the key: the key is user"]
+    #[doc =
+    " content (a tag key holds the tag\'s name, ADR 0018 §2 \"Keys are user content too\"), as in"]
+    #[doc = " [`FieldView`]."]
     pub struct FieldHistoryView {
         #[doc = " The field\'s final key (ADR 0018 §7)."]
-        key: String,
+        key: Zeroizing<String>,
         #[doc = " Its history entries, newest first."]
         entries: Vec<HistoryEntryView>,
-    }
-    #[automatically_derived]
-    impl ::core::clone::Clone for FieldHistoryView {
-        #[inline]
-        fn clone(&self) -> FieldHistoryView {
-            FieldHistoryView {
-                key: ::core::clone::Clone::clone(&self.key),
-                entries: ::core::clone::Clone::clone(&self.entries),
-            }
-        }
-    }
-    #[automatically_derived]
-    impl ::core::fmt::Debug for FieldHistoryView {
-        #[inline]
-        fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-            ::core::fmt::Formatter::debug_struct_field2_finish(f,
-                "FieldHistoryView", "key", &self.key, "entries",
-                &&self.entries)
-        }
     }
     #[automatically_derived]
     impl wasm_bindgen::__rt::marker::SupportsConstructor for FieldHistoryView
@@ -16185,7 +16172,7 @@ pub mod items {
             const _ENCODED_BYTES: &[u8] =
                 {
                     const _CHUNK_SLICES: [&[u8]; 1usize] =
-                        [b"\0\0\0\x01\x10FieldHistoryView\0\x04Y One field's merge history, without values (ROADMAP \xc2\xa74.2 \"Item revision history (restore[ old versions)\", M3): generalizes [`HistoryEntryView`]/[`password_history`] to every field.M Every entry's `source` is [`HISTORY_MERGE`]: imported `pwhist` history staysW `login.password`-only and out of this listing ([`VaultSync::item_history`]'s own doc).\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        [b"\0\0\0\x01\x10FieldHistoryView\0\x08Y One field's merge history, without values (ROADMAP \xc2\xa74.2 \"Item revision history (restore[ old versions)\", M3): generalizes [`HistoryEntryView`]/[`password_history`] to every field.M Every entry's `source` is [`HISTORY_MERGE`]: imported `pwhist` history staysW `login.password`-only and out of this listing ([`VaultSync::item_history`]'s own doc).\0Z Wiped when freed, and `Debug` prints only the entry count, never the key: the key is userZ content (a tag key holds the tag's name, ADR 0018 \xc2\xa72 \"Keys are user content too\"), as in\x0f [`FieldView`].\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                     #[allow(long_running_const_eval)]
                     const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                     #[allow(long_running_const_eval)]
@@ -16209,6 +16196,12 @@ pub mod items {
             static _GENERATED: [u8; _LEN] =
                 flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
         };
+    impl fmt::Debug for FieldHistoryView {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("FieldHistoryView").field("entries",
+                    &self.entries.len()).finish_non_exhaustive()
+        }
+    }
     impl FieldHistoryView {
         #[doc = " The field\'s final key."]
         #[must_use]
@@ -16300,7 +16293,7 @@ pub mod items {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            self.key.clone()
+            self.key.as_str().to_owned()
         }
         #[doc =
         " Its history entries, newest first; each `source` is [`HISTORY_MERGE`]."]
@@ -16437,7 +16430,7 @@ pub mod items {
         -> Vec<FieldHistoryView> {
         vault.item_history(item).into_iter().map(|field|
                     FieldHistoryView {
-                        key: field.key.as_str().to_owned(),
+                        key: field.key,
                         entries: field.entries.into_iter().enumerate().map(|(index,
                                         entry)|
                                     HistoryEntryView {
