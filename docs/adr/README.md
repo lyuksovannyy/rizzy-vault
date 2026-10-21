@@ -131,6 +131,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0072 | [Remote backup destinations (WebDAV, S3) and destination-credential storage](0072-remote-backup-destinations.md) | Proposed | M8 |
 | 0073 | [Signed release images, SBOM and supply-chain provenance](0073-signed-images-sbom-provenance.md) | Proposed | M8 |
 | 0074 | [Passkey import/export via the FIDO Credential Exchange Format (CXF)](0074-passkey-cxf-import-export.md) | Proposed | M8 |
+| 0075 | [Session management: listing and ending sessions under `/api/v1/sessions`](0075-session-listing-and-ending.md) | Proposed | M3 |
 
 ## Gates
 
