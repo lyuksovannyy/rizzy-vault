@@ -466,6 +466,8 @@ docker volume rm rizzy-drill-data rizzy-drill-secrets
 
 The server writes one JSON object per line to stderr: `ts_ms`, `level`, `event`, and fields that are integers or fixed strings. By construction it never logs secrets, tokens, request bodies, headers, login names, file paths or IP addresses ([INV-48](THREAT_MODEL.md#8-security-invariants)). Retention is the container runtime's: `compose.yaml` keeps at most 5 files of 10 MB (`json-file` driver); change `logging` there. Rootless Podman may ignore some of these options; check `podman inspect` and set `log_size_max` in `containers.conf` if needed.
 
+The web vault's Settings → "What the server stores" tells your users what the server holds for their account and how long it is kept, including that this server's logs hold no IP addresses, that your reverse proxy may log them, and that your backups keep deleted data until they expire ([AR-11](THREAT_MODEL.md#9-accepted-risks-and-out-of-scope)). Keep your proxy logging and backup retention ([§8](#8-backup)) in line with what you tell them.
+
 ## 12. Checklist
 
 - [ ] `RIZZY_ORIGIN` is the exact `https://` origin users type, and will not change.
