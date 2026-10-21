@@ -1105,3 +1105,14 @@ button.sidebar-item .sidebar-item-count {
 .password-history summary {
   cursor: pointer;
 }
+
+/* The getting-started guide (OnboardingView.tsx). */
+.onboarding-steps li[aria-current="step"] {
+  font-weight: 600;
+}
+
+/* Each dt/dd pair is wrapped in a div (valid in a dl); the wrapper takes no box, so the pairs
+   sit in the .kit grid as if unwrapped. */
+.onboarding-fields .onboarding-field {
+  display: contents;
+}

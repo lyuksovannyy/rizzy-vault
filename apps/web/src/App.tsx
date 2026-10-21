@@ -23,7 +23,8 @@ type Phase =
   | { readonly kind: "unavailable"; readonly code: string }
   | { readonly kind: "login"; readonly notice?: string }
   | { readonly kind: "signup" }
-  | { readonly kind: "vault"; readonly session: SessionInfo };
+  /** `guide`: open the getting-started guide first (after signup only; `onboarding.ts`). */
+  | { readonly kind: "vault"; readonly session: SessionInfo; readonly guide: boolean };
 
 /** The web vault (module docs). */
 export function App(props: { readonly client: CoreClient }) {
@@ -50,7 +51,12 @@ export function App(props: { readonly client: CoreClient }) {
 
   const onUnlocked = useCallback((name: string, session: SessionInfo) => {
     setLoginName(name);
-    setPhase({ kind: "vault", session });
+    setPhase({ kind: "vault", session, guide: false });
+  }, []);
+
+  const onSignedUp = useCallback((name: string, session: SessionInfo) => {
+    setLoginName(name);
+    setPhase({ kind: "vault", session, guide: true });
   }, []);
 
   const onLocked = useCallback((notice?: string) => {
@@ -85,7 +91,7 @@ export function App(props: { readonly client: CoreClient }) {
       body = (
         <SignupView
           client={client}
-          onDone={onUnlocked}
+          onDone={onSignedUp}
           onCancel={() => setPhase({ kind: "login" })}
         />
       );
@@ -96,6 +102,7 @@ export function App(props: { readonly client: CoreClient }) {
           client={client}
           loginName={loginName}
           initialSession={phase.session}
+          startWithGuide={phase.guide}
           onLocked={onLocked}
         />
       );
