@@ -45,7 +45,7 @@
 //     `inline_menu_fill_chosen` message that would have to follow only ever carries the real
 //     `itemId` the real iframe's own click handler holds — a forged show message cannot make
 //     the iframe send that for an id it never really rendered a trusted click for.
-import { MAX_CANDIDATES, MAX_FIELD_VALUE_LEN, MAX_HOST_LEN, MAX_TITLE_LEN } from "../messaging/contract.ts";
+import { MAX_CANDIDATES, MAX_FIELD_VALUE_LEN, MAX_HOST_LEN, MAX_TITLE_LEN, type FillScope } from "../messaging/contract.ts";
 
 export const INLINE_MENU_SHOW = "rizzy-inline-menu-show";
 export const INLINE_MENU_PICK = "rizzy-inline-menu-pick";
@@ -76,6 +76,14 @@ export interface InlineMenuShowMessage {
    * notice an unexpected match. Computed by `rizzy-match`, never by this module. */
   readonly pageHost: string;
   readonly candidates: readonly InlineMenuCandidate[];
+  /** The one field this login step fills (`content/login-step.ts`; ROADMAP §4.4 M3 multi-step
+   * login forms): `"username"` on an identifier-first step, `"password"` on a password-only
+   * step, absent for a one-page form (both). The iframe passes it on unchanged in its own fill
+   * request (`messaging/contract.ts`'s `InlineMenuFillRequestMessage.only`), where it can only
+   * ever narrow what the long-lived context sends; a page script that forges this message can
+   * at most widen it back to the one-page form's both-values push, which the content script
+   * still writes only into the visible fields of the step it detected. */
+  readonly only?: FillScope;
 }
 
 export interface InlineMenuPickMessage {
@@ -109,7 +117,8 @@ export function isInlineMenuShowMessage(value: unknown): value is InlineMenuShow
   if (
     v["type"] !== INLINE_MENU_SHOW ||
     !isBoundedString(v["pageOrigin"], MAX_FIELD_VALUE_LEN) ||
-    !isBoundedString(v["pageHost"], MAX_HOST_LEN)
+    !isBoundedString(v["pageHost"], MAX_HOST_LEN) ||
+    !(v["only"] === undefined || v["only"] === "username" || v["only"] === "password")
   ) {
     return false;
   }

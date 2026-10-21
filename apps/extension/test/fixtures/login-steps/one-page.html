@@ -1,0 +1,18 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>One-page login</title>
+  </head>
+  <body>
+    <!-- The classic form: both fields on one page. Step: username_and_password. -->
+    <form id="login" action="/session" onsubmit="return false">
+      <label for="user">Username</label>
+      <input id="user" type="text" autocomplete="username" />
+      <label for="pass">Password</label>
+      <input id="pass" type="password" autocomplete="current-password" />
+      <button type="submit">Log in</button>
+    </form>
+  </body>
+</html>

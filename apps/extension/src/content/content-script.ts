@@ -16,19 +16,22 @@
 // `itemId` it names of its own accord. The actual DOM write (`applyFill`, below) still runs
 // here, since this is the only context with the real `HTMLInputElement`s.
 import {
-  MAX_FIELDS_PER_REPORT,
+  MAX_FIELD_VALUE_LEN,
   isApplyFillMessage,
   type CandidatesMessage,
   type CheckSavePromptMessage,
   type CredentialsSubmittedMessage,
   type FieldDescriptor,
+  type FillScope,
+  type FillValues,
   type FromContentScript,
   type SavePromptOfferedMessage,
   type SavePromptResolvedMessage,
   type ToContentScript,
 } from "../messaging/contract.ts";
-import { INLINE_MENU_SHOW, isInlineMenuPickMessage } from "../inline-menu/protocol.ts";
-import { isOwnOverlayElement, isOwnOverlayMutation } from "./own-overlay-mutation.ts";
+import { INLINE_MENU_SHOW, isInlineMenuPickMessage, type InlineMenuShowMessage } from "../inline-menu/protocol.ts";
+import { NO_FORM, detectLoginStep, stepFillScope, type InputFacts } from "./login-step.ts";
+import { isOwnOverlayElement, pageMutations } from "./own-overlay-mutation.ts";
 import {
   MAX_Z_INDEX,
   type ChainStyleSample,
@@ -65,11 +68,32 @@ function installContentScript(): void {
   // `HTMLInputElement` in *this* tab). Cleared whenever the menu is destroyed or replaced, so an
   // `apply_fill` arriving after the user closed or changed the menu (e.g. a stale, delayed
   // response racing a later report) lands on nothing rather than an unrelated field.
-  let activeFillTargets: { readonly usernameField: HTMLInputElement | null; readonly passwordField: HTMLInputElement } | undefined;
+  //
+  // Multi-step login pages (ROADMAP §4.4 M3; `login-step.ts`): on an identifier-first step only
+  // `usernameField` is set, on a password-only step only `passwordField`. Each step's menu is
+  // its own offer and each fill its own trusted click (INV-36): nothing is carried from one
+  // step's pick to the next step's fields, and nothing survives a navigation (this whole closure
+  // is per document).
+  let activeFillTargets: FillTargets | undefined;
 
-  const report = () => {
-    const fields = detectFields();
-    if (fields.length === 0) {
+  // The step the latest detection pass found, compared on attribute-only mutations so a page
+  // that merely restyles itself (animations, focus classes) does not re-ask the background and
+  // re-create the menu on every change; a step that appears, changes or goes away (a password
+  // field revealed by "Next", say) does.
+  let currentStep: DetectedStep | undefined;
+  // Bumped per report: only the answer to the latest report wires a menu, so a slow answer for
+  // a step the page has already left never anchors a menu to that old step's fields.
+  let reportSeq = 0;
+
+  const report = (force: boolean) => {
+    const step = detectStep();
+    if (!force && sameStep(step, currentStep)) {
+      return;
+    }
+    currentStep = step;
+    reportSeq += 1;
+    const seq = reportSeq;
+    if (step === undefined) {
       // A real bug, found fixing the security review's iframe-geometry finding: with no visible
       // field left at all (e.g. a client-side route change replaced a login form with other
       // content, without the old field ever receiving a `blur` — single-page apps routinely
@@ -90,20 +114,22 @@ function installContentScript(): void {
       type: "fields_detected",
       pageUrl: location.href,
       isTopFrame: true,
-      fields,
+      fields: step.fields,
     }).then((answer) => {
-      if (answer?.type === "candidates") {
-        wireInlineMenu(answer);
+      if (answer?.type === "candidates" && seq === reportSeq) {
+        wireInlineMenu(answer, step);
       }
     });
   };
 
-  function wireInlineMenu(answer: CandidatesMessage): void {
-    const usernameField = document.querySelector<HTMLInputElement>('input[data-rizzy-field="username"]');
-    const passwordField = document.querySelector<HTMLInputElement>('input[data-rizzy-field="password"]');
+  function wireInlineMenu(answer: CandidatesMessage, step: DetectedStep): void {
+    const { usernameField, passwordField, only } = step;
     menu?.destroy();
     activeFillTargets = undefined;
-    if (passwordField === null) {
+    // The menu anchors on the password field when the step has one (the one-page form, as
+    // before, and the password-only step), else on the identifier-first step's username field.
+    const anchor = passwordField ?? usernameField;
+    if (anchor === null || !anchor.isConnected) {
       menu = undefined;
       return;
     }
@@ -122,7 +148,7 @@ function installContentScript(): void {
     // indirectly, as an `apply_fill` push the background sends back to *this* tab once it has
     // validated that request — never as anything the iframe tells this content script directly,
     // which a compromised content script could otherwise have spoofed by itself.
-    menu = new InlineMenu(passwordField, answer.candidates, answer.pageHost);
+    menu = new InlineMenu(anchor, answer.candidates, answer.pageHost, only);
   }
 
   let savePrompt: SavePromptBanner | undefined;
@@ -182,14 +208,23 @@ function installContentScript(): void {
   // by `requestIdleCallback`-style batching via a simple timer so a busy page cannot cause a
   // flood of `fields_detected` messages (each is still independently size- and rate-limited by
   // the background's `MAX_MESSAGE_BYTES`/shape validation; this is a courtesy, not the gate).
+  //
+  // `force`: re-report even if the detected step did not change (the first pass, and any batch
+  // with a `childList` change — the behaviour before multi-step support, kept as it was). An
+  // attribute-only batch (`style`, `class`, `hidden`, …: how a same-page identifier-first form
+  // usually reveals its password field) re-reports only when the step itself changed.
   let pending: number | undefined;
-  const schedule = () => {
+  let pendingForce = false;
+  const schedule = (force: boolean) => {
+    pendingForce ||= force;
     if (pending !== undefined) {
       return;
     }
     pending = window.setTimeout(() => {
       pending = undefined;
-      report();
+      const f = pendingForce;
+      pendingForce = false;
+      report(f);
     }, 250);
   };
   // The one message this script ever receives rather than sends (ADR 0040): the
@@ -218,7 +253,7 @@ function installContentScript(): void {
     if (menu === undefined || !menu.isFillAllowedNow(performance.now())) {
       return undefined;
     }
-    applyFill(message.values, activeFillTargets.usernameField, activeFillTargets.passwordField);
+    applyFill(message.values, activeFillTargets);
     return undefined;
   });
 
@@ -232,48 +267,155 @@ function installContentScript(): void {
     // observed directly, could tear the menu out from under a click already in flight. Only
     // mutations that add or remove something other than our own marked elements count as "the
     // page changed" and deserve a re-detection.
-    if (isOwnOverlayMutation(records)) {
+    //
+    // Attribute changes are observed too (multi-step login pages, ROADMAP §4.4 M3: a password
+    // field revealed in place by toggling `hidden`/`style`/`class`), filtered the same way: the
+    // inline menu restyles its own iframe on every animation frame (`pointer-events`), which
+    // must never count as the page changing. `data-rizzy-*` attributes this script writes are
+    // not in the filter at all.
+    const relevant = pageMutations(records);
+    if (relevant === "none") {
       return;
     }
-    schedule();
-  }).observe(document.documentElement, { childList: true, subtree: true });
-  schedule();
+    schedule(relevant === "structure");
+  }).observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["style", "class", "hidden", "disabled", "readonly"],
+  });
+  schedule(true);
 }
 
-/** Finds visible username/password-shaped inputs, tags them with a `data-rizzy-field`
- * attribute so {@link wireInlineMenu}/fill can find them again by a stable marker instead of
- * re-running heuristics, and reports at most {@link MAX_FIELDS_PER_REPORT}. No hidden or
- * zero-size field is ever reported (ADR 0037 §5 "no hidden/invisible field fill"). */
-function detectFields(): FieldDescriptor[] {
-  const inputs = Array.from(document.querySelectorAll("input"));
-  const out: FieldDescriptor[] = [];
-  for (const input of inputs) {
-    if (out.length >= MAX_FIELDS_PER_REPORT) {
-      break;
+/** The fields one login step fills (`login-step.ts`): both on a one-page form, one of them on
+ * an identifier-first or password-only step. */
+interface FillTargets {
+  readonly usernameField: HTMLInputElement | null;
+  readonly passwordField: HTMLInputElement | null;
+}
+
+/** One detection pass's result: the step's own fields, the `only` scope its menu carries, and
+ * the field report the background gets (ADR 0036 §4 "detected-field reports"). */
+interface DetectedStep extends FillTargets {
+  readonly only: FillScope | undefined;
+  readonly fields: readonly FieldDescriptor[];
+}
+
+function sameStep(a: DetectedStep | undefined, b: DetectedStep | undefined): boolean {
+  if (a === undefined || b === undefined) {
+    return a === b;
+  }
+  return a.usernameField === b.usernameField && a.passwordField === b.passwordField;
+}
+
+/** Upper bound on `<input>` elements one detection pass reads, so a page with a pathological
+ * number of inputs costs a bounded amount of layout work per pass. A login form is at the top of
+ * any realistic page's inputs; past this bound the page gets no offer (fail closed: no menu, no
+ * fill), never a wrong one. */
+const MAX_INPUTS_SCANNED = 1000;
+/** Upper bound on each hint string (`login-step.ts`'s `InputFacts.hints`, a form's hint text). */
+const MAX_HINT_LEN = 512;
+
+function hintOf(parts: readonly (string | null | undefined)[]): string {
+  return parts
+    .filter((p): p is string => typeof p === "string" && p !== "")
+    .join(" ")
+    .slice(0, MAX_HINT_LEN)
+    .toLowerCase();
+}
+
+const SUBMIT_CONTROLS = 'button:not([type]), button[type="submit"], input[type="submit"]';
+
+function submitControlText(el: Element): string {
+  return el instanceof HTMLInputElement ? el.value : (el.textContent ?? "");
+}
+
+/**
+ * Runs `login-step.ts`'s heuristic over this document and tags the chosen field(s) with
+ * `data-rizzy-field` (`username`/`password`; the submit listener and the e2e suite read the
+ * tag), clearing the tag from every other input. Only inputs that pass the visibility and
+ * topmost gate (THREAT_MODEL A7, INV-37) are ever chosen — the gate runs here, before the
+ * heuristic, and again at fill time in {@link applyFill}. Reads this frame's own document only:
+ * fields inside any iframe, cross-origin or not, are never seen (ADR 0037 §5).
+ */
+function detectStep(): DetectedStep | undefined {
+  const elements = Array.from(document.querySelectorAll("input")).slice(0, MAX_INPUTS_SCANNED);
+  const forms = new Map<HTMLFormElement, number>();
+  Array.from(document.forms).forEach((form, i) => forms.set(form, i));
+  const facts: InputFacts[] = elements.map((el) => {
+    const type = el.type.toLowerCase();
+    // Layout reads (`isVisible`) only for the types the heuristic can ever choose.
+    const relevant = type === "password" || type === "text" || type === "email" || type === "tel";
+    const labels = el.labels === null ? [] : Array.from(el.labels, (l) => (l.textContent ?? "").slice(0, MAX_HINT_LEN));
+    return {
+      type,
+      autocomplete: (el.getAttribute("autocomplete") ?? "").toLowerCase(),
+      hints: hintOf([el.getAttribute("name"), el.getAttribute("id"), el.getAttribute("placeholder"), el.getAttribute("aria-label"), ...labels]),
+      visible: relevant && isVisible(el),
+      editable: !el.readOnly && !el.disabled,
+      form: el.form === null ? NO_FORM : (forms.get(el.form) ?? NO_FORM),
+    };
+  });
+  const formHint = (form: number): string => {
+    if (form === NO_FORM) {
+      const outside = Array.from(document.querySelectorAll(SUBMIT_CONTROLS)).filter(
+        (el) => (el as HTMLButtonElement | HTMLInputElement).form === null,
+      );
+      return hintOf(outside.map(submitControlText));
     }
-    if (!isVisible(input)) {
+    const el = document.forms[form];
+    if (el === undefined) {
+      return "";
+    }
+    return hintOf([
+      el.getAttribute("id"),
+      el.getAttribute("name"),
+      el.getAttribute("action"),
+      el.getAttribute("aria-label"),
+      ...Array.from(el.querySelectorAll(SUBMIT_CONTROLS), submitControlText),
+    ]);
+  };
+  const step = detectLoginStep(facts, formHint);
+  const usernameField = step !== undefined && "username" in step ? (elements[step.username] ?? null) : null;
+  const passwordField = step !== undefined && "password" in step ? (elements[step.password] ?? null) : null;
+  for (const el of document.querySelectorAll<HTMLInputElement>("input[data-rizzy-field]")) {
+    if (el !== usernameField && el !== passwordField) {
+      delete el.dataset["rizzyField"];
+    }
+  }
+  if (step === undefined) {
+    return undefined;
+  }
+  const fields: FieldDescriptor[] = [];
+  for (const [el, kind] of [
+    [usernameField, "username"],
+    [passwordField, "password"],
+  ] as const) {
+    if (el === null) {
       continue;
     }
-    const kind = classify(input);
-    if (kind === undefined) {
-      continue;
-    }
-    const fieldId = stableFieldId(input);
-    input.dataset["rizzyField"] = kind;
-    input.dataset["rizzyFieldId"] = fieldId;
-    out.push({
+    const fieldId = stableFieldId(el);
+    el.dataset["rizzyField"] = kind;
+    el.dataset["rizzyFieldId"] = fieldId;
+    fields.push({
       fieldId,
       kind,
       visible: true,
-      ...(kind === "username" && input.value !== "" ? { currentValue: input.value.slice(0, 4096) } : {}),
+      ...(kind === "username" && el.value !== "" ? { currentValue: el.value.slice(0, MAX_FIELD_VALUE_LEN) } : {}),
     });
   }
-  return out;
+  return { usernameField, passwordField, only: stepFillScope(step), fields };
 }
 
 function isVisible(el: HTMLElement): boolean {
   const rect = el.getBoundingClientRect();
   if (rect.width === 0 || rect.height === 0) {
+    return false;
+  }
+  // Off-screen (THREAT_MODEL A7: "fields positioned off-screen"): entirely left of or above the
+  // document's own origin, where no scrolling can ever bring it into view. A field merely below
+  // the fold or right of the viewport is still reachable and stays visible here.
+  if (rect.right + window.scrollX <= 0 || rect.bottom + window.scrollY <= 0) {
     return false;
   }
   const style = getComputedStyle(el);
@@ -304,20 +446,6 @@ function isTopmost(el: HTMLElement, rect: DOMRect): boolean {
   return topEl === el || el.contains(topEl);
 }
 
-function classify(input: HTMLInputElement): "username" | "password" | undefined {
-  if (input.type === "password") {
-    return "password";
-  }
-  const auto = input.autocomplete.toLowerCase();
-  const type = input.type.toLowerCase();
-  if (auto.includes("username") || auto === "email" || type === "email" || type === "text") {
-    // A heuristic, not matching: it decides what to *report*, never what to *fill* — filling is
-    // always the one field the user picked in the inline menu (ADR 0036 §4).
-    return "username";
-  }
-  return undefined;
-}
-
 let counter = 0;
 const idsByElement = new WeakMap<HTMLInputElement, string>();
 function stableFieldId(el: HTMLInputElement): string {
@@ -331,21 +459,24 @@ function stableFieldId(el: HTMLInputElement): string {
   return id;
 }
 
-function applyFill(
-  values: { readonly username?: string; readonly password: string },
-  usernameField: HTMLInputElement | null,
-  passwordField: HTMLInputElement,
-): void {
+function applyFill(values: FillValues, { usernameField, passwordField }: FillTargets): void {
   // Mapped by kind, not by `fieldId` (ADR 0040: the background never sees or
   // names a `fieldId`, only `username`/`password`) — `usernameField`/`passwordField` are exactly
-  // the two fields `wireInlineMenu` tagged when the inline menu was shown for them, so there is
-  // nothing left to look up by id.
+  // the field(s) `wireInlineMenu` tagged when the inline menu was shown for them, so there is
+  // nothing left to look up by id. On a multi-step login page (`login-step.ts`) one of them is
+  // `null`: a value for a field this step does not have is dropped here, never written anywhere
+  // else (and the long-lived context does not send it in the first place, `only`).
   const targets: ReadonlyArray<readonly [HTMLInputElement | null, string | undefined]> = [
     [usernameField, values.username],
     [passwordField, values.password],
   ];
   for (const [target, value] of targets) {
     if (target === null || value === undefined) {
+      continue;
+    }
+    // A page can detach, disable or lock a field between detection and fill; none of those is
+    // a field the user can see being filled.
+    if (!target.isConnected || target.readOnly || target.disabled) {
       continue;
     }
     // THREAT_MODEL.md row "T" (page scripts rearrange forms between click and fill): "re-check
@@ -471,7 +602,7 @@ class InlineMenu {
   #deepOccluderCandidates: Element[] = [];
   readonly #deepOccluderObserver: MutationObserver;
 
-  constructor(anchor: HTMLInputElement, candidates: CandidatesMessage["candidates"], pageHost: string) {
+  constructor(anchor: HTMLInputElement, candidates: CandidatesMessage["candidates"], pageHost: string, only: FillScope | undefined) {
     const frame = document.createElement("iframe");
     this.#frame = frame;
     frame.setAttribute("data-rizzy-inline-menu", "");
@@ -545,7 +676,8 @@ class InlineMenu {
               needsWarning: c.needsWarning,
               savedHost: c.savedHost,
             })),
-          },
+            ...(only === undefined ? {} : { only }),
+          } satisfies InlineMenuShowMessage,
           menuOrigin,
         );
       },

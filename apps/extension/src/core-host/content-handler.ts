@@ -26,6 +26,8 @@ import type {
   ApplyFillMessage,
   ApplyPasskeyResultMessage,
   ContentErrorMessage,
+  FillScope,
+  FillValues,
   FromContentScript,
   InlineMenuFillRequestMessage,
   InlineMenuFillResponse,
@@ -70,7 +72,7 @@ function isSecureOrigin(origin: string): boolean {
  * does have `tabs` like every other extension page. Firefox's `background-page.ts` has `tabs`
  * directly and takes the first branch, same as any other context that has it.
  */
-async function pushApplyFill(ext: WebExtNamespace, tabId: number, values: { readonly username?: string; readonly password: string }): Promise<void> {
+async function pushApplyFill(ext: WebExtNamespace, tabId: number, values: FillValues): Promise<void> {
   if (ext.tabs !== undefined) {
     await ext.tabs.sendMessage(tabId, { type: "apply_fill", values } satisfies ApplyFillMessage);
     return;
@@ -280,6 +282,24 @@ export function selectFillCandidate(
 }
 
 /**
+ * The part of `revealed` one fill request's `only` lets cross to the content script (ADR 0036
+ * §4: no decrypted field "beyond what the user is filling"; ROADMAP §4.4 M3 multi-step login
+ * forms): both for a one-page form, only the username on an identifier-first step, only the
+ * password on a password-only step. `undefined` when the step's one field is a username the
+ * item does not have — nothing to fill, so nothing is sent.
+ */
+export function narrowFillValues(revealed: { readonly username?: string; readonly password: string }, only: FillScope | undefined): FillValues | undefined {
+  switch (only) {
+    case undefined:
+      return revealed;
+    case "username":
+      return revealed.username === undefined ? undefined : { username: revealed.username };
+    case "password":
+      return { password: revealed.password };
+  }
+}
+
+/**
  * Handles an {@link InlineMenuFillRequestMessage} from the inline-menu iframe
  * (`core-host/listener.ts` routes to this only once `sender.ts`'s `isInlineMenuSender` has
  * vouched for the sender, and only ever with that sender's own real `tabId`/`tabUrl` — never
@@ -310,9 +330,13 @@ export async function handleInlineMenuFillRequest(
   if (!selection.ok) {
     return refused(selection.code);
   }
-  const values = revealCredentialsForFill(message.itemId);
-  if (values === undefined) {
+  const revealed = revealCredentialsForFill(message.itemId);
+  if (revealed === undefined) {
     return refused("inline_menu_fill_chosen: the device is locked");
+  }
+  const values = narrowFillValues(revealed, message.only);
+  if (values === undefined) {
+    return refused("inline_menu_fill_chosen: the chosen item has no username to fill");
   }
   await pushApplyFill(ext, tabId, values);
   return { type: "inline_menu_fill_dispatched" };

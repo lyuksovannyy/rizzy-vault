@@ -22,6 +22,11 @@
         max-height: calc(100% - 64px);
         overflow-y: auto;
       }
+      /* The one-line step note (multi-step login pages) takes its room from the list, so the
+         generator button below never slides out of the fixed frame. */
+      body:has(#step-note:not(:empty)) #list {
+        max-height: calc(100% - 84px);
+      }
     </style>
   </head>
   <body>
@@ -35,6 +40,9 @@
          matching or not (gap 31 in the M2 gap audit). Filled by `main.ts` as plain text only,
          never as a link or anything else `innerHTML` could parse as markup. -->
     <div id="page-host"></div>
+    <!-- Multi-step login pages (ROADMAP §4.4 M3): says which one field this step fills, as plain
+         text set by `main.ts`; empty on a one-page form. -->
+    <div id="step-note"></div>
     <div id="list"></div>
     <!-- Gap 32 in the M2 gap audit: a password generator offered right in the page's own
          password field, not only in the popup (ROADMAP §4.4) — on the same trusted click as
