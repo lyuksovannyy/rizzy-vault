@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@rizzy-vault/core": "workspace:*",
+    "@rizzy-vault/i18n": "workspace:*",
     "@rizzy-vault/ui": "workspace:*",
     "react": "19.3.0",
     "react-dom": "19.3.0"
