@@ -20,6 +20,7 @@
 //! | Trash, restore, purge | [`Session::trash_item`], [`Session::restore_item`], [`Session::purge_item`] |
 //! | Password history | [`Session::password_history`] (dates only), [`Session::reveal_password_history`] (one value) |
 //! | Item history | [`Session::item_history`] (dates only, every field), [`Session::reveal_field_history`] (one value), [`Session::restore_field_history`] |
+//! | Conflict ("keep both / pick one") | [`Session::field_conflict`] (concealed values withheld), [`Session::reveal_conflict_value`] (one value), [`Session::resolve_conflict_pick`], [`Session::resolve_conflict_keep_both`] |
 //! | Late-edit and trash notices | [`Session::take_notices`] after a sync; [`Session::restore_late_as_new`] |
 //! | TOTP code | [`Session::totp`] |
 //! | Passkey assertion | [`Session::passkey_assertion`] ([`create_passkey`](crate::passkey::create_passkey) is stateless, module docs) |
@@ -87,8 +88,8 @@ use zeroize::Zeroizing;
 use crate::error::{CoreError, CoreResult, IMPORT_FAILED, LOCKED, UNKNOWN_FORMAT, WRONG_STATE};
 use crate::http::{self, HttpRequest};
 use crate::items::{
-    self, FieldHistoryView, FieldView, HistoryEntryView, ItemDraft, ItemSummary, hex,
-    type_from_name, visible_item,
+    self, ConflictValueView, FieldHistoryView, FieldView, HistoryEntryView, ItemDraft, ItemSummary,
+    hex, type_from_name, visible_item,
 };
 use crate::login::{Credentials, LoginFlow, Purpose};
 use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
@@ -616,6 +617,109 @@ impl Session {
             now_ms,
         )?;
         Ok(())
+    }
+
+    /// A conflicting field's distinct values (ROADMAP §4.5 "keep both / pick one"; ADR 0018
+    /// §6; [`crate::items`] module docs), the displayed one first, concealed values withheld.
+    /// Empty when the field does not conflict.
+    ///
+    /// # Errors
+    /// As [`Session::item`]; `invalid_input` for a key outside the grammar.
+    #[wasm_bindgen(js_name = fieldConflict)]
+    pub fn field_conflict(&self, id: &str, key: &str) -> Result<Vec<ConflictValueView>, CoreError> {
+        let vault = &self.inner()?.vault;
+        let item = visible_item(vault, id)?;
+        items::field_conflict(vault, item, key)
+    }
+
+    /// One conflicting value as text, concealed or not: call it only on the user's request (ADR
+    /// 0013 §3 rule 3). `key`, `index` and `value_id` name the value exactly as
+    /// [`Session::field_conflict`] listed it.
+    ///
+    /// # Errors
+    /// As [`Session::item`]; `unknown_item` for a value that is not listed (any more) under
+    /// that index and id; `invalid_input` for a Cleared value or one with no text form.
+    #[wasm_bindgen(js_name = revealConflictValue)]
+    pub fn reveal_conflict_value(
+        &self,
+        id: &str,
+        key: &str,
+        index: usize,
+        value_id: &str,
+    ) -> Result<String, CoreError> {
+        let vault = &self.inner()?.vault;
+        let item = visible_item(vault, id)?;
+        Ok(
+            items::reveal_conflict_value(vault, item, key, index, value_id)?
+                .as_str()
+                .to_owned(),
+        )
+    }
+
+    /// "Pick one": writes the named value back to the field, an ordinary edit whose context
+    /// covers every conflicting value, so the conflict ends on every device that syncs it
+    /// (`rizzy_client::sync::VaultSync::resolve_conflict_pick`).
+    ///
+    /// # Errors
+    /// As [`Session::edit_item`]; `unknown_item` for a value that is not listed (any more)
+    /// under that index and id.
+    #[wasm_bindgen(js_name = resolveConflictPick)]
+    pub fn resolve_conflict_pick(
+        &mut self,
+        id: &str,
+        key: &str,
+        index: usize,
+        value_id: &str,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let inner = self.writable()?;
+        let item = items::item_id(id)?;
+        let dot = items::conflict_value(&inner.vault, item, key, index, value_id)?.dot;
+        inner.vault.resolve_conflict_pick(
+            &mut inner.rng,
+            &inner.unlocked,
+            item,
+            key,
+            dot,
+            now_ms,
+        )?;
+        Ok(())
+    }
+
+    /// "Keep both": keeps the named value in the field and moves every other non-empty value
+    /// into a new website (for a website) or a new custom field (hidden when the field is
+    /// concealed), labelled `label` or, for a custom field without one, with its own label
+    /// (`rizzy_client::sync::VaultSync::resolve_conflict_keep_both`). Returns the new
+    /// elements' ids.
+    ///
+    /// # Errors
+    /// As [`Session::edit_item`]; `unknown_item` for a value that is not listed (any more)
+    /// under that index and id; `invalid_edit` for a field only "pick one" resolves (not
+    /// text, or no second value to keep); `invalid_input` for a fixed field without a label.
+    #[wasm_bindgen(js_name = resolveConflictKeepBoth)]
+    pub fn resolve_conflict_keep_both(
+        &mut self,
+        id: &str,
+        key: &str,
+        index: usize,
+        value_id: &str,
+        label: Option<String>,
+        now_ms: u64,
+    ) -> Result<Vec<String>, CoreError> {
+        let inner = self.writable()?;
+        let item = items::item_id(id)?;
+        let keep = items::conflict_value(&inner.vault, item, key, index, value_id)?.dot;
+        let label = label.map(Zeroizing::new);
+        let elements = inner.vault.resolve_conflict_keep_both(
+            &mut inner.rng,
+            &inner.unlocked,
+            item,
+            key,
+            keep,
+            label.as_ref().map(|l| l.as_str()),
+            now_ms,
+        )?;
+        Ok(elements.iter().map(|e| e.as_str().to_owned()).collect())
     }
 
     /// The notices not yet handed over in this session (gap 02), each handed over once: an edit

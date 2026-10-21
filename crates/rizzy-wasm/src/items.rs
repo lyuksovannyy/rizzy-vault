@@ -35,6 +35,16 @@
 //!   where every write passes the schema checks. The draft holds the typed values in zeroizing
 //!   buffers until then.
 //!
+//! - **A conflict** ([`ConflictValueView`]; ROADMAP §4.5 "keep both / pick one", M3; ADR 0012
+//!   §4 step 5, ADR 0018 §6) lists a conflicting field's distinct values, the displayed one
+//!   first, each with its identity (the hex of the dot of the op that wrote it), its device and
+//!   its date. A value crosses only if the field's key is shown by default, as in
+//!   [`FieldView`]; a concealed one crosses through [`crate::Session::reveal_conflict_value`],
+//!   on the user's request. [`crate::Session::resolve_conflict_pick`] and
+//!   [`crate::Session::resolve_conflict_keep_both`] write the resolution as an ordinary edit
+//!   (`rizzy-client`'s `conflicts` module), naming the value by `(index, id)` as the history
+//!   calls do.
+//!
 //! The draft's calls mirror `rv item create`/`item edit`: `set` (a field, by its final key,
 //! including an existing element's attribute such as `uri/<id>/value`), `clear`, `tag` and
 //! `untag`, `addUri`, `addCustomField` (text, hidden or boolean) and `removeElement`.
@@ -846,6 +856,196 @@ fn history_entry(
         .filter(|entry| dot_hex(entry.dot) == entry_id)
         .filter(|entry| !entry.value.is_cleared())
         .ok_or(ClientError::UnknownItem.into())
+}
+
+/// One distinct value of a conflicting field (ROADMAP §4.5 "keep both / pick one"; ADR 0018 §6;
+/// module docs), as [`crate::Session::field_conflict`] lists them: the displayed one first. The
+/// value crosses here only when the field's key is shown by default; a concealed one (and to be
+/// safe every key this build does not know) crosses only through
+/// [`crate::Session::reveal_conflict_value`], on the user's request (ADR 0013 §3 rule 3).
+/// Wiped when freed; `Debug` shows the shape only.
+#[wasm_bindgen]
+pub struct ConflictValueView {
+    /// The value's position in the listing.
+    index: usize,
+    /// The value's identity: the hex of its dot (the op that wrote it), the id
+    /// [`crate::Session::reveal_conflict_value`] and the resolutions take.
+    id: String,
+    /// The id of the device that wrote it ("edited on X"), 32 hex digits.
+    device: String,
+    /// When it was written, in Unix milliseconds (its op's HLC). Display only.
+    written_ms: u64,
+    /// Whether this is the value the field displays.
+    displayed: bool,
+    /// Whether the value is Cleared: "cleared on X" (ADR 0018 §6).
+    cleared: bool,
+    /// `text`, `bool`, `number`, `enum`, `bytes`, `sort_key` or `unknown`.
+    kind: &'static str,
+    /// Whether the value is withheld until revealed.
+    concealed: bool,
+    /// The value as text, unless concealed, Cleared or not text-like.
+    value: Option<Zeroizing<String>>,
+}
+
+impl fmt::Debug for ConflictValueView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConflictValueView")
+            .field("index", &self.index)
+            .field("kind", &self.kind)
+            .field("concealed", &self.concealed)
+            .finish_non_exhaustive()
+    }
+}
+
+#[wasm_bindgen]
+impl ConflictValueView {
+    /// The position in the listing, for display and list keys.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    /// The id to pass back with [`ConflictValueView::index`].
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    /// The writing device's id; name it from the device list.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn device(&self) -> String {
+        self.device.clone()
+    }
+
+    /// When the value was written, in Unix milliseconds.
+    #[wasm_bindgen(getter, js_name = writtenMs)]
+    #[must_use]
+    pub fn written_ms(&self) -> u64 {
+        self.written_ms
+    }
+
+    /// Whether this is the value the field displays.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn displayed(&self) -> bool {
+        self.displayed
+    }
+
+    /// Whether the value is Cleared ("cleared on X").
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn cleared(&self) -> bool {
+        self.cleared
+    }
+
+    /// `text`, `bool`, `number`, `enum`, `bytes`, `sort_key` or `unknown`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn kind(&self) -> String {
+        self.kind.to_owned()
+    }
+
+    /// Whether the value is withheld until revealed.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn concealed(&self) -> bool {
+        self.concealed
+    }
+
+    /// The value as text, or `undefined` when concealed, Cleared or not text-like.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn value(&self) -> Option<String> {
+        self.value.as_ref().map(|v| v.as_str().to_owned())
+    }
+}
+
+/// The distinct values of `key` while it conflicts (`rizzy-client`'s `field_conflict`),
+/// concealed values withheld (module docs). Empty when the field does not conflict, and for the
+/// `pwhist` list, whose values cross only as password history.
+///
+/// # Errors
+/// `invalid_input` for a key outside the grammar.
+pub(crate) fn field_conflict(
+    vault: &VaultSync,
+    item: ItemId,
+    key: &str,
+) -> CoreResult<Vec<ConflictValueView>> {
+    let parsed = FieldKey::parse(key.as_bytes()).map_err(|_| ClientError::InvalidInput)?;
+    if parsed.as_key().list() == Some(LIST_PWHIST) {
+        return Ok(Vec::new());
+    }
+    let hidden = concealed(&parsed);
+    Ok(vault
+        .field_conflict(item, key)
+        .into_iter()
+        .enumerate()
+        .map(|(index, v)| {
+            let (kind, text) = kind_and_text(&v.value);
+            ConflictValueView {
+                index,
+                id: dot_hex(v.dot),
+                device: hex(v.dot.device_id().as_bytes()),
+                written_ms: v.written_ms,
+                displayed: v.displayed,
+                cleared: v.value.is_cleared(),
+                kind,
+                concealed: hidden,
+                value: if hidden { None } else { text },
+            }
+        })
+        .collect())
+}
+
+/// The dot `index`/`value_id` name in `key`'s conflict listing, checked the way
+/// [`restore_field_history_dot`] checks a history entry: the listing is read again, and an
+/// index past its end or an id that differs is refused, so a sync between the listing and the
+/// call never resolves or reveals another value than the one the user saw.
+///
+/// # Errors
+/// `unknown_item` for an index past the end or an id that does not match (the conflict may be
+/// resolved by now); `invalid_input` for a key outside the grammar.
+pub(crate) fn conflict_value(
+    vault: &VaultSync,
+    item: ItemId,
+    key: &str,
+    index: usize,
+    value_id: &str,
+) -> CoreResult<rizzy_client::conflicts::ConflictValue> {
+    let parsed = FieldKey::parse(key.as_bytes()).map_err(|_| ClientError::InvalidInput)?;
+    if parsed.as_key().list() == Some(LIST_PWHIST) {
+        return Err(ClientError::UnknownItem.into());
+    }
+    vault
+        .field_conflict(item, key)
+        .into_iter()
+        .nth(index)
+        .filter(|v| dot_hex(v.dot) == value_id)
+        .ok_or(ClientError::UnknownItem.into())
+}
+
+/// One conflicting value as text, concealed or not: call it only on the user's request (ADR
+/// 0013 §3 rule 3).
+///
+/// # Errors
+/// As [`conflict_value`]; `invalid_input` for a Cleared value or one with no text form.
+pub(crate) fn reveal_conflict_value(
+    vault: &VaultSync,
+    item: ItemId,
+    key: &str,
+    index: usize,
+    value_id: &str,
+) -> CoreResult<Zeroizing<String>> {
+    let value = conflict_value(vault, item, key, index, value_id)?.value;
+    if value.is_cleared() {
+        return Err(ClientError::InvalidInput.into());
+    }
+    kind_and_text(&value)
+        .1
+        .ok_or(ClientError::InvalidInput.into())
 }
 
 /// A custom field's kind, as the draft names it.
