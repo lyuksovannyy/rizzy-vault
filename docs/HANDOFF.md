@@ -19,8 +19,10 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
 - **Second wave (2026-10-21).**
   - **Transparency page:** integrated as a client-only Settings group, "What the server stores" (`dae02d6`…`3e4ee56`). Its server-reported byte sizes are blocked: no Accepted ADR defines an endpoint, and ADR 0048 is Proposed.
   - **Force logout:** blocked at the ADR gate. ADR 0075 (Proposed) now drafts it, so it waits for the owner (§3).
-  - **Conflict chooser:** running in `wip/m3-conflicts`.
-  - **Onboarding:** not started.
+  - **Conflict chooser:** integrated: rizzy-client `conflicts.rs`, wasm, core, the web chooser and e2e. Both resolutions are ordinary edits under ADR 0012 §4 step 5 and ADR 0018 §6, and `rizzy-sync` is untouched. **Owner decision:** the ADRs name "keep both" but define no layout. The implementation keeps the shown value and moves each other Text value into a new website or custom field, using only ADR 0018 §7 keys. Concurrent keep-both on two devices yields duplicate copies (documented). Bool, Enum and similar fields resolve only by pick. Bindings `unsafe` went from 945 to 997, all wasm-bindgen glue for the new exports. No `rv` support (no ADR asks for it).
+  - **Onboarding:** integrated as a getting-started guide after signup (Emergency Kit confirmation, import, extension instructions), which Settings reopens. Nothing is persisted, because CRYPTO §11.4 allows only the opted-in Secret Key and the theme in browser storage; a remembered "dismissed" state would need an owner change there. The e2e sign-up helpers close the guide, so new sign-up e2e code must too.
+  - **Advisory bump:** vitest 4.1.12 (GHSA-qxg6-89mg-rqv8, GHSA-xp26-3454-mjgp). The owner reviews it, as with the earlier bumps.
+  - **Multi-step login:** running in `wip/m3-multistep`.
 - The gap-numbered audit (`docs/handoff/gap-audit.json`), which older gap ids below trace back to, still lives only on branch `wip/client-m1`. Keep that branch; its code is superseded by the commits in §2. `wip/match-core` (one unfinished commit off `main`) is likewise superseded and kept only for reference.
 
 ## 2. Done since the last rewrite
