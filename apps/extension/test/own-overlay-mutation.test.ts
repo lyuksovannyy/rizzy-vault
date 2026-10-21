@@ -7,7 +7,7 @@
 // doc comment says it was split out to allow under this workspace's `environment: "node"`.
 import { describe, expect, it } from "vitest";
 
-import { isOwnOverlayMutation } from "../src/content/own-overlay-mutation.ts";
+import { isOwnOverlayMutation, pageMutations } from "../src/content/own-overlay-mutation.ts";
 
 function fakeNode(attrs: readonly string[]): { hasAttribute: (name: string) => boolean } {
   return { hasAttribute: (name) => attrs.includes(name) };
@@ -50,5 +50,37 @@ describe("isOwnOverlayMutation", () => {
   it("is false for a node with no hasAttribute at all (a non-Element, e.g. a text node)", () => {
     const records = [{ addedNodes: [{}], removedNodes: [] }];
     expect(isOwnOverlayMutation(records)).toBe(false);
+  });
+});
+
+// `pageMutations`: the attribute-aware classification the content script's observer uses since
+// multi-step login support (a password field revealed in place by an attribute change).
+describe("pageMutations", () => {
+  function childList(added: readonly string[][], removed: readonly string[][] = []) {
+    return { type: "childList", target: fakeNode([]), ...record(added, removed) };
+  }
+  function attributeChange(target: unknown) {
+    return { type: "attributes", target, addedNodes: [], removedNodes: [] };
+  }
+  const frame = fakeNode(["data-rizzy-inline-menu"]);
+  const insideBanner = { ...fakeNode([]), parentNode: { ...fakeNode([]), parentNode: fakeNode(["data-rizzy-save-prompt"]) } };
+  const pageElement = { ...fakeNode([]), parentNode: fakeNode([]) };
+
+  it("is none for an empty batch and for our own overlay's own changes", () => {
+    expect(pageMutations([])).toBe("none");
+    expect(pageMutations([childList([["data-rizzy-inline-menu"]]), attributeChange(frame), attributeChange(insideBanner)])).toBe("none");
+  });
+
+  it("is attributes when only attributes changed and one of them on a page element", () => {
+    expect(pageMutations([attributeChange(frame), attributeChange(pageElement)])).toBe("attributes");
+  });
+
+  it("is structure as soon as a page node was added or removed, whatever else changed", () => {
+    expect(pageMutations([attributeChange(pageElement), childList([[]])])).toBe("structure");
+    expect(pageMutations([childList([], [[]])])).toBe("structure");
+  });
+
+  it("never walks into an own overlay through a page element's parent chain", () => {
+    expect(pageMutations([attributeChange({ parentNode: null })])).toBe("attributes");
   });
 });

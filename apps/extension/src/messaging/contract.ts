@@ -170,11 +170,32 @@ export type FromContentScript =
  * `confirmedEquivalence` must be `true` whenever the recomputed candidate's own `needsWarning`
  * is `true` (ADR 0037 §5's second explicit confirmation) — checked again here, server-side,
  * not only in `main.ts`'s own UI, in case that UI is ever bypassed.
+ *
+ * `only` narrows the fill to one field on a multi-step login page (`content/login-step.ts`):
+ * `"username"` on an identifier-first step, `"password"` on a password-only step; absent, both
+ * (the one-page form). It only ever narrows: the long-lived context sends the content script no
+ * value beyond the one kind named (ADR 0036 §4: nothing "beyond what the user is filling"), and
+ * a forged or missing `only` can at most give the content script the same both-values push it
+ * gets for a one-page form, still written only into the visible fields of the step the user
+ * clicked on. It is not remembered: every step is its own click and its own request (INV-36).
  */
 export interface InlineMenuFillRequestMessage {
   readonly type: "inline_menu_fill_chosen";
   readonly itemId: string;
   readonly confirmedEquivalence: boolean;
+  readonly only?: FillScope;
+}
+
+/** The one field kind a multi-step login step fills ({@link InlineMenuFillRequestMessage.only}). */
+export type FillScope = "username" | "password";
+
+/** The values one fill pushes to the content script, by kind (never by field id): at least one
+ * of the two. A one-page form gets both (or the password alone when the item has no username);
+ * an identifier-first step only `username`; a password-only step, and the generator, only
+ * `password`. */
+export interface FillValues {
+  readonly username?: string;
+  readonly password?: string;
 }
 
 /** Acknowledges a successful {@link InlineMenuFillRequestMessage}: never carries the revealed
@@ -255,7 +276,7 @@ export interface PasskeyCeremonyDispatchedMessage {
  */
 export interface ApplyFillMessage {
   readonly type: "apply_fill";
-  readonly values: { readonly username?: string; readonly password: string };
+  readonly values: FillValues;
 }
 
 /**
@@ -316,7 +337,7 @@ export interface RelayPasskeyResultMessage {
 export interface RelayApplyFillMessage {
   readonly type: "relay_apply_fill";
   readonly tabId: number;
-  readonly values: { readonly username?: string; readonly password: string };
+  readonly values: FillValues;
 }
 
 /** A match candidate as shown to the content script/inline menu: title/username/icon only,
@@ -454,7 +475,12 @@ export function isInlineMenuFillRequestMessage(value: unknown): value is InlineM
     return false;
   }
   const v = value as Record<string, unknown>;
-  return v["type"] === "inline_menu_fill_chosen" && isBoundedString(v["itemId"], 256) && typeof v["confirmedEquivalence"] === "boolean";
+  return (
+    v["type"] === "inline_menu_fill_chosen" &&
+    isBoundedString(v["itemId"], 256) &&
+    typeof v["confirmedEquivalence"] === "boolean" &&
+    (v["only"] === undefined || v["only"] === "username" || v["only"] === "password")
+  );
 }
 
 /** Validates a raw message claimed to be an {@link InlineMenuGeneratePasswordRequestMessage} —
@@ -482,16 +508,20 @@ export function isPasskeyCeremonyMessage(value: unknown): value is PasskeyCeremo
 }
 
 /** Shared by {@link isApplyFillMessage} and {@link isRelayApplyFillMessage}: both carry the
- * exact same `values` shape (username/password by kind, never by field id). */
-function isFillValues(value: unknown): value is { readonly username?: string; readonly password: string } {
+ * exact same `values` shape (username/password by kind, never by field id), at least one of the
+ * two present. */
+function isFillValues(value: unknown): value is FillValues {
   if (typeof value !== "object" || value === null) {
     return false;
   }
   const v = value as Record<string, unknown>;
-  if (!isBoundedString(v["password"], MAX_FIELD_VALUE_LEN)) {
+  if (v["username"] === undefined && v["password"] === undefined) {
     return false;
   }
-  return v["username"] === undefined || isBoundedString(v["username"], MAX_FIELD_VALUE_LEN);
+  return (
+    (v["password"] === undefined || isBoundedString(v["password"], MAX_FIELD_VALUE_LEN)) &&
+    (v["username"] === undefined || isBoundedString(v["username"], MAX_FIELD_VALUE_LEN))
+  );
 }
 
 /** Validates a raw message claimed to be an {@link ApplyFillMessage} — checked by

@@ -6,7 +6,7 @@
 // page: see `protocol.ts` for exactly what that origin boundary does and does not guarantee.
 import { INLINE_MENU_PICK, isInlineMenuShowMessage, type InlineMenuCandidate } from "./protocol.ts";
 import { decideClick } from "./decide-click.ts";
-import type { InlineMenuFillRequestMessage, InlineMenuGeneratePasswordRequestMessage } from "../messaging/contract.ts";
+import type { FillScope, InlineMenuFillRequestMessage, InlineMenuGeneratePasswordRequestMessage } from "../messaging/contract.ts";
 
 // GATE C (A7/THREAT_MODEL gap, HANDOFF X6; defense-in-depth, Chromium only, never the sole
 // gate — Firefox has no IntersectionObserver v2, and the manual Gates A/B in
@@ -60,11 +60,19 @@ const generateContainer = document.getElementById("generate");
 if (generateContainer === null) {
   throw new Error("inline-menu: #generate is missing from index.html");
 }
+const stepNote = document.getElementById("step-note");
+if (stepNote === null) {
+  throw new Error("inline-menu: #step-note is missing from index.html");
+}
 
 let replyOrigin: string | undefined;
 /** The page's own exact normalised host (ADR 0037 §5 "Exact host shown"; gap 31 in the M2 gap
  * audit), for the equivalence-only warning's "this page is …" clause. */
 let pageHost = "";
+/** The one field this login step fills, from the latest show message (`protocol.ts`'s
+ * `InlineMenuShowMessage.only`): passed on in {@link requestFill}, and `"username"` hides the
+ * generator, which has no password field to fill on an identifier-first step. */
+let only: FillScope | undefined;
 
 window.addEventListener("message", (event) => {
   // `event.source`/`event.origin` are set by the browser from the real sending window and
@@ -84,6 +92,9 @@ window.addEventListener("message", (event) => {
   // `rizzy-match` produced, but this document still treats every cross-boundary string as
   // untrusted content, not markup.
   pageHostHeader.textContent = pageHost;
+  only = event.data.only;
+  stepNote.textContent = only === "username" ? "Fills the username only." : only === "password" ? "Fills the password only." : "";
+  generateContainer.hidden = only === "username";
   render(event.data.candidates);
 });
 
@@ -203,6 +214,7 @@ async function requestFill(itemId: string, confirmedEquivalence: boolean): Promi
       type: "inline_menu_fill_chosen",
       itemId,
       confirmedEquivalence,
+      ...(only === undefined ? {} : { only }),
     } satisfies InlineMenuFillRequestMessage);
   } catch {
     // The background/offscreen document was unreachable (e.g. mid-restart): nothing to do.

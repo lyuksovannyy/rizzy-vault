@@ -43,3 +43,43 @@ export function isOwnOverlayMutation(records: readonly { addedNodes: Iterable<un
   }
   return true;
 }
+
+/** Whether `node` is one of our own overlay elements or sits inside one (walking
+ * `parentNode`, duck-typed like {@link isOwnOverlayElement}). */
+function isInOwnOverlay(node: unknown): boolean {
+  let current: unknown = node;
+  while (typeof current === "object" && current !== null) {
+    if (isOwnOverlayElement(current)) {
+      return true;
+    }
+    current = (current as { parentNode?: unknown }).parentNode;
+  }
+  return false;
+}
+
+/**
+ * What one `MutationObserver` batch means for field detection, now that the content script
+ * also observes attributes (multi-step login pages reveal a password field in place by toggling
+ * `hidden`/`style`/`class`; ROADMAP §4.4 M3):
+ * - `"structure"`: some record added or removed a node that is not ours — a full re-detection
+ *   and re-report, exactly as before attributes were observed ({@link isOwnOverlayMutation});
+ * - `"attributes"`: only attribute changes, at least one on a page element — re-detect, and
+ *   re-report only if the login step changed;
+ * - `"none"`: everything touched was our own overlay (the inline menu restyles its own iframe
+ *   on every animation frame, which must never count as the page changing).
+ */
+export function pageMutations(
+  records: readonly { type: string; target: unknown; addedNodes: Iterable<unknown>; removedNodes: Iterable<unknown> }[],
+): "none" | "attributes" | "structure" {
+  let attributes = false;
+  for (const record of records) {
+    if (record.type === "attributes") {
+      attributes ||= !isInOwnOverlay(record.target);
+      continue;
+    }
+    if (!isOwnOverlayMutation([record])) {
+      return "structure";
+    }
+  }
+  return attributes ? "attributes" : "none";
+}

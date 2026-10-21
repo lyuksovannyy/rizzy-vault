@@ -1,0 +1,16 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Contact form</title>
+  </head>
+  <body>
+    <!-- Not a login: two text fields, so even with "Continue" a weak signal is not enough. -->
+    <form id="contact" action="/next">
+      <input id="name" name="fullname" type="text" />
+      <input id="email" name="email" type="email" />
+      <button type="submit">Continue</button>
+    </form>
+  </body>
+</html>
