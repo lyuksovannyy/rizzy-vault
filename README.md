@@ -58,6 +58,7 @@ apps/web              the React web vault (ADR 0014); loads the rizzy-wasm core 
 apps/extension        the browser extension (Chromium MV3 and Firefox; ADR 0036), M2
 packages/core         the typed wrapper that is the only import path to the generated wasm bindings
 packages/ui           shared UI components and the M1 token CSS (ADR 0014)
+packages/i18n         the typed English message catalogue and its t() helper (ADR 0014 §4)
 deploy/               the container image (deploy/Containerfile) and compose files (ADR 0010 §4)
 docs/                 roadmap, threat model, crypto design, ADRs; index in docs/README.md
 fuzz/                 cargo-fuzz targets; its own workspace, run on nightly
