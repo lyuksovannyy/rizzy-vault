@@ -354,7 +354,9 @@ writes only that step's own field(s):
 - **Same-page reveal.** The content script's `MutationObserver` now also watches `style`,
   `class`, `hidden`, `disabled` and `readonly`, since a revealed password field is usually an
   attribute change rather than a new node. An attribute-only change re-asks the background only
-  if the detected step changed; the menu's own per-frame restyling of its iframe never counts.
+  if it reveals a field the current step did not have, so a passing restyle (a View
+  Transition, an animation) never tears the menu down; the menu's own per-frame restyling of
+  its iframe never counts at all.
   A field whose `type` attribute flips (`hidden` → `password`) is not watched, so such a reveal
   is picked up only at the next structural change: a known gap.
 - **Not done:** save/update-on-submit still needs a password field and the username on the same
