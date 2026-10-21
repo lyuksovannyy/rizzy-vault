@@ -11,7 +11,7 @@ use super::*;
 
 /// Like [`login_and_enrol`], but without its "exactly one certificate so far" assertion: these
 /// tests enrol a third and fourth device on one account.
-fn enrol_another_device(
+pub(super) fn enrol_another_device(
     server: &mut Server,
     rng: &mut ChaCha20Rng,
     sk: &str,
