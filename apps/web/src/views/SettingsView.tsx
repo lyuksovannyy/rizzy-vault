@@ -2,10 +2,12 @@
 
 // Settings (redesign slice 2, item 5): Two-factor, Devices and Appearance, grouped under one
 // sidebar entry instead of three. Each group is still its own panel; this view only lays them
-// out together and adds the Appearance group (theme.ts module docs: memory-only for now).
+// out together and adds the Appearance group (theme.ts module docs: memory-only for now). The
+// "What the server stores" group (ROADMAP §4.5) is `TransparencyPane.tsx`.
 import { isTheme, useThemeContext } from "../theme.ts";
 import type { VaultContext } from "./VaultView.tsx";
 import { DevicesPane } from "./DevicesPane.tsx";
+import { TransparencyPane } from "./TransparencyPane.tsx";
 import { TwoFactorPane } from "./TwoFactorPane.tsx";
 
 /** The Appearance group: the theme choice (module docs). */
@@ -45,6 +47,7 @@ export function SettingsView(props: { readonly ctx: VaultContext }) {
       <TwoFactorPane ctx={props.ctx} />
       <DevicesPane ctx={props.ctx} />
       <AppearanceGroup />
+      <TransparencyPane ctx={props.ctx} />
     </div>
   );
 }
