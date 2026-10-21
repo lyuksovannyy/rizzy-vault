@@ -9,7 +9,12 @@ Delete or rewrite this file when its next steps are done.
 - `origin/main` is still `5922c1d` (ADR 0042 proposed).
 - No commit in `origin/main..HEAD` (66 commits) carries `Signed-off-by`. Before `main` is fast-forwarded, the owner runs `git rebase --signoff origin/main` so CI's DCO job passes (ADR 0017 Decision 4).
 - The 30 new ADR drafts `docs/adr/0045-*.md` … `0074-*.md`, their `docs/adr/README.md` rows and the `CLAUDE.md` status-line edit are committed together with this file (`docs(adr): propose ADRs 0045-0074 …`). They went through one blockers-only review each, one cross-batch consistency pass and one shared-number allocation pass.
-- An M3 implementation fleet is running in worktrees under `rizzy-wt/m3-*` on rows that Accepted ADRs already clear (§6); its commits are not on the branch yet.
+- M3 fleet (rows Accepted ADRs already clear, §6), all based on `cc07afd`, each verified per track and reviewed once, **not yet integrated or full-gated**. Pushed as branches; cherry-pick onto this branch, run the full gate (`rizzy-wt/gate-full.sh`), then push:
+  - `wip/m3-tokens` (4 commits): neutral token source, `cargo xtask generate-tokens [--check]`, WCAG AA contrast check (ADR 0014 §5, ADR 0019 §13). Review fixes applied.
+  - `wip/m3-palette` (4): Ctrl/Cmd+K command palette, large-type password display. Review fixes applied. Favorites UI not confirmed done: check before closing the row.
+  - `wip/m3-history` (6): per-field item history + restore in rizzy-client, wasm, web, `rv item history` / `restore-history`. **Not reviewed**: the agent was cut off by an account-access error after committing.
+  - `wip/m3-quadlet` (8): Podman Quadlet units for profile A + docs/self-hosting.md §13. Unverified: podman not available here.
+  - Not started (agents failed on the same access error): force logout (m3-sessions), transparency page, conflict chooser, onboarding, `cargo xtask check-tables`. Re-run them.
 - The gap-numbered audit (`docs/handoff/gap-audit.json`) that older gap ids below trace back to still lives only on branch `wip/client-m1`. Keep that branch; its code is superseded by the commits in §2.
 
 ## 2. Done since the last rewrite
