@@ -68,6 +68,32 @@ websites (URIs), custom fields (text, hidden, boolean) and tags, not only its fi
   core: a normal option reaches the right call, an impossible combination is refused with
   exactly the core's own message, and the editor's fill is a pure DOM write.
 
+## Conflicts: keep both / pick one
+
+When two devices edit the same field before either has seen the other's edit, the sync engine
+keeps both values ([ADR 0012](../../docs/adr/0012-sync-engine.md) §4, ADR 0018 §6) and the item
+view marks the field "conflict" ([ROADMAP](../../docs/ROADMAP.md) §4.5). Its "Resolve
+conflict" button opens `src/views/ConflictChooser.tsx` (wording and rules in
+`src/conflicts.ts`, tested by `test/conflicts.test.ts`):
+
+- **What it shows.** "Edited on X and Y at the same time", then each distinct value with the
+  device and date that wrote it, the value shown now first. A concealed value (a password, a
+  hidden field) stays masked until the user reveals that one value; the listing never carries
+  it (ADR 0013 §3 rule 3). A value cleared on one device shows as "(cleared)".
+- **Pick one.** "Use this value" writes that value back to the field ("Keep it cleared" for a
+  cleared one). **Keep both** (text fields only) leaves the shown value in the field and moves
+  every other value into a new custom field labelled "<field> (from <device>)", hidden when the
+  field is concealed, or, for a website, into a new website.
+- **How it syncs.** A resolution is an ordinary edit (`rizzy-client`'s `conflicts` module): it
+  goes out with the next sync and ends the conflict on every device. If two devices resolve the
+  same conflict at once with different choices, the field conflicts again, visibly; nothing is
+  dropped. A resolution names the value by its listed position and id, so a sync between the
+  listing and the click is refused ("This conflict has changed…") instead of resolving to a
+  value the user did not see.
+- **End to end:** `e2e/conflict.spec.ts` races two browser contexts of one account offline on
+  the same password, resolves the first conflict by "pick one" and the second by "keep both",
+  and checks that each resolution reaches the other session.
+
 ## Export and import
 
 `src/views/TransferPane.tsx`, with its steps in `src/export-flow.ts` and the countdown in
