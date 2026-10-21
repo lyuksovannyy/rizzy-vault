@@ -726,13 +726,24 @@ pub(crate) fn reveal_history(
 /// old versions)", M3): generalizes [`HistoryEntryView`]/[`password_history`] to every field.
 /// Every entry's `source` is [`HISTORY_MERGE`]: imported `pwhist` history stays
 /// `login.password`-only and out of this listing ([`VaultSync::item_history`]'s own doc).
+///
+/// Wiped when freed, and `Debug` prints only the entry count, never the key: the key is user
+/// content (a tag key holds the tag's name, ADR 0018 §2 "Keys are user content too"), as in
+/// [`FieldView`].
 #[wasm_bindgen]
-#[derive(Clone, Debug)]
 pub struct FieldHistoryView {
     /// The field's final key (ADR 0018 §7).
-    key: String,
+    key: Zeroizing<String>,
     /// Its history entries, newest first.
     entries: Vec<HistoryEntryView>,
+}
+
+impl fmt::Debug for FieldHistoryView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FieldHistoryView")
+            .field("entries", &self.entries.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[wasm_bindgen]
@@ -741,7 +752,7 @@ impl FieldHistoryView {
     #[wasm_bindgen(getter)]
     #[must_use]
     pub fn key(&self) -> String {
-        self.key.clone()
+        self.key.as_str().to_owned()
     }
 
     /// Its history entries, newest first; each `source` is [`HISTORY_MERGE`].
@@ -760,7 +771,7 @@ pub(crate) fn item_history(vault: &VaultSync, item: ItemId) -> Vec<FieldHistoryV
         .item_history(item)
         .into_iter()
         .map(|field| FieldHistoryView {
-            key: field.key.as_str().to_owned(),
+            key: field.key,
             entries: field
                 .entries
                 .into_iter()
@@ -1427,5 +1438,19 @@ mod tests {
         // private key passed in above must never show up in it (module docs on `NewPasskey`,
         // "must never outlive this one write").
         assert_eq!(format!("{draft:?}"), "ItemDraft { entries: 1 }");
+    }
+
+    /// A field-history listing's key is user content (a tag key holds the tag's name), so its
+    /// `Debug` prints the entry count only, like [`FieldView`]'s.
+    #[test]
+    fn field_history_view_debug_prints_no_key() {
+        let view = FieldHistoryView {
+            key: Zeroizing::new("tag/73656372657420746167".to_owned()),
+            entries: Vec::new(),
+        };
+        assert_eq!(view.key(), "tag/73656372657420746167");
+        let shown = format!("{view:?}");
+        assert!(!shown.contains("tag/"), "{shown}");
+        assert!(!shown.contains("7365"), "{shown}");
     }
 }
