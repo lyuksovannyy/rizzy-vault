@@ -46,6 +46,7 @@ cargo check-wasm                    # alias: check -p rizzy-core -p rizzy-sync -
 cargo deny check                    # advisories, licenses, bans, sources (deny.toml)
 cargo xtask check-deps              # crate-boundary and dependency rules (ADR 0016 §5, R1–R8; ADR 0009 feature sets, crypto crates with default-features = false); no unsafe keyword in first-party .rs files (ADR 0019 §4.1)
 cargo xtask check-clippy            # clippy.toml entries clippy ignores ("found a module", ADR 0016 §5)
+cargo xtask check-tables            # not in CI yet: every table name after FROM/JOIN/INTO/UPDATE/TABLE/REFERENCES in the domain crates' queries/ and the migrations carries its owner's prefix (auth_, vault_), apart from the one foreign key to auth_accounts (id) ON DELETE CASCADE (ADR 0011 points 5–7, ADR 0016 R4); storage_ tables and backup queries are not checked yet
 cargo xtask check-spdx              # every first-party .rs/.ts/.tsx/.js/.mjs/.sh/.css/.html file starts with the SPDX header (ADR 0017 Decision 6); `--fix` inserts or corrects it
 cargo check --manifest-path fuzz/Cargo.toml --locked --bins               # fuzz targets still build
 cargo deny --manifest-path fuzz/Cargo.toml check                          # fuzz/Cargo.lock
