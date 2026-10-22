@@ -47,6 +47,8 @@ USAGE:
     rv device list
     rv device revoke <device> --name <login> [--standard]
     rv device forget
+    rv session list
+    rv session end <session> | end --others
     rv rotate --name <login> [--full]
     rv recovery start --server <url> --name <login>
     rv recovery complete --server <url> --name <login> [--skip-rotation]
@@ -63,7 +65,11 @@ OPTIONS:
     -h, --help       Print this help
     -V, --version    Print version
 
-<item> and <device> are hex ids or unique prefixes of one, as the list commands print them.
+<item>, <device> and <session> are hex ids or unique prefixes of one, as the list commands
+print them. `session end` ends another web or password login, or a recovery session; a
+device's session is ended by suspending or revoking the device (`device revoke`). `session end
+--others` ends every other one of those; devices stay logged in. rv ends its own session when
+a command exits.
 <custom field> is --custom <label>=<text>, --custom-secret <label> (a hidden field; its value
 is asked for) or --custom-bool <label>=true|false. <id> is a URI's or custom field's element
 id as `item show` prints it in the field's key (uri/<id>/value), or a unique prefix of one.
@@ -312,6 +318,12 @@ pub enum Command {
     },
     /// `device forget`.
     DeviceForget,
+    /// `session list` (ADR 0075 R1).
+    SessionList,
+    /// `session end <session>` (R3).
+    SessionEnd(String),
+    /// `session end --others` (R4).
+    SessionEndOthers,
     /// `rotate`.
     Rotate {
         /// `--name`.
@@ -506,6 +518,7 @@ pub fn parse(arguments: Vec<OsString>) -> Result<Invocation, CliError> {
         Some("export") => export(&mut args)?,
         Some("import") => import(&mut args)?,
         Some("device") => device(&mut args)?,
+        Some("session") => session(&mut args)?,
         Some("rotate") => {
             let (mut name, mut full) = (None, false);
             while let Some(option) = args.next() {
@@ -946,6 +959,26 @@ fn device(args: &mut Args) -> Result<Command, CliError> {
     }
 }
 
+/// `session …` (ADR 0075 §9).
+fn session(args: &mut Args) -> Result<Command, CliError> {
+    match args.next().as_deref() {
+        Some("list") => Ok(Command::SessionList),
+        Some("end") => match args.next() {
+            Some(flag) if flag == "--others" => match args.next() {
+                None => Ok(Command::SessionEndOthers),
+                Some(other) => Err(unknown(&other)),
+            },
+            Some(flag) if flag.starts_with("--") => Err(unknown(&flag)),
+            Some(id) => match args.next() {
+                None => Ok(Command::SessionEnd(id)),
+                Some(other) => Err(unknown(&other)),
+            },
+            None => Err(usage("session end needs a session or --others")),
+        },
+        _ => Err(usage("session needs list or end")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1034,6 +1067,27 @@ mod tests {
             "item restore-history ab12 --field login.password",
             "item restore-history ab12 --entry cd34",
             "item restore-history ab12 --field login.password --entry",
+        ] {
+            assert!(matches!(parsed(line), Err(CliError::Usage(_))), "{line}");
+        }
+    }
+
+    /// ADR 0075 §9: `session list`, `session end <id>`, `session end --others`.
+    #[test]
+    fn session_commands_parse() {
+        assert_eq!(command("session list"), Command::SessionList);
+        assert_eq!(
+            command("session end 0a1b"),
+            Command::SessionEnd("0a1b".to_owned())
+        );
+        assert_eq!(command("session end --others"), Command::SessionEndOthers);
+        for line in [
+            "session",
+            "session end",
+            "session end --all",
+            "session end ab cd",
+            "session end --others ab",
+            "session kill ab",
         ] {
             assert!(matches!(parsed(line), Err(CliError::Usage(_))), "{line}");
         }

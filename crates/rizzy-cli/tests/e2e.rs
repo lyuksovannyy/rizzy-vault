@@ -48,7 +48,7 @@ use std::time::{Duration, Instant};
 use rizzy_cli::CliError;
 use rizzy_cli::args::parse;
 use rizzy_cli::commands::run;
-use rizzy_cli::device::Env;
+use rizzy_cli::device::{Env, SignOuts};
 use rizzy_cli::ui::Ui;
 use rizzy_client::ClientError;
 use rizzy_client::export::plaintext::PLAINTEXT_EXPORT_WARNING;
@@ -695,6 +695,7 @@ impl Rv {
                             .flatten()
                     }),
                     ui: &mut script,
+                    sign_outs: SignOuts::default(),
                 };
                 self.runtime.block_on(run(invocation, &mut env))
             }
@@ -1364,6 +1365,7 @@ fn rv_end_to_end() {
             account: None,
             trust: rizzy_cli::tls::Trust::default(),
             ui: &mut script,
+            sign_outs: SignOuts::default(),
         };
         let held = a
             .runtime
@@ -1395,6 +1397,7 @@ fn open_device(rv: &Rv, script: &mut Script) -> rizzy_cli::device::Device {
         account: None,
         trust: rizzy_cli::tls::Trust::default(),
         ui: script,
+        sign_outs: SignOuts::default(),
     };
     rv.runtime
         .block_on(rizzy_cli::device::Device::open(&mut env))
@@ -1429,6 +1432,7 @@ fn interrupted_commits_are_settled_by_the_next_run() {
             account: None,
             trust: rizzy_cli::tls::Trust::default(),
             ui: &mut script,
+            sign_outs: SignOuts::default(),
         };
         let prepared = a
             .runtime
@@ -1584,6 +1588,7 @@ fn an_interrupted_signup_is_registered_again_after_its_setup_was_retired() {
             account: None,
             trust: rizzy_cli::tls::Trust::default(),
             ui: &mut script,
+            sign_outs: SignOuts::default(),
         };
         let prepared = a
             .runtime
@@ -1821,6 +1826,113 @@ fn create_note(rv: &Rv, name: &str) -> String {
     )
     .out[0]
         .clone()
+}
+
+/// The rows `session list` printed: the id and the rest of each line.
+fn session_rows(script: &Script) -> Vec<(String, String)> {
+    script
+        .out
+        .iter()
+        .map(|line| {
+            let (id, rest) = line.split_once("  ").unwrap();
+            (id.to_owned(), rest.to_owned())
+        })
+        .collect()
+}
+
+/// ADR 0075 §9 through `rv`: `session list` marks this run's own session and shows the
+/// others; `session end <prefix>` ends a password login and refuses a device's session;
+/// `session end --others` ends every password login and leaves the devices; and each `rv` run
+/// ends its own device session when it exits (owner answer 3), so no earlier run's session is
+/// left listed.
+#[test]
+fn sessions_are_listed_and_ended() {
+    let server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("sa");
+    let (secret_key, _) = sign_up(&a, &origin, "sessionuser");
+    let b = Rv::new("sb");
+    log_in(&b, &origin, "sessionuser", &secret_key);
+    a.ok(&["sync"], &[]);
+    a.ok(&["sync"], &[]);
+
+    // Two syncs ran before this list, each over a device session of its own: both ended at exit.
+    let listed = a.ok(&["session", "list"], &[]);
+    let rows = session_rows(&listed);
+    let own: Vec<_> = rows
+        .iter()
+        .filter(|(_, rest)| rest.starts_with("device session of this device"))
+        .collect();
+    assert_eq!(own.len(), 1, "{rows:?}");
+    assert!(
+        own[0].1.ends_with("(this rv run; it ends when rv exits)"),
+        "{rows:?}"
+    );
+    let logins: Vec<_> = rows
+        .iter()
+        .filter(|(_, rest)| rest.starts_with("web or password login"))
+        .collect();
+    assert!(
+        !logins.is_empty(),
+        "the login of device b is open: {rows:?}"
+    );
+    assert!(listed.noted("not proof that nothing else is open"));
+
+    // One password login, by a unique prefix.
+    let target = logins[0].0.clone();
+    let ended = a.ok(&["session", "end", &target[..12]], &[]);
+    assert!(ended.noted("change your password"));
+    let after = session_rows(&a.ok(&["session", "list"], &[]));
+    assert!(after.iter().all(|(id, _)| *id != target), "{after:?}");
+
+    // A device's live session is listed but not ended: suspension is its control (§5).
+    let mut b_script = Script::default();
+    b_script.secrets.push_back(PASSWORD.to_owned());
+    let mut b_device = open_device(&b, &mut b_script);
+    b.runtime.block_on(b_device.online(&mut b_script)).unwrap();
+    let rows = session_rows(&a.ok(&["session", "list"], &[]));
+    let (b_id, _) = rows
+        .iter()
+        .find(|(_, rest)| rest.starts_with("device session of desktop/cli"))
+        .unwrap_or_else(|| panic!("b's device session: {rows:?}"));
+    let (outcome, refused) = a.try_run(&["session", "end", &b_id[..12]], &[PASSWORD], &[], &[]);
+    assert!(
+        matches!(outcome, Err(CliError::BadInput(text)) if text.contains("suspend or revoke")),
+        "{:?}",
+        refused.notes
+    );
+    // Not a hex prefix, and a prefix no listed session has.
+    let (outcome, _) = a.try_run(&["session", "end", "zz"], &[PASSWORD], &[], &[]);
+    assert!(matches!(outcome, Err(CliError::Usage(_))));
+    let (outcome, _) = a.try_run(
+        &["session", "end", "0123456789abcdef0123456789abcdef"],
+        &[PASSWORD],
+        &[],
+        &[],
+    );
+    assert!(matches!(outcome, Err(CliError::BadInput(_))));
+
+    // Another password login, then every other one ends; the devices stay.
+    let c = Rv::new("sc");
+    log_in(&c, &origin, "sessionuser", &secret_key);
+    let before = session_rows(&a.ok(&["session", "list"], &[]));
+    assert!(
+        before
+            .iter()
+            .any(|(_, rest)| rest.starts_with("web or password login"))
+    );
+    let others = a.ok(&["session", "end", "--others"], &[]);
+    assert!(others.noted("Other sessions ended"));
+    let left = session_rows(&a.ok(&["session", "list"], &[]));
+    assert!(
+        left.iter()
+            .all(|(_, rest)| rest.starts_with("device session of")),
+        "{left:?}"
+    );
+    assert!(left.iter().any(|(id, _)| id == b_id), "{left:?}");
+    // b's device session still works.
+    b.runtime.block_on(b_device.sync(&mut b_script)).unwrap();
+    drop(b_device);
 }
 
 /// ADR 0048 §5: `rv unlock` prints the storage use the server reports with the account answer,

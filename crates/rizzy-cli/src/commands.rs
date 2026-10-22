@@ -61,6 +61,9 @@ use rizzy_client::items::{Dot, FieldEdit, FieldKey, ItemId, ItemLifecycle, ItemT
 use rizzy_client::lists::split_order_ops;
 use rizzy_client::rizzy_import::{self, Format};
 use rizzy_client::rotation::RotationLevel;
+use rizzy_client::sessions::{
+    ListedSession, OTHERS_ENDED_NOTICE, SESSION_ENDED_BY_YOU_NOTICE, SessionList, SessionRowKind,
+};
 use rizzy_client::signup::DeviceKind;
 use rizzy_client::store::rows::Alarm;
 use rizzy_client::sync::VaultSync;
@@ -99,12 +102,21 @@ const CONCEALED: &str = "********";
 /// The largest file an import reads: the largest input any importer accepts (a 1PUX archive).
 const MAX_IMPORT_FILE_LEN: usize = rizzy_import::limits::MAX_ARCHIVE_LEN;
 
-/// Runs one command.
+/// Runs one command, then ends the device sessions it opened on the server
+/// (`sessions/current/end`; ADR 0075 owner answer 3: best effort, no retry), whatever the
+/// command's outcome.
 ///
 /// # Errors
 /// [`CliError`]; its `Display` is what the user reads.
-#[expect(clippy::too_many_lines, reason = "one arm per command")]
 pub async fn run(invocation: Invocation, env: &mut Env<'_>) -> Result<(), CliError> {
+    let outcome = Box::pin(run_command(invocation, env)).await;
+    env.sign_outs.send_all().await;
+    outcome
+}
+
+/// Runs one command ([`run`]).
+#[expect(clippy::too_many_lines, reason = "one arm per command")]
+async fn run_command(invocation: Invocation, env: &mut Env<'_>) -> Result<(), CliError> {
     if let Some(account) = &invocation.account {
         env.account = Some(
             unhex::<16>(account)
@@ -206,6 +218,9 @@ pub async fn run(invocation: Invocation, env: &mut Env<'_>) -> Result<(), CliErr
             standard,
         } => Box::pin(device_revoke(env, &device, &name, standard)).await,
         Command::DeviceForget => device_forget(env).await,
+        Command::SessionList => Box::pin(session_list(env)).await,
+        Command::SessionEnd(prefix) => Box::pin(session_end(env, Some(&prefix))).await,
+        Command::SessionEndOthers => Box::pin(session_end(env, None)).await,
         Command::Rotate { name, full } => {
             let mut device = Device::open(env).await?;
             let level = if full {
@@ -1204,6 +1219,103 @@ async fn import(
     sync_after_write(&mut device, env.ui).await
 }
 
+/// How `session list` names a session (ADR 0075 §9).
+fn session_kind_text(device: &Device, row: &ListedSession) -> String {
+    let on = |id: Option<DeviceId>| {
+        id.map_or_else(
+            || "an unknown device".to_owned(),
+            |d| device_label(device, d),
+        )
+    };
+    match row.kind() {
+        SessionRowKind::PasswordLogin => "web or password login".to_owned(),
+        SessionRowKind::PasswordRecheck => format!("password re-check on {}", on(row.device_id())),
+        SessionRowKind::Device => format!("device session of {}", on(row.device_id())),
+        SessionRowKind::Recovery => "account recovery in progress".to_owned(),
+        SessionRowKind::Unknown => "a session of a kind this rv does not know".to_owned(),
+    }
+}
+
+/// `session list` (ADR 0075 R1, §9): the account's live sessions as the server reports them.
+async fn session_list(env: &mut Env<'_>) -> Result<(), CliError> {
+    let mut device = Device::open(env).await?;
+    device.online(env.ui).await?;
+    let list = device.sessions().await?;
+    for row in list.sessions() {
+        // Times as `device list` prints them: seconds since the Unix epoch, the server's word.
+        let mut line = format!(
+            "{}  {}  opened {}  expires {}",
+            hex(&row.session_id()),
+            session_kind_text(&device, row),
+            row.created_at_ms() / 1000,
+            row.expires_at_ms() / 1000
+        );
+        if row.current() {
+            line.push_str("  (this rv run; it ends when rv exits)");
+        }
+        env.ui.print(&line)?;
+    }
+    if list.truncated() {
+        env.ui
+            .note("The server listed only the newest sessions; the account has more.");
+    }
+    env.ui.note(
+        "This is the server's list, not proof that nothing else is open. A device's session \
+         ends by suspending or revoking the device (`rv device revoke`).",
+    );
+    Ok(())
+}
+
+/// `session end <prefix>` (R3) or, with `None`, `session end --others` (R4). No password:
+/// rv's device session counts as fresh (ADR 0075 §4, §9).
+async fn session_end(env: &mut Env<'_>, prefix: Option<&str>) -> Result<(), CliError> {
+    let mut device = Device::open(env).await?;
+    device.online(env.ui).await?;
+    let Some(prefix) = prefix else {
+        device.end_other_sessions().await?;
+        env.ui.note(OTHERS_ENDED_NOTICE);
+        return Ok(());
+    };
+    let list = device.sessions().await?;
+    let row = resolve_session(&list, prefix)?;
+    if row.kind() == SessionRowKind::Device {
+        return Err(CliError::BadInput(
+            "that is a device's session, which signs in again by itself: suspend or revoke the \
+             device instead (rv device revoke)",
+        ));
+    }
+    if row.current() {
+        return Err(CliError::BadInput(
+            "that is this rv run's own session; rv ends it when it exits",
+        ));
+    }
+    let request = row.end_request()?;
+    device.end_session(&request).await?;
+    env.ui.note(SESSION_ENDED_BY_YOU_NOTICE);
+    Ok(())
+}
+
+/// The listed session a hex id or a unique prefix of one names.
+fn resolve_session<'a>(list: &'a SessionList, prefix: &str) -> Result<&'a ListedSession, CliError> {
+    let wanted = prefix.to_ascii_lowercase();
+    if wanted.is_empty() || !wanted.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(CliError::Usage(
+            "a session is named by its hex id or a prefix of it".into(),
+        ));
+    }
+    let mut found = list
+        .sessions()
+        .iter()
+        .filter(|s| hex(&s.session_id()).starts_with(&wanted));
+    match (found.next(), found.next()) {
+        (Some(row), None) => Ok(row),
+        (None, _) => Err(CliError::BadInput("no listed session has that id")),
+        (Some(_), Some(_)) => Err(CliError::BadInput(
+            "that prefix names more than one session; give more digits",
+        )),
+    }
+}
+
 /// The name of a device kind.
 const fn kind_name(kind: DeviceKind) -> &'static str {
     match kind {
@@ -1385,6 +1497,7 @@ async fn device_forget(env: &mut Env<'_>) -> Result<(), CliError> {
                 device.vault().unacknowledged()
             };
             let (_, lock) = device.close().await;
+            let lock = lock.ok_or(CliError::Client(ClientError::Internal))?;
             (lock, Some(unsent))
         }
         Err(CliError::InUse) => return Err(CliError::InUse),

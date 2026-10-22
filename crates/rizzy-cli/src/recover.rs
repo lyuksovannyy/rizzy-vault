@@ -218,6 +218,7 @@ pub async fn complete(
         (done.certificates, done.revocations, done.authors),
         vault,
         password,
+        env.sign_outs.clone(),
     )?;
     if done.dropped_items > 0 {
         env.ui.note(&format!(

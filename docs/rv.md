@@ -141,6 +141,18 @@ If a rotation or a signup is interrupted after it was sent, the next `rv` run fi
 
 `rv login` and `rv recovery complete` save nothing before the server answers ([ADR 0026](adr/0026-client-device-state-and-cache.md) defines no pending stage for them; an open point). If their answer is lost, `rv` says that the outcome is unknown: run the command again, and if the first attempt did reach the server, revoke the extra device it left with `rv device revoke`. After a recovery with an unknown outcome keep both Emergency Kits until you know which one logs in.
 
+## Sessions
+
+```sh
+rv session list            # the account's open sessions, as the server reports them
+rv session end 3fa0        # ends one web or password login (or a recovery session) by id prefix
+rv session end --others    # ends every other web or password login and recovery session
+```
+
+`session list` prints one line per session the server holds for the account: its id, what it is ("web or password login", "password re-check on" a device, "device session of" a device, "account recovery in progress"), and when it was opened and expires, in seconds since the Unix epoch. The line of this run's own session says so. Each `rv` command opens a device session of its own and ends it on the server when it exits (best effort: if the server cannot be reached then, the session lapses after its hour). The list is the server's word, not proof that nothing else is open ([ADR 0075](adr/0075-session-listing-and-ending.md)).
+
+`session end` takes a hex id or a unique prefix of one, as `device revoke` does. Neither form needs your password: `rv`'s requests are signed with the device key. Neither ends a device's session: a device signs in again by itself, so the way to log a device out is to suspend or revoke it (`rv device revoke`). `session end` refuses a device's session and says so. Ending a session does not stop someone who knows your master password and Secret Key from logging in again; if you think someone does, change your password (below).
+
 ## Master password, Secret Key and two-factor login
 
 ```sh
