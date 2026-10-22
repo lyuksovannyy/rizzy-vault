@@ -517,6 +517,31 @@ impl Env {
             .with_page_bytes(page_bytes)
     }
 
+    /// A second domain over the same database and certificates, with `quota`.
+    pub(crate) fn domain_with_quota(&self, quota: rizzy_domain_vault::Quota) -> VaultDomain<Directory> {
+        VaultDomain::new(self.db.clone(), self.directory.clone(), Bus::default()).with_quota(quota)
+    }
+
+    /// The account's storage counter and the true sum of its rows (ADR 0048 §2–§4).
+    pub(crate) async fn usage(&self) -> (u64, u64) {
+        let mut r = self.db.begin_read().await.unwrap();
+        let counter = rizzy_storage::quota::bytes_used(r.conn(), ACCOUNT.as_bytes())
+            .await
+            .unwrap();
+        let truth = rizzy_domain_vault::usage::counted_bytes(r.conn(), ACCOUNT)
+            .await
+            .unwrap();
+        r.finish().await.unwrap();
+        (counter, truth)
+    }
+
+    /// Asserts the counter equals the true sum, and returns it.
+    pub(crate) async fn counted(&self) -> u64 {
+        let (counter, truth) = self.usage().await;
+        assert_eq!(counter, truth, "the storage counter drifted from the rows");
+        counter
+    }
+
     /// Takes the database slot out of this environment, dropping its handles.
     pub(crate) fn into_slot(self) -> Slot {
         self.slot

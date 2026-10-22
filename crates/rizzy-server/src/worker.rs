@@ -38,6 +38,13 @@
 //!    ([`notice_retirable_setups`]). The worker never retires one: `rizzy-vault secrets
 //!    retire-setups` does, with the server stopped ([`crate::admin`]).
 //!
+//! 8. **The storage counter's reconciliation** (ADR 0048 §4, "a daily reconciliation pass"),
+//!    after a run that kept the leader lock, at most once every [`USAGE_RECONCILE_INTERVAL`]
+//!    ([`reconcile_usage`]): every account's true total is recomputed from the domains' rows and
+//!    the counter corrected on drift, one transaction per account under its lock; each
+//!    correction is logged as `storage_usage_corrected` with the account id and both values,
+//!    never content.
+//!
 //! **When it runs.** Once at startup, then every configured interval, and early when the vault
 //! domain publishes `CompactionQueued` on the in-process bus (the durable queue, not the event,
 //! is the record of truth: a missed or lagged event only delays the item to the next run).
@@ -100,6 +107,9 @@ pub const LEADER_RETRY: Duration = Duration::from_secs(15);
 /// check that takes longer counts as a lost lock. This crate's choice, reported to the owner.
 pub const LEADER_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How often the storage counter is reconciled (ADR 0048 §4: daily).
+pub const USAGE_RECONCILE_INTERVAL: Duration = Duration::from_secs(24 * 3600);
+
 /// The shortest time between two runs woken by events, so a burst of uploads costs one run.
 const EVENT_DEBOUNCE: Duration = Duration::from_secs(1);
 
@@ -143,6 +153,7 @@ pub async fn run(
     let mut leader: Option<WorkerLeader> = None;
     let mut standby_logged = false;
     let mut retirable_logged: Option<Instant> = None;
+    let mut usage_reconciled: Option<Instant> = None;
     loop {
         if leader.is_none() {
             leader = take_leadership(&db, &mut standby_logged).await;
@@ -164,6 +175,9 @@ pub async fn run(
             );
             if !report.leadership_lost {
                 notice_retirable_setups(&api, &mut retirable_logged).await;
+            }
+            if !report.leadership_lost && still_leader(held).await {
+                reconcile_usage(&db, &mut usage_reconciled).await;
             }
             if report.leadership_lost {
                 // Dropping the leader drops its connection: whatever is left of the session
@@ -322,6 +336,40 @@ pub async fn notice_retirable_setups(api: &Api, last: &mut Option<Instant>) -> u
     }
 }
 
+/// Step 8 (module docs, ADR 0048 §4): when `last` is unset or [`USAGE_RECONCILE_INTERVAL`] old,
+/// recomputes every account's counted bytes and corrects the storage counter where it drifted
+/// ([`crate::usage::reconcile`]), logging each correction (`storage_usage_corrected`: the account
+/// id, the old and the new value) and each account that failed, then sets `last`. Returns the
+/// number of corrections, `None` when the pass did not run or could not list the accounts.
+pub async fn reconcile_usage(db: &Database, last: &mut Option<Instant>) -> Option<usize> {
+    if last.is_some_and(|at| at.elapsed() < USAGE_RECONCILE_INTERVAL) {
+        return None;
+    }
+    match crate::usage::reconcile(db, i64::try_from(now_ms()).unwrap_or(i64::MAX)).await {
+        Ok((corrections, failures)) => {
+            for c in &corrections {
+                log::warn(
+                    "storage_usage_corrected",
+                    &[
+                        Field::Id("account", &c.account_id),
+                        Field::U64("was", c.drift.was),
+                        Field::U64("now", c.drift.now),
+                    ],
+                );
+            }
+            for e in &failures {
+                log::error("storage_usage_account_failed", &[Field::Error("error", e)]);
+            }
+            *last = Some(Instant::now());
+            Some(corrections.len())
+        }
+        Err(e) => {
+            log::error("worker_usage_failed", &[Field::Error("error", &e)]);
+            None
+        }
+    }
+}
+
 /// A count as a log integer.
 fn count(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
@@ -415,7 +463,7 @@ pub async fn run_once(
                 ..report
             };
         }
-        match api.vault.run_compaction(COMPACTION_BATCH).await {
+        match api.vault.run_compaction(COMPACTION_BATCH, now).await {
             Ok(run) => {
                 report.items_compacted = report.items_compacted.saturating_add(run.processed);
                 report.bodies_deleted = report

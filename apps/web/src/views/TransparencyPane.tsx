@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 // The Settings "What the server stores" group (ROADMAP §4.5): the static list and retention
-// rules of `transparency.ts`, and the counts this browser already holds (that module's docs:
-// no server-reported numbers, and why).
+// rules of `transparency.ts`, the counts this browser already holds, and the one number the
+// server reports, the account's storage usage (ADR 0048 §5; that module's docs say why it is
+// the only one).
 import { useEffect, useState } from "react";
 
 import { codeOf } from "../core-client.ts";
-import { type LocalCounts, RETENTION, STORED, countRows } from "../transparency.ts";
+import { type LocalCounts, RETENTION, STORED, countRows, usageText } from "../transparency.ts";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText } from "./common.tsx";
 
@@ -53,6 +54,19 @@ export function TransparencyPane(props: { readonly ctx: VaultContext }) {
           ))}
         </tbody>
       </table>
+      <h3>Storage on the server</h3>
+      {ctx.session.storageUsage === undefined ? (
+        <p className="hint">The server has not reported this account's storage use.</p>
+      ) : (
+        <>
+          <p data-testid="storage-usage">Used: {usageText(ctx.session.storageUsage)}</p>
+          <p className="hint">
+            Reported by the server and not checked by this browser. It counts the encrypted items, their change
+            history and signed headers. When the limit is reached, the server refuses new changes until your
+            server operator raises it.
+          </p>
+        </>
+      )}
       <h3>How long it is kept</h3>
       <ul>
         {RETENTION.map((line) => (

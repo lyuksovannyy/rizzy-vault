@@ -497,7 +497,8 @@ impl Endpoint {
 }
 
 /// The HTTP status of an error code ([ADR 0028] item 3, with `setup_retired` 409 as ADR 0031 point
-/// 3 adds it and `credentials_stale` 409 as ADR 0032 adds it). A code this build does not send
+/// 3 adds it, `credentials_stale` 409 as ADR 0032 adds it, and `quota_exceeded` 409 as ADR 0048
+/// §5 restates the item with it). A code this build does not send
 /// (`unknown`) maps to `500` like `internal`. Clients branch on the code, never on the status.
 ///
 /// [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
@@ -515,7 +516,8 @@ pub const fn status(code: ErrorCode) -> StatusCode {
         | ErrorCode::RecordConflict
         | ErrorCode::PrevSeqMismatch
         | ErrorCode::SetupRetired
-        | ErrorCode::CredentialsStale => StatusCode::CONFLICT,
+        | ErrorCode::CredentialsStale
+        | ErrorCode::QuotaExceeded => StatusCode::CONFLICT,
         ErrorCode::ApiVersionGone => StatusCode::GONE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -1211,6 +1213,7 @@ mod tests {
             (ErrorCode::PrevSeqMismatch, 409),
             (ErrorCode::SetupRetired, 409),
             (ErrorCode::CredentialsStale, 409),
+            (ErrorCode::QuotaExceeded, 409),
             (ErrorCode::ApiVersionGone, 410),
             (ErrorCode::PayloadTooLarge, 413),
             (ErrorCode::RateLimited, 429),

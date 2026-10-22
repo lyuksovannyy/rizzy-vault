@@ -261,7 +261,8 @@ pub(crate) async fn heal_self_grant(
     {
         repo::delete_wrap(tx.conn(), vault_id, stale.item_id, &stale.item_key_id).await?;
     }
-    repo::clear_record_wraps_below(tx.conn(), vault_id, new_epoch).await?;
+    let freed = repo::clear_record_wraps_below(tx.conn(), vault_id, new_epoch).await?;
+    crate::usage::charge(tx, session.account_id, crate::usage::credit(freed), now).await?;
     Ok(Ok(()))
 }
 

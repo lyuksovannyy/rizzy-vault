@@ -17,6 +17,8 @@
 //! - [`rotation`]: the vault half of a key rotation (ADR 0025): the rewrite of the wrap set, one
 //!   test per refusal, epochs after a restore, a planted junk wrap, healing below the current
 //!   epoch, the recovery cursor, and uploads racing rotations (`RIZZY_TEST_RACE_RUNS`).
+//! - [`quota`]: the per-account storage quota (ADR 0048): the counted unit, the refusal at the
+//!   exact boundary, the headroom, the healing exemption, compaction's credit.
 //! - [`selfgrant`]: healing step 3b (ADR 0032 §2–§3): a lagging self-grant repaired with its
 //!   wrap set, one test per refusal of the lag rule, the repeat rules, and a vault epoch ahead
 //!   of the account epoch.
@@ -24,6 +26,7 @@
 mod common;
 mod compaction;
 mod healing;
+mod quota;
 mod rotation;
 mod selfgrant;
 mod upload;

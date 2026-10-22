@@ -241,6 +241,8 @@ impl Server {
             account_settings: s.settings.clone(),
             identity_secret_keys: s.e_id.clone(),
             vault_self_grants: List::new(s.grants.clone()).unwrap(),
+            bytes_used: 4_096,
+            quota_bytes: 5 << 30,
         };
         self.capture(serde_json::to_vec(&view));
         view
@@ -1032,6 +1034,17 @@ fn unlock_detects_rollback_fork_and_hidden_devices() {
     let a_unlocked = a_state.unlock(PASSWORD).unwrap();
     let account = verify_unlock(&mut a_state, &a_unlocked, &server.view(), None).unwrap();
     assert_eq!(a_state.pin().state().state_seq, 2);
+    // ADR 0048 §5: the server's usage figure rides along, unverified, for display.
+    assert_eq!(
+        account.usage(),
+        Some(crate::account::StorageUsage {
+            bytes_used: 4_096,
+            quota_bytes: 5 << 30,
+        })
+    );
+    let mut no_quota = server.view();
+    no_quota.quota_bytes = 0;
+    assert_eq!(crate::account::StorageUsage::of_view(&no_quota), None);
 
     // Rollback: the server serves the signup state again.
     assert_eq!(

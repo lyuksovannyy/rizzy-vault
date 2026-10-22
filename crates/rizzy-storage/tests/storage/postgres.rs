@@ -154,6 +154,7 @@ fn postgres_migrate_restore_dump_and_lock() {
         assert_eq!(after, before + TASKS);
 
         debug_hides_row_values(&db).await;
+        crate::common::exercise_quota(&db).await;
         db.close().await;
     });
 }

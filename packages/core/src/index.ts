@@ -975,6 +975,17 @@ function mapOne<T extends { free(): void }, U>(item: T, f: (item: T) => U): U {
 // The session
 
 /**
+ * The account's storage usage as the server reports it (ADR 0048 §5): unsigned, so the
+ * server's word, shown for information only.
+ */
+export interface StorageUsage {
+  /** The account's counted bytes on the server. */
+  readonly bytesUsed: number;
+  /** The instance's per-account quota (`RIZZY_ACCOUNT_QUOTA_BYTES`). */
+  readonly quotaBytes: number;
+}
+
+/**
  * An unlocked session. The keys live in the core's memory behind this handle; `lock` wipes
  * them. One call per user action (ADR 0013 §3 rule 6). Writes go to memory first; `sync`
  * uploads them.
@@ -1028,6 +1039,22 @@ export class VaultSession {
   /** Own changes the server has not acknowledged: what `lock` would lose. */
   get unsentChanges(): number {
     return call(() => this.#s().unsentChanges);
+  }
+
+  /**
+   * The account's storage usage the server reported with its last account answer (ADR 0048
+   * §5): its counted bytes and the instance's quota, `undefined` when it reported none. The
+   * server's word, unverified: for display only.
+   */
+  get storageUsage(): StorageUsage | undefined {
+    return call(() => {
+      const s = this.#s();
+      const used = s.storageBytesUsed;
+      const quota = s.storageQuotaBytes;
+      return used === undefined || quota === undefined
+        ? undefined
+        : { bytesUsed: Number(used), quotaBytes: Number(quota) };
+    });
   }
 
   /** Locks: wipes every key and decrypted item; unsent changes are lost. */

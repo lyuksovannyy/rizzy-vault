@@ -17,7 +17,8 @@
 //!   `fresh_session_required` (CRYPTO.md §11 "Replacing credentials": a fresh OPAQUE session of
 //!   at most 5 minutes), `setup_retired` (ADR 0031 point 3: a registration whose echoed OPAQUE
 //!   `setup_id` is retired or unknown), `credentials_stale` (ADR 0032 §4: after KE3 verified, the
-//!   account's OPAQUE record lags its signed state).
+//!   account's OPAQUE record lags its signed state), `quota_exceeded` (ADR 0048 §3 and §5: the
+//!   record would push the account's counted bytes past its quota and headroom).
 //! - Generic, this crate's: `invalid_request`, `payload_too_large`, `unauthorized`,
 //!   `second_factor_required`, `rate_limited`, `not_found`, `internal`.
 //!
@@ -25,7 +26,8 @@
 //! `invalid_request` and `client_too_old` 400; `unauthorized` and `second_factor_required` 401;
 //! `fresh_session_required` 403; `not_found` 404; `state_conflict`, `stale_epoch`,
 //! `record_conflict`, `prev_seq_mismatch`, `setup_retired` (ADR 0031 point 3, which adds it to
-//! item 3's list) and `credentials_stale` (ADR 0032, which adds it to item 3's list) 409;
+//! item 3's list), `credentials_stale` (ADR 0032, which adds it to item 3's list) and
+//! `quota_exceeded` (ADR 0048 §5, which restates the whole sentence with it) 409;
 //! `api_version_gone` 410; `payload_too_large` 413; `rate_limited` 429, with `Retry-After` in
 //! whole seconds; `internal` 500. A method a route does not serve is `405` with
 //! `invalid_request`. **Clients branch on the code, never on the status.**
@@ -92,6 +94,11 @@ pub enum ErrorCode {
     /// authentication, so it tells an unauthenticated prober nothing (CRYPTO.md §5.9). The client
     /// waits for an enrolled device to re-register the record at its next password unlock.
     CredentialsStale,
+    /// An upload record would push the account's counted bytes past its storage quota plus the
+    /// instance's upload limit as headroom (ADR 0048 §3). Sent per record of an ordinary upload,
+    /// never for a healing request. Distinct from [`ErrorCode::PayloadTooLarge`], which is the
+    /// per-request body limit checked before any body byte is parsed.
+    QuotaExceeded,
     /// The server failed. No detail.
     Internal,
     /// A code this build does not know; only ever produced by parsing a newer server's answer.
@@ -134,6 +141,10 @@ mod tests {
             serde_json::to_string(&ErrorResponse::new(ErrorCode::StaleEpoch)).unwrap(),
             r#"{"error":"stale_epoch"}"#
         );
+        assert_eq!(
+            serde_json::to_string(&ErrorResponse::new(ErrorCode::QuotaExceeded)).unwrap(),
+            r#"{"error":"quota_exceeded"}"#
+        );
     }
 
     #[test]
@@ -149,6 +160,7 @@ mod tests {
             ErrorCode::PrevSeqMismatch,
             ErrorCode::SetupRetired,
             ErrorCode::CredentialsStale,
+            ErrorCode::QuotaExceeded,
         ] {
             let json = serde_json::to_string(&ErrorResponse::new(code)).unwrap();
             assert_eq!(
