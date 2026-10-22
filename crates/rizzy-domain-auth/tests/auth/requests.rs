@@ -83,7 +83,7 @@ async fn enrol(env: &mut Env, client: &mut Client) -> Device {
 
 /// Registers `password` with a new Secret Key over `session` and builds the commit of
 /// `password_epoch + 1` (CRYPTO.md §11.5 steps 3–5). Returns the commit and the new state.
-async fn password_change(
+pub(crate) async fn password_change(
     env: &mut Env,
     client: &Client,
     session: &rizzy_domain_auth::Session,

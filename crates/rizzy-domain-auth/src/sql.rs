@@ -177,6 +177,14 @@ queries! {
     TOTP_STALE_ACCOUNTS = "totp_stale_accounts";
     /// Replaces a TOTP row's sealed secret and data key id.
     TOTP_RESEAL = "totp_reseal";
+    /// The unexpired sessions of an account, newest first, with a row limit (ADR 0075 R1).
+    SESSIONS_LIST_ACCOUNT = "sessions_list_account";
+    /// The kind and expiry of one session of an account, by `session_id` (ADR 0075 R3).
+    SESSION_GET_BY_ID = "session_get_by_id";
+    /// Ends one session of an account, by `session_id` (ADR 0075 R3).
+    SESSION_DELETE_ID = "session_delete_id";
+    /// Ends one session, by token hash (ADR 0075 R2).
+    SESSION_DELETE = "session_delete";
 }
 
 /// Runs a statement on a [`rizzy_storage::Conn`] and returns the number of rows it changed:
