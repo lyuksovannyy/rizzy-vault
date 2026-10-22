@@ -28,6 +28,11 @@
 //! - **The local and server unlock keys:** the same, `rizzy-core`'s `key_for_tests` is
 //!   `cfg(test)` there.
 //! - **`E_ks` and `ACCOUNT_KEY_FORWARD`:** not built yet (CRYPTO.md, M3/M7 keystore unlock).
+//! - **The attachment key** (ADR 0054 §8 (c)): `rizzy-core` lets it out only into the
+//!   `ATTACHMENT_KEY_WRAP` plaintext and its own test build, as the private keys above. What
+//!   this crate can reach, the chunk plaintext, is searched for in every attachment request body
+//!   by `attachments::an_attachment_round_trips_byte_for_byte_and_the_op_goes_first`; the web
+//!   vault's Playwright test does the same over the requests the browser sends.
 
 use rizzy_core::opaque::PasswordInput;
 use rizzy_core::secret_key::RecoveryCode;
