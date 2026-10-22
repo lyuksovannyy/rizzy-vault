@@ -43,6 +43,8 @@ export default defineConfig(({ mode }) => {
     "src/options/index": entry("./src/options/index.html"),
     "src/inline-menu/index": entry("./src/inline-menu/index.html"),
     "src/passkey-consent/index": entry("./src/passkey-consent/index.html"),
+    // ADR 0076 §5.2: the extension-origin save dialog.
+    "src/save-dialog/index": entry("./src/save-dialog/index.html"),
   };
   if (target === "chromium") {
     input["src/background/service-worker"] = entry("./src/background/service-worker.ts");

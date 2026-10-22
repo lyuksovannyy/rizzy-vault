@@ -17,7 +17,7 @@
  * checks must not mistake for the frame's own, legitimate sibling. */
 export function isOwnOverlayElement(node: unknown): boolean {
   const el = node as { hasAttribute?: (name: string) => boolean };
-  return typeof el.hasAttribute === "function" && (el.hasAttribute("data-rizzy-inline-menu") || el.hasAttribute("data-rizzy-save-prompt"));
+  return typeof el.hasAttribute === "function" && (el.hasAttribute("data-rizzy-inline-menu") || el.hasAttribute("data-rizzy-save-prompt") || el.hasAttribute("data-rizzy-save-dialog"));
 }
 
 /** Whether every node a batch of `MutationRecord`s added or removed is one of the content

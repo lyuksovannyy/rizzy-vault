@@ -1,0 +1,13 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- ADR 0076 §1.3–§1.4 fixture: one-time-code on a 2FA step -->
+<html lang="en">
+  <head><meta charset="utf-8" /><title>one-time-code on a 2FA step</title></head>
+  <body>
+    <form id="two-factor" action="/2fa">
+      <label for="code">Authentication code</label>
+      <input id="code" name="code" type="text" autocomplete="one-time-code" inputmode="numeric" maxlength="6" />
+      <button type="submit">Verify</button>
+    </form>
+  </body>
+</html>

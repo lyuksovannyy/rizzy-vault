@@ -26,6 +26,8 @@
 // cross-origin iframes never reach it at all: the content script runs in the top frame only and
 // reads only that frame's own document (ADR 0037 §5 "no cross-origin iframe fill by default").
 
+import { DELIVERY_HINT, TOTP_HINT, TOTP_NEGATIVE_HINT, parseAutocomplete, type ParsedAutocomplete } from "../messaging/autocomplete.ts";
+
 /** What the content script observed about one `<input>`, all strings lowercased. */
 export interface InputFacts {
   /** `input.type` as the browser normalises it (`"text"` for a missing or unknown type). */
@@ -40,6 +42,12 @@ export interface InputFacts {
   readonly editable: boolean;
   /** Index of the owning `<form>` in document order, or {@link NO_FORM}. */
   readonly form: number;
+  /** The `inputmode` attribute (ADR 0076 §1.3 rule (d)); absent reads as none. */
+  readonly inputMode?: string;
+  /** `maxlength`, or absent/-1 when the page set none. */
+  readonly maxLength?: number;
+  /** `minlength`, or absent/-1 when the page set none. */
+  readonly minLength?: number;
 }
 
 /** {@link InputFacts.form} for an input outside every `<form>`. */
@@ -48,9 +56,14 @@ export const NO_FORM = -1;
 /** One detected login step. Indexes point into the `inputs` array passed to
  * {@link detectLoginStep}. */
 export type LoginStep =
-  | { readonly kind: "username_and_password"; readonly username: number; readonly password: number }
-  | { readonly kind: "username"; readonly username: number }
-  | { readonly kind: "password"; readonly password: number };
+  | { readonly kind: "username_and_password"; readonly username: number; readonly password: number; readonly totp?: number }
+  | { readonly kind: "username"; readonly username: number; readonly totp?: number }
+  | { readonly kind: "password"; readonly password: number; readonly totp?: number }
+  /** A TOTP-only step (ADR 0076 §1.2–§1.3): the 2FA page after the password. */
+  | { readonly kind: "totp"; readonly totp: number }
+  /** A `new-password` field and no current one (ADR 0076 §1.2, owner answer 5): never the
+   * target of a saved password; the inline menu offers the generator there only. */
+  | { readonly kind: "new_password"; readonly password: number };
 
 /** Hint words that make a text field look like a login identifier. */
 const IDENTIFIER_HINT = /user|login|log-in|signin|sign-in|e-?mail|identifier|account|benutzer|usuario|correo|courriel/;
@@ -92,13 +105,17 @@ export function identifierSignal(f: InputFacts): 0 | 1 | 2 | undefined {
   if (!isTextLike(f)) {
     return undefined;
   }
-  const toks = tokens(f.autocomplete);
-  if (toks.includes("one-time-code") || toks.includes("new-password") || toks.includes("current-password")) {
-    return undefined;
-  }
-  if (toks.includes("username") || toks.includes("webauthn")) {
+  // ADR 0076 §1.2: `username` or the `webauthn` flag is strong; `email`, `tel` and
+  // `tel-national` fall through to the weak rules below; every other declared field name has no
+  // role. Absent, `off` and custom tokens keep the heuristics.
+  const parsed = parseAutocomplete(f.autocomplete);
+  if ((parsed.kind === "standard" && parsed.field === "username") || parsed.webauthn) {
     return 2;
   }
+  if (parsed.kind === "standard" && !["email", "tel", "tel-national"].includes(parsed.field)) {
+    return undefined;
+  }
+  const toks = parsed.kind === "standard" ? [parsed.field] : tokens(f.autocomplete);
   if (NOT_IDENTIFIER_HINT.test(f.hints)) {
     return undefined;
   }
@@ -196,24 +213,220 @@ function identifierOnly(inputs: readonly InputFacts[], formHint: (form: number) 
  * step, never a fill into the decoy.
  */
 export function detectLoginStep(inputs: readonly InputFacts[], formHint: (form: number) => string): LoginStep | undefined {
-  const password = inputs.findIndex((f) => f.type === "password" && isFillable(f));
-  if (password !== -1) {
-    const username = pairedIdentifier(inputs, password);
-    return username === undefined ? { kind: "password", password } : { kind: "username_and_password", username, password };
+  const password = inputs.findIndex((f) => isPasswordTarget(f));
+  const step: LoginStep | undefined = (() => {
+    if (password !== -1) {
+      const username = pairedIdentifier(inputs, password);
+      return username === undefined ? { kind: "password", password } : { kind: "username_and_password", username, password };
+    }
+    const username = identifierOnly(inputs, formHint);
+    return username === undefined ? undefined : { kind: "username", username };
+  })();
+  const roles = new Set<number>();
+  if (step !== undefined && "username" in step) {
+    roles.add(step.username);
   }
-  const username = identifierOnly(inputs, formHint);
-  return username === undefined ? undefined : { kind: "username", username };
+  if (step !== undefined && "password" in step) {
+    roles.add(step.password);
+  }
+  const totp = totpTarget(inputs, formHint, roles);
+  if (step !== undefined) {
+    return totp === undefined ? step : { ...step, totp };
+  }
+  if (totp !== undefined) {
+    return { kind: "totp", totp };
+  }
+  const newPassword = inputs.findIndex(
+    (f) => f.type === "password" && isFillable(f) && isStandard(parseAutocomplete(f.autocomplete), "new-password"),
+  );
+  return newPassword === -1 ? undefined : { kind: "new_password", password: newPassword };
 }
 
-/** What a step lets the inline menu fill: `undefined` for both fields (the one-page form, the
- * same request shape as before this change), otherwise the one field kind the step has. */
-export function stepFillScope(step: LoginStep): "username" | "password" | undefined {
+/** What a step lets the inline menu fill (ADR 0076 §4.1 `only`): `undefined` for the one-page
+ * form, otherwise the one kind of field the step has. */
+export function stepFillScope(step: LoginStep): "username" | "password" | "totp" | undefined {
   switch (step.kind) {
     case "username_and_password":
       return undefined;
     case "username":
       return "username";
     case "password":
+    case "new_password":
       return "password";
+    case "totp":
+      return "totp";
   }
+}
+
+/** The fill scope of one step (ADR 0076 §4.1), as the content script sends it to the menu. */
+export interface StepScope {
+  readonly only?: "username" | "password" | "totp";
+  readonly totp?: true;
+  readonly custom?: readonly string[];
+  readonly usernameToken?: string;
+  readonly passwordToken?: string;
+}
+
+/**
+ * Whether the content script opens the inline menu for a step (ADR 0076 §1.3 rule (g), §4.1):
+ * a TOTP-only step only when some candidate for this page can produce a code (`hasTotp`), the
+ * main defence against over-detection. Every other step opens it as before (the generator needs
+ * no candidate).
+ */
+export function menuAllowed(kind: LoginStep["kind"], candidates: readonly { readonly hasTotp: boolean }[]): boolean {
+  return kind !== "totp" || candidates.some((c) => c.hasTotp);
+}
+
+/** The most custom tokens one scope carries (ADR 0076 §4.1). */
+export const MAX_SCOPE_TOKENS = 16;
+
+/** The custom token `f` carries, if any (ADR 0076 §1.1 rule 5). */
+export function customTokenOf(f: InputFacts): string | undefined {
+  const parsed = parseAutocomplete(f.autocomplete);
+  return parsed.kind === "custom" ? parsed.token : undefined;
+}
+
+/** The forms (indexes, or {@link NO_FORM}) a step's fields belong to. */
+function stepForms(inputs: readonly InputFacts[], step: LoginStep): Set<number> {
+  const forms = new Set<number>();
+  for (const i of [
+    "username" in step ? step.username : undefined,
+    "password" in step ? step.password : undefined,
+    "totp" in step ? step.totp : undefined,
+  ]) {
+    const f = i === undefined ? undefined : inputs[i];
+    if (f !== undefined) {
+      forms.add(f.form);
+    }
+  }
+  return forms;
+}
+
+/**
+ * The step's fill scope (ADR 0076 §4.1): `only`, whether it also has a TOTP target, and the
+ * distinct custom tokens on the visible, editable fields of the step's form(s), in document
+ * order, at most 16, with the tokens the username and password targets carry. A
+ * `new-password` step has no scope beyond `only` (the generator fills it, never a saved value).
+ */
+export function stepScope(inputs: readonly InputFacts[], step: LoginStep): StepScope {
+  const only = stepFillScope(step);
+  if (step.kind === "new_password") {
+    return { only: "password" };
+  }
+  const forms = stepForms(inputs, step);
+  const custom: string[] = [];
+  for (const f of inputs) {
+    if (custom.length >= MAX_SCOPE_TOKENS) {
+      break;
+    }
+    if (!forms.has(f.form) || !isFillable(f)) {
+      continue;
+    }
+    const token = customTokenOf(f);
+    if (token !== undefined && !custom.includes(token)) {
+      custom.push(token);
+    }
+  }
+  const tokenAt = (i: number | undefined) => {
+    const f = i === undefined ? undefined : inputs[i];
+    const token = f === undefined ? undefined : customTokenOf(f);
+    return token !== undefined && custom.includes(token) ? token : undefined;
+  };
+  const usernameToken = tokenAt("username" in step ? step.username : undefined);
+  const passwordToken = tokenAt("password" in step ? step.password : undefined);
+  return {
+    ...(only !== undefined ? { only } : {}),
+    ...(step.kind !== "totp" && "totp" in step && step.totp !== undefined ? { totp: true as const } : {}),
+    ...(custom.length > 0 ? { custom } : {}),
+    ...(usernameToken !== undefined ? { usernameToken } : {}),
+    ...(passwordToken !== undefined ? { passwordToken } : {}),
+  };
+}
+
+function isStandard(parsed: ParsedAutocomplete, field: string): boolean {
+  return parsed.kind === "standard" && parsed.field === field;
+}
+
+/**
+ * Whether `f` may be the step's password target (ADR 0076 §1.2): a visible, editable
+ * `type=password` input whose attribute declares no field name, only `off` or a custom token,
+ * or `current-password`. `new-password` is never the target of a saved password, a
+ * password-type `one-time-code` is the TOTP target, and every other declared name has no role.
+ */
+export function isPasswordTarget(f: InputFacts): boolean {
+  if (f.type !== "password" || !isFillable(f)) {
+    return false;
+  }
+  const parsed = parseAutocomplete(f.autocomplete);
+  return parsed.kind !== "standard" || parsed.field === "current-password";
+}
+
+/** ADR 0076 §1.3 rule (d): numeric-shaped, and a `maxlength` if set is 6–8. */
+function numericShaped(f: InputFacts): boolean {
+  const max = f.maxLength ?? -1;
+  const min = f.minLength ?? -1;
+  if (max >= 0 && (max < 6 || max > 8)) {
+    return false;
+  }
+  const lengthSays = (max >= 6 && max <= 8) || (min >= 6 && min <= 8);
+  return f.inputMode === "numeric" || f.type === "tel" || f.type === "number" || lengthSays;
+}
+
+/** Whether `form` holds a visible `new-password` field (§1.3 rule (f)). */
+function hasVisibleNewPassword(inputs: readonly InputFacts[], form: number): boolean {
+  return inputs.some((g) => g.form === form && g.visible && isStandard(parseAutocomplete(g.autocomplete), "new-password"));
+}
+
+/**
+ * The page's TOTP target (ADR 0076 §1.2–§1.4), or `undefined`. Either a `one-time-code` field
+ * of type text, tel, number or password whose own hints carry no delivery word (SMS, phone,
+ * e-mail, …), or — only where the attribute declares no field name (absent or `off`) — a field
+ * that passes every rule of the strict heuristic:
+ * - (a) type text, tel or number; visible and editable; not the step's username or password;
+ * - (b) its hints say "authenticator code" (`code` alone is not enough);
+ * - (c) no negative hint (SMS, card, PIN, postal, captcha, coupon, backup, …): a negative wins;
+ * - (d) numeric-shaped, with a `maxlength` of 6–8 if any;
+ * - (e) the only such field of its form (so split-digit boxes never qualify);
+ * - (f) its form does not look like a sign-up, checkout or contact form, and has no visible
+ *   `new-password` field.
+ * Rule (g), "a candidate can produce a code", is the menu's (`hasTotp`). A field declared with
+ * any other WHATWG name (`cc-csc`, `postal-code`, `tel`, …) or a custom token is never a TOTP
+ * target, however it looks. Of several qualifying forms, the first in document order.
+ */
+export function totpTarget(inputs: readonly InputFacts[], formHint: (form: number) => string, roles: ReadonlySet<number>): number | undefined {
+  const byForm = new Map<number, number[]>();
+  for (let i = 0; i < inputs.length; i += 1) {
+    const f = inputs[i];
+    if (f === undefined || roles.has(i) || !isFillable(f)) {
+      continue;
+    }
+    const parsed = parseAutocomplete(f.autocomplete);
+    let qualifies: boolean;
+    if (isStandard(parsed, "one-time-code")) {
+      const max = f.maxLength ?? -1;
+      qualifies =
+        ["text", "tel", "number", "password"].includes(f.type) && !DELIVERY_HINT.test(f.hints) && !(max >= 0 && max < 6);
+    } else if (parsed.kind === "none" && !parsed.webauthn) {
+      qualifies =
+        ["text", "tel", "number"].includes(f.type) && TOTP_HINT.test(f.hints) && !TOTP_NEGATIVE_HINT.test(f.hints) && numericShaped(f);
+    } else if (parsed.kind === "off") {
+      qualifies =
+        ["text", "tel", "number"].includes(f.type) && TOTP_HINT.test(f.hints) && !TOTP_NEGATIVE_HINT.test(f.hints) && numericShaped(f);
+    } else {
+      qualifies = false;
+    }
+    if (qualifies) {
+      byForm.set(f.form, [...(byForm.get(f.form) ?? []), i]);
+    }
+  }
+  for (const [form, found] of byForm) {
+    if (found.length !== 1) {
+      continue; // (e): split-digit boxes, or two code fields: never offered.
+    }
+    if (NOT_LOGIN_FORM_HINT.test(formHint(form)) || hasVisibleNewPassword(inputs, form)) {
+      continue; // (f)
+    }
+    return found[0];
+  }
+  return undefined;
 }

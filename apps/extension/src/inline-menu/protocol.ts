@@ -45,7 +45,7 @@
 //     `inline_menu_fill_chosen` message that would have to follow only ever carries the real
 //     `itemId` the real iframe's own click handler holds — a forged show message cannot make
 //     the iframe send that for an id it never really rendered a trusted click for.
-import { MAX_CANDIDATES, MAX_FIELD_VALUE_LEN, MAX_HOST_LEN, MAX_TITLE_LEN, isInstanceToken, type FillScope } from "../messaging/contract.ts";
+import { MAX_CANDIDATES, MAX_FIELD_VALUE_LEN, MAX_HOST_LEN, MAX_TITLE_LEN, isFillOnly, isFillScope, isInstanceToken, type FillOnly, type FillScope } from "../messaging/contract.ts";
 
 export const INLINE_MENU_SHOW = "rizzy-inline-menu-show";
 export const INLINE_MENU_PICK = "rizzy-inline-menu-pick";
@@ -64,6 +64,8 @@ export interface InlineMenuCandidate {
    * `rizzy-match`, never by this module: render it verbatim, never decoded to Unicode, so a
    * mixed-script host keeps showing its punycode `xn--` form. */
   readonly savedHost: string;
+  /** ADR 0076 §4.1: the item can produce a TOTP code. */
+  readonly hasTotp?: boolean;
 }
 
 export interface InlineMenuShowMessage {
@@ -91,7 +93,11 @@ export interface InlineMenuShowMessage {
    * ever narrow what the long-lived context sends; a page script that forges this message can
    * at most widen it back to the one-page form's both-values push, which the content script
    * still writes only into the visible fields of the step it detected. */
-  readonly only?: FillScope;
+  readonly only?: FillOnly;
+  /** The step's whole fill scope (ADR 0076 §4.1): `only`, a TOTP target, the custom tokens.
+   * The iframe sends it in its offer request; the long-lived context only ever narrows with it,
+   * and discloses in the menu, before the click, everything a click on a row would fill. */
+  readonly scope?: FillScope;
 }
 
 export interface InlineMenuPickMessage {
@@ -113,7 +119,8 @@ function isCandidate(value: unknown): value is InlineMenuCandidate {
     isBoundedString(v["title"], MAX_TITLE_LEN) &&
     isBoundedString(v["username"], MAX_FIELD_VALUE_LEN) &&
     typeof v["needsWarning"] === "boolean" &&
-    isBoundedString(v["savedHost"], MAX_HOST_LEN)
+    isBoundedString(v["savedHost"], MAX_HOST_LEN) &&
+    (v["hasTotp"] === undefined || typeof v["hasTotp"] === "boolean")
   );
 }
 
@@ -127,7 +134,8 @@ export function isInlineMenuShowMessage(value: unknown): value is InlineMenuShow
     !isBoundedString(v["pageOrigin"], MAX_FIELD_VALUE_LEN) ||
     !isInstanceToken(v["instanceToken"]) ||
     !isBoundedString(v["pageHost"], MAX_HOST_LEN) ||
-    !(v["only"] === undefined || v["only"] === "username" || v["only"] === "password")
+    !(v["only"] === undefined || isFillOnly(v["only"])) ||
+    !(v["scope"] === undefined || isFillScope(v["scope"]))
   ) {
     return false;
   }

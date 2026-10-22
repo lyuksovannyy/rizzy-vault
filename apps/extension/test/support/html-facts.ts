@@ -201,10 +201,19 @@ export function factsFromHtml(html: string): FixtureFacts {
       visible: !p.hidden,
       editable: !a.has("readonly") && !a.has("disabled"),
       form: p.form,
+      // As `HTMLInputElement.maxLength`/`minLength` read them: -1 when absent or not a number.
+      inputMode: (a.get("inputmode") ?? "").toLowerCase(),
+      maxLength: lengthAttr(a.get("maxlength")),
+      minLength: lengthAttr(a.get("minlength")),
     });
     ids.push(id);
   }
   const formHint = (form: number): string =>
     (form === NO_FORM ? noFormHints.join(" ") : (formHints[form] ?? "")).toLowerCase();
   return { inputs, ids, formHint };
+}
+
+/** A `maxlength`/`minlength` attribute as the DOM reads it: a non-negative integer, else -1. */
+function lengthAttr(value: string | undefined): number {
+  return value !== undefined && /^\d+$/.test(value.trim()) ? Number(value.trim()) : -1;
 }
