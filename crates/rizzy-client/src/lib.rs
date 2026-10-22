@@ -47,6 +47,7 @@
 //! | [`rotation`] | CRYPTO.md §11.6, §11.8 steps 1–3; ADR 0025 §2 | Standard and full key rotation with an optional revocation: new keys, the auth half, the vault half, the retry rule |
 //! | [`credentials`] | CRYPTO.md §11.5, §11.3 step 5 | Master password and Secret Key change, with or without a rotation; following a change made elsewhere |
 //! | [`two_factor`] | CRYPTO.md §5.10, §11.15 | Server-side 2FA enrolment (the otpauth URI) and removal requests |
+//! | [`breach`] | CRYPTO.md §11.16; ADR 0053 | The breach check: the prefix request, the constant-time verdict |
 //! | [`session`] | CRYPTO.md §5.10; ADR 0012 §7 "A device enrolled after the backup" | Device authentication (also certificate-carrying, after a restore) and request signing |
 //! | [`sessions`] | ADR 0075 §5, §6, §8, §9 | Listing and ending sessions: the rows, which may be ended, sign-out, the ended-session rule |
 //! | [`attachments`] | ADR 0054 §1–§4, §7; INV-78, INV-79 | Encrypted attachments: the item op first, the sealed upload, the download verified against the item's own size and assembled only complete, deletion |
@@ -106,6 +107,7 @@
 pub mod account;
 pub mod attachments;
 pub mod autofill;
+pub mod breach;
 pub mod conflicts;
 pub mod credentials;
 pub mod device;

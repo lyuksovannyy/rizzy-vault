@@ -156,6 +156,16 @@ pub mod paths {
     /// Delete an attachment and release its quota (ADR 0054 §7).
     pub const ATTACHMENTS_DELETE: &str = "/api/v1/attachments/delete";
 
+    /// The breach-check range query of the `icons` role ([ADR 0053]; [`crate::breach`]). Not
+    /// in [`ALL`]: the `api` role never serves it, the `icons` role's own listener does
+    /// (ADR 0010 §1–§2), so a reverse proxy routes `/api/v1/icons/` to that process.
+    ///
+    /// [ADR 0053]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0053-hibp-breach-check-egress.md
+    pub const ICONS_BREACH_RANGE: &str = "/api/v1/icons/breach-range";
+
+    /// The prefix of every path the `icons` role serves.
+    pub const ICONS_PREFIX: &str = "/api/v1/icons/";
+
     /// Every `/api/v1` path, in the order above.
     pub const ALL: [&str; 36] = [
         REGISTER_START,
@@ -212,6 +222,17 @@ mod tests {
         for name in [REQUEST_COUNTER_HEADER, REQUEST_SIGNATURE_HEADER] {
             assert!(name.starts_with("Rizzy-"), "{name}");
         }
+    }
+
+    #[test]
+    fn icons_paths_stay_apart_from_the_api_role() {
+        assert!(paths::ICONS_BREACH_RANGE.starts_with(paths::ICONS_PREFIX));
+        assert!(paths::ICONS_PREFIX.starts_with(API_V1_PREFIX));
+        assert!(
+            paths::ALL
+                .iter()
+                .all(|path| !path.starts_with(paths::ICONS_PREFIX))
+        );
     }
 
     #[test]

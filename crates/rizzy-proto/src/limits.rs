@@ -143,6 +143,19 @@ pub const MAX_ITEM_KEY_WRAPS: usize = 65_536;
 /// [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md
 pub const MAX_SESSIONS_LISTED: usize = 256;
 
+/// Byte limit (this crate's choice): one upstream breach-check range response ([ADR 0053];
+/// CRYPTO.md §11.16), relayed as one JSON string. A range line is at most 58 bytes (35 suffix
+/// characters, a colon, a count of at most 20 digits, CRLF), and the upstream's padded answers
+/// hold 800 to 1,000 lines plus the real ones; 512 KiB leaves a wide margin above the about
+/// 50 KB answers seen in practice (U: the upstream publishes no maximum).
+///
+/// [ADR 0053]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0053-hibp-breach-check-egress.md
+pub const MAX_BREACH_RANGE_LEN: usize = 512 * 1024;
+
+/// Count limit (this crate's choice): entries in one breach-check range response; 8,192 lines
+/// of the longest form fill about [`MAX_BREACH_RANGE_LEN`].
+pub const MAX_BREACH_RANGE_ENTRIES: usize = 8192;
+
 /// Count limit (this crate's choice): API versions and minimum client versions in
 /// `GET /api/meta` (ADR 0002 point 3).
 pub const MAX_META_ENTRIES: usize = 32;
