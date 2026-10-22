@@ -19,6 +19,11 @@
 //! - a create of each M1 type (Login, Secure Note, Card, Identity, and the Vault-settings
 //!   system type), the Login create writing `login.username`, `login.password` and
 //!   `login.totp` to pin the §4 key order;
+//! - a create of each M3 type of ADR 0055 (SSH key, API credential, Software license, Wi-Fi,
+//!   Bank account; ADR 0055 §5, CRYPTO.md §15 item 1 "added in the milestone that ships them"),
+//!   each writing every key of its type, so every concealed key of ADR 0055 §4 is in one, and an
+//!   SSH-key create without `ssh.port` (absent means 22, a display default that is never
+//!   stored: the vector pins that no such write is made);
 //! - a list edit (a custom field and a tag added, a URI removed by writing Cleared to its
 //!   attributes);
 //! - trash, restore and purge;
@@ -206,6 +211,95 @@ fn op_vectors() -> Vec<OpVector> {
                 w("vault.name", text("Personal")),
             ],
             hex: HEX_CREATE_SETTINGS,
+        },
+        OpVector {
+            name: "create SSH key",
+            lifecycle: Lifecycle::Active,
+            writes: vec![
+                w("item.name", text("Deploy key")),
+                w("item.type", enumv(0x0005)),
+                w("ssh.host", text("git.example.com")),
+                w("ssh.passphrase", text("hunter2 hunter2")),
+                w("ssh.port", text("2222")),
+                w(
+                    "ssh.private_key",
+                    text(
+                        "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n",
+                    ),
+                ),
+                w(
+                    "ssh.public_key",
+                    text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample alice@example.com"),
+                ),
+                w("ssh.username", text("git")),
+            ],
+            hex: HEX_CREATE_SSH_KEY,
+        },
+        OpVector {
+            name: "create SSH key, ssh.port absent",
+            lifecycle: Lifecycle::Active,
+            writes: vec![
+                w("item.name", text("Router")),
+                w("item.type", enumv(0x0005)),
+                w("ssh.host", text("192.0.2.1")),
+                w("ssh.username", text("admin")),
+            ],
+            hex: HEX_CREATE_SSH_KEY_NO_PORT,
+        },
+        OpVector {
+            name: "create API credential",
+            lifecycle: Lifecycle::Active,
+            writes: vec![
+                w("api.endpoint", text("https://api.example.com/v1")),
+                w("api.key", text("AKIAEXAMPLE")),
+                w("api.name", text("Example API")),
+                w(
+                    "api.secret",
+                    text("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
+                ),
+                w("item.name", text("CI token")),
+                w("item.type", enumv(0x0006)),
+            ],
+            hex: HEX_CREATE_API_CREDENTIAL,
+        },
+        OpVector {
+            name: "create Software license",
+            lifecycle: Lifecycle::Active,
+            writes: vec![
+                w("item.name", text("Editor")),
+                w("item.type", enumv(0x0007)),
+                w("license.expires", text("2027-12-31")),
+                w("license.key", text("ABCD-EFGH-IJKL-MNOP")),
+                w("license.name", text("Example Editor")),
+                w("license.seats", text("5")),
+            ],
+            hex: HEX_CREATE_SOFTWARE_LICENSE,
+        },
+        OpVector {
+            name: "create Wi-Fi",
+            lifecycle: Lifecycle::Active,
+            writes: vec![
+                w("item.name", text("Home")),
+                w("item.type", enumv(0x0008)),
+                w("wifi.password", text("correct horse")),
+                w("wifi.security_type", text("WPA2")),
+                w("wifi.ssid", text("home-net")),
+            ],
+            hex: HEX_CREATE_WIFI,
+        },
+        OpVector {
+            name: "create Bank account",
+            lifecycle: Lifecycle::Active,
+            writes: vec![
+                w("bank.account_holder", text("Alice Example")),
+                w("bank.account_number", text("DE89370400440532013000")),
+                w("bank.account_type", text("Checking")),
+                w("bank.bank_name", text("Example Bank")),
+                w("bank.routing_number", text("COBADEFFXXX")),
+                w("item.name", text("Salary")),
+                w("item.type", enumv(0x0009)),
+            ],
+            hex: HEX_CREATE_BANK_ACCOUNT,
         },
         OpVector {
             name: "list edit",
@@ -475,6 +569,65 @@ fn op_vectors_are_byte_exact() {
         let committed = hex(v.hex);
         assert_eq!(parse_op(&committed), Ok(record), "{}", v.name);
     }
+}
+
+/// ADR 0055 §5: the M3 create vectors are creates the schema accepts for their own type, each
+/// concealed key of §4 is written by one of them, and the SSH-key create without `ssh.port`
+/// displays the default port.
+#[test]
+fn the_m3_create_vectors_fit_the_schema() {
+    use rizzy_core::item::key::FieldKeyRef;
+    use rizzy_core::item::schema::{
+        self, Concealment, KeyClass, WriteMode, WriteSource, check_create, classify,
+    };
+    use rizzy_core::item::types::ItemType;
+
+    let vectors = op_vectors();
+    let mut concealed: Vec<&str> = Vec::new();
+    for (name, item_type) in [
+        ("create SSH key", ItemType::SSH_KEY),
+        ("create SSH key, ssh.port absent", ItemType::SSH_KEY),
+        ("create API credential", ItemType::API_CREDENTIAL),
+        ("create Software license", ItemType::SOFTWARE_LICENSE),
+        ("create Wi-Fi", ItemType::WIFI),
+        ("create Bank account", ItemType::BANK_ACCOUNT),
+    ] {
+        let v = vectors.iter().find(|v| v.name == name).unwrap();
+        let writes = v
+            .writes
+            .iter()
+            .map(|(k, val)| (WriteSource::Entered, k.as_bytes(), val.as_slice()));
+        assert_eq!(
+            check_create(item_type, WriteMode::Create, writes),
+            Ok(()),
+            "{name}"
+        );
+        for (k, _) in &v.writes {
+            if let KeyClass::Known(spec) = classify(FieldKeyRef::parse(k.as_bytes()).unwrap())
+                && spec.concealment == Concealment::Concealed
+            {
+                concealed.push(k);
+            }
+        }
+        if name.ends_with("absent") {
+            assert!(v.writes.iter().all(|(k, _)| k != schema::SSH_PORT));
+            assert_eq!(schema::ssh_port(None), Some("22"));
+        }
+    }
+    concealed.sort_unstable();
+    assert_eq!(
+        concealed,
+        [
+            "api.key",
+            "api.secret",
+            "bank.account_number",
+            "bank.routing_number",
+            "license.key",
+            "ssh.passphrase",
+            "ssh.private_key",
+            "wifi.password",
+        ]
+    );
 }
 
 #[test]
@@ -1065,6 +1218,50 @@ const HEX_CREATE_IDENTITY: &str = "\
 const HEX_CREATE_SETTINGS: &str = "\
     01010003000000096974656d2e747970650000000305f0010000000a7661756c742e69636f6e000000070173\
     6869656c640000000a7661756c742e6e616d650000000901506572736f6e616c";
+/// "create SSH key" (ADR 0055 §5).
+const HEX_CREATE_SSH_KEY: &str = "\
+    01010008000000096974656d2e6e616d650000000b014465706c6f79206b6579000000096974656d2e747970\
+    6500000003050005000000087373682e686f737400000010016769742e6578616d706c652e636f6d0000000e\
+    7373682e70617373706872617365000000100168756e746572322068756e74657232000000087373682e706f\
+    72740000000501323232320000000f7373682e707269766174655f6b657900000060012d2d2d2d2d42454749\
+    4e204f50454e5353482050524956415445204b45592d2d2d2d2d0a6233426c626e4e7a614331725a586b7464\
+    6a4541414141410a2d2d2d2d2d454e44204f50454e5353482050524956415445204b45592d2d2d2d2d0a0000\
+    000e7373682e7075626c69635f6b65790000003f017373682d65643235353139204141414143334e7a614331\
+    6c5a4449314e54453541414141494578616d706c6520616c696365406578616d706c652e636f6d0000000c73\
+    73682e757365726e616d650000000401676974";
+/// "create SSH key, ssh.port absent" (ADR 0055 §5).
+const HEX_CREATE_SSH_KEY_NO_PORT: &str = "\
+    01010004000000096974656d2e6e616d650000000701526f75746572000000096974656d2e74797065000000\
+    03050005000000087373682e686f73740000000a013139322e302e322e310000000c7373682e757365726e61\
+    6d65000000060161646d696e";
+/// "create API credential" (ADR 0055 §5).
+const HEX_CREATE_API_CREDENTIAL: &str = "\
+    010100060000000c6170692e656e64706f696e740000001b0168747470733a2f2f6170692e6578616d706c65\
+    2e636f6d2f7631000000076170692e6b65790000000c01414b49414558414d504c45000000086170692e6e61\
+    6d650000000c014578616d706c65204150490000000a6170692e7365637265740000002901774a616c725855\
+    746e46454d492f4b374d44454e472f62507852666943594558414d504c454b4559000000096974656d2e6e61\
+    6d650000000901434920746f6b656e000000096974656d2e7479706500000003050006";
+/// "create Software license" (ADR 0055 §5).
+const HEX_CREATE_SOFTWARE_LICENSE: &str = "\
+    01010006000000096974656d2e6e616d650000000701456469746f72000000096974656d2e74797065000000\
+    030500070000000f6c6963656e73652e657870697265730000000b01323032372d31322d33310000000b6c69\
+    63656e73652e6b65790000001401414243442d454647482d494a4b4c2d4d4e4f500000000c6c6963656e7365\
+    2e6e616d650000000f014578616d706c6520456469746f720000000d6c6963656e73652e7365617473000000\
+    020135";
+/// "create Wi-Fi" (ADR 0055 §5).
+const HEX_CREATE_WIFI: &str = "\
+    01010005000000096974656d2e6e616d650000000501486f6d65000000096974656d2e747970650000000305\
+    00080000000d776966692e70617373776f72640000000e01636f727265637420686f72736500000012776966\
+    692e73656375726974795f7479706500000005015750413200000009776966692e737369640000000901686f\
+    6d652d6e6574";
+/// "create Bank account" (ADR 0055 §5).
+const HEX_CREATE_BANK_ACCOUNT: &str = "\
+    010100070000001362616e6b2e6163636f756e745f686f6c6465720000000e01416c696365204578616d706c\
+    650000001362616e6b2e6163636f756e745f6e756d6265720000001701444538393337303430303434303533\
+    323031333030300000001162616e6b2e6163636f756e745f747970650000000901436865636b696e67000000\
+    0e62616e6b2e62616e6b5f6e616d650000000d014578616d706c652042616e6b0000001362616e6b2e726f75\
+    74696e675f6e756d6265720000000c01434f424144454646585858000000096974656d2e6e616d6500000007\
+    0153616c617279000000096974656d2e7479706500000003050009";
 /// "list edit".
 const HEX_LIST_EDIT: &str = "\
     010100070000002b6669656c642f306630653064306330623061303930383037303630353034303330323031\
