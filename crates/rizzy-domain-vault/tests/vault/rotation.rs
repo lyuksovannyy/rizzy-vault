@@ -265,7 +265,10 @@ fn a_rotation_rewrites_the_wrap_set_and_raises_the_epoch() {
             dropped: vec![locator(2)],
         };
         let key_id = keys.account_key_id();
+        let carried = env.counted().await;
         apply(&env, &half.upload(), 1, key_id).await.unwrap();
+        // The cleared record wraps are credited: the counter stays the rows' sum (ADR 0048 §2).
+        assert!(env.counted().await < carried);
 
         let (grant, pages) = observe(&env).await;
         assert_eq!(grant, half.grant);

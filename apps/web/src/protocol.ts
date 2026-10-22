@@ -31,6 +31,7 @@ import type {
   PassphraseOptions,
   PasswordOptions,
   SettingsChange,
+  StorageUsage,
   TotpCode,
   TwoFactorSetup,
 } from "@rizzy-vault/core";
@@ -42,6 +43,8 @@ export interface SessionInfo {
   readonly deviceId: string;
   readonly readOnly: boolean;
   readonly unsentChanges: number;
+  /** The storage usage the server last reported (ADR 0048 §5); unverified, for display. */
+  readonly storageUsage?: StorageUsage | undefined;
 }
 
 /** The Emergency Kit as it crosses to the UI: bytes the UI zeroes once rendered. */

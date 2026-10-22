@@ -4,7 +4,7 @@
 // list kept to what this server holds today (THREAT_MODEL §3.4 rows for unbuilt roles left out).
 import { describe, expect, it } from "vitest";
 
-import { RETENTION, STORED, countRows } from "../src/transparency.ts";
+import { RETENTION, STORED, countRows, formatBytes, usageText } from "../src/transparency.ts";
 
 describe("countRows", () => {
   it("lists items, trashed items and devices, in that order", () => {
@@ -13,6 +13,29 @@ describe("countRows", () => {
       { label: "Items in the Trash", value: 1 },
       { label: "Enrolled devices, active or revoked", value: 0 },
     ]);
+  });
+});
+
+describe("usage (ADR 0048 §5)", () => {
+  it("formats bytes in binary units", () => {
+    expect(formatBytes(0)).toBe("0 bytes");
+    expect(formatBytes(1023)).toBe("1023 bytes");
+    expect(formatBytes(1024)).toBe("1.0 KiB");
+    expect(formatBytes(1536 * 1024)).toBe("1.5 MiB");
+    expect(formatBytes(5 * 1024 ** 3)).toBe("5.0 GiB");
+    expect(formatBytes(-5)).toBe("0 bytes");
+    expect(formatBytes(Number.NaN)).toBe("0 bytes");
+  });
+
+  it("states the used bytes, the quota and a percentage that is not capped", () => {
+    expect(usageText({ bytesUsed: 1536 * 1024, quotaBytes: 5 * 1024 ** 3 })).toBe("1.5 MiB of 5.0 GiB (0%)");
+    expect(usageText({ bytesUsed: 128 * 1024 ** 2, quotaBytes: 256 * 1024 ** 2 })).toBe(
+      "128.0 MiB of 256.0 MiB (50%)",
+    );
+    // The headroom of one upload can take an account past its quota (ADR 0048 §3).
+    expect(usageText({ bytesUsed: 300 * 1024 ** 2, quotaBytes: 256 * 1024 ** 2 })).toBe(
+      "300.0 MiB of 256.0 MiB (117%)",
+    );
   });
 });
 

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rizzy_storage::tables::TABLES;
-use rizzy_storage::{Dump, TableDump, Value, schema_version};
+use rizzy_storage::{Dump, TableDump, Value, on_engine, schema_version};
 
 /// Runs `f` to completion on a current-thread tokio runtime.
 #[expect(
@@ -286,6 +286,7 @@ pub(crate) fn fixture() -> Dump {
             "vault_device_cursors",
             vec![vec![v1(), d1(), blob(33, 26), int(34)]],
         ),
+        ("storage_account_usage", vec![vec![a1(), int(1_234), int(35)]]),
     ];
     // Keep the fixture in TABLES order, and make sure it covers every table.
     let tables: Vec<TableDump> = TABLES
@@ -328,4 +329,70 @@ pub(crate) fn fixture_after_restore() -> Dump {
         .unwrap();
     vaults.rows[0][3] = int(6);
     d
+}
+
+/// The per-account counter of ADR 0048 §3–§4, on either engine. Needs `fixture()` restored:
+/// `ACCOUNT_1` has a row of 1 234 bytes, `ACCOUNT_2` none.
+#[expect(
+    clippy::unwrap_used,
+    reason = "a test helper: a failure fails the test, which CLAUDE.md allows in test code"
+)]
+pub(crate) async fn exercise_quota(db: &rizzy_storage::Database) {
+    use rizzy_storage::lock_account;
+    use rizzy_storage::quota::{Drift, accounts, adjust, bytes_used, reconcile};
+    let (a1, a2) = (id(ACCOUNT_1), id(ACCOUNT_2));
+    let mut r = db.begin_read().await.unwrap();
+    assert_eq!(bytes_used(r.conn(), &a1).await.unwrap(), 1_234);
+    assert_eq!(bytes_used(r.conn(), &a2).await.unwrap(), 0, "no row reads as 0");
+    assert_eq!(accounts(r.conn()).await.unwrap(), vec![a1]);
+    r.finish().await.unwrap();
+
+    let mut w = db.begin_write().await.unwrap();
+    lock_account(&mut w, &a1).await.unwrap();
+    assert_eq!(adjust(&mut w, &a1, 766, 40).await.unwrap(), 2_000);
+    assert_eq!(adjust(&mut w, &a1, -500, 41).await.unwrap(), 1_500);
+    // A credit larger than the value stops at 0 (drift; the next pass corrects it).
+    assert_eq!(adjust(&mut w, &a1, -9_999, 42).await.unwrap(), 0);
+    lock_account(&mut w, &a2).await.unwrap();
+    // The upsert: an account with no row starts from 0.
+    assert_eq!(adjust(&mut w, &a2, 10, 43).await.unwrap(), 10);
+    w.commit().await.unwrap();
+
+    let mut w = db.begin_write().await.unwrap();
+    lock_account(&mut w, &a1).await.unwrap();
+    assert_eq!(
+        reconcile(&mut w, &a1, 700, false, 44).await.unwrap(),
+        Some(Drift { was: 0, now: 700 })
+    );
+    assert_eq!(reconcile(&mut w, &a1, 700, false, 45).await.unwrap(), None);
+    w.commit().await.unwrap();
+    let mut r = db.begin_read().await.unwrap();
+    assert_eq!(bytes_used(r.conn(), &a1).await.unwrap(), 700);
+    assert_eq!(bytes_used(r.conn(), &a2).await.unwrap(), 10);
+    assert_eq!(accounts(r.conn()).await.unwrap(), vec![a1, a2]);
+    r.finish().await.unwrap();
+
+    // Seeding writes a row of 0 for an account without one; without `seed`, 0 writes nothing.
+    let mut w = db.begin_write().await.unwrap();
+    on_engine!(w.conn(), |c| sqlx::query(
+        "DELETE FROM storage_account_usage WHERE account_id = $1"
+    )
+    .bind(&a2[..])
+    .execute(&mut *c)
+    .await
+    .unwrap()
+    .rows_affected());
+    lock_account(&mut w, &a2).await.unwrap();
+    assert_eq!(reconcile(&mut w, &a2, 0, false, 46).await.unwrap(), None);
+    w.commit().await.unwrap();
+    let mut r = db.begin_read().await.unwrap();
+    assert_eq!(accounts(r.conn()).await.unwrap(), vec![a1]);
+    r.finish().await.unwrap();
+    let mut w = db.begin_write().await.unwrap();
+    lock_account(&mut w, &a2).await.unwrap();
+    assert_eq!(reconcile(&mut w, &a2, 0, true, 47).await.unwrap(), None);
+    w.commit().await.unwrap();
+    let mut r = db.begin_read().await.unwrap();
+    assert_eq!(accounts(r.conn()).await.unwrap(), vec![a1, a2]);
+    r.finish().await.unwrap();
 }

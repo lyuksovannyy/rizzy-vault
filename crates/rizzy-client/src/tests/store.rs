@@ -1150,6 +1150,58 @@ fn a_rotation_is_persisted_and_followed() {
     assert_crash_safe(&b.cache.history, &[&old_unlocked, &b.unlocked]);
 }
 
+/// ADR 0048 §3: an op refused `quota_exceeded` is reported to the host, changes no row and stays
+/// unacknowledged, so the next upload sends the same bytes again (after the operator raised the
+/// quota, the server stores them).
+#[test]
+fn a_quota_refusal_keeps_the_op_and_resends_it() {
+    let mut rng = ChaCha20Rng::seed_from_u64(81);
+    let mut server = Server::new(82);
+    let (mut a, _sk, _code) = Dev::signed_up(&mut server, &mut rng);
+    a.fetch(&server);
+    a.create(&mut rng, "over quota");
+    let up = a
+        .vault
+        .upload_request(&mut rng, &a.unlocked)
+        .unwrap()
+        .unwrap();
+    a.flush();
+    let sent_row = a
+        .cache
+        .rows
+        .ops
+        .iter()
+        .find(|o| o.own == own::SENT)
+        .unwrap()
+        .clone();
+    let refused = UploadResponse {
+        restore_generation: Fixed::from_bytes(server.generation),
+        results: List::new(
+            up.records
+                .as_slice()
+                .iter()
+                .map(|_| UploadResult::Rejected {
+                    error: ErrorCode::QuotaExceeded,
+                })
+                .collect(),
+        )
+        .unwrap(),
+    };
+    let outcome = a.vault.apply_upload_response(&refused).unwrap();
+    a.flush();
+    assert_eq!(outcome.rejected, vec![ErrorCode::QuotaExceeded; up.records.len()]);
+    assert!(!outcome.own_conflict);
+    let after = a.cache.rows.ops.iter().find(|o| o.own == own::SENT).unwrap();
+    assert_eq!(*after, sent_row, "a quota refusal changes no row");
+    assert_eq!(a.vault.unacknowledged().0, 1);
+    let again = a
+        .vault
+        .upload_request(&mut rng, &a.unlocked)
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.records.as_slice()[0], up.records.as_slice()[0]);
+}
+
 /// ADR 0026 §4 step 6: a stale answer changes no row; the re-issue replaces the row under the
 /// same `device_seq` in a transaction committed before the new bytes are sent; a crash before
 /// it resends the old bytes. And §4 step 7 with the owner's decision on open question 5: a

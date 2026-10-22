@@ -60,6 +60,7 @@ use rizzy_sync::dot::Dot;
 use crate::authors::DeviceDirectory;
 use crate::error::VaultError;
 use crate::repo::{self, FetchedOp, StoredRecord};
+use crate::usage::STATEMENT_FRAME;
 use crate::{VaultDomain, restore_generation};
 
 /// The most ops in one page: half of [`MAX_RECORDS`], so that the page's covers fit the other
@@ -180,10 +181,6 @@ async fn snapshot_record(
         key_wrap: served_wrap(tx, vault_id, item_id, stored.key_wrap.as_deref()).await?,
     })
 }
-
-/// The framing a served statement adds to its header and signature container: the statement
-/// length, version and header length prefixes and the two signed hashes (CRYPTO.md §9.6).
-const STATEMENT_FRAME: usize = 4 + 2 + 4 + 64;
 
 /// The bytes an op adds to a page.
 fn op_size(op: &FetchedOp) -> usize {

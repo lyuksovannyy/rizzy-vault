@@ -307,7 +307,15 @@ impl<V: VaultPort> AuthService<V> {
             crate::config::RECOVERY_SESSION_TTL_MS,
         )
         .await?;
-        let view = view::build(&self.vault, tx.conn(), &trust, &devices, ViewScope::Chain).await?;
+        let view = view::build(
+            &self.vault,
+            tx.conn(),
+            &trust,
+            &devices,
+            ViewScope::Chain,
+            self.config.account_quota_bytes,
+        )
+        .await?;
         let vaults = self.vault.recovery_vaults(tx.conn(), account).await?;
         tx.commit().await?;
         Ok(RecoveryRelease {

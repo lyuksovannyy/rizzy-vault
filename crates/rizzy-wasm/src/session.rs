@@ -317,6 +317,26 @@ impl Session {
         Ok(self.inner()?.vault.unacknowledged().0)
     }
 
+    /// The account's counted bytes the server reported with the last account answer (ADR 0048
+    /// §5), `undefined` when it reported none. The server's word, unverified: for display only.
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(getter, js_name = storageBytesUsed)]
+    pub fn storage_bytes_used(&self) -> Result<Option<u64>, CoreError> {
+        Ok(self.inner()?.account.usage().map(|u| u.bytes_used))
+    }
+
+    /// The instance's per-account storage quota the server reported with the last account
+    /// answer (ADR 0048 §1, §5), `undefined` when it reported none. Unverified, for display.
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(getter, js_name = storageQuotaBytes)]
+    pub fn storage_quota_bytes(&self) -> Result<Option<u64>, CoreError> {
+        Ok(self.inner()?.account.usage().map(|u| u.quota_bytes))
+    }
+
     /// Whether a sync is running.
     ///
     /// # Errors

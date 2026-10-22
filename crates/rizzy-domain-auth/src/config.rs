@@ -214,6 +214,10 @@ pub struct AuthConfig {
     pub max_web_certificates: usize,
     /// The rate limits.
     pub rate_limits: RateLimits,
+    /// The instance's per-account storage quota (ADR 0048 §1), served in every
+    /// [`AccountView`](rizzy_proto::account::AccountView) beside the account's counted bytes
+    /// (§5). `rizzy-server` sets it from `RIZZY_ACCOUNT_QUOTA_BYTES`; the bound is checked there.
+    pub account_quota_bytes: u64,
 }
 
 impl AuthConfig {
@@ -230,6 +234,7 @@ impl AuthConfig {
             reconciliation_limit_ms: DEFAULT_RECONCILIATION_LIMIT_MS,
             max_web_certificates: MAX_WEB_CERTIFICATES,
             rate_limits: RateLimits::default(),
+            account_quota_bytes: rizzy_storage::quota::DEFAULT_QUOTA_BYTES,
         }
     }
 

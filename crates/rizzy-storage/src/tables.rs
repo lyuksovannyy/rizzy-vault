@@ -3,8 +3,9 @@
 //! The tables a logical backup carries, with their columns, in restore order (ADR 0011
 //! "Backups").
 //!
-//! [`TABLES`] lists every `auth_` and `vault_` table except the short-lived session state, in
-//! foreign-key order: a table comes after every table it references, so `restore` inserts
+//! [`TABLES`] lists every `auth_` and `vault_` table except the short-lived session state, and
+//! `storage_account_usage` (ADR 0048 §4: backed up, so a restore's counter matches its restored
+//! rows), in foreign-key order: a table comes after every table it references, so `restore` inserts
 //! rows with foreign keys on. Each table has two shared query files under
 //! `queries/backup/`, one `SELECT` of every column in primary-key order and one `INSERT` of one
 //! row with `$1 … $n`; both list the columns in the order of [`TableSpec::columns`].
@@ -354,6 +355,16 @@ pub const TABLES: &[TableSpec] = &[
             col("vault_id", Kind::Blob, false),
             col("device_id", Kind::Blob, false),
             col("cursor", Kind::Blob, false),
+            col("updated_at_ms", Kind::Integer, false),
+        ],
+    },
+    TableSpec {
+        name: "storage_account_usage",
+        select: include_str!("../queries/backup/storage_account_usage.select.sql"),
+        insert: include_str!("../queries/backup/storage_account_usage.insert.sql"),
+        columns: &[
+            col("account_id", Kind::Blob, false),
+            col("bytes_used", Kind::Integer, false),
             col("updated_at_ms", Kind::Integer, false),
         ],
     },

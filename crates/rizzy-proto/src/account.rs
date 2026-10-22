@@ -55,6 +55,13 @@ pub struct AccountView {
     pub identity_secret_keys: IdentitySecretKeys,
     /// The vault self-grants under the current account key.
     pub vault_self_grants: List<VaultSelfGrant, MAX_VAULT_GRANTS>,
+    /// The account's counted bytes (ADR 0048 §2, §5): the server's own figure, unsigned and
+    /// informational, so a client shows usage without a dedicated endpoint.
+    pub bytes_used: u64,
+    /// The instance's per-account storage quota, `RIZZY_ACCOUNT_QUOTA_BYTES` (ADR 0048 §1,
+    /// §5). An upload record that would push `bytes_used` past it plus the upload limit is
+    /// refused [`ErrorCode::QuotaExceeded`](crate::error::ErrorCode).
+    pub quota_bytes: u64,
 }
 
 /// What an enrolled device already holds, so the server can leave out what has not changed

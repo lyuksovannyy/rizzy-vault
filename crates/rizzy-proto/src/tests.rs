@@ -88,6 +88,8 @@ fn account_view() -> AccountView {
             envelope: b(b"e_id"),
         },
         vault_self_grants: l(vec![vault_self_grant()]),
+        bytes_used: 1_234,
+        quota_bytes: 5_368_709_120,
     }
 }
 
@@ -529,6 +531,26 @@ fn responses_ignore_unknown_fields() {
     let mut view = serde_json::to_value(account_view()).unwrap();
     view["added_later"] = true.into();
     assert!(serde_json::from_value::<AccountView>(view).is_ok());
+}
+
+#[test]
+fn account_usage_of_adr_0048() {
+    // §5: two plain integer fields on `AccountView`, and `quota_exceeded` on the wire.
+    let view = serde_json::to_value(account_view()).unwrap();
+    assert_eq!(view["bytes_used"], 1_234);
+    assert_eq!(view["quota_bytes"], 5_368_709_120_u64);
+    assert_eq!(
+        serde_json::to_string(&crate::error::ErrorResponse::new(ErrorCode::QuotaExceeded)).unwrap(),
+        r#"{"error":"quota_exceeded"}"#
+    );
+    let result: crate::vault::UploadResult =
+        serde_json::from_str(r#"{"result":"rejected","error":"quota_exceeded"}"#).unwrap();
+    assert_eq!(
+        result,
+        crate::vault::UploadResult::Rejected {
+            error: ErrorCode::QuotaExceeded
+        }
+    );
 }
 
 #[test]

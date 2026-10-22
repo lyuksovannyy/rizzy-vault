@@ -131,7 +131,7 @@ pub async fn apply_rotation(
         );
     }
     for plan in &plans {
-        write_vault(tx, plan, now).await?;
+        write_vault(tx, account_id, plan, now).await?;
     }
     Ok(())
 }
@@ -276,8 +276,15 @@ async fn check_cutoff(
     Ok(())
 }
 
-/// The writes of one checked vault (module docs, "Writes").
-async fn write_vault(tx: &mut WriteTx, plan: &VaultPlan, now: i64) -> Result<(), VaultError> {
+/// The writes of one checked vault (module docs, "Writes"). The carried wraps it clears are
+/// credited to the account's storage counter (ADR 0048 §2; the `auth` commit transaction holds
+/// the account lock).
+async fn write_vault(
+    tx: &mut WriteTx,
+    account_id: AccountId,
+    plan: &VaultPlan,
+    now: i64,
+) -> Result<(), VaultError> {
     let vault_id = plan.vault_id;
     repo::set_vault_epoch(tx.conn(), vault_id, plan.grant.vault_key_epoch).await?;
     repo::write_self_grant(tx.conn(), vault_id, &plan.grant, plan.has_grant, now).await?;
@@ -295,7 +302,8 @@ async fn write_vault(tx: &mut WriteTx, plan: &VaultPlan, now: i64) -> Result<(),
             });
         }
     }
-    repo::clear_record_wraps(tx.conn(), vault_id).await
+    let freed = repo::clear_record_wraps(tx.conn(), vault_id).await?;
+    crate::usage::charge(tx, account_id, crate::usage::credit(freed), now).await
 }
 
 #[cfg(test)]

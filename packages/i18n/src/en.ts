@@ -36,6 +36,8 @@ export const en = {
   "errors.setup_retired": "The server refused the registration again after it was restarted. Try again later.",
   "errors.server_credentials_stale":
     "The server was restored from a backup and does not take this login yet. Open rizzy-vault on a device that is already set up for this account (it repairs the server with your master password), then log in again.",
+  "errors.server_quota_exceeded":
+    "This account has reached its storage limit on this server, so the server did not save the latest change. Ask the server's operator for more space.",
   "errors.transport_failed": "Cannot reach the server. Check the connection and try again.",
   "errors.response_too_large": "The server's answer was too large.",
   "errors.locked": "The vault is locked.",
