@@ -74,9 +74,8 @@ export const FIXED_FIELDS: Readonly<Partial<Record<ItemType, readonly FixedField
 
 /** `uri/<id>/match`'s wire values (ADR 0037 §4, Accepted M2), for the editor's select and the
  * item detail view. `0x0000` ("absent") falls back to the account-level match default
- * (ADR 0037 §6); this web vault has no UI for that account setting yet (see ROADMAP §4.4 and
- * the M2 report), so it is shown as "Account default" without naming which mode that resolves
- * to. `0x0005` (Regex) is a value `rizzy-match` accepts and stores, but its own matching
+ * (ADR 0037 §6), which Settings → Website matching sets (`MatchingPane.tsx`; ADR 0042), so it is
+ * shown as "Account default" here without naming which mode that resolves to. `0x0005` (Regex) is a value `rizzy-match` accepts and stores, but its own matching
  * decision reports `NotSupported` for it today (`crates/rizzy-match/src/modes.rs`): the editor
  * must not claim it works. */
 export const MATCH_MODE_OPTIONS: readonly { readonly value: number; readonly label: string }[] = [
