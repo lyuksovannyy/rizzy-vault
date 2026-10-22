@@ -1154,3 +1154,131 @@ fn healing_fields_of_adr_0032() {
         r#"{"error":"credentials_stale"}"#
     );
 }
+
+/// ADR 0075 §3: the `sessions` messages. Known answers from all-zero and all-0xff ids.
+#[test]
+fn known_answer_sessions() {
+    use crate::session::{EndSessionRequest, SessionKindView, SessionListResponse, SessionView};
+
+    let end = EndSessionRequest { session_id: id(0) };
+    assert_eq!(
+        round_trip(&end),
+        r#"{"session_id":"AAAAAAAAAAAAAAAAAAAAAA"}"#
+    );
+    let list = SessionListResponse {
+        sessions: l(vec![
+            SessionView {
+                session_id: id(0xff),
+                kind: SessionKindView::Device,
+                device_id: Some(id(0)),
+                created_at_ms: 2,
+                expires_at_ms: 3,
+                current: true,
+            },
+            SessionView {
+                session_id: id(0),
+                kind: SessionKindView::Opaque,
+                device_id: None,
+                created_at_ms: 1,
+                expires_at_ms: 4,
+                current: false,
+            },
+            SessionView {
+                session_id: id(0),
+                kind: SessionKindView::Recovery,
+                device_id: None,
+                created_at_ms: 0,
+                expires_at_ms: 5,
+                current: false,
+            },
+        ]),
+        truncated: false,
+    };
+    assert_eq!(
+        round_trip(&list),
+        concat!(
+            r#"{"sessions":["#,
+            r#"{"session_id":"_____________________w","kind":"device","device_id":"AAAAAAAAAAAAAAAAAAAAAA","created_at_ms":2,"expires_at_ms":3,"current":true},"#,
+            r#"{"session_id":"AAAAAAAAAAAAAAAAAAAAAA","kind":"opaque","created_at_ms":1,"expires_at_ms":4,"current":false},"#,
+            r#"{"session_id":"AAAAAAAAAAAAAAAAAAAAAA","kind":"recovery","created_at_ms":0,"expires_at_ms":5,"current":false}"#,
+            r#"],"truncated":false}"#
+        )
+    );
+}
+
+/// ADR 0075 §3 and §11 item 7: a `SessionView` carries exactly these fields, so a field
+/// derived from the token (or any new metadata) cannot slip in unreviewed.
+#[test]
+fn session_view_fields_are_pinned() {
+    use crate::session::{SessionKindView, SessionView};
+
+    let view = SessionView {
+        session_id: id(1),
+        kind: SessionKindView::Opaque,
+        device_id: Some(id(2)),
+        created_at_ms: 1,
+        expires_at_ms: 2,
+        current: false,
+    };
+    let value = serde_json::to_value(&view).unwrap();
+    let mut keys: Vec<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "created_at_ms",
+            "current",
+            "device_id",
+            "expires_at_ms",
+            "kind",
+            "session_id"
+        ]
+    );
+}
+
+/// ADR 0075 §3: the request is strict, the response tolerant, the list bounded, and an
+/// unknown kind parses as `Unknown`.
+#[test]
+fn sessions_messages_are_bounded_and_tolerant() {
+    use crate::limits::MAX_SESSIONS_LISTED;
+    use crate::session::{EndSessionRequest, SessionKindView, SessionListResponse};
+
+    // Request: unknown field and bad id refused.
+    assert!(
+        serde_json::from_str::<EndSessionRequest>(
+            r#"{"session_id":"AAAAAAAAAAAAAAAAAAAAAA","extra":1}"#
+        )
+        .is_err()
+    );
+    assert!(serde_json::from_str::<EndSessionRequest>(r#"{"session_id":"AAAA"}"#).is_err());
+    assert!(serde_json::from_str::<EndSessionRequest>("{}").is_err());
+
+    // Response: unknown fields ignored, `truncated` defaults to false, unknown kind.
+    let parsed: SessionListResponse = serde_json::from_str(concat!(
+        r#"{"sessions":[{"session_id":"AAAAAAAAAAAAAAAAAAAAAA","kind":"passkey","#,
+        r#""created_at_ms":1,"expires_at_ms":2,"current":true,"user_agent":"x"}],"later":1}"#
+    ))
+    .unwrap();
+    assert!(!parsed.truncated);
+    let first = &parsed.sessions.as_slice()[0];
+    assert_eq!(first.kind, SessionKindView::Unknown);
+    assert_eq!(first.device_id, None);
+
+    // 256 entries parse, 257 do not.
+    let entry = r#"{"session_id":"AAAAAAAAAAAAAAAAAAAAAA","kind":"opaque","created_at_ms":1,"expires_at_ms":2,"current":false}"#;
+    let body = |n: usize| {
+        format!(
+            r#"{{"sessions":[{}],"truncated":true}}"#,
+            vec![entry; n].join(",")
+        )
+    };
+    let full: SessionListResponse = serde_json::from_str(&body(MAX_SESSIONS_LISTED)).unwrap();
+    assert_eq!(full.sessions.len(), MAX_SESSIONS_LISTED);
+    assert!(full.truncated);
+    assert!(serde_json::from_str::<SessionListResponse>(&body(MAX_SESSIONS_LISTED + 1)).is_err());
+}
