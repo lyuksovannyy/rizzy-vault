@@ -172,8 +172,15 @@ jobs:
       - run: cargo build --locked -p rizzy-server --bin rizzy-vault
       - run: pnpm run test
       - run: pnpm --filter @rizzy-vault/web exec playwright install --with-deps chromium
-      # Builds rizzy-vault with `embed-web` first, then runs Playwright against it.
+      # Builds rizzy-vault with `embed-web` first, then runs Playwright against it. Includes the
+      # accessibility audit and keyboard-only walk of every screen (e2e/a11y.spec.ts,
+      # e2e/keyboard-nav.spec.ts; ADR 0014 §5, ROADMAP §4.5).
       - run: pnpm run e2e
+      # The extension's accessibility audit only (popup, options page, inline menu; ADR 0014 §5):
+      # self-contained and a few seconds long, against the extension `pnpm run build` built and
+      # the server `pnpm run e2e` built. The rest of the extension's Playwright suite is not in
+      # CI yet.
+      - run: pnpm --filter @rizzy-vault/extension exec playwright test e2e/a11y.spec.ts
 
   bindings-baseline:
     name: wasm-bindgen expansion baseline (ADR 0019 §4.1)
