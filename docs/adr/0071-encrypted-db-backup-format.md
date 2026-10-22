@@ -72,6 +72,18 @@ Subkey: `k = HKDF(ikm = backup_keys[backup_key_id].key, salt = empty, info = LAB
 
 **This ADR depends on [ADR 0047](0047-opaque-secrets-operator-commands.md)** (M1, Proposed, filed in this same review batch) for a secrets-restore path. ADR 0047's `rizzy-vault secrets restore` reinstalls the secrets file's whole parsed JSON content verbatim, via `secrets_file::parse` and `fsutil::replace_private` — generic over every field the file holds, not field-specific — so it already carries `backup_keys` and `current_backup_key_id` forward together with every pre-existing field, once a `backup-secrets` snapshot captured them; no change to ADR 0047 is needed for that. Until ADR 0047 is Accepted, no command restores a lost secrets file at all, and a secrets-file loss leaves every format_version 2 backup permanently unrestorable even once the rest of the file is recovered (Consequences).
 
+### Owner answers at acceptance (2026-10-22)
+
+The owner accepted this ADR as drafted; the recommendations of "Open questions for the owner" stand:
+
+1. Placement of the chunk-framing text: no recommendation recorded, so this question stays open. The drafted CRYPTO.md edits assume a new §9.x after §9.7, and this change follows the draft with a new §9.8. Folding that text into §5.11 instead is still the owner's call.
+2. `BACKUP_FILE` (`0x0071`) stays reserved and unused.
+3. Old `backup_keys` entries are not dropped automatically: retention depends on ADR 0072's still-undecided off-site retention.
+4. `--encrypt` does not become the default. The scheduled job (ADR 0072) always uses format_version 2.
+5. `CHUNK_LEN` is fixed at 8 MiB, with no operator override, for now.
+
+Of "CRYPTO.md and `rizzy-core` edits landing in this change" and "What this ADR supersedes", the documentation edits are made in the accepting change: CRYPTO.md §1 rule 2 item 12, §4.3's "Server DB-backup subkey" row, the §5.11 secrets-file and envelope lists, §8.4's `SERVER_DB_BACKUP` row, §9.6 for format_version 2, and the new §9.8; INV-98 (THREAT_MODEL.md §8.8); and the status lines of ADR 0023 (§2 in part) and ADR 0028 (item 13), with their index rows. The `rizzy-core` `labels.rs` constant and its registry test, and the purpose count in `Purpose::ALL`, are code for the implementation.
+
 ## Consequences
 
 ### Positive
