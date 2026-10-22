@@ -55,6 +55,18 @@ A passkey's private key travels in CXF as PKCS#8 `PrivateKeyInfo` (RFC 5958): fo
 
 ADR 0027 §5 (the warning bullets) is **not** superseded: its base text and "CSV adds" bullet stay exactly accurate for the plaintext JSON/CSV exports they describe. `export_cxf` instead gets its own warning constant, new and separate (§2 "Warning" above) — it does not extend or reuse ADR 0027 §5's text, so no entry for it belongs in this list.
 
+### Owner answers at acceptance (2026-10-22)
+
+The owner accepted this ADR as drafted; the recommendations of "Open questions for the owner" stand:
+
+1. CXF is built now. CXP stays out of scope.
+2. PKCS#8 is a hand-written reader and writer in `rizzy-core`, not the `pkcs8` features of `p256` and `ed25519-dalek`.
+3. CXF export reuses the literal `EXPORT PLAINTEXT` phrase.
+4. A bare, unencrypted CXF export: the recommendation is yes, in the same change, behind the same warning, hold and phrase. But it needs a ROADMAP §4.10 edit, and §4.10 still names only "Passkey import/export via FIDO Credential Exchange Protocol (CXP/CXF) when stable". Until the owner makes that edit, the bare form is out of scope. This stays open.
+5. `exporterDisplayName` is the fixed literal `"rizzy-vault"` and `exporterRpId` is empty for M8.
+
+Of the "On acceptance" edits, items 1, 2 and 4 are made in the accepting change: CRYPTO.md §11.14 gains the CXF wrapper; the status lines of ADR 0027 (§1 in part) and ADR 0034 (point 3 in part) change, with their index rows; and THREAT_MODEL.md AST-9 and AST-20 gain their sentences. This ADR's index row already exists, as Accepted. Item 3 asks for no edit.
+
 ## Consequences
 
 ### Positive

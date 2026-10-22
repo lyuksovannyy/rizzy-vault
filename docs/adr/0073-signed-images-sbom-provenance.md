@@ -70,6 +70,18 @@ Ship a `containers-policy.json` template (Podman's native `containers-image` sig
 
 The PR that accepts this ADR: sets ADR 0017's status line to `Partially superseded by [ADR 0073](0073-signed-images-sbom-provenance.md) (§7 in part)`; attaches the three supply-chain approval records Context requires (cosign, the Rust and JS CycloneDX generators, the merge tool), with no acceptance without them; adds this ADR's row to [docs/adr/README.md](README.md); records the owner's answers to the open questions below in the Decision section above; and updates THREAT_MODEL's Q-17, A10, §7.17 and AR-22 text, and adds the INV-100 row to §8.9. None of these edits is made now.
 
+### Owner answers at acceptance (2026-10-22)
+
+The owner accepted this ADR as drafted; the recommendations of "Open questions for the owner" stand:
+
+1. No entry is added to ADR 0019 §7's artifact table. This ADR governs its two artifacts, and both point at the same workflow.
+2. Both tools are kept: `gh attestation verify` for the binding artifacts that client CI checks, and cosign for the image and third-party Sigstore tooling.
+3. The JS SBOM comes from `@cyclonedx/cyclonedx-npm`, run via `pnpm dlx`, and is merged with OWASP's `cyclonedx-cli merge`. A small `xtask` subcommand is the fallback only if the CLI cannot set a release-specific `metadata.component`.
+4. The two artifacts claim SLSA Build Level 2 for M8. Level 3 is revisited together with ADR 0019 §7's own artifacts.
+5. The `containers-policy.json` template ships in the same change as the signing, not in a follow-up docs PR.
+
+Of the "On acceptance" edits, the accepting change sets ADR 0017's status line (§7 in part) and its index row. It also updates THREAT_MODEL.md Q-17, A10, §7.17 (the T row) and AR-22, and adds INV-100 to §8.9. The index row already exists. **Not attached:** the three supply-chain approval records (cosign, the Rust and JS CycloneDX generators, the merge tool). They need exact pins or commits, provenance, maintainers and advisories, which this documentation change cannot verify. "On acceptance" and Risks make them a condition of this ADR binding. Until they are attached, none of those tools may run in the release workflow. The `cosign verify` line for `docs/self-hosting.md` (§4) lands with the CI change that first signs a release, because it needs that workflow's real identity.
+
 ## Consequences
 
 ### Positive

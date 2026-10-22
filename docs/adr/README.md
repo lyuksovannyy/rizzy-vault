@@ -73,24 +73,24 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0014 | [UI stack for the web platforms](0014-ui-stack.md) | Partially superseded by [0022](0022-server-mode-only.md) (§6) | M1 (web vault) / M2 (extensions) / M3 (design system) / M5 (share page) |
 | 0015 | [Desktop shell: Tauri](0015-desktop-tauri.md) | Superseded by [0019](0019-native-clients.md) | M3 |
 | 0016 | [Workspace layout and crate boundaries](0016-workspace-layout.md) | Partially superseded by [0022](0022-server-mode-only.md) (§3 in part); [0019](0019-native-clients.md) (§3 in part, R2 in part, R5, R6, R7 in part, §5 in part, §7, Risks in part, Alternatives considered in part) | M0 (rules, current crates) / M1–M9 (planned crates) |
-| 0017 | [Licensing and contribution terms](0017-licensing.md) | Accepted | M0 |
+| 0017 | [Licensing and contribution terms](0017-licensing.md) | Partially superseded by [0073](0073-signed-images-sbom-provenance.md) (§7 in part) | M0 |
 | 0018 | [Item-record encoding: canonical binary layout and the M1 item schema](0018-item-record-encoding.md) | Partially superseded by [0076](0076-autocomplete-driven-autofill.md) (§7 in part) | M1 |
 | 0019 | [Native desktop and mobile clients in separate repositories](0019-native-clients.md) | Accepted | M3 (desktop) / M7 (mobile) |
 | 0020 | [Record architecture decisions, with partial supersession](0020-partial-supersession.md) | Accepted | M0 |
 | 0021 | [Server-side compaction with concurrent snapshots](0021-server-compaction.md) | Partially superseded by [0032](0032-healing-rotation-after-backup.md) (§9 "Healing request" in part); [0050](0050-paged-fetch-tombstone-boundary.md) (§4 "Covers" in part) | M1 (server; Accepted before step 3) |
 | 0022 | [Server mode only: On-device sync parked](0022-server-mode-only.md) | Accepted | M1 (scope) / post-1.0 (parked) |
-| 0023 | [Logical database backup file format](0023-logical-backup-format.md) | Accepted | M1 |
+| 0023 | [Logical database backup file format](0023-logical-backup-format.md) | Partially superseded by [0071](0071-encrypted-db-backup-format.md) (§2 in part) | M1 |
 | 0024 | [Disabling core dumps through rustix](0024-core-dump-disabling-rustix.md) | Accepted | M1 (server, `rv`) / M3 (bindings) |
 | 0025 | [Key rotation upload: the vault half and the rotation cut-off](0025-rotation-vault-half.md) | Accepted | M1 |
 | 0026 | [Client device state and encrypted local cache](0026-client-device-state-and-cache.md) | Partially superseded by [0051](0051-equivalence-list-version-persistence.md) (§3 in part); [0056](0056-local-index-recently-used-search.md) (§1 in part, §3 in part); [0057](0057-device-state-v2-keystore.md) (§1 row "Device-state record"; §4 step 5) | M1 (`rv`) / M2 (extension) / M3 (`rizzy-ffi`) |
-| 0027 | [Export payload encoding and plaintext export](0027-export-payload.md) | Partially superseded by [0034](0034-export-reauth-and-plaintext-hold.md) (§5 in part) | M1 |
-| 0028 | [`/api/v1` HTTP conventions](0028-api-v1-http-conventions.md) | Partially superseded by [0031](0031-retiring-old-opaque-setups.md) (item 3 in part); [0032](0032-healing-rotation-after-backup.md) (item 3 in part); [0048](0048-per-account-storage-quota.md) (item 3 in part, item 12 in part); [0049](0049-web-role-route-table.md) (item 10 in part, item 15); [0052](0052-icon-proxy-role.md) (item 1 in part); [0075](0075-session-listing-and-ending.md) (item 1 in part) | M1 |
+| 0027 | [Export payload encoding and plaintext export](0027-export-payload.md) | Partially superseded by [0034](0034-export-reauth-and-plaintext-hold.md) (§5 in part); [0074](0074-passkey-cxf-import-export.md) (§1 in part) | M1 |
+| 0028 | [`/api/v1` HTTP conventions](0028-api-v1-http-conventions.md) | Partially superseded by [0031](0031-retiring-old-opaque-setups.md) (item 3 in part); [0032](0032-healing-rotation-after-backup.md) (item 3 in part); [0048](0048-per-account-storage-quota.md) (item 3 in part, item 12 in part); [0049](0049-web-role-route-table.md) (item 10 in part, item 15); [0052](0052-icon-proxy-role.md) (item 1 in part); [0071](0071-encrypted-db-backup-format.md) (item 13); [0075](0075-session-listing-and-ending.md) (item 1 in part) | M1 |
 | 0029 | [KeePass KDBX import: legacy primitives in `rizzy-import`](0029-kdbx-import.md) | Accepted | M3 |
 | 0030 | [Client-side TLS for `rv`](0030-client-tls-rv.md) | Partially superseded by [0035](0035-ca-file-ca-certificates-only.md) (Decision 5 in part); [0052](0052-icon-proxy-role.md) (Decision 1 in part) | M1 |
 | 0031 | [Retiring old OPAQUE setups](0031-retiring-old-opaque-setups.md) | Accepted | M1 |
 | 0032 | [Healing a key rotation made after a backup](0032-healing-rotation-after-backup.md) | Accepted | M1 |
 | 0033 | [Protocol Buffers encoding for client–server messages](0033-protobuf-api-encoding.md) | Proposed | M1 (JSON only) / M3 (trigger re-checked) |
-| 0034 | [Re-authentication before every export and a hold before plaintext export](0034-export-reauth-and-plaintext-hold.md) | Accepted | M1 |
+| 0034 | [Re-authentication before every export and a hold before plaintext export](0034-export-reauth-and-plaintext-hold.md) | Partially superseded by [0074](0074-passkey-cxf-import-export.md) (point 3 in part) | M1 |
 | 0035 | [A private CA file holds CA certificates only](0035-ca-file-ca-certificates-only.md) | Accepted | M1 |
 | 0036 | [Browser extension: architecture and key custody](0036-browser-extension-architecture-and-key-custody.md) | Partially superseded by [0040](0040-extension-fill-request-from-inline-menu.md) (§4, first bullet, in part); [0043](0043-inline-menu-instance-token.md) (§4, first bullet, in part); [0076](0076-autocomplete-driven-autofill.md) (§4 in part) | M2 |
 | 0037 | [URL matching and autofill rules](0037-url-matching-and-autofill-rules.md) | Accepted | M2 |
