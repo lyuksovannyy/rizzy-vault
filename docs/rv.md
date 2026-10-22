@@ -107,6 +107,18 @@ Devices are named by kind and the first 16 digits of their id, a prefix of the f
 
 Item types: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`, `software-license`, `wifi`, `bank-account`, `passkey`. Field keys are those of the item schema ([ADR 0018](adr/0018-item-record-encoding.md)), for example `item.name`, `item.notes`, `login.username`, `login.password`, `login.totp`, `card.number`.
 
+The M3 types have their own keys ([ADR 0055](adr/0055-m3-item-type-field-keys.md)), all text, each only on its own type:
+
+| Type | Keys | Concealed (typed at a prompt with `--secret`) |
+|---|---|---|
+| `ssh-key` | `ssh.host`, `ssh.port`, `ssh.username`, `ssh.private_key`, `ssh.public_key`, `ssh.passphrase` | `ssh.private_key`, `ssh.passphrase` |
+| `api-credential` | `api.name`, `api.key`, `api.secret`, `api.endpoint` | `api.key`, `api.secret` |
+| `software-license` | `license.name`, `license.key`, `license.seats`, `license.expires` | `license.key` |
+| `wifi` | `wifi.ssid`, `wifi.password`, `wifi.security_type` | `wifi.password` |
+| `bank-account` | `bank.bank_name`, `bank.account_holder`, `bank.account_number`, `bank.routing_number`, `bank.account_type` | `bank.account_number`, `bank.routing_number` |
+
+`api.name`, `license.name` and `bank.bank_name` name the service, the product and the bank; `item.name` stays the item's own title. An SSH key without `ssh.port` uses port 22: `item show` prints `ssh.port: 22 (default)`, and nothing is stored for it. A CSV export leaves items of these types out (the JSON export keeps them whole). An `rv` older than these types lists and shows such items but refuses to create or edit them, and keeps their fields as they are.
+
 ## Export and import
 
 ```sh

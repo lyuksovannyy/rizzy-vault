@@ -1544,6 +1544,48 @@ mod tests {
         }
         assert!(type_from_name("vault-settings").is_err());
         assert_eq!(type_name(None), "unknown");
+        // A type no ADR assigns yet shows generically (ADR 0018 §8, §11), as the M3 types did
+        // in a build before ADR 0055.
+        assert_eq!(type_name(Some(ItemType::from_id(0x000B))), "unknown");
+    }
+
+    /// ADR 0055 §4: the eight concealed M3 keys cross only through a reveal; the other 14 are
+    /// shown in the item view.
+    #[test]
+    fn m3_keys_are_concealed_as_the_schema_says() {
+        let key = |k: &str| FieldKey::parse(k.as_bytes()).unwrap();
+        for k in [
+            "ssh.private_key",
+            "ssh.passphrase",
+            "api.key",
+            "api.secret",
+            "license.key",
+            "wifi.password",
+            "bank.account_number",
+            "bank.routing_number",
+            // Unassigned under an M3 prefix: reserved, so concealed to be safe.
+            "ssh.key_type",
+        ] {
+            assert!(concealed(&key(k)), "{k}");
+        }
+        for k in [
+            "ssh.host",
+            "ssh.port",
+            "ssh.username",
+            "ssh.public_key",
+            "api.name",
+            "api.endpoint",
+            "license.name",
+            "license.seats",
+            "license.expires",
+            "wifi.ssid",
+            "wifi.security_type",
+            "bank.bank_name",
+            "bank.account_holder",
+            "bank.account_type",
+        ] {
+            assert!(!concealed(&key(k)), "{k}");
+        }
     }
 
     #[test]
