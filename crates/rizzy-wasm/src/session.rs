@@ -1375,7 +1375,7 @@ impl Session {
     /// Sets the account-level match default (`0x0001`–`0x0006`): the commit request.
     ///
     /// # Errors
-    /// `invalid_input` for `0x0000` or an unassigned value; as [`Session::settings_change`].
+    /// `invalid_input` for `0x0000` or an unassigned value; as the private `settings_change` (impl docs).
     #[wasm_bindgen(js_name = setMatchDefaultRequest)]
     pub fn set_match_default_request(&mut self, mode: u16) -> Result<HttpRequest, CoreError> {
         let mode = matching::default_mode_of(mode)?;
@@ -1388,7 +1388,7 @@ impl Session {
     /// # Errors
     /// `equivalence_domain_rejected` for a public suffix or a subdomain; `invalid_input` for a
     /// domain that does not normalise or a bad count; `settings_limit_reached` past 64 groups;
-    /// as [`Session::settings_change`].
+    /// as the private `settings_change` (impl docs).
     #[wasm_bindgen(js_name = addUserGroupRequest)]
     pub fn add_user_group_request(
         &mut self,
@@ -1401,7 +1401,7 @@ impl Session {
     ///
     /// # Errors
     /// `invalid_input` for a malformed id or one no user group has; as
-    /// [`Session::settings_change`].
+    /// the private `settings_change` (impl docs).
     #[wasm_bindgen(js_name = removeUserGroupRequest)]
     pub fn remove_user_group_request(&mut self, id: &str) -> Result<HttpRequest, CoreError> {
         let id = matching::group_id_of(id)?;
@@ -1412,7 +1412,7 @@ impl Session {
     ///
     /// # Errors
     /// `invalid_input` for a malformed id or one already disabled; `settings_limit_reached`
-    /// past 1,024; as [`Session::settings_change`].
+    /// past 1,024; as the private `settings_change` (impl docs).
     #[wasm_bindgen(js_name = disableGlobalGroupRequest)]
     pub fn disable_global_group_request(&mut self, id: &str) -> Result<HttpRequest, CoreError> {
         let id = matching::group_id_of(id)?;
@@ -1422,7 +1422,7 @@ impl Session {
     /// Enables the global group `id` (hex) again: the commit request.
     ///
     /// # Errors
-    /// `invalid_input` for a malformed id or one not disabled; as [`Session::settings_change`].
+    /// `invalid_input` for a malformed id or one not disabled; as the private `settings_change` (impl docs).
     #[wasm_bindgen(js_name = enableGlobalGroupRequest)]
     pub fn enable_global_group_request(&mut self, id: &str) -> Result<HttpRequest, CoreError> {
         let id = matching::group_id_of(id)?;
@@ -1462,7 +1462,7 @@ impl Session {
     ///
     /// # Errors
     /// `locked`; `wrong_state` with no change kept or while a sync runs; `rollback`, `fork`;
-    /// as [`Session::settings_change`].
+    /// as the private `settings_change` (impl docs).
     #[wasm_bindgen(js_name = settingsRetryRequest)]
     pub fn settings_retry_request(&mut self) -> Result<HttpRequest, CoreError> {
         let inner = self.writable()?;

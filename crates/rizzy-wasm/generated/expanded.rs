@@ -22107,7 +22107,7 @@ pub mod matching {
     //! (`crate::Session`, `crate::DeviceSession`) instead: that reads the account's
     //! `ACCOUNT_SETTINGS` once per object ([ADR 0042] §6, `rizzy_client::settings::SettingsCache`) and
     //! applies its match default, disabled global groups and user groups
-    //! ([`decide_with_account`]). Persisting the highest accepted `list_version` across launches
+    //! (`decide_with_account`). Persisting the highest accepted `list_version` across launches
     //! (INV-39) is still deferred (gap 27(b)): it needs an ADR amending ADR 0026's `cache_meta`
     //! format, so every call accepts version `0` (`global_equivalence_groups`'s own docs). While
     //! `rizzy_match::compiled::GLOBAL_LIST` is `None`, the only equivalence groups are the account's
@@ -38031,7 +38031,7 @@ pub mod session {
         #[doc = ""]
         #[doc = " # Errors"]
         #[doc =
-        " `invalid_input` for `0x0000` or an unassigned value; as [`Session::settings_change`]."]
+        " `invalid_input` for `0x0000` or an unassigned value; as the private `settings_change` (impl docs)."]
         pub fn set_match_default_request(&mut self, mode: u16)
             -> Result<HttpRequest, CoreError> {
             #[automatically_derived]
@@ -38042,7 +38042,7 @@ pub mod session {
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
-                    " `invalid_input` for `0x0000` or an unassigned value; as [`Session::settings_change`]."]
+                    " `invalid_input` for `0x0000` or an unassigned value; as the private `settings_change` (impl docs)."]
                     #[export_name =
                     "session_setMatchDefaultRequest_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_setMatchDefaultRequest(me:
@@ -38099,7 +38099,7 @@ pub mod session {
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
-                    " `invalid_input` for `0x0000` or an unassigned value; as [`Session::settings_change`]."]
+                    " `invalid_input` for `0x0000` or an unassigned value; as the private `settings_change` (impl docs)."]
                     #[no_mangle]
                     #[doc(hidden)]
                     pub extern "C-unwind" fn __wbindgen_describe_session_setMatchDefaultRequest_e09cc0eb35f8b583() {
@@ -38123,7 +38123,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\x04P Sets the account-level match default (`0x0001`\xe2\x80\x93`0x0006`): the commit request.\0\t # ErrorsV `invalid_input` for `0x0000` or an unassigned value; as [`Session::settings_change`].\0\x01\x04mode\0\0\0\0\0\x16setMatchDefaultRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\x04P Sets the account-level match default (`0x0001`\xe2\x80\x93`0x0006`): the commit request.\0\t # Errorsc `invalid_input` for `0x0000` or an unassigned value; as the private `settings_change` (impl docs).\0\x01\x04mode\0\0\0\0\0\x16setMatchDefaultRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -38161,7 +38161,7 @@ pub mod session {
         " `equivalence_domain_rejected` for a public suffix or a subdomain; `invalid_input` for a"]
         #[doc =
         " domain that does not normalise or a bad count; `settings_limit_reached` past 64 groups;"]
-        #[doc = " as [`Session::settings_change`]."]
+        #[doc = " as the private `settings_change` (impl docs)."]
         pub fn add_user_group_request(&mut self, domains: Vec<String>)
             -> Result<HttpRequest, CoreError> {
             #[automatically_derived]
@@ -38176,7 +38176,7 @@ pub mod session {
                     " `equivalence_domain_rejected` for a public suffix or a subdomain; `invalid_input` for a"]
                     #[doc =
                     " domain that does not normalise or a bad count; `settings_limit_reached` past 64 groups;"]
-                    #[doc = " as [`Session::settings_change`]."]
+                    #[doc = " as the private `settings_change` (impl docs)."]
                     #[export_name =
                     "session_addUserGroupRequest_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_addUserGroupRequest(me:
@@ -38237,7 +38237,7 @@ pub mod session {
                     " `equivalence_domain_rejected` for a public suffix or a subdomain; `invalid_input` for a"]
                     #[doc =
                     " domain that does not normalise or a bad count; `settings_limit_reached` past 64 groups;"]
-                    #[doc = " as [`Session::settings_change`]."]
+                    #[doc = " as the private `settings_change` (impl docs)."]
                     #[no_mangle]
                     #[doc(hidden)]
                     pub extern "C-unwind" fn __wbindgen_describe_session_addUserGroupRequest_e09cc0eb35f8b583() {
@@ -38261,7 +38261,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\x07Y Adds a user-defined equivalence group of `domains` (2 to 64, each a registrable domain):\x14 the commit request.\0\t # ErrorsX `equivalence_domain_rejected` for a public suffix or a subdomain; `invalid_input` for aX domain that does not normalise or a bad count; `settings_limit_reached` past 64 groups;! as [`Session::settings_change`].\0\x01\x07domains\0\0\0\0\0\x13addUserGroupRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\x07Y Adds a user-defined equivalence group of `domains` (2 to 64, each a registrable domain):\x14 the commit request.\0\t # ErrorsX `equivalence_domain_rejected` for a public suffix or a subdomain; `invalid_input` for aX domain that does not normalise or a bad count; `settings_limit_reached` past 64 groups;. as the private `settings_change` (impl docs).\0\x01\x07domains\0\0\0\0\0\x13addUserGroupRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -38295,7 +38295,7 @@ pub mod session {
         #[doc = " # Errors"]
         #[doc =
         " `invalid_input` for a malformed id or one no user group has; as"]
-        #[doc = " [`Session::settings_change`]."]
+        #[doc = " the private `settings_change` (impl docs)."]
         pub fn remove_user_group_request(&mut self, id: &str)
             -> Result<HttpRequest, CoreError> {
             #[automatically_derived]
@@ -38307,7 +38307,7 @@ pub mod session {
                     #[doc = " # Errors"]
                     #[doc =
                     " `invalid_input` for a malformed id or one no user group has; as"]
-                    #[doc = " [`Session::settings_change`]."]
+                    #[doc = " the private `settings_change` (impl docs)."]
                     #[export_name =
                     "session_removeUserGroupRequest_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_removeUserGroupRequest(me:
@@ -38366,7 +38366,7 @@ pub mod session {
                     #[doc = " # Errors"]
                     #[doc =
                     " `invalid_input` for a malformed id or one no user group has; as"]
-                    #[doc = " [`Session::settings_change`]."]
+                    #[doc = " the private `settings_change` (impl docs)."]
                     #[no_mangle]
                     #[doc(hidden)]
                     pub extern "C-unwind" fn __wbindgen_describe_session_removeUserGroupRequest_e09cc0eb35f8b583() {
@@ -38390,7 +38390,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\x05? Removes the user-defined group `id` (hex): the commit request.\0\t # Errors@ `invalid_input` for a malformed id or one no user group has; as\x1e [`Session::settings_change`].\0\x01\x02id\0\0\0\0\0\x16removeUserGroupRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\x05? Removes the user-defined group `id` (hex): the commit request.\0\t # Errors@ `invalid_input` for a malformed id or one no user group has; as+ the private `settings_change` (impl docs).\0\x01\x02id\0\0\0\0\0\x16removeUserGroupRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -38424,7 +38424,7 @@ pub mod session {
         #[doc = " # Errors"]
         #[doc =
         " `invalid_input` for a malformed id or one already disabled; `settings_limit_reached`"]
-        #[doc = " past 1,024; as [`Session::settings_change`]."]
+        #[doc = " past 1,024; as the private `settings_change` (impl docs)."]
         pub fn disable_global_group_request(&mut self, id: &str)
             -> Result<HttpRequest, CoreError> {
             #[automatically_derived]
@@ -38436,7 +38436,8 @@ pub mod session {
                     #[doc = " # Errors"]
                     #[doc =
                     " `invalid_input` for a malformed id or one already disabled; `settings_limit_reached`"]
-                    #[doc = " past 1,024; as [`Session::settings_change`]."]
+                    #[doc =
+                    " past 1,024; as the private `settings_change` (impl docs)."]
                     #[export_name =
                     "session_disableGlobalGroupRequest_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_disableGlobalGroupRequest(me:
@@ -38495,7 +38496,8 @@ pub mod session {
                     #[doc = " # Errors"]
                     #[doc =
                     " `invalid_input` for a malformed id or one already disabled; `settings_limit_reached`"]
-                    #[doc = " past 1,024; as [`Session::settings_change`]."]
+                    #[doc =
+                    " past 1,024; as the private `settings_change` (impl docs)."]
                     #[no_mangle]
                     #[doc(hidden)]
                     pub extern "C-unwind" fn __wbindgen_describe_session_disableGlobalGroupRequest_e09cc0eb35f8b583() {
@@ -38519,7 +38521,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\x05: Disables the global group `id` (hex): the commit request.\0\t # ErrorsU `invalid_input` for a malformed id or one already disabled; `settings_limit_reached`- past 1,024; as [`Session::settings_change`].\0\x01\x02id\0\0\0\0\0\x19disableGlobalGroupRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\x05: Disables the global group `id` (hex): the commit request.\0\t # ErrorsU `invalid_input` for a malformed id or one already disabled; `settings_limit_reached`: past 1,024; as the private `settings_change` (impl docs).\0\x01\x02id\0\0\0\0\0\x19disableGlobalGroupRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -38553,7 +38555,7 @@ pub mod session {
         #[doc = ""]
         #[doc = " # Errors"]
         #[doc =
-        " `invalid_input` for a malformed id or one not disabled; as [`Session::settings_change`]."]
+        " `invalid_input` for a malformed id or one not disabled; as the private `settings_change` (impl docs)."]
         pub fn enable_global_group_request(&mut self, id: &str)
             -> Result<HttpRequest, CoreError> {
             #[automatically_derived]
@@ -38564,7 +38566,7 @@ pub mod session {
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
-                    " `invalid_input` for a malformed id or one not disabled; as [`Session::settings_change`]."]
+                    " `invalid_input` for a malformed id or one not disabled; as the private `settings_change` (impl docs)."]
                     #[export_name =
                     "session_enableGlobalGroupRequest_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_enableGlobalGroupRequest(me:
@@ -38622,7 +38624,7 @@ pub mod session {
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
-                    " `invalid_input` for a malformed id or one not disabled; as [`Session::settings_change`]."]
+                    " `invalid_input` for a malformed id or one not disabled; as the private `settings_change` (impl docs)."]
                     #[no_mangle]
                     #[doc(hidden)]
                     pub extern "C-unwind" fn __wbindgen_describe_session_enableGlobalGroupRequest_e09cc0eb35f8b583() {
@@ -38646,7 +38648,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\x04? Enables the global group `id` (hex) again: the commit request.\0\t # ErrorsY `invalid_input` for a malformed id or one not disabled; as [`Session::settings_change`].\0\x01\x02id\0\0\0\0\0\x18enableGlobalGroupRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\x04? Enables the global group `id` (hex) again: the commit request.\0\t # Errorsf `invalid_input` for a malformed id or one not disabled; as the private `settings_change` (impl docs).\0\x01\x02id\0\0\0\0\0\x18enableGlobalGroupRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -38853,7 +38855,7 @@ pub mod session {
         #[doc = " # Errors"]
         #[doc =
         " `locked`; `wrong_state` with no change kept or while a sync runs; `rollback`, `fork`;"]
-        #[doc = " as [`Session::settings_change`]."]
+        #[doc = " as the private `settings_change` (impl docs)."]
         pub fn settings_retry_request(&mut self)
             -> Result<HttpRequest, CoreError> {
             #[automatically_derived]
@@ -38868,7 +38870,7 @@ pub mod session {
                     #[doc = " # Errors"]
                     #[doc =
                     " `locked`; `wrong_state` with no change kept or while a sync runs; `rollback`, `fork`;"]
-                    #[doc = " as [`Session::settings_change`]."]
+                    #[doc = " as the private `settings_change` (impl docs)."]
                     #[export_name =
                     "session_settingsRetryRequest_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_settingsRetryRequest(me:
@@ -38908,7 +38910,7 @@ pub mod session {
                     #[doc = " # Errors"]
                     #[doc =
                     " `locked`; `wrong_state` with no change kept or while a sync runs; `rollback`, `fork`;"]
-                    #[doc = " as [`Session::settings_change`]."]
+                    #[doc = " as the private `settings_change` (impl docs)."]
                     #[no_mangle]
                     #[doc(hidden)]
                     pub extern "C-unwind" fn __wbindgen_describe_session_settingsRetryRequest_e09cc0eb35f8b583() {
@@ -38931,7 +38933,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\x07U After `server_state_conflict` and a sync: the change rebuilt on the account the sync\\ verified (`CasRetry`: a rollback or fork stops it; otherwise the same edit is redone on the\x11 current record).\0\t # ErrorsV `locked`; `wrong_state` with no change kept or while a sync runs; `rollback`, `fork`;! as [`Session::settings_change`].\0\0\0\0\x14settingsRetryRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\x07U After `server_state_conflict` and a sync: the change rebuilt on the account the sync\\ verified (`CasRetry`: a rollback or fork stops it; otherwise the same edit is redone on the\x11 current record).\0\t # ErrorsV `locked`; `wrong_state` with no change kept or while a sync runs; `rollback`, `fork`;. as the private `settings_change` (impl docs).\0\0\0\0\x14settingsRetryRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
