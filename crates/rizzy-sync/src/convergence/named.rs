@@ -17,8 +17,8 @@
 //! | [`adr0018_purge_over_active_and_ops_after_the_purge`] | ADR 0018 §3 "A Purge is never rejected", "Applying" 3; spike test of the same name |
 //! | [`an_oversize_item_across_compaction_and_a_restore`] | ADR 0021 §5 "Oversize items", §8; ADR 0018 owner decision 12 |
 //! | [`a_lost_answer_across_a_restore`] | ADR 0021 §2 "Restore generation", §9; spike `stale_sent_resolution` |
-//! | [`finding_a_paged_tombstone_cover_split_from_its_purge_stalls`] | a finding: ADR 0021 §4 paging against ADR 0018 §3 "Snapshots are claims" |
-//! | [`gap14_audit_14_g1_mixed_family_seed_hits_the_same_paged_purge_split`] | gap 14, audit uid "14-G1": a generated `mixed`-family seed hitting the same finding |
+//! | [`a_paged_tombstone_cover_split_from_its_purge_is_held_and_taken`] | ADR 0050 §4, the boundary case (gap 14) |
+//! | [`a_tombstone_cover_whose_purge_is_on_a_later_devices_chain_is_held_and_taken`] | ADR 0050 §4, the cross-device case, the purge one to many pages later |
 //! | [`a_claimed_dot_never_swallows_the_genuine_op`] | ADR 0018 §3 "Snapshots are claims"; ADR 0021 §8 claims of unheld dots; spike `tests/faulty.rs` test of the same name |
 //! | [`an_omitting_snapshot_never_removes_a_held_value`] | ADR 0018 §3 "The absence of a value is never evidence"; spike `tests/faulty.rs` test of the same name |
 //! | [`a_tombstone_that_records_a_known_write_is_refused`] | ADR 0018 §3 "refuses ... a snapshot that contradicts an op body it holds"; spike `tests/faulty.rs` test of the same name |
@@ -514,18 +514,16 @@ fn a_lost_answer_across_a_restore() {
     );
 }
 
-/// **Finding** (reported, not fixed here): a paged Fetch can put a tombstone cover in the page
-/// of the bodiless headers it covers while its recorded purge, a later link of the same chain,
-/// falls in the next page. The merge cuts the cover to the headers verified so far (ADR 0018 §3
-/// "Snapshots are claims"), so it refuses the tombstone (`PurgeAboveCut`); the bodiless headers
-/// then count against no accepted cover, the chain stops at a gap, the cursor stays, and every
-/// later Fetch with the same paging repeats it: against an honest server the device never
-/// converges. The server cannot page around it: the purge dot is inside the encrypted snapshot.
-/// ADR 0021 §4 ("Each page of a paged response carries its own covers") and the spike (which
-/// does not model paging) leave this open. This test pins the stall; when the owner settles the
-/// rule and the engine changes, it fails and becomes a convergence test.
+/// ADR 0050 §4, the boundary case (formerly a finding, gap 14): a paged Fetch puts a tombstone
+/// cover in the page of the bodiless headers it covers while its recorded purge, a later link of
+/// the same chain, falls in the next page. The merge cuts the cover to the headers verified so
+/// far (ADR 0018 §3 "Snapshots are claims") and refuses it (`PurgeAboveCut`); before ADR 0050
+/// the chain stopped at a gap, the cursor stayed, and every later Fetch with the same paging
+/// repeated it, so the device never converged against an honest server. Now the device holds
+/// the cover, its chain and cursor go past the held headers, and the next page's purge header
+/// lets the retry take it.
 #[test]
-fn finding_a_paged_tombstone_cover_split_from_its_purge_stalls() {
+fn a_paged_tombstone_cover_split_from_its_purge_is_held_and_taken() {
     let faults = Faults {
         page_len: 3,
         page_in_drain: true,
@@ -548,49 +546,106 @@ fn finding_a_paged_tombstone_cover_split_from_its_purge_stalls() {
     w.step(Step::Worker);
     assert_eq!(w.server.bodiless(w.items[0]).len(), 4, "not compacted");
     w.join(2);
-    w.drain();
-    w.check_quiescent(1);
+    // One Fetch: three pages of three records, the purge (seq 4) alone in the second.
+    w.step(Step::Fetch { d: 2 });
     let a = w.id(0).unwrap();
     let c = &w.devices[2];
-    assert!(c.stats.paged_refused > 0, "the split cover was not refused");
-    assert_eq!(c.log.head(a), 0, "the chain went past the refused cover");
-    assert!(
-        w.verdict().is_err(),
-        "the stall no longer happens: settle the finding"
+    assert!(c.stats.held > 0, "the split cover was not held");
+    assert_eq!(
+        c.stats.holds_resolved, c.stats.held,
+        "a held cover was not resolved"
     );
+    assert_eq!(c.stats.refused, 0, "a held cover was given up");
+    assert_eq!(c.log.head(a), 4, "the chain stopped at the held cover");
+    assert_eq!(
+        c.log.settled(w.items[0]).get(a),
+        4,
+        "the purge did not settle"
+    );
+    assert!(c.last_complete.is_empty(), "{:?}", c.last_complete);
+    settle(&mut w);
 }
 
-/// **Finding** (gap 14, audit uid "14-G1", pinned not fixed): a *generated* `mixed`-family
-/// history (`super::generate::run`) hits the same gap as
-/// [`finding_a_paged_tombstone_cover_split_from_its_purge_stalls`] above, found on fresh seeds
-/// at 10x the PR budget. Device 0 fetches device 1's item-0 tombstone cover (covered VV
-/// `{device 1: 3, device 2: 2}`, device 1's own purge dot) in one 3-page response
-/// (`Faults::page_len` for this seed); confirmed with a temporary probe, the cover's bodiless
-/// headers and enough of their own evidence land split across that response's pages so the
-/// *unbounded* per-item cut (`merge/evidence.rs`'s `cut`, not the bound-capped path
-/// `absorb_snapshot` added for the lag-repair fix) refuses the cover `PurgeAboveCut` twice:
-/// once on page 1 of 3 (`page.partial` true) and again on page 3 of 3, the response's own last
-/// page (`page.partial` false) -- the same single page-split, re-tried against the same
-/// still-incomplete evidence, not two separate incidents. That is exactly the mechanism the
-/// finding above pins (ADR 0021 §4, "Each page of a paged response carries its own covers"),
-/// just landing its second, unexempted refusal on a last page instead of a later Fetch. The
-/// harness's `paged_refused` exemption (`device::Device::process_page`: `kind ==
-/// "PurgeAboveCut" && page.partial`) only recognises the first of the two, so
-/// `World::check_quiescent` still counts the second as a refusal on an untainted record.
-/// Unlike the hand-built finding above, this device does not stall for good: several Fetches
-/// later (confirmed with the same probe) device 0's `log.head` of device 1 reaches its full
-/// chain head and item 0's covered VV passes device 1's purge dot with no unresolved
-/// disagreements, so the gap closes here on its own. Widening the exemption to swallow a
-/// last-page `PurgeAboveCut` would also hide the hand-built finding's permanently-stalling
-/// case if it ever lands on a last page, so nothing in the harness or production code changes
-/// here; pending the owner's ADR for gap 14, this seed is pinned as its own regression instead.
+/// ADR 0050 §4, the cross-device case: the tombstone's recorded purge is another device's op,
+/// on a chain the server serves only after the chain of the bodiless headers the cover is
+/// selected for (devices in ascending id order, ADR 0021 §4), so the purge header comes one,
+/// two or many pages later. The device holds the cover across every page in between and
+/// takes it once the purger's chain reaches the purge.
 #[test]
-#[ignore = "gap 14: a paged Fetch splits a tombstone cover from its purge (ADR 0021 §4); audit uid 14-G1"]
-fn gap14_audit_14_g1_mixed_family_seed_hits_the_same_paged_purge_split() {
-    assert!(
-        super::generate::run(7, 0x4da9_6853_5bc3_084a).is_err(),
-        "the gap closed on this seed: settle gap 14 and move it to generate::REGRESSIONS"
-    );
+fn a_tombstone_cover_whose_purge_is_on_a_later_devices_chain_is_held_and_taken() {
+    for (seed, page_len, pad) in [(21, 3, 0), (22, 2, 2), (23, 1, 5), (24, 2, 9)] {
+        let faults = Faults {
+            page_len,
+            page_in_drain: true,
+            ..Faults::default()
+        };
+        let mut w = World::new(3, 2, 2, seed, faults);
+        // The writer is the device with the lower id, the purger the other one, so the
+        // purger's chain comes after the writer's in every response.
+        let (writer, purger) = if w.id(0) < w.id(1) { (0, 1) } else { (1, 0) };
+        w.step(Step::Write {
+            d: writer,
+            i: 0,
+            k: 0,
+        });
+        w.step(Step::Write {
+            d: writer,
+            i: 0,
+            k: 1,
+        });
+        w.step(Step::Trash { d: writer, i: 0 });
+        sync(&mut w, writer);
+        // `pad` ops of the purger on another item put pages between the cover and the purge.
+        for k in 0..pad {
+            w.step(Step::Write {
+                d: purger,
+                i: 1,
+                k: k % 3,
+            });
+        }
+        w.step(Step::Fetch { d: purger });
+        w.step(Step::Purge { d: purger, i: 0 });
+        sync(&mut w, purger);
+        // The writer learns the purge and writes the tombstone that records it; the purger
+        // writes none, so the only cover of the writer's headers names the purger's purge.
+        w.step(Step::Fetch { d: writer });
+        w.step(Step::Snapshot { d: writer, i: 0 });
+        w.step(Step::Upload {
+            d: writer,
+            lose: false,
+        });
+        w.step(Step::Worker);
+        assert!(
+            !w.server.bodiless(w.items[0]).is_empty(),
+            "seed {seed}: not compacted"
+        );
+        w.join(2);
+        w.step(Step::Fetch { d: 2 });
+        let c = &w.devices[2];
+        assert!(
+            c.stats.held > 0,
+            "seed {seed}: the split cover was not held"
+        );
+        assert_eq!(c.stats.holds_resolved, c.stats.held, "seed {seed}");
+        assert_eq!(c.stats.refused, 0, "seed {seed}: a held cover was given up");
+        let (wid, pid) = (w.id(writer).unwrap(), w.id(purger).unwrap());
+        assert_eq!(
+            c.log.head(wid),
+            w.devices[writer].log.head(wid),
+            "seed {seed}"
+        );
+        assert_eq!(
+            c.log.head(pid),
+            w.devices[purger].log.head(pid),
+            "seed {seed}"
+        );
+        assert!(
+            c.last_complete.is_empty(),
+            "seed {seed}: {:?}",
+            c.last_complete
+        );
+        settle(&mut w);
+    }
 }
 
 /// Device `d` writes a snapshot of item `i` telling `fault`.

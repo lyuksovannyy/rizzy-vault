@@ -429,10 +429,6 @@ pub(super) struct Page {
     pub(super) ops: Vec<OpRecord>,
     /// The covers.
     pub(super) covers: Vec<SnapRecord>,
-    /// Whether a later page of the same response follows: the page is a strict prefix of the
-    /// response (metadata of the delivery, which the device reads to tell the paging finding of
-    /// [`super::world::World::drain`] from any other refusal).
-    pub(super) partial: bool,
 }
 
 /// A Fetch response.
@@ -1092,13 +1088,11 @@ impl Server {
             page_len
         };
         let chunks: Vec<&[OpRecord]> = records.chunks(size).collect();
-        let last = chunks.len().saturating_sub(1);
         let mut pages = Vec::new();
-        for (at, chunk) in chunks.into_iter().enumerate() {
+        for chunk in chunks {
             let mut page = Page {
                 ops: chunk.to_vec(),
                 covers: Vec::new(),
-                partial: at < last,
             };
             let mut bodiless: BTreeMap<ItemId, Vec<Dot>> = BTreeMap::new();
             for r in chunk.iter().filter(|r| r.body.is_none()) {

@@ -1148,16 +1148,22 @@ impl VaultLog {
         let mut out = Vec::new();
         for chain in self.chains.values() {
             let mut first_unsettled: Option<Dot> = None;
+            // A run of held or lapsed links is one gap: only its first is named for itself, as
+            // the chain check names only the first header it stops at (ADR 0050 §2).
+            let mut held_named = false;
             for link in chain.links.range(chain.frontier..).map(|(_, l)| l) {
                 if settled(&self.items, link) || link.state == LinkState::Revoked {
                     continue;
                 }
                 let dot = link.header.dot;
+                let held = matches!(link.state, LinkState::Held | LinkState::Lapsed);
                 let reason = match (link.state, first_unsettled) {
                     (LinkState::Waiting, _) => Some(WaitReason::Body),
                     (LinkState::Rejected, _) => Some(WaitReason::Rejected),
-                    (LinkState::Held, _) => Some(WaitReason::Held),
-                    (LinkState::Bodiless | LinkState::Lapsed, _) => Some(WaitReason::Uncovered),
+                    (LinkState::Held, _) if !held_named => Some(WaitReason::Held),
+                    (LinkState::Bodiless | LinkState::Lapsed, _) if !held_named => {
+                        Some(WaitReason::Uncovered)
+                    }
                     (_, Some(first)) => Some(WaitReason::Chain {
                         first_unsettled: first,
                     }),
@@ -1171,6 +1177,7 @@ impl VaultLog {
                         reason,
                     });
                 }
+                held_named |= held;
                 first_unsettled.get_or_insert(dot);
             }
         }
@@ -1535,3 +1542,10 @@ mod tests;
     reason = "the generated histories index fixtures they built; a panic there fails the test, which CLAUDE.md allows"
 )]
 mod proptests;
+
+#[cfg(test)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code indexes fixtures it built; a panic there fails the test, which CLAUDE.md allows"
+)]
+mod holds;

@@ -68,14 +68,21 @@ const PR_CASES: u32 = 1_000;
 /// Generated histories per PR run of the gap-detection test.
 const PR_GAP_CASES: u32 = 1_000;
 
+/// Generated histories per PR run of the paged tombstone-split test ([`run_split`]).
+const PR_SPLIT_CASES: u32 = 300;
+
 /// Fixed seeds that once failed, run on every PR: `(family, seed)`.
-const REGRESSIONS: [(usize, u64); 8] = [
+const REGRESSIONS: [(usize, u64); 9] = [
     // A restore to an empty backup: own acknowledged ops without bodies need a fresh snapshot
     // that covers own unacknowledged ops too (the healing closure in `device`).
     (4, 11_895_903_307_134_407_466),
-    // A paged response splits a tombstone cover from its recorded purge (`World::drain`; the named finding test pins it).
+    // A paged response splits a tombstone cover from its recorded purge: the device holds the
+    // cover until a later page brings the purge (ADR 0050 §2; the named tests of `named`).
     (7, 8_380_964_389_207_079_218),
     (7, 16_352_471_332_150_547_450),
+    // Gap 14, audit uid "14-G1": the same split, the cover refused on page 1 and again on page
+    // 3 of one response before ADR 0050.
+    (7, 0x4da9_6853_5bc3_084a),
     // `World::check_rotations`'s writer-rule check flagged an envelope `Server::worker`'s R1
     // had dropped the body of (fully covered by a retained snapshot) and a later restore to a
     // backup taken before that drop brought back: the pre-rotation `RotationRecord::before`
@@ -519,6 +526,113 @@ fn compact_then_expire(world: &mut World, k: usize, other: usize) {
     world.pass_time(1_000);
 }
 
+/// One paged tombstone-split history (ADR 0050 §4), and whether its purger is another device
+/// than the writer of the bodiless headers (the cross-device case). A writer edits and trashes
+/// item 0, other devices may edit it too, a purger (the writer or another device) purges it,
+/// devices write padding ops on the other items (never late edits of item 0: cut absorptions of
+/// tombstones with late values can report honest disagreements under paging, a separate
+/// finding outside ADR 0050; a paged drain of the generated families shows honest disagreements
+/// with no hold at all, e.g. `history(7, 27u64.wrapping_mul(0x9e37_79b9_7f4a_7c15))`) before
+/// and after the purge so that the purge
+/// header lands one, two or many pages after the cover, a random subset of devices writes
+/// tombstones, `worker` compacts, and a device enrolled late fetches every response in pages of
+/// one to four records, shuffled and duplicated at random, until quiescence: a tombstone cover
+/// then often comes in a page before the header of the Purge it records, on the same chain or
+/// a later device's. The quiescent checks run properties 1, 2, 3, 4, 6 and 7 and ADR 0021 §8
+/// property 3 over it; a hold the response leaves unresolved is a violation.
+fn split_history(seed: u64) -> (World, bool) {
+    let mut rng = Rng::new(seed);
+    let devices = 3 + rng.below(3);
+    let items = 2 + rng.below(2);
+    let faults = Faults {
+        page_len: 1 + rng.below(4),
+        shuffle: rng.chance(1, 3),
+        duplicate: rng.chance(1, 3),
+        page_in_drain: true,
+    };
+    let joined = devices - 1;
+    let mut world = World::new(devices, joined, items, rng.next(), faults);
+    let writer = rng.below(joined);
+    let purger = if rng.chance(1, 3) {
+        writer
+    } else {
+        rng.below(joined)
+    };
+    let key = |rng: &mut Rng| rng.below(super::KEYS.len());
+    let pad = |world: &mut World, rng: &mut Rng, n: usize| {
+        for _ in 0..n {
+            let d = rng.below(joined);
+            let i = 1 + rng.below(items - 1);
+            let k = key(rng);
+            world.step(Step::Write { d, i, k });
+            if rng.chance(1, 2) {
+                world.step(Step::Upload { d, lose: false });
+            }
+        }
+    };
+    for _ in 0..=rng.below(4) {
+        let k = key(&mut rng);
+        world.step(Step::Write { d: writer, i: 0, k });
+    }
+    world.step(Step::Upload {
+        d: writer,
+        lose: false,
+    });
+    for d in 0..joined {
+        if d != writer && rng.chance(1, 3) {
+            world.step(Step::Fetch { d });
+            let k = key(&mut rng);
+            world.step(Step::Write { d, i: 0, k });
+            world.step(Step::Upload { d, lose: false });
+        }
+    }
+    world.step(Step::Fetch { d: writer });
+    world.step(Step::Trash { d: writer, i: 0 });
+    world.step(Step::Upload {
+        d: writer,
+        lose: false,
+    });
+    let before = rng.below(10);
+    pad(&mut world, &mut rng, before);
+    world.step(Step::Upload {
+        d: purger,
+        lose: false,
+    });
+    world.step(Step::Fetch { d: purger });
+    world.step(Step::Purge { d: purger, i: 0 });
+    world.step(Step::Upload {
+        d: purger,
+        lose: false,
+    });
+    let after = rng.below(6);
+    pad(&mut world, &mut rng, after);
+    for d in 0..joined {
+        if rng.chance(2, 3) {
+            world.step(Step::Upload { d, lose: false });
+            world.step(Step::Fetch { d });
+            world.step(Step::Snapshot { d, i: 0 });
+            world.step(Step::Upload { d, lose: false });
+        }
+    }
+    world.step(Step::Worker);
+    world.join(joined);
+    if !world.drain() {
+        world
+            .violations
+            .push("the drain did not reach quiescence".to_owned());
+    }
+    world.check_quiescent(2);
+    (world, purger != writer)
+}
+
+/// Runs one paged tombstone-split history ([`split_history`]).
+///
+/// # Errors
+/// The first violation.
+pub(super) fn run_split(seed: u64) -> Result<(), String> {
+    split_history(seed).0.verdict()
+}
+
 /// Runs one gap-detection history (property 7, ADR 0012 §12 "a server that withholds an op on
 /// one item while serving a compacted snapshot of another"): a writer edits two items, the
 /// others snapshot and compact, then the server withholds one of the writer's ops, with a later
@@ -675,6 +789,44 @@ fn withheld_ops_are_reported() {
     run_cases(PR_GAP_CASES, 1, Seeds::Fixed, |_, seed| run_gap(seed));
 }
 
+/// ADR 0050 §4: properties 1, 2, 3, 4, 6 and 7 on [`PR_SPLIT_CASES`] paged tombstone-split
+/// histories ([`run_split`]), the purge in the same chain as the cover's bodiless headers or
+/// another device's, one to many pages after the cover.
+#[test]
+fn paged_tombstone_splits_converge() {
+    run_cases(PR_SPLIT_CASES, 1, Seeds::Fixed, |_, seed| run_split(seed));
+}
+
+/// The split histories reach what they are for (ADR 0050 §4): covers held across a page
+/// boundary and taken on a retry, with the purge on the bodiless headers' own chain and on
+/// another device's.
+#[test]
+fn paged_tombstone_splits_reach_holds() {
+    let (mut same, mut cross) = ((0, 0), (0, 0));
+    for seed in 0..80u64 {
+        let (w, other) = split_history(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        if let Err(e) = w.verdict() {
+            panic!("seed {seed}: {e}");
+        }
+        let held: u64 = w.devices.iter().map(|d| d.stats.held).sum();
+        let taken: u64 = w.devices.iter().map(|d| d.stats.holds_taken).sum();
+        let tally = if other { &mut cross } else { &mut same };
+        tally.0 += held;
+        tally.1 += taken;
+    }
+    assert!(same.0 > 0 && same.1 > 0, "same chain: {same:?}");
+    assert!(cross.0 > 0 && cross.1 > 0, "cross-device: {cross:?}");
+}
+
+/// The nightly budget of [`paged_tombstone_splits_converge`], on fresh seeds.
+#[test]
+#[ignore = "nightly budget: 100 times the PR cases on fresh seeds (ADR 0012 §12)"]
+fn nightly_paged_tombstone_splits_converge() {
+    run_cases(PR_SPLIT_CASES * 100, 1, Seeds::Fresh, |_, seed| {
+        run_split(seed)
+    });
+}
+
 /// The fixed seeds of [`REGRESSIONS`].
 #[test]
 fn regression_seeds() {
@@ -722,9 +874,9 @@ struct Reach {
     revoked_refused: u64,
     /// Own snapshots the server refused because they reached it before the ops they cover.
     early_refused: u64,
-    /// Runs whose "no gap against the honest server" check was skipped for the paging
-    /// finding ([`World::gap_check_skipped`]).
-    gap_skipped: u64,
+    /// Covers held across a page boundary (ADR 0050 §2), those resolved (taken on a retry, or
+    /// made moot by a cover taken since), and those taken on a retry.
+    holds: (u64, u64, u64),
     /// Snapshots the property 3 replays absorbed.
     replay_absorbed: u64,
     /// Older retained snapshots checked by server property 4.
@@ -771,7 +923,6 @@ fn reach(family: usize, seeds: u64) -> Reach {
         r.heals += w.server.stats.heals_stored;
         r.already_stored += w.server.stats.already_stored;
         r.revoked_refused += w.server.stats.revoked_refused;
-        r.gap_skipped += u64::from(w.gap_check_skipped());
         r.replay_absorbed += w.replay_absorbed;
         r.older_kept += w.server.stats.worker_checks.older_kept;
         r.linear += w.server.stats.worker_checks.linear;
@@ -799,6 +950,9 @@ fn reach(family: usize, seeds: u64) -> Reach {
             r.keys.1 += dev.stats.keys_unwrapped;
             r.reissued.0 += dev.stats.reissued;
             r.reissued.1 += dev.stats.republished;
+            r.holds.0 += dev.stats.held;
+            r.holds.1 += dev.stats.holds_resolved;
+            r.holds.2 += dev.stats.holds_taken;
             for merge in dev.items.values() {
                 if let Ok(super::oracle::State::Tombstone { late, .. }) = super::oracle::held(merge)
                     && !late.is_empty()
@@ -816,9 +970,8 @@ fn reach(family: usize, seeds: u64) -> Reach {
 /// authors' snapshots refused, the server properties 4 and 5, property 3 with absorptions,
 /// lies written, absorbed and refused; rotations, fresh keys, stale answers, re-issues,
 /// property 6 and lag repairs; kind-4 expiries and their covers; items beyond the
-/// faulty-device bound. A generator that silently stopped reaching one
-/// would make the property tests vacuous there. The paging finding may skip the "no gap"
-/// check only in a small minority of the paged families' runs.
+/// faulty-device bound. A generator that silently stopped reaching one would make the property
+/// tests vacuous there.
 #[test]
 fn the_families_reach_their_rules() {
     let index = |name: &str| FAMILIES.iter().position(|f| *f == name).unwrap();
@@ -843,7 +996,6 @@ fn the_families_reach_their_rules() {
     assert!(revocation.revoked_refused > 0, "{revocation:?}");
     for name in ["faults", "mixed"] {
         let paged = reach(index(name), 60);
-        assert!(paged.gap_skipped * 10 <= paged.runs, "{name}: {paged:?}");
         if name == "faults" {
             assert!(paged.already_stored > 0, "{paged:?}");
         }
