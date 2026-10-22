@@ -23,7 +23,11 @@
 //! its own registrable domain under the compiled-in Public Suffix List ([`crate::suffix`]), so a
 //! bare public suffix (`co.uk`, `github.io`) or a subdomain is refused, and
 //! `flag_third_party_hostable` is `0x00` (that flag records a *reviewed* exception, ADR 0038 §4
-//! point 3, which no user group has).
+//! point 3, which no user group has). The codec itself already enforces ADR 0044's member rules
+//! for every group, global or user (no IP literal; each member its own registrable domain), so
+//! the first check adds, for a user group, only the refusal of a dotless name
+//! ([`crate::equivalence::is_valid_member`] accepts one as its own registrable domain; the PSL
+//! does not).
 //!
 //! The decoder is strict, like every decoder of the format family: one accepted encoding per
 //! value, so `encode(decode(x)) == x` for every `x` that decodes (ADR 0018 §12's property,
@@ -43,13 +47,12 @@ use std::collections::BTreeSet;
 use rizzy_core::encoding::{Reader, put_u16};
 use rizzy_core::error::EncodeError;
 
-use crate::equivalence::{EquivalenceGroup, EquivalenceView, GroupId};
+use crate::equivalence::{EquivalenceGroup, EquivalenceView, GroupId, is_valid_member};
 use crate::error::{
     MAX_DISABLED_GROUPS, MAX_GROUP_DOMAINS, MAX_USER_GROUPS, MatchingSettingsError,
 };
 use crate::modes::MatchMode;
 use crate::normalize::normalize_domain;
-use crate::suffix::registrable_domain;
 
 /// The matching section of the account settings (module docs). Build one with
 /// [`MatchingSettings::default`] (the ADR 0037 §6 default: *Base domain*, nothing disabled, no
@@ -125,9 +128,20 @@ pub fn user_group(
     EquivalenceGroup::new(id, normalized, false).map_err(|_| MatchingSettingsError::InvalidGroup)
 }
 
-/// Whether `domain` (already normalised) is its own registrable domain (module docs).
+/// Whether `domain` (already normalised) is its own registrable domain under the compiled-in
+/// PSL (module docs; ADR 0042 §4).
+///
+/// The member rules every group obeys live in one place, [`is_valid_member`] (ADR 0044: no IP
+/// literal; the domain equals its own registrable domain, with a dotless name counting as its own),
+/// which [`EquivalenceGroup::new`] and [`EquivalenceGroup::decode`] enforce for every caller.
+/// This check is only what ADR 0042 §4 asks of a *user* group on top of that: the domain must be
+/// its own *PSL* registrable domain, which a dotless name never is (under the PSL's default `*`
+/// rule a single label is itself a suffix, `com` or an unlisted `nas` alike), so a user group
+/// also refuses one. The check runs here, before [`EquivalenceGroup::new`], only so the caller
+/// gets [`MatchingSettingsError::NotRegistrableDomain`] rather than the generic
+/// [`MatchingSettingsError::InvalidGroup`].
 fn is_own_registrable_domain(domain: &str) -> bool {
-    registrable_domain(domain).as_deref() == Some(domain)
+    is_valid_member(domain) && domain.contains('.')
 }
 
 /// Whether `group` may be stored as a user group (ADR 0042 §4): rule 2 and 3 of [`user_group`].

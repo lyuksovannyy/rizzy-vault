@@ -18,8 +18,10 @@
 #   starter groups below need it.
 # - domains: two or more, comma-separated, no spaces required (surrounding whitespace is
 #   trimmed), each a registrable domain. `cargo xtask equivalence-list` normalises each to its
-#   IDNA A-label form and rejects the line if a domain does not normalise, there are fewer
-#   than two domains, or two domains normalise to the same value.
+#   IDNA A-label form and rejects the line if a domain does not normalise, is an IP literal,
+#   is not its own registrable domain (a bare public suffix such as co.uk, or a subdomain such
+#   as mail.example.com; ADR 0044), there are fewer than two domains, or two domains normalise
+#   to the same value.
 # - Blank lines and lines starting with `#` are ignored.
 # - Line order does not matter: `cargo xtask equivalence-list` sorts groups by id itself.
 #   Append a new group anywhere; do not renumber or reorder existing lines.

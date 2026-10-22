@@ -251,12 +251,35 @@ fn active_groups(specs: &[EquivGroupSpec]) -> Vec<GroupData> {
             if domains.len() != supplied_len || domains.len() < 2 {
                 return None;
             }
+            // ADR 0044: one bad member makes the whole group unbuildable, never a smaller group.
+            if !domains.iter().all(|d| is_valid_member(d)) {
+                return None;
+            }
             Some(GroupData {
                 active: !(s.is_global && s.disabled),
                 domains: domains.into_iter().collect(),
             })
         })
         .collect()
+}
+
+/// ADR 0044's member rules, restated independently of `rizzy_match::equivalence::is_valid_member`:
+/// (1) no IP literal: the WHATWG URL Standard's "ends in a number" test (last label all ASCII
+/// digits, or `0x`/`0X` then hex digits) sends a host to the IPv4 parser, which either yields
+/// an IPv4 address (refused) or fails (no page can have that host; refused too); an IPv6
+/// literal contains `:`, which no domain does; (2) the member equals its own registrable
+/// domain under this oracle's own PSL reading, dotless names counting as their own.
+fn is_valid_member(domain: &str) -> bool {
+    let last = domain.rsplit('.').next().unwrap_or(domain);
+    let hex = last
+        .strip_prefix("0x")
+        .or_else(|| last.strip_prefix("0X"))
+        .is_some_and(|h| h.bytes().all(|b| b.is_ascii_hexdigit()));
+    let ends_in_a_number = hex || (!last.is_empty() && last.bytes().all(|b| b.is_ascii_digit()));
+    if ends_in_a_number || domain.contains(':') {
+        return false;
+    }
+    registrable_domain_of_named(domain).as_deref() == Some(domain)
 }
 
 fn same_group(groups: &[GroupData], a: &str, b: &str) -> bool {
