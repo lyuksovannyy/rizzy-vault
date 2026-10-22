@@ -109,7 +109,35 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
   
   **ADR 0077 (Proposed)** resolves all of this, with seven open questions and recommendations. It needs owner acceptance; then the track runs. Its acceptance also authorizes one CI workflow edit (installing OpenSSL).
 - **Possible flake:** `rv` e2e signups intermittently answer `Server(InvalidRequest)`. Seen three times in different tests under load; they pass on rerun. Not investigated.
-- **What is left for agents:** 0076, 0056 and 0054 are running. Not started: 0052, 0053, 0057, 0060, 0071, 0073 (CI signing waits on its approval records) and 0074.
+- **Wave 3 (integrated, full-gated):**
+  - **ADR 0076, autocomplete autofill:**
+    - Writer checks W1–W5, TOTP-code fill computed in core, custom-field fill by exact token, and the extension's offer/disclosure/save dialog.
+    - The ADR 0043 token is kept and the 0076 offer messages are added on top: the reconciliation the owner still has to bless.
+    - W5 (Display Name required) exempts order-only writes, which is the agent's reading.
+    - The e2e found and fixed a forged-message bug in the save dialog.
+  - **ADR 0056, local index:** `rv` only, as owner answer 4 scopes it.
+    - Cleartext `item_index` in cache **format 3** (the ADR says 2, but 0051 took it); `rv item search/recent`, `rv cache reindex`.
+    - Search-text parts are joined with `\n`, the agent's reading of INV-80.
+  - **ADR 0054, attachments:** chunk envelopes, migration **0007** (backup schema_version 7), five endpoints, the 24 h sweep, and the web Attachments section. Interpretations for the owner:
+    - quota charge = wrap + size + 90 per chunk, charged at create with no upload headroom;
+    - the exact chunk length is enforced;
+    - no new rate-limit bucket;
+    - no `rv` commands, so `rv` purge leaves the blobs;
+    - export/import carries attachment fields but not the files, so imports elsewhere get dangling references;
+    - a toast behind the modal is exposed in the AX tree (a `packages/ui` issue, left as found).
+  - **ADR 0053, HIBP breach check:**
+    - The `icons` role, which runs alone; minimal ADR 0052 scaffolding in the new crate `rizzy-icon-proxy`.
+    - `POST /api/v1/icons/breach-range`; "Check for breaches" plus a "Password health" report.
+    - Judgment calls for the owner: the path name; the `{"range":…}` response; upstream failure answers 500; the setting names `RIZZY_BREACH_CHECK` / `RIZZY_ICON_CACHE_DIR`.
+    - Deploy files don't include the icons service yet. Never run against the real HIBP API.
+  - **ADR 0060, admin panel, partial:** only the separate admin listener (`RIZZY_ADMIN_LISTEN`, default 127.0.0.1:8081, its own router and CSP, 404 everywhere).
+    - **Every screen waits on new ADRs:** admin login, bootstrap token, 2FA and sessions (INV-69); an ADR 0011 settings-schema follow-up; invite-only signup; a metrics endpoint; and a name/ctx for purpose 0x0103.
+    - All test server spawners now set `RIZZY_ADMIN_LISTEN=127.0.0.1:0`, and new spawners must too.
+  - **Signup flake: fixed.** The cause was a test-harness port race: readiness meant "anything answers on the port", so tests could sign up on another test's server. Readiness now waits for the server's own listening line, a taken port is retried, and a failing test prints the server log tail. Fixed in the Rust harnesses and the TS helpers. No product bug.
+  - **Still flaky under load:** `adversarial-fill-requests.spec.ts:187` once failed its setup step ("did not capture a real itemId"); it passed 3/3 alone.
+  - **`gate.sh`** now runs `cargo test --no-fail-fast`.
+- **Found while implementing ADR 0071:** its "Ordering and completeness" sentence claims a `plaintext_len` edit fails the commitment. That is false as written: `plaintext_len` is in no chunk's AAD. A strict canonical reader catches the edit through exact framing plus the last chunk's AEAD, and that is what is implemented. Correcting the ADR text, or binding `plaintext_len` into the ctx, needs a new ADR from the owner.
+- **What is left for agents:** 0074 (CXF), 0071 (DB backup) and 0052 (icon proxy) are running. Not started: 0057 (keystore), and 0073 (signed images; CI signing waits on its approval records). Blocked on the owner: 0058/0059 (ADR 0077).
 - The gap-numbered audit (`docs/handoff/gap-audit.json`), which older gap ids below trace back to, still lives only on branch `wip/client-m1`. Keep that branch; its code is superseded by the commits in §2. `wip/match-core` (one unfinished commit off `main`) is likewise superseded and kept only for reference.
 
 ## 2. Done since the last rewrite
