@@ -61,7 +61,7 @@ export function useAction(): {
 /** Reads a secret input's text and empties the element, so the text sits in no React state.
  * Only call this once the save it is for has already succeeded (see `peekSecret`): clearing the
  * element before that point would drop the value from a retried save. */
-export function takeSecret(input: HTMLInputElement | null): string {
+export function takeSecret(input: HTMLInputElement | HTMLTextAreaElement | null): string {
   if (input === null) {
     return "";
   }
@@ -75,6 +75,6 @@ export function takeSecret(input: HTMLInputElement | null): string {
  * value if that attempt fails, so a retry resends the same secret instead of silently omitting
  * it. The caller clears the element itself (`takeSecret`, or `input.value = ""`) only after the
  * save has resolved successfully. */
-export function peekSecret(input: HTMLInputElement | null): string {
+export function peekSecret(input: HTMLInputElement | HTMLTextAreaElement | null): string {
   return input?.value ?? "";
 }

@@ -32,6 +32,7 @@ import {
   type Element,
   type FixedField,
   type Grouped,
+  CREATABLE_TYPES,
   FIXED_FIELDS,
   fixedChanges,
   group,
@@ -43,6 +44,11 @@ import { fillGenerated, generateValue } from "../generator-flow.ts";
 import { messageFor } from "../messages.ts";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText, peekSecret, useAction } from "./common.tsx";
+
+/** The element as an input, or `null` for a textarea or none: the generator fills inputs only. */
+function inputOf(el: HTMLInputElement | HTMLTextAreaElement | null | undefined): HTMLInputElement | null {
+  return el instanceof HTMLInputElement ? el : null;
+}
 
 /** The fields of a type this editor shows; unknown types get the title and notes only. */
 function fieldsOf(type: ItemType | "unknown"): readonly FixedField[] {
@@ -109,7 +115,9 @@ export function ItemEditor(props: {
   const [pendingUris, setPendingUris] = useState<PendingUri[]>([]);
   const [pendingCustom, setPendingCustom] = useState<PendingCustom[]>([]);
   const [newTags, setNewTags] = useState("");
-  const secrets = useRef(new Map<string, HTMLInputElement | null>());
+  // A fixed field's secret element: an input, or the textarea of a multi-line secret (an SSH
+  // private key, ADR 0055; `SecretField`'s `multiline`).
+  const secrets = useRef(new Map<string, HTMLInputElement | HTMLTextAreaElement | null>());
   const pendingCustomSecrets = useRef(new Map<string, HTMLInputElement | null>());
   const { busy, error, setError, run } = useAction();
   // Which generate slot (by field key) is mid-call, and the core's message for one whose
@@ -266,8 +274,8 @@ export function ItemEditor(props: {
     // secret instead of silently dropping it (module docs; mirrors the id-based idempotency
     // for list elements). Every peeked input is collected and cleared only once the save has
     // resolved successfully, inside `run`.
-    const toClear: HTMLInputElement[] = [];
-    const peek = (input: HTMLInputElement | null | undefined): string => {
+    const toClear: (HTMLInputElement | HTMLTextAreaElement)[] = [];
+    const peek = (input: HTMLInputElement | HTMLTextAreaElement | null | undefined): string => {
       if (input == null) {
         return "";
       }
@@ -400,7 +408,9 @@ export function ItemEditor(props: {
 
   return (
     <form className="panel item-editor" onSubmit={save} aria-labelledby="editor-title">
-      <h2 id="editor-title">{props.id === undefined ? `New ${type}` : "Edit item"}</h2>
+      <h2 id="editor-title">
+        {props.id === undefined ? `New ${CREATABLE_TYPES.find((t) => t.type === type)?.noun ?? type}` : "Edit item"}
+      </h2>
       {fieldsOf(type).map((f) => {
         const before = held.get(f.key);
         const concealed = before?.concealed ?? f.secret === true;
@@ -410,14 +420,23 @@ export function ItemEditor(props: {
               <SecretField
                 label={f.label}
                 name={f.key}
-                inputRef={(el) => {
-                  secrets.current.set(f.key, el);
-                }}
+                {...(f.multiline === true
+                  ? {
+                      multiline: true,
+                      textareaRef: (el: HTMLTextAreaElement | null) => {
+                        secrets.current.set(f.key, el);
+                      },
+                    }
+                  : {
+                      inputRef: (el: HTMLInputElement | null) => {
+                        secrets.current.set(f.key, el);
+                      },
+                    })}
                 {...(before !== undefined ? { hint: "Leave empty to keep the current value." } : {})}
               />
               <div className="actions">
                 {f.key === "login.password" && (
-                  <PasswordGenerateSlot {...generatorSlotProps(f.key, () => secrets.current.get(f.key) ?? null)} />
+                  <PasswordGenerateSlot {...generatorSlotProps(f.key, () => inputOf(secrets.current.get(f.key)))} />
                 )}
                 {before !== undefined && (
                   <label className="check">
@@ -441,6 +460,8 @@ export function ItemEditor(props: {
           value: texts[f.key] ?? "",
           onChange: (e: { currentTarget: { value: string } }) =>
             setTexts({ ...texts, [f.key]: e.currentTarget.value }),
+          // What an empty field means (`ssh.port`: 22, never stored; ADR 0055 §1).
+          ...(f.placeholder !== undefined ? { placeholder: f.placeholder } : {}),
         };
         return (
           <div key={f.key} className="field-edit">
@@ -620,7 +641,7 @@ export function ItemEditor(props: {
                     hint="Leave empty to keep the current value."
                   />
                   <PasswordGenerateSlot
-                    {...generatorSlotProps(valueField?.key ?? k, () => secrets.current.get(valueField?.key ?? k) ?? null)}
+                    {...generatorSlotProps(valueField?.key ?? k, () => inputOf(secrets.current.get(valueField?.key ?? k)))}
                   />
                   <label className="check">
                     <input
