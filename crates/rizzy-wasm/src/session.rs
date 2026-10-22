@@ -23,6 +23,7 @@
 //! | Conflict ("keep both / pick one") | [`Session::field_conflict`] (concealed values withheld), [`Session::reveal_conflict_value`] (one value), [`Session::resolve_conflict_pick`], [`Session::resolve_conflict_keep_both`] |
 //! | Late-edit and trash notices | [`Session::take_notices`] after a sync; [`Session::restore_late_as_new`] |
 //! | TOTP code | [`Session::totp`] |
+//! | Breach check (ADR 0053) | [`Session::breach_check_item`] → [`BreachCheck`] (also [`BreachCheck::for_password`] for a typed or generated password) |
 //! | Passkey assertion | [`Session::passkey_assertion`] ([`create_passkey`](crate::passkey::create_passkey) is stateless, module docs) |
 //! | Export | [`Session::reauth`] + [`Session::confirm_reauth`], then [`Session::export_encrypted`], or [`Session::plaintext_warning_shown`] + [`Session::export_plaintext`] after the hold |
 //! | Import | [`detect_import_format`], then [`Session::import_file`] or [`Session::import_encrypted`] |
@@ -76,7 +77,7 @@ use rizzy_client::rizzy_core::ids::{AccountId, AttachmentId};
 use rizzy_client::rizzy_core::item::key::ElementId;
 use rizzy_client::rizzy_core::item::schema::{
     ATTR_ALG, ATTR_CREATED_MS, ATTR_CREDENTIAL_ID, ATTR_PRIVATE_KEY, ATTR_RP_ID, ATTR_USER_HANDLE,
-    LIST_PASSKEY, LOGIN_TOTP,
+    LIST_PASSKEY, LOGIN_PASSWORD, LOGIN_TOTP,
 };
 use rizzy_client::rizzy_core::item::value::ValueRef;
 use rizzy_client::rizzy_core::passkey::Es256SigningKey;
@@ -98,6 +99,7 @@ use rizzy_client::two_factor::{TotpEnrolment, disable_request};
 use wasm_bindgen::prelude::wasm_bindgen;
 use zeroize::Zeroizing;
 
+use crate::breach::BreachCheck;
 use crate::error::{CoreError, CoreResult, IMPORT_FAILED, LOCKED, UNKNOWN_FORMAT, WRONG_STATE};
 use crate::http::{self, HttpRequest};
 use crate::items::{
@@ -871,6 +873,29 @@ impl Session {
         id: &str,
     ) -> Result<Vec<crate::autofill::CustomFieldAutofillView>, CoreError> {
         crate::autofill::custom_field_autofill(&self.inner()?.vault, id)
+    }
+
+    /// A breach check of an item's `login.password` (CRYPTO.md §11.16; [`crate::breach`]): the
+    /// password is read here and never crosses; `undefined` when the item has no password.
+    ///
+    /// # Errors
+    /// As [`Session::item`].
+    #[wasm_bindgen(js_name = breachCheckItem)]
+    pub fn breach_check_item(&self, id: &str) -> Result<Option<BreachCheck>, CoreError> {
+        let vault = &self.inner()?.vault;
+        let item = visible_item(vault, id)?;
+        if vault
+            .field_value(item, LOGIN_PASSWORD)
+            .filter(|v| !v.is_cleared())
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let password = items::reveal(vault, item, LOGIN_PASSWORD)?;
+        if password.is_empty() {
+            return Ok(None);
+        }
+        BreachCheck::of(&password).map(Some)
     }
 
     /// The current TOTP code of an item's `login.totp`, which holds an `otpauth://` URI or a
