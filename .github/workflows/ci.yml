@@ -47,6 +47,10 @@ jobs:
       # clippy.toml entries clippy ignores ("found a module"), which `-D warnings` does not
       # catch (ADR 0016 §5). Reuses the results of `cargo lint` above.
       - run: cargo xtask check-clippy
+      # Design tokens (ADR 0014 §5, ADR 0019 §13): every declared token pair meets WCAG AA
+      # contrast in both themes (a pair cannot ask for less than 3:1), and the generated CSS and
+      # native-toolkit files (Swift, Kotlin, XAML, QML) in packages/ui match tokens.json.
+      - run: cargo xtask generate-tokens --check
 
   test:
     name: test (${{ matrix.os }})

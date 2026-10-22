@@ -51,7 +51,9 @@
 //! [`contrast_ratio`] is the plain WCAG 2 relative-luminance formula. A pair's `min-ratio` is
 //! `4.5` for normal text or `3.0` for large text/UI components (WCAG AA); the source file encodes
 //! whichever applies per declared pair, so the check in [`check_contrast`] needs no separate
-//! text-size classification.
+//! text-size classification. A `min-ratio` below [`WCAG_AA_FLOOR`] (3:1, the lowest ratio WCAG
+//! 2 AA accepts for anything: SC 1.4.3 large text, SC 1.4.11 non-text) is a parse error, so a
+//! pair can never be declared into passing below AA; a stricter ratio (AAA's 7:1) is allowed.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -123,6 +125,11 @@ const RADIUS_KEYS: &[&str] = &["1", "2"];
 
 /// Shadow token keys (`--shadow-<key>`), in declaration order.
 const SHADOW_KEYS: &[&str] = &["1", "2"];
+
+/// The lowest `min-ratio` a declared pair may ask for (module docs, "Contrast"): WCAG 2 AA's
+/// 3:1, which applies to large text (SC 1.4.3) and to UI components and focus indicators
+/// (SC 1.4.11). Normal text needs 4.5:1, which the source declares per pair.
+pub(crate) const WCAG_AA_FLOOR: f64 = 3.0;
 
 /// One declared WCAG AA contrast pair (module docs, "The source format").
 #[derive(Clone, Debug, PartialEq)]
@@ -288,7 +295,7 @@ fn require_theme_pair(
 ///
 /// Returns a message when `value` is not an array, an entry is not an object with exactly
 /// `fg`/`bg`/`min-ratio`, `fg`/`bg` is not a string naming a [`COLOR_KEYS`] entry, `min-ratio` is
-/// not a positive number, or any of this is malformed in the entry's index.
+/// not a number of at least [`WCAG_AA_FLOOR`], or any of this is malformed in the entry's index.
 fn parse_contrast_pairs(value: &Value, context: &str) -> Result<Vec<ContrastPair>, String> {
     let Value::Array(items) = value else {
         return Err(format!("{context}: expected an array"));
@@ -315,9 +322,9 @@ fn parse_contrast_pairs(value: &Value, context: &str) -> Result<Vec<ContrastPair
         if !COLOR_KEYS.contains(&bg.as_str()) {
             return Err(format!("{entry_context}.bg: unknown colour key {bg:?}"));
         }
-        if min_ratio <= 0.0 {
+        if min_ratio.is_nan() || min_ratio < WCAG_AA_FLOOR {
             return Err(format!(
-                "{entry_context}.min-ratio: must be positive, found {min_ratio}"
+                "{entry_context}.min-ratio: must be at least {WCAG_AA_FLOOR} (WCAG AA), found {min_ratio}"
             ));
         }
         out.push(ContrastPair {
@@ -1335,7 +1342,25 @@ mod tests {
         let mut doc = valid_json();
         doc["contrast-pairs"][0]["min-ratio"] = serde_json::json!(0);
         let err = parse(&doc.to_string()).unwrap_err();
-        assert!(err.contains("must be positive"), "{err}");
+        assert!(err.contains("must be at least 3 (WCAG AA)"), "{err}");
+    }
+
+    #[test]
+    fn parse_rejects_a_min_ratio_below_wcag_aa() {
+        // A pair cannot be declared into passing below AA: 2.9:1 is under the 3:1 floor.
+        let mut doc = valid_json();
+        doc["contrast-pairs"][1]["min-ratio"] = serde_json::json!(2.9);
+        let err = parse(&doc.to_string()).unwrap_err();
+        assert!(err.contains("contrast-pairs[1].min-ratio"), "{err}");
+        assert!(err.contains("must be at least 3 (WCAG AA)"), "{err}");
+    }
+
+    #[test]
+    fn parse_accepts_a_stricter_than_aa_min_ratio() {
+        let mut doc = valid_json();
+        doc["contrast-pairs"][0]["min-ratio"] = serde_json::json!(7.0);
+        let tokens = parse(&doc.to_string()).unwrap();
+        assert!((tokens.contrast_pairs[0].min_ratio - 7.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1366,6 +1391,50 @@ mod tests {
         let violations = check_contrast(&tokens);
         assert_eq!(violations.len(), 2, "{violations:?}"); // light theme + dark theme
         assert!(violations[0].contains("1.00:1"), "{violations:?}");
+    }
+
+    #[test]
+    fn check_contrast_fails_just_below_aa_and_passes_just_above() {
+        // #777777 on white is 4.48:1, just under AA's 4.5:1 for text; #767676 is 4.54:1, just over
+        // it. Both themes get the same pair, so a failure is reported once per theme.
+        let mut doc = valid_json();
+        for theme in ["light", "dark"] {
+            doc["color"][theme]["surface"] = serde_json::json!("#ffffff");
+            doc["color"][theme]["text-muted"] = serde_json::json!("#777777");
+        }
+        doc["contrast-pairs"] = serde_json::json!([
+            { "fg": "text-muted", "bg": "surface", "min-ratio": 4.5 },
+        ]);
+        let tokens = parse(&doc.to_string()).unwrap();
+        let violations = check_contrast(&tokens);
+        assert_eq!(violations.len(), 2, "{violations:?}");
+        assert!(violations[0].contains("4.48:1"), "{violations:?}");
+
+        for theme in ["light", "dark"] {
+            doc["color"][theme]["text-muted"] = serde_json::json!("#767676");
+        }
+        let tokens = parse(&doc.to_string()).unwrap();
+        assert_eq!(check_contrast(&tokens), Vec::<String>::new());
+    }
+
+    #[test]
+    fn check_contrast_holds_ui_pairs_to_three_to_one() {
+        // #949494 on white is 3.03:1 (passes 3:1); #959595 is 2.99:1 (fails), WCAG SC 1.4.11.
+        let mut doc = valid_json();
+        for theme in ["light", "dark"] {
+            doc["color"][theme]["bg"] = serde_json::json!("#ffffff");
+            doc["color"][theme]["focus"] = serde_json::json!("#959595");
+        }
+        doc["contrast-pairs"] = serde_json::json!([
+            { "fg": "focus", "bg": "bg", "min-ratio": 3.0 },
+        ]);
+        let tokens = parse(&doc.to_string()).unwrap();
+        assert_eq!(check_contrast(&tokens).len(), 2);
+        for theme in ["light", "dark"] {
+            doc["color"][theme]["focus"] = serde_json::json!("#949494");
+        }
+        let tokens = parse(&doc.to_string()).unwrap();
+        assert_eq!(check_contrast(&tokens), Vec::<String>::new());
     }
 
     #[test]
