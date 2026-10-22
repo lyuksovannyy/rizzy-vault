@@ -364,6 +364,23 @@ fn populated(secrets_path: &Path) -> Dump {
             ]],
         ),
         ("vault_compaction_queue", vec![vec![v1(), item(), int(34)]]),
+        // ADR 0054 §5: one attachment of 100 bytes, its one chunk stored.
+        (
+            "vault_attachments",
+            vec![vec![
+                idv(36),
+                v1(),
+                item(),
+                blob(37, 122),
+                int(100),
+                int(1),
+                int(38),
+            ]],
+        ),
+        (
+            "vault_attachment_chunks",
+            vec![vec![idv(36), int(0), blob(39, 190)]],
+        ),
         (
             "vault_device_cursors",
             vec![vec![v1(), d1(), blob(35, 26), int(35)]],
