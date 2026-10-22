@@ -122,7 +122,8 @@ fn candidates(web: &WebSession, page: &str, saved: &str) -> usize {
         is_top_frame: true,
         frame_origin: page,
     };
-    decide_with_settings(page, &frame, &[uri], &read(web))
+    let (global, _) = crate::matching::global_equivalence_groups(0);
+    decide_with_settings(page, &frame, &[uri], &read(web), &global)
         .unwrap()
         .candidates
         .len()

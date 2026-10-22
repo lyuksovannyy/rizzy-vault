@@ -15,6 +15,9 @@
 //!   the changeset through the store's floors first; the SQL checks the rules it can check a
 //!   second time (a counter that would go down, another statement at a held dot, an `own`
 //!   that would go back) and fails the whole transaction instead of writing.
+//! - [`Db::open`] upgrades a cache of an older format first: each of `rizzy-client`'s
+//!   [`MIGRATIONS`] steps from the stored format on runs as one `BEGIN IMMEDIATE` transaction,
+//!   every statement of it required to change exactly one row (ADR 0026 §5; ADR 0051 §2).
 //! - [`Db::read`] reads every table back into the store's row model, which then verifies every
 //!   row ([`rizzy_client::store::load`]). Before any blob is read its length is checked in SQL
 //!   against the `rizzy-proto` limit of its column, so a hostile file cannot make `rv`
@@ -42,8 +45,8 @@ use rizzy_client::rizzy_proto::objects::VaultSelfGrant;
 use rizzy_client::store::record::MAX_DEVICE_STATE_LEN;
 use rizzy_client::store::rows::limits::{MAX_KEY_COLUMN_LEN, MAX_SELF_GRANT_JSON_LEN};
 use rizzy_client::store::rows::{
-    CacheRows, Changeset, ObjectRow, OpRow, PRAGMAS, SCHEMA, SnapshotRow, VaultRow, WrapRow, Write,
-    kind, meta, own,
+    CACHE_FORMAT, CacheRows, Changeset, MIGRATIONS, ObjectRow, OpRow, PRAGMAS, SCHEMA, SnapshotRow,
+    VaultRow, WrapRow, Write, kind, meta, own,
 };
 use sqlx_client as sqlx;
 use sqlx_client::sqlite::{
@@ -140,6 +143,8 @@ const DELETE_SNAPSHOT: &str =
 const SELECT_META: &str = "SELECT k, v FROM cache_meta WHERE length(k) <= 64 AND length(v) <= 1024";
 /// How many `cache_meta` rows there are.
 const COUNT_META: &str = "SELECT COUNT(*) FROM cache_meta";
+/// The stored format, for the migration steps (`v` length-capped like every meta read).
+const SELECT_FORMAT: &str = "SELECT v FROM cache_meta WHERE k = 'format' AND length(v) <= 1024";
 /// The device-state record, if its length is within the cap.
 const SELECT_DEVICE_STATE: &str = "SELECT record FROM device_state WHERE length(record) <= ?1";
 /// How many device-state rows there are.
@@ -328,7 +333,49 @@ impl Db {
         if !path.is_file() {
             return Err(CliError::NotEnrolled);
         }
-        Self::connect(path).await
+        let mut db = Self::connect(path).await?;
+        if let Err(error) = db.migrate().await {
+            db.close().await;
+            return Err(error);
+        }
+        Ok(db)
+    }
+
+    /// Runs every migration step from the stored format on (module docs), each in its own
+    /// transaction. A file without a readable format, or of a format no step starts from, is
+    /// left as it is: [`rizzy_client::store::load::open`] reports it.
+    async fn migrate(&mut self) -> Result<(), CliError> {
+        loop {
+            let format: Option<Vec<u8>> = sqlx::query_scalar(SELECT_FORMAT)
+                .fetch_optional(&mut self.conn)
+                .await
+                .map_err(|e| db_error(&e))?;
+            let Some(format) = format
+                .and_then(|v| <[u8; 2]>::try_from(v.as_slice()).ok())
+                .map(u16::from_be_bytes)
+            else {
+                return Ok(());
+            };
+            if format >= CACHE_FORMAT {
+                return Ok(());
+            }
+            let Some((_, statements)) = MIGRATIONS.iter().find(|(from, _)| *from == format) else {
+                return Ok(());
+            };
+            let mut tx = self
+                .conn
+                .begin_with(BEGIN_IMMEDIATE)
+                .await
+                .map_err(|e| db_error(&e))?;
+            for statement in *statements {
+                let done = sqlx::query(*statement)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| db_error(&e))?;
+                one_row(done.rows_affected()).map_err(|e| db_error(&e))?;
+            }
+            tx.commit().await.map_err(|e| db_error(&e))?;
+        }
     }
 
     /// Runs `changeset` as one `BEGIN IMMEDIATE` transaction. An empty changeset does nothing.
@@ -577,7 +624,10 @@ async fn read_rows(conn: &mut SqliteConnection) -> Result<CacheRows, sqlx::Error
 async fn apply(conn: &mut SqliteConnection, write: &Write) -> Result<(), sqlx::Error> {
     match write {
         Write::Meta { key, value } => {
-            let sql = if matches!(*key, meta::NEXT_DEVICE_SEQ | meta::HLC) {
+            let sql = if matches!(
+                *key,
+                meta::NEXT_DEVICE_SEQ | meta::HLC | meta::HIGHEST_EQUIVALENCE_LIST_VERSION
+            ) {
                 META_COUNTER
             } else {
                 META_FIXED
@@ -933,6 +983,7 @@ mod tests {
             },
             counter(meta::NEXT_DEVICE_SEQ, 1),
             counter(meta::HLC, 0),
+            counter(meta::HIGHEST_EQUIVALENCE_LIST_VERSION, 0),
             Write::DeviceState(Zeroizing::new(vec![1, 2, 3])),
         ]
         .into_iter()
@@ -1154,6 +1205,74 @@ mod tests {
             ops: rows.ops.clone(),
             snapshots: rows.snapshots.clone(),
         }
+    }
+
+    /// ADR 0051 §2: `Db::open` migrates a format-1 file to format 2 exactly as the reference
+    /// `load::migration_writes` does (one row added at 0, the format bumped, nothing else),
+    /// once; the floor is a counter the SQL never lowers, and it survives a reopen.
+    #[test]
+    fn a_format_1_file_is_migrated_and_the_floor_persists() {
+        block_on(async {
+            let path = temp_file("migrate");
+            // What a format-1 `create_writes` wrote: no floor row, format 1.
+            let v1: Changeset = [
+                Write::Meta {
+                    key: meta::FORMAT,
+                    value: 1u16.to_be_bytes().to_vec(),
+                },
+                Write::Meta {
+                    key: meta::SERVER_ORIGIN,
+                    value: b"https://vault.example.com".to_vec(),
+                },
+                Write::Meta {
+                    key: meta::ACCOUNT_ID,
+                    value: vec![0xa1; 16],
+                },
+                Write::Meta {
+                    key: meta::DEVICE_ID,
+                    value: DEVICE.to_vec(),
+                },
+                counter(meta::NEXT_DEVICE_SEQ, 1),
+                counter(meta::HLC, 0),
+                Write::DeviceState(Zeroizing::new(vec![1, 2, 3])),
+            ]
+            .into_iter()
+            .collect();
+            Db::create(&path, &v1).await.unwrap().close().await;
+
+            let mut db = Db::open(&path).await.unwrap();
+            let migrated = db.read().await.unwrap();
+            let mut reference = CacheRows::default();
+            reference.apply(&v1);
+            let migration = rizzy_client::store::load::migration_writes(&reference).unwrap();
+            assert_eq!(migration.writes().len(), 2);
+            reference.apply(&migration);
+            assert_eq!(parts(migrated), parts(reference));
+            // Raised, then a lower value is refused by the SQL guard too.
+            let floor = |v: u64| -> Changeset {
+                [counter(meta::HIGHEST_EQUIVALENCE_LIST_VERSION, v)]
+                    .into_iter()
+                    .collect()
+            };
+            db.write(&floor(4)).await.unwrap();
+            assert!(db.write(&floor(3)).await.is_err());
+            db.close().await;
+            // Reopened: no second migration, the stored floor kept.
+            let mut db = Db::open(&path).await.unwrap();
+            let rows = db.read().await.unwrap();
+            assert_eq!(
+                rows.meta.get(meta::FORMAT).map(Vec::as_slice),
+                Some(CACHE_FORMAT.to_be_bytes().as_slice())
+            );
+            assert_eq!(
+                rows.meta
+                    .get(meta::HIGHEST_EQUIVALENCE_LIST_VERSION)
+                    .map(Vec::as_slice),
+                Some(4u64.to_be_bytes().as_slice())
+            );
+            db.close().await;
+            discard(&path);
+        });
     }
 
     /// ADR 0026 §4, §6: a crash after any write of a step leaves the file as it was before the

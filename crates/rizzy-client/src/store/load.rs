@@ -56,7 +56,7 @@ use crate::device::{DeviceState, UnlockedDevice};
 use crate::error::ClientError;
 use crate::store::floors::{Floors, id16, u64_be};
 use crate::store::record::{DeviceRecord, Stage};
-use crate::store::rows::{Alarm, CACHE_FORMAT, CacheRows, ObjectRow, kind, meta};
+use crate::store::rows::{Alarm, CACHE_FORMAT, CacheRows, Changeset, ObjectRow, Write, kind, meta};
 use crate::sync::{Authors, VaultImage, VaultSync};
 
 /// A cache that loaded in full (module docs).
@@ -85,7 +85,54 @@ impl fmt::Debug for Loaded {
     }
 }
 
+/// The writes that upgrade `rows` from an older cache format to [`CACHE_FORMAT`] (ADR 0026
+/// §5; [ADR 0051] §2), for a host that stores raw rows and commits them as one transaction
+/// before [`open`]; the reference [`crate::store::rows::MIGRATIONS`]'s SQL is tested against.
+/// Empty for a cache already at [`CACHE_FORMAT`].
+///
+/// Format 1 → 2 adds `highest_equivalence_list_version` at `0` and bumps `format`; nothing
+/// else is read, re-parsed or re-encrypted. These writes are not [`Floors::admit`]ted: they
+/// run before any floor exists, and the format bump is the one change of a set-once row a
+/// migration makes. [`open`] then checks the result like any other cache.
+///
+/// # Errors
+/// [`ClientError::CacheUpdateRequired`] for a format newer than this build's;
+/// [`ClientError::CacheCorrupt`] for a missing or malformed format, format 0, or a format-1
+/// cache that already holds a key format 1 does not have.
+///
+/// [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
+pub fn migration_writes(rows: &CacheRows) -> Result<Changeset, ClientError> {
+    let corrupt = ClientError::CacheCorrupt;
+    let format = rows.meta.get(meta::FORMAT).ok_or(corrupt)?;
+    let format = u16::from_be_bytes(format.as_slice().try_into().map_err(|_| corrupt)?);
+    let mut changeset = Changeset::new();
+    match format {
+        CACHE_FORMAT => {}
+        1 => {
+            if rows
+                .meta
+                .contains_key(meta::HIGHEST_EQUIVALENCE_LIST_VERSION)
+            {
+                return Err(corrupt);
+            }
+            changeset.push(Write::Meta {
+                key: meta::HIGHEST_EQUIVALENCE_LIST_VERSION,
+                value: 0u64.to_be_bytes().to_vec(),
+            });
+            changeset.push(Write::Meta {
+                key: meta::FORMAT,
+                value: CACHE_FORMAT.to_be_bytes().to_vec(),
+            });
+        }
+        newer if newer > CACHE_FORMAT => return Err(ClientError::CacheUpdateRequired),
+        _ => return Err(corrupt),
+    }
+    Ok(changeset)
+}
+
 /// Step 1 of the load (module docs): the format, the meta rows and the device-state record.
+/// A cache of an older format must be migrated first ([`migration_writes`]): [`open`] knows
+/// only the current format's key set, and refuses an older one as corrupt.
 ///
 /// # Errors
 /// [`ClientError::CacheUpdateRequired`] for a cache format or record version this build does
@@ -117,7 +164,12 @@ pub fn open(rows: &CacheRows) -> Result<DeviceRecord, ClientError> {
     }
     let next_device_seq = u64_be(rows.meta.get(meta::NEXT_DEVICE_SEQ).ok_or(corrupt)?)?;
     u64_be(rows.meta.get(meta::HLC).ok_or(corrupt)?)?;
-    if next_device_seq == 0 {
+    let highest_list_version = u64_be(
+        rows.meta
+            .get(meta::HIGHEST_EQUIVALENCE_LIST_VERSION)
+            .ok_or(corrupt)?,
+    )?;
+    if next_device_seq == 0 || highest_list_version > u64::from(u32::MAX) {
         return Err(corrupt);
     }
     // A pending record or a pending signup and the stored commit are written and removed

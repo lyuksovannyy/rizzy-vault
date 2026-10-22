@@ -26,7 +26,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use rizzy_wasm::items::{MAX_DRAFT_ENTRIES, hex, parse_id};
-use rizzy_wasm::matching::{UriInput, decide_match_candidates, normalize_page_url};
+use rizzy_wasm::matching::{GlobalEquivalence, UriInput, decide_match_candidates, normalize_page_url};
 use rizzy_wasm::store::KvRow;
 use rizzy_wasm::{
     DeviceSession, EnrolFlow, ItemDraft, LoginFlow, SignupFlow, check_meta, expect_no_content,
@@ -115,6 +115,7 @@ fuzz_target!(|data: &[u8]| {
     let _ = normalize_page_url(a);
     let mode = u16::from(data.first().copied().unwrap_or(0));
     let uris = vec![UriInput::new(a.to_owned(), b.to_owned(), c.to_owned(), mode)];
-    let _ = decide_match_candidates(a, true, b, mode, uris.clone());
-    let _ = decide_match_candidates(a, false, b, mode, uris);
+    let global = GlobalEquivalence::without_cache();
+    let _ = decide_match_candidates(a, true, b, mode, uris.clone(), &global);
+    let _ = decide_match_candidates(a, false, b, mode, uris, &global);
 });

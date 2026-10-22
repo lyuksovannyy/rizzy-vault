@@ -115,7 +115,7 @@ pub use generator::{
 pub use http::{HttpRequest, check_meta, expect_no_content, meta_request};
 pub use items::{FieldView, HistoryEntryView, ItemDraft, ItemSummary, generate_element_id};
 pub use login::LoginFlow;
-pub use matching::{MatchDecision, decide_match_candidates, normalize_page_url};
+pub use matching::{GlobalEquivalence, MatchDecision, decide_match_candidates, normalize_page_url};
 pub use passkey::{CreatedPasskey, PasskeyAssertion, create_passkey};
 pub use session::{
     DeviceView, EncryptedExport, ImportReport, Notice, Session, TotpCode, TwoFactorEnrolment,

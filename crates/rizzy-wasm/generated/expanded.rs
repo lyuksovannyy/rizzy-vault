@@ -165,6 +165,9 @@ pub mod device {
         Enrolled, LoggedIn, LoginAwaitingSession, LoginInput, LoginStarted,
         start_login,
     };
+    use rizzy_client::matching::{
+        EquivalenceGroup, startup_equivalence_groups,
+    };
     use rizzy_client::passkey::get_assertion;
     use rizzy_client::rizzy_core::item::key::ElementId;
     use rizzy_client::rizzy_core::item::schema::{
@@ -187,7 +190,7 @@ pub mod device {
     };
     use rizzy_client::settings::SettingsCache;
     use rizzy_client::store::floors::Floors;
-    use rizzy_client::store::rows::CacheRows;
+    use rizzy_client::store::rows::{CacheRows, Changeset};
     use rizzy_client::store::{self, record::Stage as RecordStage};
     use rizzy_client::sync::{Authors, VaultSync};
     use wasm_bindgen::prelude::wasm_bindgen;
@@ -1825,7 +1828,7 @@ pub mod device {
                     session: Some(DeviceSession::from_parts(enrolled.device,
                             enrolled.unlocked, account, authors,
                             <[_]>::into_vec(::alloc::boxed::box_new([vault])), rows,
-                            floors)),
+                            floors, Changeset::new())),
                 })
         }
     }
@@ -2132,6 +2135,24 @@ pub mod device {
         #[doc =
         " The account settings of `account`, read once per object (ADR 0042 §6)."]
         settings: SettingsCache,
+        #[doc =
+        " The compiled-in global equivalence list\'s groups, verified once when the session"]
+        #[doc =
+        " started against the cache\'s persisted floor (ADR 0051 §4), for every later decision."]
+        global_groups: Vec<EquivalenceGroup>,
+        #[doc =
+        " Writes of the session\'s start not yet in `cache`: a format migration of the rows it was"]
+        #[doc =
+        " unlocked from ([`store::load::migration_writes`]) and a raised"]
+        #[doc =
+        " `highest_equivalence_list_version` ([`startup_equivalence_groups`]). The first"]
+        #[doc =
+        " [`DeviceSession::drain_cache_writes`] puts them ahead of every other write, through"]
+        #[doc =
+        " [`Floors::admit`] like any other (ADR 0051 §3, INV-75: until the host commits them, a"]
+        #[doc =
+        " restart re-migrates and re-verifies, never accepts an older list)."]
+        start_writes: Changeset,
     }
     #[automatically_derived]
     impl wasm_bindgen::__rt::marker::SupportsConstructor for DeviceSession { }
@@ -2410,10 +2431,15 @@ pub mod device {
     impl DeviceSession {
         /// Wraps an already-unlocked device (used by [`EnrolResult::new`] and
         /// [`DeviceSession::unlock`]).
+        #[expect(clippy::too_many_arguments, reason =
+        "one private constructor over the session's parts; a parts struct would only rename them")]
         fn from_parts(device: DeviceState, unlocked: UnlockedDevice,
             account: VerifiedAccount, authors: Authors,
-            vaults: Vec<VaultSync>, cache: CacheRows, floors: Floors)
-            -> Self {
+            vaults: Vec<VaultSync>, cache: CacheRows, floors: Floors,
+            mut start_writes: Changeset) -> Self {
+            let (global_groups, floor_writes) =
+                startup_equivalence_groups(&floors);
+            start_writes.append(floor_writes);
             Self {
                 device,
                 unlocked,
@@ -2427,6 +2453,8 @@ pub mod device {
                 sync: SyncDriver::default(),
                 rng: os_rng(),
                 settings: SettingsCache::default(),
+                global_groups,
+                start_writes,
             }
         }
         /// The personal vault, read-only (struct docs). A write goes through a direct
@@ -2452,7 +2480,8 @@ pub mod device {
         /// [`ClientError::Internal`] if the changeset breaks a floor (never, for a changeset this
         /// device's own steps produced over its own `floors`) or a row does not encode.
         fn drain_cache_writes(&mut self) -> CoreResult<CacheDelta> {
-            let mut changeset = store::account_writes(&self.account);
+            let mut changeset = core::mem::take(&mut self.start_writes);
+            changeset.append(store::account_writes(&self.account));
             for vault in &mut self.vaults {
                 changeset.append(vault.take_writes());
             }
@@ -2666,7 +2695,11 @@ pub mod device {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             let password = take_secret(password)?;
-            let rows = decode_rows(&cache_rows).map_err(CoreError::from)?;
+            let stored = decode_rows(&cache_rows).map_err(CoreError::from)?;
+            let migration =
+                store::load::migration_writes(&stored).map_err(CoreError::from)?;
+            let mut rows = decode_rows(&cache_rows).map_err(CoreError::from)?;
+            rows.apply(&migration);
             let record = store::load::open(&rows).map_err(CoreError::from)?;
             let unlocked =
                 record.unlock(password.as_str()).map_err(CoreError::from)?;
@@ -2674,7 +2707,8 @@ pub mod device {
                 store::load::load(&rows, &record, &unlocked,
                             now_ms).map_err(CoreError::from)?;
             Ok(Self::from_parts(loaded.device, unlocked, loaded.account,
-                    loaded.authors, loaded.vaults, rows, loaded.floors))
+                    loaded.authors, loaded.vaults, stored, loaded.floors,
+                    migration))
         }
         #[doc = " The account, hex."]
         #[must_use]
@@ -7007,7 +7041,7 @@ pub mod device {
                 };
             let settings = self.settings.get(&self.account, &self.unlocked)?;
             matching::decide_with_account(page_url, is_top_frame,
-                frame_origin, &uris, settings)
+                frame_origin, &uris, settings, &self.global_groups)
         }
         #[doc =
         " The account\'s matching settings, against this build\'s global list."]
@@ -7109,7 +7143,8 @@ pub mod device {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             let settings = self.settings.get(&self.account, &self.unlocked)?;
-            Ok(matching::settings_view(settings.matching()))
+            Ok(matching::settings_view(settings.matching(),
+                    &self.global_groups))
         }
     }
     #[automatically_derived]
@@ -22103,18 +22138,20 @@ pub mod matching {
     //!
     //! **Two entry points.** The free [`decide_match_candidates`] holds no session and so no account
     //! settings: it takes the account default as an argument and builds its [`EquivalenceView`]
-    //! from the compiled-in global list alone ([`rizzy_client::matching::global_equivalence_groups`],
-    //! ADR 0037 §7, ADR 0038 §5). A host with a session calls the session's `decideMatchCandidates`
-    //! (`crate::Session`, `crate::DeviceSession`) instead: that reads the account's
-    //! `ACCOUNT_SETTINGS` once per object ([ADR 0042] §6, `rizzy_client::settings::SettingsCache`) and
-    //! applies its match default, disabled global groups and user groups
-    //! (`decide_with_account`). Persisting the highest accepted `list_version` across launches
-    //! (INV-39) is still deferred (gap 27(b)): it needs an ADR amending ADR 0026's `cache_meta`
-    //! format, so every call accepts version `0` (`global_equivalence_groups`'s own docs). While
-    //! `rizzy_match::compiled::GLOBAL_LIST` is `None`, the only equivalence groups are the account's
-    //! own.
+    //! from the compiled-in global list alone, as a [`GlobalEquivalence`] the host verified once
+    //! (ADR 0037 §7, ADR 0038 §5, [ADR 0051] §4). A host with a session calls the session's
+    //! `decideMatchCandidates` (`crate::Session`, `crate::DeviceSession`) instead: that reads the
+    //! account's `ACCOUNT_SETTINGS` once per object ([ADR 0042] §6,
+    //! `rizzy_client::settings::SettingsCache`) and applies its match default, disabled global groups
+    //! and user groups (`decide_with_account`), over the global groups the session verified when it
+    //! started: a `crate::DeviceSession` against its cache's persisted
+    //! `highest_equivalence_list_version` (INV-39; ADR 0051 §1–§4, raised in its first cache
+    //! write when a newer list verifies), a `crate::Session` (the web vault, no cache) from `0`
+    //! (ADR 0051 §5). While `rizzy_match::compiled::GLOBAL_LIST` is `None`, the only equivalence
+    //! groups are the account's own.
     //!
     //! [ADR 0042]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0042-account-settings-matching-layout.md
+    //! [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
     use core::fmt;
     use std::collections::BTreeSet;
     use rizzy_client::ClientError;
@@ -24518,11 +24555,527 @@ pub mod matching {
             static _GENERATED: [u8; _LEN] =
                 flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
         };
+    #[wasm_bindgen()]
+    #[__wasm_bindgen_retried]
+    #[doc =
+    " The compiled-in global equivalence list\'s groups, verified once and passed to every"]
+    #[doc =
+    " [`decide_match_candidates`] call instead of being verified per decision (ADR 0051 §4)."]
+    pub struct GlobalEquivalence {
+        #[doc =
+        " The verified groups; empty while no list is compiled in or one fails to verify."]
+        groups: Vec<EquivalenceGroup>,
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsConstructor for GlobalEquivalence
+        {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for
+        GlobalEquivalence {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsStaticProperty for
+        GlobalEquivalence {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribe for GlobalEquivalence {
+        fn describe() {
+            use wasm_bindgen::describe::*;
+            inform(RUST_STRUCT);
+            inform(17u32);
+            inform(71u32);
+            inform(108u32);
+            inform(111u32);
+            inform(98u32);
+            inform(97u32);
+            inform(108u32);
+            inform(69u32);
+            inform(113u32);
+            inform(117u32);
+            inform(105u32);
+            inform(118u32);
+            inform(97u32);
+            inform(108u32);
+            inform(101u32);
+            inform(110u32);
+            inform(99u32);
+            inform(101u32);
+            inform(27u32);
+            inform(114u32);
+            inform(105u32);
+            inform(122u32);
+            inform(122u32);
+            inform(121u32);
+            inform(45u32);
+            inform(119u32);
+            inform(97u32);
+            inform(115u32);
+            inform(109u32);
+            inform(45u32);
+            inform(101u32);
+            inform(48u32);
+            inform(57u32);
+            inform(99u32);
+            inform(99u32);
+            inform(48u32);
+            inform(101u32);
+            inform(98u32);
+            inform(51u32);
+            inform(53u32);
+            inform(102u32);
+            inform(56u32);
+            inform(98u32);
+            inform(53u32);
+            inform(56u32);
+            inform(51u32);
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::IntoWasmAbi for GlobalEquivalence {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GlobalEquivalence>>;
+        fn into_abi(self) -> Self::Abi {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+            WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self))) as
+                    *mut WasmRefCell<GlobalEquivalence>)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::FromWasmAbi for GlobalEquivalence {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GlobalEquivalence>>;
+        unsafe fn from_abi(js: Self::Abi) -> Self {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+            use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+            let ptr = js.into_ptr();
+            assert_not_null(ptr);
+            let rc = Rc::from_raw(ptr);
+            match Rc::try_unwrap(rc) {
+                Ok(cell) => cell.into_inner(),
+                Err(_) =>
+                    wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::core::convert::From<GlobalEquivalence> for
+        wasm_bindgen::JsValue {
+        fn from(value: GlobalEquivalence) -> Self {
+            let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_globalequivalence_new_e09cc0eb35f8b583"]
+                fn __wbg_globalequivalence_new(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GlobalEquivalence>>)
+                -> u32;
+            }
+            unsafe {
+                <wasm_bindgen::JsValue as
+                        wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_globalequivalence_new(ptr))
+            }
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[export_name = "__wbg_globalequivalence_free_e09cc0eb35f8b583"]
+            #[doc(hidden)]
+            pub unsafe extern "C-unwind" fn __wbg_globalequivalence_free(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GlobalEquivalence>>,
+                allow_delayed: u32) {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                if allow_delayed != 0 {
+                    let ptr = ptr.into_ptr();
+                    wasm_bindgen::__rt::assert_not_null(ptr);
+                    drop(Rc::from_raw(ptr));
+                } else {
+                    let _ =
+                        <GlobalEquivalence as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                }
+            }
+        };
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefFromWasmAbi for GlobalEquivalence {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GlobalEquivalence>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<GlobalEquivalence>;
+        unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRef::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefMutFromWasmAbi for GlobalEquivalence {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GlobalEquivalence>>;
+        type Anchor = wasm_bindgen::__rt::RcRefMut<GlobalEquivalence>;
+        unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRefMut::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::LongRefFromWasmAbi for GlobalEquivalence {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GlobalEquivalence>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<GlobalEquivalence>;
+        unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            <Self as wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionIntoWasmAbi for GlobalEquivalence {
+        #[inline]
+        fn none() -> Self::Abi {
+            <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GlobalEquivalence>>>::null()
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionFromWasmAbi for GlobalEquivalence {
+        #[inline]
+        fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::TryFromJsValue for GlobalEquivalence {
+        fn try_from_js_value(value: wasm_bindgen::JsValue)
+            ->
+                wasm_bindgen::__rt::core::result::Result<Self,
+                wasm_bindgen::JsValue> {
+            Self::try_from_js_value_ref(&value).ok_or(value)
+        }
+        fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+            -> wasm_bindgen::__rt::core::option::Option<Self> {
+            let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name =
+                "__wbg_globalequivalence_unwrap_e09cc0eb35f8b583"]
+                fn __wbg_globalequivalence_unwrap(ptr: u32)
+                ->
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GlobalEquivalence>>;
+            }
+            let ptr = unsafe { __wbg_globalequivalence_unwrap(idx) };
+            if ptr.is_null() {
+                wasm_bindgen::__rt::core::option::Option::None
+            } else {
+                unsafe {
+                    wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                }
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribeVector for GlobalEquivalence {
+        fn describe_vector() {
+            use wasm_bindgen::describe::*;
+            inform(VECTOR);
+            <GlobalEquivalence as
+                    wasm_bindgen::describe::WasmDescribe>::describe();
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorIntoWasmAbi for GlobalEquivalence {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::IntoWasmAbi>::Abi;
+        fn vector_into_abi(vector:
+                wasm_bindgen::__rt::alloc::boxed::Box<[GlobalEquivalence]>)
+            -> Self::Abi {
+            wasm_bindgen::convert::js_value_vector_into_abi(vector)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorFromWasmAbi for GlobalEquivalence {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::FromWasmAbi>::Abi;
+        unsafe fn vector_from_abi(js: Self::Abi)
+            -> wasm_bindgen::__rt::alloc::boxed::Box<[GlobalEquivalence]> {
+            wasm_bindgen::convert::js_value_vector_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\x01\x11GlobalEquivalence\0\x02T The compiled-in global equivalence list's groups, verified once and passed to everyX [`decide_match_candidates`] call instead of being verified per decision (ADR 0051 \xc2\xa74).\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    impl fmt::Debug for GlobalEquivalence {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("GlobalEquivalence").field("groups",
+                    &self.groups.len()).finish()
+        }
+    }
+    impl GlobalEquivalence {
+        #[doc =
+        " Verifies the compiled-in list for a host that keeps no cache, and so no persisted floor:"]
+        #[doc =
+        " from `highest_accepted_version = 0`, as the web vault does every session (ADR 0051 §5)."]
+        #[doc =
+        " A host with a cache uses its `DeviceSession` instead, which verifies against the"]
+        #[doc = " cache\'s persisted floor and raises it."]
+        #[must_use]
+        pub fn without_cache() -> Self {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Verifies the compiled-in list for a host that keeps no cache, and so no persisted floor:"]
+                    #[doc =
+                    " from `highest_accepted_version = 0`, as the web vault does every session (ADR 0051 §5)."]
+                    #[doc =
+                    " A host with a cache uses its `DeviceSession` instead, which verifies against the"]
+                    #[doc = " cache\'s persisted floor and raises it."]
+                    #[must_use]
+                    #[export_name =
+                    "globalequivalence_withoutCache_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_GlobalEquivalence_withoutCache()
+                        ->
+                            wasm_bindgen::convert::WasmRet<<GlobalEquivalence as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        { let _ret = GlobalEquivalence::without_cache(); _ret }
+                                    });
+                        <GlobalEquivalence as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Verifies the compiled-in list for a host that keeps no cache, and so no persisted floor:"]
+                    #[doc =
+                    " from `highest_accepted_version = 0`, as the web vault does every session (ADR 0051 §5)."]
+                    #[doc =
+                    " A host with a cache uses its `DeviceSession` instead, which verifies against the"]
+                    #[doc = " cache\'s persisted floor and raises it."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_globalequivalence_withoutCache_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <GlobalEquivalence as WasmDescribe>::describe();
+                        <GlobalEquivalence as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x11GlobalEquivalence\x04Y Verifies the compiled-in list for a host that keeps no cache, and so no persisted floor:Y from `highest_accepted_version = 0`, as the web vault does every session (ADR 0051 \xc2\xa75).Q A host with a cache uses its `DeviceSession` instead, which verifies against the' cache's persisted floor and raises it.\0\0\0\0\x0cwithoutCache\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            Self { groups: global_equivalence_groups(0).0 }
+        }
+        #[doc =
+        " How many global groups verified (`0` while no list is compiled in)."]
+        #[must_use]
+        pub fn group_count(&self) -> usize {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " How many global groups verified (`0` while no list is compiled in)."]
+                    #[must_use]
+                    #[export_name =
+                    "globalequivalence_groupCount_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_GlobalEquivalence_groupCount(me:
+                            <GlobalEquivalence as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<usize as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<GlobalEquivalence>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<GlobalEquivalence>();
+                                            let me =
+                                                unsafe {
+                                                    <GlobalEquivalence as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.group_count();
+                                            _ret
+                                        }
+                                    });
+                        <usize as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " How many global groups verified (`0` while no list is compiled in)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_globalequivalence_groupCount_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <usize as WasmDescribe>::describe();
+                        <usize as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x11GlobalEquivalence\x01D How many global groups verified (`0` while no list is compiled in).\0\0\0\0\ngroupCount\x01\x01\0\0\0\0\x01\0\x02\ngroupCount\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.groups.len()
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
     #[allow(dead_code)]
     #[doc =
     " Decides which of `uris` are autofill candidates for `page_url`, requested by the frame at"]
     #[doc =
-    " `frame_origin` (module docs; `rizzy_client::matching::decide_candidates`)."]
+    " `frame_origin` (module docs; `rizzy_client::matching::decide_candidates`), over the global"]
+    #[doc = " groups `global` the host verified once (ADR 0051 §4)."]
     #[doc = ""]
     #[doc =
     " `is_top_frame` and `frame_origin` are the content script\'s own report (ADR 0037 §5);"]
@@ -24539,8 +25092,8 @@ pub mod matching {
     #[expect(clippy::needless_pass_by_value, reason =
     "wasm-bindgen hands this exported call ownership of the JS array as Vec<UriInput>, never a slice")]
     pub fn decide_match_candidates(page_url: &str, is_top_frame: bool,
-        frame_origin: &str, account_default_mode: u16, uris: Vec<UriInput>)
-        -> Result<MatchDecision, CoreError> {
+        frame_origin: &str, account_default_mode: u16, uris: Vec<UriInput>,
+        global: &GlobalEquivalence) -> Result<MatchDecision, CoreError> {
         let account_default = mode_of(account_default_mode)?;
         let mut owned_ids = Vec::with_capacity(uris.len());
         for input in &uris {
@@ -24558,11 +25111,10 @@ pub mod matching {
                             mode: *mode,
                         }).collect();
         let frame = FrameContext { is_top_frame, frame_origin };
-        let global: Vec<EquivalenceGroup> = global_equivalence_groups();
         let no_disabled_groups: BTreeSet<GroupId> = BTreeSet::new();
         let no_user_defined_groups: Vec<EquivalenceGroup> = Vec::new();
         let equivalence =
-            EquivalenceView::new(&global, &no_disabled_groups,
+            EquivalenceView::new(&global.groups, &no_disabled_groups,
                 &no_user_defined_groups);
         let decision =
             matching::decide_candidates(page_url, &frame, account_default,
@@ -24575,7 +25127,8 @@ pub mod matching {
             #[doc =
             " Decides which of `uris` are autofill candidates for `page_url`, requested by the frame at"]
             #[doc =
-            " `frame_origin` (module docs; `rizzy_client::matching::decide_candidates`)."]
+            " `frame_origin` (module docs; `rizzy_client::matching::decide_candidates`), over the global"]
+            #[doc = " groups `global` the host verified once (ADR 0051 §4)."]
             #[doc = ""]
             #[doc =
             " `is_top_frame` and `frame_origin` are the content script\'s own report (ADR 0037 §5);"]
@@ -24651,7 +25204,23 @@ pub mod matching {
                     as wasm_bindgen::convert::WasmAbi>::Prim3,
                 arg4_4:
                     <<Vec<UriInput> as wasm_bindgen::convert::FromWasmAbi>::Abi
-                    as wasm_bindgen::convert::WasmAbi>::Prim4)
+                    as wasm_bindgen::convert::WasmAbi>::Prim4,
+                arg5_1:
+                    <<GlobalEquivalence as
+                    wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg5_2:
+                    <<GlobalEquivalence as
+                    wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg5_3:
+                    <<GlobalEquivalence as
+                    wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg5_4:
+                    <<GlobalEquivalence as
+                    wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4)
                 ->
                     wasm_bindgen::convert::WasmRet<<Result<MatchDecision,
                     CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
@@ -24707,8 +25276,18 @@ pub mod matching {
                                                         wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
                                                     arg4_3, arg4_4))
                                         };
+                                    wasm_bindgen::__rt::ensure_ref_unwind_safe::<GlobalEquivalence>();
+                                    let arg5 =
+                                        unsafe {
+                                            <GlobalEquivalence as
+                                                    wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<GlobalEquivalence
+                                                        as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg5_1, arg5_2,
+                                                    arg5_3, arg5_4))
+                                        };
+                                    let arg5 = &*arg5;
                                     let _ret =
-                                        decide_match_candidates(arg0, arg1, arg2, arg3, arg4);
+                                        decide_match_candidates(arg0, arg1, arg2, arg3, arg4, arg5);
                                     _ret
                                 }
                             });
@@ -24722,7 +25301,8 @@ pub mod matching {
             #[doc =
             " Decides which of `uris` are autofill candidates for `page_url`, requested by the frame at"]
             #[doc =
-            " `frame_origin` (module docs; `rizzy_client::matching::decide_candidates`)."]
+            " `frame_origin` (module docs; `rizzy_client::matching::decide_candidates`), over the global"]
+            #[doc = " groups `global` the host verified once (ADR 0051 §4)."]
             #[doc = ""]
             #[doc =
             " `is_top_frame` and `frame_origin` are the content script\'s own report (ADR 0037 §5);"]
@@ -24745,12 +25325,13 @@ pub mod matching {
                 wasm_bindgen::__rt::link_mem_intrinsics();
                 inform(FUNCTION);
                 inform(0);
-                inform(5u32);
+                inform(6u32);
                 <&str as WasmDescribe>::describe();
                 <bool as WasmDescribe>::describe();
                 <&str as WasmDescribe>::describe();
                 <u16 as WasmDescribe>::describe();
                 <Vec<UriInput> as WasmDescribe>::describe();
+                <&GlobalEquivalence as WasmDescribe>::describe();
                 <Result<MatchDecision, CoreError> as
                         WasmDescribe>::describe();
                 <Result<MatchDecision, CoreError> as
@@ -24765,7 +25346,7 @@ pub mod matching {
             const _ENCODED_BYTES: &[u8] =
                 {
                     const _CHUNK_SLICES: [&[u8]; 1usize] =
-                        [b"\x01\0\nZ Decides which of `uris` are autofill candidates for `page_url`, requested by the frame atK `frame_origin` (module docs; `rizzy_client::matching::decide_candidates`).\0V `is_top_frame` and `frame_origin` are the content script's own report (ADR 0037 \xc2\xa75);D `account_default_mode` resolves any URI whose own mode is `0x0000`.\0\t # Errors\\ `invalid_input` if `page_url` or `account_default_mode` does not parse; a malformed item or] URI id in `uris` is `invalid_input` too (unlike a saved URI that fails to *normalise*, whichR this call reports as a warning instead, per `rizzy_client::matching`'s own docs).\0\x05\x08page_url\0\0\0\x0cis_top_frame\0\0\0\x0cframe_origin\0\0\0\x14account_default_mode\0\0\0\x04uris\0\0\0\0\0\x15decideMatchCandidates\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        [b"\x01\0\x0bZ Decides which of `uris` are autofill candidates for `page_url`, requested by the frame at[ `frame_origin` (module docs; `rizzy_client::matching::decide_candidates`), over the global7 groups `global` the host verified once (ADR 0051 \xc2\xa74).\0V `is_top_frame` and `frame_origin` are the content script's own report (ADR 0037 \xc2\xa75);D `account_default_mode` resolves any URI whose own mode is `0x0000`.\0\t # Errors\\ `invalid_input` if `page_url` or `account_default_mode` does not parse; a malformed item or] URI id in `uris` is `invalid_input` too (unlike a saved URI that fails to *normalise*, whichR this call reports as a warning instead, per `rizzy_client::matching`'s own docs).\0\x06\x08page_url\0\0\0\x0cis_top_frame\0\0\0\x0cframe_origin\0\0\0\x14account_default_mode\0\0\0\x04uris\0\0\0\x06global\0\0\0\0\0\x15decideMatchCandidates\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                     #[allow(long_running_const_eval)]
                     const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                     #[allow(long_running_const_eval)]
@@ -24818,7 +25399,7 @@ pub mod matching {
     /// As [`decide_match_candidates`].
     pub(crate) fn decide_with_account(page_url: &str, is_top_frame: bool,
         frame_origin: &str, uris: &[UriInput],
-        settings: &AccountSettingsRecord)
+        settings: &AccountSettingsRecord, global: &[EquivalenceGroup])
         -> Result<MatchDecision, CoreError> {
         let mut owned_ids = Vec::with_capacity(uris.len());
         for input in uris {
@@ -24836,7 +25417,7 @@ pub mod matching {
         let frame = FrameContext { is_top_frame, frame_origin };
         let decision =
             matching::decide_with_settings(page_url, &frame, &item_uris,
-                    settings)?;
+                    settings, global)?;
         Ok(decision_view(decision))
     }
     #[wasm_bindgen()]
@@ -26191,10 +26772,10 @@ pub mod matching {
             static _GENERATED: [u8; _LEN] =
                 flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
         };
-    /// The settings screen's view of `settings` against the compiled-in global list.
-    pub(crate) fn settings_view(settings: &MatchingSettings)
-        -> MatchSettingsView {
-        let global = global_equivalence_groups();
+    /// The settings screen's view of `settings` against the compiled-in global list's groups
+    /// `global`, as the session verified them at its start (ADR 0051 §4).
+    pub(crate) fn settings_view(settings: &MatchingSettings,
+        global: &[EquivalenceGroup]) -> MatchSettingsView {
         let disabled = settings.disabled_global();
         let group_view =
             |g: &EquivalenceGroup, disabled: bool|
@@ -29204,7 +29785,8 @@ pub mod session {
     use rizzy_client::items::{Dot, FieldEdit, ItemId, TRASH_RETENTION_MS};
     use rizzy_client::login::WebSession;
     use rizzy_client::matching::{
-        FrameContext, ItemUri, SavedUri, decide_with_settings, vault_item_uris,
+        EquivalenceGroup, FrameContext, ItemUri, SavedUri,
+        decide_with_settings, global_equivalence_groups, vault_item_uris,
     };
     use rizzy_client::passkey::get_assertion;
     use rizzy_client::rizzy_core::ids::AccountId;
@@ -29295,6 +29877,10 @@ pub mod session {
         /// A settings change sent to `account/commit` and not yet answered, or kept after a
         /// `state_conflict` for a retry.
         settings_pending: Option<PendingSettingsChange>,
+        /// The compiled-in global equivalence list's groups, verified once when the session starts
+        /// and kept for every decision (ADR 0051 §4). The web vault keeps no cache, so no floor:
+        /// it verifies from `highest_accepted_version = 0` every session (ADR 0051 §5).
+        global_groups: Vec<EquivalenceGroup>,
     }
     #[wasm_bindgen()]
     #[__wasm_bindgen_retried]
@@ -29596,6 +30182,7 @@ pub mod session {
                                 shown_trash_notices: BTreeSet::new(),
                                 settings: SettingsCache::default(),
                                 settings_pending: None,
+                                global_groups: global_equivalence_groups(0).0,
                             })),
                 })
         }
@@ -38097,7 +38684,8 @@ pub mod session {
                 };
             let inner = self.inner_mut()?;
             let record = inner.settings.get(&inner.account, &inner.unlocked)?;
-            Ok(matching::settings_view(record.matching()))
+            Ok(matching::settings_view(record.matching(),
+                    &inner.global_groups))
         }
         #[doc =
         " The autofill candidates among this vault\'s items for `page_url` as a top frame, under the"]
@@ -38241,7 +38829,8 @@ pub mod session {
             let frame =
                 FrameContext { is_top_frame: true, frame_origin: page_url };
             let decision =
-                decide_with_settings(page_url, &frame, &uris, record)?;
+                decide_with_settings(page_url, &frame, &uris, record,
+                        &inner.global_groups)?;
             Ok(matching::decision_view(decision))
         }
         #[doc =
@@ -45948,10 +46537,15 @@ pub mod store {
     //!   → `KvRow` diff (write only the rows a step actually touched) is a documented follow-up,
     //!   not a correctness requirement ([`CacheRows::apply`] is still the only place a write's
     //!   meaning is decided; this module never reimplements it).
-    //! - **Migration.** Cache format 1 is the only format `rizzy-client` itself knows yet (its own
-    //!   module docs, "Not in this build"); this module inherits that.
+    //! - **Migration.** `rizzy-client` decides it (`rizzy_client::store::load::migration_writes`,
+    //!   ADR 0026 §5): `DeviceSession::unlock` applies it to the rows it loads and hands the same
+    //!   writes to the host in its first drained delta. Format 2 ([ADR 0051] §2) adds the one
+    //!   `cache_meta` row `highest_equivalence_list_version`, an 8-byte big-endian value under that
+    //!   UTF-8 key, the same key and encoding `rv`'s `SQLite` file uses (ADR 0051 open question 3).
+    //!   This module's row codec is unchanged by it: a `cache_meta` row is already opaque bytes.
     //!
     //! [ADR 0026]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0026-client-device-state-and-cache.md
+    //! [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
     use rizzy_client::ClientError;
     use rizzy_client::rizzy_core::encoding::{
         Reader, put_bytes, put_u8, put_u64,
@@ -48843,7 +49437,8 @@ pub use items::{
 };
 pub use login::LoginFlow;
 pub use matching::{
-    MatchDecision, decide_match_candidates, normalize_page_url,
+    GlobalEquivalence, MatchDecision, decide_match_candidates,
+    normalize_page_url,
 };
 pub use passkey::{CreatedPasskey, PasskeyAssertion, create_passkey};
 pub use session::{

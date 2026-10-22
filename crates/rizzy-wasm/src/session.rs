@@ -66,7 +66,8 @@ use rizzy_client::export::plaintext::{
 use rizzy_client::items::{Dot, FieldEdit, ItemId, TRASH_RETENTION_MS};
 use rizzy_client::login::WebSession;
 use rizzy_client::matching::{
-    FrameContext, ItemUri, SavedUri, decide_with_settings, vault_item_uris,
+    EquivalenceGroup, FrameContext, ItemUri, SavedUri, decide_with_settings,
+    global_equivalence_groups, vault_item_uris,
 };
 use rizzy_client::passkey::get_assertion;
 use rizzy_client::rizzy_core::ids::AccountId;
@@ -154,6 +155,10 @@ struct Inner {
     /// A settings change sent to `account/commit` and not yet answered, or kept after a
     /// `state_conflict` for a retry.
     settings_pending: Option<PendingSettingsChange>,
+    /// The compiled-in global equivalence list's groups, verified once when the session starts
+    /// and kept for every decision (ADR 0051 §4). The web vault keeps no cache, so no floor:
+    /// it verifies from `highest_accepted_version = 0` every session (ADR 0051 §5).
+    global_groups: Vec<EquivalenceGroup>,
 }
 
 /// An unlocked web-vault session (module docs). `Debug` shows nothing secret.
@@ -213,6 +218,7 @@ impl Session {
                 shown_trash_notices: BTreeSet::new(),
                 settings: SettingsCache::default(),
                 settings_pending: None,
+                global_groups: global_equivalence_groups(0).0,
             })),
         })
     }
@@ -1369,7 +1375,10 @@ impl Session {
     pub fn match_settings(&mut self) -> Result<MatchSettingsView, CoreError> {
         let inner = self.inner_mut()?;
         let record = inner.settings.get(&inner.account, &inner.unlocked)?;
-        Ok(matching::settings_view(record.matching()))
+        Ok(matching::settings_view(
+            record.matching(),
+            &inner.global_groups,
+        ))
     }
 
     /// The autofill candidates among this vault's items for `page_url` as a top frame, under the
@@ -1388,7 +1397,7 @@ impl Session {
             is_top_frame: true,
             frame_origin: page_url,
         };
-        let decision = decide_with_settings(page_url, &frame, &uris, record)?;
+        let decision = decide_with_settings(page_url, &frame, &uris, record, &inner.global_groups)?;
         Ok(matching::decision_view(decision))
     }
 
