@@ -9,7 +9,8 @@
 //! server's allow-list table, never in a client's.
 //!
 //! A context (`ctx`) is the ordered list of fields that says where a ciphertext belongs. Each
-//! M1 purpose, and each M3 attachment purpose (ADR 0054), has a context type implementing
+//! M1 purpose, each M3 attachment purpose (ADR 0054), and M8's `SERVER_DB_BACKUP` (ADR 0071),
+//! has a context type implementing
 //! [`Context`]; the type fixes the purpose, so a caller cannot pair a context with the wrong
 //! purpose id. Purposes of later milestones, and
 //! the parked ones, are registered (their ids are reserved) but have no context type yet, so
@@ -221,11 +222,14 @@ pub enum Purpose {
     ServerLoginState = 0x0101,
     /// The server-secrets backup (server only).
     ServerSecretsBackup = 0x0102,
+    /// One chunk of an encrypted database backup, format version 2 (server only, M8;
+    /// CRYPTO.md §9.8, ADR 0071).
+    ServerDbBackup = 0x0105,
 }
 
 impl Purpose {
     /// Every purpose, in id order.
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 32] = [
         Self::AccountKeyServerWrap,
         Self::AccountKeyLocalWrap,
         Self::AccountKeyRecoveryWrap,
@@ -257,6 +261,7 @@ impl Purpose {
         Self::ServerTotpSecret,
         Self::ServerLoginState,
         Self::ServerSecretsBackup,
+        Self::ServerDbBackup,
     ];
 
     /// The registry row: CRYPTO.md §8.4 with the allow-lists of §9.5 and the plaintext rules
@@ -308,6 +313,7 @@ impl Purpose {
             Self::ServerTotpSecret => ("SERVER_TOTP_SECRET", SYM, SYMMETRIC, Unpadded, M::M1),
             Self::ServerLoginState => ("SERVER_LOGIN_STATE", SYM, SYMMETRIC, Unpadded, M::M1),
             Self::ServerSecretsBackup => ("SERVER_SECRETS_BACKUP", SYM, SYMMETRIC, Unpadded, M::M1),
+            Self::ServerDbBackup => ("SERVER_DB_BACKUP", SYM, SYMMETRIC, Unpadded, M::M8),
         };
         PurposeSpec {
             id: self as u16,
@@ -909,6 +915,27 @@ context! {
         kdf_id: KdfId,
         /// The 16-byte random Argon2id salt.
         backup_salt: [u8; 16],
+    }
+}
+
+context! {
+    /// `SERVER_DB_BACKUP` (server only, M8; CRYPTO.md §9.8, ADR 0071):
+    /// `backup_id ‖ u64 created_at_ms ‖ u32 backup_key_id ‖ u32 chunk_index ‖ u32 chunk_count`.
+    ///
+    /// `chunk_index` and `chunk_count` bind each chunk's position and the chunk count of its
+    /// backup, so a reordered, duplicated or dropped chunk, an edited clear `chunk_count`, or
+    /// a chunk from another backup fails the commitment of the chunks it lands next to.
+    ServerDbBackupCtx: ServerDbBackup, ServerContext {
+        /// The backup: 16 random bytes per run.
+        backup_id: BackupId,
+        /// Creation time, milliseconds since the Unix epoch.
+        created_at_ms: u64,
+        /// The `backup_key_id` of the secrets-file backup key the chunk is sealed under.
+        backup_key_id: u32,
+        /// The chunk's 0-based position in the container.
+        chunk_index: u32,
+        /// The container's chunk count.
+        chunk_count: u32,
     }
 }
 

@@ -29,7 +29,7 @@ use crate::normalize::{LoginName, ServerOrigin};
 use crate::opaque::{CredentialIdentifier, EnumKey, OpaqueContext, PasswordInput};
 use crate::secret::{Key32, SecretArray};
 use crate::secret_key::{RecoveryCode, SecretKey};
-use crate::server_seal::ServerDataKey;
+use crate::server_seal::{ServerDataKey, ServerDbBackupKey};
 use crate::sign::{
     DeviceCertificate, DeviceKind, DeviceRevocation, DeviceSigningKey, IdentitySigningKey,
     IdentityVerifyingKey, Verified,
@@ -231,6 +231,14 @@ pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
             .u64("settings_seq", 7)
             .bytes("settings_envelope", &random_vec(rng, 200)),
     ));
+    // M8 (ADR 0071), drawn last so the earlier vectors keep their inputs.
+    out.push(vector(
+        "server/db-backup",
+        0,
+        Obj::new()
+            .bytes("backup_key", &random::<32>(rng))
+            .num("backup_key_id", 2),
+    ));
     out
 }
 
@@ -423,6 +431,12 @@ pub(super) fn compute(name: &str, m: &Map<String, Value>) -> Map<String, Value> 
                 ServerDataKey::from_slice(&bytes(m, "server_data_key"), num(m, "data_key_id"))
                     .expect("32 bytes");
             key_outputs(&key.subkey_for_tests(label).expect("derive"))
+        }
+        "server/db-backup" => {
+            let key =
+                ServerDbBackupKey::from_slice(&bytes(m, "backup_key"), num(m, "backup_key_id"))
+                    .expect("32 bytes");
+            key_outputs(&key.subkey_for_tests().expect("derive"))
         }
         "hpke-psk/device-grant" => device_grant_psk(m),
         "fingerprint" => fingerprint(m),

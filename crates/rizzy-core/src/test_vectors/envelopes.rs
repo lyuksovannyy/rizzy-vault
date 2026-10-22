@@ -41,8 +41,8 @@ use crate::envelope::purpose::{
     AccountKeyDeviceGrantCtx, AccountKeyLocalWrapCtx, AccountKeyRecoveryWrapCtx,
     AccountKeyServerWrapCtx, AccountSettingsCtx, DeviceSecretKeysCtx, ExportFileCtx,
     IdentitySecretKeysCtx, ItemKeyWrapCtx, ItemOpCtx, ItemSnapshotCtx, Milestone,
-    RetiredSecretKeyCtx, ServerLoginStateCtx, ServerSecretsBackupCtx, ServerTotpSecretCtx,
-    VaultKeySelfGrantCtx,
+    RetiredSecretKeyCtx, ServerDbBackupCtx, ServerLoginStateCtx, ServerSecretsBackupCtx,
+    ServerTotpSecretCtx, VaultKeySelfGrantCtx,
 };
 use crate::envelope::symmetric::{server_open, server_seal};
 use crate::envelope::{
@@ -367,6 +367,17 @@ pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
         .bytes("backup_salt", &random::<16>(rng));
     let pt = random_vec(rng, 300);
     out.push(vector("SERVER_SECRETS_BACKUP", 0, symmetric(rng, ctx, &pt)));
+
+    // M8 (ADR 0071), drawn last so the earlier vectors keep their inputs. The key is the
+    // DB-backup subkey itself (its derivation is `derivation/server/db-backup`).
+    let ctx = Obj::new()
+        .bytes("backup_id", &id(rng))
+        .u64("created_at_ms", 1_780_000_000_000)
+        .num("backup_key_id", 2)
+        .num("chunk_index", 1)
+        .num("chunk_count", 3);
+    let pt = random_vec(rng, 500);
+    out.push(vector("SERVER_DB_BACKUP", 0, symmetric(rng, ctx, &pt)));
     out
 }
 
@@ -375,8 +386,9 @@ pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
 /// purpose.
 pub(super) fn check_file(vectors: &[Vector]) {
     for p in Purpose::ALL {
-        // VAULT_KEY_MEMBER_GRANT is M9; its context exists only in tests.
-        if p.spec().first_used != Milestone::M1 {
+        // VAULT_KEY_MEMBER_GRANT is M9; its context exists only in tests. SERVER_DB_BACKUP is
+        // M8 and implemented (ADR 0071).
+        if p.spec().first_used != Milestone::M1 && p != Purpose::ServerDbBackup {
             continue;
         }
         let of_purpose: Vec<&Vector> = vectors.iter().filter(|v| v.name == p.name()).collect();
@@ -706,6 +718,16 @@ pub(super) fn compute(name: &str, m: &Map<String, Value>) -> Map<String, Value> 
                 created_at_ms: u64_of(c, "created_at_ms"),
                 kdf_id: kdf_id(c),
                 backup_salt: arr(c, "backup_salt"),
+            },
+        ),
+        "SERVER_DB_BACKUP" => server_outputs(
+            m,
+            &ServerDbBackupCtx {
+                backup_id: BackupId::from_bytes(arr(c, "backup_id")),
+                created_at_ms: u64_of(c, "created_at_ms"),
+                backup_key_id: num(c, "backup_key_id"),
+                chunk_index: num(c, "chunk_index"),
+                chunk_count: num(c, "chunk_count"),
             },
         ),
         other => panic!("unknown envelope vector {other}"),
