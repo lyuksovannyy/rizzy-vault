@@ -26,6 +26,7 @@ import {
   type CacheStore,
   type Clock,
   CoreError,
+  MAX_ATTACHMENT_BYTES,
   type SessionListView,
   type HistoryEntry,
   MatchMode,
@@ -1278,6 +1279,43 @@ describe.skipIf(binary === undefined)("against a real server", () => {
   // ADR 0075: two web sessions of one account; one lists both, ends the other, and the other
   // learns it on its next request; a lock ends a session on the server too; a stale session
   // needs a fresh login first and switches to it.
+  it("adds an attachment, downloads it byte for byte in another session, and deletes it", async () => {
+    const secretKey = erinSecretKey;
+    expect(secretKey).not.toBe("");
+    const transport = fetchTransport(origin);
+    const web = () => login(transport, { origin, loginName: "erin", secretKey, password: PASSWORD });
+    const a = await web();
+    await a.sync();
+    const item = a.createItem("login", [{ op: "set", key: "item.name", value: "With a file" }]);
+    await a.sync();
+    // Two chunks: one full 512 KiB chunk and a short last one (ADR 0054 §2).
+    const data = new Uint8Array(600_000);
+    for (let i = 0; i < data.length; i += 1) {
+      data[i] = i % 251;
+    }
+    const id = await a.addAttachment(item, "photo.jpg", "image/jpeg", data);
+    expect(a.attachments(item)).toEqual([{ id, name: "photo.jpg", mime: "image/jpeg", size: 600_000 }]);
+    await expect(
+      a.addAttachment(item, "big.bin", "application/octet-stream", new Uint8Array(MAX_ATTACHMENT_BYTES + 1)),
+    ).rejects.toMatchObject({ code: "attachment_too_large" });
+
+    // Another session learns of it from the item and verifies every chunk.
+    const b = await web();
+    await b.sync();
+    expect(b.attachments(item).map((x) => x.id)).toEqual([id]);
+    const back = await b.downloadAttachment(item, id);
+    expect(back).toEqual(data);
+
+    // Delete: the blob first, then the fields; a second delete of the gone blob is quiet.
+    await b.deleteAttachment(item, id);
+    expect(b.attachments(item)).toEqual([]);
+    await a.sync();
+    expect(a.attachments(item)).toEqual([]);
+    await expect(a.downloadAttachment(item, id)).rejects.toMatchObject({ code: "unknown_item" });
+    a.lock();
+    b.lock();
+  });
+
   it("lists sessions, ends another one, and ends its own on lock", async () => {
     const secretKey = erinSecretKey;
     expect(secretKey).not.toBe("");

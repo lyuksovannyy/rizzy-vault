@@ -809,6 +809,20 @@ export interface SessionRowView {
 }
 
 /** The account's sessions: the rows, newest first, and whether the server cut the list. */
+/**
+ * One attachment an item lists (ADR 0054 §4): its id, file name, declared media type and size
+ * in bytes. Item data, for display.
+ */
+export interface AttachmentInfo {
+  readonly id: string;
+  readonly name: string;
+  readonly mime: string;
+  readonly size: number;
+}
+
+/** The largest attachment, in bytes: 25 MiB (ADR 0054 §2). Checked in the core too. */
+export const MAX_ATTACHMENT_BYTES = 26_214_400;
+
 export interface SessionListView {
   readonly sessions: readonly SessionRowView[];
   readonly truncated: boolean;
@@ -1594,6 +1608,89 @@ export class VaultSession {
     const s = this.#s();
     const answer = await this.#transport(takeRequest(call(() => s.endSessionRequest(id))));
     call(() => expectNoContent(answer.status, answer.body));
+  }
+
+  /** The attachments of an item, in list order (ADR 0054 §4). */
+  attachments(itemId: string): AttachmentInfo[] {
+    return mapFree(call(() => this.#s().attachments(itemId)), (a) => ({
+      id: a.id,
+      name: a.name,
+      mime: a.mime,
+      size: Number(a.size),
+    }));
+  }
+
+  /**
+   * Adds a file to an item as an encrypted attachment (ADR 0054): the core writes the item op
+   * naming it first (§7), seals every chunk, and this sends `attachments/create` and each
+   * `upload-chunk` in turn. Then syncs, so the op reaches the server. Returns the attachment id.
+   * Codes: `attachment_too_large` over 25 MiB, `server_quota_exceeded` past the account's quota.
+   */
+  async addAttachment(itemId: string, name: string, mime: string, data: Uint8Array): Promise<string> {
+    const s = this.#s();
+    const id = call(() => s.addAttachment(itemId, name, mime, data, this.#now()));
+    try {
+      const created = await this.#transport(takeRequest(call(() => s.attachmentCreateRequest(id))));
+      call(() => expectNoContent(created.status, created.body));
+      const count = call(() => s.attachmentChunkCount(id));
+      for (let i = 0; i < count; i++) {
+        const answer = await this.#transport(
+          takeRequest(call(() => s.attachmentUploadChunkRequest(id, i))),
+        );
+        call(() => expectNoContent(answer.status, answer.body));
+      }
+    } finally {
+      if (!this.locked) {
+        call(() => s.attachmentUploadDone(id));
+      }
+    }
+    await this.sync();
+    return id;
+  }
+
+  /**
+   * Downloads and verifies an attachment: the chunk count comes from the item's own size, every
+   * chunk is opened where it was asked for, and the file is returned only when all of them
+   * opened (INV-79). Codes: `server_not_found` (the server lacks it), `attachment_incomplete`.
+   */
+  async downloadAttachment(itemId: string, attachmentId: string): Promise<Uint8Array> {
+    const s = this.#s();
+    const count = call(() => s.attachmentDownloadStart(itemId, attachmentId));
+    try {
+      const wrap = await this.#transport(takeRequest(call(() => s.attachmentGetRequest(attachmentId))));
+      call(() => s.attachmentGetResponse(attachmentId, wrap.status, wrap.body));
+      for (let i = 0; i < count; i++) {
+        const answer = await this.#transport(
+          takeRequest(call(() => s.attachmentDownloadChunkRequest(attachmentId, i))),
+        );
+        call(() => s.attachmentDownloadChunkResponse(attachmentId, i, answer.status, answer.body));
+      }
+      return call(() => s.attachmentDownloadFinish(attachmentId));
+    } catch (e) {
+      if (!this.locked) {
+        call(() => s.attachmentDownloadAbort(attachmentId));
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Deletes an attachment: `attachments/delete` first (a `server_not_found` answer means it is
+   * gone already), then the item's fields are cleared and synced, so a failure leaves a
+   * reference that heals rather than a blob that keeps counting against the quota.
+   */
+  async deleteAttachment(itemId: string, attachmentId: string): Promise<void> {
+    const s = this.#s();
+    const answer = await this.#transport(takeRequest(call(() => s.attachmentDeleteRequest(attachmentId))));
+    try {
+      call(() => expectNoContent(answer.status, answer.body));
+    } catch (e) {
+      if (!(e instanceof CoreError) || e.code !== "server_not_found") {
+        throw e;
+      }
+    }
+    call(() => s.removeAttachment(itemId, attachmentId, this.#now()));
+    await this.sync();
   }
 
   /**
