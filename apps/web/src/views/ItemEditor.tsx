@@ -23,10 +23,18 @@
 // a `move` change right away, one small op at a time, so the list the user sees always matches
 // what the move was computed against; reordering a still-pending row is a plain array swap,
 // resolved only when the whole draft is first saved.
-import type { ItemChange, ItemSummary, ItemType } from "@rizzy-vault/core";
+import type { CustomFieldAutofill, ItemChange, ItemSummary, ItemType } from "@rizzy-vault/core";
 import { PasswordGenerateSlot, SecretField } from "@rizzy-vault/ui";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 
+import {
+  type AutocompleteRow,
+  type RowProblems,
+  autocompleteProblems,
+  idProblemText,
+  lowercaseAscii,
+  shadowedText,
+} from "../autocomplete.ts";
 import { codeOf } from "../core-client.ts";
 import {
   type Element,
@@ -76,6 +84,13 @@ interface PendingCustom {
   label: string;
   kind: "text" | "hidden" | "boolean";
   value: string;
+  /** The autocomplete id (ADR 0076 §2), lowercased as typed; empty for none. */
+  autocomplete: string;
+}
+
+/** The key of a custom field's autocomplete id. */
+function autocompleteKey(element: string): string {
+  return `field/${element}/autocomplete`;
 }
 
 /** Moves `index` one step `dir` (-1 up, +1 down) in `list`; a no-op at either end. */
@@ -115,6 +130,13 @@ export function ItemEditor(props: {
   const [pendingUris, setPendingUris] = useState<PendingUri[]>([]);
   const [pendingCustom, setPendingCustom] = useState<PendingCustom[]>([]);
   const [newTags, setNewTags] = useState("");
+  // What each saved custom field's autocomplete id does (ADR 0076 §2.5): the "also used by"
+  // warning of a merge-made duplicate. Empty for a new item.
+  const [autofill, setAutofill] = useState<readonly CustomFieldAutofill[]>([]);
+  // Set by the first Save press: from then on a missing Display Name is shown as an error.
+  const [submitted, setSubmitted] = useState(false);
+  // Autocomplete ids the user typed into saved custom fields, by `field/<element>`.
+  const [autocompletes, setAutocompletes] = useState<Record<string, string>>({});
   // A fixed field's secret element: an input, or the textarea of a multi-line secret (an SSH
   // private key, ADR 0055; `SecretField`'s `multiline`).
   const secrets = useRef(new Map<string, HTMLInputElement | HTMLTextAreaElement | null>());
@@ -137,8 +159,13 @@ export function ItemEditor(props: {
     }
     const id = props.id;
     try {
-      const [s, f] = await Promise.all([ctx.client.call("item", id), ctx.client.call("fields", id)]);
+      const [s, f, a] = await Promise.all([
+        ctx.client.call("item", id),
+        ctx.client.call("fields", id),
+        ctx.client.call("customFieldAutofill", id),
+      ]);
       const g = group(f);
+      setAutofill(a);
       setSummary(s);
       setCurrent(g);
       setFavorite(g.favorite);
@@ -175,6 +202,80 @@ export function ItemEditor(props: {
   }
 
   const held = new Map(current.fixed.map((f) => [f.key, f]));
+
+  // Custom fields and their autocomplete ids (ADR 0076 §2.3–§2.5): the form's rows as the W1–W5
+  // checks see them, and their problems, shown inline and checked again on Save.
+  const kindOfElement = (c: Element): "text" | "hidden" | "boolean" => {
+    const v = c.attributes.get("value");
+    return v?.kind === "bool" ? "boolean" : v?.concealed === true ? "hidden" : "text";
+  };
+  const savedIdOf = (c: Element): string => c.attributes.get("autocomplete")?.value ?? "";
+  const idOf = (c: Element): string => autocompletes[`${c.list}/${c.element}`] ?? savedIdOf(c);
+  const labelKeyOf = (c: Element): string => `field/${c.element}/label`;
+  const labelOfElement = (c: Element): string => texts[labelKeyOf(c)] ?? c.attributes.get("label")?.value ?? "";
+  const editedElement = (c: Element): boolean => {
+    const savedLabel = c.attributes.get("label")?.value ?? "";
+    const v = c.attributes.get("value");
+    return (
+      labelOfElement(c) !== savedLabel ||
+      idOf(c) !== savedIdOf(c) ||
+      (v !== undefined && !v.concealed && (texts[v.key] ?? v.value ?? "") !== (v.value ?? "")) ||
+      (v !== undefined && clearSecret[v.key] === true)
+    );
+  };
+  const pendingTouched = (row: PendingCustom): boolean =>
+    row.label.trim() !== "" || row.value !== "" || row.autocomplete !== "";
+  const acRows: AutocompleteRow[] = [
+    ...current.custom
+      .filter((c) => removed[`${c.list}/${c.element}`] !== true)
+      .map((c) => ({
+        key: c.element,
+        label: labelOfElement(c),
+        kind: kindOfElement(c),
+        id: idOf(c),
+        savedId: savedIdOf(c),
+        edited: editedElement(c),
+      })),
+    ...pendingCustom.map((row) => ({
+      key: row.id,
+      label: row.label,
+      kind: row.kind,
+      id: row.autocomplete,
+      savedId: "",
+      edited: pendingTouched(row),
+    })),
+  ];
+  const acProblems = autocompleteProblems(acRows);
+  /** The problems of one row, and the inline messages they render. */
+  const fieldMessages = (key: string, id: string, shadowedBy: string | undefined, labelId: string) => {
+    const problems: RowProblems = acProblems.get(key) ?? {};
+    return (
+      <>
+        {problems.id !== undefined && (
+          <p className="error small" id={`${labelId}-ac`}>
+            {idProblemText(problems.id)}
+          </p>
+        )}
+        {problems.id === undefined && shadowedBy !== undefined && (
+          <p className="warning small" id={`${labelId}-ac`}>
+            {shadowedText(id, shadowedBy)}
+          </p>
+        )}
+        {submitted && problems.label !== undefined && (
+          <p className="error small" id={`${labelId}-name`}>
+            A display name is required.
+          </p>
+        )}
+      </>
+    );
+  };
+  const shadowedByOf = (c: Element): string | undefined => {
+    const state = autofill.find((a) => a.element === c.element);
+    if (state?.state !== "shadowed" || idOf(c) !== savedIdOf(c)) {
+      return undefined;
+    }
+    return state.winnerLabel ?? "another field";
+  };
 
   // Fills `key`'s secret input with a fresh value, using the session's shared generator
   // options (`ctx.generator`, generator-memory.ts: the same options the generator page and
@@ -264,7 +365,7 @@ export function ItemEditor(props: {
   const addPendingCustom = () =>
     void run(async () => {
       const id = await ctx.client.call("newElementId");
-      setPendingCustom((rows) => [...rows, { id, label: "", kind: "text", value: "" }]);
+      setPendingCustom((rows) => [...rows, { id, label: "", kind: "text", value: "", autocomplete: "" }]);
     });
 
   const save = (e: FormEvent) => {
@@ -317,7 +418,14 @@ export function ItemEditor(props: {
         // `order` and `kind` are layout attributes written elsewhere (reordering, the custom
         // field's own kind control); `match` is handled below, where the "absent" case (no
         // register at all) can be represented, which this generic loop cannot (module docs).
-        if (attr.attribute === "order" || attr.attribute === "kind" || attr.attribute === "match") {
+        // `autocomplete` is written by its own pass below: clearing it is a "clear", never an
+        // empty set (ADR 0076 §2.1).
+        if (
+          attr.attribute === "order" ||
+          attr.attribute === "kind" ||
+          attr.attribute === "match" ||
+          attr.attribute === "autocomplete"
+        ) {
           continue;
         }
         if (attr.concealed) {
@@ -367,8 +475,42 @@ export function ItemEditor(props: {
         }
       }
     }
+    // Saved custom fields: a Display Name typed into an unnamed one (it has no `label` register
+    // for the loop above to compare against), and autocomplete ids, set or cleared.
+    for (const c of current.custom) {
+      if (removed[`${c.list}/${c.element}`] === true) {
+        continue;
+      }
+      const typedLabel = texts[labelKeyOf(c)];
+      if (!c.attributes.has("label") && typedLabel !== undefined && typedLabel.trim() !== "") {
+        changes.push({ op: "set", key: labelKeyOf(c), value: typedLabel });
+      }
+      const id = idOf(c);
+      if (id !== savedIdOf(c)) {
+        changes.push(id === "" ? { op: "clear", key: autocompleteKey(c.element) } : { op: "set", key: autocompleteKey(c.element), value: id });
+      }
+    }
+    // ADR 0076 §2.3: W1–W5 are checked here first, so the errors show next to their fields;
+    // `rizzy-client` checks them again on write.
+    if (acProblems.size > 0) {
+      setSubmitted(true);
+      const all = [...acProblems.values()];
+      const firstId = all.find((p) => p.id !== undefined)?.id;
+      setError(
+        all.some((p) => p.label !== undefined)
+          ? "label_required"
+          : firstId === "duplicate"
+            ? "autocomplete_duplicate"
+            : firstId === "kind"
+              ? "autocomplete_kind"
+              : firstId === "reserved"
+                ? "autocomplete_reserved"
+                : "autocomplete_invalid",
+      );
+      return;
+    }
     for (const row of pendingCustom) {
-      if (row.label.trim() === "") {
+      if (!pendingTouched(row)) {
         continue;
       }
       const value =
@@ -379,7 +521,14 @@ export function ItemEditor(props: {
               ? "true"
               : "false"
             : row.value;
-      changes.push({ op: "addCustomField", element: row.id, label: row.label.trim(), kind: row.kind, value });
+      changes.push({
+        op: "addCustomField",
+        element: row.id,
+        label: row.label.trim(),
+        kind: row.kind,
+        value,
+        ...(row.autocomplete !== "" ? { autocomplete: row.autocomplete } : {}),
+      });
     }
     for (const t of newTags.split(",").map((s) => s.trim())) {
       if (t !== "" && !current.tags.includes(t)) {
@@ -616,17 +765,24 @@ export function ItemEditor(props: {
         <legend>Custom fields</legend>
         {current.custom.map((c, index) => {
           const k = `${c.list}/${c.element}`;
-          const labelKey = c.attributes.get("label")?.key ?? "";
+          const labelKey = labelKeyOf(c);
           const valueField = c.attributes.get("value");
-          const kind =
-            valueField?.kind === "bool" ? "boolean" : valueField?.concealed === true ? "hidden" : "text";
+          const kind = kindOfElement(c);
+          const problems = acProblems.get(c.element) ?? {};
+          const msgId = `cf-${c.element}`;
+          const id = idOf(c);
+          const shadowedBy = shadowedByOf(c);
           return (
             <div key={k} className="list-row custom-field-row">
               <input
                 type="text"
                 autoComplete="off"
                 aria-label={`Custom field ${index + 1} label`}
-                value={texts[labelKey] ?? c.attributes.get("label")?.value ?? ""}
+                placeholder={c.attributes.has("label") ? "Display name" : "Unnamed field"}
+                aria-required="true"
+                aria-invalid={submitted && problems.label !== undefined}
+                aria-describedby={submitted && problems.label !== undefined ? `${msgId}-name` : undefined}
+                value={labelOfElement(c)}
                 disabled={removed[k] === true}
                 onChange={(e) => setTexts({ ...texts, [labelKey]: e.currentTarget.value })}
               />
@@ -678,6 +834,21 @@ export function ItemEditor(props: {
                   onChange={(e) => setTexts({ ...texts, [valueField?.key ?? ""]: e.currentTarget.value })}
                 />
               )}
+              {(kind !== "boolean" || id !== "") && (
+                <input
+                  type="text"
+                  autoComplete="off"
+                  spellCheck={false}
+                  aria-label={`Custom field ${index + 1} autocomplete id`}
+                  placeholder="Autocomplete id (optional)"
+                  aria-invalid={problems.id !== undefined}
+                  aria-describedby={problems.id !== undefined || shadowedBy !== undefined ? `${msgId}-ac` : undefined}
+                  value={id}
+                  disabled={removed[k] === true}
+                  onChange={(e) => setAutocompletes({ ...autocompletes, [k]: lowercaseAscii(e.currentTarget.value) })}
+                />
+              )}
+              {removed[k] !== true && fieldMessages(c.element, id, shadowedBy, msgId)}
               <div className="row-actions">
                 <button
                   type="button"
@@ -714,8 +885,11 @@ export function ItemEditor(props: {
             <input
               type="text"
               autoComplete="off"
-              placeholder="Label"
+              placeholder="Display name (required)"
               aria-label={`New custom field ${index + 1} label`}
+              aria-required="true"
+              aria-invalid={submitted && acProblems.get(row.id)?.label !== undefined}
+              aria-describedby={submitted && acProblems.get(row.id)?.label !== undefined ? `cf-${row.id}-name` : undefined}
               value={row.label}
               onChange={(e) => {
                 const label = e.currentTarget.value;
@@ -773,6 +947,23 @@ export function ItemEditor(props: {
                 }}
               />
             )}
+            {row.kind !== "boolean" || row.autocomplete !== "" ? (
+              <input
+                type="text"
+                autoComplete="off"
+                spellCheck={false}
+                aria-label={`New custom field ${index + 1} autocomplete id`}
+                placeholder="Autocomplete id (optional)"
+                aria-invalid={acProblems.get(row.id)?.id !== undefined}
+                aria-describedby={acProblems.get(row.id)?.id !== undefined ? `cf-${row.id}-ac` : undefined}
+                value={row.autocomplete}
+                onChange={(e) => {
+                  const autocomplete = lowercaseAscii(e.currentTarget.value);
+                  setPendingCustom((rows) => rows.map((r) => (r.id === row.id ? { ...r, autocomplete } : r)));
+                }}
+              />
+            ) : null}
+            {fieldMessages(row.id, row.autocomplete, undefined, `cf-${row.id}`)}
             <div className="row-actions">
               <button
                 type="button"
