@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 // One item: its fields, masked where the core conceals them, with reveal and copy; its URIs as
-// safe links (INV-42); its TOTP code; its password history (`PasswordHistory.tsx`) and every
+// safe links (INV-42); its TOTP code; its encrypted attachments (`AttachmentsSection.tsx`, ADR
+// 0054); its password history (`PasswordHistory.tsx`) and every
 // field's history with restore (`ItemHistory.tsx`); edit, trash, restore and purge. A field two
 // devices edited at once carries a "conflict" badge and a "Resolve conflict" chooser
 // (`ConflictChooser.tsx`: keep both / pick one, ROADMAP §4.5), the name included.
@@ -32,6 +33,7 @@ import {
   typeLabel,
 } from "../fields.ts";
 import { SafeLink, SafeOpenButton } from "../SafeLink.tsx";
+import { AttachmentsSection } from "./AttachmentsSection.tsx";
 import { ConflictChooser } from "./ConflictChooser.tsx";
 import { ItemHistory } from "./ItemHistory.tsx";
 import { LargeType } from "./LargeType.tsx";
@@ -418,6 +420,7 @@ export function ItemView(props: {
       {grouped.other.map((f) => (
         <FieldValue key={f.key} ctx={ctx} id={id} field={f} label={f.key} onResolved={resolved} />
       ))}
+      <AttachmentsSection ctx={ctx} id={id} writable={writable && !summary.trashed} />
       <PasswordHistory ctx={ctx} id={id} />
       <ItemHistory ctx={ctx} id={id} onRestore={writable && !summary.trashed ? restoreHistoryEntry : undefined} />
       {grouped.tags.length > 0 && (

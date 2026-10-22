@@ -11,6 +11,7 @@
 //
 // This module is types and pure checks only; it imports no wasm.
 import type {
+  AttachmentInfo,
   ConflictValue,
   DetectedImportFormat,
   DeviceView,
@@ -90,6 +91,7 @@ export interface CoreApi {
   editItem(id: string, changes: ItemChange[]): void;
   trashItem(id: string): void;
   restoreItem(id: string): void;
+  /** Deletes a trashed item for good, after deleting its attachments from the server. */
   purgeItem(id: string): void;
   /** The item's password history: sources, positions and dates, never a value (ADR 0013 §3 rule 3). */
   passwordHistory(id: string): HistoryEntry[];
@@ -164,6 +166,15 @@ export interface CoreApi {
   plaintextExportPhrase(): string;
   /** A fresh element id for a new website or custom-field row (`@rizzy-vault/core`'s `newElementId`). */
   newElementId(): string;
+  /** The attachments of an item: ids, names, media types and sizes (ADR 0054 §4). */
+  attachments(id: string): AttachmentInfo[];
+  /** Encrypts a file the user chose and attaches it to an item (ADR 0054); its bytes are
+   * transferred and zeroed after use. Returns the attachment id. */
+  addAttachment(id: string, name: string, mime: string, data: Uint8Array): string;
+  /** A verified attachment's bytes, on the user's request only (ADR 0013 §3 rule 3). */
+  downloadAttachment(id: string, attachmentId: string): Uint8Array;
+  /** Deletes an attachment from the server and from the item. */
+  deleteAttachment(id: string, attachmentId: string): void;
 }
 
 /** A method name of {@link CoreApi}. */
@@ -233,6 +244,10 @@ export const METHODS: readonly Method[] = [
   "plaintextExportWarning",
   "plaintextExportPhrase",
   "newElementId",
+  "attachments",
+  "addAttachment",
+  "downloadAttachment",
+  "deleteAttachment",
 ];
 
 /** UI → Worker: a call. */

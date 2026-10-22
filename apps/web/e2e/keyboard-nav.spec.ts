@@ -264,6 +264,46 @@ test("keyboard: a Secure Note rendered from Markdown", async ({ page, context })
   expect(problems).toEqual([]);
 });
 
+test("keyboard: an item's attachments, download and delete (ADR 0054)", async ({ page }) => {
+  const { problems } = watch(page);
+  await signUp(page, server.origin, "keyboardattach");
+  const kb = page.keyboard;
+  const button = (name: string | RegExp) => page.getByRole("button", { name });
+  await tabTo(page, button(/New item/));
+  await kb.press("Enter");
+  await tabTo(page, page.getByRole("menuitem", { name: "Login", exact: true }));
+  await kb.press("Enter");
+  await tabTo(page, page.getByLabel("Title", { exact: true }));
+  await kb.type("Keys attachment");
+  await tabTo(page, button("Save"));
+  await kb.press("Enter");
+  await expect(page.getByRole("heading", { name: "Keys attachment" })).toBeVisible();
+
+  // The file input is reachable by Tab; the file itself comes from the chooser, which a test
+  // fills the way the operating system's dialog would.
+  const section = page.getByRole("region", { name: "Attachments" });
+  const input = section.getByLabel("Attach a file");
+  await tabTo(page, input);
+  const chooser = page.waitForEvent("filechooser");
+  await kb.press("Space");
+  await (await chooser).setFiles({ name: "keys.txt", mimeType: "text/plain", buffer: Buffer.from("typed by keys") });
+  await expect(section.locator("li.attachment")).toHaveCount(1);
+
+  // Download and Delete by keyboard; the dialog's buttons too.
+  await tabTo(page, button("Download keys.txt"));
+  const downloading = page.waitForEvent("download");
+  await kb.press("Enter");
+  expect((await downloading).suggestedFilename()).toBe("keys.txt");
+  await tabTo(page, button("Delete keys.txt"));
+  await kb.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "Delete this attachment?" });
+  await expect(dialog).toBeVisible();
+  await tabTo(page, dialog.getByRole("button", { name: "Delete attachment" }));
+  await kb.press("Enter");
+  await expect(section.getByText("No attachments.")).toBeVisible();
+  expect(problems).toEqual([]);
+});
+
 test("keyboard only: create, view and reveal each M3 item type (ADR 0055)", async ({ page }) => {
   const { problems } = watch(page);
   const kb = page.keyboard;

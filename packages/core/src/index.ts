@@ -1694,6 +1694,26 @@ export class VaultSession {
   }
 
   /**
+   * Deletes every attachment an item names from the server (`attachments/delete`; a
+   * `server_not_found` answer counts as deleted), leaving the item's fields as they are. For an
+   * item about to be deleted for good: the server cannot tell which attachments an item names
+   * (ADR 0054 §7), so without this they would stay and keep counting against the quota.
+   */
+  async deleteAttachmentsOf(itemId: string): Promise<void> {
+    const s = this.#s();
+    for (const a of this.attachments(itemId)) {
+      const answer = await this.#transport(takeRequest(call(() => s.attachmentDeleteRequest(a.id))));
+      try {
+        call(() => expectNoContent(answer.status, answer.body));
+      } catch (e) {
+        if (!(e instanceof CoreError) || e.code !== "server_not_found") {
+          throw e;
+        }
+      }
+    }
+  }
+
+  /**
    * Ends every other password and recovery session (`sessions/others/end`, R4); device sessions
    * stay. Needs a fresh login, as {@link endSession}.
    */

@@ -1231,6 +1231,36 @@ button.sidebar-item .sidebar-item-count {
   margin: 0 0 var(--space-2);
 }
 
+/* An item's encrypted attachments (ADR 0054; AttachmentsSection.tsx). */
+.attachments {
+  margin: var(--space-3) 0;
+}
+
+.attachment-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.attachment {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-1) 0;
+}
+
+.attachment-name {
+  overflow-wrap: anywhere;
+}
+
+.attachment-add {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}
+
 /* An item's password history (gap 01; PasswordHistory.tsx). */
 .password-history {
   margin: var(--space-3) 0;

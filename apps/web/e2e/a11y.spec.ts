@@ -285,6 +285,39 @@ test("a11y: dark theme, forced colours and phone width", async ({ page }) => {
   expect(problems).toEqual([]);
 });
 
+test("a11y: an item's attachments section, its error and its delete dialog (ADR 0054)", async ({ page }) => {
+  const { problems } = watch(page);
+  await signUp(page, server.origin, "a11yattach");
+  await newItem(page, "Login");
+  await page.getByLabel("Title").fill("Attachment audit");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("heading", { name: "Attachment audit" })).toBeVisible();
+  const section = page.getByRole("region", { name: "Attachments" });
+  await expect(section.getByText("No attachments.")).toBeVisible();
+  await expectAccessible(page, "item view: empty attachments section");
+  const input = section.getByLabel("Attach a file");
+  await input.setInputFiles({ name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("hello attachments") });
+  await expect(section.locator("li.attachment")).toHaveCount(1);
+  await expectAccessible(page, "item view: one attachment");
+  await input.setInputFiles({ name: "big.bin", mimeType: "application/octet-stream", buffer: Buffer.alloc(25 * 1024 * 1024 + 1) });
+  await expect(section.getByRole("alert")).toBeVisible();
+  await expectAccessible(page, "item view: attachment too large");
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expectAccessible(page, "item view: attachments (dark)");
+  await page.emulateMedia({ colorScheme: "light", forcedColors: "active" });
+  await expectAccessible(page, "item view: attachments (forced colours)", { forcedColors: true });
+  await page.emulateMedia({ colorScheme: "light", forcedColors: "none" });
+  await section.getByRole("button", { name: "Delete notes.txt" }).click();
+  const dialog = page.getByRole("dialog", { name: "Delete this attachment?" });
+  await expect(dialog).toBeVisible();
+  await expectFocusTrapped(page, dialog, "delete attachment");
+  await expectAccessible(page, "delete attachment dialog");
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await page.setViewportSize({ width: 375, height: 812 });
+  await expectAccessible(page, "item view: attachments (phone width)");
+  expect(problems).toEqual([]);
+});
+
 test("a11y: a Secure Note rendered from Markdown, in light, dark, forced colours and phone width", async ({ page }) => {
   const { problems } = watch(page);
   await signUp(page, server.origin, "a11ynote");

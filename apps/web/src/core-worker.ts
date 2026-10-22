@@ -267,7 +267,12 @@ async function run(m: CallMessage): Promise<unknown> {
     editItem: () => current().editItem(str(a[0]), a[1] as never),
     trashItem: () => current().trashItem(str(a[0])),
     restoreItem: () => current().restoreItem(str(a[0])),
-    purgeItem: () => current().purgeItem(str(a[0])),
+    // ADR 0054 §7: the item's attachments go from the server first, or they would stay behind.
+    purgeItem: async () => {
+      const s = current();
+      await s.deleteAttachmentsOf(str(a[0]));
+      s.purgeItem(str(a[0]));
+    },
     // Dates only; one value per reveal (ADR 0013 §3 rule 3): the history is never sent whole.
     passwordHistory: () => current().passwordHistory(str(a[0])),
     revealPasswordHistory: () =>
@@ -312,6 +317,10 @@ async function run(m: CallMessage): Promise<unknown> {
     // Recognition needs no session: the file is read here and never leaves the Worker.
     detectImportFormat: () => detectImportFormat(bytes(a[0])),
     importFile: () => current().importFile(str(a[0]) as never, bytes(a[1])),
+    attachments: () => current().attachments(str(a[0])),
+    addAttachment: () => current().addAttachment(str(a[0]), str(a[1]), str(a[2]), bytes(a[3])),
+    downloadAttachment: () => current().downloadAttachment(str(a[0]), str(a[1])),
+    deleteAttachment: () => current().deleteAttachment(str(a[0]), str(a[1])),
     importEncrypted: () => current().importEncrypted(bytes(a[0]), bytes(a[1])),
     devices: () => current().devices(),
     sessions: () => current().sessions(),
