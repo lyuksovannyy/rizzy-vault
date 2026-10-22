@@ -4572,3 +4572,108 @@ fn a4_oracle_detects_a_planted_violation() {
         "the canary scan flagged a secret that was never in the request"
     );
 }
+
+/// ADR 0056: `item search` over the local index, in any case (the Cyrillic vector end to end),
+/// over the allow-listed fields only; `item recent` after a view; the index in the cache file in
+/// cleartext but never a concealed value or a note body; `cache reindex` forgets the uses.
+#[test]
+fn item_search_recent_and_reindex() {
+    let server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("local-index");
+    sign_up(&a, &origin, "alice");
+    let mail = a
+        .ok(
+            &[
+                "item",
+                "create",
+                "--type",
+                "login",
+                "--field",
+                "item.name=Почта Ивана",
+                "--field",
+                "login.username=ivan@example.com",
+                "--secret",
+                "login.password",
+                "--uri",
+                "https://mail.example.com",
+                "--tag",
+                "Работа",
+            ],
+            &["hunter2-CANARY"],
+        )
+        .out[0]
+        .clone();
+    let note = a
+        .ok(
+            &[
+                "item",
+                "create",
+                "--type",
+                "note",
+                "--field",
+                "item.name=Plan",
+                "--field",
+                "item.notes=the plan body CANARY",
+            ],
+            &[],
+        )
+        .out[0]
+        .clone();
+    let ids = |args: &[&str]| -> Vec<String> {
+        a.ok(args, &[])
+            .out
+            .iter()
+            .map(|l| l.split_once("  ").unwrap().0.to_owned())
+            .collect()
+    };
+    for query in [
+        "ИВАНА",
+        "ивана",
+        "Почта",
+        "IVAN@",
+        "mail.example",
+        "работа",
+        "РАБОТА",
+    ] {
+        assert_eq!(ids(&["item", "search", query]), [mail.clone()], "{query}");
+    }
+    assert_eq!(ids(&["item", "search", "plan"]), [note.clone()]);
+    for never in ["hunter2", "canary", "body"] {
+        assert!(ids(&["item", "search", never]).is_empty(), "{never}");
+    }
+    assert_eq!(ids(&["item", "search"]).len(), 2);
+
+    // Recently used: nothing until an item is viewed, then that item first.
+    assert!(ids(&["item", "recent"]).is_empty());
+    a.ok(&["item", "show", &note], &[]);
+    a.ok(&["item", "show", &mail], &[]);
+    assert_eq!(ids(&["item", "recent"]), [mail.clone(), note.clone()]);
+    assert_eq!(ids(&["item", "recent", "--limit", "1"]), [mail.clone()]);
+    assert_eq!(ids(&["item", "search"]), [mail.clone(), note.clone()]);
+
+    // The cache file holds the index in cleartext (ADR 0056 §3), lower-cased, and never a
+    // concealed value or a note body.
+    let file = std::fs::read(cache_file(&a)).unwrap();
+    let holds = |needle: &str| file.windows(needle.len()).any(|w| w == needle.as_bytes());
+    assert!(holds("почта ивана"));
+    assert!(!holds("hunter2"));
+    assert!(!holds("CANARY") && !holds("canary"));
+
+    // A trashed item leaves the default search, is found with --trash, stays recently used.
+    a.ok(&["item", "trash", &mail], &[]);
+    assert!(ids(&["item", "search", "ивана"]).is_empty());
+    assert_eq!(ids(&["item", "search", "ивана", "--trash"]), [mail.clone()]);
+    let recent = a.ok(&["item", "recent"], &[]);
+    assert!(
+        recent.out[0].ends_with("(in the trash)"),
+        "{:?}",
+        recent.out
+    );
+
+    // `cache reindex` rebuilds the index and forgets the uses.
+    let reindexed = a.ok(&["cache", "reindex"], &[]);
+    assert!(reindexed.noted("2 items"), "{:?}", reindexed.notes);
+    assert!(ids(&["item", "recent"]).is_empty());
+    assert_eq!(ids(&["item", "search", "plan"]), [note]);
+}

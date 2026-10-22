@@ -28,6 +28,8 @@ USAGE:
     rv unlock
     rv sync
     rv item list [--trash]
+    rv item search [<query>] [--trash]
+    rv item recent [--limit <n>]
     rv item show <item> [--reveal]
     rv item create --type <type> [--field <key>=<value>]... [--secret <key>]...
                    [--uri <uri>]... [--tag <name>]... [<custom field>]...
@@ -42,6 +44,7 @@ USAGE:
     rv generate [--length <n>] [--no-symbols | --symbols <chars>] [--no-ambiguous]
                 [--exclude <chars>] | --words <n> [--passphrase-number]
     rv totp <item>
+    rv cache reindex
     rv export --out <file> --name <login> [--format encrypted|json|csv]
     rv import --in <file> [--format <format>]
     rv device list
@@ -74,6 +77,12 @@ a command exits.
 is asked for) or --custom-bool <label>=true|false. <id> is a URI's or custom field's element
 id as `item show` prints it in the field's key (uri/<id>/value), or a unique prefix of one.
 <place> is first, last, before:<id> or after:<id>.
+`item search` matches the query, in any case, within an item's name, username, websites, tag
+names, text custom fields, card holder and brand, and identity names; Secure Note bodies and
+concealed fields are never searched. Without a query it lists every item, most recently used
+first. `item recent` lists the items viewed here (`item show`, `totp`), most recent first.
+Searching and use tracking run on this device only, over a search index kept in its cache
+unencrypted; `cache reindex` rebuilds that index and forgets the use history.
 <type> is login, note, card, identity, ssh-key, api-credential, software-license, wifi,
 bank-account or passkey. Field keys are the item schema's (item.name, item.notes,
 login.username, login.password, login.totp, card.number, …).
@@ -199,6 +208,9 @@ pub enum Generate {
     },
 }
 
+/// How many items `item recent` lists without `--limit`.
+const DEFAULT_RECENT: usize = 20;
+
 /// A parsed command.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -233,6 +245,20 @@ pub enum Command {
         /// `--trash`: the trashed items instead of the active ones.
         trash: bool,
     },
+    /// `item search` (ADR 0056 §5).
+    ItemSearch {
+        /// The query; empty lists every item, most recently used first.
+        query: String,
+        /// `--trash`: the trashed items instead of the active ones.
+        trash: bool,
+    },
+    /// `item recent` (ADR 0056 §2).
+    ItemRecent {
+        /// `--limit`: how many items at most.
+        limit: usize,
+    },
+    /// `cache reindex` (ADR 0056 §4).
+    CacheReindex,
     /// `item show`.
     ItemShow {
         /// The item.
@@ -519,6 +545,14 @@ pub fn parse(arguments: Vec<OsString>) -> Result<Invocation, CliError> {
         Some("import") => import(&mut args)?,
         Some("device") => device(&mut args)?,
         Some("session") => session(&mut args)?,
+        Some("cache") => match args.next().as_deref() {
+            Some("reindex") => {
+                args.done()?;
+                Command::CacheReindex
+            }
+            Some(other) => return Err(unknown(other)),
+            None => return Err(usage("cache needs a subcommand")),
+        },
         Some("rotate") => {
             let (mut name, mut full) = (None, false);
             while let Some(option) = args.next() {
@@ -678,6 +712,40 @@ fn signup(args: &mut Args) -> Result<Command, CliError> {
     })
 }
 
+/// `item search [<query>] [--trash]`.
+fn item_search(args: &mut Args) -> Result<Command, CliError> {
+    let (mut query, mut trash) = (None, false);
+    while let Some(arg) = args.next() {
+        if arg == "--trash" {
+            trash = true;
+        } else if query.is_none() {
+            query = Some(arg);
+        } else {
+            return Err(unknown(&arg));
+        }
+    }
+    Ok(Command::ItemSearch {
+        query: query.unwrap_or_default(),
+        trash,
+    })
+}
+
+/// `item recent [--limit <n>]`.
+fn item_recent(args: &mut Args) -> Result<Command, CliError> {
+    let limit = match args.next().as_deref() {
+        None => DEFAULT_RECENT,
+        Some("--limit") => args
+            .value("--limit")?
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| usage("--limit takes a positive number"))?,
+        Some(other) => return Err(unknown(other)),
+    };
+    args.done()?;
+    Ok(Command::ItemRecent { limit })
+}
+
 /// `item …`.
 fn item(args: &mut Args) -> Result<Command, CliError> {
     match args.next().as_deref() {
@@ -689,6 +757,8 @@ fn item(args: &mut Args) -> Result<Command, CliError> {
             };
             Ok(Command::ItemList { trash })
         }
+        Some("search") => item_search(args),
+        Some("recent") => item_recent(args),
         Some("show") => {
             let item = args.positional("the item")?;
             let reveal = match args.next().as_deref() {
@@ -989,6 +1059,37 @@ mod tests {
 
     fn command(line: &str) -> Command {
         parsed(line).unwrap().command
+    }
+
+    /// `item search`, `item recent` and `cache reindex` (ADR 0056 §4, §5).
+    #[test]
+    fn local_index_commands_parse() {
+        assert_eq!(
+            command("item search"),
+            Command::ItemSearch {
+                query: String::new(),
+                trash: false
+            }
+        );
+        assert_eq!(
+            command("item search ПОЧТА --trash"),
+            Command::ItemSearch {
+                query: "ПОЧТА".to_owned(),
+                trash: true
+            }
+        );
+        assert!(parsed("item search a b").is_err());
+        assert_eq!(command("item recent"), Command::ItemRecent { limit: 20 });
+        assert_eq!(
+            command("item recent --limit 5"),
+            Command::ItemRecent { limit: 5 }
+        );
+        assert!(parsed("item recent --limit 0").is_err());
+        assert!(parsed("item recent --limit x").is_err());
+        assert!(parsed("item recent extra").is_err());
+        assert_eq!(command("cache reindex"), Command::CacheReindex);
+        assert!(parsed("cache").is_err());
+        assert!(parsed("cache reindex now").is_err());
     }
 
     /// `recovery repair` (ADR 0032 §4 step 6): `--name` required, `--retype` optional.
