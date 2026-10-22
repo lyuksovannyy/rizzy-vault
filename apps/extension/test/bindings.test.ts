@@ -68,12 +68,14 @@ function candidate(
 // a website Never in the web vault, sync, and have the extension go on offering it for autofill
 // anyway unless this module actually reads the register back.
 describe("matchModeOf", () => {
-  it("resolves absent (never written) to the account default, BaseDomain", () => {
-    expect(matchModeOf(undefined)).toBe(MatchMode.BaseDomain);
+  // "No override" stays AccountDefault: the core resolves it against the account's own match
+  // default (ADR 0042 §6), so a default the user set in the web vault reaches the extension.
+  it("resolves absent (never written) to the account-default sentinel", () => {
+    expect(matchModeOf(undefined)).toBe(MatchMode.AccountDefault);
   });
 
-  it("resolves the explicit account-default sentinel (wire 0x0000) to BaseDomain", () => {
-    expect(matchModeOf("0")).toBe(MatchMode.BaseDomain);
+  it("keeps the explicit account-default sentinel (wire 0x0000)", () => {
+    expect(matchModeOf("0")).toBe(MatchMode.AccountDefault);
   });
 
   it("round-trips every assigned wire value (ADR 0037 §4) decoded as decimal", () => {
@@ -105,10 +107,10 @@ describe("matchModeOf", () => {
 
   // Unparseable text is corrupt or otherwise not a value any client meant to set — not a real,
   // deliberate Enum value the way an unassigned number above might be — so it is treated the
-  // same as "no override" (BaseDomain), not narrowed to Never: a corrupt register must not
-  // silently disable autofill for a URI with no explanation anywhere.
-  it("resolves unparseable text to BaseDomain, the same as no override at all", () => {
-    expect(matchModeOf("not a number")).toBe(MatchMode.BaseDomain);
+  // same as "no override" (the account default), not narrowed to Never: a corrupt register must
+  // not silently disable autofill for a URI with no explanation anywhere.
+  it("resolves unparseable text to the account default, the same as no override at all", () => {
+    expect(matchModeOf("not a number")).toBe(MatchMode.AccountDefault);
   });
 });
 
@@ -123,10 +125,10 @@ describe("itemUriFields", () => {
     ]);
   });
 
-  it("resolves to BaseDomain when a URI has no match register at all (never written)", () => {
+  it("resolves to the account default when a URI has no match register at all (never written)", () => {
     const fields = [f("uri/a/value", { list: "uri", element: "a", attribute: "value", value: "https://x.example/" })];
     expect(itemUriFields(fields)).toEqual([
-      { uriId: "a", value: "https://x.example/", mode: MatchMode.BaseDomain },
+      { uriId: "a", value: "https://x.example/", mode: MatchMode.AccountDefault },
     ]);
   });
 
@@ -139,7 +141,7 @@ describe("itemUriFields", () => {
     ];
     expect(itemUriFields(fields)).toEqual([
       { uriId: "a", value: "https://a.example/", mode: MatchMode.Host },
-      { uriId: "b", value: "https://b.example/", mode: MatchMode.BaseDomain },
+      { uriId: "b", value: "https://b.example/", mode: MatchMode.AccountDefault },
     ]);
   });
 
@@ -154,7 +156,7 @@ describe("itemUriFields", () => {
       f("uri/a/value", { list: "uri", element: "a", attribute: "value", value: "https://a.example/" }),
       f("login.username", { value: "alice" }),
     ];
-    expect(itemUriFields(fields)).toEqual([{ uriId: "a", value: "https://a.example/", mode: MatchMode.BaseDomain }]);
+    expect(itemUriFields(fields)).toEqual([{ uriId: "a", value: "https://a.example/", mode: MatchMode.AccountDefault }]);
   });
 });
 

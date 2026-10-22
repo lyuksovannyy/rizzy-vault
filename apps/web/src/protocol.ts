@@ -25,9 +25,12 @@ import type {
   ItemChange,
   ItemSummary,
   ItemType,
+  MatchDecisionResult,
+  MatchSettings,
   Notice,
   PassphraseOptions,
   PasswordOptions,
+  SettingsChange,
   TotpCode,
   TwoFactorSetup,
 } from "@rizzy-vault/core";
@@ -132,6 +135,12 @@ export interface CoreApi {
   enableTwoFactor(): TwoFactorSetup;
   confirmTwoFactor(code: string): void;
   disableTwoFactor(code: string): void;
+  /** The account's match default and equivalence groups (ADR 0037 §6–§7, ADR 0042). */
+  matchSettings(): MatchSettings;
+  /** What autofill would offer on a website, under the account's settings. Ids and hosts only. */
+  matchCandidates(pageUrl: string): MatchDecisionResult;
+  /** One change to the matching settings (checked with {@link isSettingsChange}). */
+  changeMatchSettings(change: SettingsChange): void;
   generatePasswordWithOptions(options: Partial<PasswordOptions>): Generated;
   generatePassphraseWithOptions(options: Partial<PassphraseOptions>): Generated;
   passwordEntropy(options: Partial<PasswordOptions>): number;
@@ -194,6 +203,9 @@ export const METHODS: readonly Method[] = [
   "enableTwoFactor",
   "confirmTwoFactor",
   "disableTwoFactor",
+  "matchSettings",
+  "matchCandidates",
+  "changeMatchSettings",
   "generatePasswordWithOptions",
   "generatePassphraseWithOptions",
   "passwordEntropy",
@@ -283,6 +295,34 @@ export function isFromWorker(value: unknown): value is FromWorker {
     m["kind"] === "result" &&
     (m["ok"] === true || (m["ok"] === false && typeof m["code"] === "string"))
   );
+}
+
+/** The most domains a user group can hold (ADR 0042 §3, `MAX_GROUP_DOMAINS`); the core checks it
+ * too, this only keeps an oversized message from being built at all. */
+export const MAX_GROUP_DOMAINS = 64;
+
+/** Whether `value` is a {@link SettingsChange} (shape only; the core checks every value). */
+export function isSettingsChange(value: unknown): value is SettingsChange {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const c = value as Record<string, unknown>;
+  switch (c["kind"]) {
+    case "matchDefault":
+      return typeof c["mode"] === "number" && Number.isInteger(c["mode"]);
+    case "addUserGroup":
+      return (
+        Array.isArray(c["domains"]) &&
+        c["domains"].length <= MAX_GROUP_DOMAINS &&
+        c["domains"].every((d) => typeof d === "string")
+      );
+    case "removeUserGroup":
+    case "disableGlobalGroup":
+    case "enableGlobalGroup":
+      return typeof c["id"] === "string";
+    default:
+      return false;
+  }
 }
 
 /** The buffers of the byte arrays in `values`, to transfer rather than copy. */

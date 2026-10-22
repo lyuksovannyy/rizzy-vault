@@ -1142,3 +1142,18 @@ button.sidebar-item .sidebar-item-count {
 .onboarding-fields .onboarding-field {
   display: contents;
 }
+
+/* Settings → Website matching (MatchingPane.tsx): one group per row, its button beside it. */
+.matching-list {
+  list-style: none;
+  margin: 0 0 var(--space-2);
+  padding: 0;
+}
+
+.matching-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-1) 0;
+}
