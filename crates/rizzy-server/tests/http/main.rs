@@ -12,6 +12,8 @@
 //! (`password_equivalents`): registration, login and password change send only OPAQUE messages.
 //! A paged Fetch splitting a tombstone cover from its purge across a small page budget, end to
 //! end with `rizzy-client` (`paged_fetch`, ADR 0050).
+//! Listing and ending sessions (`sessions`, ADR 0075): the gating and strict body of each route,
+//! the ended token's `401` byte for byte, a device ending web sessions, another account's id.
 //!
 //! ADR 0028's HTTP conventions are pinned by `conventions` (the error table and `Retry-After`,
 //! the one `401`, `Content-Length`, no CORS and no compression, the trusted-proxy rule,
@@ -36,6 +38,7 @@ mod password_equivalents;
 mod quota;
 mod recovery;
 mod rotation;
+mod sessions;
 mod setups;
 mod signing;
 mod worker;

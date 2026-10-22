@@ -20,7 +20,8 @@
 //!
 //! # What is generated, broadly (combinatorial, not hand-picked)
 //! [`generator`] draws, for each case: one of [`rizzy_server::http::api::Endpoint::ALL`] (every
-//! `/api/v1` route); a body mutation ([`generator::Mutation`]: truncated, bit-flipped, wrong
+//! `/api/v1` route; the three that end sessions, [`SESSION_ENDING`], in a run of their own that
+//! re-opens what each case ended, [`session_ending_routes_under_generated_cases`]); a body mutation ([`generator::Mutation`]: truncated, bit-flipped, wrong
 //! top-level JSON type, a null or wrong-typed field, an extra field, an oversized body, bounded
 //! deep nesting, injected control characters, or no JSON at all); and an auth mode
 //! ([`generator::AuthChoice`]: no token, a forged token, a malformed `Authorization` header,
@@ -36,7 +37,9 @@
 //!   `vault/upload`, `vault/fetch`, `vault/heal` (`vault_id`), and `device-auth/start`,
 //!   `device-auth/finish` (an `account_id`/`device_id` pair from two different accounts).
 //!   Threat model A15 "IDOR attempts against other users' ciphertext, shares and device lists",
-//!   INV-7 "authorization check and test for every endpoint and resource type".
+//!   INV-7 "authorization check and test for every endpoint and resource type". The one other
+//!   client-supplied id, `sessions/end`'s `session_id`, is tested across accounts in
+//!   `sessions.rs` (`another_accounts_session_is_not_found`).
 //! - [`method_confusion`]: every endpoint against every method it does not serve.
 //! - [`web_paths`]: path traversal, odd encodings and method confusion on the `web` role
 //!   (§7.7 "E": "Path traversal in static serving").
@@ -112,8 +115,8 @@ use zeroize::Zeroizing;
 
 use crate::common::{Reply, Server, TempDir, block_on, config_in, send_from};
 use crate::rotation::{
-    Auth, Client, PASSWORD, copy_token, device_session, login_named, now_ms, post_empty, request,
-    signup_named,
+    Auth, Client, PASSWORD, call, copy_token, device_session, login_named, now_ms, post_empty,
+    request, signup_named,
 };
 
 /// Cases of [`bulk_fuzz_pr_budget`], proptest's deterministic RNG: never flaky in CI. Sized to
@@ -679,6 +682,12 @@ fn seed_value(endpoint: Endpoint, me: &Account) -> Value {
         // GET with no body (`DeviceGrants`) or a 0 body-limit endpoint (`RecoveryCancel`,
         // `TotpEnrolStart`): no body at all.
         Endpoint::DeviceGrants | Endpoint::RecoveryCancel | Endpoint::TotpEnrolStart => Value::Null,
+        // The empty-body `sessions` endpoints (ADR 0075 §2): no body either.
+        Endpoint::SessionsList | Endpoint::SessionsCurrentEnd | Endpoint::SessionsOthersEnd => {
+            Value::Null
+        }
+        // A well-formed id that names no session: the lookup runs and answers `404`.
+        Endpoint::SessionsEnd => json!({ "session_id": b64(&[0u8; 16]) }),
         Endpoint::TotpEnrolConfirm => json!({ "totp_credential_seq": 1, "code": "123456" }),
         Endpoint::TotpDisable => json!({ "code": "123456" }),
         Endpoint::Upload => json!({
@@ -1036,7 +1045,25 @@ fn build_case_request(
     }
 }
 
-/// Runs one generated case and checks it, appending any findings to `findings`.
+/// The endpoints that end sessions (ADR 0075 R2–R4). A generated case on one of them may end
+/// the fixture's own sessions, after which every later case would answer `401` and the bulk
+/// run would test nothing past authentication. They are drawn instead by
+/// [`session_ending_routes_under_generated_cases`], which re-opens what a case ended.
+const SESSION_ENDING: &[Endpoint] = &[
+    Endpoint::SessionsCurrentEnd,
+    Endpoint::SessionsEnd,
+    Endpoint::SessionsOthersEnd,
+];
+
+/// The endpoints the shared-fixture bulk runs draw from: every one but [`SESSION_ENDING`].
+fn drawable_endpoints() -> Vec<Endpoint> {
+    Endpoint::ALL
+        .iter()
+        .copied()
+        .filter(|e| !SESSION_ENDING.contains(e))
+        .collect()
+}
+
 /// Runs one generated case, checks it, and returns its endpoint and status (`None` on a
 /// caught panic), for [`the_generator_reaches_past_the_parse_boundary`]'s reach histogram.
 async fn run_case(
@@ -1045,7 +1072,8 @@ async fn run_case(
     findings: &mut Vec<String>,
 ) -> Option<(&'static str, StatusCode)> {
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
-    let endpoint = Endpoint::ALL[rng.next_u32() as usize % Endpoint::ALL.len()];
+    let drawable = drawable_endpoints();
+    let endpoint = drawable[rng.next_u32() as usize % drawable.len()];
     let mutation = generator::ALL[rng.next_u32() as usize % generator::ALL.len()];
     let auth = generator::AUTH[rng.next_u32() as usize % generator::AUTH.len()];
     let acting = rng.next_u32() as usize % scenario.accounts.len();
@@ -1120,7 +1148,7 @@ fn the_generator_reaches_past_the_parse_boundary() {
         );
 
         let mut shallow = Vec::new();
-        for endpoint in Endpoint::ALL {
+        for endpoint in drawable_endpoints() {
             let path = endpoint.path();
             let reached_past_parse = histogram
                 .keys()
@@ -2030,4 +2058,89 @@ fn bulk_fuzz_nightly() {
             findings.join("\n")
         );
     });
+}
+
+/// The generated cases of [`run_case`] on the [`SESSION_ENDING`] endpoints, each followed by
+/// re-opening every fixture session the case ended (a device session by device
+/// authentication, the bearer-only one by a new login), so the next case starts from the same
+/// fixture. The oracle is the bulk runs' own.
+#[test]
+fn session_ending_routes_under_generated_cases() {
+    block_on(async {
+        let mut scenario = Scenario::build(75).await;
+        let mut findings = Vec::new();
+        let mut rng = ChaCha20Rng::seed_from_u64(0x0075_5E55);
+        let mut reached = BTreeMap::<&'static str, usize>::new();
+        for seed in draw_seeds(240, Seeds::Fixed) {
+            let mut case_rng = ChaCha20Rng::seed_from_u64(seed);
+            let endpoint = SESSION_ENDING[case_rng.next_u32() as usize % SESSION_ENDING.len()];
+            let mutation = generator::ALL[case_rng.next_u32() as usize % generator::ALL.len()];
+            let auth = generator::AUTH[case_rng.next_u32() as usize % generator::AUTH.len()];
+            let acting = case_rng.next_u32() as usize % scenario.accounts.len();
+            let seed_body = seed_bytes(endpoint, &scenario.accounts[acting]);
+            let body = apply_mutation(&seed_body, mutation, &mut case_rng);
+            let request = build_case_request(&mut scenario.accounts, acting, endpoint, body, auth);
+            let label = format!(
+                "seed {seed:#x} ({:?}, {mutation:?}, {auth:?}, acting {acting})",
+                endpoint.path()
+            );
+            let outcome = send_case(&scenario.server, peer_for(seed), request).await;
+            if let Outcome::Replied(reply) = &outcome
+                && reply.status != StatusCode::BAD_REQUEST
+                && reply.status != StatusCode::UNAUTHORIZED
+            {
+                *reached.entry(endpoint.path()).or_insert(0) += 1;
+            }
+            check_outcome(&label, outcome, true, &[], &mut findings);
+            scenario.reopen_sessions(&mut rng).await;
+        }
+        assert!(
+            findings.is_empty(),
+            "{} findings on the session-ending routes:\n{}",
+            findings.len(),
+            findings.join("\n")
+        );
+        for endpoint in SESSION_ENDING {
+            assert!(
+                reached.contains_key(endpoint.path()),
+                "never past 400/401: {:?}; reached {reached:?}",
+                endpoint.path()
+            );
+        }
+    });
+}
+
+impl Scenario {
+    /// Re-opens every fixture session a [`SESSION_ENDING`] case ended.
+    async fn reopen_sessions(&mut self, rng: &mut ChaCha20Rng) {
+        for account in &mut self.accounts {
+            let alive = call(
+                &self.server,
+                "POST",
+                paths::SESSIONS_LIST,
+                Vec::new(),
+                Auth::Bearer(&copy_token(&account.bare_bearer)),
+            )
+            .await;
+            if alive.status == StatusCode::UNAUTHORIZED {
+                let logged_in =
+                    login_named(&self.server, rng, &account.name, &account.secret_key, None).await;
+                account.bare_bearer = copy_token(logged_in.bearer_token());
+            }
+            let client = &mut account.client;
+            let alive = call(
+                &self.server,
+                "POST",
+                paths::SESSIONS_LIST,
+                Vec::new(),
+                Auth::Device(&mut client.session, &client.unlocked),
+            )
+            .await;
+            if alive.status == StatusCode::UNAUTHORIZED {
+                client.session = device_session(&self.server, &client.state, &client.unlocked)
+                    .await
+                    .unwrap();
+            }
+        }
+    }
 }
