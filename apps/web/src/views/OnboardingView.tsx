@@ -76,7 +76,7 @@ function ImportStep(props: { readonly ctx: VaultContext }) {
           <li key={s}>{s}</li>
         ))}
       </ul>
-      <ImportForm ctx={props.ctx} />
+      <ImportForm ctx={props.ctx} headingLevel={3} />
     </>
   );
 }
