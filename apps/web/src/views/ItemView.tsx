@@ -348,7 +348,7 @@ export function ItemView(props: {
           <TypeIcon type={summary.itemType} />
         </span>
         <h2 id="item-title">{summary.title === "" ? "(untitled)" : summary.title}</h2>
-        {writable && !summary.trashed && (
+        {writable && !summary.trashed && canEditFields(summary.itemType) && (
           <button
             type="button"
             className="secondary small icon-button favorite-toggle"
