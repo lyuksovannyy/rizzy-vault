@@ -7,7 +7,9 @@
 //
 // "Keyboard only" walks every screen the accessibility audit covers (`a11y.spec.ts`) without
 // the pointer: each control is reached with Tab alone (`tabTo`, which fails when it is not
-// reached within its bound) and operated with Enter, Space, Escape or typing.
+// reached within its bound) and operated with Enter, Space, Escape or typing. The Sessions
+// section's "End all other sessions", its dialog and its log-in-again form are walked the same
+// way in `sessions.spec.ts`, which needs a second session.
 import { expect, test } from "@playwright/test";
 
 import { tabTo } from "./a11y.ts";

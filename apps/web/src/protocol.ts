@@ -30,6 +30,7 @@ import type {
   Notice,
   PassphraseOptions,
   PasswordOptions,
+  SessionListView,
   SettingsChange,
   StorageUsage,
   TotpCode,
@@ -135,6 +136,16 @@ export interface CoreApi {
   importFile(format: ImportFormat, file: Uint8Array): ImportReport;
   importEncrypted(file: Uint8Array, password: Uint8Array): ImportReport;
   devices(): DeviceView[];
+  /** The account's live sessions (ADR 0075 R1): the server's word, for display. */
+  sessions(): SessionListView;
+  /** Ends one other session of the last list (R3); needs a fresh login. */
+  endSession(id: string): void;
+  /** Ends every other password and recovery session (R4); needs a fresh login. */
+  endOtherSessions(): void;
+  /** Logs in again and switches to the new, fresh session; the old one is ended (§9). */
+  refreshSession(secretKey: Uint8Array, password: Uint8Array): void;
+  /** The texts of ADR 0075 §6 and §8. */
+  sessionNotices(): { ended: string; othersEnded: string; oneEnded: string };
   enableTwoFactor(): TwoFactorSetup;
   confirmTwoFactor(code: string): void;
   disableTwoFactor(code: string): void;
@@ -203,6 +214,11 @@ export const METHODS: readonly Method[] = [
   "importFile",
   "importEncrypted",
   "devices",
+  "sessions",
+  "endSession",
+  "endOtherSessions",
+  "refreshSession",
+  "sessionNotices",
   "enableTwoFactor",
   "confirmTwoFactor",
   "disableTwoFactor",
@@ -253,10 +269,13 @@ export type FromWorker = ResultMessage | AskTotpMessage;
 
 /**
  * Codes the web vault adds to the core's (packages/core's README lists those): the user
- * closed the second-factor prompt; the core trapped and the page must be reloaded; a message
- * that is not one of ours.
+ * closed the second-factor prompt; the server ended the session; the core trapped and the page
+ * must be reloaded; a message that is not one of ours.
  */
 export const TOTP_CANCELLED = "totp_cancelled";
+/** The server ended this session (ADR 0075 §6): the Worker locked it, the UI shows the login
+ * with "This session has ended. Log in again." */
+export const SESSION_ENDED = "session_ended";
 export const CORE_CRASHED = "core_crashed";
 export const BAD_MESSAGE = "bad_message";
 

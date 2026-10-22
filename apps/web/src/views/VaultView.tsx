@@ -39,6 +39,7 @@ import { type CoreClient, codeOf } from "../core-client.ts";
 import { useDismissableMenu } from "../dismissable-menu.ts";
 import { CREATABLE_TYPES, tagCounts } from "../fields.ts";
 import { type GeneratorMemory, useGeneratorMemory } from "../generator-memory.ts";
+import { messageFor } from "../messages.ts";
 import { mergeNotices, noticeKey } from "../notices.ts";
 import type { SessionInfo } from "../protocol.ts";
 import { shortcutFor } from "../shortcuts.ts";
@@ -144,6 +145,12 @@ export function VaultView(props: {
     },
     [client, clipboard, onLocked],
   );
+
+  // ADR 0075 §6: the Worker locked a session the server ended; drop the vault as a lock does.
+  useEffect(() => {
+    client.setSessionEndedHandler(() => lock(messageFor("session_ended")));
+    return () => client.setSessionEndedHandler(undefined);
+  }, [client, lock]);
 
   /** Records a new session state. */
   const update = useCallback((next: SessionInfo) => {
