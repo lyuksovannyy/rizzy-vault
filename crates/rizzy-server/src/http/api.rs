@@ -193,7 +193,7 @@ const UNKNOWN_SOURCE: &[u8] = b"unknown";
 /// `Forwarded` (RFC 7239) is not read.
 ///
 /// [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
-const X_FORWARDED_FOR: &str = "x-forwarded-for";
+pub(crate) const X_FORWARDED_FOR: &str = "x-forwarded-for";
 
 /// The fixed part of a body's read deadline ([`body_deadline`]; [ADR 0028] item 8).
 ///
@@ -584,7 +584,7 @@ pub const fn status(code: ErrorCode) -> StatusCode {
 }
 
 /// A JSON response with `status`, marked `no-store` and with its route name.
-fn json_response(status: StatusCode, body: Vec<u8>, route: &'static str) -> Response {
+pub(crate) fn json_response(status: StatusCode, body: Vec<u8>, route: &'static str) -> Response {
     let mut response = Response::new(Body::from(body));
     *response.status_mut() = status;
     response
@@ -620,6 +620,17 @@ fn failure_response(failure: Failure, route: &'static str) -> Response {
             .insert(RETRY_AFTER, HeaderValue::from(seconds));
     }
     response
+}
+
+/// A `429 rate_limited` answer whose `Retry-After` is `wait_ms` in whole seconds, rounded up.
+pub(crate) fn rate_limited_response(wait_ms: u64, route: &'static str) -> Response {
+    failure_response(
+        Failure {
+            code: ErrorCode::RateLimited,
+            retry_after_secs: Some(retry_after_secs(wait_ms)),
+        },
+        route,
+    )
 }
 
 /// Why a request is refused: the error code and, for `rate_limited`, when to try again.
@@ -779,8 +790,9 @@ async fn collect(mut body: Body, limit: usize) -> Result<Bytes, BodyError> {
 }
 
 /// Reads the body up to `limit` bytes within [`body_deadline`] (step (e) of the module docs).
-async fn read_body(
-    endpoint: Endpoint,
+/// `route` names the endpoint in the log lines of an aborted or late body.
+pub(crate) async fn read_body(
+    route: &'static str,
     parts: &Parts,
     body: Body,
     limit: usize,
@@ -796,11 +808,11 @@ async fn read_body(
         Ok(Ok(bytes)) => Ok(bytes),
         Ok(Err(BodyError::TooLarge)) => Err(ErrorCode::PayloadTooLarge),
         Ok(Err(BodyError::Aborted)) => {
-            log::info("client_aborted", &[Field::Str("route", endpoint.path())]);
+            log::info("client_aborted", &[Field::Str("route", route)]);
             Err(ErrorCode::InvalidRequest)
         }
         Err(_elapsed) => {
-            log::info("body_read_timeout", &[Field::Str("route", endpoint.path())]);
+            log::info("body_read_timeout", &[Field::Str("route", route)]);
             Err(ErrorCode::InvalidRequest)
         }
     }
@@ -998,7 +1010,7 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
     } else {
         None
     };
-    let body = read_body(endpoint, &parts, body, limit).await?;
+    let body = read_body(endpoint.path(), &parts, body, limit).await?;
     let now = now_ms();
     let session = match &credentials {
         Some(credentials) => {

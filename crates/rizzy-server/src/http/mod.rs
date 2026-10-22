@@ -19,6 +19,8 @@
 //!
 //! The admin listener has its own router, [`admin_panel::router`], which is never merged into
 //! this one (ADR 0060 §2): no path here reaches it, `/admin/...` included.
+//! The `icons` role has its own listener and router ([`icons_router`]; ADR 0010 §2: it runs
+//! alone), with the same fallback, access log and common headers.
 //!
 //! [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
 //! [ADR 0002]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0002-own-protocol.md
@@ -27,6 +29,7 @@
 pub mod admin_panel;
 pub mod api;
 pub mod headers;
+pub mod icons;
 pub mod security;
 pub mod web;
 
@@ -38,7 +41,7 @@ use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use axum::routing::{MethodFilter, get, on};
+use axum::routing::{MethodFilter, get, on, post};
 use rizzy_domain_auth::types::ErrorCode;
 use rizzy_domain_auth::types::META_PATH;
 
@@ -77,6 +80,33 @@ pub fn router(api: Option<Arc<Api>>, web: bool) -> Router {
             response
         })
         .fallback(move |request: Request| async move { fallback(web, &request) })
+        .layer(middleware::from_fn(access_log))
+        .layer(middleware::map_response(finish))
+}
+
+/// Builds the router of the `icons` role ([ADR 0052] point 1, [ADR 0053]): the breach-check
+/// route when the breach check is on, nothing else. Every other path answers `404` like the
+/// public router with no role (so a disabled breach check is `404 not_found`, ADR 0028
+/// item 3: "a role not running"), and every response gets the common headers and one access
+/// line naming the route template, never the path or the body.
+///
+/// [ADR 0052]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0052-icon-proxy-role.md
+/// [ADR 0053]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0053-hibp-breach-check-egress.md
+pub fn icons_router(state: Arc<icons::Icons>) -> Router {
+    let mut router = Router::new();
+    if state.breach_check_on() {
+        router = router.route(
+            icons::BREACH_RANGE_ROUTE,
+            post(icons::breach_range).with_state(state),
+        );
+    }
+    router
+        .method_not_allowed_fallback(|| async {
+            let mut response = error_response(ErrorCode::InvalidRequest, "method_not_allowed");
+            *response.status_mut() = StatusCode::METHOD_NOT_ALLOWED;
+            response
+        })
+        .fallback(|request: Request| async move { fallback(false, &request) })
         .layer(middleware::from_fn(access_log))
         .layer(middleware::map_response(finish))
 }

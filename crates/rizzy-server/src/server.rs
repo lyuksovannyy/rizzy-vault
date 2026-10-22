@@ -63,6 +63,13 @@
 //! be lost while the database is open, so no watchdog runs. A `web`-only process opens no
 //! database and holds nothing.
 //!
+//! For the `icons` role, which runs alone ([ADR 0010] §2; [ADR 0053]): no database, no secrets.
+//! [`check_icons_isolation`] refuses to start when the secrets file or the `SQLite` database is
+//! visible to the process (a database URL was already refused by the configuration), then the
+//! cache directory is created if missing and [`serve_icons`] serves [`http::icons_router`] on
+//! the listener. With the breach check off and no favicon fetch in this build, the role serves
+//! only `404`s and logs a warning saying so.
+//!
 //! **Core dumps** (threat model INV-60) are already off when this runs: [`crate::cli::main`]
 //! disables them first and refuses to start otherwise ([`crate::coredump`], ADR 0024). The
 //! release profile keeps `panic = "abort"`.
@@ -89,6 +96,7 @@
 //! [ADR 0023]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0023-logical-backup-format.md
 //! [ADR 0048]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0048-per-account-storage-quota.md
 //! [ADR 0060]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0060-admin-panel-stack-boundary.md
+//! [ADR 0053]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0053-hibp-breach-check-egress.md
 
 use core::fmt;
 use std::future::Future;
@@ -170,6 +178,13 @@ pub enum ServeError {
     /// The instance lock is no longer held (its dedicated connection dropped): a running
     /// server exits (module docs), and an admin command stops before it writes.
     InstanceLockLost,
+    /// The `icons` role can see something ADR 0010 §2 keeps from it: `"the secrets file"` or
+    /// `"the database"`.
+    IconsIsolation(&'static str),
+    /// The `icons` role's cache directory cannot be created.
+    IconsCache(std::io::ErrorKind),
+    /// The `icons` role's TLS client configuration cannot be built.
+    IconsTls,
 }
 
 impl fmt::Display for ServeError {
@@ -206,6 +221,13 @@ impl fmt::Display for ServeError {
             Self::InstanceLockLost => f.write_str(
                 "the database's instance lock was lost (its connection dropped); stopping",
             ),
+            Self::IconsIsolation(what) => write!(
+                f,
+                "the icons role must not see {what} (ADR 0010 §2); run it in its own container \
+                 without the data and secrets volumes"
+            ),
+            Self::IconsCache(kind) => write!(f, "the icons cache directory: {kind}"),
+            Self::IconsTls => f.write_str("the icons TLS client configuration failed"),
         }
     }
 }
@@ -549,6 +571,88 @@ impl Default for ServeLimits {
     }
 }
 
+/// ADR 0010 §2's startup check of the `icons` role: it must not see the secrets file or the
+/// `SQLite` database. A path the process cannot stat counts as not visible. (A database URL is
+/// refused earlier, by [`Config::from_sources`].)
+///
+/// # Errors
+/// [`ServeError::IconsIsolation`] naming what it can see.
+pub fn check_icons_isolation(config: &Config) -> Result<(), ServeError> {
+    let visible = |path: &std::path::Path| matches!(path.try_exists(), Ok(true));
+    if visible(&config.secrets_file) {
+        return Err(ServeError::IconsIsolation("the secrets file"));
+    }
+    if let DatabaseConfig::Sqlite(path) = &config.database
+        && visible(path)
+    {
+        return Err(ServeError::IconsIsolation("the database"));
+    }
+    Ok(())
+}
+
+/// Builds the `icons` router state from `config`: the breach check when it is on, with the
+/// production connector ([`rizzy_icon_proxy::connect::PinnedTls`]) and the cache in
+/// `RIZZY_ICON_CACHE_DIR`, which is created if missing.
+///
+/// # Errors
+/// [`ServeError::IconsCache`], [`ServeError::IconsTls`].
+pub fn icons_state(config: &Config) -> Result<http::icons::Icons, ServeError> {
+    let breach = if config.breach_check {
+        std::fs::create_dir_all(&config.icon_cache_dir)
+            .map_err(|e| ServeError::IconsCache(e.kind()))?;
+        let cache = rizzy_icon_proxy::cache::Cache::new(
+            config.icon_cache_dir.clone(),
+            config.icon_cache_ttl,
+            config.icon_cache_max_bytes,
+        );
+        let connector =
+            rizzy_icon_proxy::connect::PinnedTls::new().map_err(|_| ServeError::IconsTls)?;
+        Some(rizzy_icon_proxy::breach::BreachService::new(
+            Arc::new(connector),
+            cache,
+        ))
+    } else {
+        None
+    };
+    Ok(http::icons::Icons::new(
+        breach,
+        config.trusted_proxies.clone(),
+    ))
+}
+
+/// Runs the `icons` role alone until a shutdown signal (module docs).
+///
+/// # Errors
+/// [`ServeError`].
+pub async fn serve_icons(config: &Config) -> Result<(), ServeError> {
+    check_icons_isolation(config)?;
+    let state = icons_state(config)?;
+    if !state.breach_check_on() {
+        log::warn(
+            "icons_nothing_enabled",
+            &[Field::Str(
+                "hint",
+                "set RIZZY_BREACH_CHECK=on to serve the breach check",
+            )],
+        );
+    }
+    let app = http::icons_router(Arc::new(state));
+    let listener = tokio::net::TcpListener::bind(config.listen)
+        .await
+        .map_err(|e| ServeError::Listener(e.kind()))?;
+    let port = listener.local_addr().map_or(0, |a| a.port());
+    log::info(
+        "listening",
+        &[
+            Field::Str("role", "icons"),
+            Field::U64("port", u64::from(port)),
+        ],
+    );
+    serve_http(listener, app, shutdown_signal()).await;
+    log::info("stopped", &[]);
+    Ok(())
+}
+
 /// Whether an accept error concerns only the one connection (the next accept can succeed at
 /// once), as axum's own `serve` treats them.
 fn is_connection_error(e: &std::io::Error) -> bool {
@@ -665,6 +769,9 @@ pub async fn serve(config: Config) -> Result<(), ServeError> {
             Field::Str("version", env!("CARGO_PKG_VERSION")),
         ],
     );
+    if config.roles.icons {
+        return serve_icons(&config).await;
+    }
     let mut services = if config.roles.need_database() {
         Some(open_services(&config).await?)
     } else {
@@ -825,6 +932,74 @@ mod tests {
         assert!(lost.await.is_err());
 
         db.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// ADR 0010 §2: the `icons` role refuses to start when it can see the secrets file or the
+    /// `SQLite` database; a missing cache directory is created; the breach check is off unless
+    /// switched on.
+    #[test]
+    fn icons_isolation_and_state() {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "rizzy-icons-iso-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = |extra: &[(&'static str, String)]| {
+            let mut pairs: Vec<(&'static str, String)> = vec![
+                (crate::config::ROLES, "icons".to_owned()),
+                (
+                    crate::config::DATA_DIR,
+                    dir.join("data").display().to_string(),
+                ),
+                (
+                    crate::config::SECRETS_FILE,
+                    dir.join("secrets.json").display().to_string(),
+                ),
+                (
+                    crate::config::ICON_CACHE_DIR,
+                    dir.join("cache").display().to_string(),
+                ),
+            ];
+            pairs.extend_from_slice(extra);
+            let env = move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| std::ffi::OsString::from(v))
+            };
+            Config::from_sources(&crate::config::Sources {
+                file: crate::config::Settings::new(),
+                env: &env,
+                roles_flag: None,
+            })
+            .unwrap()
+        };
+        // Nothing visible: accepted; the breach check off serves nothing and creates nothing.
+        let off = config(&[]);
+        assert!(check_icons_isolation(&off).is_ok());
+        assert!(!icons_state(&off).unwrap().breach_check_on());
+        assert!(!dir.join("cache").exists());
+        // On: the cache directory is created.
+        let on = config(&[(crate::config::BREACH_CHECK, "on".to_owned())]);
+        assert!(icons_state(&on).unwrap().breach_check_on());
+        assert!(dir.join("cache").is_dir());
+        // A visible SQLite database, then a visible secrets file, refuse the start.
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        std::fs::write(dir.join("data").join(crate::config::SQLITE_FILE_NAME), b"").unwrap();
+        assert!(matches!(
+            check_icons_isolation(&off),
+            Err(ServeError::IconsIsolation("the database"))
+        ));
+        std::fs::write(dir.join("secrets.json"), b"{}").unwrap();
+        let refused = check_icons_isolation(&off).unwrap_err();
+        assert!(matches!(
+            refused,
+            ServeError::IconsIsolation("the secrets file")
+        ));
+        assert!(refused.to_string().contains("ADR 0010 §2"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

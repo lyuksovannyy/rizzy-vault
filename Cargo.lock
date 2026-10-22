@@ -1694,6 +1694,7 @@ dependencies = [
  "rizzy-client",
  "rizzy-domain-auth",
  "rizzy-domain-vault",
+ "rizzy-icon-proxy",
  "rizzy-storage",
  "rustix",
  "serde",

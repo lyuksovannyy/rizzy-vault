@@ -77,6 +77,40 @@ fn serving_without_an_origin_is_a_configuration_error() {
     );
 }
 
+/// ADR 0010 §2: the `icons` role runs alone and never with a database URL; it refuses the
+/// start when it can see the secrets file. The URL's password is never echoed.
+#[test]
+fn the_icons_role_runs_alone() {
+    for roles in ["api,icons", "icons,web", "icons,worker"] {
+        let out = rizzy(&["--roles", roles], &[]);
+        assert_eq!(out.status.code(), Some(2), "{roles}");
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert!(stderr.contains("icons role must run alone"), "{stderr}");
+    }
+    let url = Path::new("postgres://user:hunter2@db/v");
+    let out = rizzy(&["--roles", "icons"], &[("RIZZY_DATABASE_URL", url)]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("must not see a database setting"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("hunter2"));
+
+    let dir = temp_dir("icons-iso");
+    let secrets = dir.join("secrets.json");
+    std::fs::write(&secrets, b"{}").unwrap();
+    let data = dir.join("data");
+    let out = rizzy(
+        &["--roles", "icons"],
+        &[("RIZZY_SECRETS_FILE", &secrets), ("RIZZY_DATA_DIR", &data)],
+    );
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("must not see the secrets file"), "{stderr}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// ADR 0028 item 10 (owner decision on open question 6): a public `http` origin refuses the
 /// start, for every command, and the message says what to set.
 #[test]

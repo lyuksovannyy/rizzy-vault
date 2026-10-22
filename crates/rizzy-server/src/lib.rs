@@ -13,6 +13,8 @@
 //! - **`web`**: the web vault with its CSP ([`http::web`], [`http::security`]; INV-49): with
 //!   the `embed-web` feature, the `apps/web` build embedded in the binary; without it (the
 //!   default), ADR 0010 §4's fixed page;
+//! - **`icons`** (M3, alone, no database, no secrets; [`http::icons`], `rizzy-icon-proxy`): the
+//!   breach-check range query of ADR 0053, behind its own off-by-default switch;
 //! - **`worker`**: expired auth state, re-sealing 2FA secrets after a data-key rotation, stale
 //!   reconciliation epochs, compaction, `SQLite` space and the pre-migration copy ([`worker`]).
 //!
@@ -99,7 +101,8 @@
 //! - Recording a change of the recovery waiting period in the users' security event log
 //!   (threat model §7.19, INV-69): that log is M3's.
 //! - The admin listener and API (M3),
-//!   `notify`, `icons` (M3) and `smtp` (M6).
+//!   `notify` (M3) and `smtp` (M6); of `icons`, the favicon fetch (ADR 0052): the role runs
+//!   only the breach check (ADR 0053).
 //! - A setting for the minimum client versions: the list is built in and empty
 //!   ([`http::api::MIN_CLIENT_VERSIONS`]), so no client is refused yet.
 //!
