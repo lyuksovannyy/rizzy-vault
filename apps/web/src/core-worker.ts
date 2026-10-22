@@ -12,6 +12,10 @@
 // drains. Every request also has a deadline (`bounded-fetch.ts`), so a stalled server cannot
 // hold the queue, and the login after a lock, for longer than that.
 //
+// A session the server ended (another session ended it, ADR 0075 §6) answers `401`: the Worker
+// locks it at once and answers the call `session_ended`. A lock also ends the session on the
+// server (`sessions/current/end`), best effort.
+//
 // A trap (a Rust panic under `panic = "abort"`) leaves the instance in an unknown state: every
 // later call answers `core_crashed`, and the UI asks for a reload.
 import {
@@ -28,10 +32,13 @@ import {
   init,
   login,
   newElementId,
+  othersEndedNotice,
   passphraseEntropy,
   passwordEntropy,
   plaintextExportPhrase,
   plaintextExportWarning,
+  sessionEndedByYouNotice,
+  sessionEndedNotice,
   version,
 } from "@rizzy-vault/core";
 
@@ -40,6 +47,7 @@ import {
   BAD_MESSAGE,
   CORE_CRASHED,
   type CallMessage,
+  SESSION_ENDED,
   type CoreApi,
   type FromWorker,
   type KitMessage,
@@ -99,6 +107,18 @@ function current(): VaultSession {
     throw new CoreError("locked");
   }
   return session;
+}
+
+/**
+ * Locks: every request in flight is aborted first, then the session locks, which also ends it
+ * on the server (`sessions/current/end`, ADR 0075 §6), best effort and unawaited, so that the
+ * abort does not cancel that request.
+ */
+function lockSession(): void {
+  lockEpoch += 1;
+  bounded.abortAll();
+  session?.lock();
+  session = undefined;
 }
 
 /** The current signup, or `wrong_state`. */
@@ -232,10 +252,7 @@ async function run(m: CallMessage): Promise<unknown> {
     },
     status: () => (session === undefined || session.locked ? undefined : info(session)),
     lock: () => {
-      lockEpoch += 1;
-      session?.lock();
-      session = undefined;
-      bounded.abortAll();
+      lockSession();
     },
     sync: async () => {
       const s = current();
@@ -297,6 +314,15 @@ async function run(m: CallMessage): Promise<unknown> {
     importFile: () => current().importFile(str(a[0]) as never, bytes(a[1])),
     importEncrypted: () => current().importEncrypted(bytes(a[0]), bytes(a[1])),
     devices: () => current().devices(),
+    sessions: () => current().sessions(),
+    endSession: () => current().endSession(str(a[0])),
+    endOtherSessions: () => current().endOtherSessions(),
+    refreshSession: () => current().refreshSession(bytes(a[0]), bytes(a[1]), askTotp(m.id)),
+    sessionNotices: () => ({
+      ended: sessionEndedNotice(),
+      othersEnded: othersEndedNotice(),
+      oneEnded: sessionEndedByYouNotice(),
+    }),
     enableTwoFactor: () => current().enableTwoFactor(),
     confirmTwoFactor: () => current().confirmTwoFactor(str(a[0])),
     disableTwoFactor: () => current().disableTwoFactor(str(a[0])),
@@ -337,6 +363,19 @@ function answer(id: number, outcome: { value: unknown } | { code: string }): voi
 }
 
 /** Runs a call and answers it; a non-`CoreError` throw marks the instance as crashed. */
+/**
+ * Whether the server ended the current session (ADR 0075 §6: a `401` on a request other than
+ * `login/*`, `recovery/*` and the sign-out); if so, it is locked here, which clears its keys
+ * and decrypted items as a lock does, and the call answers `session_ended`.
+ */
+function endedNow(): boolean {
+  if (session === undefined || !session.ended) {
+    return false;
+  }
+  lockSession();
+  return true;
+}
+
 async function serve(m: CallMessage): Promise<void> {
   if (crashed) {
     wipe(m.args);
@@ -344,10 +383,11 @@ async function serve(m: CallMessage): Promise<void> {
     return;
   }
   try {
-    answer(m.id, { value: await run(m) });
+    const value = await run(m);
+    answer(m.id, endedNow() ? { code: SESSION_ENDED } : { value });
   } catch (e) {
     if (e instanceof CoreError) {
-      answer(m.id, { code: e.code });
+      answer(m.id, { code: endedNow() ? SESSION_ENDED : e.code });
     } else {
       // A trap, or a bug in this module: nothing about it is sent (it could hold anything).
       crashed = true;

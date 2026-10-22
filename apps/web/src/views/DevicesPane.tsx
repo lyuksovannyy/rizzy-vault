@@ -2,13 +2,15 @@
 
 // The account's durable devices, as the login verified them (CRYPTO.md §11.8). The web vault
 // itself is an ephemeral device and is not listed. Revocation needs a key rotation, which the
-// web vault does not offer in M1; `rv devices revoke` does.
+// web vault does not offer in M1; `rv devices revoke` does. Below it, the account's sessions
+// (`SessionsSection.tsx`, ADR 0075 §9).
 import type { DeviceView } from "@rizzy-vault/core";
 import { useEffect, useState } from "react";
 
 import { codeOf } from "../core-client.ts";
 import { DEVICE_KINDS as KINDS, DEVICE_LABEL_HEX_LEN } from "../notices.ts";
 import type { VaultContext } from "./VaultView.tsx";
+import { SessionsSection } from "./SessionsSection.tsx";
 import { ErrorText } from "./common.tsx";
 
 /** The device list (module docs). */
@@ -29,6 +31,7 @@ export function DevicesPane(props: { readonly ctx: VaultContext }) {
   }, [ctx.client, ctx.revision]);
 
   return (
+    <>
     <div className="panel">
       <h2>Devices</h2>
       <p className="muted">
@@ -62,5 +65,9 @@ export function DevicesPane(props: { readonly ctx: VaultContext }) {
           </table>
         ))}
     </div>
+    <div className="panel">
+      <SessionsSection ctx={ctx} />
+    </div>
+    </>
   );
 }

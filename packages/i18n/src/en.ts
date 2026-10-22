@@ -41,6 +41,7 @@ export const en = {
   "errors.transport_failed": "Cannot reach the server. Check the connection and try again.",
   "errors.response_too_large": "The server's answer was too large.",
   "errors.locked": "The vault is locked.",
+  "errors.session_ended": "This session has ended. Log in again.",
   "errors.read_only": "This vault is read-only right now.",
   "errors.invalid_input": "That input is not valid.",
   "errors.invalid_edit": "That change is not valid for this item.",
