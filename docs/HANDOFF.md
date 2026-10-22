@@ -89,7 +89,27 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
   - **ADR 0043, iframe instance tokens:** the expired-token case is unit-tested only; Firefox was not run.
   - **Bindings:** `unsafe` went from 1063 to 1080, all generator glue.
   - **`gate.sh`:** the workspace test step now always runs on SQLite, and the PG steps get their own database.
-- **What is left for agents:** the rest of the 2026-10-22 batch, in waves (0075, 0055 and 0062 running).
+- **Wave 2 (integrated, full-gated):**
+  - **ADR 0075, sessions:** four endpoints; Settings → Devices → Sessions; `rv session list/end`; `rv` signs out at exit; the web vault locks on an ended session.
+    - Judgment call: a `401` from TOTP confirm/disable is ambiguous (a wrong code also returns 401), so core probes `sessions/list` once first.
+    - The session-ending routes have their own fuzz run.
+    - CRYPTO §5.10 now has an "Ending sessions" bullet.
+  - **ADR 0055, M3 item types:** five types, 22 keys (8 concealed), the default SSH port, vectors.
+    - Following owner answer 4, read generally, a carried key of the wrong type now skips the **whole item** on own-export import (M1 keys included).
+    - The SSH private key uses a multi-line SecretField masked with `-webkit-text-security`. Firefox is unverified.
+    - Search allow-list not extended (ADR 0056 question 5 is unwritten).
+    - Bitwarden SSH keys still import as Secure Notes; no ADR maps them.
+  - **ADR 0062, Markdown in notes:** a hand-written TS parser to a closed AST and a React renderer, for Secure Notes only. No links or images by design. A note that skips heading levels fails axe heading-order; that's user content, so the rule is not suppressed.
+- **WebAuthn (ADRs 0058/0059) is blocked.** webauthn-rs 0.5.5 can't be used under the Accepted wording:
+  - the prescribed `deny.toml` wrappers miss `webauthn-attestation-ca`;
+  - ceremony state can't be stored without `danger-allow-state-serialisation`;
+  - the crate contains a deterministically seeded RNG (`fake.rs`);
+  - storing credentials and the UV policy also need decisions;
+  - openssl-sys needs a system OpenSSL.
+  
+  **ADR 0077 (Proposed)** resolves all of this, with seven open questions and recommendations. It needs owner acceptance; then the track runs. Its acceptance also authorizes one CI workflow edit (installing OpenSSL).
+- **Possible flake:** `rv` e2e signups intermittently answer `Server(InvalidRequest)`. Seen three times in different tests under load; they pass on rerun. Not investigated.
+- **What is left for agents:** 0076, 0056 and 0054 are running. Not started: 0052, 0053, 0057, 0060, 0071, 0073 (CI signing waits on its approval records) and 0074.
 - The gap-numbered audit (`docs/handoff/gap-audit.json`), which older gap ids below trace back to, still lives only on branch `wip/client-m1`. Keep that branch; its code is superseded by the commits in §2. `wip/match-core` (one unfinished commit off `main`) is likewise superseded and kept only for reference.
 
 ## 2. Done since the last rewrite
