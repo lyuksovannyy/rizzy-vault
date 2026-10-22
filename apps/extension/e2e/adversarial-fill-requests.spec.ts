@@ -240,6 +240,11 @@ test("a forged postMessage directly into the real inline-menu iframe cannot reve
     }
     await legitVisit.close();
 
+    // ADR 0043: the real iframe now also requires its per-instance token on every request, which
+    // a page can never read. To keep THIS test about the candidate-membership check alone, the
+    // forged message below carries the real iframe's own real token (recorded by the test
+    // harness, `captureInstanceTokens`) — an attacker strictly stronger than any real page.
+    await captureInstanceTokens(context);
     const visit = await context.newPage();
     await visit.goto(`http://127.0.0.1:${page.port}/`);
     // The real content script creates the real iframe the moment it detects the password field
@@ -258,7 +263,9 @@ test("a forged postMessage directly into the real inline-menu iframe cannot reve
       timeout: 15_000,
     });
 
-    await visit.evaluate((forgedItemId) => {
+    const { token: realToken } = await realMenuToken(visit);
+
+    await visit.evaluate(({ forgedItemId, instanceToken }) => {
       const el = document.querySelector("iframe[data-rizzy-inline-menu]") as HTMLIFrameElement | null;
       if (el?.contentWindow === null || el?.contentWindow === undefined) {
         throw new Error("adversarial test setup: inline-menu iframe not found");
@@ -267,6 +274,7 @@ test("a forged postMessage directly into the real inline-menu iframe cannot reve
         {
           type: "rizzy-inline-menu-show",
           pageOrigin: location.origin,
+          instanceToken,
           pageHost: location.hostname,
           candidates: [
             {
@@ -280,7 +288,7 @@ test("a forged postMessage directly into the real inline-menu iframe cannot reve
         },
         "*",
       );
-    }, realItemId);
+    }, { forgedItemId: realItemId, instanceToken: realToken });
 
     const menu = visit.frameLocator("iframe[data-rizzy-inline-menu]");
     const forgedButton = menu.getByRole("button", { name: "Fake PayPal", exact: false });
@@ -4224,19 +4232,34 @@ async function sendFromExtensionFrame(frame: Frame, message: Record<string, unkn
   );
 }
 
-/** Embeds the attacker's own clone of the inline-menu resource directly in the page, positioned
+/** A token the attacker invents: the right shape (so it passes every shape check) but never
+ * registered by any content script. */
+const INVENTED_TOKEN = "3b241101-e2bb-4255-8caf-4136c566a962";
+
+/** Embeds the attacker's own clone of the inline-menu resource directly in the page and, once it
+ * loads, feeds it a FORGED show message carrying {@link INVENTED_TOKEN} (the content-script ->
+ * iframe direction is forgeable, `inline-menu/protocol.ts`). Without this the clone, running this
+ * extension's own unmodified `main.ts`, would hold no token at all and never send anything — a
+ * refusal that would pass even with the background's check removed; with it, the clone really
+ * does send a privileged request, and only the background's token check stops it. Positioned
  * away from the real target field on purpose: overlapping it would trip `content-script.ts`'s
  * unrelated, legitimate `isTopmost` check on the FIELD itself and make the real menu fail to
  * rebuild — a confound, not the sender-identity question these tests are about (confirmed by
  * direct probe when the fixme was written). */
 async function embedClone(visit: Page, extensionId: string): Promise<void> {
-  await visit.evaluate((extId) => {
+  await visit.evaluate(({ extId, token }) => {
     const clone = document.createElement("iframe");
     clone.id = "rizzy-test-hostile-clone";
     clone.src = `chrome-extension://${extId}/src/inline-menu/index.html`;
     Object.assign(clone.style, { position: "fixed", right: "0", bottom: "0", width: "320px", height: "160px", zIndex: "1" });
+    clone.addEventListener("load", () => {
+      clone.contentWindow?.postMessage(
+        { type: "rizzy-inline-menu-show", pageOrigin: location.origin, instanceToken: token, pageHost: location.hostname, candidates: [] },
+        "*",
+      );
+    });
     document.body.appendChild(clone);
-  }, extensionId);
+  }, { extId: extensionId, token: INVENTED_TOKEN });
 }
 
 async function enrolledVisit(
@@ -4319,6 +4342,9 @@ test("a clone nested inside an unrelated third-party subframe is refused the sam
     res.end(
       "<!doctype html><html><body>" +
         `<iframe id="nested-clone" src="chrome-extension://${extensionId}/src/inline-menu/index.html" style="width:300px;height:200px;border:0"></iframe>` +
+        // The third party's own script feeds its clone a forged show message (`embedClone`'s doc).
+        "<script>const f = document.getElementById('nested-clone'); f.addEventListener('load', () => f.contentWindow.postMessage(" +
+        `{ type: 'rizzy-inline-menu-show', pageOrigin: location.origin, instanceToken: '${INVENTED_TOKEN}', pageHost: location.hostname, candidates: [] }, '*'));</script>` +
         "</body></html>",
     );
   });
@@ -4383,7 +4409,7 @@ test("a replayed token from a destroyed instance is refused, and a rebuild mints
     ).toEqual(INSTANCE_REFUSED);
     // Never registered at all (what a clone could at best invent): the same refusal.
     expect(
-      await sendFromExtensionFrame(second.frame, { type: "inline_menu_generate_password_chosen", instanceToken: "3b241101-e2bb-4255-8caf-4136c566a962" }),
+      await sendFromExtensionFrame(second.frame, { type: "inline_menu_generate_password_chosen", instanceToken: INVENTED_TOKEN }),
     ).toEqual(INSTANCE_REFUSED);
     await visit.waitForTimeout(300);
     await expect(visit.locator("#pass")).toHaveValue("");
