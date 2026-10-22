@@ -157,6 +157,25 @@ f1e2d3c4b5a697887766554433221100 | 0 | youtube.com,youtu.be,youtube-nocookie.com
     }
 
     #[test]
+    fn rejects_an_ip_literal_or_a_non_registrable_member() {
+        // ADR 0044: `EquivalenceGroup::new` refuses these, so the line fails before signing.
+        for bad in [
+            "192.168.1.1",
+            "2130706433",
+            "[::1]",
+            "co.uk",
+            "github.io",
+            "mail.example.com",
+        ] {
+            let line = format!("f1e2d3c4b5a697887766554433221100 | 0 | {bad},example.com\n");
+            let err = parse_source(&format!("# ok\n{line}")).unwrap_err();
+            assert!(err.contains("line 2"), "{bad}: {err}");
+        }
+        // A dotless intranet name is its own registrable domain and is accepted.
+        assert!(parse_source("f1e2d3c4b5a697887766554433221100 | 0 | nas,example.com\n").is_ok());
+    }
+
+    #[test]
     fn blank_lines_and_comments_are_skipped() {
         let groups = parse_source(
             "\n  \n# comment\nf1e2d3c4b5a697887766554433221100 | 0 | a.example,b.example\n",

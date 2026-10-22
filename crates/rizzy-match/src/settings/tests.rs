@@ -103,6 +103,31 @@ fn user_group_refuses_a_public_suffix_and_a_subdomain() {
 }
 
 #[test]
+fn user_group_refuses_ip_literals_and_dotless_names() {
+    // ADR 0044's member rules (enforced by the shared codec for every group) plus ADR 0042 §4's
+    // PSL check, under which a dotless name is a suffix: a user group refuses all of these.
+    for bad in [
+        "192.168.1.1",
+        "2130706433",
+        "0x7f.1",
+        "10.0.0.1.",
+        "nas",
+        "localhost",
+    ] {
+        assert_eq!(
+            user_group(gid(1), [bad, "example.org"]).unwrap_err(),
+            MatchingSettingsError::NotRegistrableDomain,
+            "{bad}"
+        );
+    }
+    // An IPv6 literal never normalises as a domain at all.
+    assert_eq!(
+        user_group(gid(1), ["[::1]", "example.org"]).unwrap_err(),
+        MatchingSettingsError::InvalidDomain
+    );
+}
+
+#[test]
 fn user_group_refuses_bad_shapes() {
     assert_eq!(
         user_group(gid(1), ["example.com"]).unwrap_err(),
@@ -138,9 +163,12 @@ fn edits_keep_the_bounds() {
         s.add_user_group(flagged).unwrap_err(),
         MatchingSettingsError::NotRegistrableDomain
     );
-    let suffix = EquivalenceGroup::new(gid(9), ["co.uk", "example.org"], false).unwrap();
+    // ADR 0044: a bare public suffix can no longer be built into any group at all.
+    assert!(EquivalenceGroup::new(gid(9), ["co.uk", "example.org"], false).is_err());
+    // A dotless name is a valid group member (ADR 0044) but not a user-group one (ADR 0042 §4).
+    let dotless = EquivalenceGroup::new(gid(9), ["nas", "example.org"], false).unwrap();
     assert_eq!(
-        s.add_user_group(suffix).unwrap_err(),
+        s.add_user_group(dotless).unwrap_err(),
         MatchingSettingsError::NotRegistrableDomain
     );
     s.add_user_group(user_group(gid(1), ["a.example", "b.example"]).unwrap())
