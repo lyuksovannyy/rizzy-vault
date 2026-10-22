@@ -123,8 +123,9 @@ test("command palette: search, keyboard nav, open, jump to a view, favorites-fir
 
 test("command palette: copy username/password/TOTP to the real clipboard", async ({ page, context }) => {
   // Clipboard read/write granted explicitly for this one spec (Playwright's documented pattern
-  // for testing the Clipboard API in Chromium) — the rest of this app's e2e suite never needs
-  // the real OS clipboard, so nothing elsewhere in this repository relies on this permission.
+  // for testing the Clipboard API in Chromium). Elsewhere only the Secure Note Markdown checks
+  // grant it (`markdown-note.spec.ts`, `keyboard-nav.spec.ts`: Copy returns the stored source,
+  // ADR 0062 §12); the rest of this app's e2e suite never needs the real OS clipboard.
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: server.origin });
   const { problems } = watch(page);
   await signUp(page, server.origin, "paletteclip");

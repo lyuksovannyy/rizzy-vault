@@ -338,6 +338,40 @@ The same pairs, declared in `packages/ui/tokens/tokens.json`, are checked by `ca
 generate-tokens --check` in CI, which fails below AA. The rendered pages are checked too (next
 section).
 
+### Markdown in Secure Notes (ADR 0062, INV-88)
+
+A Secure Note's notes show rendered from their Markdown in the item view (`src/markdown.ts`
+parses, `src/views/NoteMarkdown.tsx` renders). Only Secure Notes: a Login's, Card's or
+Identity's notes stay plain text (ADR 0062 §2), and so do the CLI, the extension and the
+native clients. The editor keeps the plain textarea, and Copy and export always give the stored
+source unchanged (§12).
+
+- **What renders** (§5, a deliberate subset, not CommonMark): `#` to `######` headings; paragraphs,
+  where a single newline is a line break; `**bold**` or `__bold__`, `*italic*` or `_italic_`,
+  `~~struck~~` and ``code`` within one line; fenced code blocks (the language hint is dropped; no
+  highlighting); `>` quotes and `-`/`*`/`+` or `1.` lists, one level each; and `---` rules. A
+  backslash makes the next punctuation character literal; `_` inside a word (`snake_case`) stays as
+  typed.
+- **What does not.** Links (`[text](url)`, `<url>`, bare URLs), images, raw HTML, HTML entities,
+  tables, footnotes and task boxes are shown as the literal text typed (§5–§7; owner answers 2
+  and 7). A note never holds a clickable link, so nothing in it is focusable and `SafeLink` is
+  not involved.
+- **How it stays safe.** The parser outputs a closed AST with no HTML, link, image, style or
+  attribute variant; the renderer maps each variant to one fixed element with one fixed class,
+  through `switch`es with no default branch (a new variant is a compile error), and never builds
+  an HTML string or uses a raw-HTML sink (§3, §6–§9). The tokenizer is linear with no
+  backtracking pattern (§10); a note over the 64 KiB stored-value limit, or any parser
+  exception, shows the plain stored text (§11). The CSP is unchanged and only a backstop (§13).
+- **Tests.** `test/markdown.test.ts` (every construct, the deviations, literal fallbacks,
+  fail-closed, pathological 64 KiB inputs), `test/note-markdown.test.ts` (exact markup, a hostile
+  corpus, and a seeded property test that rendered markup stays inside the allow-list of
+  `e2e/attack/markdown-allow-list.ts`), `test/markdown-fuzz.test.ts` (a seeded mutation fuzzer: the
+  parser is TypeScript, so cargo-fuzz under `fuzz/` cannot reach it), and
+  `e2e/markdown-note.spec.ts` (INV-88 in the browser: a hostile note runs nothing, holds no sink
+  and nothing outside the allow-list, its URLs go nowhere; Copy returns the source; other types
+  stay plain). `RIZZY_NIGHTLY=1` widens the property and fuzz budgets with a fresh seed
+  (`RIZZY_NIGHTLY_SEED` replays one).
+
 ### Accessibility checks (ROADMAP §4.5, ADR 0014 §5)
 
 `e2e/a11y.ts` holds the checks; [CONTRIBUTING.md](../../CONTRIBUTING.md#what-the-accessibility-checks-cover)
@@ -349,8 +383,9 @@ says how they fit with the token check and the extension's audit.
   with results, the shortcuts help, the account menu, the generator, export and import with the
   plaintext-export dialog, Settings (two-factor, devices, appearance, "What the server stores",
   getting started), the trash, unlock, two-factor setup and the login's code prompt; then the
-  dark theme, forced colours (light and dark) and phone width. `e2e/conflict.spec.ts` audits a
-  conflicted item and the open conflict chooser.
+  dark theme, forced colours (light and dark) and phone width; and a Secure Note rendered from
+  its Markdown, in each of those modes. `e2e/conflict.spec.ts` audits a conflicted item and the
+  open conflict chooser.
 - **What each audit checks.** axe-core (`@axe-core/playwright`, a dev dependency) runs every
   WCAG 2.0/2.1/2.2 A and AA rule and its best-practice rules: every control named, form fields
   labelled, text alternatives, one main landmark, an h1 and no skipped heading levels, document
