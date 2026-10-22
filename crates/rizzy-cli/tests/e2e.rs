@@ -3093,6 +3093,157 @@ fn rv_reaches_the_server_through_a_tls_proxy() {
 /// `item show` lists password history (gap 01; ADR 0012 §5 "Password history is the history
 /// of `login.password`"): concealed unless `--reveal`, newest first, never through the
 /// generic field loop.
+/// ADR 0055: `item create` makes an item of each M3 type with its own keys, a concealed key
+/// only from a prompt, and `item show` conceals the eight keys of §4 unless `--reveal`. An
+/// SSH key without `ssh.port` shows the default port 22 (§1), which is never stored. A key of
+/// another type is refused.
+/// One M3 type for `item_create_and_show_the_m3_types`: its `--type` name, its `--field`
+/// arguments, and each concealed key with the value its prompt is answered with.
+type M3Case<'a> = (&'a str, &'a [&'a str], &'a [(&'a str, &'a str)]);
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one server and account for all five types; a test per type would start five servers"
+)]
+fn item_create_and_show_the_m3_types() {
+    let server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("m3types");
+    sign_up(&a, &origin, "alice");
+    let cases: [M3Case<'_>; 5] = [
+        (
+            "ssh-key",
+            &[
+                "ssh.host=git.example.com",
+                "ssh.username=git",
+                "ssh.public_key=ssh-ed25519 AAAA",
+            ],
+            &[
+                ("ssh.private_key", "-----BEGIN KEY-----"),
+                ("ssh.passphrase", "pass-phrase"),
+            ],
+        ),
+        (
+            "api-credential",
+            &[
+                "api.name=Example API",
+                "api.endpoint=https://api.example.com",
+            ],
+            &[
+                ("api.key", "AKIAEXAMPLE"),
+                ("api.secret", "api-secret-value"),
+            ],
+        ),
+        (
+            "software-license",
+            &[
+                "license.name=Editor",
+                "license.seats=5",
+                "license.expires=2027-12-31",
+            ],
+            &[("license.key", "ABCD-EFGH-IJKL")],
+        ),
+        (
+            "wifi",
+            &["wifi.ssid=home-net", "wifi.security_type=WPA2"],
+            &[("wifi.password", "wifi-password")],
+        ),
+        (
+            "bank-account",
+            &[
+                "bank.bank_name=Example Bank",
+                "bank.account_holder=Alice",
+                "bank.account_type=Checking",
+            ],
+            &[
+                ("bank.account_number", "DE8937040044"),
+                ("bank.routing_number", "COBADEFFXXX"),
+            ],
+        ),
+    ];
+    for (kind, shown, secrets) in cases {
+        let mut args = vec!["item", "create", "--type", kind, "--field"];
+        let title = format!("item.name=My {kind}");
+        args.push(&title);
+        for field in shown {
+            args.extend(["--field", field]);
+        }
+        for (key, _) in secrets {
+            args.extend(["--secret", key]);
+        }
+        let answers: Vec<&str> = secrets.iter().map(|(_, value)| *value).collect();
+        let item = a.ok(&args, &answers).out[0].clone();
+
+        let hidden = a.ok(&["item", "show", &item], &[]);
+        assert!(
+            hidden.out.iter().any(|l| l == &format!("type:  {kind}")),
+            "{:?}",
+            hidden.out
+        );
+        for field in shown {
+            let (key, value) = field.split_once('=').unwrap();
+            assert!(
+                hidden.out.iter().any(|l| l == &format!("{key}: {value}")),
+                "{kind}: {key}: {:?}",
+                hidden.out
+            );
+        }
+        for (key, value) in secrets {
+            assert!(
+                hidden.out.iter().any(|l| l == &format!("{key}: ********")),
+                "{key}"
+            );
+            assert!(
+                !hidden.out.iter().any(|l| l.contains(value)),
+                "{key} leaked"
+            );
+        }
+        let revealed = a.ok(&["item", "show", &item, "--reveal"], &[]);
+        for (key, value) in secrets {
+            assert!(
+                revealed.out.iter().any(|l| l == &format!("{key}: {value}")),
+                "{key}"
+            );
+        }
+        assert_eq!(
+            kind == "ssh-key",
+            hidden.out.iter().any(|l| l == "ssh.port: 22 (default)"),
+            "{kind}: {:?}",
+            hidden.out
+        );
+    }
+    // A stored port replaces the default line.
+    let item = a
+        .ok(
+            &[
+                "item",
+                "create",
+                "--type",
+                "ssh-key",
+                "--field",
+                "ssh.port=2222",
+            ],
+            &[],
+        )
+        .out[0]
+        .clone();
+    let shown = a.ok(&["item", "show", &item], &[]);
+    assert!(shown.out.iter().any(|l| l == "ssh.port: 2222"));
+    assert!(!shown.out.iter().any(|l| l.contains("(default)")));
+    // A concealed key is never taken from the command line, and a key of another type is
+    // refused (ADR 0055 §1: Applies::Only).
+    for bad in ["wifi.password=x", "card.number=4111", "ssh.host=h"] {
+        let (outcome, _) = a.try_run(
+            &["item", "create", "--type", "wifi", "--field", bad],
+            &[PASSWORD],
+            &[],
+            &[],
+        );
+        assert!(outcome.is_err(), "{bad}");
+    }
+}
+
 #[test]
 fn item_show_lists_password_history() {
     let server = Server::start();
