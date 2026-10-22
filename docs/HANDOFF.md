@@ -31,7 +31,18 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
     - Not yet covered on PostgreSQL: the web e2e, which needs per-server databases in `apps/web/e2e/server.ts`, and `restore`/`secrets rotate` end to end.
     - To rerun: `RIZZY_TEST_POSTGRES_URL=… ~/rizzy-wt/bin/gate.sh` adds the PG steps.
 - **Owner decisions of 2026-10-21/22 (in session):**
-  - ADR 0042 is Accepted, and is being implemented in `wip/m2-settings`.
+  - ADR 0042 is Accepted and **implemented** (gap 28):
+    - `rizzy-match::settings` holds the tag 0x0001 section, and `rizzy-client::settings` the outer record, CAS write and cache.
+    - Known-answer vectors are in `settings/vectors.rs`; the `envelopes.json` ACCOUNT_SETTINGS vector is now a real record, and CRYPTO §15 1(A) is updated.
+    - New fuzz target `client_account_settings`; new error codes `settings_update_required`, `equivalence_domain_rejected` and `settings_limit_reached`.
+    - wasm and core exports, the web Settings → Website matching pane, and the extension now applying the account default, user groups and disabled groups.
+    - Bindings `unsafe` went from 997 to 1063, all generator glue.
+    - Open items:
+      - Disabling a global group can't be tested in the browser until a signed global list ships (G1, the owner's signing act).
+      - Web settings writes need a fresh login session (≤5 min), after which the pane asks to log in again. Reusing the re-auth session would fix this, but that changes the re-auth design.
+      - Two rizzy-cli TLS-proxy e2e tests failed once under host load and passed on rerun; they may be flaky.
+      - Integration found and fixed a real command-palette focus race: keys typed right after Ctrl+K were lost.
+    - Full gate at `5bebe8d`: Rust 1752 passed; web e2e 26 passed / 2 skipped; extension e2e 69 passed / 4 skipped.
   - The dependency bumps are approved (ADR 0009 amendment of 2026-10-21).
   - Accessibility CI is unblocked and integrated: axe and CDP audits of every web and extension screen, a keyboard-only walk, the WCAG AA floor for token pairs, and `generate-tokens --check` in CI. axe-core 4.14.0 is a new devDependency (MPL-2.0). The `ci.yml` edits have not yet run on GitHub Actions.
   - Signing is authorized: "sign it". The signed branch and PR to `main` are prepared at the end of the session (see §1, last bullet).
