@@ -13,7 +13,17 @@ import { expect, test } from "@playwright/test";
 import { createHmac } from "node:crypto";
 
 import { expectAccessible, expectFocusTrapped } from "./a11y.ts";
-import { MARKDOWN_NOTE, PASSWORD, logIn, lockVault, newItem, signUp, signUpToGuide, watch } from "./helpers.ts";
+import {
+  MARKDOWN_NOTE,
+  PASSWORD,
+  dismissToasts,
+  logIn,
+  lockVault,
+  newItem,
+  signUp,
+  signUpToGuide,
+  watch,
+} from "./helpers.ts";
 import { M3_TYPES, fieldLine, fillAndSave } from "./m3-types.ts";
 import { type RunningServer, startServer } from "./server.ts";
 
@@ -307,6 +317,9 @@ test("a11y: an item's attachments section, its error and its delete dialog (ADR 
   await page.emulateMedia({ colorScheme: "light", forcedColors: "active" });
   await expectAccessible(page, "item view: attachments (forced colours)", { forcedColors: true });
   await page.emulateMedia({ colorScheme: "light", forcedColors: "none" });
+  // The "Attached" toast is dismissed first: behind the modal dialog it is inert, which the
+  // focusable-element check would otherwise report.
+  await dismissToasts(page);
   await section.getByRole("button", { name: "Delete notes.txt" }).click();
   const dialog = page.getByRole("dialog", { name: "Delete this attachment?" });
   await expect(dialog).toBeVisible();

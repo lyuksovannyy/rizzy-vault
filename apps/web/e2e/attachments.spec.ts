@@ -11,7 +11,7 @@ import { readFile } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 
 import { expectAccessible } from "./a11y.ts";
-import { newItem, signUp, watch } from "./helpers.ts";
+import { dismissToasts, newItem, signUp, watch } from "./helpers.ts";
 import { type RunningServer, startServer } from "./server.ts";
 
 let server: RunningServer;
@@ -89,7 +89,9 @@ test("attach, download byte for byte, and delete an encrypted file (ADR 0054)", 
   expect(bodies.length).toBe(sent);
   await expect(row).toHaveCount(1);
 
-  // Delete, through the confirmation dialog.
+  // Delete, through the confirmation dialog (toasts dismissed first: behind the modal they are
+  // inert, which the audit's focusable-element check would report).
+  await dismissToasts(page);
   await section.getByRole("button", { name: "Delete report.bin" }).click();
   const dialog = page.getByRole("dialog", { name: "Delete this attachment?" });
   await expect(dialog).toBeVisible();
