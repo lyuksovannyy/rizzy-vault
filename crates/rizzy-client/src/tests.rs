@@ -2154,6 +2154,7 @@ mod mutation;
 mod password_history;
 mod retention;
 mod rotation;
+mod settings;
 mod store;
 
 /// ADR 0018 §6 "List elements", "List order": URIs and custom fields of an existing item are

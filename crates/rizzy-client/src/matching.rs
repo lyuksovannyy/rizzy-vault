@@ -35,18 +35,16 @@ pub use rizzy_match::{
 use rizzy_match::security::frame_may_request_candidates;
 
 use crate::error::ClientError;
+use crate::settings::AccountSettingsRecord;
 
 /// The compiled-in global equivalence list's groups (ADR 0038 §1–§2, §7; gap 27(a) in the M2
 /// gap audit), or empty when none is compiled in yet, or when a compiled-in list fails to
 /// verify.
 ///
-/// **Only the global-list half of ADR 0038 §5's merged view is wired here.** The account's own
-/// disabled-global-group set and user-defined groups are a separate, larger gap (27(b)/"G3" in
-/// the audit): reading them needs `ACCOUNT_SETTINGS`'s plaintext layout, which [ADR 0042] has
-/// not fixed yet (`Status: Proposed`). Until it lands, a caller passes this function's result
-/// as the `global` slice of [`EquivalenceView::new`] with an empty `disabled_global` set and an
-/// empty `user_defined` slice — exactly what [`EquivalenceView::empty`] in all other respects,
-/// widened only by whatever the compiled-in global list itself allows.
+/// **This is the global-list half of ADR 0038 §5's merged view.** The account's own
+/// disabled-global-group set and user-defined groups come from `ACCOUNT_SETTINGS` ([ADR 0042]
+/// §3): [`decide_with_settings`] builds the merged view from this function's result and the
+/// account's [`crate::settings::AccountSettingsRecord`].
 ///
 /// **`highest_accepted_version` is always `0`.** Persisting the caller's highest accepted
 /// `list_version` across launches (INV-39) is gap 27(b), which needs a new ADR: [ADR 0026]'s
@@ -220,6 +218,33 @@ pub fn decide_candidates(
         }
     }
     Ok(out)
+}
+
+/// [`decide_candidates`] under the account's own settings (ADR 0042 §3, §6; ADR 0037 §6–§7): the
+/// account-level match default resolves every `0x0000` URI mode, and the merged view is the
+/// compiled-in global list ([`global_equivalence_groups`]) minus the account's disabled groups,
+/// plus its user-defined groups. Read `settings` with [`crate::settings::account_settings`] or a
+/// [`crate::settings::SettingsCache`]; a record that does not read fails there, never here, so
+/// no decision is ever made under settings this client could not read (`crate::settings` module
+/// docs).
+///
+/// # Errors
+/// As [`decide_candidates`].
+pub fn decide_with_settings(
+    page_url: &str,
+    frame: &FrameContext<'_>,
+    item_uris: &[ItemUri<'_>],
+    settings: &AccountSettingsRecord,
+) -> Result<Decision, ClientError> {
+    let global = global_equivalence_groups();
+    let matching = settings.matching();
+    decide_candidates(
+        page_url,
+        frame,
+        matching.match_default(),
+        item_uris,
+        &matching.view(&global),
+    )
 }
 
 #[cfg(test)]
