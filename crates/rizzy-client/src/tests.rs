@@ -116,6 +116,9 @@ struct Server {
     /// Serve like a compacted server (ADR 0021): ops a stored snapshot covers go bodiless,
     /// with those snapshots as covers.
     compact: bool,
+    /// Serve at most this many ops per Fetch page (0: one page), each page with the covers of
+    /// its own bodiless headers only and `complete` false while ops are left (ADR 0021 §4).
+    page_len: usize,
     /// The restore generation every answer carries.
     generation: [u8; 16],
     /// The pending device grants of rotations (`rotation` tests).
@@ -148,6 +151,7 @@ impl Server {
             snapshots: Vec::new(),
             op_items: BTreeMap::new(),
             compact: false,
+            page_len: 0,
             generation: [7; 16],
             device_grants: Vec::new(),
             rng,
@@ -598,9 +602,14 @@ impl Server {
         self.capture(serde_json::to_vec(req));
         let mut ops = Vec::new();
         let mut covers: Vec<SnapshotRecord> = Vec::new();
-        for (device, chain) in &self.ops {
+        let mut complete = true;
+        'devices: for (device, chain) in &self.ops {
             let have = req.cursor.get(&Id::from_bytes(*device));
             for (&seq, record) in chain.range(have + 1..) {
+                if self.page_len > 0 && ops.len() == self.page_len {
+                    complete = false;
+                    break 'devices;
+                }
                 let mut record = record.clone();
                 if self.compact {
                     let item = self.op_items[&(*device, seq)];
@@ -627,7 +636,7 @@ impl Server {
             ops: List::new(ops).unwrap(),
             covers: List::new(covers).unwrap(),
             item_key_wraps: List::new(self.wraps.clone()).unwrap(),
-            complete: true,
+            complete,
         };
         self.capture(serde_json::to_vec(&response));
         response
@@ -2164,6 +2173,7 @@ mod item_history;
 mod late_edits;
 mod lists;
 mod mutation;
+mod paged_fetch;
 mod password_history;
 mod retention;
 mod rotation;
