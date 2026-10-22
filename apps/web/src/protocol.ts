@@ -16,6 +16,7 @@ import type {
   ConflictValue,
   DetectedImportFormat,
   DeviceView,
+  CxfExport,
   EncryptedExport,
   FieldHistory,
   FieldView,
@@ -147,6 +148,12 @@ export interface CoreApi {
   detectImportFormat(file: Uint8Array): DetectedImportFormat;
   importFile(format: ImportFormat, file: Uint8Array): ImportReport;
   importEncrypted(file: Uint8Array, password: Uint8Array): ImportReport;
+  /** How many passkeys a CXF export would hold now (ADR 0074 §2). */
+  cxfExportPasskeys(): number;
+  /** The CXF passkey export (ADR 0074 §2), gated like {@link exportPlaintext}. */
+  exportCxf(typedPhrase: string, password: Uint8Array): CxfExport;
+  /** Imports our own CXF passkey export with its file password (ADR 0074 §3). */
+  importCxfEncrypted(file: Uint8Array, password: Uint8Array): ImportReport;
   devices(): DeviceView[];
   /** The account's live sessions (ADR 0075 R1): the server's word, for display. */
   sessions(): SessionListView;
@@ -174,6 +181,8 @@ export interface CoreApi {
   generatorLimits(): GeneratorLimits;
   plaintextExportWarning(): string;
   plaintextExportPhrase(): string;
+  /** The CXF passkey export's own warning (ADR 0074 §2). */
+  cxfExportWarning(): string;
   /** A fresh element id for a new website or custom-field row (`@rizzy-vault/core`'s `newElementId`). */
   newElementId(): string;
   /** The attachments of an item: ids, names, media types and sizes (ADR 0054 §4). */
@@ -237,6 +246,9 @@ export const METHODS: readonly Method[] = [
   "detectImportFormat",
   "importFile",
   "importEncrypted",
+  "cxfExportPasskeys",
+  "exportCxf",
+  "importCxfEncrypted",
   "devices",
   "sessions",
   "endSession",
@@ -256,6 +268,7 @@ export const METHODS: readonly Method[] = [
   "generatorLimits",
   "plaintextExportWarning",
   "plaintextExportPhrase",
+  "cxfExportWarning",
   "newElementId",
   "attachments",
   "addAttachment",

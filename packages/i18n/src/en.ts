@@ -122,4 +122,23 @@ export const en = {
   "totp.title": "Two-factor code",
   "totp.prompt": "Enter the current code from your authenticator app.",
   "totp.code": "Code",
+
+  // ---- Passkey export and import, CXF (apps/web/src/views/TransferPane.tsx; ADR 0074) ----
+  "transfer.cxfTitle": "Passkey export (CXF)",
+  "transfer.cxfIntro":
+    "Every passkey of your active logins, as a standard FIDO Credential Exchange Format (CXF) document inside a file encrypted under a password for that file. Only passkeys, nothing else.",
+  "transfer.cxfCount": "Passkeys to export: {count}.",
+  "transfer.cxfOpen": "Export passkeys…",
+  "transfer.cxfDialogTitle": "Export passkeys (CXF)",
+  "transfer.cxfPassword": "Password for this export file",
+  "transfer.cxfPasswordRepeat": "Repeat the password for this export file",
+  "transfer.cxfPasswordHint": "Needed to import the file. It is not your master password, and nobody can recover it if it is lost.",
+  "transfer.cxfConfirm": "Export passkeys",
+  "transfer.cxfWritten": "Wrote {count} passkeys, encrypted. Keep the file's password: it is needed to import the file.",
+  "transfer.countdown": "Read the warning. You can continue in {seconds} s.",
+  "transfer.countdownDone": "You can continue now.",
+  "transfer.typePhrase": "Type {phrase} to continue",
+  "transfer.formatCxfJson": "CXF passkey file (FIDO Credential Exchange Format)",
+  "transfer.formatRizzyCxf": "rizzy-vault passkey export (CXF, encrypted)",
+  "transfer.credentialsSkipped": "CXF credentials not imported (only passkeys are): {count}.",
 } as const satisfies Readonly<Record<string, string>>;
