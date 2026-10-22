@@ -5,9 +5,12 @@
 // out together and adds the Appearance group (theme.ts module docs: memory-only for now). The
 // "What the server stores" group (ROADMAP §4.5) is `TransparencyPane.tsx`. The "Getting started"
 // group re-opens the guide shown after signup (`onboarding.ts`), which is remembered nowhere.
+// "Website matching" (`MatchingPane.tsx`) is the account match default and equivalence groups
+// (ADR 0042).
 import { isTheme, useThemeContext } from "../theme.ts";
 import type { VaultContext } from "./VaultView.tsx";
 import { DevicesPane } from "./DevicesPane.tsx";
+import { MatchingPane } from "./MatchingPane.tsx";
 import { TransparencyPane } from "./TransparencyPane.tsx";
 import { TwoFactorPane } from "./TwoFactorPane.tsx";
 
@@ -65,6 +68,7 @@ export function SettingsView(props: { readonly ctx: VaultContext; readonly onOpe
       <h1>Settings</h1>
       <TwoFactorPane ctx={props.ctx} />
       <DevicesPane ctx={props.ctx} />
+      <MatchingPane ctx={props.ctx} />
       <AppearanceGroup />
       <TransparencyPane ctx={props.ctx} />
       <GettingStartedGroup onOpenGuide={props.onOpenGuide} />

@@ -66,6 +66,11 @@ export const en = {
   "errors.wrong_state": "That step is not possible now.",
   "errors.already_shown": "The Emergency Kit can be shown only once.",
   "errors.core_crashed": "The vault core stopped. Reload the page and log in again.",
+  "errors.settings_update_required":
+    "This account's settings were saved by a newer rizzy-vault. Update to read or change them; autofill matching is off until then.",
+  "errors.equivalence_domain_rejected":
+    "Use each site's own domain, like example.com: not a public suffix such as co.uk or github.io, and not a subdomain such as www.example.com.",
+  "errors.settings_limit_reached": "The account settings are full: at most 64 groups of your own and 1,024 turned-off groups.",
 
   // ---- Shared ----
   // An error code without an `errors.*` entry: shown with the code itself, so that a report

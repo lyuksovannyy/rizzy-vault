@@ -29,10 +29,13 @@ import initWasm, {
   CoreError as WasmCoreError,
   DeviceSession as WasmDeviceSession,
   EnrolFlow,
+  type EquivalenceGroupView as WasmEquivalenceGroupView,
   HttpRequest,
   ItemDraft,
   KvRow,
   LoginFlow,
+  type MatchDecision as WasmMatchDecision,
+  type MatchSettingsView as WasmMatchSettingsView,
   PasskeyAssertion as WasmPasskeyAssertion,
   PasskeyCandidate as WasmPasskeyCandidate,
   Session,
@@ -1466,6 +1469,45 @@ export class VaultSession {
     const answer = await this.#transport(takeRequest(call(() => s.twoFactorDisableRequest(code))));
     call(() => expectNoContent(answer.status, answer.body));
   }
+
+  /** The account's matching settings (ADR 0037 §6–§7, ADR 0042): `settings_update_required` when a
+   * newer rizzy-vault wrote them, `invalid_server_response` when they do not read. */
+  matchSettings(): MatchSettings {
+    const s = this.#s();
+    return matchSettingsOf(call(() => s.matchSettings()));
+  }
+
+  /** What the extension would offer on `pageUrl` (a top frame) among this vault's items, under
+   * the account's settings: the settings screen's "check a website". */
+  matchCandidates(pageUrl: string): MatchDecisionResult {
+    const s = this.#s();
+    return decisionOf(call(() => s.matchCandidates(pageUrl)));
+  }
+
+  /**
+   * Changes the account's matching settings: one `account/commit` of a new signed account state
+   * and the whole new settings record (ADR 0042 §5). When another device changed the account
+   * first (`server_state_conflict`), this syncs, which verifies the newer state, and retries the
+   * same change on top of it, once. The server takes the commit only within five minutes of the
+   * login (`server_fresh_session_required` afterwards: log in again).
+   */
+  async changeMatchSettings(change: SettingsChange): Promise<void> {
+    const s = this.#s();
+    let request = takeRequest(call(() => settingsRequest(s, change)));
+    for (let attempt = 0; ; attempt++) {
+      const answer = await this.#transport(request);
+      try {
+        call(() => s.settingsRespond(answer.status, answer.body));
+        return;
+      } catch (e) {
+        if (!(e instanceof CoreError) || e.code !== "server_state_conflict" || attempt > 0) {
+          throw e;
+        }
+      }
+      await this.sync();
+      request = takeRequest(call(() => s.settingsRetryRequest()));
+    }
+  }
 }
 
 /** An import report as a plain object. */
@@ -2304,6 +2346,30 @@ export class DurableSession {
     this.#locked = true;
     this.#inner.lock();
   }
+
+  /**
+   * Decides which of `itemUris` are autofill candidates for `pageUrl`, requested by `frame`
+   * (ADR 0037 §4, §5), under this account's own settings (ADR 0042 §6): a URI whose mode is
+   * {@link MatchMode.AccountDefault} uses the account's match default, and the account's
+   * disabled global groups and user-defined groups shape the equivalence view. Settings this
+   * build cannot read fail the call (`settings_update_required`, `invalid_server_response`): no
+   * candidate is offered under settings the core could not apply.
+   */
+  decideMatchCandidates(
+    pageUrl: string,
+    frame: MatchFrameInfo,
+    itemUris: readonly MatchUriInput[],
+  ): MatchDecisionResult {
+    const inputs = itemUris.map((u) => new UriInput(u.itemId, u.uriId, u.value, u.mode));
+    return decisionOf(
+      call(() => this.#inner.decideMatchCandidates(pageUrl, frame.isTopFrame, frame.frameOrigin, inputs)),
+    );
+  }
+
+  /** The account's matching settings (ADR 0042 §3), read-only here. */
+  matchSettings(): MatchSettings {
+    return matchSettingsOf(call(() => this.#inner.matchSettings()));
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2311,10 +2377,13 @@ export class DurableSession {
 // `rizzy_client::matching` (that crate's module docs explain the split): every check and every
 // narrowing rule is decided in Rust, never reimplemented here.
 
-/** `uri/<id>/match`'s wire values (ADR 0037 §4). `0x0000` ("account default") is never passed
- * as a URI's own mode to {@link decideMatchCandidates}; resolve it to the account's own
- * default before building {@link MatchUriInput}. */
+/** `uri/<id>/match`'s wire values (ADR 0037 §4). `AccountDefault` (`0x0000`) is a URI's "no
+ * override": the core resolves it to the account-level match default — the account's own
+ * setting through a session's `decideMatchCandidates` ({@link DurableSession.decideMatchCandidates},
+ * {@link VaultSession.matchCandidates}; ADR 0042 §6), or the `accountDefaultMode` argument of
+ * the free {@link decideMatchCandidates}. It is never itself an account default. */
 export const MatchMode = {
+  AccountDefault: 0x0000,
   BaseDomain: 0x0001,
   Host: 0x0002,
   StartsWith: 0x0003,
@@ -2392,11 +2461,10 @@ export function registrableDomainOf(url: string): string | undefined {
 /**
  * Decides which of `itemUris` are autofill candidates for `pageUrl`, requested by `frame`
  * (ADR 0037 §4, §5). `accountDefaultMode` resolves any URI whose own mode is `0x0000`. The
- * compiled-in global equivalence list is wired into the merged view (ADR 0037 §7, ADR 0038
- * §5; gap 27(a) in the M2 gap audit); the account's own disabled-global-group set and
- * user-defined groups are not yet (ADR 0042 is Proposed, not Accepted), and no list is
- * compiled in today either way, so this call's observable matching is unchanged until both
- * land (`crates/rizzy-wasm/src/matching.rs`'s module docs).
+ * merged equivalence view is the compiled-in global list alone (ADR 0037 §7, ADR 0038 §5):
+ * this function holds no session and so no account settings. A host with a session calls the
+ * session's own `decideMatchCandidates` / `matchCandidates` instead, which apply the account's
+ * match default, disabled global groups and user-defined groups (ADR 0042 §6).
  */
 export function decideMatchCandidates(
   pageUrl: string,
@@ -2406,9 +2474,13 @@ export function decideMatchCandidates(
 ): MatchDecisionResult {
   ensureReady();
   const inputs = itemUris.map((u) => new UriInput(u.itemId, u.uriId, u.value, u.mode));
-  const decision = call(() =>
-    wasmDecideMatchCandidates(pageUrl, frame.isTopFrame, frame.frameOrigin, accountDefaultMode, inputs),
+  return decisionOf(
+    call(() => wasmDecideMatchCandidates(pageUrl, frame.isTopFrame, frame.frameOrigin, accountDefaultMode, inputs)),
   );
+}
+
+/** A generated match decision as a plain object, freed. */
+function decisionOf(decision: WasmMatchDecision): MatchDecisionResult {
   try {
     const candidates = decision.candidates.map((c) => {
       try {
@@ -2420,5 +2492,73 @@ export function decideMatchCandidates(
     return { pageHost: decision.pageHost, pagePort: decision.pagePort, candidates, warnings: [...decision.warnings] };
   } finally {
     decision.free();
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Account match settings (ADR 0037 §6–§7, ADR 0042): the account-level match default, the
+// global equivalence groups the account disabled and its own user-defined groups. They live in
+// the signed account state's `ACCOUNT_SETTINGS`; the core reads, checks and writes them.
+
+/** One equivalence group as the settings screen shows it. Domains are A-label form: never decode
+ * them to Unicode for display (ADR 0037 §2 point 4). */
+export interface EquivalenceGroupInfo {
+  /** The group id, 32 lowercase hex digits. */
+  readonly id: string;
+  readonly domains: readonly string[];
+  /** For a global group: whether the account disabled it. Always `false` for a user group. */
+  readonly disabled: boolean;
+}
+
+/** The account's matching settings. */
+export interface MatchSettings {
+  /** The mode a website with no override of its own uses (`0x0001`–`0x0006`). */
+  readonly matchDefault: MatchModeValue;
+  /** The account's own groups. */
+  readonly userGroups: readonly EquivalenceGroupInfo[];
+  /** This build's signed global list, each with its disabled flag; empty while none is shipped. */
+  readonly globalGroups: readonly EquivalenceGroupInfo[];
+  /** Disabled ids that name no group of this build's global list, hex: still disabled. */
+  readonly otherDisabled: readonly string[];
+}
+
+/** One change to the account's matching settings: one `account/commit` (ADR 0042 §5). */
+export type SettingsChange =
+  | { readonly kind: "matchDefault"; readonly mode: MatchModeValue }
+  | { readonly kind: "addUserGroup"; readonly domains: readonly string[] }
+  | { readonly kind: "removeUserGroup"; readonly id: string }
+  | { readonly kind: "disableGlobalGroup"; readonly id: string }
+  | { readonly kind: "enableGlobalGroup"; readonly id: string };
+
+/** A generated settings view as a plain object, freed. */
+function matchSettingsOf(view: WasmMatchSettingsView): MatchSettings {
+  return mapOne(view, (v) => {
+    const group = (g: WasmEquivalenceGroupView): EquivalenceGroupInfo => ({
+      id: g.id,
+      domains: [...g.domains],
+      disabled: g.disabled,
+    });
+    return {
+      matchDefault: v.matchDefault as MatchModeValue,
+      userGroups: mapFree(v.userGroups, group),
+      globalGroups: mapFree(v.globalGroups, group),
+      otherDisabled: [...v.otherDisabled],
+    };
+  });
+}
+
+/** The core call that builds the commit of `change`. */
+function settingsRequest(s: Session, change: SettingsChange): HttpRequest {
+  switch (change.kind) {
+    case "matchDefault":
+      return s.setMatchDefaultRequest(change.mode);
+    case "addUserGroup":
+      return s.addUserGroupRequest([...change.domains]);
+    case "removeUserGroup":
+      return s.removeUserGroupRequest(change.id);
+    case "disableGlobalGroup":
+      return s.disableGlobalGroupRequest(change.id);
+    case "enableGlobalGroup":
+      return s.enableGlobalGroupRequest(change.id);
   }
 }

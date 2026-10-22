@@ -124,7 +124,14 @@ export async function handleContentScriptRequest(
       if (!pageUrlMatchesSender(message.pageUrl, trustedOrigin)) {
         return { type: "content_error", code: "fields_detected: pageUrl does not match the sender's own origin" };
       }
-      const result = matchCandidatesFor(message.pageUrl, { isTopFrame: message.isTopFrame, frameOrigin: trustedOrigin });
+      let result: ReturnType<typeof matchCandidatesFor>;
+      try {
+        result = matchCandidatesFor(message.pageUrl, { isTopFrame: message.isTopFrame, frameOrigin: trustedOrigin });
+      } catch {
+        // The account's match settings do not read (written by a newer rizzy-vault, ADR 0042
+        // §2): no candidate is offered under settings the core could not apply.
+        return refused("fields_detected: the account's match settings cannot be read");
+      }
       if (result === undefined) {
         return refused("fields_detected: the device is locked");
       }
