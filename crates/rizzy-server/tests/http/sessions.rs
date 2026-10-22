@@ -34,8 +34,11 @@ const ROUTES: &[(&str, &str)] = &[
     (paths::SESSIONS_OTHERS_END, ""),
 ];
 
+/// An answer's status, sorted headers (name, value bytes) and body.
+type Answer = (StatusCode, Vec<(String, Vec<u8>)>, Vec<u8>);
+
 /// The status, headers and body of an answer, for a byte-for-byte comparison.
-fn answer(reply: &Reply) -> (StatusCode, Vec<(String, Vec<u8>)>, Vec<u8>) {
+fn answer(reply: &Reply) -> Answer {
     let mut headers: Vec<(String, Vec<u8>)> = reply
         .headers
         .iter()
@@ -155,8 +158,7 @@ fn routes_are_gated_and_strict() {
 }
 
 /// A device lists the account's sessions, ends a web session by id, and that token's next
-/// request gets the `401` of an unknown token, byte for byte (§6). Sign-out (R2), then a repeat;
-/// the others (R4) leave every device session.
+/// request gets the `401` of an unknown token, byte for byte (§6).
 #[test]
 fn a_device_ends_web_sessions() {
     block_on(async {
@@ -235,8 +237,20 @@ fn a_device_ends_web_sessions() {
         )
         .await;
         assert_eq!(state.status, StatusCode::UNAUTHORIZED);
+    });
+}
 
-        // Sign-out of another web session (R2), and its repeat.
+/// Sign-out (R2) and its repeat; R4 from a fresh web session ends the other web sessions and
+/// leaves the device's; a device ends its own session with R2.
+#[test]
+fn sign_out_and_the_others() {
+    block_on(async {
+        let server = Server::start().await;
+        let mut rng = ChaCha20Rng::seed_from_u64(7513);
+        let (up, sk, _) = signup(&server, &mut rng, false).await;
+        let mut device = Client::signed_up(&server, up).await;
+
+        // Sign-out of a web session (R2), and its repeat.
         let second = login(&server, &mut rng, &sk, None).await;
         let second_token = copy_token(second.bearer_token());
         let out = empty(
