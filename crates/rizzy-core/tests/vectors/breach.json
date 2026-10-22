@@ -1,0 +1,212 @@
+{
+  "file": "breach",
+  "generator": "rand_core 0.10 ChaCha20Rng::seed_from_u64 (chacha20 =0.10.2)",
+  "schema": "rizzy-vault/test-vectors/v1",
+  "seed": "4374",
+  "spec": "CRYPTO.md §11.16 (ADR 0053 item 1: digest, prefix, suffix match)",
+  "tier": "A",
+  "vectors": [
+    {
+      "id": "breach/digest/0",
+      "inputs": {
+        "password": ""
+      },
+      "kind": "breach",
+      "name": "digest",
+      "outputs": {
+        "digest": "DA39A3EE5E6B4B0D3255BFEF95601890AFD80709",
+        "prefix": "DA39A",
+        "suffix": "3EE5E6B4B0D3255BFEF95601890AFD80709"
+      }
+    },
+    {
+      "id": "breach/digest/1",
+      "inputs": {
+        "password": "abc"
+      },
+      "kind": "breach",
+      "name": "digest",
+      "outputs": {
+        "digest": "A9993E364706816ABA3E25717850C26C9CD0D89D",
+        "prefix": "A9993",
+        "suffix": "E364706816ABA3E25717850C26C9CD0D89D"
+      }
+    },
+    {
+      "id": "breach/digest/2",
+      "inputs": {
+        "password": "password"
+      },
+      "kind": "breach",
+      "name": "digest",
+      "outputs": {
+        "digest": "5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8",
+        "prefix": "5BAA6",
+        "suffix": "1E4C9B93F3F0682250B6CF8331B7EE68FD8"
+      }
+    },
+    {
+      "id": "breach/digest/3",
+      "inputs": {
+        "password": "café crème"
+      },
+      "kind": "breach",
+      "name": "digest",
+      "outputs": {
+        "digest": "553C54923607873F87299093E903B32408E03C68",
+        "prefix": "553C5",
+        "suffix": "4923607873F87299093E903B32408E03C68"
+      }
+    },
+    {
+      "id": "breach/digest/4",
+      "inputs": {
+        "password": "café crème"
+      },
+      "kind": "breach",
+      "name": "digest",
+      "outputs": {
+        "digest": "553C54923607873F87299093E903B32408E03C68",
+        "prefix": "553C5",
+        "suffix": "4923607873F87299093E903B32408E03C68"
+      }
+    },
+    {
+      "id": "breach/digest/5",
+      "inputs": {
+        "password": " password "
+      },
+      "kind": "breach",
+      "name": "digest",
+      "outputs": {
+        "digest": "E6EE5DBAB4167ECE69097D192D7EE8B3B5AA5292",
+        "prefix": "E6EE5",
+        "suffix": "DBAB4167ECE69097D192D7EE8B3B5AA5292"
+      }
+    },
+    {
+      "id": "breach/digest/6",
+      "inputs": {
+        "password": "PASSWORD"
+      },
+      "kind": "breach",
+      "name": "digest",
+      "outputs": {
+        "digest": "112BB791304791DDCF692E29FD5CF149B35FEA37",
+        "prefix": "112BB",
+        "suffix": "791304791DDCF692E29FD5CF149B35FEA37"
+      }
+    },
+    {
+      "id": "breach/digest/7",
+      "inputs": {
+        "password": "пароль 🔑"
+      },
+      "kind": "breach",
+      "name": "digest",
+      "outputs": {
+        "digest": "48B96F6E90EB28B5A8CCEEB78AC860E58FF25AC0",
+        "prefix": "48B96",
+        "suffix": "F6E90EB28B5A8CCEEB78AC860E58FF25AC0"
+      }
+    },
+    {
+      "id": "breach/digest/8",
+      "inputs": {
+        "password": "r1bJ68ai{yxZi=3/jRkF"
+      },
+      "kind": "breach",
+      "name": "digest",
+      "outputs": {
+        "digest": "F3AEB0E328BE988594E5ADA31E726C5BBE983305",
+        "prefix": "F3AEB",
+        "suffix": "0E328BE988594E5ADA31E726C5BBE983305"
+      }
+    },
+    {
+      "id": "breach/digest/9",
+      "inputs": {
+        "password": ",\"7aOd^.1|=A}q2*4;08'Z&MbK<7g@\\+:_'AB*$=ibf!,66G+$O&BKX#A6QW{N19"
+      },
+      "kind": "breach",
+      "name": "digest",
+      "outputs": {
+        "digest": "8448CD069D66C7A1EF29DC3C86958C676EECB4BF",
+        "prefix": "8448C",
+        "suffix": "D069D66C7A1EF29DC3C86958C676EECB4BF"
+      }
+    },
+    {
+      "id": "breach/match/0",
+      "inputs": {
+        "password": "password",
+        "range": "0018A45C4D1DEF81644B54AB7F969B88D65:1\r\n1E4C9B93F3F0682250B6CF8331B7EE68FD8:52256179\r\n1E4C9B93F3F0682250B6CF8331B7EE68FD9:3"
+      },
+      "kind": "breach",
+      "name": "match",
+      "outputs": {
+        "count": "52256179"
+      }
+    },
+    {
+      "id": "breach/match/1",
+      "inputs": {
+        "password": "password",
+        "range": "0018A45C4D1DEF81644B54AB7F969B88D65:1\r\n1E4C9B93F3F0682250B6CF8331B7EE68FD9:3\r\n"
+      },
+      "kind": "breach",
+      "name": "match",
+      "outputs": {
+        "count": "0"
+      }
+    },
+    {
+      "id": "breach/match/2",
+      "inputs": {
+        "password": "password",
+        "range": "0018A45C4D1DEF81644B54AB7F969B88D65:1\r\n1E4C9B93F3F0682250B6CF8331B7EE68FD9:3\r\n1E4C9B93F3F0682250B6CF8331B7EE68FD8:7"
+      },
+      "kind": "breach",
+      "name": "match",
+      "outputs": {
+        "count": "7"
+      }
+    },
+    {
+      "id": "breach/match/3",
+      "inputs": {
+        "password": "password",
+        "range": "0018A45C4D1DEF81644B54AB7F969B88D65:1\r\n1E4C9B93F3F0682250B6CF8331B7EE68FD8:0"
+      },
+      "kind": "breach",
+      "name": "match",
+      "outputs": {
+        "count": "0"
+      }
+    },
+    {
+      "id": "breach/match/4",
+      "inputs": {
+        "password": "password",
+        "range": ""
+      },
+      "kind": "breach",
+      "name": "match",
+      "outputs": {
+        "count": "0"
+      }
+    },
+    {
+      "id": "breach/match/5",
+      "inputs": {
+        "password": "password",
+        "range": "1E4C9B93F3F0682250B6CF8331B7EE68FD9:3"
+      },
+      "kind": "breach",
+      "name": "match",
+      "outputs": {
+        "count": "0"
+      }
+    }
+  ]
+}

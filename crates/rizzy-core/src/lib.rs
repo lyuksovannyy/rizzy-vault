@@ -152,6 +152,7 @@
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
 pub mod attachment;
+pub mod breach;
 pub mod encoding;
 pub mod envelope;
 pub mod error;
