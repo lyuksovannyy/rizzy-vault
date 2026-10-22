@@ -719,8 +719,11 @@ fn pre_migration_copy() {
         let last = MIGRATIONS.last().unwrap().version;
         let mut w = db.begin_write().await.unwrap();
         on_engine!(w.conn(), |c| {
-            // Undo the last migration (0006: one table).
-            for undo in ["DROP TABLE storage_account_usage"] {
+            // Undo the last migration (0007: the two attachment tables, chunks first).
+            for undo in [
+                "DROP TABLE vault_attachment_chunks",
+                "DROP TABLE vault_attachments",
+            ] {
                 sqlx::query(undo).execute(&mut *c).await.unwrap();
             }
             sqlx::query("DELETE FROM _sqlx_migrations WHERE version = $1")
@@ -782,7 +785,8 @@ fn schema_must_match_this_release() {
         db.restore(&fixture(), RestoreGeneration([5; 16]), 0)
             .await
             .unwrap();
-        exec(&db, "DROP TABLE storage_account_usage").await;
+        exec(&db, "DROP TABLE vault_attachment_chunks").await;
+        exec(&db, "DROP TABLE vault_attachments").await;
         exec(
             &db,
             "DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM \

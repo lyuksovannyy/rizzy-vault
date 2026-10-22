@@ -17,6 +17,10 @@ use crate::account::{
     EnrolDeviceRequest, PublishAccountStateRequest, PublishBundlesRequest, PublishGrantsRequest,
     UploadWebDeviceCertificateRequest,
 };
+use crate::attachments::{
+    AttachmentRequest, CreateAttachmentRequest, DownloadChunkRequest, DownloadChunkResponse,
+    GetAttachmentResponse, UploadChunkRequest,
+};
 use crate::auth::{
     DeviceAuthFinishRequest, DeviceAuthFinishResponse, DeviceAuthStartRequest,
     DeviceAuthStartResponse, InviteToken, LoginFinishRequest, LoginFinishResponse, LoginName,
@@ -1281,4 +1285,65 @@ fn sessions_messages_are_bounded_and_tolerant() {
     assert_eq!(full.sessions.len(), MAX_SESSIONS_LISTED);
     assert!(full.truncated);
     assert!(serde_json::from_str::<SessionListResponse>(&body(MAX_SESSIONS_LISTED + 1)).is_err());
+}
+
+/// ADR 0054 §6: the five attachment messages round-trip, refuse unknown request fields, keep
+/// the chunk envelope under the 1 MiB body as base64url JSON, and bound every binary field.
+#[test]
+fn attachment_messages_round_trip_and_are_bounded() {
+    use crate::limits::{
+        ATTACHMENT_CHUNK_SIZE, ATTACHMENT_KEY_WRAP_LEN, MAX_ATTACHMENT_CHUNK_ENVELOPE_LEN,
+        MAX_ATTACHMENT_LEN, MAX_BODY_LEN,
+    };
+    assert_eq!(ATTACHMENT_CHUNK_SIZE, 512 * 1024);
+    assert_eq!(MAX_ATTACHMENT_LEN, 25 * 1024 * 1024);
+    assert_eq!(MAX_ATTACHMENT_CHUNK_ENVELOPE_LEN, 524_378);
+    assert_eq!(ATTACHMENT_KEY_WRAP_LEN, 122);
+
+    let create = CreateAttachmentRequest {
+        attachment_id: id(1),
+        vault_id: id(2),
+        item_id: id(3),
+        attachment_key_wrap: Fixed::from_bytes([7; ATTACHMENT_KEY_WRAP_LEN]),
+        total_plaintext_len: u64::MAX,
+    };
+    round_trip(&create);
+    round_trip(&AttachmentRequest {
+        attachment_id: id(1),
+    });
+    round_trip(&GetAttachmentResponse {
+        attachment_key_wrap: Fixed::from_bytes([7; ATTACHMENT_KEY_WRAP_LEN]),
+    });
+    round_trip(&DownloadChunkRequest {
+        attachment_id: id(1),
+        chunk_index: u32::MAX,
+    });
+    let full = UploadChunkRequest {
+        attachment_id: id(1),
+        chunk_index: 49,
+        envelope: b(&vec![0xab; MAX_ATTACHMENT_CHUNK_ENVELOPE_LEN]),
+    };
+    let text = round_trip(&full);
+    assert!(text.len() < MAX_BODY_LEN, "{} bytes", text.len());
+    round_trip(&DownloadChunkResponse {
+        envelope: b(&[1, 2, 3]),
+    });
+
+    // One byte over the chunk envelope limit is refused before decoding.
+    let over = text.replacen("\"envelope\":\"", "\"envelope\":\"AAAA", 1);
+    assert!(serde_json::from_str::<UploadChunkRequest>(&over).is_err());
+    // A wrap of any other length is refused.
+    let short = serde_json::to_string(&create).unwrap().replacen(
+        "\"attachment_key_wrap\":\"",
+        "\"attachment_key_wrap\":\"AAAA",
+        1,
+    );
+    assert!(serde_json::from_str::<CreateAttachmentRequest>(&short).is_err());
+    // Requests deny unknown fields; responses ignore them.
+    let extra = format!(r#"{{"attachment_id":"{ZERO_ID}","chunk_count":3}}"#);
+    assert!(serde_json::from_str::<AttachmentRequest>(&extra).is_err());
+    let extra = format!(r#"{{"attachment_id":"{ZERO_ID}","chunk_index":0,"size":1}}"#);
+    assert!(serde_json::from_str::<DownloadChunkRequest>(&extra).is_err());
+    let response = r#"{"envelope":"AQID","chunk_count":3}"#;
+    assert!(serde_json::from_str::<DownloadChunkResponse>(response).is_ok());
 }

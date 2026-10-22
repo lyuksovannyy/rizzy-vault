@@ -358,6 +358,32 @@ pub const TABLES: &[TableSpec] = &[
             col("updated_at_ms", Kind::Integer, false),
         ],
     },
+    // ADR 0054 §5: attachment rows ride the logical backup like every other vault row; the
+    // dump grows with the stored attachment bytes (ADR 0054, Consequences).
+    TableSpec {
+        name: "vault_attachments",
+        select: include_str!("../queries/backup/vault_attachments.select.sql"),
+        insert: include_str!("../queries/backup/vault_attachments.insert.sql"),
+        columns: &[
+            col("attachment_id", Kind::Blob, false),
+            col("vault_id", Kind::Blob, false),
+            col("item_id", Kind::Blob, false),
+            col("attachment_key_wrap", Kind::Blob, false),
+            col("total_plaintext_len", Kind::Integer, false),
+            col("chunk_count", Kind::Integer, false),
+            col("created_at_ms", Kind::Integer, false),
+        ],
+    },
+    TableSpec {
+        name: "vault_attachment_chunks",
+        select: include_str!("../queries/backup/vault_attachment_chunks.select.sql"),
+        insert: include_str!("../queries/backup/vault_attachment_chunks.insert.sql"),
+        columns: &[
+            col("attachment_id", Kind::Blob, false),
+            col("chunk_index", Kind::Integer, false),
+            col("chunk_envelope", Kind::Blob, false),
+        ],
+    },
     TableSpec {
         name: "storage_account_usage",
         select: include_str!("../queries/backup/storage_account_usage.select.sql"),
