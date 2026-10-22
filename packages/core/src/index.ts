@@ -30,6 +30,7 @@ import initWasm, {
   DeviceSession as WasmDeviceSession,
   EnrolFlow,
   type EquivalenceGroupView as WasmEquivalenceGroupView,
+  GlobalEquivalence,
   HttpRequest,
   ItemDraft,
   KvRow,
@@ -2056,7 +2057,7 @@ export async function unlockDurableDevice(
     const rows = cacheRows.map((r) => new KvRow(r.store, r.key, r.value));
     return call(() => WasmDeviceSession.unlock(rows, at(b, 0), nowOf(clock)));
   });
-  return new DurableSession(inner, transport, cacheStore, clock);
+  return DurableSession.started(inner, transport, cacheStore, clock);
 }
 
 /**
@@ -2124,6 +2125,32 @@ export class DurableSession {
   /** The clock as the core takes it. */
   #now(): bigint {
     return nowOf(this.#clock);
+  }
+
+  /**
+   * The session {@link unlockDurableDevice} returns, with the writes of its start already
+   * persisted: a cache-format migration of the rows it was unlocked from (ADR 0026 §5) and a
+   * raised `highest_equivalence_list_version` once a newer global equivalence list verified
+   * (ADR 0051 §1–§4), committed as part of the load, before any other step. If persisting
+   * fails, the session is locked and the error thrown; the next unlock simply migrates and
+   * verifies again (INV-75). Internal to this package.
+   *
+   * @internal
+   */
+  static async started(
+    inner: WasmDeviceSession,
+    transport: Transport,
+    cacheStore: CacheStore,
+    clock: Clock,
+  ): Promise<DurableSession> {
+    const session = new DurableSession(inner, transport, cacheStore, clock);
+    try {
+      await session.#drain();
+    } catch (e) {
+      session.lock();
+      throw e;
+    }
+    return session;
   }
 
   /** Drains the core's cache writes since the last drain and persists them (class docs). */
@@ -2485,6 +2512,9 @@ export function registrableDomainOf(url: string): string | undefined {
   return call(() => wasmRegistrableDomainOf(url));
 }
 
+/** The global groups {@link decideMatchCandidates} uses, verified on its first call. */
+let globalWithoutCache: GlobalEquivalence | undefined;
+
 /**
  * Decides which of `itemUris` are autofill candidates for `pageUrl`, requested by `frame`
  * (ADR 0037 §4, §5). `accountDefaultMode` resolves any URI whose own mode is `0x0000`. The
@@ -2492,6 +2522,10 @@ export function registrableDomainOf(url: string): string | undefined {
  * this function holds no session and so no account settings. A host with a session calls the
  * session's own `decideMatchCandidates` / `matchCandidates` instead, which apply the account's
  * match default, disabled global groups and user-defined groups (ADR 0042 §6).
+ *
+ * The global list is verified once per module load, not per call (ADR 0051 §4), from
+ * `highest_accepted_version = 0`: like the web vault, this free function keeps no cache and so
+ * no persisted floor (ADR 0051 §5). A durable session verifies against its cache's floor.
  */
 export function decideMatchCandidates(
   pageUrl: string,
@@ -2500,9 +2534,13 @@ export function decideMatchCandidates(
   itemUris: readonly MatchUriInput[],
 ): MatchDecisionResult {
   ensureReady();
+  globalWithoutCache ??= call(() => GlobalEquivalence.withoutCache());
+  const global = globalWithoutCache;
   const inputs = itemUris.map((u) => new UriInput(u.itemId, u.uriId, u.value, u.mode));
   return decisionOf(
-    call(() => wasmDecideMatchCandidates(pageUrl, frame.isTopFrame, frame.frameOrigin, accountDefaultMode, inputs)),
+    call(() =>
+      wasmDecideMatchCandidates(pageUrl, frame.isTopFrame, frame.frameOrigin, accountDefaultMode, inputs, global),
+    ),
   );
 }
 

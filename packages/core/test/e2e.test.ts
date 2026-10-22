@@ -688,6 +688,40 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     await reopenedAgain.authenticate();
     expect(reopenedAgain.items()).toEqual([]);
     reopenedAgain.lock();
+
+    // ADR 0051 §1–§2: the store holds `highest_equivalence_list_version`, 8 bytes big-endian,
+    // under the same key `rv`'s SQLite file uses, at 0 while no list is compiled in.
+    const enc = new TextEncoder();
+    const FORMAT = enc.encode("format");
+    const FLOOR = enc.encode("highest_equivalence_list_version");
+    const be64 = (n: number) => new Uint8Array([0, 0, 0, 0, n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255]);
+    expect(await store.get("cache_meta", FLOOR)).toEqual(be64(0));
+    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 2]));
+
+    // A format-1 store (as a pre-ADR-0051 build wrote it): unlocking migrates it, and the
+    // migration is persisted by the time the unlock resolves (part of the load, ADR 0051 §2).
+    await store.delete("cache_meta", FLOOR);
+    await store.put("cache_meta", FORMAT, new Uint8Array([0, 1]));
+    const migrated = await unlockDurableDevice(transport, store, PASSWORD);
+    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 2]));
+    expect(await store.get("cache_meta", FLOOR)).toEqual(be64(0));
+    expect(migrated.items()).toEqual([]);
+    migrated.lock();
+
+    // A restart keeps a stored floor: it is neither reset nor lowered by the next unlock (no
+    // newer list is compiled in, so nothing raises it either, ADR 0051 §3).
+    await store.put("cache_meta", FLOOR, be64(5));
+    const restarted = await unlockDurableDevice(transport, store, PASSWORD);
+    // A later drained write still carries the floor the load rehydrated, never 0.
+    await restarted.createItem("login", [{ op: "set", key: "item.name", value: "After restart" }]);
+    restarted.lock();
+    expect(await store.get("cache_meta", FLOOR)).toEqual(be64(5));
+
+    // A stored floor outside `u32` is a corrupt cache, never clamped (ADR 0051 §1).
+    await store.put("cache_meta", FLOOR, new Uint8Array([0, 0, 0, 1, 0, 0, 0, 0]));
+    await expect(unlockDurableDevice(transport, store, PASSWORD)).rejects.toMatchObject({ code: "cache_corrupt" });
+    await store.put("cache_meta", FLOOR, be64(5));
+    (await unlockDurableDevice(transport, store, PASSWORD)).lock();
   });
 
   // Gap 00 (ADR 0012 §5, ADR 0018 §9, §11): `VaultSession.sync` runs the client-side trash

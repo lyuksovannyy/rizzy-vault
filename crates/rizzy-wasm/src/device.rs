@@ -66,6 +66,7 @@ use rizzy_client::items::{FieldEdit, ItemId, TRASH_RETENTION_MS};
 use rizzy_client::login::{
     Enrolled, LoggedIn, LoginAwaitingSession, LoginInput, LoginStarted, start_login,
 };
+use rizzy_client::matching::{EquivalenceGroup, startup_equivalence_groups};
 use rizzy_client::passkey::get_assertion;
 use rizzy_client::rizzy_core::item::key::ElementId;
 use rizzy_client::rizzy_core::item::schema::{
@@ -86,7 +87,7 @@ use rizzy_client::session::{
 };
 use rizzy_client::settings::SettingsCache;
 use rizzy_client::store::floors::Floors;
-use rizzy_client::store::rows::CacheRows;
+use rizzy_client::store::rows::{CacheRows, Changeset};
 use rizzy_client::store::{self, record::Stage as RecordStage};
 use rizzy_client::sync::{Authors, VaultSync};
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -422,6 +423,7 @@ impl EnrolResult {
                 vec![vault],
                 rows,
                 floors,
+                Changeset::new(),
             )),
         })
     }
@@ -503,6 +505,16 @@ pub struct DeviceSession {
     rng: Rng,
     /// The account settings of `account`, read once per object (ADR 0042 §6).
     settings: SettingsCache,
+    /// The compiled-in global equivalence list's groups, verified once when the session
+    /// started against the cache's persisted floor (ADR 0051 §4), for every later decision.
+    global_groups: Vec<EquivalenceGroup>,
+    /// Writes of the session's start not yet in `cache`: a format migration of the rows it was
+    /// unlocked from ([`store::load::migration_writes`]) and a raised
+    /// `highest_equivalence_list_version` ([`startup_equivalence_groups`]). The first
+    /// [`DeviceSession::drain_cache_writes`] puts them ahead of every other write, through
+    /// [`Floors::admit`] like any other (ADR 0051 §3, INV-75: until the host commits them, a
+    /// restart re-migrates and re-verifies, never accepts an older list).
+    start_writes: Changeset,
 }
 
 impl fmt::Debug for DeviceSession {
@@ -518,6 +530,10 @@ impl fmt::Debug for DeviceSession {
 impl DeviceSession {
     /// Wraps an already-unlocked device (used by [`EnrolResult::new`] and
     /// [`DeviceSession::unlock`]).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one private constructor over the session's parts; a parts struct would only rename them"
+    )]
     fn from_parts(
         device: DeviceState,
         unlocked: UnlockedDevice,
@@ -526,7 +542,11 @@ impl DeviceSession {
         vaults: Vec<VaultSync>,
         cache: CacheRows,
         floors: Floors,
+        mut start_writes: Changeset,
     ) -> Self {
+        // ADR 0051 §4: once per session, at its start, against the floor the load rehydrated.
+        let (global_groups, floor_writes) = startup_equivalence_groups(&floors);
+        start_writes.append(floor_writes);
         Self {
             device,
             unlocked,
@@ -540,6 +560,8 @@ impl DeviceSession {
             sync: SyncDriver::default(),
             rng: os_rng(),
             settings: SettingsCache::default(),
+            global_groups,
+            start_writes,
         }
     }
 
@@ -569,7 +591,8 @@ impl DeviceSession {
     /// [`ClientError::Internal`] if the changeset breaks a floor (never, for a changeset this
     /// device's own steps produced over its own `floors`) or a row does not encode.
     fn drain_cache_writes(&mut self) -> CoreResult<CacheDelta> {
-        let mut changeset = store::account_writes(&self.account);
+        let mut changeset = core::mem::take(&mut self.start_writes);
+        changeset.append(store::account_writes(&self.account));
         for vault in &mut self.vaults {
             changeset.append(vault.take_writes());
         }
@@ -623,7 +646,14 @@ impl DeviceSession {
         now_ms: u64,
     ) -> Result<Self, CoreError> {
         let password = take_secret(password)?;
-        let rows = decode_rows(&cache_rows).map_err(CoreError::from)?;
+        // ADR 0026 §5, ADR 0051 §2: an older format is migrated before it is opened. `rows` is
+        // the migrated set the load verifies; `stored`, a second decode of the same rows, is the
+        // mirror of what the host holds, so the migration reaches the host as part of the first
+        // drained delta (`start_writes`) instead of being lost in a mirror that already has it.
+        let stored = decode_rows(&cache_rows).map_err(CoreError::from)?;
+        let migration = store::load::migration_writes(&stored).map_err(CoreError::from)?;
+        let mut rows = decode_rows(&cache_rows).map_err(CoreError::from)?;
+        rows.apply(&migration);
         let record = store::load::open(&rows).map_err(CoreError::from)?;
         let unlocked = record.unlock(password.as_str()).map_err(CoreError::from)?;
         let loaded =
@@ -637,8 +667,9 @@ impl DeviceSession {
             loaded.account,
             loaded.authors,
             loaded.vaults,
-            rows,
+            stored,
             loaded.floors,
+            migration,
         ))
     }
 
@@ -1182,7 +1213,14 @@ impl DeviceSession {
         uris: Vec<UriInput>,
     ) -> Result<MatchDecision, CoreError> {
         let settings = self.settings.get(&self.account, &self.unlocked)?;
-        matching::decide_with_account(page_url, is_top_frame, frame_origin, &uris, settings)
+        matching::decide_with_account(
+            page_url,
+            is_top_frame,
+            frame_origin,
+            &uris,
+            settings,
+            &self.global_groups,
+        )
     }
 
     /// The account's matching settings, against this build's global list.
@@ -1192,7 +1230,10 @@ impl DeviceSession {
     #[wasm_bindgen(js_name = matchSettings)]
     pub fn match_settings(&mut self) -> Result<MatchSettingsView, CoreError> {
         let settings = self.settings.get(&self.account, &self.unlocked)?;
-        Ok(matching::settings_view(settings.matching()))
+        Ok(matching::settings_view(
+            settings.matching(),
+            &self.global_groups,
+        ))
     }
 }
 

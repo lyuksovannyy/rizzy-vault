@@ -25,7 +25,9 @@ use crate::store::load::{self, Loaded};
 use crate::store::record::{
     DeviceRecord, MAX_DEVICE_STATE_LEN, PendingRecord, RECORD_VERSION, Stage,
 };
-use crate::store::rows::{Alarm, CacheRows, Changeset, ObjectRow, OpRow, Write, kind, meta, own};
+use crate::store::rows::{
+    Alarm, CACHE_FORMAT, CacheRows, Changeset, ObjectRow, OpRow, Write, kind, meta, own,
+};
 use crate::store::{self};
 use crate::unlock::apply_device_grants;
 
@@ -1525,11 +1527,36 @@ fn the_floors_refuse_what_must_never_be_written() {
             },
         );
     }
+    for format in [CACHE_FORMAT - 1, CACHE_FORMAT + 1] {
+        refused(
+            floors,
+            Write::Meta {
+                key: meta::FORMAT,
+                value: format.to_be_bytes().to_vec(),
+            },
+        );
+    }
+    // ADR 0051 §1: the equivalence-list floor never goes down and never leaves `u32`.
+    let floor_write = |version: u64| Write::Meta {
+        key: meta::HIGHEST_EQUIVALENCE_LIST_VERSION,
+        value: version.to_be_bytes().to_vec(),
+    };
+    let mut raised = floors.clone();
+    raised
+        .admit(&[floor_write(5)].into_iter().collect())
+        .unwrap();
+    assert_eq!(raised.highest_equivalence_list_version(), 5);
+    raised
+        .admit(&[floor_write(5)].into_iter().collect())
+        .unwrap();
+    refused(&raised, floor_write(4));
+    refused(&raised, floor_write(0));
+    refused(floors, floor_write(u64::from(u32::MAX) + 1));
     refused(
         floors,
         Write::Meta {
-            key: meta::FORMAT,
-            value: 2u16.to_be_bytes().to_vec(),
+            key: meta::HIGHEST_EQUIVALENCE_LIST_VERSION,
+            value: 5u32.to_be_bytes().to_vec(),
         },
     );
     // Another body at the pinned `state_seq` (a fork), and a lower `state_seq` (a rollback).
@@ -1709,6 +1736,117 @@ fn the_floors_refuse_what_must_never_be_written() {
     a.assert_loads();
 }
 
+/// ADR 0051: the highest accepted equivalence-list version is a cache row that survives a
+/// restart, is rehydrated into the floors (so a rollback is refused after the restart, not
+/// only within one process), starts at 0, and is never written while no newer list verifies.
+#[test]
+fn the_equivalence_list_floor_survives_a_restart_and_never_goes_back() {
+    let mut rng = ChaCha20Rng::seed_from_u64(84);
+    let mut server = Server::new(85);
+    let (mut a, _sk, _code) = Dev::signed_up(&mut server, &mut rng);
+    a.fetch(&server);
+    // A new cache holds the row, at 0 (ADR 0051 §1, `create_writes`).
+    assert_eq!(
+        meta_u64(&a.cache.rows, meta::HIGHEST_EQUIVALENCE_LIST_VERSION),
+        0
+    );
+    assert_eq!(a.cache.floors.highest_equivalence_list_version(), 0);
+    assert_eq!(a.reload().floors.highest_equivalence_list_version(), 0);
+
+    // The startup step with no list compiled in writes nothing (ADR 0051 §3).
+    let (groups, writes) = crate::matching::startup_equivalence_groups(&a.reload().floors);
+    assert!(groups.is_empty() && writes.is_empty());
+
+    // A host persists a raised floor (what `startup_equivalence_groups` returns once a newer
+    // list verifies): committed through the floors like any other changeset.
+    let raise = |version: u32| -> Changeset {
+        [Write::Meta {
+            key: meta::HIGHEST_EQUIVALENCE_LIST_VERSION,
+            value: u64::from(version).to_be_bytes().to_vec(),
+        }]
+        .into_iter()
+        .collect()
+    };
+    a.cache.commit(raise(3));
+    // Restart: the stored value is read back into the floors, not reset to 0.
+    let restarted = a.reload();
+    assert_eq!(restarted.floors.highest_equivalence_list_version(), 3);
+    // Rolled back to an older build: lowering is refused against the *restarted* floors.
+    let mut probe = restarted.floors.clone();
+    assert_eq!(probe.admit(&raise(2)).unwrap_err(), ClientError::Internal);
+    assert_eq!(probe.admit(&raise(0)).unwrap_err(), ClientError::Internal);
+    assert_eq!(probe.highest_equivalence_list_version(), 3);
+    // Equal is an idempotent no-op; higher is admitted.
+    probe.admit(&raise(3)).unwrap();
+    probe.admit(&raise(u32::MAX)).unwrap();
+    assert_eq!(probe.highest_equivalence_list_version(), u32::MAX);
+    a.assert_loads();
+}
+
+/// ADR 0051 §2: a format-1 cache (no `highest_equivalence_list_version` row) is migrated to
+/// format 2 by adding only that row at 0, then opens and loads unchanged; every other format
+/// is handled without a write.
+#[test]
+fn a_format_1_cache_migrates_to_format_2() {
+    let mut rng = ChaCha20Rng::seed_from_u64(86);
+    let mut server = Server::new(87);
+    let (mut a, _sk, _code) = Dev::signed_up(&mut server, &mut rng);
+    a.fetch(&server);
+    a.create(&mut rng, "kept");
+    a.flush();
+    // The current format needs no migration.
+    assert!(load::migration_writes(&a.cache.rows).unwrap().is_empty());
+
+    // The same cache as format 1 wrote it.
+    let mut v1 = copy_rows(&a.cache.rows);
+    v1.meta.remove(meta::HIGHEST_EQUIVALENCE_LIST_VERSION);
+    v1.meta
+        .insert(meta::FORMAT.to_owned(), 1u16.to_be_bytes().to_vec());
+    assert_eq!(load::open(&v1).unwrap_err(), ClientError::CacheCorrupt);
+    let migration = load::migration_writes(&v1).unwrap();
+    assert_eq!(migration.writes().len(), 2);
+    v1.apply(&migration);
+    assert_eq!(
+        v1.meta.get(meta::FORMAT).map(Vec::as_slice),
+        Some(CACHE_FORMAT.to_be_bytes().as_slice())
+    );
+    assert_eq!(meta_u64(&v1, meta::HIGHEST_EQUIVALENCE_LIST_VERSION), 0);
+    // Every other row is byte-identical, and the migrated cache loads like the original.
+    let mut original = copy_rows(&a.cache.rows);
+    assert_eq!(original.meta, v1.meta);
+    let loaded = load_rows(&v1, &a.unlocked).unwrap();
+    assert_same_vault(&a.vault, &loaded.vaults[0]);
+    assert_eq!(loaded.floors.highest_equivalence_list_version(), 0);
+    // Migrating again is a no-op.
+    assert!(load::migration_writes(&v1).unwrap().is_empty());
+
+    // A format-1 cache that already holds the format-2 key is not a format-1 cache.
+    let mut odd = copy_rows(&a.cache.rows);
+    odd.meta
+        .insert(meta::FORMAT.to_owned(), 1u16.to_be_bytes().to_vec());
+    assert_eq!(
+        load::migration_writes(&odd).unwrap_err(),
+        ClientError::CacheCorrupt
+    );
+    // A newer format asks for an update; format 0, a short or a missing format is corrupt.
+    for (value, error) in [
+        (
+            (CACHE_FORMAT + 1).to_be_bytes().to_vec(),
+            ClientError::CacheUpdateRequired,
+        ),
+        (0u16.to_be_bytes().to_vec(), ClientError::CacheCorrupt),
+        (vec![1], ClientError::CacheCorrupt),
+    ] {
+        original.meta.insert(meta::FORMAT.to_owned(), value);
+        assert_eq!(load::migration_writes(&original).unwrap_err(), error);
+    }
+    original.meta.remove(meta::FORMAT);
+    assert_eq!(
+        load::migration_writes(&original).unwrap_err(),
+        ClientError::CacheCorrupt
+    );
+}
+
 /// The load refuses what a tampered file holds (ADR 0026 §3 "Columns are indexes, never
 /// facts", §5): (d) fails the load as a whole; (e) a damaged body or wrap under a verified
 /// statement is missing data, and the load stands.
@@ -1765,12 +1903,33 @@ fn the_load_refuses_tampered_rows() {
 
     // (a) The format and the meta rows.
     let mut t = rows();
-    t.meta
-        .insert(meta::FORMAT.to_owned(), 2u16.to_be_bytes().to_vec());
+    t.meta.insert(
+        meta::FORMAT.to_owned(),
+        (CACHE_FORMAT + 1).to_be_bytes().to_vec(),
+    );
     assert_eq!(
         load::open(&t).unwrap_err(),
         ClientError::CacheUpdateRequired
     );
+    // An older format is never opened as it is: the host migrates it first.
+    let mut t = rows();
+    t.meta.insert(
+        meta::FORMAT.to_owned(),
+        (CACHE_FORMAT - 1).to_be_bytes().to_vec(),
+    );
+    assert_eq!(load::open(&t).unwrap_err(), ClientError::CacheCorrupt);
+    // ADR 0051 §1: a stored equivalence-list floor above `u32::MAX`, or not 8 bytes.
+    for value in [
+        (u64::from(u32::MAX) + 1).to_be_bytes().to_vec(),
+        u64::MAX.to_be_bytes().to_vec(),
+        1u32.to_be_bytes().to_vec(),
+    ] {
+        let mut t = rows();
+        t.meta
+            .insert(meta::HIGHEST_EQUIVALENCE_LIST_VERSION.to_owned(), value);
+        assert_eq!(load::open(&t).unwrap_err(), ClientError::CacheCorrupt);
+        corrupt(&t);
+    }
     for key in meta::ALL {
         let mut t = rows();
         t.meta.remove(key);

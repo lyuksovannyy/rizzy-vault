@@ -23,7 +23,8 @@
 //!   generation (§4 step 6);
 //! - drop the body of an `ops` row that is not `own = 0` (served rows only: the pruning of
 //!   §4 step 2);
-//! - lower `next_device_seq` or the stored HLC, leave `next_device_seq` at or below an own
+//! - lower `next_device_seq`, the stored HLC or `highest_equivalence_list_version` (or raise
+//!   the last above `u32::MAX`, ADR 0051 §1), leave `next_device_seq` at or below an own
 //!   `device_seq` held, or insert an own op below the `next_device_seq` stored before (a
 //!   reused dot);
 //! - replace a `self_grant` by one of a lower `vault_key_epoch`, or of another vault key id at
@@ -114,6 +115,9 @@ pub struct Floors {
     next_device_seq: u64,
     /// The stored HLC.
     hlc: u64,
+    /// The stored `highest_equivalence_list_version` (ADR 0051 §1): widened for storage, never
+    /// above `u32::MAX` here.
+    highest_equivalence_list_version: u64,
     /// The `account-state` row.
     state: Option<StateFloor>,
     /// The rows of kinds 1, 3 and 6 (never replaced by other bytes), and the alarm keys.
@@ -201,6 +205,16 @@ impl Floors {
         }
         floors.next_device_seq = u64_be(rows.meta.get(meta::NEXT_DEVICE_SEQ).ok_or(bad)?)?;
         floors.hlc = u64_be(rows.meta.get(meta::HLC).ok_or(bad)?)?;
+        // ADR 0051 §1: rehydrated from the stored row, so the first write after a restart is
+        // checked against the true floor, never against 0.
+        floors.highest_equivalence_list_version = u64_be(
+            rows.meta
+                .get(meta::HIGHEST_EQUIVALENCE_LIST_VERSION)
+                .ok_or(bad)?,
+        )?;
+        if floors.highest_equivalence_list_version > u64::from(u32::MAX) {
+            return Err(bad);
+        }
         for object in &rows.objects {
             if object.kind == kind::ACCOUNT_STATE {
                 floors.state = Some(StateFloor {
@@ -253,6 +267,15 @@ impl Floors {
         self.next_device_seq
     }
 
+    /// The highest global equivalence-list `list_version` this cache's device ever accepted
+    /// (ADR 0051 §1, §4): the `highest_accepted_version` a host passes to
+    /// [`crate::matching::global_equivalence_groups`] at startup. `0` for a new cache.
+    #[must_use]
+    pub fn highest_equivalence_list_version(&self) -> u32 {
+        // Range-checked on every way in (`of_rows`, `Pending::meta`), so this never saturates.
+        u32::try_from(self.highest_equivalence_list_version).unwrap_or(u32::MAX)
+    }
+
     /// Checks `changeset` against the rules of the module docs and, if every write passes,
     /// moves the index to the state after it. On an error the index is unchanged and the host
     /// writes nothing.
@@ -265,6 +288,7 @@ impl Floors {
             fixed: BTreeMap::new(),
             next_device_seq: self.next_device_seq,
             hlc: self.hlc,
+            highest_equivalence_list_version: self.highest_equivalence_list_version,
             state: None,
             objects: BTreeMap::new(),
             vaults: BTreeMap::new(),
@@ -281,6 +305,7 @@ impl Floors {
             fixed,
             next_device_seq,
             hlc,
+            highest_equivalence_list_version,
             state,
             objects,
             vaults,
@@ -291,6 +316,7 @@ impl Floors {
         self.fixed.extend(fixed);
         self.next_device_seq = next_device_seq;
         self.hlc = hlc;
+        self.highest_equivalence_list_version = highest_equivalence_list_version;
         if let Some(state) = state {
             self.state = Some(state);
         }
@@ -324,6 +350,8 @@ struct Pending<'a> {
     next_device_seq: u64,
     /// The HLC after the writes so far.
     hlc: u64,
+    /// `highest_equivalence_list_version` after the writes so far.
+    highest_equivalence_list_version: u64,
     /// The `account-state` written here.
     state: Option<StateFloor>,
     /// Immutable-kind rows written here.
@@ -636,6 +664,13 @@ impl Pending<'_> {
                     return Err(Refused);
                 }
                 self.hlc = number;
+            }
+            // ADR 0051 §1: never lowered, never above `u32::MAX`.
+            meta::HIGHEST_EQUIVALENCE_LIST_VERSION => {
+                if number < self.highest_equivalence_list_version || number > u64::from(u32::MAX) {
+                    return Err(Refused);
+                }
+                self.highest_equivalence_list_version = number;
             }
             _ => return Err(Refused),
         }

@@ -17,7 +17,8 @@
 //!
 //! - Every `u64` is its 8-byte big-endian `BLOB`, ids are 16-byte `BLOB`s (ADR 0026 §3).
 //! - `cache_meta`: `format` is `u16` big-endian; `server_origin` is UTF-8; `account_id` and
-//!   `device_id` are 16 bytes; `next_device_seq` and `hlc` are `u64` big-endian.
+//!   `device_id` are 16 bytes; `next_device_seq`, `hlc` and `highest_equivalence_list_version`
+//!   are `u64` big-endian (the last a `u32` zero-extended, ADR 0051 §1).
 //! - `vaults.self_grant` is held here as the typed [`VaultSelfGrant`]. ADR 0026 §3 says "as
 //!   served" and gives the table no epoch column, and a `VAULT_KEY_SELF_GRANT` envelope does
 //!   not carry the epochs of its context, so the blob must: the leaf stores the served JSON
@@ -46,10 +47,36 @@ use zeroize::Zeroizing;
 
 use crate::error::{ClientError, internal};
 
-/// `cache_meta.format` of this build (ADR 0026 §5).
-pub const CACHE_FORMAT: u16 = 1;
+/// `cache_meta.format` of this build (ADR 0026 §5). Format 2 adds the
+/// [`meta::HIGHEST_EQUIVALENCE_LIST_VERSION`] row ([ADR 0051] §2); a format-1 cache is
+/// upgraded by [`MIGRATIONS`] (or, for a host that stores raw rows,
+/// [`crate::store::load::migration_writes`]) before it is opened.
+///
+/// [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
+pub const CACHE_FORMAT: u16 = 2;
 
-/// The statements that create cache format 1, in order (ADR 0026 §3). Run once, in one
+/// The ordered migration steps of ADR 0026 §5 ("ordered SQL steps in `rizzy-client`, each run
+/// in one transaction with the format bump"), as `(from_format, statements)`: a host runs every
+/// step whose `from_format` is at least the stored format, in order, each step's statements in
+/// one `BEGIN IMMEDIATE` transaction. Every step ends with its own format bump, guarded by the
+/// format it starts from, so a step run against any other format changes no row and the host's
+/// one-row check fails it.
+///
+/// Format 1 → 2 ([ADR 0051] §2) adds the `highest_equivalence_list_version` row at `0` and
+/// reads, re-parses or re-encrypts nothing else. [`crate::store::load::migration_writes`] is
+/// the same step over [`CacheRows`], and the reference a host's SQL is tested against.
+///
+/// [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
+pub const MIGRATIONS: &[(u16, &[&str])] = &[(
+    1,
+    &[
+        "INSERT INTO cache_meta(k, v) VALUES('highest_equivalence_list_version', \
+         X'0000000000000000')",
+        "UPDATE cache_meta SET v = X'0002' WHERE k = 'format' AND v = X'0001'",
+    ],
+)];
+
+/// The statements that create the current cache format, in order (ADR 0026 §3). Run once, in one
 /// transaction with the `format` row (`SQLite` DDL is transactional, ADR 0026 §5). The column
 /// lists are the ADR's; primary-key columns are also `NOT NULL`, which `SQLite` does not imply
 /// for a non-integer key.
@@ -97,14 +124,19 @@ pub mod meta {
     pub const NEXT_DEVICE_SEQ: &str = "next_device_seq";
     /// The hybrid logical clock, `u64` big-endian.
     pub const HLC: &str = "hlc";
-    /// Every key, in the order above.
-    pub const ALL: [&str; 6] = [
+    /// The highest global equivalence-list `list_version` this cache's device ever accepted
+    /// (ADR 0051 §1; INV-39): a `u32`, stored zero-extended as `u64` big-endian. Never lowered,
+    /// never above `u32::MAX`, written only after that device verified a newer list.
+    pub const HIGHEST_EQUIVALENCE_LIST_VERSION: &str = "highest_equivalence_list_version";
+    /// Every key of the current format, in the order above.
+    pub const ALL: [&str; 7] = [
         FORMAT,
         SERVER_ORIGIN,
         ACCOUNT_ID,
         DEVICE_ID,
         NEXT_DEVICE_SEQ,
         HLC,
+        HIGHEST_EQUIVALENCE_LIST_VERSION,
     ];
 }
 

@@ -14,18 +14,20 @@
 //!
 //! **Two entry points.** The free [`decide_match_candidates`] holds no session and so no account
 //! settings: it takes the account default as an argument and builds its [`EquivalenceView`]
-//! from the compiled-in global list alone ([`rizzy_client::matching::global_equivalence_groups`],
-//! ADR 0037 §7, ADR 0038 §5). A host with a session calls the session's `decideMatchCandidates`
-//! (`crate::Session`, `crate::DeviceSession`) instead: that reads the account's
-//! `ACCOUNT_SETTINGS` once per object ([ADR 0042] §6, `rizzy_client::settings::SettingsCache`) and
-//! applies its match default, disabled global groups and user groups
-//! (`decide_with_account`). Persisting the highest accepted `list_version` across launches
-//! (INV-39) is still deferred (gap 27(b)): it needs an ADR amending ADR 0026's `cache_meta`
-//! format, so every call accepts version `0` (`global_equivalence_groups`'s own docs). While
-//! `rizzy_match::compiled::GLOBAL_LIST` is `None`, the only equivalence groups are the account's
-//! own.
+//! from the compiled-in global list alone, as a [`GlobalEquivalence`] the host verified once
+//! (ADR 0037 §7, ADR 0038 §5, [ADR 0051] §4). A host with a session calls the session's
+//! `decideMatchCandidates` (`crate::Session`, `crate::DeviceSession`) instead: that reads the
+//! account's `ACCOUNT_SETTINGS` once per object ([ADR 0042] §6,
+//! `rizzy_client::settings::SettingsCache`) and applies its match default, disabled global groups
+//! and user groups (`decide_with_account`), over the global groups the session verified when it
+//! started: a `crate::DeviceSession` against its cache's persisted
+//! `highest_equivalence_list_version` (INV-39; ADR 0051 §1–§4, raised in its first cache
+//! write when a newer list verifies), a `crate::Session` (the web vault, no cache) from `0`
+//! (ADR 0051 §5). While `rizzy_match::compiled::GLOBAL_LIST` is `None`, the only equivalence
+//! groups are the account's own.
 //!
 //! [ADR 0042]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0042-account-settings-matching-layout.md
+//! [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
 
 use core::fmt;
 use std::collections::BTreeSet;
@@ -224,8 +226,47 @@ pub fn registrable_domain_of(url: &str) -> Result<Option<String>, CoreError> {
         .map_err(|_| CoreError::from(ClientError::InvalidInput))
 }
 
+/// The compiled-in global equivalence list's groups, verified once and passed to every
+/// [`decide_match_candidates`] call instead of being verified per decision (ADR 0051 §4).
+#[wasm_bindgen]
+pub struct GlobalEquivalence {
+    /// The verified groups; empty while no list is compiled in or one fails to verify.
+    groups: Vec<EquivalenceGroup>,
+}
+
+impl fmt::Debug for GlobalEquivalence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GlobalEquivalence")
+            .field("groups", &self.groups.len())
+            .finish()
+    }
+}
+
+#[wasm_bindgen]
+impl GlobalEquivalence {
+    /// Verifies the compiled-in list for a host that keeps no cache, and so no persisted floor:
+    /// from `highest_accepted_version = 0`, as the web vault does every session (ADR 0051 §5).
+    /// A host with a cache uses its `DeviceSession` instead, which verifies against the
+    /// cache's persisted floor and raises it.
+    #[wasm_bindgen(js_name = withoutCache)]
+    #[must_use]
+    pub fn without_cache() -> Self {
+        Self {
+            groups: global_equivalence_groups(0).0,
+        }
+    }
+
+    /// How many global groups verified (`0` while no list is compiled in).
+    #[wasm_bindgen(getter, js_name = groupCount)]
+    #[must_use]
+    pub fn group_count(&self) -> usize {
+        self.groups.len()
+    }
+}
+
 /// Decides which of `uris` are autofill candidates for `page_url`, requested by the frame at
-/// `frame_origin` (module docs; `rizzy_client::matching::decide_candidates`).
+/// `frame_origin` (module docs; `rizzy_client::matching::decide_candidates`), over the global
+/// groups `global` the host verified once (ADR 0051 §4).
 ///
 /// `is_top_frame` and `frame_origin` are the content script's own report (ADR 0037 §5);
 /// `account_default_mode` resolves any URI whose own mode is `0x0000`.
@@ -245,6 +286,7 @@ pub fn decide_match_candidates(
     frame_origin: &str,
     account_default_mode: u16,
     uris: Vec<UriInput>,
+    global: &GlobalEquivalence,
 ) -> Result<MatchDecision, CoreError> {
     let account_default = mode_of(account_default_mode)?;
     let mut owned_ids = Vec::with_capacity(uris.len());
@@ -268,13 +310,14 @@ pub fn decide_match_candidates(
         is_top_frame,
         frame_origin,
     };
-    // The compiled-in global list's groups, with no disabled groups and no user-defined groups:
-    // this free function holds no session, so no account settings. A host with a session calls
-    // the session's own `decideMatchCandidates` instead, which applies them (ADR 0042 §6).
-    let global: Vec<EquivalenceGroup> = global_equivalence_groups();
+    // The compiled-in global list's groups the host verified once (`global`, ADR 0051 §4),
+    // with no disabled groups and no user-defined groups: this free function holds no session,
+    // so no account settings. A host with a session calls the session's own
+    // `decideMatchCandidates` instead, which applies them (ADR 0042 §6).
     let no_disabled_groups: BTreeSet<GroupId> = BTreeSet::new();
     let no_user_defined_groups: Vec<EquivalenceGroup> = Vec::new();
-    let equivalence = EquivalenceView::new(&global, &no_disabled_groups, &no_user_defined_groups);
+    let equivalence =
+        EquivalenceView::new(&global.groups, &no_disabled_groups, &no_user_defined_groups);
     let decision =
         matching::decide_candidates(page_url, &frame, account_default, &item_uris, &equivalence)
             .map_err(CoreError::from)?;
@@ -313,6 +356,7 @@ pub(crate) fn decide_with_account(
     frame_origin: &str,
     uris: &[UriInput],
     settings: &AccountSettingsRecord,
+    global: &[EquivalenceGroup],
 ) -> Result<MatchDecision, CoreError> {
     let mut owned_ids = Vec::with_capacity(uris.len());
     for input in uris {
@@ -336,7 +380,7 @@ pub(crate) fn decide_with_account(
         is_top_frame,
         frame_origin,
     };
-    let decision = matching::decide_with_settings(page_url, &frame, &item_uris, settings)?;
+    let decision = matching::decide_with_settings(page_url, &frame, &item_uris, settings, global)?;
     Ok(decision_view(decision))
 }
 
@@ -444,9 +488,12 @@ impl MatchSettingsView {
     }
 }
 
-/// The settings screen's view of `settings` against the compiled-in global list.
-pub(crate) fn settings_view(settings: &MatchingSettings) -> MatchSettingsView {
-    let global = global_equivalence_groups();
+/// The settings screen's view of `settings` against the compiled-in global list's groups
+/// `global`, as the session verified them at its start (ADR 0051 §4).
+pub(crate) fn settings_view(
+    settings: &MatchingSettings,
+    global: &[EquivalenceGroup],
+) -> MatchSettingsView {
     let disabled = settings.disabled_global();
     let group_view = |g: &EquivalenceGroup, disabled: bool| EquivalenceGroupView {
         id: hex(g.id().as_bytes()),
@@ -534,8 +581,15 @@ mod tests {
             "https://example.com/login".to_owned(),
             0x0001,
         )];
-        let decision =
-            decide_match_candidates("https://example.com/", true, "", 0x0001, uris).unwrap();
+        let decision = decide_match_candidates(
+            "https://example.com/",
+            true,
+            "",
+            0x0001,
+            uris,
+            &GlobalEquivalence::without_cache(),
+        )
+        .unwrap();
         assert_eq!(decision.candidates().len(), 1);
         assert!(!decision.candidates()[0].needs_warning());
         assert!(decision.warnings().is_empty());
@@ -555,8 +609,15 @@ mod tests {
             "https://other.example/".to_owned(),
             0x0001,
         )];
-        let decision =
-            decide_match_candidates("https://example.com/", true, "", 0x0001, uris).unwrap();
+        let decision = decide_match_candidates(
+            "https://example.com/",
+            true,
+            "",
+            0x0001,
+            uris,
+            &GlobalEquivalence::without_cache(),
+        )
+        .unwrap();
         assert!(decision.candidates().is_empty());
     }
 
@@ -571,8 +632,15 @@ mod tests {
             "https://example.com:9000/login".to_owned(),
             0x0001,
         )];
-        let decision =
-            decide_match_candidates("https://example.com:8443/", true, "", 0x0001, uris).unwrap();
+        let decision = decide_match_candidates(
+            "https://example.com:8443/",
+            true,
+            "",
+            0x0001,
+            uris,
+            &GlobalEquivalence::without_cache(),
+        )
+        .unwrap();
         assert_eq!(decision.page_port(), Some(8443));
         assert_eq!(decision.candidates()[0].saved_port(), Some(9000));
     }
@@ -585,16 +653,30 @@ mod tests {
             "https://example.com/login".to_owned(),
             0x0001,
         )];
-        let decision =
-            decide_match_candidates("https://example.com/", true, "", 0x0001, uris).unwrap();
+        let decision = decide_match_candidates(
+            "https://example.com/",
+            true,
+            "",
+            0x0001,
+            uris,
+            &GlobalEquivalence::without_cache(),
+        )
+        .unwrap();
         assert_eq!(decision.page_port(), None);
         assert_eq!(decision.candidates()[0].saved_port(), None);
     }
 
     #[test]
     fn refuses_an_unassigned_mode() {
-        let error =
-            decide_match_candidates("https://example.com/", true, "", 0x0099, vec![]).unwrap_err();
+        let error = decide_match_candidates(
+            "https://example.com/",
+            true,
+            "",
+            0x0099,
+            vec![],
+            &GlobalEquivalence::without_cache(),
+        )
+        .unwrap_err();
         assert_eq!(error.as_str(), "invalid_input");
     }
 
@@ -606,8 +688,15 @@ mod tests {
             "https://example.com/".to_owned(),
             0x0001,
         )];
-        let error =
-            decide_match_candidates("https://example.com/", true, "", 0x0001, uris).unwrap_err();
+        let error = decide_match_candidates(
+            "https://example.com/",
+            true,
+            "",
+            0x0001,
+            uris,
+            &GlobalEquivalence::without_cache(),
+        )
+        .unwrap_err();
         assert_eq!(error.as_str(), "invalid_input");
     }
 
@@ -642,6 +731,7 @@ mod tests {
             "",
             &saved("https://example.com/", 0x0000),
             &with_group,
+            &[],
         )
         .unwrap();
         assert_eq!(decision.candidates().len(), 1);
@@ -653,6 +743,7 @@ mod tests {
             "",
             0x0001,
             saved("https://example.com/", 0x0000),
+            &GlobalEquivalence::without_cache(),
         )
         .unwrap();
         assert!(free.candidates().is_empty());
@@ -666,6 +757,7 @@ mod tests {
             "",
             &saved("https://example.com/", 0x0000),
             &host,
+            &[],
         )
         .unwrap();
         assert!(narrowed.candidates().is_empty());
@@ -676,6 +768,7 @@ mod tests {
             "",
             &saved("https://example.com/", 0x0001),
             &host,
+            &[],
         )
         .unwrap();
         assert_eq!(own.candidates().len(), 1);
@@ -684,7 +777,7 @@ mod tests {
     #[test]
     fn the_settings_view_lists_groups_and_disabled_ids() {
         let record = AccountSettingsRecord::decode(&unhex(&WITH_GROUP.replace(' ', ""))).unwrap();
-        let view = settings_view(record.matching());
+        let view = settings_view(record.matching(), &[]);
         assert_eq!(view.match_default(), 0x0001);
         assert_eq!(view.user_groups().len(), 1);
         assert_eq!(view.user_groups()[0].id(), "a0".repeat(16));

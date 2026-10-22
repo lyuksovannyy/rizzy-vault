@@ -55,10 +55,15 @@
 //!   → `KvRow` diff (write only the rows a step actually touched) is a documented follow-up,
 //!   not a correctness requirement ([`CacheRows::apply`] is still the only place a write's
 //!   meaning is decided; this module never reimplements it).
-//! - **Migration.** Cache format 1 is the only format `rizzy-client` itself knows yet (its own
-//!   module docs, "Not in this build"); this module inherits that.
+//! - **Migration.** `rizzy-client` decides it (`rizzy_client::store::load::migration_writes`,
+//!   ADR 0026 §5): `DeviceSession::unlock` applies it to the rows it loads and hands the same
+//!   writes to the host in its first drained delta. Format 2 ([ADR 0051] §2) adds the one
+//!   `cache_meta` row `highest_equivalence_list_version`, an 8-byte big-endian value under that
+//!   UTF-8 key, the same key and encoding `rv`'s `SQLite` file uses (ADR 0051 open question 3).
+//!   This module's row codec is unchanged by it: a `cache_meta` row is already opaque bytes.
 //!
 //! [ADR 0026]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0026-client-device-state-and-cache.md
+//! [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
 
 use rizzy_client::ClientError;
 use rizzy_client::rizzy_core::encoding::{Reader, put_bytes, put_u8, put_u64};
