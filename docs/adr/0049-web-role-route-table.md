@@ -57,6 +57,16 @@ This ADR provides for its own amendment ([ADR 0020](0020-partial-supersession.md
 
 **INV-73** (allocated across the 2026-10-11 batch, in ADR-number order, from the next free id after INV-69. Provisional: the allocation was made across the 2026-10-11 batch in ADR-number order; if ADRs are accepted out of order, the owner renumbers at acceptance.). *Text, for the owner to add to [THREAT_MODEL.md §8.8](../THREAT_MODEL.md#88-server-and-operations) on acceptance — not edited by this ADR:* "The `web` role serves a response only from a route table fixed at compile time: a literal path, or a fixed prefix with exactly one path segment that does not select response content, is not read from the filesystem, is not echoed into a response or a redirect, and is not written to a log. Every other path outside `/api/` answers `404`. Nothing is read from disk at request time." *From:* M1. *Verified by:* `http/web.rs`'s existing exact-match test (`only_the_listed_paths_are_served`), extended to any future prefix row, plus a test on `http/mod.rs`'s access-log line (or `fallback`) asserting the logged route stays a fixed template (`RouteName`), never the request path, for any row this table gains.
 
+### Owner answers at acceptance (2026-10-22)
+
+The owner accepted this ADR as drafted; the recommendations of "Open questions for the owner" stand:
+
+1. The narrow route stands: ADR 0028 item 15 in full, plus item 10's first sentence.
+2. Future table rows are amendments to this ADR, as "Extending the table" specifies, not fresh supersessions.
+3. INV-73 keeps its number.
+
+Of the "On acceptance" edits, ADR 0028's status line, its index row and INV-73 (THREAT_MODEL.md §8.8) are made in the accepting change.
+
 ## Consequences
 
 ### Positive

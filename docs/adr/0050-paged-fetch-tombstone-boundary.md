@@ -56,6 +56,16 @@ No sibling ADR in this batch (0045–0074) touches this boundary; none is affect
 
 A deterministic two-page case, driven through `VaultDomain::with_page_bytes` set low enough to force the split: item I has an early op whose body is compacted behind a retained tombstone, and a later Purge op from the same device placed in the next page by exhausting `PAGE_MAX_OPS`/the page's byte budget between them. Before this ADR: the first page's `Report::Gap` is final and the device's chain never advances. After: `rizzy-domain-vault` tests fetch the same item over two small-budget pages against the real server code and check the hold resolves once the second page lands; `rizzy-sync`'s own generated histories (ADR 0021 §8) and the merge spike (`spikes/merge-model`) add this interleaving, **and a cross-device one** (the recorded purge authored by a different device than the bodiless header's own, the case ADR 0018 §3 "Recorded purge" allows and the Context's motivating scenario raises) — the purge op's chain segment one, two, and many pages, and one and several devices, after its cover. Regression: the response completes with the `purge_dot` never served (e.g., a revoked device past its cut-off) — the hold resolves to the same final, reported refusal as today. ADR 0012 §12 properties 1 (convergence) and 7 (gap detection), and ADR 0021 §8 property 3, run over all of it.
 
+### Owner answers at acceptance (2026-10-22)
+
+The owner accepted this ADR as drafted; the recommendations of "Open questions for the owner" stand:
+
+1. A held tombstone claim is not persisted across a restart: its loss is a known M1 limit, to revisit with M3 telemetry.
+2. The pending-claim bookkeeping is split as drafted: `VaultLog` decides when the chain may link past a held header, `ItemMerge` when the claim joins.
+3. The narrowing of INV-27 is accepted as "On acceptance" item 3 drafts it.
+
+Of the "On acceptance" edits, all three are made in the accepting change: ADR 0012's status line, its index row, and INV-27's added sentence with INV-74 (THREAT_MODEL.md §8.4). ADR 0021's status line also names this ADR, for the "Covers" bullet its §1 supersedes.
+
 ## Consequences
 
 ### Positive
