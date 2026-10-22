@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The cache schema (cache format 1), its row model, and the changeset a step returns
+//! The cache schema (cache format 3), its row model, and the changeset a step returns
 //! ([ADR 0026] §3, §4).
 //!
 //! # Who does what
@@ -46,35 +46,79 @@ use rizzy_proto::objects::VaultSelfGrant;
 use zeroize::Zeroizing;
 
 use crate::error::{ClientError, internal};
+use crate::store::index::{IndexEntry, IndexRow};
 
-/// `cache_meta.format` of this build (ADR 0026 §5). Format 2 adds the
-/// [`meta::HIGHEST_EQUIVALENCE_LIST_VERSION`] row ([ADR 0051] §2); a format-1 cache is
-/// upgraded by [`MIGRATIONS`] (or, for a host that stores raw rows,
+/// `cache_meta.format` of this build (ADR 0026 §5). Format 2 added the
+/// [`meta::HIGHEST_EQUIVALENCE_LIST_VERSION`] row ([ADR 0051] §2); format 3 adds the
+/// `item_index` table ([ADR 0056] §3, [`ITEM_INDEX_TABLE`]). An older cache is upgraded by
+/// [`MIGRATIONS`] (or, for a host that stores raw rows,
 /// [`crate::store::load::migration_writes`]) before it is opened.
 ///
 /// [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
-pub const CACHE_FORMAT: u16 = 2;
+/// [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
+pub const CACHE_FORMAT: u16 = 3;
+
+/// The `item_index` table of [ADR 0056] §3, the M3 local index ([`crate::store::index`]).
+/// Every column is cleartext; no envelope, no AAD, no purpose id. The primary key is also
+/// `NOT NULL`, as in [`SCHEMA`].
+///
+/// [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
+pub const ITEM_INDEX_TABLE: &str = "CREATE TABLE item_index(item_id BLOB PRIMARY KEY NOT NULL, \
+     vault_id BLOB NOT NULL, item_type INTEGER NOT NULL, display_name TEXT NOT NULL, \
+     search_text TEXT NOT NULL, last_used_ms BLOB, use_count INTEGER NOT NULL DEFAULT 0)";
+
+/// The statements of [`Write::IndexReset`]: the table dropped, whatever shape it had, and
+/// created again empty ([ADR 0056] §4: a corrupt table or a schema mismatch scoped to it is
+/// rebuilt alone; §3: a later migration drops and rebuilds it rather than copying its rows).
+///
+/// [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
+pub const INDEX_RESET: &[&str] = &["DROP TABLE IF EXISTS item_index", ITEM_INDEX_TABLE];
+
+/// One step of [`MIGRATIONS`].
+#[derive(Debug)]
+pub struct Migration {
+    /// The format the step starts from.
+    pub from: u16,
+    /// Schema statements (`CREATE TABLE`), which change no row; run first.
+    pub schema: &'static [&'static str],
+    /// Row statements, each of which changes exactly one row; the last is the format bump.
+    pub rows: &'static [&'static str],
+}
 
 /// The ordered migration steps of ADR 0026 §5 ("ordered SQL steps in `rizzy-client`, each run
-/// in one transaction with the format bump"), as `(from_format, statements)`: a host runs every
-/// step whose `from_format` is at least the stored format, in order, each step's statements in
-/// one `BEGIN IMMEDIATE` transaction. Every step ends with its own format bump, guarded by the
-/// format it starts from, so a step run against any other format changes no row and the host's
-/// one-row check fails it.
+/// in one transaction with the format bump"): a host runs every step whose `from` is at least
+/// the stored format, in order, each step's statements in one `BEGIN IMMEDIATE` transaction,
+/// and fails it unless each row statement changes exactly one row. Every step ends with its own
+/// format bump, guarded by the format it starts from, so a step run against any other format
+/// changes no row and the host's one-row check fails it.
 ///
-/// Format 1 → 2 ([ADR 0051] §2) adds the `highest_equivalence_list_version` row at `0` and
-/// reads, re-parses or re-encrypts nothing else. [`crate::store::load::migration_writes`] is
-/// the same step over [`CacheRows`], and the reference a host's SQL is tested against.
+/// - Format 1 → 2 ([ADR 0051] §2) adds the `highest_equivalence_list_version` row at `0`.
+/// - Format 2 → 3 ([ADR 0056] §3) creates the empty `item_index` table, through
+///   [`INDEX_RESET`]: a table of that name already in the file (no format-2 writer makes one)
+///   is dropped, never read or copied.
+///
+/// Neither reads, re-parses or re-encrypts anything else, and neither copies a plaintext-bearing
+/// row (ADR 0026 §5). [`crate::store::load::migration_writes`] is the same chain over
+/// [`CacheRows`], and the reference a host's SQL is tested against.
 ///
 /// [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
-pub const MIGRATIONS: &[(u16, &[&str])] = &[(
-    1,
-    &[
-        "INSERT INTO cache_meta(k, v) VALUES('highest_equivalence_list_version', \
-         X'0000000000000000')",
-        "UPDATE cache_meta SET v = X'0002' WHERE k = 'format' AND v = X'0001'",
-    ],
-)];
+/// [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        from: 1,
+        schema: &[],
+        rows: &[
+            "INSERT INTO cache_meta(k, v) VALUES('highest_equivalence_list_version', \
+             X'0000000000000000')",
+            "UPDATE cache_meta SET v = X'0002' WHERE k = 'format' AND v = X'0001'",
+        ],
+    },
+    Migration {
+        from: 2,
+        schema: INDEX_RESET,
+        rows: &["UPDATE cache_meta SET v = X'0003' WHERE k = 'format' AND v = X'0002'"],
+    },
+];
 
 /// The statements that create the current cache format, in order (ADR 0026 §3). Run once, in one
 /// transaction with the `format` row (`SQLite` DDL is transactional, ADR 0026 §5). The column
@@ -98,6 +142,7 @@ pub const SCHEMA: &[&str] = &[
     "CREATE TABLE snapshots(vault_id BLOB NOT NULL, snapshot_id BLOB NOT NULL, \
      item_id BLOB NOT NULL, statement BLOB NOT NULL, envelope BLOB NOT NULL, key_wrap BLOB, \
      own INTEGER NOT NULL, sent_generation BLOB, PRIMARY KEY (vault_id, snapshot_id))",
+    ITEM_INDEX_TABLE,
 ];
 
 /// The connection settings of ADR 0026 §3 "Settings", run on every connection before anything
@@ -465,6 +510,30 @@ pub enum Write {
         /// The snapshot.
         snapshot_id: [u8; 16],
     },
+    /// Inserts the `item_index` row of an item, or replaces every column of it but
+    /// `last_used_ms` and `use_count`, which a new row starts at `NULL` and `0` ([ADR 0056]
+    /// §4 "Kept incrementally"). Carries user content in zeroizing buffers.
+    ///
+    /// [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
+    IndexPut(IndexEntry),
+    /// Deletes the `item_index` row of an item: a purge, or an item no longer indexed.
+    IndexDelete {
+        /// The item.
+        item_id: [u8; 16],
+    },
+    /// Records one use of an item ([ADR 0056] §2): `last_used_ms` set to `at_ms`, `use_count`
+    /// up by one (saturating). Changes nothing for an item without a row.
+    ///
+    /// [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
+    IndexUse {
+        /// The item.
+        item_id: [u8; 16],
+        /// When, in ms since the Unix epoch.
+        at_ms: u64,
+    },
+    /// Drops and recreates the `item_index` table empty ([`INDEX_RESET`]); the rows to rebuild
+    /// it follow in the same changeset.
+    IndexReset,
 }
 
 impl fmt::Debug for Write {
@@ -489,6 +558,10 @@ impl fmt::Debug for Write {
             Self::SnapshotOwn { .. } => "Write::SnapshotOwn",
             Self::PruneOpBody { .. } => "Write::PruneOpBody",
             Self::DeleteSnapshot { .. } => "Write::DeleteSnapshot",
+            Self::IndexPut(_) => "Write::IndexPut([REDACTED])",
+            Self::IndexDelete { .. } => "Write::IndexDelete",
+            Self::IndexUse { .. } => "Write::IndexUse",
+            Self::IndexReset => "Write::IndexReset",
         })
     }
 }
@@ -562,6 +635,14 @@ pub struct CacheRows {
     pub ops: Vec<OpRow>,
     /// `snapshots`.
     pub snapshots: Vec<SnapshotRow>,
+    /// `item_index` ([ADR 0056] §3). User content in cleartext; parsed by
+    /// [`crate::store::index::reconcile`], never by [`load`](crate::store::load::load).
+    ///
+    /// [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
+    pub item_index: Vec<IndexRow>,
+    /// Whether the host could not read `item_index` (a missing table, another shape, a column
+    /// over its cap): the table is rebuilt alone and the load stands (ADR 0056 §4).
+    pub item_index_unreadable: bool,
 }
 
 impl fmt::Debug for CacheRows {
@@ -572,6 +653,7 @@ impl fmt::Debug for CacheRows {
             .field("wraps", &self.wraps.len())
             .field("ops", &self.ops.len())
             .field("snapshots", &self.snapshots.len())
+            .field("item_index", &self.item_index.len())
             .finish_non_exhaustive()
     }
 }
@@ -736,6 +818,33 @@ impl CacheRows {
             } => self
                 .snapshots
                 .retain(|s| s.vault_id != *vault_id || s.snapshot_id != *snapshot_id),
+            Write::IndexPut(entry) => {
+                let fresh = IndexRow::new(entry);
+                match self
+                    .item_index
+                    .iter_mut()
+                    .find(|r| r.item_id == fresh.item_id)
+                {
+                    Some(held) => {
+                        held.vault_id = fresh.vault_id;
+                        held.item_type = fresh.item_type;
+                        held.display_name = fresh.display_name;
+                        held.search_text = fresh.search_text;
+                    }
+                    None => self.item_index.push(fresh),
+                }
+            }
+            Write::IndexDelete { item_id } => self.item_index.retain(|r| r.item_id != *item_id),
+            Write::IndexUse { item_id, at_ms } => {
+                if let Some(held) = self.item_index.iter_mut().find(|r| r.item_id == *item_id) {
+                    held.last_used_ms = Some(at_ms.to_be_bytes().to_vec());
+                    held.use_count = held.use_count.saturating_add(1);
+                }
+            }
+            Write::IndexReset => {
+                self.item_index.clear();
+                self.item_index_unreadable = false;
+            }
         }
     }
 
@@ -790,6 +899,7 @@ impl CacheRows {
         });
         self.snapshots
             .sort_by(|a, b| (&a.vault_id, &a.snapshot_id).cmp(&(&b.vault_id, &b.snapshot_id)));
+        self.item_index.sort_by(|a, b| a.item_id.cmp(&b.item_id));
     }
 }
 

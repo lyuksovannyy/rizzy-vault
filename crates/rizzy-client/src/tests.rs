@@ -2172,6 +2172,7 @@ mod healing;
 mod item_history;
 mod late_edits;
 mod lists;
+mod local_index;
 mod mutation;
 mod paged_fetch;
 mod password_history;

@@ -90,17 +90,22 @@ impl fmt::Debug for Loaded {
 /// before [`open`]; the reference [`crate::store::rows::MIGRATIONS`]'s SQL is tested against.
 /// Empty for a cache already at [`CACHE_FORMAT`].
 ///
-/// Format 1 → 2 adds `highest_equivalence_list_version` at `0` and bumps `format`; nothing
-/// else is read, re-parsed or re-encrypted. These writes are not [`Floors::admit`]ted: they
+/// Format 1 → 2 adds `highest_equivalence_list_version` at `0`; format 2 → 3 ([ADR 0056] §3)
+/// adds the `item_index` table, which for raw rows is nothing to write (an empty
+/// [`CacheRows::item_index`]); the last write bumps `format`. Nothing else is read, re-parsed
+/// or re-encrypted, and no plaintext-bearing row is copied. These writes are not
+/// [`Floors::admit`]ted: they
 /// run before any floor exists, and the format bump is the one change of a set-once row a
 /// migration makes. [`open`] then checks the result like any other cache.
 ///
 /// # Errors
 /// [`ClientError::CacheUpdateRequired`] for a format newer than this build's;
-/// [`ClientError::CacheCorrupt`] for a missing or malformed format, format 0, or a format-1
-/// cache that already holds a key format 1 does not have.
+/// [`ClientError::CacheCorrupt`] for a missing or malformed format, format 0, a format-1
+/// cache that already holds a key format 1 does not have, or a format-2 cache that already
+/// holds `item_index` rows.
 ///
 /// [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
+/// [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
 pub fn migration_writes(rows: &CacheRows) -> Result<Changeset, ClientError> {
     let corrupt = ClientError::CacheCorrupt;
     let format = rows.meta.get(meta::FORMAT).ok_or(corrupt)?;
@@ -119,6 +124,15 @@ pub fn migration_writes(rows: &CacheRows) -> Result<Changeset, ClientError> {
                 key: meta::HIGHEST_EQUIVALENCE_LIST_VERSION,
                 value: 0u64.to_be_bytes().to_vec(),
             });
+            changeset.push(Write::Meta {
+                key: meta::FORMAT,
+                value: CACHE_FORMAT.to_be_bytes().to_vec(),
+            });
+        }
+        2 => {
+            if !rows.item_index.is_empty() {
+                return Err(corrupt);
+            }
             changeset.push(Write::Meta {
                 key: meta::FORMAT,
                 value: CACHE_FORMAT.to_be_bytes().to_vec(),

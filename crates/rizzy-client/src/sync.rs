@@ -143,6 +143,7 @@ use crate::account::{CertifiedDevice, RevokedDevice, VerifiedAccount};
 use crate::device::UnlockedDevice;
 use crate::error::{ClientError, internal};
 use crate::store::floors::{id16, u64_be};
+use crate::store::index::{self, IndexEntry};
 use crate::store::rows::{Changeset, OpRow, SnapshotRow, WrapRow, Write, meta, own};
 use crate::wire::{bytes, id};
 
@@ -343,6 +344,15 @@ enum Absorb {
     Refused,
 }
 
+/// The `item_index` rows of one vault as the cache holds them (ADR 0056 §4), for the diff each
+/// [`VaultSync::take_writes`] appends.
+struct IndexTracking {
+    /// The rows, by item id.
+    rows: BTreeMap<[u8; 16], IndexEntry>,
+    /// Whether the next take must compare even if nothing was journaled.
+    dirty: bool,
+}
+
 /// What the journal last wrote of the values that live in `cache_meta` and `vaults`, so that a
 /// value is written again only when it moved.
 #[derive(Clone, Copy, Default)]
@@ -408,6 +418,10 @@ pub struct VaultSync {
     /// The cache writes of the steps since the last [`VaultSync::take_writes`], for a host that
     /// persists the vault (ADR 0026 §4); `None` for one that does not (the web vault).
     journal: Option<Vec<Write>>,
+    /// The `item_index` rows the cache holds for this vault, when the host keeps the M3 local
+    /// index (ADR 0056 §4 "Kept incrementally"; [`crate::store::index`]); `None` for a host
+    /// that does not (the web vault, the browser extension).
+    index: Option<IndexTracking>,
     /// What the journal last wrote of the counters and the restore generation.
     journaled: Journaled,
     /// Per own op the server answered without storing it: the restore generation of that
@@ -533,6 +547,7 @@ impl VaultSync {
             seen_keys,
             stale_from: None,
             journal: None,
+            index: None,
             journaled: Journaled::default(),
             answered: BTreeMap::new(),
             held_ops: BTreeMap::new(),
@@ -591,7 +606,39 @@ impl VaultSync {
         }
         // The counters come first: an own op row is admitted only with a counter above it.
         writes.sort_by_key(|w| !matches!(w, Write::Meta { .. }));
+        // ADR 0056 §4: the index writes of the items this step changed, in the same transaction
+        // as the rows that changed them. A merge changes only through a journaled row (an op, a
+        // snapshot, a wrap that opens a body), so a step that journaled nothing changed none.
+        if let Some(tracking) = self.index.take() {
+            self.index = Some(if tracking.dirty || !writes.is_empty() {
+                let after = index::project_vault(self);
+                writes.extend(index::diff(&tracking.rows, &after));
+                IndexTracking {
+                    rows: after,
+                    dirty: false,
+                }
+            } else {
+                tracking
+            });
+        }
         writes.into_iter().collect()
+    }
+
+    /// Turns `item_index` tracking on (ADR 0056 §4) from `rows`, the rows the cache holds for
+    /// this vault once the host committed what [`crate::store::index`] returned. Only with the
+    /// journal on: the index is kept in the same transactions.
+    pub(crate) fn track_index(&mut self, rows: BTreeMap<[u8; 16], IndexEntry>) {
+        if self.journal.is_some() {
+            self.index = Some(IndexTracking { rows, dirty: false });
+        }
+    }
+
+    /// Makes the next [`VaultSync::take_writes`] compare the index even if nothing was
+    /// journaled: tracking started on a vault the table does not reflect yet.
+    pub(crate) fn mark_index_dirty(&mut self) {
+        if let Some(tracking) = self.index.as_mut() {
+            tracking.dirty = true;
+        }
     }
 
     /// Records one cache write, if the journal is on.
