@@ -175,6 +175,15 @@ test("keyboard only: every audited screen is reachable and operable without a po
   await kb.press("Escape");
   await expect(plaintext).toHaveCount(0);
   await expect(button("Export in plaintext…")).toBeFocused();
+  // The passkey (CXF) export dialog (ADR 0074 §2): opens on its first password field, Escape
+  // closes it and the focus goes back to its button.
+  await tabTo(page, button("Export passkeys…"));
+  await kb.press("Enter");
+  const cxf = page.getByRole("dialog", { name: "Export passkeys (CXF)" });
+  await expect(cxf.getByLabel("Password for this export file", { exact: true })).toBeFocused();
+  await kb.press("Escape");
+  await expect(cxf).toHaveCount(0);
+  await expect(button("Export passkeys…")).toBeFocused();
 
   // Settings: the theme select, then the getting-started guide again.
   await tabTo(page, button("Settings"));

@@ -25,6 +25,7 @@ import {
   type VaultSession,
   checkPasswordBreach,
   checkServer,
+  cxfExportWarning,
   detectImportFormat,
   fetchTransport,
   generatePassphraseWithOptions,
@@ -329,6 +330,9 @@ async function run(m: CallMessage): Promise<unknown> {
     downloadAttachment: () => current().downloadAttachment(str(a[0]), str(a[1])),
     deleteAttachment: () => current().deleteAttachment(str(a[0]), str(a[1])),
     importEncrypted: () => current().importEncrypted(bytes(a[0]), bytes(a[1])),
+    cxfExportPasskeys: () => current().cxfExportPasskeys(),
+    exportCxf: () => current().exportCxf(str(a[0]), bytes(a[1])),
+    importCxfEncrypted: () => current().importCxfEncrypted(bytes(a[0]), bytes(a[1])),
     devices: () => current().devices(),
     sessions: () => current().sessions(),
     endSession: () => current().endSession(str(a[0])),
@@ -358,6 +362,7 @@ async function run(m: CallMessage): Promise<unknown> {
     newElementId: () => newElementId(),
     plaintextExportWarning: () => plaintextExportWarning(),
     plaintextExportPhrase: () => plaintextExportPhrase(),
+    cxfExportWarning: () => cxfExportWarning(),
   } satisfies { [K in keyof CoreApi]: () => unknown };
   try {
     return await api[m.method]();

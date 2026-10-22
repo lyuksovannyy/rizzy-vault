@@ -7,10 +7,14 @@
 //   minutes;
 // - the encrypted export is under a new password for that file, typed twice;
 // - an import file's format is recognised from its bytes; our encrypted export then asks for
-//   the file's password.
+//   the file's password;
+// - the CXF passkey export (ADR 0074 §2) is under a new password for that file, typed twice, and
+//   gated like a plaintext export (its own warning, the hold, the typed phrase); our CXF export
+//   is imported with its file password, a bare CXF file of another product like any format.
 // The core enforces each gate itself (`reauth_required`, `plaintext_export_hold`); these
 // checks only stop a request the core would refuse and word it.
-import type { DetectedImportFormat, EncryptedExport, ImportFormat } from "@rizzy-vault/core";
+import type { CxfExport, DetectedImportFormat, EncryptedExport, ImportFormat } from "@rizzy-vault/core";
+import { t } from "@rizzy-vault/i18n";
 
 import { CallError, type CoreClient, secretBytes } from "./core-client.ts";
 
@@ -45,9 +49,31 @@ export async function encryptedExport(
   return client.call("exportEncrypted", secretBytes(password));
 }
 
+/**
+ * The CXF passkey export (ADR 0074 §2) under a new password for the file, typed twice, after
+ * the warning's hold and with the typed phrase. Refuses before the core is asked when the two
+ * passwords differ (`passwords_differ`) or no re-authentication is fresh (`reauth_required`);
+ * the core checks the hold and the phrase.
+ */
+export async function cxfExport(
+  client: Caller,
+  password: string,
+  repeat: string,
+  typedPhrase: string,
+): Promise<CxfExport> {
+  if (password !== repeat) {
+    throw new CallError("passwords_differ");
+  }
+  if (!(await client.call("reauthFresh"))) {
+    throw new CallError("reauth_required");
+  }
+  return client.call("exportCxf", typedPhrase, secretBytes(password));
+}
+
 /** What the import form does with a recognised (or chosen) format. */
 export type ImportPlan =
   | { readonly kind: "encrypted" }
+  | { readonly kind: "cxf-encrypted" }
   | { readonly kind: "file"; readonly format: ImportFormat }
   | { readonly kind: "refused"; readonly code: string };
 
@@ -56,6 +82,8 @@ export function importPlan(format: DetectedImportFormat): ImportPlan {
   switch (format) {
     case "rizzy-encrypted":
       return { kind: "encrypted" };
+    case "rizzy-cxf-encrypted":
+      return { kind: "cxf-encrypted" };
     case "rizzy-csv":
       return { kind: "refused", code: "rizzy_csv_not_importable" };
     case "unknown":
@@ -78,4 +106,6 @@ export const FORMAT_LABELS: Readonly<Record<Exclude<DetectedImportFormat, "unkno
   csv: "Generic CSV",
   "aliasvault-csv": "AliasVault CSV",
   "aliasvault-avux": "AliasVault (.avux)",
+  "rizzy-cxf-encrypted": t("transfer.formatRizzyCxf"),
+  "cxf-json": t("transfer.formatCxfJson"),
 };

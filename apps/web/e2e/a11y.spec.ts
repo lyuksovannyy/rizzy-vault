@@ -164,6 +164,14 @@ test("a11y: signup, login, the guide, the vault, its dialogs and settings", asyn
   await expectFocusTrapped(page, plaintext, "plaintext-export dialog");
   await plaintext.getByRole("button", { name: "Cancel" }).click();
   await expect(plaintext).toHaveCount(0);
+  // The passkey (CXF) export dialog (ADR 0074 §2).
+  await page.getByRole("button", { name: "Export passkeys…" }).click();
+  const cxf = page.getByRole("dialog", { name: "Export passkeys (CXF)" });
+  await expect(cxf).toBeVisible();
+  await expectAccessible(page, "passkey-export dialog");
+  await expectFocusTrapped(page, cxf, "passkey-export dialog");
+  await cxf.getByRole("button", { name: "Cancel" }).click();
+  await expect(cxf).toHaveCount(0);
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(page.getByRole("region", { name: "What the server stores" })).toBeVisible();
