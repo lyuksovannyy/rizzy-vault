@@ -118,9 +118,10 @@ pub use login::LoginFlow;
 pub use matching::{GlobalEquivalence, MatchDecision, decide_match_candidates, normalize_page_url};
 pub use passkey::{CreatedPasskey, PasskeyAssertion, create_passkey};
 pub use session::{
-    DeviceView, EncryptedExport, ImportReport, Notice, Session, TotpCode, TwoFactorEnrolment,
-    detect_import_format, plaintext_export_hold_ms, plaintext_export_phrase,
-    plaintext_export_warning,
+    DeviceView, EncryptedExport, ImportReport, Notice, Session, SessionRow, TotpCode,
+    TwoFactorEnrolment, detect_import_format, ends_session_on_unauthorized, others_ended_notice,
+    plaintext_export_hold_ms, plaintext_export_phrase, plaintext_export_warning,
+    session_ended_by_you_notice, session_ended_notice,
 };
 pub use signup::{EmergencyKit, SignupFlow};
 pub use store::{KvRow, cache_store_names};
