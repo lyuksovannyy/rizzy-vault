@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rv`'s account flows end to end against a real `rizzy-vault` server: a master password
 //! change and a Secret Key change, also with a full rotation, with the other device following
 //! them (CRYPTO.md §11.5, §11.6, §11.3 step 5), an interrupted change settled by the next

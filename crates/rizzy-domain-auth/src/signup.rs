@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Signup (CRYPTO.md §11.1; §5.9 "Registration"; INV-7).
 //!
 //! 1. [`AuthService::register_start`]: the login name normalised by the §2 function, the

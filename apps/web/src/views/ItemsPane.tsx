@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The item list with search, and the selected item's view or editor. In the trash, the list
 // shows trashed items, and the view offers restore and purge instead of edit.
 //
@@ -17,7 +19,7 @@ import { type KeyboardEvent, useCallback, useEffect, useRef, useState } from "re
 
 import { codeOf } from "../core-client.ts";
 import { useDismissableMenu } from "../dismissable-menu.ts";
-import { CREATABLE_TYPES, matches } from "../fields.ts";
+import { CREATABLE_TYPES, compareFavoriteFirst, matches } from "../fields.ts";
 import { moveListSelection } from "../shortcuts.ts";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText } from "./common.tsx";
@@ -98,14 +100,19 @@ export function emptyState(
 /** The list and the detail (module docs). `newItemSignal` increments each time the global `N`
  * shortcut (`VaultView.tsx`) asks this pane to start a new item of the default (first
  * creatable) type — a one-shot signal, not a boolean, so firing it twice in a row (fast double
- * `N`) is still two requests rather than one the second press' state update coalesces away. */
+ * `N`) is still two requests rather than one the second press' state update coalesces away.
+ * `openItemId`/`openItemNonce` are the same one-shot-signal shape, for the command palette's
+ * "open item" command (`CommandPalette.tsx`): `openItemNonce` increments each time the palette
+ * asks this pane to show `openItemId`'s detail view, even if it is the same id as last time. */
 export function ItemsPane(props: {
   readonly ctx: VaultContext;
   readonly trash: boolean;
   readonly scope: Scope;
   readonly newItemSignal: number;
+  readonly openItemId?: string | undefined;
+  readonly openItemNonce?: number | undefined;
 }) {
-  const { ctx, trash, scope, newItemSignal } = props;
+  const { ctx, trash, scope, newItemSignal, openItemId, openItemNonce = 0 } = props;
   const [items, setItems] = useState<ItemSummary[]>([]);
   const [query, setQuery] = useState("");
   const [detail, setDetail] = useState<Detail>({ kind: "none" });
@@ -154,10 +161,20 @@ export function ItemsPane(props: {
     // depended on, the same way effects elsewhere in this pane read `ctx` without listing it.
   }, [newItemSignal]);
 
+  /** The command palette's "open item" command (module docs above). Declared after the
+   * scope/trash-clear effect above, so that when `VaultView` changes `scope` to show this pane
+   * and bumps `openItemNonce` in the same event, this effect's `setDetail` is the one that wins
+   * the render (both effects run in this declaration order within one commit). */
+  useEffect(() => {
+    if (openItemNonce > 0 && openItemId !== undefined) {
+      setDetail({ kind: "view", id: openItemId });
+    }
+    // Only `openItemNonce` should re-trigger this, the same reasoning as the `N`-shortcut effect
+    // above.
+  }, [openItemNonce]);
+
   const inFilter = items.filter((i) => inScope(i, scope));
-  const shown = inFilter
-    .filter((i) => matches(i, query))
-    .sort((a, b) => Number(b.favorite) - Number(a.favorite) || a.title.localeCompare(b.title));
+  const shown = inFilter.filter((i) => matches(i, query)).sort(compareFavoriteFirst);
   const empty = emptyState(scope, trash, items.length > 0, inFilter.length > 0, query !== "");
 
   useEffect(() => {

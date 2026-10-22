@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes `rizzy-client`'s device-state record parser (ADR 0026 §2, §6): the record is read
 //! back from a file anyone with the user's rights can change, so it is untrusted input.
 //!

@@ -40,14 +40,27 @@ crypto and store decision still happens inside `DurableSession`/`rizzy-wasm`).
   but it is not nothing: a slow enough network, or a form that resolves synchronously, can hit
   it. A full fix is an on-load "is there a pending offer for my origin?" check the content
   script runs on every page, which this change does not add.
+- **Accessibility audit (M3, ADR 0014 §5):** `e2e/a11y.spec.ts` runs axe-core's WCAG 2.x A/AA
+  and best-practice rules, and a Chromium accessibility-tree check (`e2e/a11y.ts`, the same
+  checks as `apps/web/e2e/a11y.ts`), over the options page, the popup's set-up, items, item,
+  generator and locked views, and a login page with the inline-menu iframe in it. It is the one
+  extension spec CI runs (self-contained, a few seconds). Found and fixed by it: the inline-menu
+  iframe had no accessible name (now a constant `title`, the same whatever the menu holds) and
+  its content sat outside any landmark, and buttons in the unstyled popup and the menu were
+  under WCAG 2.2's 24px target size. Not covered: real screen readers, Firefox, and keyboard
+  use of the extension: whether a keyboard user can reach the inline menu from the page's field
+  and fill from it is not checked (its buttons accept any trusted click, keyboard activation
+  included, but nothing tests the way there).
 - **Not attempted:** Firefox Playwright coverage (no automatable unpacked-extension flow, same
   as before — this also means `pushApplyFill`'s direct-`ext.tabs` branch, the one Firefox's
   `background-page.ts` actually takes, has no e2e coverage of its own; only the Chromium relay
   branch is exercised, by the autofill-and-save spec); a longer-running soak test of whether the
   offscreen document/Firefox background page survive a real session (see "The ADR 0036 §2
-  survival spike" below); regex, per-URI match
-  mode and user-defined equivalence-group settings UI (the matcher and core support them; no
-  options-page surface edits them yet; every item matches via the account default, Base domain).
+  survival spike" below); regex, and a per-URI match mode or account match settings surface in
+  the extension itself (the web vault's item editor and Settings → Website matching edit them;
+  the extension applies them: a URI with no override of its own takes the account's match
+  default, and the account's user-defined and disabled global equivalence groups shape matching,
+  through `DurableSession.decideMatchCandidates`, ADR 0042 §6).
 
 ### Bugs found only by the end-to-end Playwright spec (`e2e/autofill-and-save.spec.ts`)
 
@@ -316,6 +329,52 @@ invisible to the unit tests or a casual manual check:
 Firefox: not automated, same reason as the rest of this file (no Playwright-automatable
 unpacked-extension flow) — the create/get interception and the consent UI are plain
 `postMessage`/DOM code with nothing Chromium-specific in it, but that is untested, not proven.
+
+### M3: multi-step login forms (ROADMAP §4.4)
+
+The inline menu is offered on each step of a login split across steps, and each step's fill
+writes only that step's own field(s):
+
+| Step | Looks like | The menu fills |
+|---|---|---|
+| One-page form | a visible password field, with its form's username field before it | both |
+| Identifier-first | a username or email field alone; the password is on the next page, or hidden until the page reveals it | the username only ("Fills the username only."; no generator) |
+| Password-only | a visible password field with no username field of its own (the username was on an earlier page) | the password only ("Fills the password only.") |
+
+- **Detection** is [`src/content/login-step.ts`](src/content/login-step.ts): a pure,
+  deterministic heuristic over facts the content script reads from the top frame's own
+  document — `autocomplete` tokens (`username` and `webauthn` are strong signals; `email` is a
+  weak one), input types, `name`/`id`/`placeholder`/`aria-label`/label hints, and form
+  structure (a username is paired only with a password of the same form; a weakly signalled
+  identifier alone needs a sign-in form: a concealed password field in it, or "Next"/"Sign in"-
+  style hints and no search/newsletter/sign-up ones). Unit tested in Node against the HTML
+  fixtures in [`test/fixtures/login-steps/`](test/fixtures/login-steps) (`test/login-step.test.ts`),
+  which `e2e/multistep.spec.ts` also loads into real Chromium.
+- **Every step is its own gesture.** A pick on the identifier step never fills the password
+  step; the password step's menu appears on its own and nothing is written until the user clicks
+  a candidate in it (INV-36; ADR 0037 §5; ADR 0040). Nothing is remembered between steps or
+  across a navigation: there is no state for it to live in, and the e2e suite checks that the
+  next step stays empty without a new click.
+- **Only the step's own value crosses.** The inline menu's existing `inline_menu_fill_chosen`
+  request carries an optional `only: "username" | "password"`, and the long-lived context
+  narrows what it pushes to the content script to that one value (`content-handler.ts`'s
+  `narrowFillValues`; ADR 0036 §4, nothing "beyond what the user is filling"). `apply_fill` can
+  therefore carry a username alone. No new message type.
+- **The A7 gates apply to every field of every step**: hidden, `opacity: 0`, zero-size,
+  off-screen (entirely left of or above the document) and covered fields are never chosen, and
+  each target is re-checked when the fill lands, as are read-only and disabled fields. A password
+  field inside an iframe is never seen at all: the content script runs in the top frame only.
+- **Same-page reveal.** The content script's `MutationObserver` now also watches `style`,
+  `class`, `hidden`, `disabled` and `readonly`, since a revealed password field is usually an
+  attribute change rather than a new node. An attribute-only change re-asks the background only
+  if it reveals a field the current step did not have, so a passing restyle (a View
+  Transition, an animation) never tears the menu down; the menu's own per-frame restyling of
+  its iframe never counts at all.
+  A field whose `type` attribute flips (`hidden` → `password`) is not watched, so such a reveal
+  is picked up only at the next structural change: a known gap.
+- **Not done:** save/update-on-submit still needs a password field and the username on the same
+  page, so a two-page sign-in is not offered for saving (the password page has no username to
+  save with it); Firefox is not automated (as everywhere in this file).
 
 ## Architecture
 

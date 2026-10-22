@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The passkey provider end to end (ADR 0039 §2; THREAT_MODEL A7's "Passkey provider" section),
 // against a real account, a real unlocked device, and a real test relying party served over
 // genuine TLS (`https-server.ts` — INV-64 and `rizzy_client::passkey::verify_rp_id` both demand
@@ -35,6 +37,15 @@ function b64ToBuf(b64) {
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return bytes.buffer;
 }
+// \`PublicKeyCredential.id\` (and so \`allowCredentials[].id\`, per real-RP-code convention: store
+// the base64url \`id\` at registration, decode it back for \`allowCredentials\` at sign-in) is
+// base64url, not the plain base64 \`b64ToBuf\` above expects (gap 35(b) in the M2 gap audit's own
+// test) — \`atob\` does not accept \`-\`/\`_\` or unpadded input.
+function b64urlToBuf(b64url) {
+  const padded = b64url.replace(/-/g, "+").replace(/_/g, "/");
+  const pad = padded.length % 4 === 0 ? "" : "=".repeat(4 - (padded.length % 4));
+  return b64ToBuf(padded + pad);
+}
 function bufToB64(buf) {
   const bytes = new Uint8Array(buf);
   let bin = "";
@@ -59,13 +70,20 @@ window.rizzyTestCreate = async (opts) => {
 };
 window.rizzyTestGet = async (opts) => {
   const cred = await navigator.credentials.get({
-    publicKey: { challenge: b64ToBuf(opts.challengeB64), timeout: opts.timeoutMs },
+    publicKey: {
+      challenge: b64ToBuf(opts.challengeB64),
+      timeout: opts.timeoutMs,
+      ...(opts.allowCredentialIdsB64 !== undefined
+        ? { allowCredentials: opts.allowCredentialIdsB64.map((id) => ({ type: "public-key", id: b64urlToBuf(id) })) }
+        : {}),
+    },
   });
   return {
     id: cred.id,
     authenticatorDataB64: bufToB64(cred.response.authenticatorData),
     clientDataJsonB64: bufToB64(cred.response.clientDataJSON),
     signatureB64: bufToB64(cred.response.signature),
+    userHandleB64: cred.response.userHandle ? bufToB64(cred.response.userHandle) : null,
   };
 };
 </script></body></html>`;
@@ -81,6 +99,9 @@ interface GetResult {
   readonly authenticatorDataB64: string;
   readonly clientDataJsonB64: string;
   readonly signatureB64: string;
+  /** `null` only if the real `AuthenticatorAssertionResponse.userHandle` were ever null — gap
+   * 35(a) in the M2 gap audit: this extension's own assertions always set it now. */
+  readonly userHandleB64: string | null;
 }
 
 declare global {
@@ -93,7 +114,7 @@ declare global {
       challengeB64: string;
       timeoutMs: number;
     }): Promise<CreateResult>;
-    rizzyTestGet(opts: { challengeB64: string; timeoutMs: number }): Promise<GetResult>;
+    rizzyTestGet(opts: { challengeB64: string; timeoutMs: number; allowCredentialIdsB64?: readonly string[] }): Promise<GetResult>;
   }
 }
 
@@ -150,12 +171,61 @@ async function enrol(context: BrowserContext, extensionId: string, server: Runni
 }
 
 /** Opens `rp.origin` and waits for the page-world shim to install (module docs on the race this
- * guards: `<script src>` injection is asynchronous) before returning. */
+ * guards: `<script src>` injection is asynchronous) before returning. Bounded explicitly (default
+ * `waitForFunction` has no timeout of its own, per the Playwright API) so a genuinely broken
+ * injection fails in seconds with its own clear error, not silently as part of this test's outer
+ * `test.setTimeout(120_000)`. */
 async function openTestRpPage(context: BrowserContext, rpOrigin: string): Promise<Page> {
   const page = await context.newPage();
   await page.goto(rpOrigin);
-  await page.waitForFunction(() => (navigator.credentials as unknown as { __rizzyVaultPasskeyShimReady?: boolean }).__rizzyVaultPasskeyShimReady === true);
+  await page.waitForFunction(
+    () => (navigator.credentials as unknown as { __rizzyVaultPasskeyShimReady?: boolean }).__rizzyVaultPasskeyShimReady === true,
+    undefined,
+    { timeout: 10_000 },
+  );
   return page;
+}
+
+/**
+ * Registers a CDP `WebAuthn` virtual authenticator on `page`, with no credentials enrolled on it
+ * — called once, right after {@link openTestRpPage}, before any ceremony runs.
+ *
+ * Root cause of the load-triggered flake this fixes: every ceremony in this file goes through
+ * the extension's own shim first (`passkey-page-shim.ts`'s `send`), which arms its own
+ * `timeoutMs`-bounded timer and falls back to the browser's *real* `navigator.credentials` if
+ * the extension's round trip (content script -> background -> consent offer -> click -> approval
+ * -> result push) does not answer in time. This project already knew, and documented at the
+ * decline step below, that headless Chromium's native WebAuthn never rejects a call when no
+ * authenticator is registered at all — it waits forever for a transport that can never arrive —
+ * but that virtual authenticator used to be registered only right before the decline case,
+ * leaving the *registration* and *sign-in* ceremonies above it with no such safety net. Under a
+ * heavily loaded machine (many parallel Playwright suites, a high load average), that same
+ * extension round trip can legitimately take long enough to lose the race against the shim's own
+ * timer; when it does, the create/get call used to fall back to a native call with nothing to
+ * answer it, hanging the awaiting `page.evaluate` call until this test's own `test.setTimeout`,
+ * at which point Playwright tears the context down out from under the still-pending call and
+ * reports "Target page, context or browser has been closed" — a confusing, two-minute-late
+ * symptom for what is really just this missing authenticator. Installing it up front, before any
+ * ceremony, means a slow-CI fallback during registration or sign-in now settles immediately too
+ * (resolving with a native, non-rizzy-vault credential that fails this test's own assertions, or
+ * rejecting), exactly as the decline case already relied on — a fast, clear test failure instead
+ * of a two-minute hang. It has no effect on the normal, fast path: the shim only ever reaches the
+ * real native call on its own fallback branch, never while its extension round trip is still
+ * winning the race, so a correctly-timed run behaves identically with or without this call.
+ */
+async function installVirtualAuthenticator(context: BrowserContext, page: Page): Promise<void> {
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("WebAuthn.enable");
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: {
+      protocol: "ctap2",
+      transport: "internal",
+      hasResidentKey: true,
+      hasUserVerification: true,
+      isUserVerified: true,
+      automaticPresenceSimulation: true,
+    },
+  });
 }
 
 test.setTimeout(120_000);
@@ -168,6 +238,7 @@ test("registers a passkey through consent, verifies the attestation, signs in wi
 }) => {
   await enrol(context, extensionId, server, "pkuser");
   const page = await openTestRpPage(context, rp.origin);
+  await installVirtualAuthenticator(context, page);
 
   // --- Registration: the consent UI shows "Test RP" (create ceremony), a trusted click
   // approves it.
@@ -209,6 +280,11 @@ test("registers a passkey through consent, verifies the attestation, signs in wi
 
   const assertion = await getPromise;
   expect(assertion.id).toBe(created.id);
+  // Gap 35(a) in the M2 gap audit: `userHandle` is never null for an assertion this extension
+  // produces, and it is the exact `user.id` the create ceremony registered — `userIdB64` above,
+  // "user-1" — never a placeholder or an empty value.
+  expect(assertion.userHandleB64).not.toBeNull();
+  expect(Buffer.from(assertion.userHandleB64 as string, "base64").toString("utf8")).toBe("user-1");
   const authenticatorData = Buffer.from(assertion.authenticatorDataB64, "base64");
   const assertionClientDataJson = Buffer.from(assertion.clientDataJsonB64, "base64");
   const signature = Buffer.from(assertion.signatureB64, "base64");
@@ -223,23 +299,13 @@ test("registers a passkey through consent, verifies the attestation, signs in wi
   // hang and never fabricate a result. Found while writing this test: with no CDP virtual
   // authenticator registered, headless Chromium's native WebAuthn `get()` does not reject — it
   // waits forever for a transport/device that can never arrive in this environment, which hung
-  // this exact test for a full 120s before this fix. A CDP `WebAuthn` virtual authenticator with
-  // no credentials enrolled on it gives the native call something real to ask and fail against
-  // (`NotAllowedError`, no matching credential), so this assertion can require the promise to
-  // *settle* within a bounded time, proving the native path was actually taken rather than this
-  // shim's own code looping or hanging on the decline.
-  const cdp = await context.newCDPSession(page);
-  await cdp.send("WebAuthn.enable");
-  await cdp.send("WebAuthn.addVirtualAuthenticator", {
-    options: {
-      protocol: "ctap2",
-      transport: "internal",
-      hasResidentKey: true,
-      hasUserVerification: true,
-      isUserVerified: true,
-      automaticPresenceSimulation: true,
-    },
-  });
+  // this exact test for a full 120s before this fix. The virtual authenticator this relies on is
+  // now installed once, right after `openTestRpPage` above (`installVirtualAuthenticator`'s own
+  // doc explains why every ceremony needs it, not only this one): a CDP `WebAuthn` virtual
+  // authenticator with no credentials enrolled on it gives the native call something real to ask
+  // and fail against (`NotAllowedError`, no matching credential), so this assertion can require
+  // the promise to *settle* within a bounded time, proving the native path was actually taken
+  // rather than this shim's own code looping or hanging on the decline.
   const declinePromise = page
     .evaluate((opts) => window.rizzyTestGet(opts), { challengeB64: b64("get-challenge-2"), timeoutMs: 5_000 })
     .then(
@@ -256,6 +322,128 @@ test("registers a passkey through consent, verifies the attestation, signs in wi
   expect(outcome.settled).toBe("rejected");
 });
 
+test("navigator.credentials.get() with allowCredentials narrows the consent UI to the matching passkey only", async ({
+  context,
+  extensionId,
+  server,
+  rp,
+}) => {
+  // Gap 35(b) in the M2 gap audit: two passkeys registered for the same RP (both land on the
+  // same Login item — `core-host/core-context.ts`'s `runCreatePasskey` attaches a second
+  // passkey for an already-known `rpId` rather than creating a second item, so both candidates'
+  // consent-UI label — `itemTitle (userName)` — is identical either way; filtering has to be
+  // proven by the *count* of offered candidates and by which credential the resulting assertion
+  // actually names, not by distinct button text).
+  await enrol(context, extensionId, server, "pkallow");
+  const page = await openTestRpPage(context, rp.origin);
+  await installVirtualAuthenticator(context, page);
+  const consentFrame = page.frameLocator("iframe[data-rizzy-passkey-consent]");
+
+  async function createOne(userIdB64: string, userName: string, challengeB64: string): Promise<CreateResult> {
+    const createPromise = page.evaluate(
+      (opts) => window.rizzyTestCreate(opts),
+      { rpName: "Test RP", userIdB64, userName, userDisplayName: userName, challengeB64, timeoutMs: 20_000 },
+    );
+    await expect(consentFrame.getByRole("button", { name: "Test RP" })).toBeVisible({ timeout: 8_000 });
+    await consentFrame.getByRole("button", { name: "Test RP" }).click();
+    return createPromise;
+  }
+
+  const first = await createOne(b64("user-A"), "alice", b64("create-challenge-A"));
+  const second = await createOne(b64("user-B"), "bob", b64("create-challenge-B"));
+  expect(first.id).not.toBe(second.id);
+
+  // --- An unrestricted get() would offer both (same rpId, two passkeys) — restricting
+  // `allowCredentials` to `first`'s own id must narrow the consent UI down to exactly one
+  // candidate, never both and never zero.
+  const getPromise = page.evaluate((opts) => window.rizzyTestGet(opts), {
+    challengeB64: b64("get-challenge-allow"),
+    timeoutMs: 20_000,
+    allowCredentialIdsB64: [first.id],
+  });
+  const candidateButtons = consentFrame.getByRole("button", { name: /Test RP \(alice\)/ });
+  await expect(candidateButtons).toHaveCount(1, { timeout: 15_000 });
+  await candidateButtons.click();
+
+  const assertion = await getPromise;
+  // The filtered-in credential, never the excluded one — proof the filtering happened at the
+  // credential-id level, not merely that some candidate was offered.
+  expect(assertion.id).toBe(first.id);
+  expect(assertion.id).not.toBe(second.id);
+  expect(assertion.userHandleB64).not.toBeNull();
+  expect(Buffer.from(assertion.userHandleB64 as string, "base64").toString("utf8")).toBe("user-A");
+});
+
+/** The "click Log in/Unlock" step alone, factored out of {@link logInToWebVault} so a regression
+ * test can force the exact adversarial timing — this extension's own inline menu already settled
+ * over the button before the click is ever attempted — without that forcing also being masked by
+ * {@link logInToWebVault}'s own field fills (each is a real, trusted click under the hood, and a
+ * click on "Login name" or "Secret Key" blurs whatever had focus before it, which can
+ * incidentally tear the menu down as a side effect — not a fix, just luck that happens to depend
+ * on fill order).
+ *
+ * Adapted from the identical fix already shipped in `account.ts`'s own `logIn` (commit
+ * `97619bf`, "gate the inline-menu iframe's own visibility and topmost state") — this file's own
+ * inlined copy (same tsconfig-separation reason `account.ts`'s module doc gives for not sharing
+ * `signUp`/`logIn` here at all) was never updated to match, which is the regression this test
+ * guards: this extension's own inline menu (`content-script.ts`'s `InlineMenu`) anchors to a
+ * password-shaped input on this page (Gap 32's "show for ANY password field") and can
+ * geometrically overlap the Log in/Unlock button directly below it. A real click there lands a
+ * `mousedown` on the page first, which blurs the field and tears the menu down (`InlineMenu`'s
+ * `#onBlur`); a Playwright locator click runs its actionability check — including "not
+ * obscured" — before dispatching any mouse event at all, so that blur never happens and the click
+ * retries against the menu forever (confirmed by direct probe: unpatched, this reliably
+ * reproduces Playwright's own "<iframe data-rizzy-inline-menu> intercepts pointer events" and
+ * ultimately the test's own timeout, independent of machine load — load only changes how often
+ * the menu is still there, settled, at the moment a single unprotected click is attempted).
+ *
+ * Diverges from `account.ts`'s own version in which field(s) it blurs, a second thing a direct
+ * probe found while reproducing this: `wireInlineMenu` (`content-script.ts`) anchors the menu to
+ * `document.querySelector('input[data-rizzy-field="password"]')` — the FIRST password-shaped
+ * input in document order, not necessarily "Master password". On this page, "Secret Key" is
+ * ALSO rendered as a masked, password-shaped input (sensible for a secret users don't want
+ * shoulder-surfed) and sits earlier in the DOM, so it is the one the extension's classifier
+ * actually matches first — confirmed directly: blurring "Master password" alone (`account.ts`'s
+ * own fix, ported here unchanged at first) left the menu's iframe in place every time; blurring
+ * "Secret Key" tore it down immediately. `account.ts`'s own `logIn` happens to avoid ever needing
+ * this in practice only because its OWN fill order (Secret Key, then Master password) already
+ * blurs Secret Key as an ordinary side effect of focusing the next field — which only ever helps
+ * against a menu that is already live DURING the fills, never one that arrives afterward, so that
+ * helper has the same latent gap, just harder to trigger. Noted here, not fixed there — out of
+ * scope for this file; no tracked issue exists for it yet, so a reader relying on one to exist
+ * will not find it. Blur BOTH fields, in sequence, on every attempt: whichever one is the live
+ * anchor at the time gets torn down regardless of which it turns out to be.
+ *
+ * Blurs by field LABEL, not by `wireInlineMenu`'s own `input[data-rizzy-field="password"]`
+ * marker, even though reusing that marker would look like the more "DRY" choice: the attribute is
+ * only ever written once `detectFields()` has actually run on this page, so on a page where
+ * detection has not fired yet (or candidates were refused) no element carries it at all, and a
+ * Playwright locator action against zero matches WAITS for one to appear rather than no-op-ing —
+ * turning the ordinary, menu-free case into a hang instead of a harmless skip. The field labels
+ * are a fixed, known part of this page's own form regardless of the extension's internal state.
+ *
+ * Worse still, `wireInlineMenu` rebuilds the menu on *any* qualifying DOM mutation regardless of
+ * current focus (`content-script.ts`'s `report`/`schedule`), so even blurring the right field
+ * once can lose a race against a menu that reappears a moment later from an unrelated page
+ * re-render. Retry the whole blur-both → wait-absent → click sequence (`toPass`) rather than doing
+ * it once: each attempt forces fresh blur events (destroying whatever menu is currently live) and
+ * then races the click against the next possible recreation, so it only fails for good if the
+ * menu keeps winning that race for the full ten seconds — a real anomaly, not routine flake. */
+async function submitWebVaultLogin(page: import("@playwright/test").Page): Promise<void> {
+  const secretKey = page.getByLabel("Secret Key", { exact: true });
+  const masterPassword = page.getByLabel("Master password", { exact: true });
+  const loginButton = page.getByRole("button", { name: /^(Log in|Unlock)$/ });
+  await expect(async () => {
+    await secretKey.focus();
+    await secretKey.blur();
+    await masterPassword.focus();
+    await masterPassword.blur();
+    await expect(page.locator("iframe[data-rizzy-inline-menu]")).toHaveCount(0, { timeout: 500 });
+    await loginButton.click({ timeout: 500 });
+  }).toPass({ timeout: 10_000 });
+  await expect(page.getByRole("button", { name: "Account menu" })).toBeVisible();
+}
+
 /** Logs in to the web vault (`apps/web/e2e/helpers.ts`'s own `logIn`, inlined rather than
  * imported: the two apps keep separate `tsconfig.json`/dependency trees, same reason
  * `account.ts`'s own module doc gives for not sharing `signUp` either). */
@@ -263,8 +451,7 @@ async function logInToWebVault(page: import("@playwright/test").Page, loginName:
   await page.getByLabel("Login name").fill(loginName);
   await page.getByLabel("Secret Key", { exact: true }).fill(secretKey);
   await page.getByLabel("Master password", { exact: true }).fill(TEST_ACCOUNT_PASSWORD);
-  await page.getByRole("button", { name: /^(Log in|Unlock)$/ }).click();
-  await expect(page.getByRole("button", { name: "Account menu" })).toBeVisible();
+  await submitWebVaultLogin(page);
 }
 
 test("a passkey the extension created shows up in the web vault, with no private key reveal, and can be deleted", async ({
@@ -275,6 +462,7 @@ test("a passkey the extension created shows up in the web vault, with no private
 }) => {
   const secretKey = await enrol(context, extensionId, server, "webuser");
   const page = await openTestRpPage(context, rp.origin);
+  await installVirtualAuthenticator(context, page);
   const createPromise = page.evaluate(
     (opts) => window.rizzyTestCreate(opts),
     {
@@ -315,4 +503,112 @@ test("a passkey the extension created shows up in the web vault, with no private
   await vault.getByRole("dialog", { name: "Delete this passkey?" }).getByRole("button", { name: "Delete passkey" }).click();
   await expect(vault.getByText("Passkey deleted.")).toBeVisible();
   await expect(vault.locator("[data-passkey]")).toHaveCount(0);
+});
+
+test("a ceremony whose own timeout fires before the extension answers falls back and settles, never hangs (regression: the load-triggered 120s hang)", async ({
+  context,
+  extensionId,
+  server,
+  rp,
+}) => {
+  // Deterministic stand-in for the nondeterministic failure a heavily loaded machine produced
+  // (load average 25-60, other Playwright suites running): rather than relying on real load to
+  // make the extension's own round trip (content script -> background -> consent offer) lose
+  // the race against the page-world shim's `timeoutMs` timer, this test gives that timer an
+  // impossibly short budget (`timeoutMs: 1`) so the shim falls back to native `navigator.
+  // credentials.create` on every run, not just an unlucky one. Before this change
+  // (`installVirtualAuthenticator` called only right before the decline step above, not here),
+  // that native fallback had no authenticator to ask and never settled at all, hanging this
+  // test's own `page.evaluate` call until Playwright's test timeout tore the context down —
+  // exactly the "Target page, context or browser has been closed" symptom, just forced instead
+  // of waited for. This test's own short `test.setTimeout` below is the actual regression check:
+  // it fails loudly, in seconds, if that hang ever comes back.
+  test.setTimeout(20_000);
+  await enrol(context, extensionId, server, "pktimeout");
+  const page = await openTestRpPage(context, rp.origin);
+  await installVirtualAuthenticator(context, page);
+
+  const createPromise = page.evaluate(
+    (opts) => window.rizzyTestCreate(opts),
+    {
+      rpName: "Test RP",
+      userIdB64: b64("user-timeout"),
+      userName: "carol",
+      userDisplayName: "Carol",
+      challengeB64: b64("create-challenge-timeout"),
+      timeoutMs: 1,
+    },
+  );
+  // No click: `timeoutMs: 1` guarantees the shim's own timer fires long before any consent offer
+  // could arrive, so there is nothing to click — the point is that `createPromise` settles on
+  // its own, one way or the other, well inside this test's 20s bound.
+  const outcome = await createPromise.then(
+    () => "resolved" as const,
+    () => "rejected" as const,
+  );
+  expect(["resolved", "rejected"]).toContain(outcome);
+});
+
+test("a sign-in ceremony whose own timeout fires before the extension answers also falls back and settles, never hangs (regression: the get() side of the same race)", async ({
+  context,
+  extensionId,
+  server,
+  rp,
+}) => {
+  // The `get()` (sign-in) analog of the regression test just above: the same fallback race
+  // exists on `passkey-page-shim.ts`'s `get()` path as on its `create()` path, and the
+  // production fix (`installVirtualAuthenticator` called once, up front, before any ceremony) is
+  // meant to cover both — but until now nothing forced `get()`'s own fallback branch
+  // deterministically; the only existing `get()` coverage either lets the extension answer in
+  // time (the first test's sign-in step) or exercises the user-decline path (also the first
+  // test), never a timed-out `get()` racing the shim's own timer. `timeoutMs: 1` forces that
+  // branch on every run, exactly as the `create()` version above does.
+  test.setTimeout(20_000);
+  await enrol(context, extensionId, server, "pktimeoutget");
+  const page = await openTestRpPage(context, rp.origin);
+  await installVirtualAuthenticator(context, page);
+
+  const getPromise = page.evaluate((opts) => window.rizzyTestGet(opts), { challengeB64: b64("get-challenge-timeout"), timeoutMs: 1 });
+  // No click: `timeoutMs: 1` guarantees the shim's own timer fires long before any consent offer
+  // could arrive, so there is nothing to click — the point is that `getPromise` settles on its
+  // own, one way or the other, well inside this test's 20s bound, exactly like the `create()`
+  // regression test above.
+  const outcome = await getPromise.then(
+    () => "resolved" as const,
+    () => "rejected" as const,
+  );
+  expect(["resolved", "rejected"]).toContain(outcome);
+});
+
+test("logging in to the web vault settles even when the extension's own inline menu is already covering the Log in button (regression: a second, distinct cause of the identical load-triggered 120s hang)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  // Deterministic stand-in for a SEPARATE load-triggered flake a review found while verifying
+  // the native-WebAuthn-fallback fix above, reproducing the identical "Target page, context or
+  // browser has been closed" symptom through an entirely different, pre-existing mechanism: this
+  // extension's own inline menu (`content-script.ts`'s page-load field detection, armed
+  // independently of any fill below — Gap 32 shows it for ANY password field, candidates or not)
+  // anchors to a password-shaped field on this page (`submitWebVaultLogin`'s own doc has which
+  // one, and why it is not the one it looks like) and can geometrically overlap the Log in button
+  // directly below it (confirmed by direct probe: `document.elementFromPoint` at the button's own
+  // center resolves to the menu's `<iframe>`, not the button, once the menu has settled). Rather
+  // than relying on real CPU load to keep that menu alive long enough to still be covering the
+  // button at click time, fill the fields once (exactly as `logInToWebVault` does) and then wait
+  // for the menu to actually settle visible BEFORE ever attempting the click —
+  // `submitWebVaultLogin` below is the real click-retry logic under test; this only forces the
+  // race it has to win on every run, rather than an unlucky one under load. (Calling
+  // `logInToWebVault` itself here instead would re-run the same three fills a second time, each
+  // of which is a real, trusted click that can blur-and-destroy the menu as an unrelated side
+  // effect — masking exactly the bug this test exists to catch, not exercising a fix.)
+  test.setTimeout(20_000);
+  const secretKey = await enrol(context, extensionId, server, "pkvaultmenu");
+  const vault = await context.newPage();
+  await vault.goto(server.origin);
+  await vault.getByLabel("Login name").fill("pkvaultmenu");
+  await vault.getByLabel("Secret Key", { exact: true }).fill(secretKey);
+  await vault.getByLabel("Master password", { exact: true }).fill(TEST_ACCOUNT_PASSWORD);
+  await expect(vault.locator("iframe[data-rizzy-inline-menu]")).toBeVisible({ timeout: 10_000 });
+  await submitWebVaultLogin(vault);
 });

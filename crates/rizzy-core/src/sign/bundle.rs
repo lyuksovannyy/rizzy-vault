@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `public-key-bundle` statement and the bundle chain (CRYPTO.md §9.6, §10.2, §10.3,
 //! §11.3 step 3; ADR 0006 decisions 10–12).
 //!

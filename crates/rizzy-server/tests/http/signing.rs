@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Request signing over HTTP ([ADR 0028] item 5; CRYPTO.md §5.10): the bytes verified are the
 //! bytes sent, and the replay window.
 //!

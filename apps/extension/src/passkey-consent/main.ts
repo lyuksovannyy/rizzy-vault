@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The passkey consent iframe's own script (ADR 0039 §2; ADR 0014 §2-style framework-free,
 // same reasoning as `inline-menu/main.ts`: a handful of buttons with no state worth a
 // framework). Runs at the extension's own origin, inside an iframe `passkey-relay.ts` injects

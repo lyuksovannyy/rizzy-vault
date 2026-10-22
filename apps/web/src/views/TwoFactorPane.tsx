@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Server two-factor authentication (TOTP at login, CRYPTO.md §11.15): enrol with an
 // authenticator app, confirm with its current code, or remove it with a current code. The
 // enrolment secret is shown once, in the secret-field component. There is no QR code in M1:

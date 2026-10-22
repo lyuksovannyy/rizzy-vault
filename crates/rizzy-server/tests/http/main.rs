@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! In-process HTTP tests of `rizzy-vault`'s router over a real `SQLite` database: the security
 //! headers and CSP (INV-49), body limits, slow and anonymous clients, the listener's timeouts and
 //! bounded shutdown, the uniform error answers, the session gating and strict bodies of the
@@ -5,7 +7,8 @@
 //! `SQLite` with the data-key rotation end to end (`worker`: `secrets rotate --data-key`, the
 //! worker's re-seal, the old key dropped; and the recovery-wait setting), and key rotation end to end with `rizzy-client` (`rotation`: standard and full
 //! rotation, the revocation of CRYPTO.md §11.8, the `state_conflict` retry, ADR 0025). Retiring old OPAQUE
-//! setups end to end (`setups`, ADR 0031).
+//! setups end to end (`setups`, ADR 0031). Threat model INV-1 over captured request bodies
+//! (`password_equivalents`): registration, login and password change send only OPAQUE messages.
 //!
 //! ADR 0028's HTTP conventions are pinned by `conventions` (the error table and `Retry-After`,
 //! the one `401`, `Content-Length`, no CORS and no compression, the trusted-proxy rule,
@@ -20,10 +23,12 @@
 )]
 
 mod account;
+mod attack;
 mod common;
 mod conventions;
 mod headers;
 mod limits;
+mod password_equivalents;
 mod recovery;
 mod rotation;
 mod setups;

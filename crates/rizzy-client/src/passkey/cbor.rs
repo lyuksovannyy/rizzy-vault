@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The fixed, small set of CBOR structures `WebAuthn` needs: a COSE `EC2` key map for ES256,
 //! and the three-entry `"none"`-attestation `attestationObject` map (ADR 0039 §4, §5).
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Device authentication and request signing (CRYPTO.md §5.10; ROADMAP §4.3 "Request
 //! signing"; threat model Q-7).
 //!

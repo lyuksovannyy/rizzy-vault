@@ -1,6 +1,6 @@
 # Contributing to rizzy-vault
 
-rizzy-vault is at **M0 done, M1 in progress**. M1 step 1, the `rizzy-core` cryptography, is implemented. Steps 2 and 3 (the item schema and sync engine, the server) are in progress; step 4 (the client core and the `rv` CLI) is in progress; step 5 (the wasm bindings and web vault) is not started. The [README](README.md#status) has the details.
+rizzy-vault is at **M0 done, M1 in progress**, with M2 (browser extension and matching) under way too. M1 step 1, the `rizzy-core` cryptography, is implemented. Steps 2–5 (item schema and sync engine, server, client core and `rv` CLI, wasm bindings and web vault) all have code landed; none is formally closed. The [README](README.md#status) has the details.
 
 - **Most useful now:** review of [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), [docs/CRYPTO.md](docs/CRYPTO.md) and the [ADRs](docs/adr/README.md).
 - **Code PRs** in the ADR-first areas (see [ADR first](#adr-first)) are accepted only when an **Accepted** ADR covers them. ADRs [0020](docs/adr/0020-partial-supersession.md) (which carries ADR 0001 forward), [0016](docs/adr/0016-workspace-layout.md) and [0017](docs/adr/0017-licensing.md) (licensing and contribution terms) are Accepted. Until ADR 0017's App Store permission (Decision 3) is committed, only documentation PRs from outside contributors are merged.
@@ -26,31 +26,87 @@ Scope is defined in [docs/ROADMAP.md](docs/ROADMAP.md). A feature that is not th
    cargo install cargo-deny --locked
    ```
 
-Nothing else is needed today. The JavaScript toolchain for the web vault and extension arrives with [ADR 0014](docs/adr/0014-ui-stack.md).
+4. **Node.js 24 or later and pnpm**, for the web vault, its packages and the browser extension ([ADR 0014](docs/adr/0014-ui-stack.md)). Node's own corepack picks up the pinned pnpm version from `package.json`'s `packageManager` field:
+
+   ```sh
+   corepack enable
+   ```
+
+   `cargo xtask build-wasm` also needs `wasm-bindgen-cli` installed at the exact version `Cargo.lock` pins for `wasm-bindgen` (see the `web` job in [ci.yml](.github/workflows/ci.yml) for the install command).
 
 ## Checks to run before every push
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs exactly these, and a PR is not reviewed until they pass:
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs each of these as its own job, and a PR is not reviewed until they pass. This is also the list CLAUDE.md gives AI coding agents as "Before any push":
 
 ```sh
 cargo fmt --all -- --check
 cargo lint                          # alias: clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked     # CI runs this on Linux, macOS and Windows
-cargo check-wasm                    # alias: check -p rizzy-core -p rizzy-sync -p rizzy-proto -p rizzy-client -p rizzy-import --target wasm32-unknown-unknown --locked
+cargo check-wasm                    # alias: check -p rizzy-core -p rizzy-sync -p rizzy-proto -p rizzy-client -p rizzy-import -p rizzy-wasm -p rizzy-match --target wasm32-unknown-unknown --locked
 cargo deny check                    # advisories, licenses, bans, sources (deny.toml)
 cargo xtask check-deps              # crate-boundary and dependency rules (ADR 0016 §5, R1–R8; ADR 0009 feature sets, crypto crates with default-features = false); no unsafe keyword in first-party .rs files (ADR 0019 §4.1)
 cargo xtask check-clippy            # clippy.toml entries clippy ignores ("found a module", ADR 0016 §5)
+cargo xtask generate-tokens --check # every declared design-token pair meets WCAG AA contrast in both themes (no pair may ask for less than 3:1); the generated CSS and native-toolkit token files (Swift, Kotlin, XAML, QML) match packages/ui/tokens/tokens.json (ADR 0014 §5, ADR 0019 §13)
+cargo xtask check-tables            # not in CI yet: every table name after FROM/JOIN/INTO/UPDATE/TABLE/REFERENCES in the domain crates' queries/ and the migrations carries its owner's prefix (auth_, vault_), apart from the one foreign key to auth_accounts (id) ON DELETE CASCADE (ADR 0011 points 5–7, ADR 0016 R4); storage_ tables and backup queries are not checked yet
+cargo xtask check-spdx              # every first-party .rs/.ts/.tsx/.js/.mjs/.sh/.css/.html file starts with the SPDX header (ADR 0017 Decision 6); `--fix` inserts or corrects it
 cargo check --manifest-path fuzz/Cargo.toml --locked --bins               # fuzz targets still build
 cargo deny --manifest-path fuzz/Cargo.toml check                          # fuzz/Cargo.lock
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 cargo xtask check-signoff origin/main..HEAD                                # every commit signed off by its author (ADR 0017 §4)
 ```
 
+CI also runs two more jobs that the list above does not cover, for the web vault and browser-extension-facing code (ADR 0013 §4, ADR 0014; ci.yml jobs `web` and `bindings-baseline`):
+
+```sh
+cargo xtask build-wasm                                     # needs wasm-bindgen-cli at the exact version Cargo.lock pins
+pnpm install --frozen-lockfile
+cargo xtask check-js                                        # exact versions, pinned pnpm, empty install-script allow-list, deny.toml licences, pnpm audit
+pnpm run lint
+pnpm run build
+cargo xtask check-manifest                                  # not in CI yet: built extension manifests (Chromium, Firefox) against INV-40, ADR 0036 §4/§5, ADR 0040: no externally_connectable, allow-listed permissions/host_permissions/web_accessible_resources, all_frames: false, extension-pages CSP
+cargo build --locked -p rizzy-server --bin rizzy-vault     # so the end-to-end test below has a server binary
+pnpm run test
+pnpm run e2e                                                 # Playwright against rizzy-vault built with embed-web, including the accessibility audit (e2e/a11y.spec.ts) and the keyboard-only walk (e2e/keyboard-nav.spec.ts)
+pnpm --filter @rizzy-vault/extension exec playwright test e2e/a11y.spec.ts   # the extension's accessibility audit only (popup, options page, inline menu); the rest of its Playwright suite is not in CI yet
+cargo xtask expand-bindings                                 # regenerates crates/rizzy-wasm/generated/; CI fails on any diff from the committed baseline (ADR 0019 §4.1)
+```
+
+`cargo xtask check-manifest` is not yet a CI job: [`docs/HANDOFF.md`](docs/HANDOFF.md) lists wiring it (and `check-tables`) into `.github/workflows/` as blocked on the owner. Run it locally, right after `pnpm run build`, until that's wired.
+
+### What the accessibility checks cover
+
+ROADMAP §4.5 asks for keyboard-only use, screen-reader labels and WCAG AA contrast; ADR 0014 §5
+sets the checks. The automated ones:
+
+- **Token contrast** (`cargo xtask generate-tokens --check`, `crates/xtask/src/tokens.rs`): the
+  WCAG contrast ratio of every token pair `tokens.json` declares for text and controls, in both
+  themes, at 4.5:1 for text or 3:1 for large text and UI components; below AA fails. It covers the
+  declared pairs only.
+- **Rendered pages** (`apps/web/e2e/a11y.ts`, `apps/extension/e2e/a11y.ts`): axe-core's WCAG
+  2.0/2.1/2.2 A and AA rules and its best-practice rules on every screen and dialog of the web
+  vault and on the extension's popup, options page and inline menu, plus Chromium's own
+  accessibility tree (every focusable element exposed and named) and a Tab/Shift+Tab focus trap
+  check on every modal dialog. The web vault is also audited in the dark theme, under forced
+  colours (Windows High Contrast emulation) and at phone width.
+- **Keyboard only** (`apps/web/e2e/keyboard-nav.spec.ts`): every audited web vault screen reached
+  with Tab and operated with Enter, Space, Escape, the arrow keys or typing.
+
+What they do not cover: real screen readers (NVDA, JAWS, VoiceOver, TalkBack, Orca) — automated
+rules catch missing names, labels and structure, not whether the result is pleasant to use, so a
+UI change still needs a manual pass with one; Firefox (the Playwright suites run Chromium only);
+keyboard use of the extension (the popup and inline menu are audited, not walked by keyboard);
+undeclared token pairs; and the native clients. This repository's share of "native
+toolkits" is the generated token files under `packages/ui/tokens/generated/` staying in sync
+with the checked source; each native app's own contrast, high-contrast/increased-contrast mode and
+screen-reader checks live in that app's repository (ADR 0019 §6), set by its own ADR (ADR 0014
+§5).
+
 CI also builds the server image, [`deploy/Containerfile`](deploy/Containerfile), for `linux/amd64` and `linux/arm64` on every PR, each natively on its own runner. It pushes nothing. Locally: `docker build -f deploy/Containerfile .` (or `podman build`).
 
 Notes:
 
 - `cargo xtask check-signoff <base>..<head>` fails when any commit in the range lacks a `Signed-off-by:` trailer with its author's exact name and email (the email ignores case). Merge commits are checked too, so update a branch by rebasing. CI runs it on the PR's commits (`base.sha..head.sha`). On each push to `main` CI runs `cargo xtask check-signoff --squash <before>..<after>` instead: GitHub writes the squash commit, with the merger as author and the PR's `Signed-off-by:` lines in its body, so that mode only requires each pushed commit to keep at least one well-formed `Signed-off-by:` line anywhere in its message. See [Sign-off](#sign-off).
+- `cargo xtask check-spdx` covers the files ADR 0017 Decision 6 names — Rust, TypeScript/JavaScript, shell, CSS and HTML templates — listed with `git ls-files`, the same way `check-deps` does, minus `.claude/`, `.github/` and `crates/rizzy-wasm/generated/`. It does not cover `Cargo.toml` or other TOML/JSON/YAML config: Decision 6 does not name them, and a manifest's license is already `license.workspace = true`. `--fix` inserts a header line (plus a blank line, so a `//!` module doc's first paragraph never shares a line with it) or corrects a wrong one in place, and is idempotent. This check is not yet wired into CI (`.github/workflows/ci.yml`); that is a separate ask for the owner.
 - `cargo lint`, `cargo check-wasm` and `cargo xtask` are aliases defined in [`.cargo/config.toml`](.cargo/config.toml). `cargo xtask` runs the workspace's `xtask` crate.
 - `fuzz/` is its own workspace with its own `Cargo.lock` (ADR 0016 §7), so the workspace commands do not see it. A change to `rizzy-core`'s dependencies refreshes `fuzz/Cargo.lock` in the same change. `libfuzzer-sys` is `(MIT OR Apache-2.0) AND NCSA`. `deny.toml` allows NCSA for that crate alone, because it is reachable only from `fuzz/`, which never ships. Running the fuzz targets needs nightly and `cargo-fuzz`; CI does that in a weekly job ([`.github/workflows/fuzz.yml`](.github/workflows/fuzz.yml)) that never blocks a PR.
 - On Windows PowerShell, set the rustdoc flag with `$env:RUSTDOCFLAGS="-D warnings"` before the last command.
@@ -217,6 +273,53 @@ Rules:
 - Commit the `Cargo.lock` change in the same PR.
 - **A cryptographic crate** (anything that touches key material, randomness, or encryption, hashing or signature code paths) additionally needs the approval procedure and exact pin from [ADR 0009](docs/adr/0009-crypto-dependency-policy.md#approving-a-new-crypto-crate).
 - Licenses must be on the allow-list in [`deny.toml`](deny.toml). The policy behind it is [ADR 0017](docs/adr/0017-licensing.md#5-the-dependency-license-allow-list-is-denytoml).
+
+## Equivalence list contributions
+
+The global equivalence list ([ADR 0038](docs/adr/0038-equivalent-domain-list.md)) is data
+every client trusts for autofill, so adding or changing a group has its own path on top of the
+general [workflow](#workflow) above:
+
+1. **Propose the group as a GitHub issue first**, from the
+   [`equivalence-group`](.github/ISSUE_TEMPLATE/equivalence-group.yml) issue template, under
+   [ADR 0038 §4](docs/adr/0038-equivalent-domain-list.md#4-review-rules-for-list-entries)'s
+   rules. What it needs:
+   - **evidence of shared ownership** for every domain, and separately for every ccTLD
+     pairing (`brand.com` and `brand.co.uk` each need their own proof, not an assumption from
+     the base domain): a shared WHOIS registrant/organisation, or a public
+     cross-referencing statement on both domains (a `security.txt`, a support article).
+     "Looks plausible next to a big brand" is not proof;
+   - whether any domain is third-party-hostable, and the Public Suffix List entry that
+     splits it by registrant if so (`third_party_hostable = 1` in
+     `data/equivalence/groups.txt` is the explicit, reviewed exception, never silently
+     assumed);
+   - a note of the next scheduled re-check (at minimum every release cycle).
+
+   The project owner creates an `equivalence-list` label in the repository's Settings →
+   Labels; the template applies it automatically once that label exists, and it is the
+   review queue for both the issue and the PR that follows.
+2. **Open the PR** that edits [`data/equivalence/groups.txt`](data/equivalence/groups.txt)
+   once the issue's evidence stands up to review, using the
+   [`equivalence-list`](.github/PULL_REQUEST_TEMPLATE/equivalence-list.md) pull request
+   template and linking the issue, following
+   [docs/equivalence-list.md §2](docs/equivalence-list.md#2-editing-the-source-file).
+3. **An entry without ownership proof, or without proof for every ccTLD variant, is
+   rejected.** A domain a scheduled re-check finds lapsed is removed, not kept on the benefit
+   of the doubt (ADR 0038 §4, points 1, 4 and 5).
+4. **Review is the owner's own act; so is signing and shipping a new list version.** With
+   one maintainer, the owner reviews the PR and records the evidence cited in it; the
+   two-maintainer rule in [ADR 0038 §4](docs/adr/0038-equivalent-domain-list.md#4-review-rules-for-list-entries)
+   becomes real review the moment a second maintainer exists. No community PR ships a signed
+   list on its own: merging a PR only changes the human-editable
+   `data/equivalence/groups.txt`. Separately, and only the owner does this
+   ([docs/equivalence-list.md](docs/equivalence-list.md)), the reviewed source is signed
+   offline with a dedicated Ed25519 keypair kept apart from every release-signing credential
+   (ADR 0038 §3), under a `list_version` strictly greater than every version published
+   before it (clients reject an equal or lower version, ADR 0038 §2). The signed
+   bytes and the pinned public key are then committed together into
+   `crates/rizzy-match/src/compiled.rs`'s `GLOBAL_LIST` and `LIST_SIGNING_PUBLIC_KEY`, so a
+   new or updated list always ships inside a client release — there is no out-of-band list
+   update in M2.
 
 ## AI coding agents
 

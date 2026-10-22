@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The relay content script <-> passkey-consent iframe channel (`passkey-consent/protocol.ts`),
 // the same asymmetric-trust pattern as `inline-menu/protocol.ts`'s own tested validators
 // (`inline-menu-protocol.test.ts`) — this validator only bounds the shape before display; the

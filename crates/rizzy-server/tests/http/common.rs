@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The harness: a server started the way `rizzy-vault` starts (a secrets file on its own
 //! directory, a real `SQLite` database in a data directory, the startup checks), its router driven
 //! in-process with `tower::ServiceExt::oneshot`.
@@ -108,6 +110,22 @@ pub(crate) struct Server {
     pub(crate) services: Services,
     /// The router of `api` and `web`.
     pub(crate) router: Router,
+    /// Every request `rotation::call` sent and its answer, in order: the captured HTTP bodies
+    /// of the request-capture tests (threat model INV-1, INV-15).
+    pub(crate) exchanges: std::sync::Mutex<Vec<Exchange>>,
+}
+
+/// One request and its answer, as sent and received.
+#[derive(Clone)]
+pub(crate) struct Exchange {
+    /// The path.
+    pub(crate) path: String,
+    /// The request body.
+    pub(crate) request: Vec<u8>,
+    /// The answer's status.
+    pub(crate) status: StatusCode,
+    /// The answer's body.
+    pub(crate) response: Vec<u8>,
 }
 
 /// A response, collected.
@@ -183,7 +201,23 @@ impl Server {
             dir,
             services,
             router,
+            exchanges: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Records a request to `path` with `request` as its body, and its answer.
+    pub(crate) fn record(&self, path: &str, request: &[u8], reply: &Reply) {
+        self.exchanges.lock().unwrap().push(Exchange {
+            path: path.to_owned(),
+            request: request.to_vec(),
+            status: reply.status,
+            response: reply.body.clone(),
+        });
+    }
+
+    /// Every exchange recorded so far.
+    pub(crate) fn exchanges(&self) -> Vec<Exchange> {
+        self.exchanges.lock().unwrap().clone()
     }
 
     /// Stops the server: closes the pools, which releases the writer lock, and hands back its

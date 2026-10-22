@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! HOTP and TOTP, `otpauth://` URIs, and server-side 2FA verification (CRYPTO.md §11.15;
 //! RFC 4226, RFC 6238).
 //!

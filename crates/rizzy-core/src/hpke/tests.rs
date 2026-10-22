@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! HPKE tests: RFC 7748 and RFC 9180 vectors through this module's code, independent known
 //! answers for the device grant, round trips in both modes, mode separation, and the negative
 //! tests of CRYPTO.md §15 item 4 for HPKE purposes.
@@ -459,6 +461,9 @@ fn a_base_purpose_never_accepts_psk_mode() {
     assert_eq!(opens, 0);
 }
 
+/// A server that relabels a grant with a symmetric or reserved algorithm.
+///
+/// ETH class: 4 (threat model §5.2, envelope and algorithm downgrade).
 #[test]
 fn symmetric_and_reserved_algorithms_are_rejected_before_crypto() {
     let rcpt = recipient();

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! ADR 0032 "Healing a key rotation made after a backup" end to end: `rv` against the real
 //! `rizzy-vault` binary, put back with `rizzy-vault restore` after a backup that predates a
 //! standard rotation, a revocation with a full rotation, a Secret Key change and a full

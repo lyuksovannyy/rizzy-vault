@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the `/api/v1` types of `rizzy-proto` on arbitrary JSON bytes: every request type the
 //! server parses from a client, and every response type a client parses from a server the
 //! threat model does not trust (ADR 0002 point 3; threat model §7.6 "D", A2). None may panic,

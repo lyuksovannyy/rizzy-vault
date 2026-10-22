@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! An unlocked web-vault session: the one handle that holds keys (ADR 0013 §3 rule 1, "Hosts
 //! hold opaque handles").
 //!
@@ -16,6 +18,10 @@
 //! | List, view, reveal | [`Session::items`], [`Session::item`], [`Session::item_fields`], [`Session::reveal_field`] |
 //! | Save | [`Session::create_item`], [`Session::edit_item`] with an [`ItemDraft`] |
 //! | Trash, restore, purge | [`Session::trash_item`], [`Session::restore_item`], [`Session::purge_item`] |
+//! | Password history | [`Session::password_history`] (dates only), [`Session::reveal_password_history`] (one value) |
+//! | Item history | [`Session::item_history`] (dates only, every field), [`Session::reveal_field_history`] (one value), [`Session::restore_field_history`] |
+//! | Conflict ("keep both / pick one") | [`Session::field_conflict`] (concealed values withheld), [`Session::reveal_conflict_value`] (one value), [`Session::resolve_conflict_pick`], [`Session::resolve_conflict_keep_both`] |
+//! | Late-edit and trash notices | [`Session::take_notices`] after a sync; [`Session::restore_late_as_new`] |
 //! | TOTP code | [`Session::totp`] |
 //! | Passkey assertion | [`Session::passkey_assertion`] ([`create_passkey`](crate::passkey::create_passkey) is stateless, module docs) |
 //! | Export | [`Session::reauth`] + [`Session::confirm_reauth`], then [`Session::export_encrypted`], or [`Session::plaintext_warning_shown`] + [`Session::export_plaintext`] after the hold |
@@ -47,6 +53,7 @@
 //!   `account/state` first.
 
 use core::fmt;
+use std::collections::BTreeSet;
 
 use rizzy_client::ClientError;
 use rizzy_client::account::VerifiedAccount;
@@ -56,22 +63,28 @@ use rizzy_client::export::gate::{self, ExportGate, check_export_password};
 use rizzy_client::export::plaintext::{
     PLAINTEXT_EXPORT_PHRASE, PLAINTEXT_EXPORT_WARNING, PlaintextExportAck, csv_export_warning,
 };
-use rizzy_client::items::{FieldEdit, ItemId};
+use rizzy_client::items::{Dot, FieldEdit, ItemId, TRASH_RETENTION_MS};
 use rizzy_client::login::WebSession;
+use rizzy_client::matching::{
+    FrameContext, ItemUri, SavedUri, decide_with_settings, vault_item_uris,
+};
 use rizzy_client::passkey::get_assertion;
 use rizzy_client::rizzy_core::ids::AccountId;
 use rizzy_client::rizzy_core::item::key::ElementId;
 use rizzy_client::rizzy_core::item::schema::{
-    ATTR_CREDENTIAL_ID, ATTR_PRIVATE_KEY, LIST_PASSKEY, LOGIN_TOTP,
+    ATTR_ALG, ATTR_CREATED_MS, ATTR_CREDENTIAL_ID, ATTR_PRIVATE_KEY, ATTR_RP_ID, ATTR_USER_HANDLE,
+    LIST_PASSKEY, LOGIN_TOTP,
 };
 use rizzy_client::rizzy_core::item::value::ValueRef;
 use rizzy_client::rizzy_core::passkey::Es256SigningKey;
 use rizzy_client::rizzy_core::sign::DeviceKind;
 use rizzy_client::rizzy_core::totp::{OtpAuthUri, TotpParams, TotpSecret};
 use rizzy_client::rizzy_import::{self, Format};
+use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::rizzy_proto::http::paths;
 use rizzy_client::rizzy_proto::totp::TotpEnrolStartResponse;
 use rizzy_client::rizzy_proto::wire::SessionToken;
+use rizzy_client::settings::{PendingSettingsChange, SettingsCache, SettingsEdit, change_settings};
 use rizzy_client::sync::{Authors, VaultSync};
 use rizzy_client::two_factor::{TotpEnrolment, disable_request};
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -79,9 +92,13 @@ use zeroize::Zeroizing;
 
 use crate::error::{CoreError, CoreResult, IMPORT_FAILED, LOCKED, UNKNOWN_FORMAT, WRONG_STATE};
 use crate::http::{self, HttpRequest};
-use crate::items::{self, FieldView, ItemDraft, ItemSummary, hex, type_from_name, visible_item};
+use crate::items::{
+    self, ConflictValueView, FieldHistoryView, FieldView, HistoryEntryView, ItemDraft, ItemSummary,
+    hex, type_from_name, visible_item,
+};
 use crate::login::{Credentials, LoginFlow, Purpose};
-use crate::passkey::PasskeyAssertion;
+use crate::matching::{self, MatchDecision, MatchSettingsView};
+use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
 use crate::rng::{Rng, os_rng};
 use crate::secret::take_secret;
 use crate::sync::{Ctx, Signer, SyncDriver};
@@ -120,6 +137,23 @@ struct Inner {
     gate: ExportGate,
     /// The RNG.
     rng: Rng,
+    /// The "deleted on X while it was being edited on Y" notices already handed to the host
+    /// (item, the losing Trashed dot, the displayed Active dot), so that
+    /// [`Session::take_notices`] hands each one over once. Keyed on the dots, not just the
+    /// device pair: a conflict that resolves and then recurs between the very same two devices
+    /// is a new conflict with new dots, and must be handed over too.
+    ///
+    /// Session memory only, on purpose: it is dropped with the session, so a notice shows again
+    /// after the next unlock. Keeping it across sessions would mean a new record in the local
+    /// cache, a persistent-format change that needs an ADR 0026 amendment first (gap 02). The
+    /// late-edit notices' marks live in the same place for the same reason (`rizzy-client`'s
+    /// `VaultSync::mark_late_edits_surfaced`).
+    shown_trash_notices: BTreeSet<(ItemId, Dot, Dot)>,
+    /// The account settings of the verified account, read once per object (ADR 0042 §6).
+    settings: SettingsCache,
+    /// A settings change sent to `account/commit` and not yet answered, or kept after a
+    /// `state_conflict` for a retry.
+    settings_pending: Option<PendingSettingsChange>,
 }
 
 /// An unlocked web-vault session (module docs). `Debug` shows nothing secret.
@@ -176,6 +210,9 @@ impl Session {
                 sync: SyncDriver::default(),
                 gate: ExportGate::new(),
                 rng: os_rng(),
+                shown_trash_notices: BTreeSet::new(),
+                settings: SettingsCache::default(),
+                settings_pending: None,
             })),
         })
     }
@@ -467,6 +504,316 @@ impl Session {
         self.lifecycle(id, VaultSync::purge_item::<Rng>, now_ms)
     }
 
+    /// Purges every trashed item whose retention period has elapsed (gap 00; ADR 0012 §5,
+    /// ADR 0018 §9, §11). The host calls this once after a successful sync (module docs of
+    /// `rizzy_client::items::VaultSync::auto_purge_due`), while the session is unlocked, so it
+    /// runs only when this device is online. Returns the purged items' ids, ascending; empty
+    /// when nothing was due.
+    ///
+    /// # Errors
+    /// `locked`; `wrong_state` while a sync runs.
+    #[wasm_bindgen(js_name = autoPurge)]
+    pub fn auto_purge(&mut self, now_ms: u64) -> Result<Vec<String>, CoreError> {
+        let inner = self.writable()?;
+        let purged = inner.vault.auto_purge_due(
+            &mut inner.rng,
+            &inner.unlocked,
+            now_ms,
+            TRASH_RETENTION_MS,
+        )?;
+        Ok(purged.into_iter().map(|id| hex(id.as_bytes())).collect())
+    }
+
+    /// One item's password history without values (gap 01; [`crate::items`] module docs):
+    /// source, position and date per entry. Empty when the item has none.
+    ///
+    /// # Errors
+    /// As [`Session::item`].
+    #[wasm_bindgen(js_name = passwordHistory)]
+    pub fn password_history(&self, id: &str) -> Result<Vec<HistoryEntryView>, CoreError> {
+        let vault = &self.inner()?.vault;
+        let item = visible_item(vault, id)?;
+        Ok(items::password_history(vault, item))
+    }
+
+    /// The value of one password-history entry, as [`Session::password_history`] listed it:
+    /// call it only on the user's request (ADR 0013 §3 rule 3). `entry_id` is the entry's own
+    /// id as the listing gave it ([`crate::items::HistoryEntryView::id`]); an entry at `index`
+    /// with another id is refused, so a listing made stale by a sync never reveals a value
+    /// under another entry's identity.
+    ///
+    /// # Errors
+    /// As [`Session::item`]; `invalid_input` for an unknown source; `unknown_item` for an
+    /// entry that is not there (any more) or whose id differs.
+    #[wasm_bindgen(js_name = revealPasswordHistory)]
+    pub fn reveal_password_history(
+        &self,
+        id: &str,
+        source: &str,
+        index: usize,
+        entry_id: &str,
+    ) -> Result<String, CoreError> {
+        let vault = &self.inner()?.vault;
+        let item = visible_item(vault, id)?;
+        Ok(items::reveal_history(vault, item, source, index, entry_id)?
+            .as_str()
+            .to_owned())
+    }
+
+    /// Every field's history without values (gap "item history"; [`crate::items`] module docs;
+    /// ROADMAP §4.2 "Item revision history (restore old versions)", M3): generalizes
+    /// [`Session::password_history`] to every field. Empty when the item has none.
+    ///
+    /// # Errors
+    /// As [`Session::item`].
+    #[wasm_bindgen(js_name = itemHistory)]
+    pub fn item_history(&self, id: &str) -> Result<Vec<FieldHistoryView>, CoreError> {
+        let vault = &self.inner()?.vault;
+        let item = visible_item(vault, id)?;
+        Ok(items::item_history(vault, item))
+    }
+
+    /// The value of one field-history entry, as [`Session::item_history`] listed it: call it
+    /// only on the user's request (ADR 0013 §3 rule 3). As [`Session::reveal_password_history`],
+    /// generalized to any field; `key` scopes `index`/`entry_id`, so an id from one field's
+    /// listing never reveals another field's value even when the two share a dot
+    /// ([`crate::items`] module docs).
+    ///
+    /// # Errors
+    /// As [`Session::item`]; `unknown_item` for an entry that is not there (any more) or whose
+    /// id differs; `invalid_input` for a value with no text form.
+    #[wasm_bindgen(js_name = revealFieldHistory)]
+    pub fn reveal_field_history(
+        &self,
+        id: &str,
+        key: &str,
+        index: usize,
+        entry_id: &str,
+    ) -> Result<String, CoreError> {
+        let vault = &self.inner()?.vault;
+        let item = visible_item(vault, id)?;
+        Ok(
+            items::reveal_field_history(vault, item, key, index, entry_id)?
+                .as_str()
+                .to_owned(),
+        )
+    }
+
+    /// Restores one field-history entry as the field's current value (ROADMAP §4.2): an
+    /// ordinary edit (`rizzy_client::items::VaultSync::restore_field_history`), so it syncs and
+    /// merges like any other. `key`, `index` and `entry_id` name the entry exactly as
+    /// [`Session::item_history`] listed it, checked the same way
+    /// [`Session::reveal_field_history`] is, so a sync between the listing and this call never
+    /// restores a value under the wrong identity.
+    ///
+    /// # Errors
+    /// As [`Session::edit_item`]; `unknown_item` for an entry that is not there (any more) or
+    /// whose id differs.
+    #[wasm_bindgen(js_name = restoreFieldHistory)]
+    pub fn restore_field_history(
+        &mut self,
+        id: &str,
+        key: &str,
+        index: usize,
+        entry_id: &str,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let inner = self.writable()?;
+        let item = items::item_id(id)?;
+        let dot = items::restore_field_history_dot(&inner.vault, item, key, index, entry_id)?;
+        inner.vault.restore_field_history(
+            &mut inner.rng,
+            &inner.unlocked,
+            item,
+            key,
+            dot,
+            now_ms,
+        )?;
+        Ok(())
+    }
+
+    /// A conflicting field's distinct values (ROADMAP §4.5 "keep both / pick one"; ADR 0018
+    /// §6; [`crate::items`] module docs), the displayed one first, concealed values withheld.
+    /// Empty when the field does not conflict.
+    ///
+    /// # Errors
+    /// As [`Session::item`]; `invalid_input` for a key outside the grammar.
+    #[wasm_bindgen(js_name = fieldConflict)]
+    pub fn field_conflict(&self, id: &str, key: &str) -> Result<Vec<ConflictValueView>, CoreError> {
+        let vault = &self.inner()?.vault;
+        let item = visible_item(vault, id)?;
+        items::field_conflict(vault, item, key)
+    }
+
+    /// One conflicting value as text, concealed or not: call it only on the user's request (ADR
+    /// 0013 §3 rule 3). `key`, `index` and `value_id` name the value exactly as
+    /// [`Session::field_conflict`] listed it.
+    ///
+    /// # Errors
+    /// As [`Session::item`]; `unknown_item` for a value that is not listed (any more) under
+    /// that index and id; `invalid_input` for a Cleared value or one with no text form.
+    #[wasm_bindgen(js_name = revealConflictValue)]
+    pub fn reveal_conflict_value(
+        &self,
+        id: &str,
+        key: &str,
+        index: usize,
+        value_id: &str,
+    ) -> Result<String, CoreError> {
+        let vault = &self.inner()?.vault;
+        let item = visible_item(vault, id)?;
+        Ok(
+            items::reveal_conflict_value(vault, item, key, index, value_id)?
+                .as_str()
+                .to_owned(),
+        )
+    }
+
+    /// "Pick one": writes the named value back to the field, an ordinary edit whose context
+    /// covers every conflicting value, so the conflict ends on every device that syncs it
+    /// (`rizzy_client::sync::VaultSync::resolve_conflict_pick`).
+    ///
+    /// # Errors
+    /// As [`Session::edit_item`]; `unknown_item` for a value that is not listed (any more)
+    /// under that index and id.
+    #[wasm_bindgen(js_name = resolveConflictPick)]
+    pub fn resolve_conflict_pick(
+        &mut self,
+        id: &str,
+        key: &str,
+        index: usize,
+        value_id: &str,
+        now_ms: u64,
+    ) -> Result<(), CoreError> {
+        let inner = self.writable()?;
+        let item = items::item_id(id)?;
+        let dot = items::conflict_value(&inner.vault, item, key, index, value_id)?.dot;
+        inner.vault.resolve_conflict_pick(
+            &mut inner.rng,
+            &inner.unlocked,
+            item,
+            key,
+            dot,
+            now_ms,
+        )?;
+        Ok(())
+    }
+
+    /// "Keep both": keeps the named value in the field and moves every other non-empty value
+    /// into a new website (for a website) or a new custom field (hidden when the field is
+    /// concealed), labelled `label` or, for a custom field without one, with its own label
+    /// (`rizzy_client::sync::VaultSync::resolve_conflict_keep_both`). Returns the new
+    /// elements' ids.
+    ///
+    /// # Errors
+    /// As [`Session::edit_item`]; `unknown_item` for a value that is not listed (any more)
+    /// under that index and id; `invalid_edit` for a field only "pick one" resolves (not
+    /// text, or no second value to keep); `invalid_input` for a fixed field without a label.
+    #[wasm_bindgen(js_name = resolveConflictKeepBoth)]
+    pub fn resolve_conflict_keep_both(
+        &mut self,
+        id: &str,
+        key: &str,
+        index: usize,
+        value_id: &str,
+        label: Option<String>,
+        now_ms: u64,
+    ) -> Result<Vec<String>, CoreError> {
+        let inner = self.writable()?;
+        let item = items::item_id(id)?;
+        let keep = items::conflict_value(&inner.vault, item, key, index, value_id)?.dot;
+        let label = label.map(Zeroizing::new);
+        let elements = inner.vault.resolve_conflict_keep_both(
+            &mut inner.rng,
+            &inner.unlocked,
+            item,
+            key,
+            keep,
+            label.as_ref().map(|l| l.as_str()),
+            now_ms,
+        )?;
+        Ok(elements.iter().map(|e| e.as_str().to_owned()).collect())
+    }
+
+    /// The notices not yet handed over in this session (gap 02), each handed over once: an edit
+    /// that arrived for an item deleted permanently (ADR 0018 §3 "Surfacing"; the host offers
+    /// [`Session::restore_late_as_new`]), and an item deleted on one device while it was being
+    /// edited on another (ADR 0012 §5 "Active wins"), with [`Notice::conflict_id`] set so a
+    /// second, genuinely distinct race between the same two devices on the same item is not
+    /// mistaken for a repeat of the first. Device ids only; the host names them from
+    /// [`Session::devices`]. The host calls this after each sync.
+    ///
+    /// "Handed over once" lasts this session only: the marks live in memory (the late-edit
+    /// marks in the vault's merge, the trash notices in this session), so the next unlock shows
+    /// the notices again. Persisting them is an ADR 0026 cache-format change (gap 02).
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(js_name = takeNotices)]
+    pub fn take_notices(&mut self) -> Result<Vec<Notice>, CoreError> {
+        let inner = self.inner_mut()?;
+        let mut out = Vec::new();
+        for item in inner.vault.item_ids() {
+            let late = inner.vault.late_edit_devices(item);
+            if !late.is_empty() {
+                inner.vault.mark_late_edits_surfaced(item);
+                out.push(Notice {
+                    kind: NOTICE_LATE_EDIT,
+                    item: hex(item.as_bytes()),
+                    devices: late.iter().map(|d| hex(d.as_bytes())).collect(),
+                    conflict_id: None,
+                });
+            }
+            if let Some(trash) = inner.vault.concurrent_trash(item)
+                && inner
+                    .shown_trash_notices
+                    .insert((item, trash.trashed_dot, trash.edited_dot))
+            {
+                out.push(Notice {
+                    kind: NOTICE_CONCURRENT_TRASH,
+                    item: hex(item.as_bytes()),
+                    devices: vec![
+                        hex(trash.trashed_by.as_bytes()),
+                        hex(trash.edited_by.as_bytes()),
+                    ],
+                    conflict_id: Some(concurrent_trash_conflict_id(
+                        trash.trashed_dot,
+                        trash.edited_dot,
+                    )),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Restores the late edits of an item deleted permanently as a new item of `item_type`,
+    /// the type the user picked (ADR 0018 §3 "Surfacing": never inferred). Returns the new
+    /// item's id; the deleted item stays deleted.
+    ///
+    /// # Errors
+    /// `locked`; `wrong_state` while a sync runs; `invalid_input` for an id that is not 32 hex
+    /// digits or an unknown type; `unknown_item` unless the item was deleted permanently;
+    /// `read_only`.
+    #[wasm_bindgen(js_name = restoreLateAsNew)]
+    pub fn restore_late_as_new(
+        &mut self,
+        id: &str,
+        item_type: &str,
+        now_ms: u64,
+    ) -> Result<String, CoreError> {
+        let item_type = type_from_name(item_type)?;
+        let inner = self.writable()?;
+        let item = items::item_id(id)?;
+        let restored = inner.vault.restore_late_as_new_item(
+            &mut inner.rng,
+            &inner.unlocked,
+            item,
+            item_type,
+            now_ms,
+        )?;
+        Ok(hex(restored.as_bytes()))
+    }
+
     /// The current TOTP code of an item's `login.totp`, which holds an `otpauth://` URI or a
     /// bare Base32 secret (then SHA-1, 6 digits, 30 s; CRYPTO.md §11.15), at `now_ms`.
     ///
@@ -508,11 +855,17 @@ impl Session {
     /// item `id`, ADR 0039 §1, §2; [`crate::passkey`] module docs). The stored private key is
     /// read and used here, never returned: only the resulting [`PasskeyAssertion`] crosses to
     /// JavaScript, the same pattern [`Session::totp`] uses for a different concealed field.
+    /// [`PasskeyAssertion::user_handle`] is read back the same way `credential_id` already was
+    /// (gap 35(a) in the M2 gap audit).
     ///
     /// `origin` must be the browser-verified origin
     /// ([`rizzy_client::passkey`]'s `verify_rp_id` scope-boundary docs — this call cannot
     /// establish that itself, [`crate::passkey`] module docs); `rp_id` is the page's requested
     /// `rpId`, already defaulted by the caller to `origin`'s host if the page omitted it.
+    ///
+    /// This call does **not** check `passkey_id` against the page's `allowCredentials` — that
+    /// is the caller's job, done *before* this call, by filtering
+    /// [`Session::passkey_candidates`]'s result (gap 35(b); [`crate::passkey`] module docs).
     ///
     /// # Errors
     /// As [`Session::item`]; `invalid_input` when `passkey_id` is not a valid element id, the
@@ -532,17 +885,20 @@ impl Session {
         let bad = || CoreError::from(ClientError::InvalidInput);
         let element = ElementId::from_bytes(items::parse_id(passkey_id)?);
 
-        let credential_id_key = element
-            .key(LIST_PASSKEY, ATTR_CREDENTIAL_ID)
-            .map_err(|_| bad())?;
-        let credential_id = match vault
-            .field_value(item, credential_id_key.as_str())
-            .ok_or_else(bad)?
-            .decode()
-        {
-            Ok(ValueRef::Bytes(bytes)) => bytes.to_vec(),
-            _ => return Err(bad()),
+        let bytes_field = |attr: &str| -> Result<Vec<u8>, CoreError> {
+            let key = element.key(LIST_PASSKEY, attr).map_err(|_| bad())?;
+            match vault
+                .field_value(item, key.as_str())
+                .ok_or_else(bad)?
+                .decode()
+            {
+                Ok(ValueRef::Bytes(bytes)) => Ok(bytes.to_vec()),
+                _ => Err(bad()),
+            }
         };
+
+        let credential_id = bytes_field(ATTR_CREDENTIAL_ID)?;
+        let user_handle = bytes_field(ATTR_USER_HANDLE)?;
 
         let private_key_key = element
             .key(LIST_PASSKEY, ATTR_PRIVATE_KEY)
@@ -556,8 +912,71 @@ impl Session {
             _ => return Err(bad()),
         };
 
-        let assertion = get_assertion(&signing_key, &credential_id, origin, rp_id, challenge)?;
+        let assertion = get_assertion(
+            &signing_key,
+            &credential_id,
+            &user_handle,
+            origin,
+            rp_id,
+            challenge,
+        )?;
         Ok(assertion.into())
+    }
+
+    /// Every stored passkey's non-secret metadata on item `id` (`passkey/<id>/…`; ADR 0039
+    /// §1), for the host to list `navigator.credentials.get()`/`.create()` candidates (gaps
+    /// 35(a)/(b) in the M2 gap audit; [`crate::passkey`] module docs) — never `private_key`,
+    /// which stays in Rust and is read only by [`Session::passkey_assertion`].
+    ///
+    /// # Errors
+    /// As [`Session::item`].
+    #[wasm_bindgen(js_name = passkeyCandidates)]
+    pub fn passkey_candidates(&self, id: &str) -> Result<Vec<PasskeyCandidate>, CoreError> {
+        let vault = &self.inner()?.vault;
+        let item = visible_item(vault, id)?;
+        let mut out = Vec::new();
+        for element in vault.list_elements(item, LIST_PASSKEY) {
+            let element_id = element.element.as_str();
+            let key = |attr: &str| format!("{LIST_PASSKEY}/{element_id}/{attr}");
+            let text = |attr: &str| match vault.field_value(item, &key(attr))?.decode() {
+                Ok(ValueRef::Text(text)) => Some(text.to_owned()),
+                _ => None,
+            };
+            let bytes = |attr: &str| match vault.field_value(item, &key(attr))?.decode() {
+                Ok(ValueRef::Bytes(bytes)) => Some(bytes.to_vec()),
+                _ => None,
+            };
+            let enum_value = |attr: &str| match vault.field_value(item, &key(attr))?.decode() {
+                Ok(ValueRef::Enum(value)) => Some(value),
+                _ => None,
+            };
+            let u64_value = |attr: &str| match vault.field_value(item, &key(attr))?.decode() {
+                Ok(ValueRef::U64(value)) => Some(value),
+                _ => None,
+            };
+
+            // A passkey element with a missing or mistyped required field is skipped, not an
+            // error for the whole list: one malformed element must not hide every other
+            // account's candidates (the same "a bad entry must not fail everything else" rule
+            // `decide_candidates` already applies to a saved URI that fails to normalise).
+            let (Some(rp_id), Some(user_handle), Some(credential_id), Some(alg)) = (
+                text(ATTR_RP_ID),
+                bytes(ATTR_USER_HANDLE),
+                bytes(ATTR_CREDENTIAL_ID),
+                enum_value(ATTR_ALG),
+            ) else {
+                continue;
+            };
+            out.push(PasskeyCandidate {
+                element_id: element_id.to_owned(),
+                rp_id,
+                user_handle,
+                credential_id,
+                alg,
+                created_ms: u64_value(ATTR_CREATED_MS).unwrap_or(0),
+            });
+        }
+        Ok(out)
     }
 
     /// The vault as an encrypted export file (CRYPTO.md §11.14; ADR 0027), under a new
@@ -908,6 +1327,183 @@ impl Session {
     }
 }
 
+/// Account settings: the match default and the equivalence groups (ADR 0037 §6–§7; ADR 0042).
+///
+/// Reading goes through `rizzy_client::settings::SettingsCache`, so the `ACCOUNT_SETTINGS` of the
+/// session's verified account is decrypted and parsed once per object (ADR 0042 §6). A change is
+/// one `account/commit` (ADR 0042 §5): one of the `…Request` calls below builds it and returns the
+/// request; the host sends it and passes the answer to [`Session::settings_respond`]. On
+/// `server_state_conflict` the host syncs (the sync's `account/state` step refreshes the account)
+/// and calls [`Session::settings_retry_request`], which lets `CasRetry` decide and redoes the same
+/// edit on the current record. The server takes a settings commit only over a fresh OPAQUE
+/// session (CRYPTO.md §11 "Replacing credentials"): a web session older than five minutes gets
+/// `server_fresh_session_required`, and the host asks the user to log in again.
+#[wasm_bindgen]
+impl Session {
+    /// The account's matching settings, against this build's global list.
+    ///
+    /// # Errors
+    /// `locked`; `settings_update_required` for settings a newer rizzy-vault wrote;
+    /// `invalid_server_response` for settings that do not open or parse; `account_key_rotated`.
+    #[wasm_bindgen(js_name = matchSettings)]
+    pub fn match_settings(&mut self) -> Result<MatchSettingsView, CoreError> {
+        let inner = self.inner_mut()?;
+        let record = inner.settings.get(&inner.account, &inner.unlocked)?;
+        Ok(matching::settings_view(record.matching()))
+    }
+
+    /// The autofill candidates among this vault's items for `page_url` as a top frame, under the
+    /// account's settings (ADR 0037 §4; ADR 0042 §6): what the extension would offer there. The
+    /// settings screen uses it to show what a change does.
+    ///
+    /// # Errors
+    /// `locked`; as [`Session::match_settings`]; `invalid_input` if `page_url` does not parse.
+    #[wasm_bindgen(js_name = matchCandidates)]
+    pub fn match_candidates(&mut self, page_url: &str) -> Result<MatchDecision, CoreError> {
+        let inner = self.inner_mut()?;
+        let record = inner.settings.get(&inner.account, &inner.unlocked)?;
+        let saved = vault_item_uris(&inner.vault);
+        let uris: Vec<ItemUri<'_>> = saved.iter().map(SavedUri::as_item_uri).collect();
+        let frame = FrameContext {
+            is_top_frame: true,
+            frame_origin: page_url,
+        };
+        let decision = decide_with_settings(page_url, &frame, &uris, record)?;
+        Ok(matching::decision_view(decision))
+    }
+
+    /// Sets the account-level match default (`0x0001`–`0x0006`): the commit request.
+    ///
+    /// # Errors
+    /// `invalid_input` for `0x0000` or an unassigned value; as the private `settings_change` (impl docs).
+    #[wasm_bindgen(js_name = setMatchDefaultRequest)]
+    pub fn set_match_default_request(&mut self, mode: u16) -> Result<HttpRequest, CoreError> {
+        let mode = matching::default_mode_of(mode)?;
+        self.settings_change(SettingsEdit::SetMatchDefault(mode))
+    }
+
+    /// Adds a user-defined equivalence group of `domains` (2 to 64, each a registrable domain):
+    /// the commit request.
+    ///
+    /// # Errors
+    /// `equivalence_domain_rejected` for a public suffix or a subdomain; `invalid_input` for a
+    /// domain that does not normalise or a bad count; `settings_limit_reached` past 64 groups;
+    /// as the private `settings_change` (impl docs).
+    #[wasm_bindgen(js_name = addUserGroupRequest)]
+    pub fn add_user_group_request(
+        &mut self,
+        domains: Vec<String>,
+    ) -> Result<HttpRequest, CoreError> {
+        self.settings_change(SettingsEdit::AddUserGroup(domains))
+    }
+
+    /// Removes the user-defined group `id` (hex): the commit request.
+    ///
+    /// # Errors
+    /// `invalid_input` for a malformed id or one no user group has; as
+    /// the private `settings_change` (impl docs).
+    #[wasm_bindgen(js_name = removeUserGroupRequest)]
+    pub fn remove_user_group_request(&mut self, id: &str) -> Result<HttpRequest, CoreError> {
+        let id = matching::group_id_of(id)?;
+        self.settings_change(SettingsEdit::RemoveUserGroup(id))
+    }
+
+    /// Disables the global group `id` (hex): the commit request.
+    ///
+    /// # Errors
+    /// `invalid_input` for a malformed id or one already disabled; `settings_limit_reached`
+    /// past 1,024; as the private `settings_change` (impl docs).
+    #[wasm_bindgen(js_name = disableGlobalGroupRequest)]
+    pub fn disable_global_group_request(&mut self, id: &str) -> Result<HttpRequest, CoreError> {
+        let id = matching::group_id_of(id)?;
+        self.settings_change(SettingsEdit::DisableGlobalGroup(id))
+    }
+
+    /// Enables the global group `id` (hex) again: the commit request.
+    ///
+    /// # Errors
+    /// `invalid_input` for a malformed id or one not disabled; as the private `settings_change` (impl docs).
+    #[wasm_bindgen(js_name = enableGlobalGroupRequest)]
+    pub fn enable_global_group_request(&mut self, id: &str) -> Result<HttpRequest, CoreError> {
+        let id = matching::group_id_of(id)?;
+        self.settings_change(SettingsEdit::EnableGlobalGroup(id))
+    }
+
+    /// The answer to the settings commit: on success the session takes the new settings.
+    ///
+    /// # Errors
+    /// `locked`; `wrong_state` with no change outstanding; the server's code otherwise. On
+    /// `server_state_conflict` the change is kept for [`Session::settings_retry_request`];
+    /// after any other error it is dropped.
+    #[wasm_bindgen(js_name = settingsRespond)]
+    pub fn settings_respond(&mut self, status: u16, body: &[u8]) -> Result<(), CoreError> {
+        let inner = self.inner_mut()?;
+        let pending = inner
+            .settings_pending
+            .take()
+            .ok_or(CoreError::new(WRONG_STATE))?;
+        match http::empty(status, body) {
+            Ok(()) => {
+                inner.settings.clear();
+                Ok(pending.finalize(&mut inner.account)?)
+            }
+            Err(e) => {
+                if http::server_code(status, body) == Some(ErrorCode::StateConflict) {
+                    inner.settings_pending = Some(pending);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// After `server_state_conflict` and a sync: the change rebuilt on the account the sync
+    /// verified (`CasRetry`: a rollback or fork stops it; otherwise the same edit is redone on the
+    /// current record).
+    ///
+    /// # Errors
+    /// `locked`; `wrong_state` with no change kept or while a sync runs; `rollback`, `fork`;
+    /// as the private `settings_change` (impl docs).
+    #[wasm_bindgen(js_name = settingsRetryRequest)]
+    pub fn settings_retry_request(&mut self) -> Result<HttpRequest, CoreError> {
+        let inner = self.writable()?;
+        let pending = inner
+            .settings_pending
+            .take()
+            .ok_or(CoreError::new(WRONG_STATE))?;
+        let retried = pending.on_state_conflict(&mut inner.rng, &inner.account, &inner.unlocked)?;
+        let request = HttpRequest::post(
+            paths::ACCOUNT_COMMIT,
+            retried.commit_request(),
+            Some(&inner.token),
+        )?;
+        inner.settings_pending = Some(retried);
+        Ok(request)
+    }
+}
+
+impl Session {
+    /// Builds one settings change and keeps it until [`Session::settings_respond`] (impl docs).
+    ///
+    /// # Errors
+    /// `locked`; `wrong_state` while a sync runs; `read_only` after a rollback or fork;
+    /// `settings_update_required` and `invalid_server_response` for settings this build cannot read
+    /// (no write is built over them, ADR 0042 §2); `account_key_rotated`.
+    fn settings_change(&mut self, edit: SettingsEdit) -> CoreResult<HttpRequest> {
+        let inner = self.writable()?;
+        if inner.vault.is_read_only() {
+            return Err(ClientError::ReadOnly.into());
+        }
+        let pending = change_settings(&mut inner.rng, &inner.account, &inner.unlocked, edit)?;
+        let request = HttpRequest::post(
+            paths::ACCOUNT_COMMIT,
+            pending.commit_request(),
+            Some(&inner.token),
+        )?;
+        inner.settings_pending = Some(pending);
+        Ok(request)
+    }
+}
+
 /// The name of a device kind.
 const fn kind_name(kind: DeviceKind) -> &'static str {
     match kind {
@@ -1112,6 +1708,80 @@ impl ImportReport {
     #[must_use]
     pub fn fields_not_carried(&self) -> usize {
         self.fields_not_carried
+    }
+}
+
+/// [`Notice::conflict_id`] for a concurrent trash: the hex of both dots, joined, so two
+/// distinct conflicts between the same device pair and item (two different races, or the same
+/// race re-read) compare equal only when both dots match. Not a persistent or wire format
+/// (ADR 0018 §3 "Surfacing"): computed fresh for one in-memory host call, never stored.
+fn concurrent_trash_conflict_id(trashed_dot: Dot, edited_dot: Dot) -> String {
+    format!(
+        "{}:{}",
+        items::dot_hex(trashed_dot),
+        items::dot_hex(edited_dot)
+    )
+}
+
+/// [`Notice::kind`] of "An edit from `<device>` arrived for an item you deleted permanently.
+/// Restore it as a new item?" (ADR 0018 §3 "Surfacing").
+pub const NOTICE_LATE_EDIT: &str = "late-edit";
+/// [`Notice::kind`] of "deleted on X while it was being edited on Y" (ADR 0012 §5).
+pub const NOTICE_CONCURRENT_TRASH: &str = "concurrent-trash";
+
+/// One notice of [`Session::take_notices`]: ids only, no item data.
+#[wasm_bindgen]
+#[derive(Clone, Debug)]
+pub struct Notice {
+    /// [`NOTICE_LATE_EDIT`] or [`NOTICE_CONCURRENT_TRASH`].
+    kind: &'static str,
+    /// The item, hex.
+    item: String,
+    /// For a late edit, the devices whose edits arrived, ascending; for a concurrent trash,
+    /// X (the device that deleted it) then Y (the device whose edit kept it). Hex.
+    devices: Vec<String>,
+    /// For a concurrent trash, this one conflict's own identity: the two dots, not just the
+    /// device pair, so a host-side dedup (the web vault's `noticeKey`) can tell a second,
+    /// genuinely distinct race between the same two devices on the same item apart from the
+    /// first instead of mistaking it for a duplicate (`ConcurrentTrash` docs, ADR 0012 §2).
+    /// `None` for a late edit, which has no per-conflict identity: `late_edit_devices` names
+    /// devices, not one op. Not a persistent or wire format (ADR 0018 §3 "Surfacing"):
+    /// computed fresh for one in-memory host call, never stored.
+    conflict_id: Option<String>,
+}
+
+#[wasm_bindgen]
+impl Notice {
+    /// `late-edit` or `concurrent-trash`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn kind(&self) -> String {
+        self.kind.to_owned()
+    }
+
+    /// The item id, 32 hex digits.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn item(&self) -> String {
+        self.item.clone()
+    }
+
+    /// The device ids, 32 hex digits each: the late edits' devices, or `[X, Y]` for a
+    /// concurrent trash.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn devices(&self) -> Vec<String> {
+        self.devices.clone()
+    }
+
+    /// This one conflict's own identity, for `concurrent-trash` only (`undefined` for
+    /// `late-edit`): fold it into a host-side dedup key alongside `item` and `devices`, so a
+    /// second race between the same two devices on the same item is kept, not dropped as a
+    /// duplicate of the first.
+    #[wasm_bindgen(getter, js_name = conflictId)]
+    #[must_use]
+    pub fn conflict_id(&self) -> Option<String> {
+        self.conflict_id.clone()
     }
 }
 

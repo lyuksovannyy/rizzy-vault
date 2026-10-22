@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! TLS for `https://` origins: the client configuration and the trust store of [ADR 0030].
 //!
 //! # Protocol (Decision 2)

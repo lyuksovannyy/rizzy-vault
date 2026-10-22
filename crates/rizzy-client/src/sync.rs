@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The sync driver of one vault on one device (ADR 0012 §4, §7; ADR 0018 §3, §10; ADR 0021
 //! §2, §4, §9; CRYPTO.md §8.4, §10.2, §11.6 reader and writer rules).
 //!
@@ -1191,6 +1193,7 @@ impl VaultSync {
                     data: &data,
                 },
                 &with,
+                Some(&plan.cut),
             ) {
                 Ok(absorption) => match absorption.outcome {
                     AbsorbOutcome::Absorbed(absorbed) => {
@@ -1365,7 +1368,7 @@ pub(crate) struct OwnChange<'a> {
 
 impl VaultSync {
     /// Whether the client holds an unapplied record of `item` (ADR 0018 §11: no purge then).
-    fn holds_unapplied(&self, item: ItemId) -> bool {
+    pub(crate) fn holds_unapplied(&self, item: ItemId) -> bool {
         self.log.waiting().iter().any(|w| w.item_id == item)
     }
 
@@ -1996,6 +1999,13 @@ impl VaultSync {
         self.items.get(&item)
     }
 
+    /// The merge of `item`, mutably, if any op reached it. Unlike [`VaultSync::merge_mut`]
+    /// (the static helper own writes use), this never creates one: a presentation-only call
+    /// (ADR 0018 §3 "Surfacing") has nothing to mark on an item this replica never saw.
+    pub(crate) fn existing_merge_mut(&mut self, item: ItemId) -> Option<&mut ItemMerge> {
+        self.items.get_mut(&item)
+    }
+
     /// Every item's merge, ascending by item id (the order of an export payload, ADR 0027 §1).
     pub(crate) fn merges(&self) -> impl Iterator<Item = (ItemId, &ItemMerge)> + '_ {
         self.items.iter().map(|(id, merge)| (*id, merge))
@@ -2133,6 +2143,16 @@ impl VaultSync {
             .into_iter()
             .flatten()
             .filter_map(|k| Some((k.key_id().ok()?, k.created_vault_key_epoch())))
+            .collect()
+    }
+
+    /// Test access: the bytes of the vault key and of every item key held, for the INV-15
+    /// canary (`tests/canary.rs`), which searches what the fake server saw for them.
+    #[cfg(test)]
+    pub(crate) fn key_bytes_for_tests(&self) -> Vec<Vec<u8>> {
+        core::iter::once(self.vault_key.key())
+            .chain(self.item_keys.values().flatten().map(ItemKey::key))
+            .map(|k| k.expose_secret().to_vec())
             .collect()
     }
 

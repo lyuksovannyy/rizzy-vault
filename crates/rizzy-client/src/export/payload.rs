@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The encrypted export's payload: its encoding, its reader, and the import of our own export
 //! ([ADR 0027] §1–§2; CRYPTO.md §11.14 for the file around it).
 //!

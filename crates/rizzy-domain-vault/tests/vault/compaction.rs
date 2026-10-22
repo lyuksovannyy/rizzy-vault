@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Compaction through the `worker` job and the covers Fetch serves (ADR 0021 §3–§5, §8
 //! "Storage").
 

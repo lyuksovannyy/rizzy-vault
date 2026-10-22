@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the `WebAuthn` passkey ceremonies (`rizzy_client::passkey::{create_credential,
 //! get_assertion}`, [ADR 0039] §1, §2, §4) on attacker/relying-party-controlled input: the
 //! origin and `rpId` strings a malicious or buggy page can send through the extension's
@@ -103,10 +105,23 @@ fuzz_target!(|data: &[u8]| {
 
     // The same origin/rp_id that just passed INV-64 for creation is a pure function of those
     // two strings, so it must pass again for an assertion (module docs on `verify_rp_id`).
-    let assertion =
-        get_assertion(&created.signing_key, &created.credential_id, origin, rp_id, challenge)
-            .expect("the origin/rp_id that created the credential must also pass for assertion");
+    //
+    // Gap 35(a) in the M2 gap audit: `get_assertion` now takes `user_handle: &[u8]` and echoes
+    // it back unchanged (`Assertion.user_handle`) — reusing the already-fuzzed, arbitrary-length
+    // `challenge` bytes here exercises that passthrough with genuinely untrusted-length input,
+    // the same reason every other argument here is fuzzed data rather than a fixed value.
+    let user_handle = challenge;
+    let assertion = get_assertion(
+        &created.signing_key,
+        &created.credential_id,
+        user_handle,
+        origin,
+        rp_id,
+        challenge,
+    )
+    .expect("the origin/rp_id that created the credential must also pass for assertion");
     assert_eq!(assertion.credential_id, created.credential_id);
+    assert_eq!(assertion.user_handle.as_deref(), Some(user_handle));
 
     let mut message = assertion.authenticator_data.clone();
     message.extend_from_slice(&client_data_hash(&assertion.client_data_json));

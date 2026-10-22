@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-vault` — the self-hosted server binary. Everything it runs lives in the
 //! `rizzy_server` library; see its crate docs and [`rizzy_server::cli`].
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Device revocation (CRYPTO.md §11.8; ADR 0012 §6): suspension, then the revocation with a
 //! standard rotation in one atomic change.
 

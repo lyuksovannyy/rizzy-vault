@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The enrolment form (CRYPTO.md §11.2; ADR 0036 §3): server URL, account (login name), Secret
 // Key and master password, same four values the web vault's own login screen collects for a new
 // device. `SecretField` renders the Secret Key and the master password (INV-68: both are

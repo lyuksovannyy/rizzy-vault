@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! INV-64: checking a `WebAuthn` `rpId` against the browser-verified origin
 //! ([THREAT_MODEL] §8 INV-64; [ADR 0039] §2; the PSL from [ADR 0037] §3).
 //!
@@ -210,6 +212,15 @@ pub struct Assertion {
     /// response needs its own `rawId`/`id`, and the caller must not have to thread it through a
     /// second path parallel to this one just to hand it back (ADR 0039 §5, "the API is coarse").
     pub credential_id: Vec<u8>,
+    /// `passkey/<id>/user_handle`, echoed back unchanged, for the page's
+    /// `AuthenticatorAssertionResponse.userHandle` (gap 35(a) in the M2 gap audit: this field
+    /// was stored at creation but never read back out for an assertion). `None` only when the
+    /// caller has no stored user handle to attach — `WebAuthn` allows an assertion response to
+    /// omit `userHandle` when the relying party already identified the user some other way
+    /// (`allowCredentials` was non-empty); every passkey this project creates does store one
+    /// (ADR 0039 §1's field list has no "absent" case), so a caller reading it from storage
+    /// should never actually need to pass `None` in practice.
+    pub user_handle: Option<Vec<u8>>,
     /// `clientDataJSON`, for the caller to hand back to the page verbatim.
     pub client_data_json: Vec<u8>,
     /// `authenticatorData`, for the caller to hand back to the page verbatim.
@@ -223,12 +234,14 @@ pub struct Assertion {
 /// caller (from the page's `allowCredentials`, or the one discoverable credential the person
 /// picked) and its signing key already decrypted from `passkey/<id>/private_key` (ADR 0039 §2).
 ///
-/// `credential_id` is `passkey/<id>/credential_id` for that same credential: this function
-/// does not look it up or check it against anything (there is nothing in this crate yet to look
-/// it up *in*, module docs), it only carries it through to [`Assertion::credential_id`] so the
-/// caller has one self-contained ceremony result instead of a second value to remember to
-/// attach. Matching `credential_id` to `signing_key` — and, when the page sent
-/// `allowCredentials`, checking this credential is one of them — is entirely the caller's.
+/// `credential_id` is `passkey/<id>/credential_id` and `user_handle` is
+/// `passkey/<id>/user_handle` for that same credential: this function does not look either up
+/// or check them against anything (there is nothing in this crate yet to look them up *in*,
+/// module docs), it only carries them through to [`Assertion::credential_id`] and
+/// [`Assertion::user_handle`] so the caller has one self-contained ceremony result instead of
+/// further values to remember to attach. Matching `credential_id` to `signing_key` — and, when
+/// the page sent `allowCredentials`, checking this credential is one of them — is entirely the
+/// caller's.
 ///
 /// # Errors
 /// Whatever `verify_rp_id` returns. [`ClientError::Internal`] only for the unreachable
@@ -239,6 +252,7 @@ pub struct Assertion {
 pub fn get_assertion(
     signing_key: &Es256SigningKey,
     credential_id: &[u8],
+    user_handle: &[u8],
     origin: &str,
     rp_id: &str,
     challenge: &[u8],
@@ -257,6 +271,7 @@ pub fn get_assertion(
 
     Ok(Assertion {
         credential_id: credential_id.to_vec(),
+        user_handle: Some(user_handle.to_vec()),
         client_data_json,
         authenticator_data,
         signature_der,
@@ -391,6 +406,27 @@ mod tests {
             Err(ClientError::InvalidInput)
         );
     }
+
+    /// A run of trailing dots on the origin's host folds the same way exactly one does
+    /// (ADR 0037 §2 point 3): `verify_rp_id` must accept it against the plain `rp_id`, not
+    /// reject it for carrying leftover dots `NormalizedUrl::parse` already promises to strip.
+    #[test]
+    fn origin_with_a_trailing_dot_run_is_accepted_the_same_as_without_one() {
+        assert!(verify_rp_id("https://example.com.../", "example.com").is_ok());
+    }
+
+    /// `rp_id` itself may carry a run of trailing dots too, normalised by `normalize_domain`
+    /// before the INV-64 comparison runs (module docs' `VerifiedRp` doc comment). A non-ASCII
+    /// idna label separator (U+3002 here), not an ASCII dot, pins this diff's own change:
+    /// `normalize_domain`'s ASCII trailing-dot handling was already correct before this diff
+    /// (confirmed against the parent commit, 9b76cf4, which already trimmed every ASCII
+    /// trailing dot off its raw input before calling `idna`); only the trim of dots `idna`
+    /// itself renders into its *output* for the three non-ASCII separators is new here, so an
+    /// ASCII-dot `rp_id` would pass this test identically even with this diff fully reverted.
+    #[test]
+    fn rp_id_with_a_trailing_non_ascii_separator_run_is_accepted_the_same_as_without_one() {
+        assert!(verify_rp_id("https://example.com", "example.com\u{3002}\u{3002}").is_ok());
+    }
 }
 
 #[cfg(test)]
@@ -438,6 +474,7 @@ mod ceremony_tests {
         let assertion = get_assertion(
             &created.signing_key,
             &created.credential_id,
+            b"user-handle",
             "https://example.com",
             "example.com",
             b"login-challenge",
@@ -445,6 +482,7 @@ mod ceremony_tests {
         .expect("valid origin/rp_id");
 
         assert_eq!(assertion.credential_id, created.credential_id);
+        assert_eq!(assertion.user_handle, Some(b"user-handle".to_vec()));
 
         let mut message = assertion.authenticator_data.clone();
         message.extend_from_slice(&rizzy_core::passkey::client_data_hash(
@@ -466,6 +504,7 @@ mod ceremony_tests {
         let err = get_assertion(
             &created.signing_key,
             &created.credential_id,
+            b"user-handle",
             "http://example.com",
             "example.com",
             b"c",
@@ -486,24 +525,33 @@ mod ceremony_tests {
         let created = create_credential(&mut rng, "https://example.com", "EXAMPLE.COM", b"reg")
             .expect("EXAMPLE.COM folds to the origin's own host");
 
-        let assertion = get_assertion(
-            &created.signing_key,
-            &created.credential_id,
-            "https://example.com",
-            "example.com.",
-            b"c",
-        )
-        .expect("a trailing dot folds the same way");
-
         // The registration's rpIdHash is the first 32 bytes of the authenticatorData the CBOR
         // attestationObject wraps; recomputing it directly (rather than decoding CBOR back out,
         // which this crate deliberately never does) is the simplest independent check.
         let registration_rp_id_hash =
             rizzy_core::passkey::rp_id_hash(&normalize_rp_id_for_test("EXAMPLE.COM"));
-        assert_eq!(
-            assertion.authenticator_data.get(..32),
-            Some(registration_rp_id_hash.as_slice())
-        );
+
+        // A single trailing dot, a run of them, and the non-ASCII idna separator
+        // (U+3002 IDEOGRAPHIC FULL STOP) `idna` itself renders as a literal `.` in its
+        // output — all three must fold to the same `rpIdHash` as the plain spelling, because
+        // `normalize_domain` (not a hand-rolled ASCII-only trim) normalises `rp_id` before it
+        // is ever hashed.
+        for rp_id in ["example.com.", "example.com...", "example.com\u{3002}"] {
+            let assertion = get_assertion(
+                &created.signing_key,
+                &created.credential_id,
+                b"user-handle",
+                "https://example.com",
+                rp_id,
+                b"c",
+            )
+            .unwrap_or_else(|e| panic!("{rp_id:?} must fold the same way as example.com: {e:?}"));
+            assert_eq!(
+                assertion.authenticator_data.get(..32),
+                Some(registration_rp_id_hash.as_slice()),
+                "{rp_id:?} produced a different rpIdHash"
+            );
+        }
     }
 
     /// Mirrors exactly what [`super::verify_rp_id`] does to `rp_id`, so the test above asserts

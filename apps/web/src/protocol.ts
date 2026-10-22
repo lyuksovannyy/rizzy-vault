@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The messages between the UI thread and the core Worker (ADR 0013 §4 "Where the core lives").
 //
 // The Worker holds the only wasm instance, every handle and every key; the UI thread holds
@@ -9,19 +11,26 @@
 //
 // This module is types and pure checks only; it imports no wasm.
 import type {
+  ConflictValue,
   DetectedImportFormat,
   DeviceView,
   EncryptedExport,
+  FieldHistory,
   FieldView,
   Generated,
   GeneratorLimits,
+  HistoryEntry,
   ImportFormat,
   ImportReport,
   ItemChange,
   ItemSummary,
   ItemType,
+  MatchDecisionResult,
+  MatchSettings,
+  Notice,
   PassphraseOptions,
   PasswordOptions,
+  SettingsChange,
   TotpCode,
   TwoFactorSetup,
 } from "@rizzy-vault/core";
@@ -78,6 +87,39 @@ export interface CoreApi {
   trashItem(id: string): void;
   restoreItem(id: string): void;
   purgeItem(id: string): void;
+  /** The item's password history: sources, positions and dates, never a value (ADR 0013 §3 rule 3). */
+  passwordHistory(id: string): HistoryEntry[];
+  /** One password-history entry's value, on the user's request only. */
+  revealPasswordHistory(
+    id: string,
+    source: HistoryEntry["source"],
+    index: number,
+    entryId: string,
+  ): string;
+  /** Every field's history: positions and dates per field, never a value (ROADMAP §4.2). */
+  itemHistory(id: string): FieldHistory[];
+  /** One field-history entry's value, on the user's request only. */
+  revealFieldHistory(id: string, key: string, index: number, entryId: string): string;
+  /** Restores one field-history entry as the field's current value, an ordinary edit. */
+  restoreFieldHistory(id: string, key: string, index: number, entryId: string): void;
+  /** A conflicting field's distinct values, concealed ones withheld (ROADMAP §4.5 "keep both / pick one"). */
+  fieldConflict(id: string, key: string): ConflictValue[];
+  /** One conflicting value, on the user's request only (ADR 0013 §3 rule 3). */
+  revealConflictValue(id: string, key: string, index: number, valueId: string): string;
+  /** "Pick one": writes the named value back to the field, an ordinary edit. */
+  resolveConflictPick(id: string, key: string, index: number, valueId: string): void;
+  /** "Keep both": keeps the named value; the others become new fields (or websites). */
+  resolveConflictKeepBoth(
+    id: string,
+    key: string,
+    index: number,
+    valueId: string,
+    label: string | undefined,
+  ): string[];
+  /** The late-edit and trash notices not yet handed over in this session (gap 02). */
+  takeNotices(): Notice[];
+  /** Restores the late edits of an item deleted permanently as a new item; returns its id. */
+  restoreLateAsNew(id: string, itemType: ItemType): string;
   totp(id: string): TotpCode;
   exportEncrypted(password: Uint8Array): EncryptedExport;
   exportBlockers(): string[];
@@ -93,6 +135,12 @@ export interface CoreApi {
   enableTwoFactor(): TwoFactorSetup;
   confirmTwoFactor(code: string): void;
   disableTwoFactor(code: string): void;
+  /** The account's match default and equivalence groups (ADR 0037 §6–§7, ADR 0042). */
+  matchSettings(): MatchSettings;
+  /** What autofill would offer on a website, under the account's settings. Ids and hosts only. */
+  matchCandidates(pageUrl: string): MatchDecisionResult;
+  /** One change to the matching settings (checked with {@link isSettingsChange}). */
+  changeMatchSettings(change: SettingsChange): void;
   generatePasswordWithOptions(options: Partial<PasswordOptions>): Generated;
   generatePassphraseWithOptions(options: Partial<PassphraseOptions>): Generated;
   passwordEntropy(options: Partial<PasswordOptions>): number;
@@ -129,6 +177,17 @@ export const METHODS: readonly Method[] = [
   "trashItem",
   "restoreItem",
   "purgeItem",
+  "passwordHistory",
+  "revealPasswordHistory",
+  "itemHistory",
+  "revealFieldHistory",
+  "restoreFieldHistory",
+  "fieldConflict",
+  "revealConflictValue",
+  "resolveConflictPick",
+  "resolveConflictKeepBoth",
+  "takeNotices",
+  "restoreLateAsNew",
   "totp",
   "exportEncrypted",
   "exportBlockers",
@@ -144,6 +203,9 @@ export const METHODS: readonly Method[] = [
   "enableTwoFactor",
   "confirmTwoFactor",
   "disableTwoFactor",
+  "matchSettings",
+  "matchCandidates",
+  "changeMatchSettings",
   "generatePasswordWithOptions",
   "generatePassphraseWithOptions",
   "passwordEntropy",
@@ -233,6 +295,34 @@ export function isFromWorker(value: unknown): value is FromWorker {
     m["kind"] === "result" &&
     (m["ok"] === true || (m["ok"] === false && typeof m["code"] === "string"))
   );
+}
+
+/** The most domains a user group can hold (ADR 0042 §3, `MAX_GROUP_DOMAINS`); the core checks it
+ * too, this only keeps an oversized message from being built at all. */
+export const MAX_GROUP_DOMAINS = 64;
+
+/** Whether `value` is a {@link SettingsChange} (shape only; the core checks every value). */
+export function isSettingsChange(value: unknown): value is SettingsChange {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const c = value as Record<string, unknown>;
+  switch (c["kind"]) {
+    case "matchDefault":
+      return typeof c["mode"] === "number" && Number.isInteger(c["mode"]);
+    case "addUserGroup":
+      return (
+        Array.isArray(c["domains"]) &&
+        c["domains"].length <= MAX_GROUP_DOMAINS &&
+        c["domains"].every((d) => typeof d === "string")
+      );
+    case "removeUserGroup":
+    case "disableGlobalGroup":
+    case "enableGlobalGroup":
+      return typeof c["id"] === "string";
+    default:
+      return false;
+  }
 }
 
 /** The buffers of the byte arrays in `values`, to transfer rather than copy. */

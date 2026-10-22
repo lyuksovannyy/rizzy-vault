@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Persists the one non-secret fact `unlockDevice` needs beyond the encrypted cache: which
 // server this device enrolled against (ADR 0026 §3's `device_state`/cache rows hold no server
 // URL).

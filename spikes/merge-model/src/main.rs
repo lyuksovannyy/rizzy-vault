@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Explorer CLI. `cargo run --release -- <family|flavour|all|exhaustive|random-all|list> [options]`;
 //! see README.md.
 #![forbid(unsafe_code)]

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Envelope tests: registries, context layouts, round trips for every M1 symmetric purpose,
 //! known answers, and the negative tests of CRYPTO.md §15 item 4.
 
@@ -1358,6 +1360,9 @@ fn truncation_and_extension_at_every_length_never_panic() {
     assert_eq!(open(&k, &ctx, &shifted).map(|_| ()), Err(DecryptError));
 }
 
+/// A server that relabels an envelope with a version or algorithm outside the allow-list.
+///
+/// ETH class: 4 (threat model §5.2, envelope and algorithm downgrade).
 #[test]
 fn version_and_algorithm_outside_the_allow_list_are_rejected_before_crypto() {
     let (k, env) = sealed_op();

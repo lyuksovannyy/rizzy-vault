@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The page-world WebAuthn interception point (ADR 0039 §2; THREAT_MODEL A7's "Passkey provider"
 // section): overrides `navigator.credentials.create`/`.get` in the page's own main-world JS
 // realm — the only place that can see the real `options` object before any site script reads

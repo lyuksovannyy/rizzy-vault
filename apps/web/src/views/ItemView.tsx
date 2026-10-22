@@ -1,28 +1,46 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // One item: its fields, masked where the core conceals them, with reveal and copy; its URIs as
-// safe links (INV-42); its TOTP code; edit, trash, restore and purge.
+// safe links (INV-42); its TOTP code; its password history (`PasswordHistory.tsx`) and every
+// field's history with restore (`ItemHistory.tsx`); edit, trash, restore and purge. A field two
+// devices edited at once carries a "conflict" badge and a "Resolve conflict" chooser
+// (`ConflictChooser.tsx`: keep both / pick one, ROADMAP §4.5), the name included.
 //
 // A concealed value crosses from the Worker only when the user asks (reveal or copy; ADR 0013
-// §3 rule 3), and a revealed value is shown in the secret-field component (INV-68).
-import type { FieldView, ItemSummary, TotpCode } from "@rizzy-vault/core";
+// §3 rule 3), and a revealed value is shown in the secret-field component (INV-68). The
+// large-type password display (`LargeType.tsx`) reveals nothing beyond that same path: its
+// "Large type" trigger below only renders a value `FieldValue` already fetched for Reveal/Copy.
+import type { FieldView, HistoryEntry, ItemSummary, TotpCode } from "@rizzy-vault/core";
 import { ConfirmDialog, IconStarFilled, IconStarOutline, SecretField, TypeIcon, useToast } from "@rizzy-vault/ui";
 import { useEffect, useId, useState } from "react";
 
 import { codeOf } from "../core-client.ts";
 import { type Element, type Grouped, group, labelOf, matchModeLabel } from "../fields.ts";
 import { SafeLink, SafeOpenButton } from "../SafeLink.tsx";
+import { ConflictChooser } from "./ConflictChooser.tsx";
+import { ItemHistory } from "./ItemHistory.tsx";
+import { LargeType } from "./LargeType.tsx";
+import { PasswordHistory } from "./PasswordHistory.tsx";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText, useAction } from "./common.tsx";
 
-/** The value line of one field: plain, or masked with reveal and copy. */
+/** The value line of one field: plain, or masked with reveal and copy. `onLargeType`, when
+ * given, adds a "Large type" button once the field is revealed, calling back with the already-
+ * revealed value (never fetching it again: `LargeType.tsx`'s module docs). */
 function FieldValue(props: {
   readonly ctx: VaultContext;
   readonly id: string;
   readonly field: FieldView;
   readonly label: string;
   readonly link?: boolean;
+  readonly onLargeType?: ((value: string) => void) | undefined;
+  /** The refresh after a conflict resolution (`ConflictChooser.tsx`); `undefined` when the
+   * item cannot be written (read-only vault, trashed item), so the chooser only shows. */
+  readonly onResolved?: ((message: string) => Promise<void>) | undefined;
 }) {
   const { ctx, id, field, label } = props;
   const [revealed, setRevealed] = useState<string | undefined>();
+  const [choosing, setChoosing] = useState(false);
   const [copied, setCopied] = useState(false);
   const { error, run } = useAction();
 
@@ -71,11 +89,29 @@ function FieldValue(props: {
             {revealed !== undefined ? "Hide" : "Reveal"}
           </button>
         )}
+        {revealed !== undefined && props.onLargeType !== undefined && (
+          <button type="button" className="secondary small" onClick={() => props.onLargeType?.(revealed)}>
+            Large type
+          </button>
+        )}
         <button type="button" className="secondary small" onClick={copy}>
           {copied ? "Copied" : "Copy"}
         </button>
+        {field.conflict && (
+          <button
+            type="button"
+            className="secondary small"
+            aria-expanded={choosing}
+            onClick={() => setChoosing((c) => !c)}
+          >
+            {choosing ? "Close conflict" : "Resolve conflict"}
+          </button>
+        )}
       </span>
       <ErrorText code={error} />
+      {field.conflict && choosing && (
+        <ConflictChooser ctx={ctx} id={id} field={field} label={label} onResolved={props.onResolved} />
+      )}
     </div>
   );
 }
@@ -209,6 +245,8 @@ export function ItemView(props: {
    * `window.confirm`). `{ kind: "deletePasskey", element }` names which `passkey/<element>/…`
    * row a "Delete" click targets (ADR 0039's own write path has no other way to identify one). */
   const [confirming, setConfirming] = useState<{ readonly kind: "trash" | "purge" } | { readonly kind: "deletePasskey"; readonly element: string } | undefined>();
+  /** The large-type overlay's value (module docs, `LargeType.tsx`), `undefined` while closed. */
+  const [largeType, setLargeType] = useState<string | undefined>();
 
   useEffect(() => {
     let live = true;
@@ -254,6 +292,27 @@ export function ItemView(props: {
       false,
     );
 
+  /** `ItemHistory`'s write path: restoring an entry is an ordinary edit (ROADMAP §4.2). Unlike
+   * `act` (used for a button's own `onClick`), this returns a promise that settles when the
+   * write has, so the row stays busy until then; a refused restore shows through `run`'s
+   * shared error state (the one trash, purge and favorite use), not in the row. */
+  const restoreHistoryEntry = (fieldKey: string, entry: HistoryEntry): Promise<void> =>
+    run(async () => {
+      await ctx.client.call("restoreFieldHistory", id, fieldKey, entry.index, entry.id);
+      await props.onWritten(false);
+      notify("success", "Value restored.");
+    }).then(() => undefined);
+
+  /** `ConflictChooser`'s refresh after a resolution, an ordinary edit (ROADMAP §4.5): like
+   * `restoreHistoryEntry`, the view syncs and reloads; only a writable, active item gets it. */
+  const resolved =
+    writable && !summary.trashed
+      ? async (message: string): Promise<void> => {
+          await props.onWritten(false);
+          notify("success", message);
+        }
+      : undefined;
+
   return (
     <article className="panel item" aria-labelledby="item-title">
       <div className="item-header">
@@ -276,9 +335,18 @@ export function ItemView(props: {
       </div>
       <p className="muted">{summary.itemType}</p>
       {grouped.fixed
-        .filter((f) => f.key !== "item.name")
+        // The name is the title; it gets a row of its own only to resolve a conflict.
+        .filter((f) => f.key !== "item.name" || f.conflict)
         .map((f) => (
-          <FieldValue key={f.key} ctx={ctx} id={id} field={f} label={labelOf(f.key)} />
+          <FieldValue
+            key={f.key}
+            ctx={ctx}
+            id={id}
+            field={f}
+            label={labelOf(f.key)}
+            onLargeType={f.key === "login.password" ? setLargeType : undefined}
+            onResolved={resolved}
+          />
         ))}
       {summary.hasTotp && !summary.trashed && <TotpLine ctx={ctx} id={id} />}
       {grouped.uris.map((u) => {
@@ -288,7 +356,7 @@ export function ItemView(props: {
         }
         return (
           <div key={v.key}>
-            <FieldValue ctx={ctx} id={id} field={v} label="Website" link />
+            <FieldValue ctx={ctx} id={id} field={v} label="Website" link onResolved={resolved} />
             <p className="muted small" data-field={`${v.key.replace(/\/value$/, "/match")}`}>
               Match: {matchModeLabel(u.attributes.get("match")?.value)}
             </p>
@@ -298,7 +366,9 @@ export function ItemView(props: {
       {grouped.custom.map((c) => {
         const v = c.attributes.get("value");
         const label = c.attributes.get("label")?.value ?? "Field";
-        return v === undefined ? null : <FieldValue key={v.key} ctx={ctx} id={id} field={v} label={label} />;
+        return v === undefined ? null : (
+          <FieldValue key={v.key} ctx={ctx} id={id} field={v} label={label} onResolved={resolved} />
+        );
       })}
       {grouped.passkeys.map((p) => (
         <PasskeyLine
@@ -310,8 +380,10 @@ export function ItemView(props: {
         />
       ))}
       {grouped.other.map((f) => (
-        <FieldValue key={f.key} ctx={ctx} id={id} field={f} label={f.key} />
+        <FieldValue key={f.key} ctx={ctx} id={id} field={f} label={f.key} onResolved={resolved} />
       ))}
+      <PasswordHistory ctx={ctx} id={id} />
+      <ItemHistory ctx={ctx} id={id} onRestore={writable && !summary.trashed ? restoreHistoryEntry : undefined} />
       {grouped.tags.length > 0 && (
         <p className="tags">
           {grouped.tags.map((t) => (
@@ -395,6 +467,7 @@ export function ItemView(props: {
         }}
         onCancel={() => setConfirming(undefined)}
       />
+      <LargeType label="Password" value={largeType} onClose={() => setLargeType(undefined)} />
     </article>
   );
 }

@@ -32,6 +32,15 @@ zeroize.workspace = true
 chacha20.workspace = true
 # Round-trip and canonical-form properties of the device-state record (ADR 0026 §6). Test-only.
 proptest.workspace = true
+# Public-suffix lookup for `tests/inv64_rp_id_differential.rs`'s independent oracle (ADR 0037
+# §3's own lookup, not a new crate: already a normal dependency of `rizzy-match`, pinned in
+# `[workspace.dependencies]`; this only extends the existing, already-reviewed pin to test code
+# in this crate too, for the same public-suffix lookup ADR 0039 §2 says INV-64 reuses).
+psl.workspace = true
+# The JSON bodies a transport would send for the fake server's requests and answers, which the
+# INV-15 canary searches (`src/tests/canary.rs`). Test-only; the version every host and
+# `rizzy-proto`'s tests already lock, so no new package.
+serde_json.workspace = true
 
 [lints]
 workspace = true

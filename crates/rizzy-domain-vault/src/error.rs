@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The errors of the vault domain.
 //!
 //! **What an error may say** (threat model INV-48). A message names a rule, a table or column,

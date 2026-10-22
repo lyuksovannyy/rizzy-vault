@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `ConfirmDialog.tsx`'s pure focus-trap arithmetic (module docs there and in `Toast.tsx`: no
 // DOM in this workspace's Vitest — the actual trap, Esc and backdrop-close behaviour are
 // exercised by the Playwright specs instead).

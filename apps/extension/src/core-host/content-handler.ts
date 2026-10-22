@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Handles a content-script request forwarded by the service worker (ADR 0036 §4, ADR 0037 §1:
 // "matching... runs in the background/long-lived context"), and — separately —
 // {@link handleInlineMenuFillRequest}'s own privileged request from the inline-menu iframe
@@ -11,6 +13,7 @@ import {
   approvePasskeyCeremony,
   checkPendingSavePromptByLocation,
   declinePasskeyCeremony,
+  generatePasswordForFill,
   itemSummaryFor,
   matchCandidatesFor,
   offerPasskeyCreate,
@@ -23,9 +26,12 @@ import type {
   ApplyFillMessage,
   ApplyPasskeyResultMessage,
   ContentErrorMessage,
+  FillScope,
+  FillValues,
   FromContentScript,
   InlineMenuFillRequestMessage,
   InlineMenuFillResponse,
+  InlineMenuGeneratePasswordResponse,
   PasskeyCeremonyMessage,
   PasskeyCeremonyResponse,
   RelayApplyFillMessage,
@@ -66,7 +72,7 @@ function isSecureOrigin(origin: string): boolean {
  * does have `tabs` like every other extension page. Firefox's `background-page.ts` has `tabs`
  * directly and takes the first branch, same as any other context that has it.
  */
-async function pushApplyFill(ext: WebExtNamespace, tabId: number, values: { readonly username?: string; readonly password: string }): Promise<void> {
+async function pushApplyFill(ext: WebExtNamespace, tabId: number, values: FillValues): Promise<void> {
   if (ext.tabs !== undefined) {
     await ext.tabs.sendMessage(tabId, { type: "apply_fill", values } satisfies ApplyFillMessage);
     return;
@@ -118,19 +124,26 @@ export async function handleContentScriptRequest(
       if (!pageUrlMatchesSender(message.pageUrl, trustedOrigin)) {
         return { type: "content_error", code: "fields_detected: pageUrl does not match the sender's own origin" };
       }
-      const result = matchCandidatesFor(message.pageUrl, { isTopFrame: message.isTopFrame, frameOrigin: trustedOrigin });
+      let result: ReturnType<typeof matchCandidatesFor>;
+      try {
+        result = matchCandidatesFor(message.pageUrl, { isTopFrame: message.isTopFrame, frameOrigin: trustedOrigin });
+      } catch {
+        // The account's match settings do not read (written by a newer rizzy-vault, ADR 0042
+        // §2): no candidate is offered under settings the core could not apply.
+        return refused("fields_detected: the account's match settings cannot be read");
+      }
       if (result === undefined) {
         return refused("fields_detected: the device is locked");
       }
-      // The match decision itself only ever carries `itemId`/`uriId`/`needsWarning` (never a
-      // secret, ADR 0013 §3 rule 3); title/username for display come from one `item()` lookup
-      // per candidate here. A candidate whose item vanished between the match and this lookup
-      // (e.g. deleted mid-request) is dropped rather than shown blank.
+      // The match decision itself only ever carries `itemId`/`uriId`/`needsWarning`/`savedHost`
+      // (never a secret, ADR 0013 §3 rule 3); title/username for display come from one `item()`
+      // lookup per candidate here. A candidate whose item vanished between the match and this
+      // lookup (e.g. deleted mid-request) is dropped rather than shown blank.
       const candidates = result.candidates.flatMap((c) => {
         const summary = itemSummaryFor(c.itemId);
-        return summary === undefined ? [] : [{ itemId: c.itemId, ...summary, needsWarning: c.needsWarning }];
+        return summary === undefined ? [] : [{ itemId: c.itemId, ...summary, needsWarning: c.needsWarning, savedHost: c.savedHost }];
       });
-      return { type: "candidates", candidates, warnings: result.warnings };
+      return { type: "candidates", pageHost: result.pageHost, candidates, warnings: result.warnings };
     }
     case "credentials_submitted": {
       if (!pageUrlMatchesSender(message.pageUrl, trustedOrigin)) {
@@ -194,7 +207,7 @@ export async function handleContentScriptRequest(
       if (!isSecureOrigin(trustedOrigin)) {
         return refused("passkey_get_request: origin is not https");
       }
-      const offer = offerPasskeyGet(trustedOrigin, trustedTabId, message.rpIdHint, message.challengeB64);
+      const offer = offerPasskeyGet(trustedOrigin, trustedTabId, message.rpIdHint, message.challengeB64, message.allowCredentialIdsB64);
       if (offer === undefined) {
         return refused("passkey_get_request: the device is locked, or no stored passkey matches this rpId");
       }
@@ -276,6 +289,24 @@ export function selectFillCandidate(
 }
 
 /**
+ * The part of `revealed` one fill request's `only` lets cross to the content script (ADR 0036
+ * §4: no decrypted field "beyond what the user is filling"; ROADMAP §4.4 M3 multi-step login
+ * forms): both for a one-page form, only the username on an identifier-first step, only the
+ * password on a password-only step. `undefined` when the step's one field is a username the
+ * item does not have — nothing to fill, so nothing is sent.
+ */
+export function narrowFillValues(revealed: { readonly username?: string; readonly password: string }, only: FillScope | undefined): FillValues | undefined {
+  switch (only) {
+    case undefined:
+      return revealed;
+    case "username":
+      return revealed.username === undefined ? undefined : { username: revealed.username };
+    case "password":
+      return { password: revealed.password };
+  }
+}
+
+/**
  * Handles an {@link InlineMenuFillRequestMessage} from the inline-menu iframe
  * (`core-host/listener.ts` routes to this only once `sender.ts`'s `isInlineMenuSender` has
  * vouched for the sender, and only ever with that sender's own real `tabId`/`tabUrl` — never
@@ -306,10 +337,45 @@ export async function handleInlineMenuFillRequest(
   if (!selection.ok) {
     return refused(selection.code);
   }
-  const values = revealCredentialsForFill(message.itemId);
-  if (values === undefined) {
+  const revealed = revealCredentialsForFill(message.itemId);
+  if (revealed === undefined) {
     return refused("inline_menu_fill_chosen: the device is locked");
+  }
+  const values = narrowFillValues(revealed, message.only);
+  if (values === undefined) {
+    return refused("inline_menu_fill_chosen: the chosen item has no username to fill");
   }
   await pushApplyFill(ext, tabId, values);
   return { type: "inline_menu_fill_dispatched" };
+}
+
+/**
+ * Handles an {@link InlineMenuGeneratePasswordRequestMessage} from the inline-menu iframe (gap
+ * 32 in the M2 gap audit) — the same sender class and the same "never back to the iframe" rule
+ * as {@link handleInlineMenuFillRequest} (ADR 0040), applied to the generator instead of a saved
+ * item's credentials: `core-host/listener.ts` routes to this only once `sender.ts`'s
+ * `isInlineMenuSender` has vouched for the sender, with that sender's own real `tabId`. The
+ * generated value is pushed straight to that tab's content script as an {@link ApplyFillMessage}
+ * (`values: { password }`, no `username` — {@link pushApplyFill}'s existing shape, reused as-is
+ * rather than a second push type for the same "values land on the content script's own tagged
+ * fields" rule), never answered back to the iframe that asked.
+ */
+export async function handleInlineMenuGeneratePasswordRequest(
+  ext: WebExtNamespace,
+  tabId: number,
+  tabUrl: string,
+): Promise<InlineMenuGeneratePasswordResponse> {
+  try {
+    new URL(tabUrl);
+  } catch {
+    return refused("inline_menu_generate_password_chosen: the sender's tab URL does not parse");
+  }
+  let password: string;
+  try {
+    password = await generatePasswordForFill();
+  } catch {
+    return refused("inline_menu_generate_password_chosen: generation failed");
+  }
+  await pushApplyFill(ext, tabId, { password });
+  return { type: "inline_menu_generate_password_dispatched" };
 }

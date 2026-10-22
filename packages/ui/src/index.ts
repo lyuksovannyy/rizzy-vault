@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // @rizzy-vault/ui — the web design system (ADR 0014 §5), minimal in M1. The token CSS is
 // imported by path (`@rizzy-vault/ui/tokens.css`).
 export { PasswordGenerateSlot } from "./PasswordGenerateSlot.tsx";
@@ -29,8 +31,9 @@ export {
   IconUnknown,
   TypeIcon,
 } from "./icons.tsx";
-export { ConfirmDialog, type ConfirmDialogProps, nextFocusIndex } from "./ConfirmDialog.tsx";
-export { isAnyModalOpen } from "./modalRegistry.ts";
+export { ConfirmDialog, type ConfirmDialogProps } from "./ConfirmDialog.tsx";
+export { nextFocusIndex, trapTab } from "./focusTrap.ts";
+export { isAnyModalOpen, setModalOpen } from "./modalRegistry.ts";
 export {
   TOAST_DURATION_MS,
   ToastProvider,

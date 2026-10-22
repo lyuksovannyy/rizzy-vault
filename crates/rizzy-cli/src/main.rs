@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rv` — rizzy-vault command-line client. Everything is in the library crate
 //! ([`rizzy_cli`]), so the end-to-end tests drive the same code.
 

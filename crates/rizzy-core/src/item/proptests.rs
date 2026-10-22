@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Property tests of the item schema (ADR 0018 §12, the schema-layer round trips): the value
 //! decoder and the key grammar never panic and are canonical (decode then encode, and parse
 //! then rebuild, are the identity); every key the grammar generates parses, and the parser

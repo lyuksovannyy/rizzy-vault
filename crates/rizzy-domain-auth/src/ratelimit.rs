@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Rate limits and backoff, kept in the database (ADR 0010 §5; CRYPTO.md §5.9; INV-7).
 //!
 //! "Unauthenticated login and registration attempts get exponential backoff per (account

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Per-URI match modes and the match decision (ADR 0037 §4; INV-38).
 //!
 //! [`decide`] is the one function that combines a page's [`NormalizedUrl`], an item URI's
@@ -123,6 +125,24 @@ impl MatchedVia {
     }
 }
 
+/// [`EffectiveMode`] narrowed to the four modes that reach the per-mode dispatch in [`decide`]:
+/// every variant except [`EffectiveMode::Regex`] and [`EffectiveMode::Never`], both of which
+/// `decide` already returns for before the registrable-domain gate runs. A value of this type
+/// cannot hold `Regex` or `Never` at all, so the dispatch match in [`decide`] is exhaustive with
+/// no catch-all arm and no panic path, unlike matching [`EffectiveMode`] directly there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum GatedMode {
+    /// Registrable-domain or equivalence-group match (the gate itself; always passes once the
+    /// gate above it has).
+    BaseDomain,
+    /// Full host and port, no equivalence widening.
+    Host,
+    /// Path-prefix of the full normalised URL (host, port and path).
+    StartsWith,
+    /// Byte-equal full normalised URL.
+    Exact,
+}
+
 /// The result of [`decide`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MatchOutcome {
@@ -168,26 +188,36 @@ pub fn decide(
     equivalence: &EquivalenceView<'_>,
 ) -> MatchOutcome {
     let effective = mode.resolve(account_default);
-    if effective == EffectiveMode::Regex {
-        return MatchOutcome::NotSupported;
-    }
-    if effective == EffectiveMode::Never {
-        return MatchOutcome::NoMatch;
-    }
+    // One exhaustive match narrows `effective` to `GatedMode` (module docs, `GatedMode`) and
+    // returns early for the two modes that never reach the gates below, in the same order the
+    // two `if`s used to: *Regex* first (this build cannot evaluate it at all), then *Never*.
+    // `GatedMode` cannot hold either variant, so the per-mode dispatch further down is
+    // exhaustive with no catch-all arm and no panic path.
+    let gated = match effective {
+        EffectiveMode::Regex => return MatchOutcome::NotSupported,
+        EffectiveMode::Never => return MatchOutcome::NoMatch,
+        EffectiveMode::BaseDomain => GatedMode::BaseDomain,
+        EffectiveMode::Host => GatedMode::Host,
+        EffectiveMode::StartsWith => GatedMode::StartsWith,
+        EffectiveMode::Exact => GatedMode::Exact,
+    };
     if https_downgrade_blocks(uri.scheme(), page.scheme()) {
         return MatchOutcome::NoMatch;
     }
     let Some(matched_via) = registrable_gate(page, uri, equivalence) else {
         return MatchOutcome::NoMatch;
     };
-    let passes_mode_rule = match effective {
-        EffectiveMode::BaseDomain => true,
-        EffectiveMode::Host => page.host() == uri.host(),
-        EffectiveMode::StartsWith => page
+    let passes_mode_rule = match gated {
+        GatedMode::BaseDomain => true,
+        // ADR 0037 §2 rule 5: a non-default port "is part of the comparison for Host... mode".
+        // `NormalizedUrl::port` already omits each scheme's own default, so two different
+        // default ports (http 80 vs https 443) still compare equal (both `None`), and only a
+        // genuinely different explicit port fails this check.
+        GatedMode::Host => page.host() == uri.host() && page.port() == uri.port(),
+        GatedMode::StartsWith => page
             .normalized_string()
             .starts_with(&uri.normalized_string()),
-        EffectiveMode::Exact => page.normalized_string() == uri.normalized_string(),
-        EffectiveMode::Regex | EffectiveMode::Never => unreachable!("handled above"),
+        GatedMode::Exact => page.normalized_string() == uri.normalized_string(),
     };
     if passes_mode_rule {
         MatchOutcome::Match(matched_via)
@@ -287,6 +317,81 @@ mod tests {
     }
 
     #[test]
+    fn host_mode_requires_equal_ports() {
+        // ADR 0037 §2 rule 5: a non-default port "is part of the comparison for Host... mode".
+        // Equal explicit ports still match.
+        let page = url("https://example.com:8443/");
+        let uri = url("https://example.com:8443/login");
+        assert_eq!(
+            decide(
+                &page,
+                &uri,
+                MatchMode::Host,
+                MatchMode::BaseDomain,
+                &no_equivalence()
+            ),
+            MatchOutcome::Match(MatchedVia::RegistrableDomain)
+        );
+    }
+
+    #[test]
+    fn host_mode_rejects_a_different_explicit_port() {
+        // Regression: `https://example.com:8443` must never match a URI saved for
+        // `https://example.com:9000` just because the hosts are equal (ADR 0037 §2 rule 5).
+        let page = url("https://example.com:8443/");
+        let uri = url("https://example.com:9000/login");
+        assert_eq!(
+            decide(
+                &page,
+                &uri,
+                MatchMode::Host,
+                MatchMode::BaseDomain,
+                &no_equivalence()
+            ),
+            MatchOutcome::NoMatch
+        );
+    }
+
+    #[test]
+    fn host_mode_treats_an_explicit_default_port_the_same_as_an_omitted_one() {
+        // `https://example.com:443` normalises to the same (portless) form as
+        // `https://example.com` (ADR 0037 §2 rule 5: default ports are omitted before any mode
+        // compares them), so Host mode must still match.
+        let page = url("https://example.com:443/");
+        let uri = url("https://example.com/login");
+        assert_eq!(
+            decide(
+                &page,
+                &uri,
+                MatchMode::Host,
+                MatchMode::BaseDomain,
+                &no_equivalence()
+            ),
+            MatchOutcome::Match(MatchedVia::RegistrableDomain)
+        );
+    }
+
+    #[test]
+    fn host_mode_does_not_confuse_differing_http_and_https_default_ports() {
+        // `http://example.com` (default port 80, omitted) and `https://example.com` (default
+        // port 443, also omitted) must compare as the same (absent) port, never as "80 != 443":
+        // `NormalizedUrl::port` already strips the scheme's own default before Host mode ever
+        // sees it. An HTTP-saved URI may still match an HTTPS page (ADR 0037 §5).
+        let https_page = url("https://example.com/");
+        let http_uri = url("http://example.com/login");
+        assert_eq!(
+            decide(
+                &https_page,
+                &http_uri,
+                MatchMode::Host,
+                MatchMode::BaseDomain,
+                &no_equivalence()
+            ),
+            MatchOutcome::Match(MatchedVia::RegistrableDomain)
+        );
+    }
+
+    #[test]
     fn host_mode_requires_exact_host() {
         let page = url("https://sub.example.com/");
         let uri = url("https://example.com/");
@@ -344,6 +449,59 @@ mod tests {
                 &no_equivalence()
             ),
             MatchOutcome::Match(MatchedVia::RegistrableDomain)
+        );
+    }
+
+    #[test]
+    fn starts_with_matches_when_ports_are_equal() {
+        let page = url("https://example.com:8443/account/settings");
+        let uri = url("https://example.com:8443/account");
+        assert_eq!(
+            decide(
+                &page,
+                &uri,
+                MatchMode::StartsWith,
+                MatchMode::BaseDomain,
+                &no_equivalence()
+            ),
+            MatchOutcome::Match(MatchedVia::RegistrableDomain)
+        );
+    }
+
+    #[test]
+    fn starts_with_rejects_a_different_explicit_port() {
+        // ADR 0037 §2 rule 5: the port is part of *Starts with*'s comparison too (via the full
+        // normalised URL). `https://example.com:8443/account` must not be treated as a prefix
+        // match for a page on a different explicit port.
+        let page = url("https://example.com:9000/account/settings");
+        let uri = url("https://example.com:8443/account");
+        assert_eq!(
+            decide(
+                &page,
+                &uri,
+                MatchMode::StartsWith,
+                MatchMode::BaseDomain,
+                &no_equivalence()
+            ),
+            MatchOutcome::NoMatch
+        );
+    }
+
+    #[test]
+    fn exact_rejects_a_different_explicit_port() {
+        // ADR 0037 §2 rule 5: the port is part of *Exact*'s comparison too (via the full
+        // normalised URL).
+        let page = url("https://example.com:8443/login");
+        let uri = url("https://example.com:9000/login");
+        assert_eq!(
+            decide(
+                &page,
+                &uri,
+                MatchMode::Exact,
+                MatchMode::BaseDomain,
+                &no_equivalence()
+            ),
+            MatchOutcome::NoMatch
         );
     }
 

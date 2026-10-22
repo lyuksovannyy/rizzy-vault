@@ -1,0 +1,91 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+
+<!-- GENERATED FILE — do not edit by hand. Source: packages/ui/tokens/tokens.json; -->
+<!-- regenerate with `cargo xtask generate-tokens` (ADR 0014 §5, ADR 0019 §13). -->
+
+<!-- No client in this repository consumes this file yet (ADR 0019 §6); it exists so -->
+<!-- the release workflow can ship it in the token bundle (ADR 0019 §7) once that -->
+<!-- client repository exists. -->
+
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <ResourceDictionary.ThemeDictionaries>
+    <ResourceDictionary x:Key="Light">
+      <Color x:Key="ColorBg">#f7f7f8</Color>
+      <SolidColorBrush x:Key="BrushBg" Color="{StaticResource ColorBg}" />
+      <Color x:Key="ColorSurface">#ffffff</Color>
+      <SolidColorBrush x:Key="BrushSurface" Color="{StaticResource ColorSurface}" />
+      <Color x:Key="ColorBorder">#c9cad1</Color>
+      <SolidColorBrush x:Key="BrushBorder" Color="{StaticResource ColorBorder}" />
+      <Color x:Key="ColorText">#17181c</Color>
+      <SolidColorBrush x:Key="BrushText" Color="{StaticResource ColorText}" />
+      <Color x:Key="ColorTextMuted">#4d505b</Color>
+      <SolidColorBrush x:Key="BrushTextMuted" Color="{StaticResource ColorTextMuted}" />
+      <Color x:Key="ColorAccent">#2f4fd6</Color>
+      <SolidColorBrush x:Key="BrushAccent" Color="{StaticResource ColorAccent}" />
+      <Color x:Key="ColorOnAccent">#ffffff</Color>
+      <SolidColorBrush x:Key="BrushOnAccent" Color="{StaticResource ColorOnAccent}" />
+      <Color x:Key="ColorDanger">#b3261e</Color>
+      <SolidColorBrush x:Key="BrushDanger" Color="{StaticResource ColorDanger}" />
+      <Color x:Key="ColorOnDanger">#ffffff</Color>
+      <SolidColorBrush x:Key="BrushOnDanger" Color="{StaticResource ColorOnDanger}" />
+      <Color x:Key="ColorWarningBg">#fff4d6</Color>
+      <SolidColorBrush x:Key="BrushWarningBg" Color="{StaticResource ColorWarningBg}" />
+      <Color x:Key="ColorWarningText">#4a3500</Color>
+      <SolidColorBrush x:Key="BrushWarningText" Color="{StaticResource ColorWarningText}" />
+      <Color x:Key="ColorFocus">#2f4fd6</Color>
+      <SolidColorBrush x:Key="BrushFocus" Color="{StaticResource ColorFocus}" />
+    </ResourceDictionary>
+    <ResourceDictionary x:Key="Dark">
+      <Color x:Key="ColorBg">#121317</Color>
+      <SolidColorBrush x:Key="BrushBg" Color="{StaticResource ColorBg}" />
+      <Color x:Key="ColorSurface">#1c1d23</Color>
+      <SolidColorBrush x:Key="BrushSurface" Color="{StaticResource ColorSurface}" />
+      <Color x:Key="ColorBorder">#3b3d47</Color>
+      <SolidColorBrush x:Key="BrushBorder" Color="{StaticResource ColorBorder}" />
+      <Color x:Key="ColorText">#ececf1</Color>
+      <SolidColorBrush x:Key="BrushText" Color="{StaticResource ColorText}" />
+      <Color x:Key="ColorTextMuted">#b4b6c2</Color>
+      <SolidColorBrush x:Key="BrushTextMuted" Color="{StaticResource ColorTextMuted}" />
+      <Color x:Key="ColorAccent">#8fa6ff</Color>
+      <SolidColorBrush x:Key="BrushAccent" Color="{StaticResource ColorAccent}" />
+      <Color x:Key="ColorOnAccent">#0b1030</Color>
+      <SolidColorBrush x:Key="BrushOnAccent" Color="{StaticResource ColorOnAccent}" />
+      <Color x:Key="ColorDanger">#ffb4ab</Color>
+      <SolidColorBrush x:Key="BrushDanger" Color="{StaticResource ColorDanger}" />
+      <Color x:Key="ColorOnDanger">#410002</Color>
+      <SolidColorBrush x:Key="BrushOnDanger" Color="{StaticResource ColorOnDanger}" />
+      <Color x:Key="ColorWarningBg">#3a2c00</Color>
+      <SolidColorBrush x:Key="BrushWarningBg" Color="{StaticResource ColorWarningBg}" />
+      <Color x:Key="ColorWarningText">#ffe08a</Color>
+      <SolidColorBrush x:Key="BrushWarningText" Color="{StaticResource ColorWarningText}" />
+      <Color x:Key="ColorFocus">#8fa6ff</Color>
+      <SolidColorBrush x:Key="BrushFocus" Color="{StaticResource ColorFocus}" />
+    </ResourceDictionary>
+    <!-- HighContrast intentionally left empty: WinUI then leaves the system theme brushes -->
+    <!-- untouched (ADR 0019 §13's documented alternative), instead of a SystemColors -->
+    <!-- mapping invented here that no WinUI build in this repository can verify. -->
+    <ResourceDictionary x:Key="HighContrast" />
+  </ResourceDictionary.ThemeDictionaries>
+
+  <!-- Spacing, type and radius keep the web source's own CSS unit as a string resource -->
+  <!-- (module docs on `generate-tokens` in crates/xtask/src/tokens.rs). -->
+  <x:String x:Key="Space1">0.25rem</x:String>
+  <x:String x:Key="Space2">0.5rem</x:String>
+  <x:String x:Key="Space3">0.75rem</x:String>
+  <x:String x:Key="Space4">1rem</x:String>
+  <x:String x:Key="Space6">1.5rem</x:String>
+  <x:String x:Key="Space8">2rem</x:String>
+  <x:String x:Key="FontBody">system-ui, -apple-system, "Segoe UI", Roboto, sans-serif</x:String>
+  <x:String x:Key="FontMono">ui-monospace, "SF Mono", Menlo, Consolas, monospace</x:String>
+  <x:String x:Key="FontSizeSmall">0.875rem</x:String>
+  <x:String x:Key="FontSizeBody">1rem</x:String>
+  <x:String x:Key="FontSizeTitle">1.375rem</x:String>
+  <x:String x:Key="Radius1">4px</x:String>
+  <x:String x:Key="Radius2">8px</x:String>
+  <x:String x:Key="ShadowLight1">0 1px 2px rgba(0, 0, 0, 0.12)</x:String>
+  <x:String x:Key="ShadowLight2">0 4px 12px rgba(0, 0, 0, 0.16)</x:String>
+  <x:String x:Key="ShadowDark1">0 1px 2px rgba(0, 0, 0, 0.4)</x:String>
+  <x:String x:Key="ShadowDark2">0 4px 16px rgba(0, 0, 0, 0.55)</x:String>
+</ResourceDictionary>

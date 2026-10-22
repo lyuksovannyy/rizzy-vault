@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Op and snapshot upload (ADR 0012 §7 "Upload" as ADR 0021 §9 supersedes it in part) and the
 //! restore-healing request (ADR 0021 §9 "Healing request", "Server acceptance").
 //!

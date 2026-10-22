@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Known-answer vector files (CRYPTO.md §15 item 1): generation and byte-for-byte replay.
 //!
 //! The files live in `crates/rizzy-core/tests/vectors/` and follow `schema.json` there; its

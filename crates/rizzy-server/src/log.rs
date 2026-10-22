@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Structured logging with an allow-list of fields (threat model INV-48, §7.13; ADR 0010).
 //!
 //! **What a log line can hold.** One JSON object per line on stderr, with `ts_ms`, `level`,

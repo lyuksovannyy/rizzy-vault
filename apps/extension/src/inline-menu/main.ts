@@ -1,17 +1,78 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The inline-menu iframe's own script (ADR 0036 §4/§5; ADR 0014 §2-style — framework-free,
 // like the content script, since this is a few buttons with no state worth a framework). Runs
 // at the extension's own origin, inside an iframe `content-script.ts` injects into an untrusted
 // page: see `protocol.ts` for exactly what that origin boundary does and does not guarantee.
 import { INLINE_MENU_PICK, isInlineMenuShowMessage, type InlineMenuCandidate } from "./protocol.ts";
 import { decideClick } from "./decide-click.ts";
-import type { InlineMenuFillRequestMessage } from "../messaging/contract.ts";
+import type { FillScope, InlineMenuFillRequestMessage, InlineMenuGeneratePasswordRequestMessage } from "../messaging/contract.ts";
+
+// GATE C (A7/THREAT_MODEL gap, HANDOFF X6; defense-in-depth, Chromium only, never the sole
+// gate — Firefox has no IntersectionObserver v2, and the manual Gates A/B in
+// `content-script.ts`/`menu-visibility.ts` are the floor on both browsers regardless): if this
+// browser supports IOv2's `isVisible` (anti-clickjacking, the same mechanism payment/ad iframes
+// use), observe every candidate button and the generate-password button as they render, and
+// refuse to even ASK for a fill/generate when the most recent entry says `isVisible === false`.
+// This assumes IOv2's `isVisible`, computed inside this cross-origin document, reflects
+// opacity/occlusion effects the EMBEDDING page applies to the outer `<iframe>` element —
+// plausible from general knowledge of why IOv2 exists, but not independently verified here (U).
+// Degrades gracefully either way: on a browser without it, or if the assumption above is wrong,
+// this simply never blocks anything beyond what Gates A/B already would.
+interface Iov2Entry extends IntersectionObserverEntry {
+  readonly isVisible?: boolean;
+}
+const IOV2_SUPPORTED =
+  typeof IntersectionObserver !== "undefined" &&
+  typeof IntersectionObserverEntry !== "undefined" &&
+  "isVisible" in IntersectionObserverEntry.prototype;
+const iov2LastVisible = new WeakMap<Element, boolean>();
+const iov2Observer: IntersectionObserver | undefined = IOV2_SUPPORTED
+  ? new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          const isVisible = (entry as Iov2Entry).isVisible;
+          if (isVisible !== undefined) {
+            iov2LastVisible.set(entry.target, isVisible);
+          }
+        }
+      },
+      { threshold: 1, trackVisibility: true, delay: 100 } as IntersectionObserverInit,
+    )
+  : undefined;
+
+/** `true` only once IOv2 has actually delivered an entry for `el` saying it is NOT visible. No
+ * entry yet (or no IOv2 support at all) never blocks on this alone — Gates A/B remain the
+ * authoritative checks regardless of what this returns. */
+function isHiddenByIov2(el: Element): boolean {
+  return iov2LastVisible.get(el) === false;
+}
 
 const list = document.getElementById("list");
 if (list === null) {
   throw new Error("inline-menu: #list is missing from index.html");
 }
+const pageHostHeader = document.getElementById("page-host");
+if (pageHostHeader === null) {
+  throw new Error("inline-menu: #page-host is missing from index.html");
+}
+const generateContainer = document.getElementById("generate");
+if (generateContainer === null) {
+  throw new Error("inline-menu: #generate is missing from index.html");
+}
+const stepNote = document.getElementById("step-note");
+if (stepNote === null) {
+  throw new Error("inline-menu: #step-note is missing from index.html");
+}
 
 let replyOrigin: string | undefined;
+/** The page's own exact normalised host (ADR 0037 §5 "Exact host shown"; gap 31 in the M2 gap
+ * audit), for the equivalence-only warning's "this page is …" clause. */
+let pageHost = "";
+/** The one field this login step fills, from the latest show message (`protocol.ts`'s
+ * `InlineMenuShowMessage.only`): passed on in {@link requestFill}, and `"username"` hides the
+ * generator, which has no password field to fill on an identifier-first step. */
+let only: FillScope | undefined;
 
 window.addEventListener("message", (event) => {
   // `event.source`/`event.origin` are set by the browser from the real sending window and
@@ -26,6 +87,14 @@ window.addEventListener("message", (event) => {
     return;
   }
   replyOrigin = event.data.pageOrigin;
+  pageHost = event.data.pageHost;
+  // Plain text only (`textContent`, never `innerHTML`): `pageHost` is an A-label host string
+  // `rizzy-match` produced, but this document still treats every cross-boundary string as
+  // untrusted content, not markup.
+  pageHostHeader.textContent = pageHost;
+  only = event.data.only;
+  stepNote.textContent = only === "username" ? "Fills the username only." : only === "password" ? "Fills the password only." : "";
+  generateContainer.hidden = only === "username";
   render(event.data.candidates);
 });
 
@@ -52,17 +121,26 @@ function renderCandidate(candidate: InlineMenuCandidate): HTMLElement {
   item.style.display = "block";
   item.style.width = "100%";
   item.style.textAlign = "left";
+  // ADR 0037 §5: the warning names both the matched (saved) site and the page's own site, in
+  // their exact A-label form — never decoded to Unicode, so a mixed-script host still shows
+  // its punycode `xn--` form (gap 31 in the M2 gap audit; `protocol.ts`'s own doc on why).
   const label = () =>
     candidate.needsWarning && !confirmed.has(candidate.itemId)
-      ? `${candidate.title} (${candidate.username}) — different, equivalent domain. Click again to fill.`
+      ? `${candidate.title} (${candidate.username}) — saved for ${candidate.savedHost}, this page is ${pageHost} (equivalent domain). Click again to fill.`
       : `${candidate.title} (${candidate.username})`;
   item.textContent = label();
+  iov2Observer?.observe(item);
   item.addEventListener("click", (event) => {
     // Defence in depth, not the primary guarantee (INV-36): the primary guarantee is that this
     // document's DOM is unreachable from the page's own JS at all (cross-origin iframe), so the
     // page cannot call `.click()` on this button in the first place. This check only guards
     // against some future change accidentally making that call reachable.
     if (!event.isTrusted) {
+      return;
+    }
+    // GATE C (module header): Chromium-only, additive. Gates A/B in `content-script.ts` are
+    // authoritative regardless of this result.
+    if (isHiddenByIov2(item)) {
       return;
     }
     // Captured now, not read again inside the `.finally` below: `replyOrigin` is a `let`
@@ -136,7 +214,54 @@ async function requestFill(itemId: string, confirmedEquivalence: boolean): Promi
       type: "inline_menu_fill_chosen",
       itemId,
       confirmedEquivalence,
+      ...(only === undefined ? {} : { only }),
     } satisfies InlineMenuFillRequestMessage);
+  } catch {
+    // The background/offscreen document was unreachable (e.g. mid-restart): nothing to do.
+  }
+}
+
+// Gap 32 in the M2 gap audit: a "Generate password" button, always present (unlike the
+// candidate rows above, it does not depend on `render()`'s per-report data at all — there is
+// always exactly one password field this document is anchored to, `content-script.ts`'s
+// `InlineMenu` constructor). Built once at module load, not inside the `message` listener,
+// since nothing about it ever changes between reports.
+const generateButton = document.createElement("button");
+generateButton.type = "button";
+generateButton.textContent = "Generate password";
+generateButton.addEventListener("click", (event) => {
+  // Same defence-in-depth rationale as every candidate button's own check above: the primary
+  // guarantee is that this document is unreachable from the page's own JS at all.
+  if (!event.isTrusted) {
+    return;
+  }
+  // GATE C: same rationale as the candidate buttons' own check above.
+  if (isHiddenByIov2(generateButton)) {
+    return;
+  }
+  void requestGeneratePassword();
+});
+generateContainer.appendChild(generateButton);
+iov2Observer?.observe(generateButton);
+
+/**
+ * Sends the generator's one privileged message (ADR 0040's pattern, applied to the generator
+ * instead of a saved item's credentials). Unlike {@link requestFill}, this never tears the menu
+ * down afterward: generating a password is not a terminal choice the way picking a saved login
+ * is — the user may still want to pick a saved candidate instead, or click "Generate password"
+ * again for a different value — so no `INLINE_MENU_PICK` is sent, and this document stays open
+ * until the user blurs the field or a fresh report replaces it, same as before any click here.
+ * The response is not inspected, same rationale as {@link requestFill}'s own doc.
+ */
+async function requestGeneratePassword(): Promise<void> {
+  const ext = typeof chrome !== "undefined" ? chrome : browser;
+  if (ext === undefined) {
+    return;
+  }
+  try {
+    await ext.runtime.sendMessage({
+      type: "inline_menu_generate_password_chosen",
+    } satisfies InlineMenuGeneratePasswordRequestMessage);
   } catch {
     // The background/offscreen document was unreachable (e.g. mid-restart): nothing to do.
   }

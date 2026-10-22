@@ -1,6 +1,6 @@
 - [Stick to milestones, Rust-only](stick-to-milestones.md) — follow HANDOFF/ROADMAP steps in order; no Python, no tangents
 - [Handoff lifecycle](handoff-lifecycle.md) — delete docs/HANDOFF.md once its Next steps are done
-- [M1 state](m1-state.md) — main = 31a1579 (2026-10-06, 75 signed-off commits, ff from branch); ADRs 0001–0032,0034,0035 Accepted and built; 0033 Proposed
+- [M1 state](m1-state.md) — 2026-10-09: HANDOFF gaps 00-03,27a,30-33,35,docs done on branch 03c1db2; main still 5922c1d; ADRs 0001-0041 Accepted, 0042 Proposed
 - [Owner profile](user-profile.md) — musician/producer Иван Зула, casual Russian, music side projects outside rizzy-vault
 - [Bounded doc reviews](bounded-doc-reviews.md) — prose ADR review loops diverge; line budgets, one blockers-only pass, executable spikes
 - [Document everything](document-everything.md) — all logic/crypto/services/tooling documented as built; missing_docs lints enforce it
@@ -8,3 +8,5 @@
 - [Code first, docs in parallel](code-first-parallel-docs.md) — start code as soon as ADRs allow; ADR bookkeeping runs in background, never blocks
 - [Owner delegates mechanics](owner-delegates-mechanics.md) — full control 2026-09-27: do status lines/mirrors/commits myself after owner decides; no scripts for them to run
 - [Server-hosted focus](server-hosted-focus.md) — rizzy is VPS-hosted with web vault; drop client-local niceties (rv clipboard), defer optional formats (KDBX→M3)
+- [No subagent cap](no-subagent-cap.md) — owner 2026-10-10: run as many parallel agents as needed; disk is the limit
+- [Autonomy grants](autonomy-grants.md) — 2026-10-11: push branch after green gate, draft all Proposed ADRs, remove integrated worktrees

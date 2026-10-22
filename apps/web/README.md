@@ -31,6 +31,11 @@ TypeScript ([ADR 0014](../../docs/adr/0014-ui-stack.md)), served by the `web` ro
   policy (`src/trusted-types.ts`), which admits only that URL.
 - **Fixed output names** (`assets.ts`): the server embeds exactly these files; the build fails
   on any other.
+- **User-facing text** comes from the typed English catalogue of `@rizzy-vault/i18n`
+  ([its README](../../packages/i18n/README.md): how to add a key, how a locale would be added).
+  So far that is every error code's wording (`src/messages.ts` looks up `errors.<code>`), the
+  login and unlock screen (`LoginView.tsx`) and the two-factor prompt (`TotpDialog.tsx`); the
+  other views still hold literal English, and move over view by view.
 
 ## The item editor
 
@@ -67,6 +72,32 @@ websites (URIs), custom fields (text, hidden, boolean) and tags, not only its fi
   the core (`export-flow.ts`'s pattern), tested in `generator-flow.test.ts` against the real
   core: a normal option reaches the right call, an impossible combination is refused with
   exactly the core's own message, and the editor's fill is a pure DOM write.
+
+## Conflicts: keep both / pick one
+
+When two devices edit the same field before either has seen the other's edit, the sync engine
+keeps both values ([ADR 0012](../../docs/adr/0012-sync-engine.md) §4, ADR 0018 §6) and the item
+view marks the field "conflict" ([ROADMAP](../../docs/ROADMAP.md) §4.5). Its "Resolve
+conflict" button opens `src/views/ConflictChooser.tsx` (wording and rules in
+`src/conflicts.ts`, tested by `test/conflicts.test.ts`):
+
+- **What it shows.** "Edited on X and Y at the same time", then each distinct value with the
+  device and date that wrote it, the value shown now first. A concealed value (a password, a
+  hidden field) stays masked until the user reveals that one value; the listing never carries
+  it (ADR 0013 §3 rule 3). A value cleared on one device shows as "(cleared)".
+- **Pick one.** "Use this value" writes that value back to the field ("Keep it cleared" for a
+  cleared one). **Keep both** (text fields only) leaves the shown value in the field and moves
+  every other value into a new custom field labelled "<field> (from <device>)", hidden when the
+  field is concealed, or, for a website, into a new website.
+- **How it syncs.** A resolution is an ordinary edit (`rizzy-client`'s `conflicts` module): it
+  goes out with the next sync and ends the conflict on every device. If two devices resolve the
+  same conflict at once with different choices, the field conflicts again, visibly; nothing is
+  dropped. A resolution names the value by its listed position and id, so a sync between the
+  listing and the click is refused ("This conflict has changed…") instead of resolving to a
+  value the user did not see.
+- **End to end:** `e2e/conflict.spec.ts` races two browser contexts of one account offline on
+  the same password, resolves the first conflict by "pick one" and the second by "keep both",
+  and checks that each resolution reaches the other session.
 
 ## Export and import
 
@@ -138,10 +169,13 @@ still remains.
   the *safe* action (never the destructive one), Escape and a labelled backdrop button both
   cancel. Replaces `window.confirm` for: moving an item to trash, deleting it for good
   (`ItemView.tsx`), locking with unsaved changes (`VaultView.tsx`), and turning two-factor
-  authentication off (`TwoFactorPane.tsx`). The trap's cyclic arithmetic, `nextFocusIndex`, is
+  authentication off (`TwoFactorPane.tsx`). The trap is `packages/ui/src/focusTrap.ts`'s
+  `trapTab`, shared with every other modal dialog (shortcuts help, large type, the second-factor
+  prompt, the plaintext-export dialog). Its cyclic arithmetic, `nextFocusIndex`, is
   unit-tested directly (`packages/ui/test/confirm-dialog.test.ts`); there is no jsdom dependency
   in this workspace, so the trap/Escape/backdrop behaviour itself is covered by Playwright
-  instead (`e2e/vault.spec.ts`'s trash confirmation).
+  instead (`e2e/vault.spec.ts`'s trash confirmation, `e2e/a11y.spec.ts`'s trap check on every
+  dialog).
 
 ### Keyboard shortcuts (`src/shortcuts.ts`)
 
@@ -176,7 +210,60 @@ detail side by side, unchanged. Covered by `e2e/phone.spec.ts` at 375×812.
   action — every M1 session is an OPAQUE login with no durable session to sign out of beyond
   locking (module docs above).
 - **Settings** (`SettingsView.tsx`): one sidebar entry grouping Two-factor (`TwoFactorPane.tsx`,
-  unchanged), Devices (`DevicesPane.tsx`, unchanged) and a new Appearance group (below).
+  unchanged), Devices (`DevicesPane.tsx`, unchanged), Website matching (below), a new
+  Appearance group (below), "What the server stores" (below) and "Getting started", which
+  re-opens the guide below.
+
+### Website matching (ADR 0037 §6–§7, ADR 0042)
+
+`src/views/MatchingPane.tsx`, helpers in `src/match-settings.ts`: the account-level match default
+(the mode every website whose own match is "Account default" uses), the account's own
+equivalence groups (add: two or more domains, each a site's own registrable domain — a public
+suffix such as `co.uk` or a subdomain such as `www.example.com` is refused with
+`equivalence_domain_rejected`; remove), the signed global list's groups with a Turn off / Turn on
+switch each (none today: no signed list ships yet, and the pane says so), and "Check a website",
+which asks the core what autofill would offer on an address under these settings. All of it is
+the account's encrypted `ACCOUNT_SETTINGS`, committed with a new signed account state; the core
+reads, checks and writes it (`VaultSession.changeMatchSettings`). The server takes a settings
+change only within five minutes of the login (a fresh OPAQUE session, CRYPTO.md §11 "Replacing
+credentials"); later, the change fails with "Log in again to do this." Covered by
+`e2e/match-settings.spec.ts` and `test/match-settings.test.ts`.
+
+### What the server stores (transparency, ROADMAP §4.5)
+
+`src/views/TransparencyPane.tsx`, worded in `src/transparency.ts`: what the server holds for the
+account and how (THREAT_MODEL §3.4, only the rows this server holds today: no shares, aliases,
+mail or `icons` yet), how long it is kept (the 30-day Trash, tombstones and signed change
+headers for the life of the vault, logs and backups: ADR 0012 §5 and §7, ADR 0021 §6, AR-11),
+and the item, Trash and enrolled-device counts this browser already has from the vault it
+fetched. The counts are labelled as the browser's own, not a server report. There are no
+byte sizes and no server call of its own: no Accepted ADR defines a transparency endpoint
+(ADR 0028 item 1 lists `GET /api/v1/devices/grants` as the only `GET`, and item 14's
+`/api/meta` holds nothing about any account), and ADR 0048's `bytes_used` is Proposed.
+
+### The getting-started guide (onboarding, ROADMAP §4.5)
+
+`src/views/OnboardingView.tsx`, with its steps in `src/onboarding.ts`. It opens right after
+signup, in place of the item list, and Settings' "Getting started" group opens it again. Three
+steps, each with "Skip this step", and "Close the guide" at any step:
+
+1. **Keep your Emergency Kit safe.** A confirmation only: the kit is shown once, at signup (ADR
+   0008 point 1, CRYPTO.md §7), and the core refuses a second showing (`already_shown`), so the
+   guide never displays the Secret Key or the recovery code. It says plainly that without a copy
+   the account cannot be opened once the session ends. "Continue" waits for the box to be ticked.
+2. **Import from another password manager.** The import form of "Export and import"
+   (`TransferPane.tsx` `ImportForm`, unchanged), with the list of formats it reads.
+3. **Install the browser extension.** Static instructions (load the unpacked Chromium build, or
+   the Firefox build as a temporary add-on; the extension is not in the stores yet) and the
+   values its "Set up this device" form asks for, with this server's origin and the login name
+   filled in. No link, no request.
+
+Then a summary of how each step ended. Each new step moves the focus to its heading, and the
+step list marks the current step with `aria-current="step"`. The guide adds no endpoint, wire
+field or stored value: CRYPTO.md §11.4 lets the web vault keep only the opted-in Secret Key and
+the theme choice in browser storage, so "the guide is done" is remembered nowhere. The guide
+shows after signup only, never after a login. Covered by `test/onboarding.test.ts` and
+`e2e/onboarding.spec.ts`.
 
 ### Appearance (theme)
 
@@ -247,6 +334,44 @@ every pair here clears with margin to spare):
 | `--color-on-danger` on `--color-danger` | 6.54:1 | 10.09:1 |
 | `--color-warning-text` on `--color-warning-bg` | 10.64:1 | 10.57:1 |
 
+The same pairs, declared in `packages/ui/tokens/tokens.json`, are checked by `cargo xtask
+generate-tokens --check` in CI, which fails below AA. The rendered pages are checked too (next
+section).
+
+### Accessibility checks (ROADMAP §4.5, ADR 0014 §5)
+
+`e2e/a11y.ts` holds the checks; [CONTRIBUTING.md](../../CONTRIBUTING.md#what-the-accessibility-checks-cover)
+says how they fit with the token check and the extension's audit.
+
+- **What is audited.** `e2e/a11y.spec.ts`: login, signup, the getting-started guide's steps,
+  the vault list, the new-item menu, the editor (new and edit) and its generator popover, the
+  item view (and a revealed password), large type, the trash confirmation, the command palette
+  with results, the shortcuts help, the account menu, the generator, export and import with the
+  plaintext-export dialog, Settings (two-factor, devices, appearance, "What the server stores",
+  getting started), the trash, unlock, two-factor setup and the login's code prompt; then the
+  dark theme, forced colours (light and dark) and phone width. `e2e/conflict.spec.ts` audits a
+  conflicted item and the open conflict chooser.
+- **What each audit checks.** axe-core (`@axe-core/playwright`, a dev dependency) runs every
+  WCAG 2.0/2.1/2.2 A and AA rule and its best-practice rules: every control named, form fields
+  labelled, text alternatives, one main landmark, an h1 and no skipped heading levels, document
+  language and title, no duplicate ids that ARIA references, nothing focusable hidden from the
+  accessibility tree, named dialogs, valid ARIA, target size, colour contrast of the rendered
+  text. Any violation fails; `REQUIRED_RULES` fails a run in which axe did not evaluate one of
+  the rules this list relies on. Then Chromium's own accessibility tree (CDP): every visible,
+  focusable element is exposed and has a name. Every modal dialog must keep Tab and Shift+Tab
+  inside it. Under forced colours, axe's contrast rule is replaced by "nothing opts out with
+  `forced-color-adjust: none`" (Chromium reports the author's text colour there, not the
+  painted system colour; see `a11y.ts`).
+- **Keyboard only.** `e2e/keyboard-nav.spec.ts` walks the same screens with Tab, Enter, Space,
+  Escape, the arrow keys and typing; `tabTo` fails when a control is not reached within its
+  bound.
+- **What is not covered.** Real screen readers (NVDA, JAWS, VoiceOver, Orca): the rules catch
+  missing names, labels and structure, not whether the result reads well, so a UI change still
+  needs a manual pass with one. Firefox and Safari (Chromium only). Contrast of colours the token
+  file does not declare as a pair, outside what axe measures on the audited screens. The native
+  clients' toolkits: their checks live in their own repositories (ADR 0019 §6); this repository
+  only keeps their generated token files in sync (`cargo xtask generate-tokens --check`).
+
 ### Not yet done
 
 Slice 1 covered items 1–3 of the redesign brief and the contrast table of item 7; the centered
@@ -271,6 +396,7 @@ pnpm run build          # packages/core, then apps/web → apps/web/dist
 pnpm run lint           # the ADR 0014 §2 rules (eslint.config.mjs)
 pnpm run test           # Vitest, every package
 pnpm run e2e            # builds rizzy-vault with embed-web, then Playwright (Chromium) against it
+pnpm --filter @rizzy-vault/web run e2e e2e/a11y.spec.ts   # only the accessibility audit
 ```
 
 Playwright needs its Chromium build: `pnpm --filter @rizzy-vault/web exec playwright install chromium`.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The password and passphrase generator (ROADMAP §4.2). The core generates (rizzy-core
 // `generator`, OS randomness in the Worker) and computes the entropy of a set of options
 // without generating anything (`passwordEntropy`/`passphraseEntropy`); this view only collects
@@ -121,7 +123,7 @@ export function GeneratorPane(props: { readonly ctx: VaultContext }) {
 
   return (
     <div className="panel narrow generator-pane">
-      <h2>Generator</h2>
+      <h1>Generator</h1>
       <fieldset>
         <legend>Kind</legend>
         <label className="check">

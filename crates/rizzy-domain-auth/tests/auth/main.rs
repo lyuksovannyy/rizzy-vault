@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Integration tests of `rizzy-domain-auth` against real SQLite files, with `rizzy-core`'s
 //! client-side functions playing the client.
 //!

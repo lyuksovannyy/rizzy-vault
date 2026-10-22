@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Version-vector tests.
 //!
 //! - Known answers for the canonical encoding (ADR 0012 §3), independent of insertion order,
@@ -180,6 +182,9 @@ fn read_reports_offsets_relative_to_its_start() {
 /// ADR 0012 §7 "Chain check after compaction": X's snapshot has VV[D] = 50, so a VV check
 /// counts D's seq 12, an edit of item Z, as covered. The retained header is what tells them
 /// apart; coverage alone cannot.
+///
+/// ETH class: none. Withholding is threat model §5.6, which has no ETH class (CRYPTO.md §15
+/// item 5).
 #[test]
 fn adr_0012_withheld_op_example() {
     let snapshot_of_x = vv(&[(0xd0, 50)]);

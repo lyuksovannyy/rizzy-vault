@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-wasm` — the wasm-bindgen bindings of rizzy-vault's client core for the web vault
 //! ([ADR 0013] §1, §3, §4; [ADR 0016] §3 row `rizzy-wasm`; [ADR 0014] §4 `packages/core`).
 //!
@@ -111,12 +113,12 @@ pub use generator::{
     generator_limits, passphrase_entropy, password_entropy,
 };
 pub use http::{HttpRequest, check_meta, expect_no_content, meta_request};
-pub use items::{FieldView, ItemDraft, ItemSummary, generate_element_id};
+pub use items::{FieldView, HistoryEntryView, ItemDraft, ItemSummary, generate_element_id};
 pub use login::LoginFlow;
 pub use matching::{MatchDecision, decide_match_candidates, normalize_page_url};
 pub use passkey::{CreatedPasskey, PasskeyAssertion, create_passkey};
 pub use session::{
-    DeviceView, EncryptedExport, ImportReport, Session, TotpCode, TwoFactorEnrolment,
+    DeviceView, EncryptedExport, ImportReport, Notice, Session, TotpCode, TwoFactorEnrolment,
     detect_import_format, plaintext_export_hold_ms, plaintext_export_phrase,
     plaintext_export_warning,
 };

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Shared helpers: a real SQLite database in a temporary directory, an in-memory vault port,
 //! and a client that runs `rizzy-core`'s client-side functions (the other half of every flow).
 

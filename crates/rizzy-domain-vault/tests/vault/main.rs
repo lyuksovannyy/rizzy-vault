@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Integration tests of `rizzy-domain-vault` against real SQLite files, or a real PostgreSQL
 //! database when `RIZZY_TEST_POSTGRES_URL` names one the tests may wipe (`common::Slot`), with
 //! real `op` and `snapshot` statements signed by `rizzy-core` device keys.

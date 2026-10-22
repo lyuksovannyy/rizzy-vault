@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Vite build of the extension's ES-module surfaces (ADR 0014 §3): the popup, the options page,
 // the inline-menu iframe, the service worker (Chromium) or background page (Firefox), and the
 // offscreen document (Chromium). These may freely share chunks (every one of them is loaded as

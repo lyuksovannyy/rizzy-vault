@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes `rizzy-client`'s export payload reader (ADR 0027 §2 step 2; threat model A16) and
 //! the import mapping behind it (ADR 0027 §2 steps 3–4), on arbitrary bytes: the plaintext of
 //! an `EXPORT_FILE` envelope is attacker-chosen for anyone who knows or picks the export

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Executable model of the rizzy-vault sync merge (spike, see `README.md`).
 //!
 //! It models one item, 2-5 devices, a Server-mode server (ADR 0012 §7 as partly replaced by

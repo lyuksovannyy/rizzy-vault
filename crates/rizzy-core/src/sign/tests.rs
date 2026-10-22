@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Signature tests: RFC 8032 through the wrappers, `verify_strict` behaviour, the container,
 //! independent known answers for every statement, a round trip and a bit-flip tamper test per
 //! statement, the structural rules and length bounds of each statement, the `account-state`
@@ -446,6 +448,10 @@ fn device_certificate_known_answer_round_trip_and_tamper() {
     );
 }
 
+/// Malicious server: serves an op a kind-4 (web) certificate signed past `expires_at_ms`
+/// (CRYPTO.md §15 item 5).
+///
+/// ETH class: 3 (threat model §5.5, forged device registrations; §5.9 gives it class 3).
 #[test]
 fn device_certificate_kind_4_expiry_rule() {
     let web = DeviceCertificate {
@@ -734,6 +740,9 @@ fn account_state_compare_and_swap_rules() {
 
 /// `is_fork` against the persisted state (§10.2, §11.3 step 2.5, INV-25): the same
 /// `state_seq` with different content, however small the difference, and only then.
+///
+/// ETH class: none. Forks are threat model §5.6, which has no ETH class (CRYPTO.md §15
+/// item 5).
 #[test]
 fn account_state_fork_against_the_persisted_state() {
     let persisted = state();
@@ -1330,6 +1339,9 @@ fn pinned_first() -> VerifiedBundle {
     PublicKeyBundle::verify_self_signed(&first_bundle().sign(&identity()).unwrap()).unwrap()
 }
 
+/// Includes a substituted bundle public key, which no longer verifies (CRYPTO.md §15 item 5).
+///
+/// ETH class: 3 (threat model §5.4, public-key substitution).
 #[test]
 fn first_bundle_known_answer_round_trip_and_tamper() {
     let wire = first_bundle().sign(&identity()).unwrap();
@@ -1688,6 +1700,11 @@ fn an_identity_change_replaces_both_identity_keys() {
     );
 }
 
+/// Malicious server: serves an older bundle, two bundles with the same predecessor, or a
+/// bundle of another account (CRYPTO.md §15 item 5).
+///
+/// ETH class: 3 for the other account's bundle (threat model §5.4, public-key
+/// substitution). None for the rollback and the fork: threat model §5.6 has no ETH class.
 #[test]
 fn rollback_fork_gap_and_account_mismatch() {
     let pinned = pinned_first();

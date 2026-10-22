@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // A tiny in-memory stand-in for the browser's IndexedDB, written for `test/idb.test.ts` only.
 // It implements exactly the slice of the real API `cache/idb.ts` calls: `factory.open` /
 // `deleteDatabase`, the `upgradeneeded` / `success` / `error` request events, `db.createObjectStore`,

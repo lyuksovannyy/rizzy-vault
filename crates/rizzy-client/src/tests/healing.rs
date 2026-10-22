@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Account-side restore healing tests (ADR 0012 §7 steps 1–3, "A device enrolled after the
 //! backup"; ADR 0021 §9 "Server behind") against the fake server of the parent module, which
 //! here also plays a restore (its account rows put back to an earlier copy) and the

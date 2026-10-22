@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `ItemEditor`'s pure list-reorder helper: moving a still-unsaved website or custom-field row
 // up or down in the pending list before the first save (ItemEditor.tsx module docs).
 import { describe, expect, it } from "vitest";

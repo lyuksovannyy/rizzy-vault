@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Messaging validation (ADR 0036 §4, INV-40): `parseFromContentScript` must accept every
 // well-formed message this contract defines and refuse anything oversized or malshaped, before
 // any shape-specific logic runs.
@@ -9,6 +11,7 @@ import {
   MAX_URL_LEN,
   isApplyFillMessage,
   isInlineMenuFillRequestMessage,
+  isInlineMenuGeneratePasswordRequestMessage,
   isRelayApplyFillMessage,
 } from "../src/messaging/contract.ts";
 import { MessageRejected, parseFromContentScript } from "../src/messaging/validate.ts";
@@ -132,6 +135,13 @@ describe("parseFromContentScript: refuses bad input", () => {
     const message = { type: "inline_menu_fill_chosen", itemId: "item-1", confirmedEquivalence: true };
     expect(() => parseFromContentScript(message)).toThrow(MessageRejected);
   });
+
+  // Same ADR 0040 defence-in-depth rule, for the generator's privileged request (gap 32 in the
+  // M2 gap audit): it must never be reachable through the content-script path either.
+  it("inline_menu_generate_password_chosen is not a content-script message at all", () => {
+    const message = { type: "inline_menu_generate_password_chosen" };
+    expect(() => parseFromContentScript(message)).toThrow(MessageRejected);
+  });
 });
 
 describe("isInlineMenuFillRequestMessage", () => {
@@ -155,6 +165,33 @@ describe("isInlineMenuFillRequestMessage", () => {
     expect(isInlineMenuFillRequestMessage(null)).toBe(false);
     expect(isInlineMenuFillRequestMessage("inline_menu_fill_chosen")).toBe(false);
   });
+
+  // Multi-step login pages (ROADMAP §4.4 M3): `only` narrows a fill to one field kind.
+  it("accepts only: username or password, and rejects any other value", () => {
+    const base = { type: "inline_menu_fill_chosen", itemId: "item-1", confirmedEquivalence: false };
+    expect(isInlineMenuFillRequestMessage({ ...base, only: "username" })).toBe(true);
+    expect(isInlineMenuFillRequestMessage({ ...base, only: "password" })).toBe(true);
+    expect(isInlineMenuFillRequestMessage({ ...base, only: "both" })).toBe(false);
+    expect(isInlineMenuFillRequestMessage({ ...base, only: null })).toBe(false);
+    expect(isInlineMenuFillRequestMessage({ ...base, only: ["username"] })).toBe(false);
+  });
+});
+
+// Gap 32 in the M2 gap audit: the generator's own privileged request, same validator pattern as
+// `isInlineMenuFillRequestMessage` above, but with no fields beyond `type` to bound.
+describe("isInlineMenuGeneratePasswordRequestMessage", () => {
+  it("accepts a well-formed request", () => {
+    expect(isInlineMenuGeneratePasswordRequestMessage({ type: "inline_menu_generate_password_chosen" })).toBe(true);
+  });
+
+  it("rejects the wrong type tag", () => {
+    expect(isInlineMenuGeneratePasswordRequestMessage({ type: "inline_menu_fill_chosen" })).toBe(false);
+  });
+
+  it("rejects a non-object", () => {
+    expect(isInlineMenuGeneratePasswordRequestMessage(null)).toBe(false);
+    expect(isInlineMenuGeneratePasswordRequestMessage("inline_menu_generate_password_chosen")).toBe(false);
+  });
 });
 
 describe("isApplyFillMessage", () => {
@@ -166,8 +203,20 @@ describe("isApplyFillMessage", () => {
     expect(isApplyFillMessage({ type: "apply_fill", values: { username: "alice", password: "s3cret" } })).toBe(true);
   });
 
-  it("rejects a missing password", () => {
-    expect(isApplyFillMessage({ type: "apply_fill", values: { username: "alice" } })).toBe(false);
+  // Multi-step login pages (ROADMAP §4.4 M3): an identifier-first step's fill carries the
+  // username alone, never the password (ADR 0036 §4).
+  it("accepts a username-only fill", () => {
+    expect(isApplyFillMessage({ type: "apply_fill", values: { username: "alice" } })).toBe(true);
+  });
+
+  it("rejects values with neither a username nor a password", () => {
+    expect(isApplyFillMessage({ type: "apply_fill", values: {} })).toBe(false);
+  });
+
+  it("rejects an over-long or non-string value", () => {
+    expect(isApplyFillMessage({ type: "apply_fill", values: { username: "a".repeat(4097) } })).toBe(false);
+    expect(isApplyFillMessage({ type: "apply_fill", values: { password: 7 } })).toBe(false);
+    expect(isApplyFillMessage({ type: "apply_fill", values: { username: "alice", password: null } })).toBe(false);
   });
 
   it("rejects a missing values object", () => {
@@ -196,8 +245,12 @@ describe("isRelayApplyFillMessage", () => {
     expect(isRelayApplyFillMessage({ type: "relay_apply_fill", tabId: "7", values: { password: "s3cret" } })).toBe(false);
   });
 
-  it("rejects a missing password", () => {
-    expect(isRelayApplyFillMessage({ type: "relay_apply_fill", tabId: 7, values: { username: "alice" } })).toBe(false);
+  it("accepts a username-only relay (an identifier-first step)", () => {
+    expect(isRelayApplyFillMessage({ type: "relay_apply_fill", tabId: 7, values: { username: "alice" } })).toBe(true);
+  });
+
+  it("rejects values with neither a username nor a password", () => {
+    expect(isRelayApplyFillMessage({ type: "relay_apply_fill", tabId: 7, values: {} })).toBe(false);
   });
 
   it("rejects a different message type (e.g. the public apply_fill shape)", () => {

@@ -1,7 +1,7 @@
 # ADR 0042: ACCOUNT_SETTINGS plaintext: canonical layout and the M2 matching section
 
-- Status: Proposed
-- Date: 2026-10-08
+- Status: Accepted
+- Date: 2026-10-08 (accepted 2026-10-21)
 - Deciders: project owner
 - Milestone: M2
 
@@ -174,6 +174,10 @@ public-suffix domain, `match_default` out of range, `flag = 1` in a user group, 
 1` (parked, not rejected). Property: encode → decode → encode is the identity
 ([ADR 0018](0018-item-record-encoding.md) §12). The placeholder plaintext at `envelopes.rs:174`
 is replaced by a real encoded record (see [On acceptance](#on-acceptance)).
+
+### Owner answers at acceptance (2026-10-21)
+
+The owner accepted this ADR as drafted. HANDOFF §3 had recommended "Accept as drafted", so the recommendations of "Open questions for the owner" stand: the settings-length side channel is accepted unchanged (question 1); `MAX_USER_GROUPS` / `MAX_DISABLED_GROUPS` / `MAX_SETTINGS_ENTRIES` are 64 / 1,024 / 256 (question 2); and the error UX for a rejected public-suffix entry is left to the implementation (question 3). Of the "On acceptance" edits, item 2 (CRYPTO.md §8.4) is made in the accepting change. Item 3 (CRYPTO.md §15 and the replaced vector) lands with the implementation, which writes those vectors.
 
 ## Consequences
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The core Worker: the one context of the web vault that holds the wasm instance, every handle
 // and every key (ADR 0013 §4 "Where the core lives"). It runs the KDF, does the HTTP transport
 // to its own origin (`/api/v1`, ADR 0028) through packages/core's `fetchTransport`, and answers
@@ -43,6 +45,7 @@ import {
   type KitMessage,
   type SessionInfo,
   TOTP_CANCELLED,
+  isSettingsChange,
   isToWorker,
   transferables,
 } from "./protocol.ts";
@@ -155,6 +158,14 @@ function bool(v: unknown): boolean {
   return v;
 }
 
+/** A non-negative safe-integer argument (a list position), or `invalid_input`. */
+function index(v: unknown): number {
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) {
+    throw new CoreError("invalid_input");
+  }
+  return v;
+}
+
 /** Zeroes every byte array among `args`, whatever the call did with them. */
 function wipe(args: readonly unknown[]): void {
   for (const a of args) {
@@ -239,6 +250,33 @@ async function run(m: CallMessage): Promise<unknown> {
     trashItem: () => current().trashItem(str(a[0])),
     restoreItem: () => current().restoreItem(str(a[0])),
     purgeItem: () => current().purgeItem(str(a[0])),
+    // Dates only; one value per reveal (ADR 0013 §3 rule 3): the history is never sent whole.
+    passwordHistory: () => current().passwordHistory(str(a[0])),
+    revealPasswordHistory: () =>
+      current().revealPasswordHistory(str(a[0]), str(a[1]) as never, index(a[2]), str(a[3])),
+    // ROADMAP §4.2: the same dates-only/one-value-per-reveal rule, generalized to every field.
+    itemHistory: () => current().itemHistory(str(a[0])),
+    revealFieldHistory: () =>
+      current().revealFieldHistory(str(a[0]), str(a[1]), index(a[2]), str(a[3])),
+    restoreFieldHistory: () =>
+      current().restoreFieldHistory(str(a[0]), str(a[1]), index(a[2]), str(a[3])),
+    // ROADMAP §4.5 "keep both / pick one": the listing withholds concealed values; one value
+    // crosses per reveal; a resolution names the value by its listed index and id.
+    fieldConflict: () => current().fieldConflict(str(a[0]), str(a[1])),
+    revealConflictValue: () =>
+      current().revealConflictValue(str(a[0]), str(a[1]), index(a[2]), str(a[3])),
+    resolveConflictPick: () =>
+      current().resolveConflictPick(str(a[0]), str(a[1]), index(a[2]), str(a[3])),
+    resolveConflictKeepBoth: () =>
+      current().resolveConflictKeepBoth(
+        str(a[0]),
+        str(a[1]),
+        index(a[2]),
+        str(a[3]),
+        a[4] === undefined ? undefined : str(a[4]),
+      ),
+    takeNotices: () => current().takeNotices(),
+    restoreLateAsNew: () => current().restoreLateAsNew(str(a[0]), str(a[1]) as never),
     totp: () => current().totp(str(a[0])),
     exportEncrypted: () => current().exportEncrypted(bytes(a[0])),
     exportBlockers: () => current().exportBlockers(),
@@ -261,6 +299,14 @@ async function run(m: CallMessage): Promise<unknown> {
     enableTwoFactor: () => current().enableTwoFactor(),
     confirmTwoFactor: () => current().confirmTwoFactor(str(a[0])),
     disableTwoFactor: () => current().disableTwoFactor(str(a[0])),
+    matchSettings: () => current().matchSettings(),
+    matchCandidates: () => current().matchCandidates(str(a[0])),
+    changeMatchSettings: async () => {
+      if (!isSettingsChange(a[0])) {
+        throw new CoreError("invalid_input");
+      }
+      await current().changeMatchSettings(a[0]);
+    },
     generatePasswordWithOptions: () => generatePasswordWithOptions(a[0] as never),
     generatePassphraseWithOptions: () => generatePassphraseWithOptions(a[0] as never),
     passwordEntropy: () => passwordEntropy(a[0] as never),

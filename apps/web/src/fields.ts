@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // How the web vault lays out items: the fixed fields of each writable M1 item type (ADR 0018
 // §7), their labels, and the grouping of a field list into fixed fields, URIs, custom fields
 // and tags. Which fields are concealed is the core's answer (`FieldView.concealed`), never
@@ -72,9 +74,8 @@ export const FIXED_FIELDS: Readonly<Partial<Record<ItemType, readonly FixedField
 
 /** `uri/<id>/match`'s wire values (ADR 0037 §4, Accepted M2), for the editor's select and the
  * item detail view. `0x0000` ("absent") falls back to the account-level match default
- * (ADR 0037 §6); this web vault has no UI for that account setting yet (see ROADMAP §4.4 and
- * the M2 report), so it is shown as "Account default" without naming which mode that resolves
- * to. `0x0005` (Regex) is a value `rizzy-match` accepts and stores, but its own matching
+ * (ADR 0037 §6), which Settings → Website matching sets (`MatchingPane.tsx`; ADR 0042), so it is
+ * shown as "Account default" here without naming which mode that resolves to. `0x0005` (Regex) is a value `rizzy-match` accepts and stores, but its own matching
  * decision reports `NotSupported` for it today (`crates/rizzy-match/src/modes.rs`): the editor
  * must not claim it works. */
 export const MATCH_MODE_OPTIONS: readonly { readonly value: number; readonly label: string }[] = [
@@ -232,6 +233,17 @@ export function matches(
     (item.websiteHost?.toLocaleLowerCase().includes(q) ?? false) ||
     (item.tags?.some((tag) => tag.toLocaleLowerCase().includes(q)) ?? false)
   );
+}
+
+/** Sorts favorites before non-favorites, then by title (case-insensitive, locale-aware).
+ * Shared by the item list (`ItemsPane.tsx`) and the command palette's item results
+ * (`palette.ts`, ROADMAP §4.2/§4.5 "favorites first"), so the two places items are ranked in
+ * this vault never drift apart. */
+export function compareFavoriteFirst(
+  a: { readonly favorite: boolean; readonly title: string },
+  b: { readonly favorite: boolean; readonly title: string },
+): number {
+  return Number(b.favorite) - Number(a.favorite) || a.title.localeCompare(b.title);
 }
 
 /** Every distinct tag over `items`, with how many items carry it, most-used first and

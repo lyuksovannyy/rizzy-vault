@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes `rizzy-match`'s equivalence-list parser (ADR 0038 §1): [`EquivalenceList::verify`]
 //! never panics on arbitrary bytes, under a fixed public key unrelated to any real signature,
 //! and a list this process builds and signs itself (domains derived from the fuzzer's own

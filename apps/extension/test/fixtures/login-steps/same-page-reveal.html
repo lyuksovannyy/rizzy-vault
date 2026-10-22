@@ -1,0 +1,28 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Identifier-first, same page</title>
+  </head>
+  <body>
+    <!-- One page, two steps: the password field is in the document from the start but hidden
+         until "Next" reveals it (an attribute change, not a DOM insertion). Before: username
+         step. After: username_and_password. -->
+    <form id="signin" action="/session" onsubmit="return false">
+      <label for="user">Email or username</label>
+      <input id="user" name="identifier" type="text" />
+      <div id="pw-step" hidden>
+        <label for="pass">Password</label>
+        <input id="pass" name="password" type="password" autocomplete="current-password" />
+      </div>
+      <button id="next" type="button">Next</button>
+      <button id="submit" type="submit">Sign in</button>
+    </form>
+    <script>
+      document.getElementById("next").addEventListener("click", function () {
+        document.getElementById("pw-step").hidden = false;
+      });
+    </script>
+  </body>
+</html>

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Ciphertext envelopes (CRYPTO.md §8, §9; ADR 0005, ADR 0007).
 //!
 //! Every ciphertext `rizzy-core` produces is a versioned envelope: a fixed binary layout whose

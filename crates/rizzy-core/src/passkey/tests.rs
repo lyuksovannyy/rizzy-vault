@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Known-answer and round-trip tests for [`super::Es256SigningKey`]/[`super::Es256VerifyingKey`].
 //!
 //! Vector sources (CRYPTO.md §15 item 2, "upstream vectors"):

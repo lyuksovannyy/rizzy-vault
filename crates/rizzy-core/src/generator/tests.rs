@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Tests of the generator (CRYPTO.md §12.1): chi-square bias checks on index draws,
 //! characters, required-class candidates and word choice, entropy values, option validation,
 //! and checks that the constant-time passphrase layout matches plain concatenation byte for

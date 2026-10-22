@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The whole happy path, and the checks a client runs on what the server returns.
 
 use rizzy_core::envelope::purpose::{AccountKeyServerWrapCtx, IdentitySecretKeysCtx};

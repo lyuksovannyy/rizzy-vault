@@ -19,6 +19,12 @@ psl.workspace = true
 # bytes (ADR 0016 §4 "Dev-dependencies": R1's allow-list covers normal and build dependencies
 # only, so tests may use proptest).
 proptest.workspace = true
+# Mints detached-signature test fixtures for `tests/inv39_equivalence_list_differential.rs`:
+# not a new crate (already the ADR 0009-approved, workspace-pinned Ed25519 implementation
+# `rizzy-core` itself uses), only extended to this crate's test code so it can sign its own
+# generated lists the same way `cargo xtask equivalence-list` does, independent of
+# `EquivalenceList::verify`'s own decision logic under test.
+ed25519-dalek.workspace = true
 
 [lints]
 workspace = true

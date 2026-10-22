@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // packages/core end to end against a real `rizzy-vault` server, through the wasm module:
 // signup → Emergency Kit → login → items → sync → a second session sees them → reveal → edit →
 // trash and restore → TOTP → encrypted export behind a re-authentication, recognised and
@@ -22,12 +24,16 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   type CacheRow,
   type CacheStore,
+  type Clock,
   CoreError,
+  type HistoryEntry,
+  MatchMode,
   Signup,
   type Transport,
   type VaultSession,
   checkServer,
   createPasskey,
+  decideMatchCandidates,
   PASSKEY_ALG_ES256,
   fetchTransport,
   detectImportFormat,
@@ -307,6 +313,22 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     first.restoreItem(id);
     expect(first.items().map((i) => i.id)).toEqual([id]);
 
+    // Permanent delete, on a dedicated item so the export/import counts below stay
+    // unaffected: gone for good on this session, rejected on a non-trashed or unknown item,
+    // and gone on the second session once it syncs (gap 03; the web vault's confirm dialog and
+    // the durable-device binding below have their own tests).
+    const toPurge = first.createItem("login", [{ op: "set", key: "item.name", value: "To purge" }]);
+    first.trashItem(toPurge);
+    first.purgeItem(toPurge);
+    expect(first.items().some((i) => i.id === toPurge)).toBe(false);
+    expect(first.items(true).some((i) => i.id === toPurge)).toBe(false);
+    expect(() => first.purgeItem(toPurge)).toThrowError(expect.objectContaining({ code: "unknown_item" }));
+    expect(() => first.purgeItem("0".repeat(32))).toThrowError(expect.objectContaining({ code: "unknown_item" }));
+    await first.sync();
+    await second.sync();
+    expect(second.items().some((i) => i.id === toPurge)).toBe(false);
+    expect(second.items(true).some((i) => i.id === toPurge)).toBe(false);
+
     // TOTP from an item's secret (RFC 6238's SHA-1 key, as Base32).
     const totpItem = first.createItem("login", [
       { op: "set", key: "item.name", value: "With 2FA" },
@@ -566,6 +588,22 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     await signup.confirm(lastGroup);
     const owner = await signup.login();
     const ownerAccountId = owner.accountId;
+    // ADR 0042 §5: the web session writes the account's match settings, one `account/commit` of
+    // the whole record each; the durable device below (the extension's binding) reads them.
+    expect(owner.matchSettings()).toEqual({
+      matchDefault: MatchMode.BaseDomain,
+      userGroups: [],
+      globalGroups: [],
+      otherDisabled: [],
+    });
+    await expect(
+      owner.changeMatchSettings({ kind: "addUserGroup", domains: ["co.uk", "example.com"] }),
+    ).rejects.toMatchObject({ code: "equivalence_domain_rejected" });
+    await owner.changeMatchSettings({ kind: "addUserGroup", domains: ["example.com", "Example.NET"] });
+    await owner.changeMatchSettings({ kind: "matchDefault", mode: MatchMode.Host });
+    const written = owner.matchSettings();
+    expect(written.matchDefault).toBe(MatchMode.Host);
+    expect(written.userGroups.map((g) => g.domains)).toEqual([["example.com", "example.net"]]);
     owner.lock();
 
     const store = memoryCacheStore();
@@ -589,6 +627,25 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     // syncs an item of its own: persisted through `store` before each call resolves.
     await session.sync();
     expect(session.items()).toEqual([]);
+
+    // ADR 0042 §6: the device reads the same settings and applies them to its match decision.
+    expect(session.matchSettings()).toEqual(written);
+    const saved = (mode: (typeof MatchMode)[keyof typeof MatchMode]) => [
+      { itemId: "a".repeat(32), uriId: "b".repeat(32), value: "https://example.com/login", mode },
+    ];
+    const top = { isTopFrame: true, frameOrigin: "" };
+    // Base domain widens through the user group, with the equivalence warning...
+    expect(
+      session.decideMatchCandidates("https://example.net/", top, saved(MatchMode.BaseDomain)).candidates.map(
+        (c) => c.needsWarning,
+      ),
+    ).toEqual([true]);
+    // ...the free function, which holds no account settings, does not...
+    expect(decideMatchCandidates("https://example.net/", top, MatchMode.BaseDomain, saved(MatchMode.BaseDomain)).candidates).toEqual([]);
+    // ...and a URI with no override of its own takes the account default, Host: not offered on
+    // a subdomain that its Base domain own-mode twin is offered on.
+    expect(session.decideMatchCandidates("https://www.example.com/", top, saved(MatchMode.AccountDefault)).candidates).toEqual([]);
+    expect(session.decideMatchCandidates("https://www.example.com/", top, saved(MatchMode.BaseDomain)).candidates).toHaveLength(1);
     const id = await session.createItem("login", [
       { op: "set", key: "item.name", value: "Extension item" },
       { op: "set", key: "login.username", value: "extension-user" },
@@ -617,7 +674,554 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     const [summary] = reopened.items();
     expect(summary).toMatchObject({ id, itemType: "login", title: "Extension item" });
     expect(reopened.reveal(id, "login.username")).toBe("extension-user");
+
+    // Permanent delete through the async durable-device binding (index.ts:2001): purges,
+    // rejected on a non-trashed item, and the deletion persists across a reopen from the
+    // store without any further sync.
+    await reopened.trashItem(id);
+    await reopened.purgeItem(id);
+    expect(reopened.items()).toEqual([]);
+    await expect(reopened.purgeItem(id)).rejects.toMatchObject({ code: "unknown_item" });
     reopened.lock();
+
+    const reopenedAgain = await unlockDurableDevice(transport, store, PASSWORD);
+    await reopenedAgain.authenticate();
+    expect(reopenedAgain.items()).toEqual([]);
+    reopenedAgain.lock();
+  });
+
+  // Gap 00 (ADR 0012 §5, ADR 0018 §9, §11): `VaultSession.sync` runs the client-side trash
+  // auto-purge once the fetch/upload driver settles. Before the retention period, trashing
+  // alone must not purge; past it, the next `sync()` does, and the server never does it
+  // (ADR 0022) — only this client-side pass does.
+  it("auto-purges a trashed item once its retention period has elapsed, on sync", async () => {
+    const transport = fetchTransport(origin);
+    let skew = 0;
+    const clock = () => Date.now() + skew;
+    const signup = await Signup.start(
+      transport,
+      { origin, loginName: "Carol", password: PASSWORD, issueRecoveryCode: false },
+      clock,
+    );
+    const lastGroup = (() => {
+      const kit = signup.emergencyKit();
+      const secretKey = new TextDecoder().decode(kit.secretKey);
+      kit.secretKey.fill(0);
+      return secretKey.split("-").at(-1) ?? "";
+    })();
+    await signup.confirm(lastGroup);
+    const first = await signup.login();
+
+    const id = first.createItem("login", [{ op: "set", key: "item.name", value: "To expire" }]);
+    await first.sync();
+    first.trashItem(id);
+    await first.sync();
+    // Well before 30 days: trashing alone never purges.
+    expect(first.items(true).map((i) => i.id)).toEqual([id]);
+
+    // Past the 30-day default retention (ADR 0012 §5): the next sync purges it client-side.
+    skew += 30 * 24 * 60 * 60 * 1000 + 60_000;
+    await first.sync();
+    expect(first.items(true)).toEqual([]);
+    expect(first.items()).toEqual([]);
+
+    first.lock();
+  });
+
+  /**
+   * A confirmed signup of `loginName` and its first session, with the Secret Key text. `clock`
+   * (default `Date.now`) is the session's clock for every write it makes afterwards: a frozen
+   * clock forces two edits to land on the very same millisecond, on purpose, for a test.
+   */
+  async function freshAccount(
+    loginName: string,
+    clock: Clock = Date.now,
+  ): Promise<{ session: VaultSession; secretKey: string }> {
+    const transport = fetchTransport(origin);
+    const signup = await Signup.start(
+      transport,
+      {
+        origin,
+        loginName,
+        password: PASSWORD,
+        issueRecoveryCode: false,
+      },
+      clock,
+    );
+    const kit = signup.emergencyKit();
+    const secretKey = new TextDecoder().decode(kit.secretKey);
+    kit.secretKey.fill(0);
+    await signup.confirm(secretKey.split("-").at(-1) ?? "");
+    return { session: await signup.login(), secretKey };
+  }
+
+  // Gap 01 (ADR 0012 §5, ADR 0013 §3 rule 3): the history crosses as dates only; one value
+  // crosses per reveal, bound to the entry's own id (finding 0), not its display date. A
+  // frozen clock forces every edit onto the same millisecond, so two entries share one
+  // `changedMs` by construction, not by luck: the deterministic version of the race a sync
+  // between the listing and the reveal could otherwise cause only sometimes.
+  it("lists password history without values and reveals one entry on request", async () => {
+    const frozen = Date.now();
+    const { session: s } = await freshAccount("Dave", () => frozen);
+    const id = s.createItem("login", [
+      { op: "set", key: "item.name", value: "Mail" },
+      { op: "set", key: "login.password", value: "v0" },
+    ]);
+    const bare = s.createItem("note", [{ op: "set", key: "item.name", value: "No history" }]);
+
+    // Empty: one value only, or no password at all.
+    expect(s.passwordHistory(id)).toEqual([]);
+    expect(s.passwordHistory(bare)).toEqual([]);
+
+    s.editItem(id, [{ op: "set", key: "login.password", value: "v1" }]);
+    s.editItem(id, [{ op: "set", key: "login.password", value: "v2" }]);
+    await s.sync();
+    const two = s.passwordHistory(id);
+    expect(two.map((h) => [h.source, h.index])).toEqual([
+      ["merge", 0],
+      ["merge", 1],
+    ]);
+    for (const entry of two) {
+      expect(typeof entry.changedMs).toBe("number");
+      expect(typeof entry.id).toBe("string");
+      // Dates only: no value of any kind in the listing.
+      expect(Object.keys(entry).sort()).toEqual(["changedMs", "id", "index", "source"]);
+    }
+    // The collision this test forces: the same millisecond, by the frozen clock above.
+    expect(two[0]?.changedMs).toBe(frozen);
+    expect(two[1]?.changedMs).toBe(frozen);
+    // Distinguishable all the same: each entry's own dot.
+    expect(two[0]?.id).not.toBe(two[1]?.id);
+    expect(JSON.stringify(two)).not.toContain("v0");
+    expect(JSON.stringify(two)).not.toContain("v1");
+    const [newer, older] = two as [HistoryEntry, HistoryEntry];
+    expect(s.revealPasswordHistory(id, "merge", 0, newer.id)).toBe("v1");
+    expect(s.revealPasswordHistory(id, "merge", 1, older.id)).toBe("v0");
+    // The two entries' own ids never reveal the other's value, even at the other's index.
+    expect(() => s.revealPasswordHistory(id, "merge", 0, older.id)).toThrowError(
+      expect.objectContaining({ code: "unknown_item" }),
+    );
+    const refused = (source: HistoryEntry["source"], index: number, entryId: string) =>
+      expect(() => s.revealPasswordHistory(id, source, index, entryId)).toThrowError(
+        expect.objectContaining({ code: "unknown_item" }),
+      );
+    refused("merge", 2, older.id);
+    refused("imported", 0, "irrelevant");
+    expect(() => s.revealPasswordHistory(id, "other" as never, 0, newer.id)).toThrowError(
+      expect.objectContaining({ code: "invalid_input" }),
+    );
+
+    // Capped at 50 (the merge's history limit): v0..v54 replaced, the 50 newest kept.
+    for (let n = 3; n <= 55; n += 1) {
+      s.editItem(id, [{ op: "set", key: "login.password", value: `v${n}` }]);
+    }
+    const capped = s.passwordHistory(id);
+    expect(capped).toHaveLength(50);
+    expect(s.revealPasswordHistory(id, "merge", 0, capped[0]?.id ?? "")).toBe("v54");
+    expect(s.revealPasswordHistory(id, "merge", 49, capped[49]?.id ?? "")).toBe("v5");
+    refused("merge", 50, capped[49]?.id ?? "");
+    // A stale listing: position 0 now holds v54, not the v1 the old listing named, even
+    // though every entry here shares the exact same frozen date. Refused, never another
+    // entry's value under the old entry's identity.
+    expect(capped[0]?.id).not.toBe(newer.id);
+    refused("merge", 0, newer.id);
+
+    // ROADMAP §4.2 "Item revision history (restore old versions)", M3: itemHistory
+    // generalizes passwordHistory to every field, on the same session and item (no extra
+    // signup: the auth rate limiter's signup bucket is shared across this whole file).
+    // ADR 0018 §4 "Uniqueness" is per field key, not across fields, so one op writing both
+    // `login.username` and `login.password` puts the very same dot in both histories; that
+    // is forced here to prove an id from one field's listing is read and restored only
+    // under that field's name.
+    expect(s.itemHistory(bare)).toEqual([]);
+    // A history entry's dot is the write it came from, not the edit that later superseded
+    // it (same storage for a current value and a history one, module docs above): to share
+    // one dot between the two fields' history, the *same* op must first write both ("dave0"
+    // and "shared-pw"), and a *later* op then supersede both at once.
+    s.editItem(id, [
+      { op: "set", key: "login.username", value: "dave0" },
+      { op: "set", key: "login.password", value: "shared-pw" },
+    ]);
+    s.editItem(id, [
+      { op: "set", key: "login.username", value: "dave1" },
+      { op: "set", key: "login.password", value: "final-password" },
+    ]);
+    await s.sync();
+    const history = s.itemHistory(id);
+    const byKey = new Map(history.map((f) => [f.key, f.entries]));
+    expect([...byKey.keys()].sort()).toEqual(["login.password", "login.username"]);
+    const usernameEntries = byKey.get("login.username") ?? [];
+    const passwordEntries = byKey.get("login.password") ?? [];
+    expect(usernameEntries).toHaveLength(1);
+    // Dates only, never a value, same shape as passwordHistory's entries.
+    for (const entry of [...usernameEntries, ...passwordEntries]) {
+      expect(Object.keys(entry).sort()).toEqual(["changedMs", "id", "index", "source"]);
+      expect(entry.source).toBe("merge");
+    }
+    expect(JSON.stringify(history)).not.toContain("final-password");
+    expect(JSON.stringify(history)).not.toContain("shared-pw");
+    expect(JSON.stringify(history)).not.toContain("dave0");
+
+    const sharedDot = usernameEntries[0] as HistoryEntry;
+    expect(passwordEntries[0]?.id).toBe(sharedDot.id);
+    expect(s.revealFieldHistory(id, "login.password", 0, sharedDot.id)).toBe("shared-pw");
+    expect(s.revealFieldHistory(id, "login.username", 0, sharedDot.id)).toBe("dave0");
+    // The id from one field's listing never reveals a value under a different field's name
+    // just because it happens to resolve there too: each call above named its own field
+    // explicitly, and each got that field's own value, never the other's.
+
+    // A stale index, or an id read under the wrong field, is refused.
+    expect(() => s.revealFieldHistory(id, "login.password", 1, sharedDot.id)).toThrowError(
+      expect.objectContaining({ code: "unknown_item" }),
+    );
+    expect(() => s.revealFieldHistory(id, "login.password", 0, "not-a-real-id")).toThrowError(
+      expect.objectContaining({ code: "unknown_item" }),
+    );
+
+    // Restoring under "login.password" writes "shared-pw" back as current, and only
+    // touches that field: the username is untouched.
+    s.restoreFieldHistory(id, "login.password", 0, sharedDot.id);
+    expect(s.reveal(id, "login.password")).toBe("shared-pw");
+    expect(s.reveal(id, "login.username")).toBe("dave1");
+    // A restored entry is an ordinary edit: it neither removes nor dedupes the entry it
+    // copied (still capped at 50, the merge's history limit, module docs above), and
+    // pushes the value it displaced ("final-password") to the top of history.
+    const after = s.itemHistory(id).find((f) => f.key === "login.password")?.entries ?? [];
+    expect(after).toHaveLength(50);
+    expect(s.revealFieldHistory(id, "login.password", 0, after[0]?.id ?? "")).toBe(
+      "final-password",
+    );
+
+    expect(() => s.restoreFieldHistory(id, "login.password", 0, "not-a-real-id")).toThrowError(
+      expect.objectContaining({ code: "unknown_item" }),
+    );
+    s.lock();
+  });
+
+  // Gap 01, imported history (ADR 0018 §7 `pwhist/<id>/value` · `/ms`): the schema shows
+  // `pwhist` values, but they never cross through fields(); one crosses per reveal.
+  it("keeps imported password history out of fields and reveals it one entry at a time", async () => {
+    const { session: s } = await freshAccount("Frank");
+    const history = [
+      { password: "imported-old-a", lastUsedDate: "2024-01-02T03:04:05.000Z" },
+      { password: "imported-old-b", lastUsedDate: "2023-05-06T07:08:09.000Z" },
+    ];
+    const file = new TextEncoder().encode(
+      JSON.stringify({
+        encrypted: false,
+        items: [
+          {
+            type: 1,
+            name: "Imported login",
+            login: { username: "frank", password: "imported-current" },
+            passwordHistory: history,
+          },
+        ],
+      }),
+    );
+    expect(s.importFile("bitwarden-json", file).imported).toBe(1);
+    const id = s.items().find((i) => i.title === "Imported login")?.id ?? "";
+    expect(id).not.toBe("");
+
+    // fields(): no pwhist row, so no former password crosses with the item view.
+    const fields = s.fields(id);
+    expect(fields.some((f) => f.list === "pwhist" || f.key.startsWith("pwhist/"))).toBe(false);
+    expect(JSON.stringify(fields)).not.toContain("imported-old");
+
+    // The listing: imported entries with their dates, no values.
+    const listed = s.passwordHistory(id);
+    expect(listed.map((h) => h.source)).toEqual(["imported", "imported"]);
+    expect(JSON.stringify(listed)).not.toContain("imported-old");
+    const byDate = new Map(history.map((h) => [Date.parse(h.lastUsedDate), h.password]));
+    expect(new Set(listed.map((h) => h.changedMs))).toEqual(new Set(byDate.keys()));
+    // Every entry's id is its own, never shared with the other.
+    expect(listed[0]?.id).not.toBe(listed[1]?.id);
+
+    // Each reveal returns the value of the entry the listing named by id.
+    for (const entry of listed) {
+      expect(s.revealPasswordHistory(id, "imported", entry.index, entry.id)).toBe(
+        byDate.get(entry.changedMs ?? -1),
+      );
+    }
+    // Out of range, the wrong source, or an id the entry does not carry: refused.
+    const first = listed[0] as HistoryEntry;
+    const second = listed[1] as HistoryEntry;
+    for (const [source, index, entryId] of [
+      ["imported", 2, first.id],
+      ["imported", 99, first.id],
+      ["merge", 0, first.id],
+      ["imported", first.index, second.id],
+      ["imported", first.index, "not-a-real-id"],
+    ] as const) {
+      expect(() => s.revealPasswordHistory(id, source, index, entryId)).toThrowError(
+        expect.objectContaining({ code: "unknown_item" }),
+      );
+    }
+
+    // Finding 0 (imported branch, deterministic): an importer that wrote no `lastUsedDate`
+    // for either row leaves both `changedMs` fields `undefined`. The old date-based guard
+    // matched `undefined === undefined` at any index, so a sync that reordered the list
+    // could reveal the wrong row's password under the right one's label. The id-based guard
+    // never collides, because two different `pwhist` rows never share one.
+    const noDates = [{ password: "no-date-a" }, { password: "no-date-b" }];
+    const noDatesFile = new TextEncoder().encode(
+      JSON.stringify({
+        encrypted: false,
+        items: [
+          {
+            type: 1,
+            name: "No dates",
+            login: { username: "frank2", password: "current" },
+            passwordHistory: noDates,
+          },
+        ],
+      }),
+    );
+    expect(s.importFile("bitwarden-json", noDatesFile).imported).toBe(1);
+    const noDatesId = s.items().find((i) => i.title === "No dates")?.id ?? "";
+    expect(noDatesId).not.toBe("");
+
+    const listedNoDates = s.passwordHistory(noDatesId);
+    expect(listedNoDates).toHaveLength(2);
+    for (const entry of listedNoDates) {
+      // The old guard's hole exactly: every entry's date is absent.
+      expect(entry.changedMs).toBeUndefined();
+    }
+    // Distinguishable ids, even though the dates coincide (both absent).
+    const [a, b] = listedNoDates as [HistoryEntry, HistoryEntry];
+    expect(a.id).not.toBe(b.id);
+
+    const byPassword = new Set(
+      listedNoDates.map((entry) => s.revealPasswordHistory(noDatesId, "imported", entry.index, entry.id)),
+    );
+    expect(byPassword).toEqual(new Set(["no-date-a", "no-date-b"]));
+    // `a`'s id never reveals `b`'s value at `b`'s index, nor the reverse: no coincidental
+    // `undefined === undefined` match.
+    expect(() => s.revealPasswordHistory(noDatesId, "imported", b.index, a.id)).toThrowError(
+      expect.objectContaining({ code: "unknown_item" }),
+    );
+    expect(() => s.revealPasswordHistory(noDatesId, "imported", a.index, b.id)).toThrowError(
+      expect.objectContaining({ code: "unknown_item" }),
+    );
+    s.lock();
+  });
+
+  // Gap 02 (ADR 0018 §3 "Surfacing", ADR 0012 §5 "Active wins"): each notice is handed over
+  // once per session, kept in session memory only, and a late edit restores as a new item.
+  it("hands over late-edit and concurrent-trash notices once per session", async () => {
+    const transport = fetchTransport(origin);
+    const { session: first, secretKey } = await freshAccount("Erin");
+    const kept = first.createItem("note", [{ op: "set", key: "item.name", value: "Kept" }]);
+    const gone = first.createItem("note", [{ op: "set", key: "item.name", value: "Gone" }]);
+    await first.sync();
+    // No notice on a quiet vault.
+    expect(first.takeNotices()).toEqual([]);
+
+    const second = await login(transport, {
+      origin,
+      loginName: "erin",
+      secretKey,
+      password: PASSWORD,
+    });
+    await second.sync();
+
+    // The first session trashes one item, then purges the other; each time the second edits
+    // the item before it has heard of that.
+    first.trashItem(kept);
+    await first.sync();
+    second.editItem(kept, [{ op: "set", key: "item.notes", value: "still needed" }]);
+    await second.sync();
+    first.trashItem(gone);
+    first.purgeItem(gone);
+    await first.sync();
+    second.editItem(gone, [{ op: "set", key: "item.notes", value: "late" }]);
+    await second.sync();
+
+    await first.sync();
+    const notices = first.takeNotices();
+    expect(notices).toHaveLength(2);
+    expect(notices).toContainEqual({
+      kind: "concurrent-trash",
+      item: kept,
+      devices: [first.deviceId, second.deviceId],
+      conflictId: expect.any(String),
+    });
+    expect(notices).toContainEqual({
+      kind: "late-edit",
+      item: gone,
+      devices: [second.deviceId],
+      conflictId: undefined,
+    });
+    // Handed over once in this session, even after another sync.
+    expect(first.takeNotices()).toEqual([]);
+    await first.sync();
+    expect(first.takeNotices()).toEqual([]);
+    // The edit kept the trashed item; the purged one stays gone.
+    expect(first.items().map((i) => i.id)).toContain(kept);
+    expect(first.items().map((i) => i.id)).not.toContain(gone);
+
+    // Restore as a new item of the type the user picks.
+    expect(() => first.restoreLateAsNew(kept, "note")).toThrowError(
+      expect.objectContaining({ code: "unknown_item" }),
+    );
+    expect(() => first.restoreLateAsNew(gone, "spaceship" as never)).toThrowError(
+      expect.objectContaining({ code: "invalid_input" }),
+    );
+    const restored = first.restoreLateAsNew(gone, "note");
+    expect(restored).not.toBe(gone);
+    expect(first.fields(restored).find((f) => f.key === "item.notes")?.value).toBe("late");
+    await first.sync();
+    expect(first.items().map((i) => i.id)).not.toContain(gone);
+
+    // Still nothing new for the session that was handed them.
+    expect(first.takeNotices()).toEqual([]);
+
+    // Finding 3: a second, genuinely distinct conflict between the very same two devices,
+    // within this one session, is handed over too -- not silently dropped because it shares
+    // a device pair with a conflict already shown.
+    const raced = first.createItem("note", [{ op: "set", key: "item.name", value: "Raced" }]);
+    await first.sync();
+    await second.sync();
+    first.trashItem(raced);
+    await first.sync();
+    second.editItem(raced, [{ op: "set", key: "item.notes", value: "round one" }]);
+    await second.sync();
+    await first.sync();
+    const roundOne = first.takeNotices();
+    expect(roundOne).toContainEqual({
+      kind: "concurrent-trash",
+      item: raced,
+      devices: [first.deviceId, second.deviceId],
+      conflictId: expect.any(String),
+    });
+    const roundOneId = roundOne.find((n) => n.item === raced)?.conflictId;
+    // Handed over once already, same as any other notice.
+    expect(first.takeNotices()).toEqual([]);
+
+    // The conflict resolves: `second` learns of `first`'s trash, then writes an edit whose
+    // causal context covers both the losing Trashed op and the kept Active op (ADR 0012 §5).
+    await second.sync();
+    second.editItem(raced, [{ op: "set", key: "item.notes", value: "resolved" }]);
+    await second.sync();
+
+    // The same two devices race again, from that new base: `first` (who never fetched the
+    // resolving edit) trashes once more; `second` (who never fetched `first`'s new trash)
+    // edits once more too. A fresh, genuinely distinct conflict between the very same pair.
+    first.trashItem(raced);
+    await first.sync();
+    second.editItem(raced, [{ op: "set", key: "item.notes", value: "round two" }]);
+    await second.sync();
+    await first.sync();
+    const roundTwo = first.takeNotices();
+    expect(roundTwo).toContainEqual({
+      kind: "concurrent-trash",
+      item: raced,
+      devices: [first.deviceId, second.deviceId],
+      conflictId: expect.any(String),
+    });
+    // Finding 3b (re-review of finding 3): this second race is a genuinely distinct conflict,
+    // not a repeat of the first, so its `conflictId` differs -- a host-side dedup keyed on it
+    // (the web vault's `noticeKey`) must not mistake it for the one already shown.
+    const roundTwoId = roundTwo.find((n) => n.item === raced)?.conflictId;
+    expect(roundTwoId).not.toBe(roundOneId);
+    expect(first.takeNotices()).toEqual([]);
+
+    // Session memory only: lock, then unlock again (the web vault's unlock is a fresh login
+    // of the same account). The marks went with the locked session, so the notices come back,
+    // and are again handed over once.
+    first.lock();
+    const unlocked = await login(transport, {
+      origin,
+      loginName: "erin",
+      secretKey,
+      password: PASSWORD,
+    });
+    await unlocked.sync();
+    const again = unlocked.takeNotices().map((n) => [n.kind, n.item]);
+    expect(again).toContainEqual(["late-edit", gone]);
+    expect(again).toContainEqual(["concurrent-trash", kept]);
+    expect(unlocked.takeNotices()).toEqual([]);
+    await unlocked.sync();
+    expect(unlocked.takeNotices()).toEqual([]);
+
+    // ROADMAP §4.5 "keep both / pick one" (ADR 0012 §4 step 5, ADR 0018 §6), on two of these
+    // sessions (the signup bucket is shared across this file): each edits the password before
+    // it has heard of the other's edit, so both values stay and the field conflicts.
+    await unlocked.sync();
+    await second.sync();
+    const login1 = unlocked.createItem("login", [
+      { op: "set", key: "item.name", value: "Shared" },
+      { op: "set", key: "login.password", value: "base" },
+    ]);
+    await unlocked.sync();
+    await second.sync();
+    unlocked.editItem(login1, [{ op: "set", key: "login.password", value: "from-first" }]);
+    second.editItem(login1, [{ op: "set", key: "login.password", value: "from-second" }]);
+    await unlocked.sync();
+    await second.sync();
+    await unlocked.sync();
+    for (const s of [unlocked, second]) {
+      expect(s.fields(login1).find((f) => f.key === "login.password")?.conflict).toBe(true);
+    }
+    // A concealed field: values withheld from the listing, one reveal per value.
+    const listed = unlocked.fieldConflict(login1, "login.password");
+    expect(listed).toHaveLength(2);
+    expect(listed[0]?.displayed).toBe(true);
+    expect(listed.every((v) => v.concealed && v.value === undefined && !v.cleared)).toBe(true);
+    expect(new Set(listed.map((v) => v.device))).toEqual(new Set([unlocked.deviceId, second.deviceId]));
+    const fromSecond = listed.find((v) => v.device === second.deviceId);
+    if (fromSecond === undefined) {
+      throw new Error("no value from the second session");
+    }
+    expect(unlocked.revealConflictValue(login1, "login.password", fromSecond.index, fromSecond.id)).toBe(
+      "from-second",
+    );
+    // A stale identity is refused, never resolved to another value.
+    expect(() => unlocked.resolveConflictPick(login1, "login.password", fromSecond.index, "00")).toThrowError(
+      expect.objectContaining({ code: "unknown_item" }),
+    );
+    // Pick one: an ordinary edit; a repeat finds no conflict and writes nothing.
+    unlocked.resolveConflictPick(login1, "login.password", fromSecond.index, fromSecond.id);
+    expect(unlocked.fieldConflict(login1, "login.password")).toEqual([]);
+    expect(() =>
+      unlocked.resolveConflictPick(login1, "login.password", fromSecond.index, fromSecond.id),
+    ).toThrowError(expect.objectContaining({ code: "unknown_item" }));
+    await unlocked.sync();
+    await second.sync();
+    for (const s of [unlocked, second]) {
+      expect(s.fieldConflict(login1, "login.password")).toEqual([]);
+      expect(s.reveal(login1, "login.password")).toBe("from-second");
+    }
+
+    // Keep both, on a shown field: the values cross in the listing; the other value becomes a
+    // text custom field with the host's label, on both sessions.
+    unlocked.editItem(login1, [{ op: "set", key: "item.name", value: "Name A" }]);
+    second.editItem(login1, [{ op: "set", key: "item.name", value: "Name B" }]);
+    await unlocked.sync();
+    await second.sync();
+    await unlocked.sync();
+    const names = second.fieldConflict(login1, "item.name");
+    expect(names.map((v) => v.value).sort()).toEqual(["Name A", "Name B"]);
+    const keep = names[0];
+    const other = names[1];
+    if (keep === undefined || other === undefined) {
+      throw new Error("two names expected");
+    }
+    expect(() =>
+      second.resolveConflictKeepBoth(login1, "item.name", keep.index, keep.id, undefined),
+    ).toThrowError(expect.objectContaining({ code: "invalid_input" }));
+    const added = second.resolveConflictKeepBoth(login1, "item.name", keep.index, keep.id, "Other name");
+    expect(added).toHaveLength(1);
+    await second.sync();
+    await unlocked.sync();
+    for (const s of [unlocked, second]) {
+      const fields = s.fields(login1);
+      expect(fields.find((f) => f.key === "item.name")).toMatchObject({ value: keep.value, conflict: false });
+      expect(fields.find((f) => f.key === `field/${added[0]}/label`)?.value).toBe("Other name");
+      expect(s.reveal(login1, `field/${added[0]}/value`)).toBe(other.value);
+      expect(fields.some((f) => f.conflict)).toBe(false);
+    }
+    lockAll(first, second, unlocked);
   });
 });
 

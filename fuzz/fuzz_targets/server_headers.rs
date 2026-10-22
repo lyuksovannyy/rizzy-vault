@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes `rizzy-server`'s request-header parsers (`rizzy_server::http::headers`): the bearer
 //! token, the two request-signing headers, `Content-Length`, `Rizzy-Client` and
 //! `X-Forwarded-For` (ADR 0028 items 4, 5, 7, 11 and 14; CRYPTO.md §5.10; threat model §7.6

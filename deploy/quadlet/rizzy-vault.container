@@ -1,0 +1,89 @@
+# rizzy-vault, profile A (solo), Podman Quadlet unit for the `rizzy-vault` server
+# (`api,web,worker`). Mirrors the `rizzy-vault` service of ../compose.yaml (ADR 0010 §4) for a
+# systemd-managed, rootless deployment (ROADMAP §4.9). Operator guide: docs/self-hosting.md §13.
+#
+# Rootless install: copy this file, the matching *.volume and *.network files in this
+# directory, and rizzy-vault.env (from rizzy-vault.env.example) into
+# ~/.config/containers/systemd/, then `systemctl --user daemon-reload`.
+#
+# This file was written without a Podman install to test it against in this environment.
+# docs/self-hosting.md §13 "Unverified" lists every key whose exact podman-systemd.unit(5)
+# behaviour was not confirmed by running it. Read that list before you rely on this unit.
+
+[Unit]
+Description=rizzy-vault server (api,web,worker)
+# Quadlet adds Requires=/After= for the .volume and .network files Volume=/Network= name below
+# on its own; nothing else to add here (compose.yaml has no depends_on for this service either).
+
+[Container]
+ContainerName=rizzy-vault
+# The image compose.yaml also defaults to (its ${RIZZY_IMAGE:-localhost/rizzy-vault:dev}).
+# Quadlet has no ${VAR:-default} substitution: to run a different tag, edit this line (or add
+# a drop-in, see docs/self-hosting.md §13).
+Image=localhost/rizzy-vault:dev
+Exec=serve
+
+# ---- same hardening as compose.yaml's `x-hardening` anchor, applied to this service only ----
+ReadOnly=true
+# Rely only on the explicit Tmpfs= line below for /tmp, the one writable path besides the
+# /data volume (Containerfile, self-hosting.md §1): compose.yaml mounts tmpfs at /tmp alone,
+# nothing else, so a default "tmpfs everywhere ReadOnly=true implies" is turned off to match.
+# Unverified: ReadOnlyTmpfs's exact default and behaviour when false (self-hosting.md §13).
+ReadOnlyTmpfs=false
+Tmpfs=/tmp:size=64m,mode=1777
+DropCapability=ALL
+NoNewPrivileges=true
+# compose.yaml's `user: "65532:65532"`. Two keys instead of one `User=65532:65532`: the
+# separate Group= form is the one this guide is most confident podman-systemd.unit(5) accepts
+# (self-hosting.md §13).
+User=65532
+Group=65532
+# ---- end hardening ----
+
+Network=rizzy-vault-edge.network
+# No PublishPort=: compose.yaml only `expose`s 8080 to the proxy container on the edge
+# network, it is never bound to a host port.
+
+Volume=rizzy-vault-data.volume:/data
+# Read-only for the server: it never writes the secrets file (ADR 0010 §4).
+Volume=rizzy-vault-secrets.volume:/run/rizzy-secrets:ro
+
+# compose.yaml hardcodes this one rather than reading it from .env; do the same here.
+Environment=RIZZY_LISTEN=0.0.0.0:8080
+# The rest (RIZZY_ORIGIN, RIZZY_SIGNUP, RIZZY_LOG_LEVEL, RIZZY_RECOVERY_WAIT_HOURS,
+# RIZZY_TRUSTED_PROXIES) come from the env file, as compose.yaml's `environment:` block reads
+# them from deploy/.env. Unverified: whether %h expands inside a Quadlet EnvironmentFile= path
+# in your Podman version (self-hosting.md §13) — replace %h with your home directory if not.
+EnvironmentFile=%h/.config/containers/systemd/rizzy-vault.env
+
+# podman auto-update (ROADMAP §4.9) is OFF by default. THREAT_MODEL.md Q-17/AR-22: before
+# signed images and a verifying policy.json exist (ROADMAP §4.9, M8; no Accepted ADR covers
+# the mechanism yet), a tag-following update trusts whoever controls the registry tag
+# completely, with no signature check. Also, the
+# default image above (localhost/rizzy-vault:dev) is a local build with no registry behind it,
+# so this key is a no-op until Image= names a real registry tag. Uncommenting this is the
+# operator's own opt-in, not this change's default — see docs/self-hosting.md §13 "Auto-update"
+# for the trade-off before you turn it on.
+# AutoUpdate=registry
+
+# No HealthCmd=: compose.yaml defines no healthcheck either, because the distroless image has
+# no shell and no HTTP client to run one with (Containerfile, self-hosting.md §1 and §6).
+# Monitor `GET https://<domain>/api/meta` from outside the container instead.
+
+[Service]
+# compose.yaml's `restart: unless-stopped`. `systemctl stop` does not trigger Restart=, so an
+# explicit operator stop behaves the same as "unless-stopped" within this boot. They diverge
+# across a reboot: this unit is enabled ([Install] below), so it starts again at the next boot
+# or login even after a prior manual stop, unlike Docker, which remembers that stop. To keep it
+# down across a reboot, `systemctl --user disable` it too (self-hosting.md §13; Unverified:
+# whether disable on a Quadlet-generated unit sticks across a generator re-run).
+Restart=always
+# compose.yaml's `stop_grace_period: 40s`.
+TimeoutStopSec=40
+# Defence in depth for INV-60 (self-hosting.md §1, ADR 0024): the binary already sets its own
+# core limit to 0 and refuses to start otherwise. Mirrors compose.yaml's `ulimits: core: 0`,
+# which self-hosting.md §1 already names this exact systemd key for.
+LimitCORE=0
+
+[Install]
+WantedBy=default.target

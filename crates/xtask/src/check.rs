@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Rule evaluation for `cargo xtask check-deps` (ADR 0016 §4, §5; ADR 0009; ADR 0019 §4.1;
 //! ADR 0024).
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Key-hierarchy tests: independent known answers for the §4.3 derivations and the signed
 //! device grant, round trips of every M1 wrapped-key object, context binding (a wrap moved to
 //! another item, vault, device, account or epoch does not open), the seal-time consistency
@@ -285,6 +287,10 @@ fn account_fingerprints_compare_in_constant_time() {
     assert_eq!(set.len(), 2);
 }
 
+/// The `device_set_hash` that catches a device hidden from the certificate list (CRYPTO.md
+/// §15 item 5).
+///
+/// ETH class: 3 (threat model §5.5, forged device registrations; §5.9 gives it class 3).
 #[test]
 fn device_set_hash_rules() {
     let none: [&Verified<DeviceCertificate>; 0] = [];
@@ -342,6 +348,10 @@ fn device_set_hash_rules() {
     );
 }
 
+/// The `settings_hash` and `settings_seq` checks that reject an older `ACCOUNT_SETTINGS`
+/// (CRYPTO.md §15 item 5).
+///
+/// ETH class: 2 (threat model §5.3, unbound items and stale settings).
 #[test]
 fn settings_hash_rules_and_state_checks() {
     assert_eq!(settings_hash(0, None), Some([0; 32]));
@@ -499,6 +509,8 @@ fn e_local_is_bound_to_its_device() {
 /// context names another `kdf_id` is refused when sealing. A reader derives with the stored
 /// `kdf_id` and rebuilds the context from it, so such a wrap could never be opened. Uses a
 /// cheap test profile, so no 64 MiB Argon2id run.
+///
+/// ETH class: 5 (threat model §5.1, KDF parameter downgrade).
 #[test]
 fn unlock_key_wraps_are_bound_to_the_kdf_id_of_the_key() {
     let cheap = KdfId::test_cheap(0xfff1, 1);
@@ -805,6 +817,10 @@ fn item_key_wrap_moves_to_another_item_vault_or_epoch_fail() {
     assert!(vk.unwrap_item_key(&epoch_ctx, &wrap).is_err());
 }
 
+/// After a rotation the server serves only the re-wrapped old item key; the writer rule makes
+/// a device enrolled after the rotation use a fresh item key (CRYPTO.md §15 item 5).
+///
+/// ETH class: 2 (threat model §5.3, unbound item-level encryption).
 #[test]
 fn item_key_creation_epoch_survives_rotation_and_drives_the_writer_rule() {
     let vk1 = VaultKey::generate(&mut seeded_rng(11), vault(), 1);

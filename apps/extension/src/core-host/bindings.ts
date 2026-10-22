@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Host glue over `@rizzy-vault/core`'s durable-device surface (ADR 0036 §1–§3). Lives in
 // `core-host/`, not `core/` (where this module's unimplemented predecessor, `core/bindings.ts`,
 // used to live): `eslint.config.mjs` allows a *value* import of `@rizzy-vault/core` only from
@@ -20,8 +22,10 @@ import {
   type ItemSummary,
   type MatchCandidate,
   type MatchFrameInfo,
+  type MatchModeValue,
   type MatchUriInput,
   type PasskeyAssertionResult,
+  type PasskeyCandidateResult,
   DurableSession,
   MatchMode,
   PASSKEY_ALG_ES256,
@@ -53,14 +57,14 @@ export function createPasskey(origin: string, rpId: string, challenge: Uint8Arra
   return coreCreatePasskey(origin, rpId, challenge);
 }
 
-/** One stored passkey's non-secret, re-derivable-from-`fields()` metadata — everything
- * {@link sessionPasskeyCandidatesForRpId} and the web vault's own listing need, and nothing a
- * `FieldView` of kind `"bytes"` could give anyway (`FieldView.value` is always `undefined` for a
- * Bytes field — `crates/rizzy-wasm/src/items.rs`'s own "Bytes and order keys have no text" —
- * which is also why this shape carries no `userHandle`/`credentialId`/`publicKeyCose`: there is
- * no `@rizzy-vault/core` call today that returns those back out once stored, only at creation
- * time, `not_done`, reported honestly rather than worked around by reaching past this package's
- * API into wasm internals). */
+/** One stored passkey's non-secret, re-derivable-from-`fields()` metadata — the `rp_id`/
+ * `created_ms` half {@link itemPasskeyFields} reads straight from `fields()`, never
+ * `userHandle`/`credentialId`/`publicKeyCose` (Bytes fields, `FieldView.value` always
+ * `undefined` for those — `crates/rizzy-wasm/src/items.rs`'s own "Bytes and order keys have no
+ * text"). `sessionPasskeyCandidatesForRpId` below reads those two byte fields through
+ * `DurableSession.passkeyCandidates` instead (gap 35(a)/(b) in the M2 gap audit's read path),
+ * never through this shape — kept only for the web vault's own non-filtering listing, which never
+ * needed either byte field. */
 export interface StoredPasskey {
   readonly elementId: string;
   readonly rpId: string;
@@ -93,22 +97,49 @@ export function itemPasskeyFields(fields: readonly FieldView[]): readonly Stored
 }
 
 /** Every stored passkey, across every active item, whose `rp_id` exactly equals `rpId` (ADR
- * 0039 §2: a `get` ceremony's candidate list for a `navigator.credentials.get()` call with no
- * `allowCredentials`, or one this project's own API has no way to narrow further by credential
- * id — `StoredPasskey`'s own doc on why). Exact string equality, not a PSL/suffix comparison:
- * `rp_id` is already the resolved value `verify_rp_id` accepted at creation time (INV-64), so
- * there is nothing left to re-derive here — the actual authority for "is this `rpId` allowed for
- * the calling origin" stays in Rust, re-checked again on the assertion call itself
- * (`DurableSession.passkeyAssertion`), never trusted from this list alone. */
+ * 0039 §2: a `get` ceremony's candidate list). Exact string equality, not a PSL/suffix
+ * comparison: `rp_id` is already the resolved value `verify_rp_id` accepted at creation time
+ * (INV-64), so there is nothing left to re-derive here — the actual authority for "is this
+ * `rpId` allowed for the calling origin" stays in Rust, re-checked again on the assertion call
+ * itself (`DurableSession.passkeyAssertion`), never trusted from this list alone.
+ *
+ * Reads through `DurableSession.passkeyCandidates` (gap 35(a) in the M2 gap audit's read path),
+ * never `itemPasskeyFields`'s own fields()-only `StoredPasskey`, specifically because
+ * `credentialId` is the one thing {@link offerPasskeyGet} needs to apply `allowCredentials`
+ * filtering (gap 35(b)): the private key itself is never read back through this or any other
+ * call — `passkeyCandidates`' own module doc in `packages/core/src/index.ts` is explicit that it
+ * exposes only the non-secret half of the stored item.
+ */
 export function sessionPasskeyCandidatesForRpId(
   session: DurableSession,
   rpId: string,
-): ReadonlyArray<{ readonly itemId: string; readonly elementId: string; readonly itemTitle: string; readonly userName: string }> {
-  const out: Array<{ itemId: string; elementId: string; itemTitle: string; userName: string }> = [];
+): ReadonlyArray<{
+  readonly itemId: string;
+  readonly elementId: string;
+  readonly itemTitle: string;
+  readonly userName: string;
+  readonly credentialId: Uint8Array;
+}> {
+  const out: Array<{ itemId: string; elementId: string; itemTitle: string; userName: string; credentialId: Uint8Array }> = [];
   for (const item of session.items()) {
-    for (const passkey of itemPasskeyFields(session.fields(item.id))) {
+    let candidates: readonly PasskeyCandidateResult[];
+    try {
+      candidates = session.passkeyCandidates(item.id);
+    } catch {
+      // Not a passkey-bearing item at all, or the call otherwise failed for this one item:
+      // skip it rather than aborting every other item's own candidates (the same "one bad item
+      // never blocks the rest" rule `handleContentScriptRequest`'s own candidate mapping uses).
+      continue;
+    }
+    for (const passkey of candidates) {
       if (passkey.rpId === rpId) {
-        out.push({ itemId: item.id, elementId: passkey.elementId, itemTitle: item.title, userName: item.username ?? "" });
+        out.push({
+          itemId: item.id,
+          elementId: passkey.elementId,
+          itemTitle: item.title,
+          userName: item.username ?? "",
+          credentialId: passkey.credentialId,
+        });
       }
     }
   }
@@ -287,73 +318,220 @@ export function updateLoginChangeset(usernameValue: string, passwordValue: strin
   ];
 }
 
-/** Every `uri/<id>/value` field of one item's `fields()` call, grouped by the list element id
- * (ADR 0018 §7, ADR 0037 §2). `uri/<id>/match` is reserved but still never written by any client
- * under owner decision 2 (`crates/rizzy-core/src/item/schema.rs`'s module docs): every URI here
- * resolves through the account-default match mode, never a per-URI override, until a later
- * change starts writing that field. */
-export function itemUriFields(fields: readonly FieldView[]): ReadonlyArray<{ uriId: string; value: string }> {
-  const out: Array<{ uriId: string; value: string }> = [];
+/** Resolves a stored `uri/<id>/match` register's decimal wire-value string (ADR 0018 §7's Enum
+ * encoding; `apps/web/src/fields.ts`'s `MATCH_MODE_OPTIONS` writes it the same way, and its
+ * `matchModeLabel` reads it back the same way, with `Number.parseInt(value, 10)`) to a
+ * {@link MatchModeValue} safe to hand to {@link decideMatchCandidates}.
+ *
+ * - `undefined` (the register was never written), `"0"` (ADR 0037 §4 row `0x0000`, the explicit
+ *   account-default sentinel), and text that does not parse as a number at all (corrupt or
+ *   otherwise not a value any client meant to set, never a deliberate choice to distinguish from
+ *   "no override") all resolve to {@link MatchMode.AccountDefault}: the core resolves it to the
+ *   account's own match default from its `ACCOUNT_SETTINGS` (ADR 0037 §6, ADR 0042 §6;
+ *   `DurableSession.decideMatchCandidates`), *Base domain* when the account never set one.
+ * - One of the six assigned values (`0x0001`-`0x0006`) resolves to that exact mode, so a stored
+ *   override — `0x0006` Never very much included — is honored rather than silently discarded.
+ * - A well-formed but unassigned Enum value (ADR 0037 §4 row `0x0007`-`0xFFFF`: a real mode a
+ *   newer client may have meant, that this build cannot evaluate) resolves to
+ *   {@link MatchMode.Never} instead, never passed through raw: `crates/rizzy-wasm/src/matching.rs`'s
+ *   `mode_of` turns an unrecognised wire value into `invalid_input`, which would fail
+ *   {@link decideMatchCandidates}'s *entire* batch call, not just this one URI
+ *   (`crates/rizzy-core/src/item/schema.rs`'s own docs: an out-of-range value here "read back as
+ *   unsupported by the matching layer"). Narrowing to `Never` rather than widening to
+ *   `BaseDomain` keeps INV-38's narrowing-only rule for a value this build does not recognise but
+ *   that is still a real, deliberately-set Enum value, unlike the unparseable case above. */
+export function matchModeOf(raw: string | undefined): MatchModeValue {
+  if (raw !== undefined) {
+    const n = Number.parseInt(raw, 10);
+    switch (n) {
+      case MatchMode.BaseDomain:
+        return MatchMode.BaseDomain;
+      case MatchMode.Host:
+        return MatchMode.Host;
+      case MatchMode.StartsWith:
+        return MatchMode.StartsWith;
+      case MatchMode.Exact:
+        return MatchMode.Exact;
+      case MatchMode.Regex:
+        return MatchMode.Regex;
+      case MatchMode.Never:
+        return MatchMode.Never;
+      default:
+        if (n === 0 || Number.isNaN(n)) {
+          return MatchMode.AccountDefault;
+        }
+        return MatchMode.Never;
+    }
+  }
+  return MatchMode.AccountDefault;
+}
+
+/** Every `uri/<id>/value` field of one item's `fields()` call, paired with its sibling
+ * `uri/<id>/match` register (if any) and grouped by the list element id (ADR 0018 §7, ADR 0037
+ * §2, §4). `uri/<id>/match` is writable from M2 (`crates/rizzy-core/src/item/schema.rs`'s module
+ * docs: owner decision 2's M1 "carry it and never write it" restriction no longer applies) and
+ * the web vault already writes it (`apps/web/src/views/ItemEditor.tsx`), so `mode` reflects
+ * whatever the item actually has stored, decoded through {@link matchModeOf} — never a hardcoded
+ * value. */
+export function itemUriFields(fields: readonly FieldView[]): ReadonlyArray<{ uriId: string; value: string; mode: MatchModeValue }> {
+  // `FieldKey`'s grammar (`crates/rizzy-core/src/item/key.rs`): `list()` is the repeated group's
+  // name ("uri"), `element()` its per-entry hex id, `attribute()` which column
+  // ("value"/"match"/"order"). `match` is collected first so the loop below can resolve it while
+  // building each URI's entry, in the `value` fields' own order.
+  const matchByElement = new Map<string, string | undefined>();
   for (const field of fields) {
-    // `FieldKey`'s grammar (`crates/rizzy-core/src/item/key.rs`): `list()` is the repeated
-    // group's name ("uri"), `element()` its per-entry hex id, `attribute()` which column
-    // ("value"/"match"/"order"). Only `value` is ever written (see this module's doc comment).
+    if (field.list === "uri" && field.attribute === "match" && field.element !== undefined) {
+      matchByElement.set(field.element, field.value);
+    }
+  }
+  const out: Array<{ uriId: string; value: string; mode: MatchModeValue }> = [];
+  for (const field of fields) {
     if (field.list === "uri" && field.attribute === "value" && field.element !== undefined && field.value !== undefined) {
-      out.push({ uriId: field.element, value: field.value });
+      out.push({ uriId: field.element, value: field.value, mode: matchModeOf(matchByElement.get(field.element)) });
     }
   }
   return out;
 }
 
 /** Every saved URI of every active item, as `decideMatchCandidates` needs them (ADR 0037 §4).
- * `mode` is always {@link MatchMode.BaseDomain}: `itemUriFields`'s doc explains why every URI's
- * own `match` field is unresolved (never written yet) and must be treated as the account
- * default already applied — this module's one `accountDefaultMode` choice, `BaseDomain`, is also
- * `rizzy-match`'s own documented default for an unset mode
- * (`crates/rizzy-match/src/modes.rs`'s `account_default_resolves_to_base_domain_when_unset`
- * test), so this is a resolved value, not a guess. */
+ * `mode` is each URI's own match mode (`itemUriFields`'s doc): a stored override is honored, not
+ * discarded, and "no override" stays {@link MatchMode.AccountDefault} for the core to resolve
+ * against the account's own setting, never a blanket default applied here. */
 export function sessionItemUris(session: DurableSession): readonly MatchUriInput[] {
   const out: MatchUriInput[] = [];
   for (const item of session.items()) {
     for (const uri of itemUriFields(session.fields(item.id))) {
-      out.push({ itemId: item.id, uriId: uri.uriId, value: uri.value, mode: MatchMode.BaseDomain });
+      out.push({ itemId: item.id, uriId: uri.uriId, value: uri.value, mode: uri.mode });
     }
   }
   return out;
 }
 
-/** Decides autofill candidates for `pageUrl` against every saved item (ADR 0037 §4–§5): one
- * call wrapping `sessionItemUris` + `decideMatchCandidates` so `content-handler.ts` never
- * touches `@rizzy-vault/core` shapes directly either. */
+/** Decides autofill candidates for `pageUrl` against every saved item (ADR 0037 §4–§5), under
+ * the account's own match settings (ADR 0042 §6: the match default, the disabled global groups
+ * and the user-defined groups, read by the core from the account's `ACCOUNT_SETTINGS`): one call
+ * wrapping `sessionItemUris` + the session's `decideMatchCandidates` so `content-handler.ts` never
+ * touches `@rizzy-vault/core` shapes directly either. Settings the core cannot read (written by
+ * a newer rizzy-vault) throw, so no candidate is offered under settings it could not apply. */
 export function decideCandidates(
   session: DurableSession,
   pageUrl: string,
   frame: MatchFrameInfo,
-): { candidates: readonly MatchCandidate[]; warnings: readonly string[] } {
-  return decideMatchCandidates(pageUrl, frame, MatchMode.BaseDomain, sessionItemUris(session));
+): { pageHost: string; pagePort: number | undefined; candidates: readonly MatchCandidate[]; warnings: readonly string[] } {
+  return session.decideMatchCandidates(pageUrl, frame, sessionItemUris(session));
 }
 
-/** The first active item whose saved URI normalises to the same URL as `pageUrl` (ADR 0037 §2's
- * normalisation) — used to offer "update" rather than "save" on a submitted form that already
- * has a matching item. Deliberately simpler than full match-mode matching (no equivalence list,
- * no base-domain narrowing): this is only a save-prompt *suggestion*, not an autofill decision,
- * and a wrong suggestion here costs the user one extra click, never a wrong fill. */
-export function findItemForUpdate(session: DurableSession, pageUrl: string): ItemSummary | undefined {
-  let normalized: string;
+/** The active item to offer "update" for on a submitted form, or `undefined` to offer "save"
+ * instead (gap 33 in the M2 gap audit). Uses the real matcher (ADR 0037 modes, `decideCandidates`
+ * — the same decision autofill itself makes, not a separate, looser notion of "the same site")
+ * and the submitted `username`, not the URL alone:
+ *
+ * - **Same full host and port, same username** → that item (update it).
+ * - **Same full host and port, a different username** → `undefined` (save as a new item): a
+ *   second account on a site the user already has one item for must never overwrite that other
+ *   account's credentials just because the form posted to the same host.
+ * - **A different full host, even one sharing the same registrable domain** (`BaseDomain` mode's
+ *   own candidate set, ADR 0037 §4 — the same set autofill uses for a URI with no stored
+ *   override, `itemUriFields`'s doc; a URI with a narrower stored mode — `Host`, `StartsWith`,
+ *   `Exact` — only shrinks this candidate set further, and one stored `Never` removes it from
+ *   the candidate set entirely, never widening it) → never an update target, even with a
+ *   matching username. Update
+ *   overwrites the matched item's live password, unconditionally and irreversibly
+ *   (`core-context.ts`'s `applySavePromptAction`) — unlike a fill, which the user can simply
+ *   decline or correct. `accounts.example.com` and `example.com` are treated as the same site for
+ *   *autofill* on purpose (ADR 0037 §4's "Base domain" rule); they are two different full hosts
+ *   for *update*, so a credential submitted on one subdomain can never silently overwrite an
+ *   item saved on another, even a third-party-hostable one sharing an apex domain the Public
+ *   Suffix List has not split. {@link selectUpdateCandidate}'s `pageHost`/`pagePort` parameters
+ *   are this extra gate: `candidate.savedHost`/`savedPort` must equal the page's own exact host
+ *   and port, not merely its registrable domain (ADR 0037 §2 rule 5: a non-default port is part
+ *   of the same-site comparison, same as `Host`/`Exact` mode's own fix — `https://example.com:8443`
+ *   and `https://example.com:9000` are two different sites even though `BaseDomain` mode, which
+ *   this gate narrows on top of, does not tell them apart). The cost is a user who saved an item
+ *   for `example.com` and later logs in at `www.example.com`, or at a different port, gets an
+ *   extra save prompt (and possibly a duplicate item) rather than a silently "updated" password —
+ *   the right default for a destructive action.
+ * - **An equivalence-only match** (`candidate.needsWarning`, ADR 0037 §5 — a different
+ *   registrable domain `rizzy-match` treats as the same site) is never an update target either,
+ *   even with a matching username: silently overwriting one site's saved password because the
+ *   user submitted a form on a different, merely "equivalent" domain is a worse outcome than an
+ *   extra save prompt. (A direct registrable-domain match or better still counts, same as
+ *   autofill — subject to the same-full-host gate above.)
+ * - **A look-alike host** (a different registrable domain with no equivalence relationship) is
+ *   not a match candidate at all, so it is never returned.
+ *
+ * Deliberately reuses the one matcher every other ADR 0037 decision goes through, rather than a
+ * second, independent "is this the same site" rule that could drift from it; the host gate above
+ * narrows the result afterward, specific to this destructive decision, not a second matcher.
+ */
+export function findItemForUpdate(session: DurableSession, pageUrl: string, username: string): ItemSummary | undefined {
+  let decision: ReturnType<typeof decideCandidates>;
   try {
-    normalized = normalizePageUrl(pageUrl);
+    decision = decideCandidates(session, pageUrl, { isTopFrame: true, frameOrigin: "" });
   } catch {
     return undefined;
   }
-  for (const item of session.items()) {
-    for (const uri of itemUriFields(session.fields(item.id))) {
+  const itemId = selectUpdateCandidate(
+    decision.candidates,
+    (candidateId) => {
       try {
-        if (normalizePageUrl(uri.value) === normalized) {
-          return item;
-        }
+        return session.item(candidateId).username;
       } catch {
-        // A saved URI that no longer parses: skip it, do not let it abort the search.
+        return undefined;
       }
+    },
+    username,
+    decision.pageHost,
+    decision.pagePort,
+  );
+  if (itemId === undefined) {
+    return undefined;
+  }
+  try {
+    return session.item(itemId);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The selection core of {@link findItemForUpdate}, pulled out so it is unit-testable without a
+ * `DurableSession` — the same reason `content-handler.ts`'s `selectFillCandidate` is its own
+ * function. The first candidate that is: not equivalence-only (`!needsWarning`); saved under
+ * exactly `pageHost` **and** `pagePort` (`candidate.savedHost === pageHost && candidate.savedPort
+ * === pagePort` — the full host and port, not just the registrable domain the `BaseDomain`-mode
+ * candidate set already narrowed to, {@link findItemForUpdate}'s own doc comment; ADR 0037 §2
+ * rule 5 treats a non-default port as part of the same-site comparison, and this gate must agree
+ * with that or `https://example.com:8443` could silently update an item saved for
+ * `https://example.com:9000`); and whose item's own saved username equals `username` exactly.
+ * `undefined` if no candidate satisfies all four (`usernameOf` resolves each candidate's current
+ * saved username, `undefined` if the lookup itself fails). The host/port check runs first and, on
+ * a mismatch, `continue`s without marking the itemId `checked`: a mismatch says nothing about
+ * that item, only about this one saved URI of it, so a later candidate for the SAME item through
+ * a different saved URI that does match `pageHost`/`pagePort` is still considered. Once a
+ * candidate passes the host, port and warning checks, its itemId is resolved through `usernameOf`
+ * at most once, even if `candidates` lists it again (one match per saved URI, so one item can
+ * appear several times) — this is the pre-existing `checked` de-dup, narrowed to apply only among
+ * same-host-and-port candidates. `pagePort`/`savedPort` are `number | undefined`, never defaulted
+ * to a sentinel, so two `undefined` ports (both at their scheme's default, ADR 0037 §2 rule 5)
+ * compare equal via `===`, exactly like `rizzy_match::modes::decide`'s own `Host` mode check. */
+export function selectUpdateCandidate(
+  candidates: readonly MatchCandidate[],
+  usernameOf: (itemId: string) => string | undefined,
+  username: string,
+  pageHost: string,
+  pagePort: number | undefined,
+): string | undefined {
+  const checked = new Set<string>();
+  for (const candidate of candidates) {
+    if (candidate.savedHost !== pageHost || candidate.savedPort !== pagePort) {
+      continue;
+    }
+    if (candidate.needsWarning || checked.has(candidate.itemId)) {
+      continue;
+    }
+    checked.add(candidate.itemId);
+    if ((usernameOf(candidate.itemId) ?? "") === username) {
+      return candidate.itemId;
     }
   }
   return undefined;

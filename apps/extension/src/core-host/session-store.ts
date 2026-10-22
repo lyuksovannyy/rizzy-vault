@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The `storage.session` fallback (ADR 0013 §3 rule 2; ADR 0036 §2): "if the offscreen
 // document/background page is torn down while the user expects to stay unlocked, the extension
 // restores unlocked state from `storage.session`, cleared on lock and on browser close, never

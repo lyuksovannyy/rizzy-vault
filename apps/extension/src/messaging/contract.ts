@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The messaging contract between the content script, the background (MV3 service worker /
 // Firefox event page), and the long-lived core-holding context (ADR 0036 §4). Every shape here
 // is a plain, serializable object (structured-clone safe, no class instances, no functions),
@@ -26,6 +28,12 @@ export const MAX_FIELD_VALUE_LEN = 4096;
 export const MAX_FIELDS_PER_REPORT = 64;
 export const MAX_CANDIDATES = 32;
 export const MAX_TITLE_LEN = 256;
+/** A DNS name is at most 253 characters (RFC 1035 §3.1's 255-byte wire form, minus the root
+ * label and the length-prefix byte it elides in presentation form). Bounds `pageHost`/
+ * `savedHost` (ADR 0037 §5 "Exact host shown"; gap 31 in the M2 gap audit): `rizzy-match`
+ * already enforces this on every host it normalises, so this is a defence-in-depth bound on an
+ * untrusted-boundary string, not the authority for host validity. */
+export const MAX_HOST_LEN = 253;
 
 // --- Passkeys (ADR 0039 §2, ADR 0040's pattern applied to a passkey ceremony instead of a
 // fill) -------------------------------------------------------------------------------------
@@ -162,11 +170,32 @@ export type FromContentScript =
  * `confirmedEquivalence` must be `true` whenever the recomputed candidate's own `needsWarning`
  * is `true` (ADR 0037 §5's second explicit confirmation) — checked again here, server-side,
  * not only in `main.ts`'s own UI, in case that UI is ever bypassed.
+ *
+ * `only` narrows the fill to one field on a multi-step login page (`content/login-step.ts`):
+ * `"username"` on an identifier-first step, `"password"` on a password-only step; absent, both
+ * (the one-page form). It only ever narrows: the long-lived context sends the content script no
+ * value beyond the one kind named (ADR 0036 §4: nothing "beyond what the user is filling"), and
+ * a forged or missing `only` can at most give the content script the same both-values push it
+ * gets for a one-page form, still written only into the visible fields of the step the user
+ * clicked on. It is not remembered: every step is its own click and its own request (INV-36).
  */
 export interface InlineMenuFillRequestMessage {
   readonly type: "inline_menu_fill_chosen";
   readonly itemId: string;
   readonly confirmedEquivalence: boolean;
+  readonly only?: FillScope;
+}
+
+/** The one field kind a multi-step login step fills ({@link InlineMenuFillRequestMessage.only}). */
+export type FillScope = "username" | "password";
+
+/** The values one fill pushes to the content script, by kind (never by field id): at least one
+ * of the two. A one-page form gets both (or the password alone when the item has no username);
+ * an identifier-first step only `username`; a password-only step, and the generator, only
+ * `password`. */
+export interface FillValues {
+  readonly username?: string;
+  readonly password?: string;
 }
 
 /** Acknowledges a successful {@link InlineMenuFillRequestMessage}: never carries the revealed
@@ -174,6 +203,30 @@ export interface InlineMenuFillRequestMessage {
  * tab as {@link ApplyFillMessage}, never back through the iframe that asked for them. */
 export interface InlineMenuFillDispatchedMessage {
   readonly type: "inline_menu_fill_dispatched";
+}
+
+/**
+ * The user clicked "Generate password" in the extension-origin inline-menu iframe, on a trusted
+ * gesture (gap 32 in the M2 gap audit) — sent directly to the long-lived context, exactly
+ * mirroring {@link InlineMenuFillRequestMessage}'s own rationale (ADR 0040): a compromised
+ * content script cannot produce `sender.origin` equal to this extension's own, so
+ * `isInlineMenuSender` is what the background trusts, never a claim this message could make.
+ * Carries no options (length/kind) at all — there is nothing here for a compromised sender to
+ * lie about, and the one generator call behind it (`core-host/core-context.ts`'s
+ * `generatePasswordForFill`) takes none either.
+ */
+export interface InlineMenuGeneratePasswordRequestMessage {
+  readonly type: "inline_menu_generate_password_chosen";
+}
+
+/** Acknowledges a successful {@link InlineMenuGeneratePasswordRequestMessage}: never carries the
+ * generated value itself (same ADR 0040 rule as {@link InlineMenuFillDispatchedMessage}) — the
+ * value goes straight to the content script's own tab as an {@link ApplyFillMessage} (`values: {
+ * password }`, reusing that exact shape rather than inventing a second one — `content-script.ts`
+ * already maps `values.password` onto whichever field it has tagged `"password"`, which for this
+ * request is always the one the inline menu is anchored to). */
+export interface InlineMenuGeneratePasswordDispatchedMessage {
+  readonly type: "inline_menu_generate_password_dispatched";
 }
 
 /**
@@ -223,7 +276,7 @@ export interface PasskeyCeremonyDispatchedMessage {
  */
 export interface ApplyFillMessage {
   readonly type: "apply_fill";
-  readonly values: { readonly username?: string; readonly password: string };
+  readonly values: FillValues;
 }
 
 /**
@@ -284,7 +337,7 @@ export interface RelayPasskeyResultMessage {
 export interface RelayApplyFillMessage {
   readonly type: "relay_apply_fill";
   readonly tabId: number;
-  readonly values: { readonly username?: string; readonly password: string };
+  readonly values: FillValues;
 }
 
 /** A match candidate as shown to the content script/inline menu: title/username/icon only,
@@ -297,10 +350,18 @@ export interface MatchCandidateSummary {
   readonly title: string;
   readonly username: string;
   readonly needsWarning: boolean;
+  /** The saved URI's exact normalised host, A-label form — exactly
+   * `@rizzy-vault/core`'s `MatchCandidate.savedHost` (ADR 0037 §5 "Exact host shown"; gap 31
+   * in the M2 gap audit): "the saved site" in the inline menu's equivalence-only warning. */
+  readonly savedHost: string;
 }
 
 export interface CandidatesMessage {
   readonly type: "candidates";
+  /** The page's own exact normalised host, A-label form — exactly
+   * `@rizzy-vault/core`'s `MatchDecisionResult.pageHost` (ADR 0037 §5 "Exact host shown"; gap
+   * 31 in the M2 gap audit). */
+  readonly pageHost: string;
   readonly candidates: readonly MatchCandidateSummary[];
   readonly warnings: readonly string[];
 }
@@ -391,6 +452,11 @@ export type ToContentScript =
  * success-plus-values shape; see {@link InlineMenuFillDispatchedMessage}'s own doc for why. */
 export type InlineMenuFillResponse = InlineMenuFillDispatchedMessage | ContentErrorMessage;
 
+/** `core-host/listener.ts`'s answer to an {@link InlineMenuGeneratePasswordRequestMessage} —
+ * same never-the-secret-itself rule, see {@link InlineMenuGeneratePasswordDispatchedMessage}'s
+ * own doc. */
+export type InlineMenuGeneratePasswordResponse = InlineMenuGeneratePasswordDispatchedMessage | ContentErrorMessage;
+
 /** `core-host/listener.ts`'s answer to a {@link PasskeyCeremonyMessage} — same
  * never-the-secret-itself rule, see {@link PasskeyCeremonyDispatchedMessage}'s own doc. */
 export type PasskeyCeremonyResponse = PasskeyCeremonyDispatchedMessage | ContentErrorMessage;
@@ -409,7 +475,19 @@ export function isInlineMenuFillRequestMessage(value: unknown): value is InlineM
     return false;
   }
   const v = value as Record<string, unknown>;
-  return v["type"] === "inline_menu_fill_chosen" && isBoundedString(v["itemId"], 256) && typeof v["confirmedEquivalence"] === "boolean";
+  return (
+    v["type"] === "inline_menu_fill_chosen" &&
+    isBoundedString(v["itemId"], 256) &&
+    typeof v["confirmedEquivalence"] === "boolean" &&
+    (v["only"] === undefined || v["only"] === "username" || v["only"] === "password")
+  );
+}
+
+/** Validates a raw message claimed to be an {@link InlineMenuGeneratePasswordRequestMessage} —
+ * same gate as {@link isInlineMenuFillRequestMessage}'s own doc explains. The message carries no
+ * fields beyond `type`, so there is nothing else to bound. */
+export function isInlineMenuGeneratePasswordRequestMessage(value: unknown): value is InlineMenuGeneratePasswordRequestMessage {
+  return typeof value === "object" && value !== null && (value as Record<string, unknown>)["type"] === "inline_menu_generate_password_chosen";
 }
 
 /** Validates a raw message claimed to be a {@link PasskeyCeremonyMessage} — only
@@ -430,16 +508,20 @@ export function isPasskeyCeremonyMessage(value: unknown): value is PasskeyCeremo
 }
 
 /** Shared by {@link isApplyFillMessage} and {@link isRelayApplyFillMessage}: both carry the
- * exact same `values` shape (username/password by kind, never by field id). */
-function isFillValues(value: unknown): value is { readonly username?: string; readonly password: string } {
+ * exact same `values` shape (username/password by kind, never by field id), at least one of the
+ * two present. */
+function isFillValues(value: unknown): value is FillValues {
   if (typeof value !== "object" || value === null) {
     return false;
   }
   const v = value as Record<string, unknown>;
-  if (!isBoundedString(v["password"], MAX_FIELD_VALUE_LEN)) {
+  if (v["username"] === undefined && v["password"] === undefined) {
     return false;
   }
-  return v["username"] === undefined || isBoundedString(v["username"], MAX_FIELD_VALUE_LEN);
+  return (
+    (v["password"] === undefined || isBoundedString(v["password"], MAX_FIELD_VALUE_LEN)) &&
+    (v["username"] === undefined || isBoundedString(v["username"], MAX_FIELD_VALUE_LEN))
+  );
 }
 
 /** Validates a raw message claimed to be an {@link ApplyFillMessage} — checked by

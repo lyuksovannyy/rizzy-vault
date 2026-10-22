@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! A simulated single-vault server that runs generated histories through the compaction
 //! functions, and an independent brute-force checker of ADR 0021 §8's server properties.
 //!

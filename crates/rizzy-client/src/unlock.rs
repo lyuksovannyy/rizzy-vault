@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The online part of an unlock on an enrolled device (CRYPTO.md §11.3 step 2–5).
 //!
 //! The offline part is [`DeviceState::unlock`]; device authentication is

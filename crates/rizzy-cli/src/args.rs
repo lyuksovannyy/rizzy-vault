@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `rv` command line.
 //!
 //! No argument is ever a secret (threat model INV-56): passwords, the Secret Key, recovery
@@ -36,6 +38,7 @@ USAGE:
                    [--remove-custom <id>]... [--move-uri <id>=<place>]...
                    [--move-custom <id>=<place>]...
     rv item trash <item> | restore <item> | purge <item>
+    rv item restore-late <item> --type <type>
     rv generate [--length <n>] [--no-symbols | --symbols <chars>] [--no-ambiguous]
                 [--exclude <chars>] | --words <n> [--passphrase-number]
     rv totp <item>
@@ -76,6 +79,10 @@ aliasvault-avux.
 After the server was restored from a backup, `recovery repair` makes the recovery code work
 again: a new code and Emergency Kit by default, or with --retype the current code, which the
 server takes only when the code did not change since the backup.
+`sync` prints a notice for an edit that arrived for an item deleted permanently, and for an
+item deleted on one device while it was being edited on another (the edit wins).
+`item restore-late` restores the late edits of an item deleted permanently as a new item of
+<type>; the deleted item stays deleted.
 
 SECRETS are never taken from the command line or the environment. rv asks for them on the
 terminal without echo; when standard input is not a terminal it reads them from it, one per
@@ -247,6 +254,31 @@ pub enum Command {
     ItemRestore(String),
     /// `item purge`.
     ItemPurge(String),
+    /// `item restore-late`: an item deleted permanently, its late edits restored as a new item
+    /// (ADR 0018 §3 "Surfacing").
+    ItemRestoreLate {
+        /// The deleted item.
+        item: String,
+        /// `--type`: the new item's type, which the user picks.
+        item_type: String,
+    },
+    /// `item history` (ROADMAP §4.2 "Item revision history (restore old versions)", M3): every
+    /// field's history, generalizing `item show`'s password-history section.
+    ItemHistory {
+        /// The item.
+        item: String,
+        /// `--reveal`: print concealed values.
+        reveal: bool,
+    },
+    /// `item restore-history`: restores one history entry as its field's current value.
+    ItemRestoreHistory {
+        /// The item.
+        item: String,
+        /// `--field`: the field's final key.
+        field: String,
+        /// `--entry`: the entry's id, as `item history` printed it.
+        entry: String,
+    },
     /// `generate`.
     Generate(Generate),
     /// `totp`.
@@ -669,8 +701,43 @@ fn item(args: &mut Args) -> Result<Command, CliError> {
         Some("trash") => Ok(Command::ItemTrash(args.positional("the item")?)),
         Some("restore") => Ok(Command::ItemRestore(args.positional("the item")?)),
         Some("purge") => Ok(Command::ItemPurge(args.positional("the item")?)),
+        Some("restore-late") => {
+            let item = args.positional("the item")?;
+            let item_type = match args.next().as_deref() {
+                Some("--type") => args.value("--type")?,
+                Some(other) => return Err(unknown(other)),
+                None => return Err(usage("--type is required")),
+            };
+            Ok(Command::ItemRestoreLate { item, item_type })
+        }
+        Some("history") => {
+            let item = args.positional("the item")?;
+            let reveal = match args.next().as_deref() {
+                None => false,
+                Some("--reveal") => true,
+                Some(other) => return Err(unknown(other)),
+            };
+            Ok(Command::ItemHistory { item, reveal })
+        }
+        Some("restore-history") => {
+            let item = args.positional("the item")?;
+            let (mut field, mut entry) = (None, None);
+            while let Some(option) = args.next() {
+                match option.as_str() {
+                    "--field" => field = Some(args.value("--field")?),
+                    "--entry" => entry = Some(args.value("--entry")?),
+                    other => return Err(unknown(other)),
+                }
+            }
+            Ok(Command::ItemRestoreHistory {
+                item,
+                field: required(field, "--field")?,
+                entry: required(entry, "--entry")?,
+            })
+        }
         _ => Err(usage(
-            "item needs list, show, create, edit, trash, restore or purge",
+            "item needs list, show, create, edit, trash, restore, purge, restore-late, history \
+             or restore-history",
         )),
     }
 }
@@ -910,6 +977,66 @@ mod tests {
         );
         assert!(parsed("recovery repair --retype").is_err());
         assert!(parsed("recovery repair --name alice --code x").is_err());
+    }
+
+    /// `item restore-late` (gap 02): the item and `--type` are both required.
+    #[test]
+    fn restore_late_parses() {
+        assert_eq!(
+            command("item restore-late ab12 --type login"),
+            Command::ItemRestoreLate {
+                item: "ab12".to_owned(),
+                item_type: "login".to_owned(),
+            }
+        );
+        for line in [
+            "item restore-late",
+            "item restore-late ab12",
+            "item restore-late ab12 --type",
+            "item restore-late ab12 --kind login",
+            "item restore-late --type login",
+        ] {
+            assert!(matches!(parsed(line), Err(CliError::Usage(_))), "{line}");
+        }
+    }
+
+    /// `item history` and `item restore-history` (ROADMAP §4.2 "Item revision history (restore
+    /// old versions)", M3).
+    #[test]
+    fn history_parses() {
+        assert_eq!(
+            command("item history ab12"),
+            Command::ItemHistory {
+                item: "ab12".to_owned(),
+                reveal: false,
+            }
+        );
+        assert_eq!(
+            command("item history ab12 --reveal"),
+            Command::ItemHistory {
+                item: "ab12".to_owned(),
+                reveal: true,
+            }
+        );
+        assert_eq!(
+            command("item restore-history ab12 --field login.password --entry cd34"),
+            Command::ItemRestoreHistory {
+                item: "ab12".to_owned(),
+                field: "login.password".to_owned(),
+                entry: "cd34".to_owned(),
+            }
+        );
+        for line in [
+            "item history",
+            "item history ab12 --unknown",
+            "item restore-history",
+            "item restore-history ab12",
+            "item restore-history ab12 --field login.password",
+            "item restore-history ab12 --entry cd34",
+            "item restore-history ab12 --field login.password --entry",
+        ] {
+            assert!(matches!(parsed(line), Err(CliError::Usage(_))), "{line}");
+        }
     }
 
     #[test]

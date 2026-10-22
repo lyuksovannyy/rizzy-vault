@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The auth domain's pure rules: checks on untrusted statements and on state transitions,
 //! with no database and no clock of their own.
 //!

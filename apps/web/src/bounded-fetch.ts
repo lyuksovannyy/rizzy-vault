@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The core Worker's transport: every request gets a deadline, and a lock aborts every request in
 // flight. Without them, one stalled request (a dead TCP path, a proxy holding the connection)
 // holds the Worker's one call queue (`core-worker.ts`), and every later call, the login after a

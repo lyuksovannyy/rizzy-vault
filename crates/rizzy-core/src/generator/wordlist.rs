@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The embedded passphrase wordlist (CRYPTO.md §12.1): the EFF large wordlist.
 //!
 //! - **Source.** "EFF's Long Wordlist", `eff_large_wordlist.txt`, published by the Electronic

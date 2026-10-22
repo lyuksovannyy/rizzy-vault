@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The UI ↔ Worker messages: shape checks, transfers, the client's call and second-factor
 // round trips.
 import { describe, expect, it } from "vitest";
@@ -38,6 +40,24 @@ describe("message checks", () => {
     expect(isToWorker(null)).toBe(false);
     expect(isToWorker("call")).toBe(false);
     expect(METHODS).toContain("login");
+    // Gaps 01 and 02, ROADMAP §4.2 and §4.5: the password history, the item history, the
+    // notices and the conflict chooser are calls the Worker serves.
+    for (const m of [
+      "passwordHistory",
+      "revealPasswordHistory",
+      "itemHistory",
+      "revealFieldHistory",
+      "restoreFieldHistory",
+      "fieldConflict",
+      "revealConflictValue",
+      "resolveConflictPick",
+      "resolveConflictKeepBoth",
+      "takeNotices",
+      "restoreLateAsNew",
+    ]) {
+      expect(METHODS).toContain(m);
+      expect(isToWorker({ kind: "call", id: 1, method: m, args: [] })).toBe(true);
+    }
     expect(new Set(METHODS).size).toBe(METHODS.length);
   });
 

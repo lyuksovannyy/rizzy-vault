@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The export and import steps of the "Export and import" pane, apart from React, so that the
 // gates are tested without a DOM (owner decision 2026-10-05):
 // - every export, encrypted or plaintext, comes after a re-authentication with the Secret Key

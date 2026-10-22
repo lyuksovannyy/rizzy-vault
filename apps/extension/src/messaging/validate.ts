@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Runtime validation of every message the background receives from a content script
 // (ADR 0036 §4, INV-40: "the background treats every content-script message as untrusted").
 // `parseFromContentScript` is the one entry point the service worker calls; it never trusts the

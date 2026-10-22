@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The canonical op and snapshot headers of ADR 0012 §3, written out by hand for the vectors.
 //!
 //! The headers are `rizzy-sync`'s (`rizzy_sync::header`, ADR 0012 §13), which this crate cannot

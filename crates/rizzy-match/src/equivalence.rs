@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The signed global equivalence list (ADR 0038 §1–§3) and the merged equivalence view
 //! (ADR 0038 §5; ADR 0037 §6–§7).
 //!
@@ -145,7 +147,7 @@ impl EquivalenceGroup {
     /// bytes; unreachable in practice, since every domain here already passed
     /// [`EquivalenceGroup::new`] or [`EquivalenceGroup::decode`], both bounded by
     /// [`MAX_HOST_LEN`], but still propagated rather than assumed.
-    fn encode(&self, out: &mut Vec<u8>) -> Result<(), rizzy_core::error::EncodeError> {
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) -> Result<(), rizzy_core::error::EncodeError> {
         out.extend_from_slice(self.id.as_bytes());
         rizzy_core::encoding::put_u16(out, u16::try_from(self.domains.len()).unwrap_or(0));
         for domain in &self.domains {
@@ -156,7 +158,7 @@ impl EquivalenceGroup {
     }
 
     /// Decodes one `group` record; `r` must be positioned at its first byte.
-    fn decode(r: &mut Reader<'_>) -> Result<Self, EquivalenceListError> {
+    pub(crate) fn decode(r: &mut Reader<'_>) -> Result<Self, EquivalenceListError> {
         let id = GroupId(
             *r.array::<16>()
                 .map_err(|_| EquivalenceListError::Malformed)?,
@@ -361,7 +363,8 @@ impl EquivalenceList {
     /// ([`EquivalenceListError::UnsupportedVersion`], [`EquivalenceListError::Malformed`]);
     /// [`EquivalenceListError::BadSignature`] if the signature does not verify;
     /// [`EquivalenceListError::NotNewer`] if `list_version` is not strictly greater than
-    /// `highest_accepted_version` (INV-39: "reject a list with an equal or lower version").
+    /// `highest_accepted_version` (INV-39; ADR 0038 §2: "reject a list with an equal or lower
+    /// version").
     pub fn verify(
         wire: &[u8],
         public_key: &[u8; 32],
@@ -476,6 +479,43 @@ mod tests {
 
     fn group(id: u8, domains: &[&str]) -> EquivalenceGroup {
         EquivalenceGroup::new(gid(id), domains.iter().copied(), false).unwrap()
+    }
+
+    #[test]
+    fn group_rejects_a_dot_only_member() {
+        // Regression: before `normalize_domain` stripped every trailing dot instead of just
+        // one, `normalize_domain("..")` returned `Ok(".")` — a degenerate, non-registrable
+        // "domain" that `new` happily stored as a group member (no round-trip check here),
+        // while `decode`'s stricter round-trip check (line below this block) would reject
+        // that same stored member as `Malformed` on every future load. `new` and `decode`
+        // must agree: a dot-only input is never a valid member, at either entry point.
+        assert_eq!(
+            EquivalenceGroup::new(gid(1), ["..", "example.com"], false).unwrap_err(),
+            EquivalenceListError::Malformed
+        );
+    }
+
+    #[test]
+    fn group_member_normalised_from_an_idna_separator_round_trips_through_encode_and_decode() {
+        // Regression: `normalize_domain` used to leave the dots idna's own domain-to-ASCII
+        // processing produces from U+3002/U+FF0E/U+FF61 in its output (it only trimmed ASCII
+        // dots from the *input*), so `new` would normalise "a\u{3002}\u{3002}" to "a.." and
+        // store that as a member — a value `decode`'s own round-trip check,
+        // `normalize_domain(domain) == domain`, then rejects, because re-normalising "a.."
+        // hits the ASCII-only path and returns "a" instead. `new` and `decode` must agree:
+        // whatever `new` accepts and stores must also survive `decode`'s self-check, for
+        // every raw spelling, not only ASCII ones.
+        let built = EquivalenceGroup::new(gid(1), ["a\u{3002}\u{3002}", "example.com"], false)
+            .expect("the ideographic-full-stop spelling normalises to a valid member");
+        assert!(built.domains().contains(&"a".to_owned()));
+        let mut out = Vec::new();
+        built.encode(&mut out).unwrap();
+        let mut reader = Reader::new(&out);
+        let decoded = EquivalenceGroup::decode(&mut reader).expect(
+            "a member `new` just normalised and stored must not be rejected by decode's own \
+             round-trip check",
+        );
+        assert_eq!(built, decoded);
     }
 
     #[test]

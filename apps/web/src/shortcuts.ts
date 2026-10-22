@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Keyboard shortcuts (redesign slice 2, item 3): pure dispatch logic, kept separate from the
 // `keydown` listener that calls it so it can be unit-tested without a DOM (module docs of
 // `@rizzy-vault/ui`'s `Toast.tsx`: this workspace's Vitest runs with no jsdom).
@@ -6,8 +8,9 @@
 // exception: Escape always fires, because the control the user is typing in might be inside the
 // very dialog Escape should close (e.g. the two-factor code field inside `TwoFactorPane`, or a
 // text field inside the item editor). Ctrl/Cmd+K is a chord, not a bare letter, so it also fires
-// while typing — that convention (a command-palette shortcut always available) is why it is
-// offered as an alternative to the bare `/` at all.
+// while typing: it opens the command palette (`CommandPalette.tsx`, ROADMAP §4.5) from anywhere,
+// the same always-available convention as a browser's own address-bar shortcut. `/` stays a
+// separate, plain-text shortcut that only focuses the inline search box.
 
 /** Minimal shape of the parts of a `KeyboardEvent`/its `target` this module reads, so it does
  * not depend on `lib.dom`'s event types directly and stays trivially testable with plain
@@ -26,7 +29,7 @@ export interface ShortcutTarget {
   readonly isContentEditable?: boolean;
 }
 
-export type ShortcutAction = "focus-search" | "new-item" | "help" | "escape";
+export type ShortcutAction = "focus-search" | "command-palette" | "new-item" | "help" | "escape";
 
 const TYPING_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT"]);
 
@@ -51,7 +54,7 @@ export function shortcutFor(e: ShortcutEvent): ShortcutAction | undefined {
   }
   const chordK = (e.ctrlKey || e.metaKey) && !e.altKey && (e.key === "k" || e.key === "K");
   if (chordK) {
-    return "focus-search";
+    return "command-palette";
   }
   if (isTypingTarget(e.target) || e.ctrlKey || e.metaKey || e.altKey) {
     return undefined;

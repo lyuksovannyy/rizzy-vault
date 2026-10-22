@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Seeded random scenarios for the random explorer, one generator per flavour. Each answer's
 //! flavour is kept as its spike copy built it, so a seed reproduces the same scenario.
 

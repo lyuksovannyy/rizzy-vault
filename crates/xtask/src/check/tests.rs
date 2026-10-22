@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Rule evaluation on synthetic metadata: a clean tree shaped like the current workspace, then
 //! one violation at a time.
 

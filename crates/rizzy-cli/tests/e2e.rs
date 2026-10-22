@@ -1,7 +1,11 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rv` end to end against a real `rizzy-vault` server: signup → login on a second device →
 //! items → sync on two devices → a conflict → export → import → TOTP and the generator →
 //! offline reads and queued writes → key rotation and its follower → device revocation with a
-//! full rotation and the identity-change confirmation → removal of a device.
+//! full rotation and the identity-change confirmation → removal of a device. And the INV-15
+//! canary: known secrets through every flow, then a search of every HTTP message, server file,
+//! debug log line and backup file for them ([`canary_secrets_never_reach_the_server_in_any_form`]).
 //!
 //! # How the server runs
 //!
@@ -33,7 +37,7 @@
     reason = "test code: a failure fails the test, which CLAUDE.md allows"
 )]
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -100,6 +104,9 @@ fn server_binary() -> PathBuf {
     binary
 }
 
+/// The log file of a server started with a debug log ([`Server::start_with`]), in its directory.
+const DEBUG_LOG: &str = "server.log";
+
 /// A running `rizzy-vault` on a loopback port. Killed on drop.
 struct Server {
     /// The process.
@@ -128,9 +135,19 @@ impl Server {
     /// A new server whose public origin is `origin` (a proxy in front of it), or
     /// `http://127.0.0.1:<its own port>`.
     fn start_at(origin: Option<String>) -> Self {
+        Self::start_with(origin, false)
+    }
+
+    /// As [`Server::start_at`]; with `debug_log`, every `rizzy-vault` process of this server,
+    /// the serving one and the operator's commands, logs at the most verbose level into
+    /// [`DEBUG_LOG`] in its directory (threat model INV-48), instead of to nowhere.
+    fn start_with(origin: Option<String>, debug_log: bool) -> Self {
         let dir = temp_dir("server");
         std::fs::create_dir_all(dir.join("data")).unwrap();
         std::fs::create_dir_all(dir.join("secrets")).unwrap();
+        if debug_log {
+            std::fs::write(dir.join(DEBUG_LOG), b"").unwrap();
+        }
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -171,6 +188,11 @@ impl Server {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        let log = dir.join(DEBUG_LOG);
+        if log.is_file() {
+            let file = std::fs::OpenOptions::new().append(true).open(log).unwrap();
+            command.env("RIZZY_LOG_LEVEL", "debug").stderr(file);
+        }
         command
     }
 
@@ -258,6 +280,9 @@ struct ProxyState {
     first_state: Option<Vec<u8>>,
     /// The paths requested, in order.
     seen: Vec<String>,
+    /// Every request (head and body) and every answer (head and body) that passed through,
+    /// in order: the HTTP haystack of the INV-15 canary.
+    wire: Vec<Vec<u8>>,
 }
 
 /// A loopback reverse proxy in front of a [`Server`], as an operator's would be, that can
@@ -275,9 +300,14 @@ struct Proxy {
 impl Proxy {
     /// A proxy on a free loopback port and the server behind it.
     fn start() -> (Self, Server) {
+        Self::start_with(false)
+    }
+
+    /// As [`Proxy::start`]; with `debug_log`, the server logs at debug into its [`DEBUG_LOG`].
+    fn start_with(debug_log: bool) -> (Self, Server) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let server = Server::start_behind(Some(port));
+        let server = Server::start_with(Some(format!("http://127.0.0.1:{port}")), debug_log);
         let upstream = server.port;
         let state = std::sync::Arc::new(std::sync::Mutex::new(ProxyState::default()));
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -311,6 +341,11 @@ impl Proxy {
     fn count(&self, path: &str) -> usize {
         let state = self.state.lock().unwrap();
         state.seen.iter().filter(|p| *p == path).count()
+    }
+
+    /// Every request and answer that passed through, heads and bodies, in order.
+    fn wire(&self) -> Vec<Vec<u8>> {
+        self.state.lock().unwrap().wire.clone()
     }
 
     /// A whole HTTP/1.1 message with a `Content-Length` (or none) from `stream`: the head
@@ -377,6 +412,7 @@ impl Proxy {
         let (fault, old_state) = {
             let mut state = state.lock().unwrap();
             state.seen.push(path.clone());
+            state.wire.push([head.as_slice(), &body].concat());
             let fault = match state.fault {
                 Some((armed, fault)) if armed == path => {
                     state.fault = None;
@@ -431,6 +467,7 @@ impl Proxy {
                 [answer_head, answer_body].concat()
             }
         };
+        state.lock().unwrap().wire.push(reply.clone());
         client.write_all(&reply)?;
         client.flush()
     }
@@ -2050,6 +2087,8 @@ fn a_gateway_error_on_a_commit_keeps_what_was_saved_for_it() {
 /// rotation's commit with `state_conflict` and then shows an older `account-state` on the
 /// retry rule's query is a possible rollback. The alarm is written when it is detected, the
 /// device is read-only across restarts, and the file (the evidence) cannot be removed.
+///
+/// ETH class: none. Rollback is threat model §5.6, which has no ETH class (CRYPTO.md §15 item 5).
 #[test]
 fn a_rollback_shown_during_a_rotation_retry_raises_the_alarm() {
     use rizzy_client::rizzy_proto::http::paths;
@@ -2438,6 +2477,9 @@ fn a_restored_server_healed_first_by_a_device_of_the_restored_set() {
 /// rollback. The device holding the newer state raises the alarm and re-publishes, the server
 /// refuses it, and the alarm stays across runs (read-only, reads still work); the device
 /// enrolled after the copy gets no session from its certificate.
+///
+/// ETH class: none. Rollback and restore are threat model §5.6 and §5.8, which have no ETH class
+/// (CRYPTO.md §15 item 5).
 #[test]
 fn a_rollback_outside_a_reconciliation_epoch_stays_an_alarm() {
     let mut server = Server::start();
@@ -2913,4 +2955,1336 @@ fn rv_reaches_the_server_through_a_tls_proxy() {
     b.ca_file = None;
     let (outcome, _) = b.try_run(&["sync"], &[PASSWORD], &[], &[]);
     assert!(matches!(outcome, Err(CliError::Tls { .. })), "{outcome:?}");
+}
+
+/// `item show` lists password history (gap 01; ADR 0012 §5 "Password history is the history
+/// of `login.password`"): concealed unless `--reveal`, newest first, never through the
+/// generic field loop.
+#[test]
+fn item_show_lists_password_history() {
+    let server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("pwhist");
+    sign_up(&a, &origin, "alice");
+    let item = a
+        .ok(
+            &[
+                "item",
+                "create",
+                "--type",
+                "login",
+                "--field",
+                "item.name=Mail",
+                "--secret",
+                "login.password",
+            ],
+            &["first-password"],
+        )
+        .out[0]
+        .clone();
+
+    // No history yet: the item has only ever held one value.
+    let shown = a.ok(&["item", "show", &item], &[]);
+    assert!(
+        !shown.out.iter().any(|l| l.starts_with("password history")),
+        "{:?}",
+        shown.out
+    );
+
+    a.ok(
+        &["item", "edit", &item, "--secret", "login.password"],
+        &["second-password"],
+    );
+    a.ok(
+        &["item", "edit", &item, "--secret", "login.password"],
+        &["third-password"],
+    );
+
+    // Concealed without --reveal: the heading names the count, the entries do not leak the
+    // old values.
+    let hidden = a.ok(&["item", "show", &item], &[]);
+    assert!(
+        hidden
+            .out
+            .iter()
+            .any(|l| l == "password history (2 older values, newest first):"),
+        "{:?}",
+        hidden.out
+    );
+    assert!(!hidden.out.iter().any(|l| l.contains("first-password")));
+    assert!(!hidden.out.iter().any(|l| l.contains("second-password")));
+    assert!(hidden.out.iter().any(|l| l.ends_with(": ********")));
+
+    // Revealed: both older values, newest (second-password) first; the current value
+    // (third-password) is not a history entry.
+    let revealed = a.ok(&["item", "show", &item, "--reveal"], &[]);
+    let history_lines: Vec<&String> = revealed
+        .out
+        .iter()
+        .skip_while(|l| !l.starts_with("password history"))
+        .skip(1)
+        .take_while(|l| l.starts_with("  "))
+        .collect();
+    assert_eq!(history_lines.len(), 2, "{:?}", revealed.out);
+    assert!(
+        history_lines[0].ends_with(": second-password"),
+        "{history_lines:?}"
+    );
+    assert!(
+        history_lines[1].ends_with(": first-password"),
+        "{history_lines:?}"
+    );
+    assert!(!history_lines.iter().any(|l| l.contains("third-password")));
+    assert_eq!(a.field(&item, "login.password"), "third-password");
+}
+
+/// `item history` and `item restore-history` (ROADMAP §4.2 "Item revision history (restore old
+/// versions)", M3): every field's history, not only `login.password`, concealed unless
+/// `--reveal`; restoring an entry writes it back as the field's current value, an ordinary
+/// edit that syncs normally.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one item through history listing, restore and both refusals"
+)]
+fn item_history_lists_every_field_and_restore_writes_the_old_value_back() {
+    let server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("item-history");
+    sign_up(&a, &origin, "alice");
+    let item = a
+        .ok(
+            &[
+                "item",
+                "create",
+                "--type",
+                "login",
+                "--field",
+                "item.name=Mail",
+                "--field",
+                "login.username=alice",
+                "--secret",
+                "login.password",
+            ],
+            &["first-password"],
+        )
+        .out[0]
+        .clone();
+
+    // No history yet.
+    let shown = a.ok(&["item", "history", &item], &[]);
+    assert_eq!(shown.out, vec!["no field history".to_owned()]);
+
+    a.ok(
+        &["item", "edit", &item, "--field", "login.username=alice2"],
+        &[],
+    );
+    a.ok(
+        &["item", "edit", &item, "--secret", "login.password"],
+        &["second-password"],
+    );
+
+    // Concealed without --reveal, one section per field.
+    let hidden = a.ok(&["item", "history", &item], &[]);
+    assert!(
+        hidden
+            .out
+            .iter()
+            .any(|l| l == "login.username (1 older value, newest first):"),
+        "{:?}",
+        hidden.out
+    );
+    assert!(
+        hidden
+            .out
+            .iter()
+            .any(|l| l == "login.password (1 older value, newest first):"),
+        "{:?}",
+        hidden.out
+    );
+    assert!(!hidden.out.iter().any(|l| l.contains("first-password")));
+    assert!(!hidden.out.iter().any(|l| l.contains("alice\"")));
+    assert!(hidden.out.iter().any(|l| l.ends_with(": ********")));
+
+    // Revealed: each field's entry, with the id `restore-history --entry` takes.
+    let revealed = a.ok(&["item", "history", &item, "--reveal"], &[]);
+    let password_line = revealed
+        .out
+        .iter()
+        .skip_while(|l| !l.starts_with("login.password ("))
+        .nth(1)
+        .unwrap();
+    assert!(
+        password_line.ends_with(": first-password"),
+        "{password_line:?}"
+    );
+    let entry_id = password_line.split_whitespace().next().unwrap();
+
+    a.ok(
+        &[
+            "item",
+            "restore-history",
+            &item,
+            "--field",
+            "login.password",
+            "--entry",
+            entry_id,
+        ],
+        &[],
+    );
+    assert_eq!(a.field(&item, "login.password"), "first-password");
+    // The displaced value ("second-password") is now history, and so is the restored
+    // entry's own original ("first-password" again, under the entry's original dot): a
+    // restore neither removes nor deduplicates, it is an ordinary edit (module docs).
+    let after = a.ok(&["item", "history", &item, "--reveal"], &[]);
+    assert!(after.out.iter().any(|l| l.ends_with(": second-password")));
+
+    // A malformed entry id is refused before any write.
+    let (outcome, _) = a.try_run(
+        &[
+            "item",
+            "restore-history",
+            &item,
+            "--field",
+            "login.password",
+            "--entry",
+            "ab12",
+        ],
+        &[PASSWORD],
+        &[],
+        &[],
+    );
+    assert!(matches!(outcome, Err(CliError::BadInput(_))), "{outcome:?}");
+
+    // A well-formed id naming no device that ever wrote this vault is refused too (flip the
+    // leading byte of a real entry id: `entry_id` is 16 bytes of device id then an 8-byte
+    // seq, so this keeps the encoding valid while naming a device that does not exist).
+    let bogus_entry = format!(
+        "{:02x}{}",
+        !u8::from_str_radix(&entry_id[0..2], 16).unwrap(),
+        &entry_id[2..]
+    );
+    let (outcome, _) = a.try_run(
+        &[
+            "item",
+            "restore-history",
+            &item,
+            "--field",
+            "login.password",
+            "--entry",
+            &bogus_entry,
+        ],
+        &[PASSWORD],
+        &[],
+        &[],
+    );
+    assert!(
+        matches!(outcome, Err(CliError::Client(ClientError::UnknownItem))),
+        "{outcome:?}"
+    );
+}
+
+/// The first 16 hex digits of the id of the device `rv` runs as, from `device list`: the
+/// length `rv sync`'s notices use (`device_label`'s `DEVICE_LABEL_HEX_LEN`), a prefix of the
+/// full id this line prints.
+fn own_device_prefix(rv: &Rv) -> String {
+    let list = rv.ok(&["device", "list"], &[]);
+    let line = list
+        .out
+        .iter()
+        .find(|l| l.ends_with("this device"))
+        .unwrap_or_else(|| panic!("{:?}", list.out));
+    line[..16].to_owned()
+}
+
+/// Whether a note is one of the gap 02 notices.
+fn is_notice(note: &str) -> bool {
+    note.contains("arrived for an item you deleted permanently") || note.contains("deleted on")
+}
+
+/// `rv sync` prints the gap 02 notices (ADR 0018 §3 "Surfacing"; ADR 0012 §5 "Active wins"):
+/// none on a quiet vault; "deleted on X while it was being edited on Y" when an edit wins over
+/// a concurrent trash; "An edit from <device> arrived for an item you deleted permanently" for
+/// an edit concurrent with a purge, which `item restore-late` restores as a new item. `rv`
+/// keeps no "already shown" mark (it would be an ADR 0026 cache record), so the next sync
+/// prints the late-edit notice again.
+#[test]
+fn sync_prints_late_edit_and_trash_notices_and_restore_late_restores() {
+    let server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("late-a");
+    let (secret_key, _) = sign_up(&a, &origin, "alice");
+    let b = Rv::new("late-b");
+    log_in(&b, &origin, "alice", &secret_key);
+    let b_prefix = own_device_prefix(&b);
+
+    // A quiet vault: no notice.
+    let kept = create_note(&a, "Kept");
+    let gone = create_note(&a, "Gone");
+    let quiet = a.ok(&["sync"], &[]);
+    assert!(
+        !quiet.notes.iter().any(|n| is_notice(n)),
+        "{:?}",
+        quiet.notes
+    );
+    b.ok(&["sync"], &[]);
+
+    // A trashes one item, then purges the other; each time B edits the item without having
+    // seen that (every write syncs, so the steps alternate).
+    a.ok(&["item", "trash", &kept], &[]);
+    b.ok(
+        &["item", "edit", &kept, "--field", "item.notes=still needed"],
+        &[],
+    );
+    a.ok(&["item", "trash", &gone], &[]);
+    a.ok(&["item", "purge", &gone], &[]);
+    b.ok(&["item", "edit", &gone, "--field", "item.notes=late"], &[]);
+
+    let synced = a.ok(&["sync"], &[]);
+    let trash_notice = format!(
+        "{kept}  Kept: deleted on this device while it was being edited on desktop/cli \
+         {b_prefix}; the edit kept it."
+    );
+    assert!(synced.notes.contains(&trash_notice), "{:?}", synced.notes);
+    let late_notice = format!(
+        "An edit from desktop/cli {b_prefix} arrived for an item you deleted permanently \
+         ({gone}). Restore it as a new item? `rv item restore-late {gone} --type <type>`"
+    );
+    assert!(synced.notes.contains(&late_notice), "{:?}", synced.notes);
+    // The edit kept the trashed item; the purged one stays gone.
+    assert!(a.items().iter().any(|(id, _)| *id == kept));
+    assert!(!a.items().iter().any(|(id, _)| *id == gone));
+
+    // Shown again by the next sync: rv keeps no mark across processes.
+    let again = a.ok(&["sync"], &[]);
+    assert!(again.notes.contains(&late_notice), "{:?}", again.notes);
+
+    // restore-late refuses an item that is not deleted, and a type it does not know.
+    let (refused, _) = a.try_run(
+        &["item", "restore-late", &kept, "--type", "note"],
+        &[PASSWORD],
+        &[],
+        &[],
+    );
+    assert!(
+        matches!(refused, Err(CliError::Client(ClientError::UnknownItem))),
+        "{refused:?}"
+    );
+    let (bad_type, _) = a.try_run(
+        &["item", "restore-late", &gone, "--type", "spaceship"],
+        &[PASSWORD],
+        &[],
+        &[],
+    );
+    assert!(matches!(bad_type, Err(CliError::Usage(_))), "{bad_type:?}");
+
+    // Restored as a new item of the type the user names; the deleted item stays deleted.
+    let restored = a
+        .ok(&["item", "restore-late", &gone[..8], "--type", "note"], &[])
+        .out[0]
+        .clone();
+    assert_ne!(restored, gone);
+    assert_eq!(a.field(&restored, "item.notes"), "late");
+    assert!(!a.items().iter().any(|(id, _)| *id == gone));
+}
+
+/// The INV-15 canary (threat model INV-15, "the master password, Secret Key, recovery code,
+/// account key, vault keys, item keys and private keys never leave a client unencrypted";
+/// extended to logs at the most verbose level by INV-48; INV-2's "the Secret Key is never sent
+/// to the server"; ADR 0011 "No plaintext").
+///
+/// An account with known secrets runs every flow `rv` has that reaches the server: signup with
+/// a recovery code, a login on a second device, item writes and syncs on both, a recovery
+/// request and its cancellation, a standard rotation the other device follows, a device
+/// revocation with a full rotation, a password change and a Secret Key change (a new kit and
+/// recovery code, a rotation). The server logs at `debug` ([`DEBUG_LOG`]), and an operator's
+/// `rizzy-vault backup` runs next to it. Then each haystack is searched for each secret, raw,
+/// as hex and as base64 at any alignment ([`canary_forms`]):
+/// - every HTTP request and answer, heads and bodies, as the [`Proxy`] in front of the server
+///   saw them;
+/// - every file of the server's data directory (the `SQLite` database and its WAL), byte for
+///   byte;
+/// - every line the server's processes logged;
+/// - the backup file.
+///
+/// The secrets: both master passwords, both Secret Keys and both recovery codes (as printed,
+/// without separators, and their bytes), the three `pw_in` values derived from them, and an
+/// item's secret field. The key bytes (account, vault, item and private keys) and the `E_dev`,
+/// `E_local`, `E_ks` and `ACCOUNT_KEY_FORWARD` envelopes of CRYPTO.md §15 item 5 never leave
+/// `rizzy-client`'s types through a public API, so this black-box test cannot name them: the
+/// canary of `rizzy-client`'s own flow tests (`src/tests/canary.rs`) searches for those.
+///
+/// What a search of raw database files can miss: a value `SQLite` splits across two overflow
+/// pages. The secrets searched for here are at most 64 bytes long, and the rows that would hold
+/// them are small.
+///
+/// The clients' own cache files are not haystacks: INV-15 is about what leaves a client, and
+/// the device record in the cache holds the Secret Key's bytes by design until an OS keystore
+/// holds them (CRYPTO.md §4.2, `rizzy-client`'s `store/record.rs`), so this search finds them
+/// there. [`rv_end_to_end`] checks that the cache holds no password, Secret Key or recovery code
+/// as typed or printed.
+///
+/// ETH class: none (CRYPTO.md §15 item 5's canary; key material leaving the client is not one of
+/// the threat model's §5 classes).
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one story through every flow, then one search over every haystack"
+)]
+fn canary_secrets_never_reach_the_server_in_any_form() {
+    use rizzy_client::rizzy_core::opaque::PasswordInput;
+    use rizzy_client::rizzy_core::secret_key::{RecoveryCode, SecretKey};
+
+    const NEW_PASSWORD: &str = "canary: the second master password";
+    const ITEM_SECRET: &str = "canary: the secret field of an item";
+
+    let (proxy, mut server) = Proxy::start_with(true);
+    let origin = server.origin();
+    let a = Rv::new("canary-a");
+    let b = Rv::new("canary-b");
+
+    let (secret_key, recovery_code) = sign_up(&a, &origin, "alice");
+    log_in(&b, &origin, "alice", &secret_key);
+    let mail = a
+        .ok(
+            &[
+                "item",
+                "create",
+                "--type",
+                "login",
+                "--field",
+                "item.name=Mail",
+                "--secret",
+                "login.password",
+            ],
+            &[ITEM_SECRET],
+        )
+        .out[0]
+        .clone();
+    a.ok(&["sync"], &[]);
+    b.ok(&["sync"], &[]);
+    assert_eq!(b.field(&mail, "login.password"), ITEM_SECRET);
+    b.ok(
+        &["item", "edit", &mail, "--field", "login.username=canary"],
+        &[],
+    );
+    b.ok(&["sync"], &[]);
+    a.ok(&["sync"], &[]);
+
+    // Recovery requested with the code on a third client, then cancelled on A.
+    let r = Rv::new("canary-r");
+    let (outcome, _) = r.try_run(
+        &["recovery", "start", "--server", &origin, "--name", "alice"],
+        &[&recovery_code],
+        &[],
+        &[],
+    );
+    outcome.unwrap();
+    let (outcome, _) = a.try_run(&["recovery", "cancel"], &[PASSWORD], &[], &[]);
+    outcome.unwrap();
+
+    // A standard rotation (the code is kept); B follows through its grant.
+    let (outcome, rotated) = a.try_run(
+        &["rotate", "--name", "alice"],
+        &[PASSWORD, &recovery_code],
+        &[],
+        &[],
+    );
+    outcome.unwrap_or_else(|e| panic!("rotate: {e:?}; {:?}", rotated.notes));
+    b.ok(&["sync"], &[]);
+
+    // B revoked with a full rotation.
+    let b_device = a
+        .ok(&["device", "list"], &[])
+        .out
+        .iter()
+        .find(|l| !l.contains("this device"))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    let (outcome, revoked) = a.try_run(
+        &["device", "revoke", &b_device, "--name", "alice"],
+        &[PASSWORD, &recovery_code],
+        &[],
+        &[],
+    );
+    outcome.unwrap_or_else(|e| panic!("revoke: {e:?}; {:?}", revoked.notes));
+
+    // The password change, then the Secret Key change: a new kit and a rotation.
+    let (outcome, changed) = a.try_run(
+        &["password", "--name", "alice"],
+        &[PASSWORD, NEW_PASSWORD, NEW_PASSWORD],
+        &[],
+        &[],
+    );
+    outcome.unwrap_or_else(|e| panic!("password: {e:?}; {:?}", changed.notes));
+    let (outcome, changed) = a.try_run(
+        &["secret-key", "--name", "alice"],
+        &[NEW_PASSWORD],
+        &[],
+        &[],
+    );
+    outcome.unwrap_or_else(|e| panic!("secret-key: {e:?}; {:?}", changed.notes));
+    let new_secret_key = changed.printed("Secret Key:");
+    let new_recovery_code = changed.printed("Recovery code:");
+    let (outcome, _) = a.try_run(&["sync"], &[NEW_PASSWORD], &[], &[]);
+    outcome.unwrap();
+
+    // The operator's backup next to the running server, then the server stops.
+    let backup = server.backup("canary.backup");
+    server.stop();
+
+    // The secrets.
+    let mut secrets: Vec<(String, Vec<u8>)> = vec![
+        ("the master password".into(), PASSWORD.into()),
+        ("the new master password".into(), NEW_PASSWORD.into()),
+        ("an item's secret field".into(), ITEM_SECRET.into()),
+    ];
+    let compact = |text: &str| -> Vec<u8> { text.bytes().filter(|b| *b != b'-').collect() };
+    for (label, text) in [
+        ("the Secret Key", &secret_key),
+        ("the new Secret Key", &new_secret_key),
+    ] {
+        let parsed = SecretKey::parse(text).unwrap();
+        secrets.push((format!("{label} as printed"), text.clone().into_bytes()));
+        secrets.push((format!("{label} without separators"), compact(text)));
+        secrets.push((format!("{label}'s bytes"), parsed.expose_secret().to_vec()));
+    }
+    for (label, text) in [
+        ("the recovery code", &recovery_code),
+        ("the new recovery code", &new_recovery_code),
+    ] {
+        let parsed = RecoveryCode::parse(text).unwrap();
+        secrets.push((format!("{label} as printed"), text.clone().into_bytes()));
+        secrets.push((format!("{label} without separators"), compact(text)));
+        secrets.push((format!("{label}'s bytes"), parsed.expose_secret().to_vec()));
+    }
+    for (label, password, sk) in [
+        ("pw_in", PASSWORD, &secret_key),
+        ("pw_in after the password change", NEW_PASSWORD, &secret_key),
+        (
+            "pw_in after the Secret Key change",
+            NEW_PASSWORD,
+            &new_secret_key,
+        ),
+    ] {
+        let sk = SecretKey::parse(sk).unwrap();
+        let pw_in = PasswordInput::derive(password, &sk).unwrap();
+        secrets.push((label.into(), pw_in.expose_secret().to_vec()));
+    }
+
+    // The haystacks.
+    let mut haystacks: Vec<(String, Vec<u8>)> = proxy
+        .wire()
+        .into_iter()
+        .enumerate()
+        .map(|(i, message)| (format!("HTTP message {i}"), message))
+        .collect();
+    let http_messages = haystacks.len();
+    let mut files = vec![server.dir.join("data")];
+    while let Some(path) = files.pop() {
+        if path.is_dir() {
+            files.extend(std::fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+        } else {
+            haystacks.push((
+                format!("the server file {}", path.display()),
+                std::fs::read(&path).unwrap(),
+            ));
+        }
+    }
+    let log = std::fs::read(server.dir.join(DEBUG_LOG)).unwrap();
+    haystacks.push(("the server log".into(), log.clone()));
+    haystacks.push(("the backup file".into(), std::fs::read(&backup).unwrap()));
+
+    // Positive controls: the haystacks hold what they should, so an empty search cannot pass.
+    assert!(http_messages > 40, "{http_messages} HTTP messages");
+    let holds = |prefix: &str, needle: &[u8]| {
+        haystacks
+            .iter()
+            .any(|(name, bytes)| name.starts_with(prefix) && canary_contains(bytes, needle))
+    };
+    assert!(holds("HTTP message", b"\"login_name\":\"alice\""));
+    assert!(holds("the server file", b"alice"));
+    assert!(holds("the backup file", b"alice"));
+    // The serving process logs one JSON line per request; the operator's commands write their
+    // messages for a human to the same file.
+    let log = String::from_utf8(log).unwrap();
+    let json_lines = log
+        .lines()
+        .filter(|l| serde_json::from_str::<serde_json::Value>(l).is_ok())
+        .count();
+    assert!(
+        json_lines > 20,
+        "{json_lines} JSON lines of {} in the log",
+        log.lines().count()
+    );
+
+    for (label, secret) in &secrets {
+        for form in canary_forms(secret) {
+            for (name, haystack) in &haystacks {
+                assert!(
+                    !canary_contains(haystack, &form),
+                    "{label} is in {name} (one of its forms)"
+                );
+            }
+        }
+    }
+}
+
+/// Whether `haystack` contains `needle`.
+fn canary_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Lowercase hex of `bytes`.
+fn canary_hex(bytes: &[u8]) -> String {
+    use core::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, b| {
+        write!(out, "{b:02x}").unwrap();
+        out
+    })
+}
+
+/// The base64 alphabet of RFC 4648 §4.
+const CANARY_STANDARD: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// The base64url alphabet of RFC 4648 §5.
+const CANARY_URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// Unpadded base64 of `bytes` in `alphabet` ([`CANARY_STANDARD`] or [`CANARY_URL`]).
+fn canary_base64(alphabet: &[u8; 64], bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for chunk in bytes.chunks(3) {
+        let mut word = [0u8; 3];
+        word[..chunk.len()].copy_from_slice(chunk);
+        let n = (u32::from(word[0]) << 16) | (u32::from(word[1]) << 8) | u32::from(word[2]);
+        for i in 0..=chunk.len() {
+            let index = usize::try_from((n >> (18 - 6 * i)) & 63).unwrap();
+            out.push(alphabet[index]);
+        }
+    }
+    out
+}
+
+/// Every form of `secret` the canary searches for: raw, lower- and upper-case hex, and base64
+/// in the standard and URL alphabets at each of the three byte alignments, so that the secret
+/// is found inside a longer encoded value too, padded or not.
+fn canary_forms(secret: &[u8]) -> Vec<Vec<u8>> {
+    let hex = canary_hex(secret);
+    let mut out = vec![
+        secret.to_vec(),
+        hex.to_ascii_uppercase().into_bytes(),
+        hex.into_bytes(),
+    ];
+    for shift in 0..3 {
+        let mut shifted = vec![0u8; shift];
+        shifted.extend_from_slice(secret);
+        // The characters that encode only bits of the secret.
+        let (start, end) = ((8 * shift).div_ceil(6), 8 * shifted.len() / 6);
+        for alphabet in [CANARY_STANDARD, CANARY_URL] {
+            out.push(canary_base64(alphabet, &shifted)[start..end].to_vec());
+        }
+    }
+    assert!(out.iter().all(|f| f.len() >= 8), "a needle too short");
+    out
+}
+
+/// The canary's search finds a secret in every form, inside longer values, and nothing else (a
+/// positive control: a search that silently matched nothing would let the canary pass forever).
+#[test]
+fn the_canary_search_finds_every_form() {
+    const STANDARD: &[u8; 64] = CANARY_STANDARD;
+    const URL: &[u8; 64] = CANARY_URL;
+    // RFC 4648 §10.
+    assert_eq!(canary_base64(STANDARD, b"foobar"), b"Zm9vYmFy");
+    assert_eq!(canary_base64(STANDARD, b"fooba"), b"Zm9vYmE");
+    assert_eq!(canary_base64(STANDARD, b"foob"), b"Zm9vYg");
+    assert_eq!(canary_base64(URL, &[0xfb, 0xff]), b"-_8");
+    let secret = b"a canary secret of 32 bytes!!!!!";
+    for shift in 0..3 {
+        let mut value = vec![0xa5u8; shift];
+        value.extend_from_slice(secret);
+        value.extend_from_slice(&[0x5a; 5]);
+        let hex = canary_hex(&value);
+        let mut padded = canary_base64(STANDARD, &value);
+        while !padded.len().is_multiple_of(4) {
+            padded.push(b'=');
+        }
+        for haystack in [
+            value.clone(),
+            hex.to_ascii_uppercase().into_bytes(),
+            hex.into_bytes(),
+            padded,
+            canary_base64(URL, &value),
+        ] {
+            let haystack = [b"{\"x\":\"".as_slice(), &haystack, b"\"}"].concat();
+            assert!(
+                canary_forms(secret)
+                    .iter()
+                    .any(|f| canary_contains(&haystack, f))
+            );
+        }
+    }
+    assert!(
+        !canary_forms(secret)
+            .iter()
+            .any(|f| canary_contains(b"{\"x\":\"nothing to see\"}", f))
+    );
+}
+
+// --- A4 (network MITM): the trusted-but-hostile proxy ----------------------------------
+//
+// THREAT_MODEL.md [A4](../../../docs/THREAT_MODEL.md#a4-network-attacker-mitm), Q-7 request
+// binding (CRYPTO.md §5.10: every native-client request after device authentication carries
+// the `device-request` statement over the origin, account, device, `session_id`, a per-session
+// `request_counter`, the method, path and body hash), and the operator's reverse proxy as a
+// trust boundary (TB-3: "TLS ends at the operator's reverse proxy", so this proxy is the one
+// place in the whole deployment that legitimately sees plaintext). [`MitmProxy`] extends
+// [`Proxy`] (same wire-level helpers, same "one full HTTP/1.1 message at a time") with a
+// generic, queued mutation per exchange, instead of one fault armed for one path: replay
+// ([`MitmOp::ReplayPrevious`]), duplicate ([`MitmOp::Duplicate`]), delay
+// ([`MitmOp::Delay`]), drop ([`MitmOp::Drop`]), truncate the answer
+// ([`MitmOp::TruncateResponse`]), and reorder or swap the answers of two requests that are
+// genuinely concurrent on the wire ([`MitmOp::Rendezvous`], which needs a thread per
+// connection to hold one side open while the other arrives, unlike `Proxy`'s one-at-a-time
+// accept loop).
+//
+// The oracle ([`check_round`]) is the invariant, not the implementation: a mutated exchange
+// must end with the client either holding exactly the state an unmutated attempt would have
+// produced, or a clean [`CliError`] (never a panic, never a hang — every read already carries
+// `Proxy`'s 30s timeout) and a state a plain retry still settles correctly (INV-23
+// idempotency; Q-7's point of per-request signing, "a relayed session can then only replay
+// what the client itself sends"); and no secret ever appears in a request's raw bytes
+// (INV-15, reusing [`canary_forms`]/[`canary_contains`]).
+//
+// Budget (ADR 0012 §12 pattern): [`pr_a4_hostile_proxy_mutations`] runs a fixed, small set of
+// mutation rounds against two already-enrolled devices' `sync` exchanges (cheap: no OPAQUE,
+// no Argon2id), plus exactly one mutated instance each of signup, a second device's login and
+// a rotation (expensive: each is one real `rizzy-vault` process doing real KDF work, so the
+// combinatorial budget lives in the cheap sync rounds, not in repeating those). Export makes
+// no network call at all (`commands.rs`: it re-encrypts the already-synced local cache), so it
+// is covered as a correctness check layered on the preceding sync mutations, not as its own
+// mutation target; this and the fixed, non-combinatorial single pass over signup/login/rotate
+// are the harness's documented coverage gaps. `nightly_a4_hostile_proxy_mutations_wider`
+// (`#[ignore]`) repeats the cheap sync rounds at 20x the PR count on fresh seeds.
+
+/// Sync-round mutations per PR run (ADR 0012 §12 "Budget" pattern: a fixed, small count every
+/// time). Every 6th round is a two-party rendezvous ([`run_hostile_sync_rounds`]), so this
+/// also fixes how many rendezvous rounds a PR run sees (2 at 12).
+const PR_SYNC_ROUNDS: usize = 12;
+
+/// How many times [`PR_SYNC_ROUNDS`] the nightly budget runs, on a fresh seed.
+const NIGHTLY_SYNC_MULTIPLIER: usize = 20;
+
+/// One mutation a hostile reverse proxy applies to one HTTP exchange.
+#[derive(Clone, Copy, Debug)]
+enum MitmOp {
+    /// Forwarded unchanged.
+    Pass,
+    /// Never reaches the server; the client's connection closes with no answer at all (no
+    /// synthetic gateway page: a raw on-path attacker, unlike `Proxy`'s `Fault::NeverSent`).
+    Drop,
+    /// Forwarded after `_0` ms (a network delay attack).
+    Delay(u64),
+    /// Forwarded, but only the first `_0` bytes of the real answer are relayed before the
+    /// connection closes (a severed answer: the request *did* reach the server).
+    TruncateResponse(usize),
+    /// The exact same signed request bytes are sent to the server twice; only the second
+    /// answer is relayed (a duplicated packet).
+    Duplicate,
+    /// The previous completed exchange's exact request bytes are replayed to the server
+    /// first (its answer is discarded), then the live request is forwarded normally (an
+    /// out-of-order, already-used `request_counter` landing again).
+    ReplayPrevious,
+    /// Waits at a named rendezvous for a second, genuinely concurrent exchange, then either
+    /// swaps which connection receives which answer (`swap: true`) or forwards the second
+    /// exchange's request to the server before the first's while still returning each its own
+    /// answer (`swap: false`: reordering delivery to the server without touching the answers).
+    Rendezvous { gate: &'static str, swap: bool },
+}
+
+/// One fully completed exchange, logged in arrival order: the HTTP haystack for the INV-15
+/// canary and the source of [`MitmOp::ReplayPrevious`].
+#[derive(Clone)]
+struct MitmExchange {
+    path: String,
+    request: Vec<u8>,
+    response: Vec<u8>,
+}
+
+/// What a [`MitmProxy`] still has queued and has seen.
+#[derive(Default)]
+struct MitmState {
+    /// Consumed one per accepted connection, in arrival order; [`MitmOp::Pass`] once empty.
+    ops: VecDeque<MitmOp>,
+    log: Vec<MitmExchange>,
+}
+
+/// A connection registered at a [`MitmOp::Rendezvous`] gate, waiting for its partner.
+struct Waiting {
+    request: Vec<u8>,
+    reply_tx: std::sync::mpsc::Sender<Vec<u8>>,
+}
+
+/// A loopback reverse proxy in front of a [`Server`], like [`Proxy`], but handling each
+/// connection on its own thread (so two genuinely concurrent exchanges can both be in flight,
+/// which [`MitmOp::Rendezvous`] needs) and consuming a queue of [`MitmOp`]s instead of one
+/// fault armed for one path.
+struct MitmProxy {
+    port: u16,
+    state: std::sync::Arc<std::sync::Mutex<MitmState>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl MitmProxy {
+    /// A proxy on a free loopback port and the server behind it.
+    fn start() -> (Self, Server) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = Server::start_with(Some(format!("http://127.0.0.1:{port}")), false);
+        let upstream = server.port;
+        let state = std::sync::Arc::new(std::sync::Mutex::new(MitmState::default()));
+        let rendezvous = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (listen_state, listen_rendezvous, listen_stop) =
+            (state.clone(), rendezvous.clone(), stop.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                if listen_stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let Ok(stream) = stream else { continue };
+                let (conn_state, conn_rendezvous) =
+                    (listen_state.clone(), listen_rendezvous.clone());
+                std::thread::spawn(move || {
+                    let _ = Self::serve(stream, upstream, &conn_state, &conn_rendezvous);
+                });
+            }
+        });
+        (Self { port, state, stop }, server)
+    }
+
+    /// Queues `ops` (consumed in order by the next connections this proxy accepts, from
+    /// whichever flow triggers them next).
+    fn queue(&self, ops: impl IntoIterator<Item = MitmOp>) {
+        self.state.lock().unwrap().ops.extend(ops);
+    }
+
+    /// Every exchange completed so far, in arrival order.
+    fn log(&self) -> Vec<MitmExchange> {
+        self.state.lock().unwrap().log.clone()
+    }
+
+    /// Connects to `upstream`, sends `head` and `body`, and returns the whole raw answer.
+    fn forward(upstream: u16, head: &[u8], body: &[u8]) -> std::io::Result<Vec<u8>> {
+        use std::io::Write as _;
+        let mut conn = std::net::TcpStream::connect(("127.0.0.1", upstream))?;
+        conn.set_read_timeout(Some(Duration::from_secs(30)))?;
+        conn.write_all(head)?;
+        conn.write_all(body)?;
+        let (answer_head, answer_body) = Proxy::read_message(&mut conn)?;
+        Ok([answer_head, answer_body].concat())
+    }
+
+    /// Resolves one [`MitmOp::Rendezvous`] gate: the first connection to arrive blocks on
+    /// `reply_tx`'s channel for the answer its partner hands it; the second drives both
+    /// requests to `upstream` (order per `swap`: unchanged if swapping answers, reversed if
+    /// only reordering) and returns its own answer directly.
+    fn rendezvous(
+        gate: &'static str,
+        swap: bool,
+        request: &[u8],
+        upstream: u16,
+        rendezvous: &std::sync::Mutex<HashMap<&'static str, Waiting>>,
+    ) -> std::io::Result<Vec<u8>> {
+        let role = {
+            let mut map = rendezvous.lock().unwrap();
+            match map.remove(gate) {
+                None => {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    map.insert(
+                        gate,
+                        Waiting {
+                            request: request.to_owned(),
+                            reply_tx: tx,
+                        },
+                    );
+                    Err(rx)
+                }
+                Some(first) => Ok(first),
+            }
+        };
+        match role {
+            Err(rx) => rx
+                .recv_timeout(Duration::from_secs(30))
+                .map_err(|_| std::io::Error::other("rendezvous partner never arrived")),
+            Ok(first) => {
+                if swap {
+                    // Upstream sees the real arrival order; the two answers are crossed.
+                    let first_answer = Self::forward_raw(upstream, &first.request)?;
+                    let second_answer = Self::forward_raw(upstream, request)?;
+                    let _ = first.reply_tx.send(second_answer);
+                    Ok(first_answer)
+                } else {
+                    // The later arrival is driven to upstream first; each keeps its own answer.
+                    let second_answer = Self::forward_raw(upstream, request)?;
+                    let first_answer = Self::forward_raw(upstream, &first.request)?;
+                    let _ = first.reply_tx.send(first_answer);
+                    Ok(second_answer)
+                }
+            }
+        }
+    }
+
+    /// As [`Self::forward`], over one already-concatenated raw request.
+    fn forward_raw(upstream: u16, request: &[u8]) -> std::io::Result<Vec<u8>> {
+        let head_end = request
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map_or(request.len(), |at| at + 4);
+        let (head, body) = request.split_at(head_end);
+        Self::forward(upstream, head, body)
+    }
+
+    /// Serves one connection: pops the next queued op (or [`MitmOp::Pass`]) and applies it.
+    fn serve(
+        mut client: std::net::TcpStream,
+        upstream: u16,
+        state: &std::sync::Mutex<MitmState>,
+        rendezvous: &std::sync::Mutex<HashMap<&'static str, Waiting>>,
+    ) -> std::io::Result<()> {
+        use std::io::Write as _;
+        client.set_read_timeout(Some(Duration::from_secs(30)))?;
+        let (head, body) = Proxy::read_message(&mut client)?;
+        let path = String::from_utf8_lossy(&head)
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or_default()
+            .to_owned();
+        let op = {
+            let mut s = state.lock().unwrap();
+            s.ops.pop_front().unwrap_or(MitmOp::Pass)
+        };
+        let outcome: std::io::Result<Option<Vec<u8>>> = match op {
+            MitmOp::Pass => Self::forward(upstream, &head, &body).map(Some),
+            MitmOp::Drop => Ok(None),
+            MitmOp::Delay(ms) => {
+                std::thread::sleep(Duration::from_millis(ms));
+                Self::forward(upstream, &head, &body).map(Some)
+            }
+            MitmOp::TruncateResponse(n) => {
+                let full = Self::forward(upstream, &head, &body)?;
+                Ok(Some(full[..n.min(full.len())].to_vec()))
+            }
+            MitmOp::Duplicate => {
+                let _ = Self::forward(upstream, &head, &body);
+                Self::forward(upstream, &head, &body).map(Some)
+            }
+            MitmOp::ReplayPrevious => {
+                let prior = state.lock().unwrap().log.last().map(|e| e.request.clone());
+                if let Some(prior) = prior {
+                    let _ = Self::forward_raw(upstream, &prior);
+                }
+                Self::forward(upstream, &head, &body).map(Some)
+            }
+            MitmOp::Rendezvous { gate, swap } => {
+                let request = [head.as_slice(), &body].concat();
+                Self::rendezvous(gate, swap, &request, upstream, rendezvous).map(Some)
+            }
+        };
+        if let Ok(Some(answer)) = outcome {
+            state.lock().unwrap().log.push(MitmExchange {
+                path,
+                request: [head.as_slice(), &body].concat(),
+                response: answer.clone(),
+            });
+            client.write_all(&answer)?;
+        }
+        let _ = client.flush();
+        Ok(())
+    }
+}
+
+impl Drop for MitmProxy {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
+    }
+}
+
+/// A deterministic splitmix64 generator (no new dev-dependency: `rizzy-sync`'s convergence
+/// suite has its own `Rng` for the same reason, in a crate `rizzy-cli` cannot depend on).
+struct MitmRng(u64);
+
+impl MitmRng {
+    const fn new(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        if n == 0 {
+            0
+        } else {
+            usize::try_from(self.next() % u64::try_from(n).unwrap_or(1)).unwrap_or(0)
+        }
+    }
+}
+
+/// One mutation drawn for a single-request flow step (everything except the two-party
+/// rendezvous, which the caller arms on its own: it needs two flows in flight at once).
+fn random_single_op(rng: &mut MitmRng) -> MitmOp {
+    match rng.below(6) {
+        0 => MitmOp::Pass,
+        1 => MitmOp::Drop,
+        2 => MitmOp::Delay(5 + u64::try_from(rng.below(40)).unwrap_or(5)),
+        3 => MitmOp::TruncateResponse(rng.below(48)),
+        4 => MitmOp::Duplicate,
+        _ => MitmOp::ReplayPrevious,
+    }
+}
+
+/// Queues `op` followed by enough [`MitmOp::Pass`] padding to cover every request one `rv`
+/// command might make, so only the command's *first* request is mutated and the rest (if
+/// any) go through unchanged; left-over padding is harmless for the next command too.
+fn arm_first_request(proxy: &MitmProxy, op: MitmOp) {
+    proxy.queue(std::iter::once(op).chain(std::iter::repeat_n(MitmOp::Pass, 7)));
+}
+
+/// Every known secret of one account, for the INV-15-style canary over [`MitmProxy::log`]
+/// (reusing [`canary_forms`]/[`canary_contains`], the same functions
+/// [`canary_secrets_never_reach_the_server_in_any_form`] uses).
+fn mitm_canary_scan(log: &[MitmExchange], secrets: &[&str]) -> Vec<String> {
+    let mut found = Vec::new();
+    for secret in secrets {
+        let forms = canary_forms(secret.as_bytes());
+        for exchange in log {
+            if forms.iter().any(|f| canary_contains(&exchange.request, f)) {
+                found.push(format!(
+                    "{} carried a known secret in its request",
+                    exchange.path
+                ));
+            }
+            // Stricter than the task's "no secret crosses in a request body": the server's
+            // own answers must not echo a secret either (they never should: items are
+            // end-to-end encrypted and the server never sees a plaintext field).
+            if forms.iter().any(|f| canary_contains(&exchange.response, f)) {
+                found.push(format!(
+                    "{} carried a known secret in its response",
+                    exchange.path
+                ));
+            }
+        }
+    }
+    found
+}
+
+/// Checks one mutated round against the invariant: either the command succeeded and the
+/// resulting item count is exactly `want_items` (the mutation was harmless: rejected upstream,
+/// idempotent, or never reached the server), or it failed cleanly (any [`CliError`], not a
+/// panic) and a plain follow-up `sync` still settles to `want_items`. Returns violations, not
+/// an assertion, so the caller can keep going and report every failure of a batch at once.
+fn check_round(
+    label: &str,
+    outcome: &Result<(), CliError>,
+    rv: &Rv,
+    want_items: usize,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let settle = || rv.try_run(&["sync"], &[PASSWORD], &[], &[]).0;
+    if outcome.is_ok() {
+        let count = rv.items().len();
+        if count != want_items {
+            violations.push(format!(
+                "{label}: admitted but left {count} item(s), wanted {want_items} \
+                 (a replay, duplicate or reorder was applied twice, or was lost)"
+            ));
+        }
+    } else {
+        // A clean refusal; a plain retry must still settle to the right count.
+        if let Err(e) = settle() {
+            violations.push(format!(
+                "{label}: refused, then a follow-up sync also failed: {e}"
+            ));
+        }
+        let count = rv.items().len();
+        if count != want_items {
+            violations.push(format!(
+                "{label}: refused, and the follow-up sync left {count} item(s), wanted \
+                 {want_items} (the local cache did not recover cleanly)"
+            ));
+        }
+    }
+    violations
+}
+
+/// Runs `rounds` combinatorial mutation rounds of `sync` on two already-enrolled devices
+/// (`a`, `b`), plus a handful of two-party [`MitmOp::Rendezvous`] rounds, and returns every
+/// violation found. `a` creates one item per single-op round and syncs it under the mutation;
+/// every `rounds / 6` rounds (at least one) is a rendezvous round where `a` and `b` both `sync`
+/// concurrently instead.
+fn run_hostile_sync_rounds(
+    proxy: &MitmProxy,
+    a: &Rv,
+    b: &Rv,
+    rounds: usize,
+    seed: u64,
+) -> (Vec<String>, usize) {
+    let mut rng = MitmRng::new(seed);
+    let mut violations = Vec::new();
+    let mut want_items = a.items().len();
+    for round in 0..rounds {
+        if round % 6 == 5 {
+            // A rendezvous round: both devices sync at once, through the same gate.
+            let gate = "concurrent-sync";
+            let swap = rng.below(2) == 0;
+            proxy.queue([
+                MitmOp::Rendezvous { gate, swap },
+                MitmOp::Rendezvous { gate, swap },
+            ]);
+            let (tx_a, rx_a) = std::sync::mpsc::channel();
+            let (tx_b, rx_b) = std::sync::mpsc::channel();
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    let _ = tx_a.send(a.try_run(&["sync"], &[PASSWORD], &[], &[]).0);
+                });
+                scope.spawn(|| {
+                    let _ = tx_b.send(b.try_run(&["sync"], &[PASSWORD], &[], &[]).0);
+                });
+            });
+            let outcome_a = (rx_a.try_recv(), rx_b.try_recv());
+            // Either device's own view of its item count must still be internally consistent
+            // once both have had a chance to settle (a plain follow-up sync each).
+            let _ = a.try_run(&["sync"], &[PASSWORD], &[], &[]);
+            let _ = b.try_run(&["sync"], &[PASSWORD], &[], &[]);
+            let count_a = a.items().len();
+            let count_b = b.items().len();
+            if count_a != want_items || count_b != want_items {
+                violations.push(format!(
+                    "round {round} (rendezvous, swap={swap}): a has {count_a}, b has {count_b}, \
+                     wanted {want_items} after a swapped/reordered concurrent sync \
+                     (outcome observed: {outcome_a:?})"
+                ));
+            }
+            continue;
+        }
+        let op = random_single_op(&mut rng);
+        arm_first_request(proxy, op);
+        let name = format!("mitm-round-{round}");
+        let field = format!("item.name={name}");
+        // Item creation is local only (no network: `commands.rs` queues it for the next
+        // sync), so the mutation lands on the sync that commits it.
+        a.ok(
+            &["item", "create", "--type", "note", "--field", &field],
+            &[],
+        );
+        want_items += 1;
+        let (outcome, _) = a.try_run(&["sync"], &[PASSWORD], &[], &[]);
+        violations.extend(check_round(
+            &format!("round {round} ({op:?})"),
+            &outcome,
+            a,
+            want_items,
+        ));
+        // Re-baseline on what actually happened: a violation for this round was already
+        // recorded above, and re-basing here keeps one bad round from cascading into every
+        // later one just because the running total no longer matches reality.
+        want_items = a.items().len();
+    }
+    (violations, want_items)
+}
+
+/// PR budget: a fixed, small set of mutation rounds on `sync` (cheap: no OPAQUE), plus one
+/// mutated instance each of signup, a second device's login and a rotation (expensive: real
+/// KDF work in a real `rizzy-vault` process). See the module section's doc comment for why
+/// the combinatorial budget lives in the sync rounds and not in repeating those three.
+#[test]
+fn pr_a4_hostile_proxy_mutations() {
+    let (proxy, server) = MitmProxy::start();
+    let origin = server.origin();
+    let mut violations = Vec::new();
+    let a = Rv::new("mitm-a");
+    let b = Rv::new("mitm-b");
+
+    // The account's own signup, with its first request delayed, instead of paying for a
+    // throwaway extra one: either it still succeeds, or it fails cleanly and a clean retry
+    // (the one true signup the rest of this test needs anyway) must succeed.
+    arm_first_request(&proxy, MitmOp::Delay(20));
+    let (outcome, signup) = a.try_run(
+        &["signup", "--server", &origin, "--name", "alice"],
+        &[PASSWORD, PASSWORD],
+        &[],
+        &[],
+    );
+    let (secret_key, recovery_code) = if outcome.is_ok() {
+        (
+            signup.printed("Secret Key:"),
+            signup.printed("Recovery code:"),
+        )
+    } else {
+        sign_up(&a, &origin, "alice")
+    };
+
+    // The second device's own login, with its first answer truncated, the same way.
+    arm_first_request(&proxy, MitmOp::TruncateResponse(24));
+    let (outcome, _) = b.try_run(
+        &["login", "--server", &origin, "--name", "alice"],
+        &[&secret_key, PASSWORD],
+        &[],
+        &[],
+    );
+    if outcome.is_err() {
+        log_in(&b, &origin, "alice", &secret_key);
+    }
+
+    let (round_violations, want_items) =
+        run_hostile_sync_rounds(&proxy, &a, &b, PR_SYNC_ROUNDS, 0x4D49_544D_5F50_5200);
+    violations.extend(round_violations);
+
+    // The one rotation, with its first request duplicated, the same way. A standard rotation
+    // keeps the recovery code; B must still be able to follow it with a plain sync afterward.
+    arm_first_request(&proxy, MitmOp::Duplicate);
+    let (outcome, rotated) = a.try_run(
+        &["rotate", "--name", "alice"],
+        &[PASSWORD, &recovery_code],
+        &[],
+        &[],
+    );
+    if outcome.is_err() {
+        let (retry, retry_rotated) = a.try_run(
+            &["rotate", "--name", "alice"],
+            &[PASSWORD, &recovery_code],
+            &[],
+            &[],
+        );
+        if retry.is_err() {
+            violations.push(format!(
+                "rotation: duplicated first request, refused, retry also failed: {:?} / {:?}",
+                rotated.notes, retry_rotated.notes
+            ));
+        }
+    }
+    let (follow, _) = b.try_run(&["sync"], &[PASSWORD], &[], &[]);
+    if follow.is_err() {
+        violations.push(format!("rotation: B's follow-up sync failed: {follow:?}"));
+    }
+
+    // Export makes no network call (`commands.rs`: it only re-encrypts the already-synced
+    // local cache), so it is checked here as the integrity read-out of everything above, not
+    // as its own mutation target (documented gap). The encrypted format is used, not the
+    // plaintext JSON/CSV ones, which carry their own mandatory 10-second hold unrelated to
+    // this harness.
+    {
+        let out = temp_dir("mitm-export").join("vault.rvexport");
+        std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+        let (outcome, exported) = a.try_run(
+            &["export", "--out", out.to_str().unwrap(), "--name", "alice"],
+            &[PASSWORD, PASSWORD, "export password", "export password"],
+            &[],
+            &[],
+        );
+        outcome.unwrap_or_else(|e| panic!("export: {e:?}; {:?}", exported.notes));
+        let live_count = a.items().len();
+        if !out.exists() {
+            violations.push("export: claimed success but wrote no file".to_owned());
+        }
+        if live_count != want_items {
+            violations.push(format!(
+                "export: the live cache held {live_count} item(s) at export time, wanted \
+                 {want_items} (the mutated sync rounds or rotation left it inconsistent)"
+            ));
+        }
+    }
+
+    // INV-15-style canary: no known secret of this account ever crossed in a raw request,
+    // including every replayed and duplicated one (the proxy's log records both).
+    let secrets = [PASSWORD, secret_key.as_str(), recovery_code.as_str()];
+    violations.extend(mitm_canary_scan(&proxy.log(), &secrets));
+
+    // Positive control for `check_round` itself (the task's "a deliberately planted bad case
+    // it must flag"): claiming success with an impossible item count must be flagged. This
+    // reuses the already-live, already-paid-for `a` device rather than standing up a second
+    // account just to prove the comparison works.
+    let planted = check_round("planted", &Ok(()), &a, a.items().len() + 1_000);
+    assert!(
+        !planted.is_empty(),
+        "check_round failed to flag an impossible planted item count"
+    );
+
+    assert!(
+        violations.is_empty(),
+        "{} violation(s):\n{}",
+        violations.len(),
+        violations.join("\n")
+    );
+}
+
+/// Nightly budget: the cheap sync-round matrix at 20x the PR count, on a fresh seed (the time
+/// since the epoch, so a scheduled run gets a new batch each night; `PROPTEST_RNG_SEED`-style
+/// reproducibility is unnecessary here because every violation already prints its round index
+/// and op, which replay against the same seed reproduces exactly). No CI job runs it yet
+/// (`.github/workflows/` is the owner's to change).
+#[test]
+#[ignore = "nightly budget: 20x the PR sync-round count, on a fresh seed"]
+fn nightly_a4_hostile_proxy_mutations_wider() {
+    let (proxy, server) = MitmProxy::start();
+    let origin = server.origin();
+    let a = Rv::new("mitm-nightly-a");
+    let b = Rv::new("mitm-nightly-b");
+    let (secret_key, _recovery_code) = sign_up(&a, &origin, "alice");
+    log_in(&b, &origin, "alice", &secret_key);
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(0x00C0_FFEE))
+        .unwrap_or(0x00C0_FFEE);
+    let (violations, _want_items) = run_hostile_sync_rounds(
+        &proxy,
+        &a,
+        &b,
+        PR_SYNC_ROUNDS * NIGHTLY_SYNC_MULTIPLIER,
+        seed,
+    );
+    assert!(
+        violations.is_empty(),
+        "{} violation(s) (seed {seed:#x}):\n{}",
+        violations.len(),
+        violations.join("\n")
+    );
+}
+
+// --- Positive control --------------------------------------------------------------------
+
+/// Proves [`mitm_canary_scan`] can actually fail: a secret planted in a fabricated exchange
+/// must be flagged, and an absent one must not be (the task's own requirement: "positive
+/// controls proving the harness can detect a violation"). [`check_round`]'s own positive
+/// control runs inside [`pr_a4_hostile_proxy_mutations`], which reuses that test's already-live
+/// account instead of paying for a second signup just to prove the comparison works.
+#[test]
+fn a4_oracle_detects_a_planted_violation() {
+    let secret = "canary: a planted master password";
+    let fabricated = vec![MitmExchange {
+        path: "/api/v1/vault/upload".to_owned(),
+        request: format!("{{\"note\":\"{secret}\"}}").into_bytes(),
+        response: b"{\"ok\":true}".to_vec(),
+    }];
+    let found = mitm_canary_scan(&fabricated, &[secret]);
+    assert!(
+        !found.is_empty(),
+        "the canary scan failed to flag a secret planted in a fabricated request"
+    );
+    let clean = mitm_canary_scan(&fabricated, &["canary: a completely different secret"]);
+    assert!(
+        clean.is_empty(),
+        "the canary scan flagged a secret that was never in the request"
+    );
 }

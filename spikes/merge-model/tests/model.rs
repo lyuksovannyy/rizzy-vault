@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Unit checks of the modelled rules against the worked examples in the ADRs, and of the rules
 //! the five answers chose (the `integrated` configuration).
 #![forbid(unsafe_code)]

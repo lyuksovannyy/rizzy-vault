@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-import` — importers for other password managers' export files, and for our own
 //! plaintext JSON export (roadmap §4.2, M1; [ADR 0002] point 2; [ADR 0016] §3; [ADR 0027] §6).
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! What `rv` asks the user and what it shows (threat model INV-56: "`rv` never takes secret
 //! values from argv or environment variables, and prints a secret to a terminal only when
 //! asked to explicitly").

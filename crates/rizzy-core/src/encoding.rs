@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Canonical binary encoding (CRYPTO.md §2) and base64url transport encoding (§9.6).
 //!
 //! - `u8`, `u16`, `u32` and `u64` are unsigned, big-endian, fixed width.

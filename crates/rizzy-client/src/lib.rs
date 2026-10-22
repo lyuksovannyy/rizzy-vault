@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-client` — the sans-I/O client core of rizzy-vault ([ADR 0013] §1–§2, [ADR 0016] §3
 //! row `rizzy-client`, [ADR 0019] §5).
 //!
@@ -48,10 +50,12 @@
 //! | [`session`] | CRYPTO.md §5.10; ADR 0012 §7 "A device enrolled after the backup" | Device authentication (also certificate-carrying, after a restore) and request signing |
 //! | [`healing`] | ADR 0012 §7 steps 1–3 as ADR 0032 §1–§4 replace them; ADR 0021 §9 "Server behind" | Account-side restore healing: the older-chain rollback, the bundle chain, the newest `account-state` with `E_id` and the settings, the self-grants of step 3b; the recovery repair; the reconciliation objects |
 //! | [`matching`] | ADR 0037, ADR 0038 | URL matching for autofill, over `rizzy-match` |
+//! | [`settings`] | ADR 0042; ADR 0037 §6–§7 | The `ACCOUNT_SETTINGS` plaintext: its record, reading it, and changing the match default and equivalence groups by whole-record replace |
 //! | [`passkey`] | ADR 0039 §2; `THREAT_MODEL.md` INV-64 | Checking a `WebAuthn` `rpId` against the browser-verified origin, over `rizzy-match`'s PSL |
 //! | [`sync`] | ADR 0012 §4, §7; ADR 0018 §3, §10; ADR 0021 §2, §4, §9 | The sync driver of one vault |
 //! | [`items`] | ADR 0018 §2, §6–§9; ADR 0012 §5; ADR 0027 §2 steps 3–5 | Item create, edit, trash, restore, purge and reads; the import path, which splits an item over a create op and the ops that follow |
 //! | [`lists`] | ADR 0018 §6 "List elements", "List order" | The writes that add, edit and remove URIs, custom fields, password-history entries and tags of an item |
+//! | [`conflicts`] | ADR 0012 §4 step 5; ADR 0018 §6 "Display"; ROADMAP §4.5 | A conflicting field's values, and its resolution as an ordinary edit: "pick one" or "keep both" |
 //! | [`export`] | CRYPTO.md §11.14 | The encrypted export file writer and bounded reader |
 //! | [`export::payload`] | ADR 0027 §1–§2 | The export payload: encoding, bounded reader, import of our own export as new items |
 //! | [`export::plaintext`] | ADR 0027 §3–§5 | Plaintext JSON and CSV behind the typed acknowledgement; the frozen warning texts |
@@ -98,6 +102,7 @@
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
 pub mod account;
+pub mod conflicts;
 pub mod credentials;
 pub mod device;
 pub mod error;
@@ -112,6 +117,7 @@ pub mod recovery;
 pub mod reregister;
 pub mod rotation;
 pub mod session;
+pub mod settings;
 pub mod signup;
 pub mod store;
 pub mod sync;

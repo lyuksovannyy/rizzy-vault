@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the KeePass XML importer (ADR 0002 point 2; threat model A16: XML entity expansion,
 //! malicious import files) and the XML reader under it. Neither may panic, and every item that comes out keeps the importer's
 //! guarantees ([`import_common::check`]).

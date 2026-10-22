@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `rv` commands (ROADMAP §4.2: "CLI client (`rv`) — list, get, add, generate, copy
 //! TOTP", with import, export, devices and rotation).
 //!
@@ -10,10 +12,19 @@
 //! `item list`, `item show`, `totp` and `generate` need no network: the cache is unlocked and
 //! loaded, and that is all (ROADMAP §4.2 "Offline read access"). `export` reads the cache as it
 //! is too, but first re-authenticates with the server (owner decision 2026-10-05), so it needs
-//! the server. `rv sync` brings the cache up to date. A command that writes (`item
-//! create/edit/trash/restore/purge`, `import`) commits the new ops to the cache first and then
-//! syncs; if the server cannot be reached the ops stay queued, the command says so and still
-//! succeeds, and the next sync uploads them.
+//! the server. `rv sync` brings the cache up to date, then prints the late-edit and trash
+//! notices of gap 02 (see "Notices" below). A command that writes (`item
+//! create/edit/trash/restore/purge/restore-late`, `import`) commits the new ops to the cache
+//! first and then syncs; if the server cannot be reached the ops stay queued, the command says
+//! so and still succeeds, and the next sync uploads them.
+//!
+//! # Notices (gap 02)
+//!
+//! After a sync, `rv` notes "An edit from `<device>` arrived for an item you deleted
+//! permanently. Restore it as a new item?" (ADR 0018 §3 "Surfacing"; `item restore-late`
+//! restores it) and "deleted on X while it was being edited on Y" (ADR 0012 §5 "Active
+//! wins"). It keeps no "already shown" mark: that would be a new local cache record, an ADR
+//! 0026 format change, so every `rv sync` repeats the notices that still hold.
 //!
 //! # Secrets (threat model INV-56)
 //!
@@ -46,20 +57,22 @@ use rizzy_client::export::gate::{ExportGate, PLAINTEXT_EXPORT_HOLD_MS, check_exp
 use rizzy_client::export::plaintext::{
     PLAINTEXT_EXPORT_PHRASE, PLAINTEXT_EXPORT_WARNING, PlaintextExportAck, csv_export_warning,
 };
-use rizzy_client::items::{FieldEdit, FieldKey, ItemId, ItemLifecycle, ItemType, Value};
+use rizzy_client::items::{Dot, FieldEdit, FieldKey, ItemId, ItemLifecycle, ItemType, Value};
 use rizzy_client::lists::split_order_ops;
 use rizzy_client::rizzy_import::{self, Format};
 use rizzy_client::rotation::RotationLevel;
 use rizzy_client::signup::DeviceKind;
 use rizzy_client::store::rows::Alarm;
 use rizzy_client::sync::VaultSync;
+use rizzy_core::encoding::Reader;
 use rizzy_core::generator::{
     CharClass, CharacterOptions, ClassRule, GeneratorError, MAX_LENGTH, MAX_WORDS, MIN_LENGTH,
     MIN_WORDS, PassphraseOptions, generate_passphrase, generate_password,
 };
 use rizzy_core::ids::DeviceId;
 use rizzy_core::item::schema::{
-    Concealment, Expected, ITEM_NAME, KeyClass, LIST_FIELD, LIST_URI, LOGIN_TOTP, classify,
+    Concealment, Expected, ITEM_NAME, KeyClass, LIST_FIELD, LIST_PWHIST, LIST_URI, LOGIN_TOTP,
+    classify,
 };
 use rizzy_core::item::tag::{tag_key, tag_name};
 use rizzy_core::item::value::ValueRef;
@@ -136,6 +149,7 @@ pub async fn run(invocation: Invocation, env: &mut Env<'_>) -> Result<(), CliErr
                 "Synced; {} items.",
                 visible_items(device.vault(), false).len()
             ));
+            print_notices(&device, env.ui);
             Ok(())
         }
         Command::ItemList { trash } => {
@@ -167,6 +181,16 @@ pub async fn run(invocation: Invocation, env: &mut Env<'_>) -> Result<(), CliErr
                 vault.purge_item(rng, unlocked, item, now)
             }))
             .await
+        }
+        Command::ItemRestoreLate { item, item_type } => {
+            Box::pin(item_restore_late(env, &item, &item_type)).await
+        }
+        Command::ItemHistory { item, reveal } => {
+            let device = Device::open(env).await?;
+            item_history(&device, env.ui, &item, reveal)
+        }
+        Command::ItemRestoreHistory { item, field, entry } => {
+            Box::pin(item_restore_history(env, &item, &field, &entry)).await
         }
         Command::Generate(options) => generate(env.ui, options),
         Command::Totp(item) => {
@@ -255,19 +279,39 @@ fn visible_items(vault: &VaultSync, trash: bool) -> Vec<ItemId> {
 
 /// The item a hex id or a unique prefix of one names, among the active and trashed items.
 fn resolve_item(vault: &VaultSync, text: &str) -> Result<ItemId, CliError> {
+    resolve_among(vault, text, |item| {
+        matches!(
+            vault.item_lifecycle(item),
+            ItemLifecycle::Active | ItemLifecycle::Trashed
+        )
+    })
+}
+
+/// The item a hex id or a unique prefix of one names, among the items deleted permanently that
+/// hold late edits ([`print_notices`]).
+fn resolve_late_item(vault: &VaultSync, text: &str) -> Result<ItemId, CliError> {
+    resolve_among(vault, text, |item| {
+        vault.item_lifecycle(item) == ItemLifecycle::Purged
+            && !vault.late_edit_devices(item).is_empty()
+    })
+}
+
+/// The item a hex id or a unique prefix of one names, among the items `candidate` accepts.
+fn resolve_among(
+    vault: &VaultSync,
+    text: &str,
+    candidate: impl Fn(ItemId) -> bool,
+) -> Result<ItemId, CliError> {
     let wanted = text.to_ascii_lowercase();
     if wanted.is_empty() || !wanted.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(CliError::BadInput(
             "an item is named by its hex id or a prefix of it",
         ));
     }
-    let mut matches = vault.item_ids().into_iter().filter(|item| {
-        hex(item.as_bytes()).starts_with(&wanted)
-            && matches!(
-                vault.item_lifecycle(*item),
-                ItemLifecycle::Active | ItemLifecycle::Trashed
-            )
-    });
+    let mut matches = vault
+        .item_ids()
+        .into_iter()
+        .filter(|item| hex(item.as_bytes()).starts_with(&wanted) && candidate(*item));
     match (matches.next(), matches.next()) {
         (Some(item), None) => Ok(item),
         (None, _) => Err(CliError::Client(ClientError::UnknownItem)),
@@ -281,6 +325,15 @@ fn type_name(item_type: Option<ItemType>) -> &'static str {
         .iter()
         .find(|(_, t)| Some(*t) == item_type)
         .map_or("unknown", |(name, _)| name)
+}
+
+/// The item type `--type` names.
+fn type_named(text: &str) -> Result<ItemType, CliError> {
+    TYPES
+        .iter()
+        .find(|(name, _)| *name == text)
+        .map(|(_, t)| *t)
+        .ok_or_else(|| CliError::Usage("unknown item type".into()))
 }
 
 /// The item types `--type` names.
@@ -387,6 +440,13 @@ fn item_show(device: &Device, ui: &mut dyn Ui, item: &str, reveal: bool) -> Resu
         let Ok(parsed) = FieldKey::parse(key.as_bytes()) else {
             continue;
         };
+        // Imported password history is its own section below (gap 01), concealed the same
+        // way as every other secret, never through this generic loop's `concealed()` check
+        // (the schema classifies `pwhist/*` as `Concealment::Shown`, since concealment there
+        // is this view's call, not the schema's).
+        if parsed.as_key().namespace() == LIST_PWHIST {
+            continue;
+        }
         let Some(value) = vault.field_value(item, &key) else {
             continue;
         };
@@ -422,7 +482,140 @@ fn item_show(device: &Device, ui: &mut dyn Ui, item: &str, reveal: bool) -> Resu
         let line = Zeroizing::new(format!("order of {list}: {}", ids.join(" ")));
         ui.print(&line)?;
     }
+    print_password_history(vault, ui, item, reveal)?;
     Ok(())
+}
+
+/// The password-history section of `item show` (gap 01; ADR 0012 §5 "Password history is the
+/// history of `login.password`"; ADR 0018 §7): newest first, concealed unless `--reveal`
+/// exactly like every other secret (module docs). Tags and password history have no order of
+/// their own (docs/rv.md). The merge history and the imported history are separate sections:
+/// the ADR defines no order across the two.
+fn print_password_history(
+    vault: &VaultSync,
+    ui: &mut dyn Ui,
+    item: ItemId,
+    reveal: bool,
+) -> Result<(), CliError> {
+    let history = vault.password_history(item);
+    if !history.is_empty() {
+        let plural = if history.len() == 1 { "" } else { "s" };
+        ui.print(&format!(
+            "password history ({} older value{plural}, newest first):",
+            history.len()
+        ))?;
+        for entry in &history {
+            let shown = if reveal {
+                show_value(&entry.value)
+            } else {
+                Zeroizing::new(CONCEALED.to_owned())
+            };
+            let line = Zeroizing::new(format!("  {} ms: {}", entry.changed_ms, shown.as_str()));
+            ui.print(&line)?;
+        }
+    }
+    let imported = vault.imported_password_history(item);
+    if !imported.is_empty() {
+        let plural = if imported.len() == 1 { "" } else { "s" };
+        ui.print(&format!(
+            "imported password history ({imported_len} value{plural}):",
+            imported_len = imported.len()
+        ))?;
+        for entry in &imported {
+            let shown = match (&entry.value, reveal) {
+                (Some(_), false) => Zeroizing::new(CONCEALED.to_owned()),
+                (Some(value), true) => show_value(value),
+                (None, _) => Zeroizing::new("(no value)".to_owned()),
+            };
+            let when = entry
+                .changed_ms
+                .map_or_else(|| "unknown time".to_owned(), |ms| format!("{ms} ms"));
+            let line = Zeroizing::new(format!("  {when}: {}", shown.as_str()));
+            ui.print(&line)?;
+        }
+    }
+    Ok(())
+}
+
+/// Lower-case hex of a dot's canonical encoding (`device_id ‖ seq`, ADR 0012 §2): a history
+/// entry's identity, stable across a sync that only reorders the list. Not a persistent or
+/// wire format: computed fresh for one `item history` listing.
+fn dot_hex(dot: Dot) -> String {
+    let mut buf = Vec::with_capacity(Dot::ENCODED_LEN);
+    dot.encode(&mut buf);
+    hex(&buf)
+}
+
+/// The dot `item restore-history --entry` names, as [`dot_hex`] printed it.
+fn parse_dot(text: &str) -> Result<Dot, CliError> {
+    let bad = || CliError::BadInput("not a valid history entry id");
+    let bytes = unhex::<{ Dot::ENCODED_LEN }>(text).ok_or_else(bad)?;
+    Dot::read(&mut Reader::new(&bytes)).map_err(|_| bad())
+}
+
+/// `item history` (ROADMAP §4.2 "Item revision history (restore old versions)", M3):
+/// generalizes `item show`'s password-history section ([`print_password_history`]) to every
+/// field. Concealed unless `--reveal`, newest first per field, each entry printed with the id
+/// `item restore-history --entry` takes.
+fn item_history(
+    device: &Device,
+    ui: &mut dyn Ui,
+    item: &str,
+    reveal: bool,
+) -> Result<(), CliError> {
+    let vault = device.vault();
+    let item = resolve_item(vault, item)?;
+    let history = vault.item_history(item);
+    if history.is_empty() {
+        ui.print("no field history")?;
+        return Ok(());
+    }
+    for field in &history {
+        let plural = if field.entries.len() == 1 { "" } else { "s" };
+        // The key is user content (a tag key holds the tag's name, ADR 0018 §2), so the line
+        // that carries it is wiped like `item show`'s labels.
+        let header = Zeroizing::new(format!(
+            "{} ({} older value{plural}, newest first):",
+            field.key.as_str(),
+            field.entries.len()
+        ));
+        ui.print(&header)?;
+        for entry in &field.entries {
+            let shown = if reveal {
+                show_value(&entry.value)
+            } else {
+                Zeroizing::new(CONCEALED.to_owned())
+            };
+            let line = Zeroizing::new(format!(
+                "  {}  {} ms: {}",
+                dot_hex(entry.dot),
+                entry.changed_ms,
+                shown.as_str()
+            ));
+            ui.print(&line)?;
+        }
+    }
+    Ok(())
+}
+
+/// `item restore-history`: writes one history entry back as its field's current value
+/// (ROADMAP §4.2), through [`rizzy_client::items::VaultSync::restore_field_history`]: an
+/// ordinary entered write (ADR 0018 §2 "Flow"), so it syncs and merges like any other edit.
+async fn item_restore_history(
+    env: &mut Env<'_>,
+    item: &str,
+    field: &str,
+    entry: &str,
+) -> Result<(), CliError> {
+    let mut device = Device::open(env).await?;
+    let item = resolve_item(device.vault(), item)?;
+    let dot = parse_dot(entry)?;
+    device
+        .edit(|vault, rng, unlocked, now| {
+            vault.restore_field_history(rng, unlocked, item, field, dot, now)
+        })
+        .await?;
+    sync_after_write(&mut device, env.ui).await
 }
 
 /// The encoded value of `text` for `key`, as the schema expects it.
@@ -511,11 +704,7 @@ async fn item_create(
     type_text: &str,
     fields: &FieldArgs,
 ) -> Result<(), CliError> {
-    let item_type = TYPES
-        .iter()
-        .find(|(name, _)| *name == type_text)
-        .map(|(_, t)| *t)
-        .ok_or_else(|| CliError::Usage("unknown item type".into()))?;
+    let item_type = type_named(type_text)?;
     let mut device = Device::open(env).await?;
     // A new item has no element whose `order` a rewrite would write: one op at most.
     let writes: Vec<(FieldKey, Value)> = collect_writes(env.ui, device.vault(), None, fields)?
@@ -578,6 +767,83 @@ async fn lifecycle(
         .edit(|vault, rng, unlocked, now| op(vault, rng, unlocked, item, now))
         .await?;
     sync_after_write(&mut device, env.ui).await
+}
+
+/// `item restore-late`: the late edits of an item deleted permanently, restored as a new item
+/// of the type the user names (ADR 0018 §3 "Surfacing": the type is never inferred). Prints the
+/// new item's id; the deleted item stays deleted, and its late edits stay restorable.
+async fn item_restore_late(env: &mut Env<'_>, item: &str, type_text: &str) -> Result<(), CliError> {
+    let item_type = type_named(type_text)?;
+    let mut device = Device::open(env).await?;
+    let item = resolve_late_item(device.vault(), item)?;
+    let restored = device
+        .edit(|vault, rng, unlocked, now| {
+            vault.restore_late_as_new_item(rng, unlocked, item, item_type, now)
+        })
+        .await?;
+    env.ui.print(&hex(restored.as_bytes()))?;
+    sync_after_write(&mut device, env.ui).await
+}
+
+/// The notices after `sync` (gap 02): "An edit from `<device>` arrived for an item you deleted
+/// permanently. Restore it as a new item?" (ADR 0018 §3 "Surfacing"), and "deleted on X while
+/// it was being edited on Y" (ADR 0012 §5 "Active wins"). Notes, not results: standard error.
+///
+/// `rv` keeps no "already shown" mark. Its session is one process, so the only memory that
+/// outlasts a command is the local cache, and a mark there is a new cache record: a
+/// persistent-format change that needs an ADR 0026 amendment first. So each `rv sync` prints
+/// every notice that still holds; a late-edit notice holds as long as the deleted item keeps
+/// its late edits, a trash notice until the next write of the item's lifecycle.
+fn print_notices(device: &Device, ui: &mut dyn Ui) {
+    let vault = device.vault();
+    for item in vault.item_ids() {
+        let id = hex(item.as_bytes());
+        let late = vault.late_edit_devices(item);
+        if !late.is_empty() {
+            let from: Vec<String> = late.iter().map(|d| device_label(device, *d)).collect();
+            ui.note(&format!(
+                "An edit from {} arrived for an item you deleted permanently ({id}). Restore it \
+                 as a new item? `rv item restore-late {id} --type <type>`",
+                from.join(" and ")
+            ));
+        }
+        if let Some(trash) = vault.concurrent_trash(item) {
+            let name = text_field(vault, item, ITEM_NAME).unwrap_or_default();
+            let line = Zeroizing::new(format!(
+                "{id}  {}: deleted on {} while it was being edited on {}; the edit kept it.",
+                name.as_str(),
+                device_label(device, trash.trashed_by),
+                device_label(device, trash.edited_by),
+            ));
+            ui.note(&line);
+        }
+    }
+}
+
+/// How many hex digits of a device id a notice shows (module-wide: [`device_label`] and the
+/// web vault's `notices.ts` `deviceLabel` use the same length), a prefix of what `device list`
+/// prints in full: short enough to read in a sentence, long enough that `device revoke`
+/// (which accepts a prefix, module docs) rarely sees two devices sharing it.
+const DEVICE_LABEL_HEX_LEN: usize = 16;
+
+/// How a notice names a device: "this device", or its kind and the first
+/// [`DEVICE_LABEL_HEX_LEN`] digits of its id, a prefix of the full id `device list` prints
+/// (and that `device revoke` accepts in place of the full id). A device certificate holds a
+/// kind and an id, no name.
+fn device_label(device: &Device, id: DeviceId) -> String {
+    if id == device.state().device_id() {
+        return "this device".to_owned();
+    }
+    let text = hex(id.as_bytes());
+    let short = text.get(..DEVICE_LABEL_HEX_LEN).unwrap_or(&text);
+    let (certificates, _) = device.devices();
+    certificates
+        .iter()
+        .find(|c| c.certificate.device_id == id)
+        .map_or_else(
+            || format!("device {short}"),
+            |c| format!("{} {short}", kind_name(c.certificate.device_kind)),
+        )
 }
 
 /// `generate`: the generator of `rizzy-core` (CRYPTO.md §12.1), printed because that is what

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // An accessible confirm dialog (redesign slice 2, item 2), replacing `window.confirm` across
 // the web vault: trash, purge, lock-with-unsaved-changes, two-factor disable.
 //
@@ -7,24 +9,13 @@
 // only inside the dialog (a focus trap) so a sighted keyboard user, and a screen-reader user in
 // browse mode, can never tab out to the page behind it.
 //
-// The trap's own arithmetic (`nextFocusIndex`) is a pure function, unit-tested directly
-// (module docs of `Toast.tsx` explain why: no DOM, no jsdom dependency in this workspace).
+// The trap is `focusTrap.ts`'s, shared with every other modal dialog of the web vault.
 import { type KeyboardEvent, useEffect, useRef } from "react";
 
+import { trapTab } from "./focusTrap.ts";
 import { setModalOpen } from "./modalRegistry.ts";
 
-/** Where Tab/Shift+Tab moves focus next, cycling through `count` focusable elements from
- * `current` (`-1` when nothing inside the dialog is focused yet, e.g. focus was moved there
- * programmatically to the dialog container itself). Exported for its own test. */
-export function nextFocusIndex(count: number, current: number, shiftKey: boolean): number {
-  if (count <= 0) {
-    return -1;
-  }
-  if (shiftKey) {
-    return current <= 0 ? count - 1 : current - 1;
-  }
-  return current >= count - 1 ? 0 : current + 1;
-}
+export { nextFocusIndex } from "./focusTrap.ts";
 
 /** The props of {@link ConfirmDialog}. */
 export interface ConfirmDialogProps {
@@ -75,38 +66,13 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
     return null;
   }
 
-  const focusables = (): HTMLElement[] => {
-    const root = containerRef.current;
-    if (root === null) {
-      return [];
-    }
-    return Array.from(
-      root.querySelectorAll<HTMLElement>(
-        'button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
-      ),
-    );
-  };
-
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.key === "Escape") {
       e.preventDefault();
       props.onCancel();
       return;
     }
-    if (e.key !== "Tab") {
-      return;
-    }
-    const elements = focusables();
-    if (elements.length === 0) {
-      return;
-    }
-    const current = elements.indexOf(document.activeElement as HTMLElement);
-    const next = nextFocusIndex(elements.length, current, e.shiftKey);
-    const target = elements[next];
-    if (target !== undefined) {
-      e.preventDefault();
-      target.focus();
-    }
+    trapTab(e, containerRef.current);
   };
 
   return (

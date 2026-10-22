@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Whether the server is behind this device: a restore from an old backup, or a rollback
 //! ([ADR 0021] §9 "Server behind", which replaces [ADR 0012] §7 "Healing a server rollback"'s
 //! read-only condition and "Leaving read-only"; threat model §5.8, INV-59).

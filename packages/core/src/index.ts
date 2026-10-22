@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // @rizzy-vault/core — the only way UI code reaches the Rust core (ADR 0013 §4 "One entry point
 // for UI code"; ADR 0014 §2, §4). This file is the set to review when the boundary changes.
 //
@@ -27,11 +29,15 @@ import initWasm, {
   CoreError as WasmCoreError,
   DeviceSession as WasmDeviceSession,
   EnrolFlow,
+  type EquivalenceGroupView as WasmEquivalenceGroupView,
   HttpRequest,
   ItemDraft,
   KvRow,
   LoginFlow,
+  type MatchDecision as WasmMatchDecision,
+  type MatchSettingsView as WasmMatchSettingsView,
   PasskeyAssertion as WasmPasskeyAssertion,
+  PasskeyCandidate as WasmPasskeyCandidate,
   Session,
   SignupFlow,
   TwoFactorEnrolment,
@@ -647,6 +653,77 @@ export interface FieldView {
   readonly conflict: boolean;
 }
 
+/**
+ * One password-history entry, without its value (ADR 0013 §3 rule 3): `merge` is the history
+ * of `login.password` (ADR 0012 §5), `imported` came from another manager (`pwhist`, ADR 0018
+ * §7). `index` is its position within its source, for display only; `changedMs` the date it
+ * stopped being current (`merge`) or the other manager's date (`imported`, when it gave one),
+ * also display only, since two entries can share one date. `id` is the entry's own identity
+ * (never shared, never absent): pass it to {@link VaultSession.revealPasswordHistory}, not
+ * `index` or `changedMs`, to bind a reveal to the exact entry this listing showed.
+ */
+export interface HistoryEntry {
+  readonly source: "merge" | "imported";
+  readonly index: number;
+  readonly changedMs: number | undefined;
+  readonly id: string;
+}
+
+/**
+ * One field's history, without values (ADR 0013 §3 rule 3; ROADMAP §4.2 "Item revision history
+ * (restore old versions)", M3): generalizes {@link HistoryEntry} to every field, not only
+ * `login.password`. `key` is the field's final key ({@link FieldView.key}); `entries` is
+ * newest first, each `source` always `"merge"` (imported `login.password` history stays
+ * {@link VaultSession.passwordHistory}-only and is never part of this listing). Pass an
+ * entry's own `id`, scoped to `key`, to {@link VaultSession.revealFieldHistory} or
+ * {@link VaultSession.restoreFieldHistory}: the same dot can appear in two different fields'
+ * histories when one edit wrote both, so an id from one field's listing is never read or
+ * restored under another field's name.
+ */
+export interface FieldHistory {
+  readonly key: string;
+  readonly entries: readonly HistoryEntry[];
+}
+
+/**
+ * One distinct value of a conflicting field (ROADMAP §4.5 "edited on Phone and Laptop at the
+ * same time — keep both / pick one"; ADR 0012 §4 step 5, ADR 0018 §6), as
+ * {@link VaultSession.fieldConflict} lists them: the displayed value first. `device` wrote it
+ * ("edited on X"; name it from {@link VaultSession.devices}), at `writtenMs` (display only).
+ * `cleared` is "cleared on X". `value` is absent while `concealed` (ADR 0013 §3 rule 3): reveal
+ * it with {@link VaultSession.revealConflictValue}. Pass `index` and `id` back as listed to
+ * reveal or resolve: when a sync has since changed the listing, the core refuses
+ * (`unknown_item`) instead of acting on another value.
+ */
+export interface ConflictValue {
+  readonly index: number;
+  readonly id: string;
+  readonly device: string;
+  readonly writtenMs: number;
+  readonly displayed: boolean;
+  readonly cleared: boolean;
+  readonly kind: FieldView["kind"];
+  readonly concealed: boolean;
+  readonly value: string | undefined;
+}
+
+/**
+ * A notice of {@link VaultSession.takeNotices}: ids only. `late-edit`: "An edit from
+ * `<devices>` arrived for an item you deleted permanently. Restore it as a new item?" (ADR 0018
+ * §3). `concurrent-trash`: "deleted on `devices[0]` while it was being edited on `devices[1]`"
+ * (ADR 0012 §5). Name the devices from {@link VaultSession.devices}. `conflictId` is this one
+ * conflict's own identity for `concurrent-trash` (`undefined` for `late-edit`, which has none):
+ * fold it into a host-side dedup key alongside `item` and `devices`, so a second, genuinely
+ * distinct race between the same two devices on the same item is not dropped as a repeat of
+ * the first.
+ */
+export interface Notice {
+  readonly kind: "late-edit" | "concurrent-trash";
+  readonly item: string;
+  readonly devices: readonly string[];
+  readonly conflictId: string | undefined;
+}
+
 /** A current TOTP code. */
 export interface TotpCode {
   readonly code: string;
@@ -734,12 +811,29 @@ export interface CreatedPasskey {
 export const PASSKEY_ALG_ES256 = 1;
 
 /** One `navigator.credentials.get()` ceremony's result (ADR 0039 §2): everything the page's
- * `PublicKeyCredential` response needs, never the private key that signed it. */
+ * `PublicKeyCredential` response needs, never the private key that signed it. `userHandle` is
+ * empty only when the stored passkey somehow has none (`PasskeyAssertion`'s own doc on why that
+ * should not happen in practice); gap 35(a) in the M2 gap audit added this field — it used to be
+ * missing from every assertion, so a relying party doing username-less discoverable sign-in
+ * could not identify the user from the response alone. */
 export interface PasskeyAssertionResult {
   readonly credentialId: Uint8Array;
+  readonly userHandle: Uint8Array;
   readonly clientDataJson: Uint8Array;
   readonly authenticatorData: Uint8Array;
   readonly signatureDer: Uint8Array;
+}
+
+/** One stored passkey's non-secret metadata (ADR 0039 §1), for the host to list
+ * `navigator.credentials.get()`/`.create()` candidates (gaps 35(a)/(b) in the M2 gap audit) —
+ * never the private key, which stays behind the wasm boundary. */
+export interface PasskeyCandidateResult {
+  readonly elementId: string;
+  readonly rpId: string;
+  readonly userHandle: Uint8Array;
+  readonly credentialId: Uint8Array;
+  readonly alg: number;
+  readonly createdMs: number;
 }
 
 /**
@@ -775,9 +869,25 @@ export function createPasskey(origin: string, rpId: string, challenge: Uint8Arra
 function mapPasskeyAssertion(assertion: WasmPasskeyAssertion): PasskeyAssertionResult {
   return mapOne(assertion, (a) => ({
     credentialId: a.credentialId,
+    userHandle: a.userHandle,
     clientDataJson: a.clientDataJson,
     authenticatorData: a.authenticatorData,
     signatureDer: a.signatureDer,
+  }));
+}
+
+/** Maps every generated {@link WasmPasskeyCandidate} and frees them — shared by
+ * {@link VaultSession.passkeyCandidates} and {@link DurableSession.passkeyCandidates}.
+ * `createdMs` narrows from the generated `bigint` to `number`, the same convention
+ * `StoredPasskey`/`mapOne`'s other `U64` fields already use for a local-display timestamp. */
+function mapPasskeyCandidates(candidates: WasmPasskeyCandidate[]): PasskeyCandidateResult[] {
+  return mapFree(candidates, (c) => ({
+    elementId: c.elementId,
+    rpId: c.rpId,
+    userHandle: c.userHandle,
+    credentialId: c.credentialId,
+    alg: c.alg,
+    createdMs: Number(c.createdMs),
   }));
 }
 
@@ -936,6 +1046,11 @@ export class VaultSession {
    * is rethrown: the outcome of that request is unknown, the unsent changes stay queued, and
    * the next `sync()` sends them again (ADR 0028 "Retry after an unknown outcome"). Writes are
    * accepted again at once.
+   *
+   * Once the fetch/upload driver settles, this also runs the client-side trash auto-purge
+   * (gap 00; ADR 0012 §5, ADR 0018 §9, §11): a pass over every trashed item whose retention
+   * period has elapsed, run only here, after a successful sync, while unlocked — never by the
+   * server (ADR 0022).
    */
   async sync(): Promise<void> {
     const s = this.#s();
@@ -943,7 +1058,7 @@ export class VaultSession {
     for (;;) {
       const request = call(() => s.syncRequest());
       if (request === undefined) {
-        return;
+        break;
       }
       let answer: CoreResponse;
       try {
@@ -960,6 +1075,7 @@ export class VaultSession {
       }
       call(() => s.syncRespond(answer.status, answer.body, this.#now()));
     }
+    call(() => this.#s().autoPurge(this.#now()));
   }
 
   /** The active items, or the trashed ones. */
@@ -1056,6 +1172,151 @@ export class VaultSession {
     call(() => this.#s().purgeItem(id, this.#now()));
   }
 
+  /**
+   * The item's password history, without values (ADR 0013 §3 rule 3): one entry per former
+   * password, `merge` entries newest first, then `imported` ones. List it again after every
+   * sync: a sync can shift the entries.
+   */
+  passwordHistory(id: string): HistoryEntry[] {
+    return mapFree(
+      call(() => this.#s().passwordHistory(id)),
+      (h) => ({
+        source: h.source as HistoryEntry["source"],
+        index: h.index,
+        changedMs: h.changedMs === undefined ? undefined : Number(h.changedMs),
+        id: h.id,
+      }),
+    );
+  }
+
+  /**
+   * One password-history entry's value, as {@link passwordHistory} listed it, on the user's
+   * request only. Pass the entry's `id` as listed: when a sync has since moved another entry
+   * to that position, the core refuses (`unknown_item`) instead of revealing it.
+   */
+  revealPasswordHistory(
+    id: string,
+    source: HistoryEntry["source"],
+    index: number,
+    entryId: string,
+  ): string {
+    return call(() => this.#s().revealPasswordHistory(id, source, index, entryId));
+  }
+
+  /**
+   * Every field's history, without values ({@link FieldHistory}'s own doc; ROADMAP §4.2 "Item
+   * revision history (restore old versions)", M3): generalizes {@link passwordHistory} to
+   * every field. List it again after every sync: a sync can shift the entries.
+   */
+  itemHistory(id: string): FieldHistory[] {
+    return mapFree(call(() => this.#s().itemHistory(id)), (field) => ({
+      key: field.key,
+      entries: mapFree(field.entries, (h) => ({
+        source: h.source as HistoryEntry["source"],
+        index: h.index,
+        changedMs: h.changedMs === undefined ? undefined : Number(h.changedMs),
+        id: h.id,
+      })),
+    }));
+  }
+
+  /**
+   * One field-history entry's value, as {@link itemHistory} listed it, on the user's request
+   * only. `key` scopes `index`/`entryId` ({@link FieldHistory}'s own doc): when a sync has
+   * since moved another entry to that position, or the id was listed under a different field,
+   * the core refuses (`unknown_item`) instead of revealing it.
+   */
+  revealFieldHistory(id: string, key: string, index: number, entryId: string): string {
+    return call(() => this.#s().revealFieldHistory(id, key, index, entryId));
+  }
+
+  /**
+   * Restores one field-history entry as the field's current value (ROADMAP §4.2): an ordinary
+   * edit, which syncs and merges like any other. `key`, `index` and `entryId` name the entry
+   * exactly as {@link itemHistory} listed it, checked the same way {@link revealFieldHistory}
+   * is.
+   */
+  restoreFieldHistory(id: string, key: string, index: number, entryId: string): void {
+    call(() => this.#s().restoreFieldHistory(id, key, index, entryId, this.#now()));
+  }
+
+  /**
+   * A conflicting field's distinct values ({@link ConflictValue}'s own doc), the displayed one
+   * first, concealed values withheld. Empty when the field does not conflict. List it again
+   * after every sync: a sync can resolve the conflict or add a value.
+   */
+  fieldConflict(id: string, key: string): ConflictValue[] {
+    return mapFree(call(() => this.#s().fieldConflict(id, key)), (v) => ({
+      index: v.index,
+      id: v.id,
+      device: v.device,
+      writtenMs: Number(v.writtenMs),
+      displayed: v.displayed,
+      cleared: v.cleared,
+      kind: v.kind as FieldView["kind"],
+      concealed: v.concealed,
+      value: v.value,
+    }));
+  }
+
+  /** One conflicting value, as {@link fieldConflict} listed it, on the user's request only. */
+  revealConflictValue(id: string, key: string, index: number, valueId: string): string {
+    return call(() => this.#s().revealConflictValue(id, key, index, valueId));
+  }
+
+  /**
+   * "Pick one": writes the named value back to the field, an ordinary edit whose context
+   * covers every conflicting value, so the conflict ends on every device once it syncs.
+   */
+  resolveConflictPick(id: string, key: string, index: number, valueId: string): void {
+    call(() => this.#s().resolveConflictPick(id, key, index, valueId, this.#now()));
+  }
+
+  /**
+   * "Keep both": keeps the named value in the field and moves every other non-empty value into
+   * a new website (for a website) or a new custom field, hidden when the field is concealed,
+   * labelled `label` (required for a fixed field such as the password; a custom field's copies
+   * take its own label without one). Returns the new elements' ids. A field that is not text,
+   * or has no second value to keep, is refused (`invalid_edit`): "pick one" resolves it.
+   */
+  resolveConflictKeepBoth(
+    id: string,
+    key: string,
+    index: number,
+    valueId: string,
+    label: string | undefined,
+  ): string[] {
+    return call(() =>
+      this.#s().resolveConflictKeepBoth(id, key, index, valueId, label, this.#now()),
+    );
+  }
+
+  /**
+   * The notices not yet handed over in this session, each handed over once (gap 02): an edit
+   * that arrived for an item deleted permanently (offer {@link restoreLateAsNew}), and an item
+   * deleted on one device while it was being edited on another. Call it after each `sync`.
+   * The "handed over" marks live in the core's memory only and end with the session.
+   */
+  takeNotices(): Notice[] {
+    return mapFree(
+      call(() => this.#s().takeNotices()),
+      (n) => ({
+        kind: n.kind as Notice["kind"],
+        item: n.item,
+        devices: n.devices,
+        conflictId: n.conflictId,
+      }),
+    );
+  }
+
+  /**
+   * Restores the late edits of an item deleted permanently as a new item of `itemType`, the
+   * type the user picked; returns the new item's id. The deleted item stays deleted.
+   */
+  restoreLateAsNew(id: string, itemType: ItemType): string {
+    return call(() => this.#s().restoreLateAsNew(id, itemType, this.#now()));
+  }
+
   /** The item's current TOTP code. */
   totp(id: string): TotpCode {
     return mapOne(
@@ -1070,6 +1331,15 @@ export class VaultSession {
    */
   passkeyAssertion(id: string, passkeyId: string, origin: string, rpId: string, challenge: Uint8Array): PasskeyAssertionResult {
     return mapPasskeyAssertion(call(() => this.#s().passkeyAssertion(id, passkeyId, origin, rpId, challenge)));
+  }
+
+  /**
+   * Every stored passkey's non-secret metadata on one item (ADR 0039 §1), for the host to pick
+   * which credential to run {@link passkeyAssertion} with — in particular, to filter against
+   * the page's `allowCredentials` before picking one (gap 35(b) in the M2 gap audit).
+   */
+  passkeyCandidates(id: string): PasskeyCandidateResult[] {
+    return mapPasskeyCandidates(call(() => this.#s().passkeyCandidates(id)));
   }
 
   /**
@@ -1198,6 +1468,45 @@ export class VaultSession {
     const s = this.#s();
     const answer = await this.#transport(takeRequest(call(() => s.twoFactorDisableRequest(code))));
     call(() => expectNoContent(answer.status, answer.body));
+  }
+
+  /** The account's matching settings (ADR 0037 §6–§7, ADR 0042): `settings_update_required` when a
+   * newer rizzy-vault wrote them, `invalid_server_response` when they do not read. */
+  matchSettings(): MatchSettings {
+    const s = this.#s();
+    return matchSettingsOf(call(() => s.matchSettings()));
+  }
+
+  /** What the extension would offer on `pageUrl` (a top frame) among this vault's items, under
+   * the account's settings: the settings screen's "check a website". */
+  matchCandidates(pageUrl: string): MatchDecisionResult {
+    const s = this.#s();
+    return decisionOf(call(() => s.matchCandidates(pageUrl)));
+  }
+
+  /**
+   * Changes the account's matching settings: one `account/commit` of a new signed account state
+   * and the whole new settings record (ADR 0042 §5). When another device changed the account
+   * first (`server_state_conflict`), this syncs, which verifies the newer state, and retries the
+   * same change on top of it, once. The server takes the commit only within five minutes of the
+   * login (`server_fresh_session_required` afterwards: log in again).
+   */
+  async changeMatchSettings(change: SettingsChange): Promise<void> {
+    const s = this.#s();
+    let request = takeRequest(call(() => settingsRequest(s, change)));
+    for (let attempt = 0; ; attempt++) {
+      const answer = await this.#transport(request);
+      try {
+        call(() => s.settingsRespond(answer.status, answer.body));
+        return;
+      } catch (e) {
+        if (!(e instanceof CoreError) || e.code !== "server_state_conflict" || attempt > 0) {
+          throw e;
+        }
+      }
+      await this.sync();
+      request = takeRequest(call(() => s.settingsRetryRequest()));
+    }
   }
 }
 
@@ -1867,6 +2176,10 @@ export class DurableSession {
    * drains and persists the step's cache writes (class docs) before the next request is
    * released (ADR 0026 §4's write order) — the durable device's own addition over the
    * ephemeral web vault's sync.
+   *
+   * Once the driver settles, this also runs the client-side trash auto-purge (gap 00; ADR
+   * 0012 §5, ADR 0018 §9, §11) and drains its cache writes, the same write-order rule as every
+   * other step.
    */
   async sync(): Promise<void> {
     const s = this.#inner;
@@ -1875,6 +2188,19 @@ export class DurableSession {
       const request = call(() => s.syncRequest());
       if (request === undefined) {
         await this.#drain();
+        // Mirrors `Device::auto_purge` (rizzy-cli/src/device.rs): whatever the pass journals
+        // before it fails is drained too, so the next drain below always runs before the
+        // error propagates (class docs' write order) — never skipped by a `call()` rethrow.
+        let failure: { error: unknown } | undefined;
+        try {
+          s.autoPurge(this.#now());
+        } catch (e) {
+          failure = { error: toCoreError(e) };
+        }
+        await this.#drain();
+        if (failure !== undefined) {
+          throw failure.error;
+        }
         return;
       }
       let answer: CoreResponse;
@@ -1961,6 +2287,15 @@ export class DurableSession {
     return mapPasskeyAssertion(call(() => this.#inner.passkeyAssertion(id, passkeyId, origin, rpId, challenge)));
   }
 
+  /**
+   * Every stored passkey's non-secret metadata on one item (ADR 0039 §1), for the host to pick
+   * which credential to run {@link passkeyAssertion} with — in particular, to filter against
+   * the page's `allowCredentials` before picking one (gap 35(b) in the M2 gap audit).
+   */
+  passkeyCandidates(id: string): PasskeyCandidateResult[] {
+    return mapPasskeyCandidates(call(() => this.#inner.passkeyCandidates(id)));
+  }
+
   /** Creates an item; returns its id. Persisted before this resolves (class docs). */
   async createItem(itemType: ItemType, changes: readonly ItemChange[]): Promise<string> {
     const draft = draftOf(changes);
@@ -2011,6 +2346,30 @@ export class DurableSession {
     this.#locked = true;
     this.#inner.lock();
   }
+
+  /**
+   * Decides which of `itemUris` are autofill candidates for `pageUrl`, requested by `frame`
+   * (ADR 0037 §4, §5), under this account's own settings (ADR 0042 §6): a URI whose mode is
+   * {@link MatchMode.AccountDefault} uses the account's match default, and the account's
+   * disabled global groups and user-defined groups shape the equivalence view. Settings this
+   * build cannot read fail the call (`settings_update_required`, `invalid_server_response`): no
+   * candidate is offered under settings the core could not apply.
+   */
+  decideMatchCandidates(
+    pageUrl: string,
+    frame: MatchFrameInfo,
+    itemUris: readonly MatchUriInput[],
+  ): MatchDecisionResult {
+    const inputs = itemUris.map((u) => new UriInput(u.itemId, u.uriId, u.value, u.mode));
+    return decisionOf(
+      call(() => this.#inner.decideMatchCandidates(pageUrl, frame.isTopFrame, frame.frameOrigin, inputs)),
+    );
+  }
+
+  /** The account's matching settings (ADR 0042 §3), read-only here. */
+  matchSettings(): MatchSettings {
+    return matchSettingsOf(call(() => this.#inner.matchSettings()));
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2018,10 +2377,13 @@ export class DurableSession {
 // `rizzy_client::matching` (that crate's module docs explain the split): every check and every
 // narrowing rule is decided in Rust, never reimplemented here.
 
-/** `uri/<id>/match`'s wire values (ADR 0037 §4). `0x0000` ("account default") is never passed
- * as a URI's own mode to {@link decideMatchCandidates}; resolve it to the account's own
- * default before building {@link MatchUriInput}. */
+/** `uri/<id>/match`'s wire values (ADR 0037 §4). `AccountDefault` (`0x0000`) is a URI's "no
+ * override": the core resolves it to the account-level match default — the account's own
+ * setting through a session's `decideMatchCandidates` ({@link DurableSession.decideMatchCandidates},
+ * {@link VaultSession.matchCandidates}; ADR 0042 §6), or the `accountDefaultMode` argument of
+ * the free {@link decideMatchCandidates}. It is never itself an account default. */
 export const MatchMode = {
+  AccountDefault: 0x0000,
   BaseDomain: 0x0001,
   Host: 0x0002,
   StartsWith: 0x0003,
@@ -2054,10 +2416,27 @@ export interface MatchCandidate {
   /** Whether the fill UI must show the equivalence-only warning (ADR 0037 §5) before the
    * fill. */
   readonly needsWarning: boolean;
+  /** The saved URI's exact normalised host, A-label form (ADR 0037 §5 "Exact host shown";
+   * gap 31 in the M2 gap audit). Never decode this to Unicode in a host UI: a mixed-script
+   * host must keep showing its punycode `xn--` form. */
+  readonly savedHost: string;
+  /** The saved URI's own port, `undefined` when it is its scheme's default (ADR 0037 §2 rule
+   * 5). `savedHost` alone is the page's *registrable-domain-narrowed* candidate set (ADR 0037
+   * §4's `BaseDomain` mode, autofill's own default); a caller doing a destructive "same site"
+   * decision on top of it — never autofill itself — must compare this alongside `savedHost`
+   * against {@link MatchDecisionResult.pagePort}, or two different ports on the same host are
+   * wrongly treated as the same site. */
+  readonly savedPort?: number | undefined;
 }
 
 /** The result of one {@link decideMatchCandidates} call. */
 export interface MatchDecisionResult {
+  /** The page's own exact normalised host, A-label form (ADR 0037 §5 "Exact host shown";
+   * gap 31 in the M2 gap audit): what the fill UI always shows, matching or not. */
+  readonly pageHost: string;
+  /** The page's own port, `undefined` when it is its scheme's default ({@link
+   * MatchCandidate.savedPort}'s own doc explains why a "same site" gate must compare this). */
+  readonly pagePort: number | undefined;
   readonly candidates: readonly MatchCandidate[];
   readonly warnings: readonly string[];
 }
@@ -2081,10 +2460,11 @@ export function registrableDomainOf(url: string): string | undefined {
 
 /**
  * Decides which of `itemUris` are autofill candidates for `pageUrl`, requested by `frame`
- * (ADR 0037 §4, §5). `accountDefaultMode` resolves any URI whose own mode is `0x0000`; this
- * call never threads the account's equivalence settings through yet (`not_done`:
- * `crates/rizzy-wasm/src/matching.rs`'s module docs), so matching narrows to plain
- * registrable-domain equality.
+ * (ADR 0037 §4, §5). `accountDefaultMode` resolves any URI whose own mode is `0x0000`. The
+ * merged equivalence view is the compiled-in global list alone (ADR 0037 §7, ADR 0038 §5):
+ * this function holds no session and so no account settings. A host with a session calls the
+ * session's own `decideMatchCandidates` / `matchCandidates` instead, which apply the account's
+ * match default, disabled global groups and user-defined groups (ADR 0042 §6).
  */
 export function decideMatchCandidates(
   pageUrl: string,
@@ -2094,19 +2474,91 @@ export function decideMatchCandidates(
 ): MatchDecisionResult {
   ensureReady();
   const inputs = itemUris.map((u) => new UriInput(u.itemId, u.uriId, u.value, u.mode));
-  const decision = call(() =>
-    wasmDecideMatchCandidates(pageUrl, frame.isTopFrame, frame.frameOrigin, accountDefaultMode, inputs),
+  return decisionOf(
+    call(() => wasmDecideMatchCandidates(pageUrl, frame.isTopFrame, frame.frameOrigin, accountDefaultMode, inputs)),
   );
+}
+
+/** A generated match decision as a plain object, freed. */
+function decisionOf(decision: WasmMatchDecision): MatchDecisionResult {
   try {
     const candidates = decision.candidates.map((c) => {
       try {
-        return { itemId: c.itemId, uriId: c.uriId, needsWarning: c.needsWarning };
+        return { itemId: c.itemId, uriId: c.uriId, needsWarning: c.needsWarning, savedHost: c.savedHost, savedPort: c.savedPort };
       } finally {
         c.free();
       }
     });
-    return { candidates, warnings: [...decision.warnings] };
+    return { pageHost: decision.pageHost, pagePort: decision.pagePort, candidates, warnings: [...decision.warnings] };
   } finally {
     decision.free();
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Account match settings (ADR 0037 §6–§7, ADR 0042): the account-level match default, the
+// global equivalence groups the account disabled and its own user-defined groups. They live in
+// the signed account state's `ACCOUNT_SETTINGS`; the core reads, checks and writes them.
+
+/** One equivalence group as the settings screen shows it. Domains are A-label form: never decode
+ * them to Unicode for display (ADR 0037 §2 point 4). */
+export interface EquivalenceGroupInfo {
+  /** The group id, 32 lowercase hex digits. */
+  readonly id: string;
+  readonly domains: readonly string[];
+  /** For a global group: whether the account disabled it. Always `false` for a user group. */
+  readonly disabled: boolean;
+}
+
+/** The account's matching settings. */
+export interface MatchSettings {
+  /** The mode a website with no override of its own uses (`0x0001`–`0x0006`). */
+  readonly matchDefault: MatchModeValue;
+  /** The account's own groups. */
+  readonly userGroups: readonly EquivalenceGroupInfo[];
+  /** This build's signed global list, each with its disabled flag; empty while none is shipped. */
+  readonly globalGroups: readonly EquivalenceGroupInfo[];
+  /** Disabled ids that name no group of this build's global list, hex: still disabled. */
+  readonly otherDisabled: readonly string[];
+}
+
+/** One change to the account's matching settings: one `account/commit` (ADR 0042 §5). */
+export type SettingsChange =
+  | { readonly kind: "matchDefault"; readonly mode: MatchModeValue }
+  | { readonly kind: "addUserGroup"; readonly domains: readonly string[] }
+  | { readonly kind: "removeUserGroup"; readonly id: string }
+  | { readonly kind: "disableGlobalGroup"; readonly id: string }
+  | { readonly kind: "enableGlobalGroup"; readonly id: string };
+
+/** A generated settings view as a plain object, freed. */
+function matchSettingsOf(view: WasmMatchSettingsView): MatchSettings {
+  return mapOne(view, (v) => {
+    const group = (g: WasmEquivalenceGroupView): EquivalenceGroupInfo => ({
+      id: g.id,
+      domains: [...g.domains],
+      disabled: g.disabled,
+    });
+    return {
+      matchDefault: v.matchDefault as MatchModeValue,
+      userGroups: mapFree(v.userGroups, group),
+      globalGroups: mapFree(v.globalGroups, group),
+      otherDisabled: [...v.otherDisabled],
+    };
+  });
+}
+
+/** The core call that builds the commit of `change`. */
+function settingsRequest(s: Session, change: SettingsChange): HttpRequest {
+  switch (change.kind) {
+    case "matchDefault":
+      return s.setMatchDefaultRequest(change.mode);
+    case "addUserGroup":
+      return s.addUserGroupRequest([...change.domains]);
+    case "removeUserGroup":
+      return s.removeUserGroupRequest(change.id);
+    case "disableGlobalGroup":
+      return s.disableGlobalGroupRequest(change.id);
+    case "enableGlobalGroup":
+      return s.enableGlobalGroupRequest(change.id);
   }
 }

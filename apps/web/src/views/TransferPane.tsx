@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Export and import (ROADMAP §4.2; CRYPTO.md §11.14; ADR 0027; owner decision 2026-10-05).
 //
 // - Every export, encrypted or plaintext, first needs the Secret Key and master password typed
@@ -12,7 +14,7 @@
 //   the file's password. A format can still be chosen by hand. The file is read in the browser
 //   and handed to the core as bytes; nothing is uploaded but the resulting encrypted items.
 import type { DetectedImportFormat, ImportReport } from "@rizzy-vault/core";
-import { SecretField } from "@rizzy-vault/ui";
+import { SecretField, setModalOpen, trapTab } from "@rizzy-vault/ui";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import { codeOf, secretBytes } from "../core-client.ts";
@@ -52,7 +54,7 @@ function Reauthenticate(props: { readonly ctx: VaultContext; readonly onDone: ()
 
   return (
     <form onSubmit={submit} aria-labelledby="export-reauth-title">
-      <h3 id="export-reauth-title">Confirm it is you</h3>
+      <h2 id="export-reauth-title">Confirm it is you</h2>
       <p>
         Every export, encrypted or not, needs your Secret Key and master password again. The
         confirmation allows one export within five minutes.
@@ -106,7 +108,7 @@ function EncryptedExport(props: {
 
   return (
     <form onSubmit={submit} aria-labelledby="export-enc-title">
-      <h3 id="export-enc-title">Encrypted export</h3>
+      <h2 id="export-enc-title">Encrypted export</h2>
       <p className="muted">
         Choose a password for this export file. It is needed to import the file. It is not your
         master password, and nobody can recover it if it is lost.
@@ -132,6 +134,10 @@ function EncryptedExport(props: {
  * The plaintext export dialog: the warning, the 10-second countdown with the confirm button
  * disabled, and the typed phrase. Mounting it starts the hold (in the core and here);
  * closing and opening it again starts it over.
+ *
+ * A modal dialog like `ConfirmDialog`: the focus moves to the phrase field when it opens and
+ * back to what opened it when it closes, Tab stays inside it (`trapTab`), Escape cancels, and
+ * it registers in the modal registry so the vault's global shortcuts stay silent behind it.
  */
 function PlaintextDialog(props: {
   readonly ctx: VaultContext;
@@ -145,6 +151,21 @@ function PlaintextDialog(props: {
   const [typed, setTyped] = useState("");
   const [left, setLeft] = useState<number | undefined>(undefined);
   const { busy, error, run } = useAction();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const phraseRef = useRef<HTMLInputElement>(null);
+  const { onClose } = props;
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement;
+    phraseRef.current?.focus();
+    setModalOpen(true);
+    return () => {
+      setModalOpen(false);
+      if (previouslyFocused instanceof HTMLElement) {
+        previouslyFocused.focus();
+      }
+    };
+  }, []);
 
   useEffect(() => {
     let stop = () => {};
@@ -197,47 +218,60 @@ function PlaintextDialog(props: {
   const ready = left !== undefined && confirmEnabled(left, busy);
   return (
     <div className="overlay">
-      <form
+      {/* The dialog is a `div` around the form: ARIA in HTML does not allow `role="dialog"` on
+          a `<form>`. */}
+      <div
+        ref={dialogRef}
         className="panel dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="export-plain-title"
-        onSubmit={submit}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            onClose(undefined, undefined);
+            return;
+          }
+          trapTab(e, dialogRef.current);
+        }}
       >
-        <h2 id="export-plain-title">Plaintext export ({format.toUpperCase()})</h2>
-        <p className="warning" data-testid="plaintext-warning">
-          {warning}
-        </p>
-        {format === "csv" && (
-          <p className="warning" data-testid="plaintext-csv-warning">
-            {csvWarning}
+        <form onSubmit={submit}>
+          <h2 id="export-plain-title">Plaintext export ({format.toUpperCase()})</h2>
+          <p className="warning" data-testid="plaintext-warning">
+            {warning}
           </p>
-        )}
-        <p data-testid="plaintext-countdown" aria-live="polite">
-          {left === undefined || left > 0
-            ? `Read the warning. You can continue in ${left ?? 10} s.`
-            : "You can continue now."}
-        </p>
-        <label htmlFor="plain-phrase">
-          Type <strong>{phrase}</strong> to continue
-        </label>
-        <input
-          id="plain-phrase"
-          autoComplete="off"
-          spellCheck={false}
-          value={typed}
-          onChange={(e) => setTyped(e.currentTarget.value)}
-        />
-        <ErrorText code={error} />
-        <div className="actions">
-          <button type="submit" className="danger" disabled={!ready}>
-            Export in plaintext
-          </button>
-          <button type="button" className="secondary" onClick={() => props.onClose(undefined, undefined)}>
-            Cancel
-          </button>
-        </div>
-      </form>
+          {format === "csv" && (
+            <p className="warning" data-testid="plaintext-csv-warning">
+              {csvWarning}
+            </p>
+          )}
+          <p data-testid="plaintext-countdown" aria-live="polite">
+            {left === undefined || left > 0
+              ? `Read the warning. You can continue in ${left ?? 10} s.`
+              : "You can continue now."}
+          </p>
+          <label htmlFor="plain-phrase">
+            Type <strong>{phrase}</strong> to continue
+          </label>
+          <input
+            ref={phraseRef}
+            id="plain-phrase"
+            autoComplete="off"
+            spellCheck={false}
+            value={typed}
+            onChange={(e) => setTyped(e.currentTarget.value)}
+          />
+          <ErrorText code={error} />
+          <div className="actions">
+            <button type="submit" className="danger" disabled={!ready}>
+              Export in plaintext
+            </button>
+            <button type="button" className="secondary" onClick={() => props.onClose(undefined, undefined)}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
@@ -251,7 +285,7 @@ function PlaintextExport(props: {
   const [open, setOpen] = useState(false);
   return (
     <div aria-labelledby="export-plain-choice-title">
-      <h3 id="export-plain-choice-title">Plaintext export</h3>
+      <h2 id="export-plain-choice-title">Plaintext export</h2>
       <p className="muted">
         A file anyone can read. Use it only to move to another product; the encrypted export is
         the safe copy.
@@ -323,8 +357,14 @@ function Export(props: { readonly ctx: VaultContext }) {
   );
 }
 
-/** The import form. */
-function Import(props: { readonly ctx: VaultContext }) {
+/** The import form. The getting-started guide (`OnboardingView.tsx`) shows it as its import
+ * step; the two are never on screen together, so its element ids stay unique. */
+export function ImportForm(props: {
+  readonly ctx: VaultContext;
+  /** The level of the form's "Import" heading: 2 under this pane's h1 (the default), 3 inside
+   * the getting-started guide's step, whose own title is an h2. */
+  readonly headingLevel?: 2 | 3;
+}) {
   const { ctx } = props;
   const [file, setFile] = useState<File | undefined>();
   const [detected, setDetected] = useState<DetectedImportFormat | undefined>();
@@ -378,7 +418,7 @@ function Import(props: { readonly ctx: VaultContext }) {
 
   return (
     <form onSubmit={submit} aria-labelledby="import-title">
-      <h3 id="import-title">Import</h3>
+      {props.headingLevel === 3 ? <h3 id="import-title">Import</h3> : <h2 id="import-title">Import</h2>}
       <label htmlFor="import-file">File</label>
       <input id="import-file" type="file" onChange={(e) => pick(e.currentTarget.files?.[0])} required />
       {detected !== undefined && (
@@ -436,10 +476,10 @@ function Import(props: { readonly ctx: VaultContext }) {
 export function TransferPane(props: { readonly ctx: VaultContext }) {
   return (
     <div className="panel narrow">
-      <h2>Export and import</h2>
+      <h1>Export and import</h1>
       <Export ctx={props.ctx} />
       <hr />
-      <Import ctx={props.ctx} />
+      <ImportForm ctx={props.ctx} />
     </div>
   );
 }

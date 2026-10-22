@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Session-only generator memory (ROADMAP §4.2 "generate"): the password/passphrase options the
 // generator page and the editor's generate popover both start from, and a short history of
 // values the generator page produced.

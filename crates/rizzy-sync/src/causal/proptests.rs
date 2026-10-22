@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Property tests of the chain check and causal delivery over generated histories (ADR 0012
 //! §12 "Generated histories" and properties 3 and 7; ADR 0021 §8 "fetches from cursors behind
 //! the head at every step" with compaction on).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The symmetric wrapped-key objects of M1 (CRYPTO.md §4.2, §8.4, §8.5).
 //!
 //! Every wrap checks, before sealing, that the context describes the keys being wrapped (the

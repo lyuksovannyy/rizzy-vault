@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The randomness the libraries never draw themselves (ADR 0016 R2; ADR 0009 "RNG rules", as
 //! ADR 0019 §1.3 restates its third bullet; CRYPTO.md §12.1). This leaf crate supplies it to
 //! `rizzy-client`.

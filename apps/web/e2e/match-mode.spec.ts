@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The item editor's per-URI match mode (ADR 0037 §4, Accepted M2; ROADMAP §4.4 "Per-URI match
 // mode"): picking a mode writes `uri/<id>/match`, it round-trips through a reload, and a
 // website the user never touched stays absent (the account default) rather than being pinned

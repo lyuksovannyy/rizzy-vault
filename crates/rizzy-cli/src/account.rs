@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The account commands of `rv`: a new master password or Secret Key (CRYPTO.md §11.5) and
 //! server-side 2FA (§5.10, §11.15). The flows are [`Device::change_credentials`],
 //! [`Device::totp_enable`] and [`Device::totp_disable`]; this module opens the device and

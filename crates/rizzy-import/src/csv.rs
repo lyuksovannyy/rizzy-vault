@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! A bounded CSV reader (RFC 4180, comma-separated), one record at a time, into zeroizing
 //! fields. For the generic, Chrome and Firefox CSV importers.
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `items.json`: the schema layer of the item record (ADR 0018 §2): the value encoding of §6,
 //! with the values a reader shows as unsupported, the field-key grammar of §7 and its §10
 //! length limit, with rejected keys, and tag keys from tag names (§7, owner decision 7).

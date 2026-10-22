@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // A tiny, Chromium-only piece of transport plumbing, not part of the content-script/popup
 // contract in `messaging/contract.ts`: a message the popup/options transport sends once before
 // its first real request, purely to make `background/service-worker.ts` create the offscreen

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Symmetric envelope, algorithm `0x01` (CRYPTO.md §8.3, §9.1; ADR 0005, ADR 0007).
 //!
 //! XChaCha20-Poly1305 inside Bellare–Hoang's `UtC` transform with the AAD folded into the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Hybrid logical clocks (ADR 0012 §2 "HLC" and "Skew guard").
 //!
 //! An [`Hlc`] is a `u64`: the top 48 bits are Unix milliseconds, the low 16 bits a logical

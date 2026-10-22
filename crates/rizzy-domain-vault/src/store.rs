@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The store transaction's rules, shared by upload and restore healing (ADR 0012 §7 "Upload" as
 //! ADR 0021 §9 supersedes it in part; ADR 0021 §2, §3 "Where it runs").
 //!

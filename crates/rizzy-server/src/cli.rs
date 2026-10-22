@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The `rizzy-vault` command line.
 //!
 //! ```text

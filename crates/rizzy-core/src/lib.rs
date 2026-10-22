@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! `rizzy-core` — the single implementation of rizzy-vault's cryptography and data model.
 //!
 //! Every client (the web vault and extension through wasm, the CLI and desktop app natively,
@@ -170,6 +172,8 @@ pub mod server_seal;
 pub mod sign;
 pub mod totp;
 
+#[cfg(test)]
+mod kdf_runs_tests;
 #[cfg(test)]
 #[expect(
     clippy::indexing_slicing,

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Server-side 2FA with TOTP (CRYPTO.md §5.10 "Server-side 2FA", §5.11, §11.15; INV-8).
 //!
 //! - **Secrets.** rizzy-vault issues them: 20 random bytes from the injected CSPRNG

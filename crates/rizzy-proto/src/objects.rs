@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The signed statements, envelopes and wrapped-key objects the messages carry.
 //!
 //! None of these is parsed here. Each travels as the bytes `rizzy-core` writes and verifies:

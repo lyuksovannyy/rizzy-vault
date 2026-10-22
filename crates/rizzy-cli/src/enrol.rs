@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Becoming a device: signup (CRYPTO.md §11.1) and login on a new device with its enrolment
 //! (§11.2), each ending with a cache file ([ADR 0026]).
 //!

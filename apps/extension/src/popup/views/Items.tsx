@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // The item list, search and detail view (ROADMAP §4.4 "item list and detail with copy").
 // Fetches the list once on mount; detail fields are fetched lazily per item (ADR 0013 §3 rule
 // 3: list views never carry more than title/username, so the detail call is what reveals a

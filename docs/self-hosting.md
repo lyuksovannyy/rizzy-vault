@@ -17,6 +17,7 @@ Contents:
 10. [The restore drill](#10-the-restore-drill)
 11. [Logs](#11-logs)
 12. [Checklist](#12-checklist)
+13. [Podman Quadlet (systemd-managed, rootless)](#13-podman-quadlet-systemd-managed-rootless)
 
 ## 1. What you run
 
@@ -38,6 +39,7 @@ The files are in [`deploy/`](../deploy/):
 | [`compose.yaml`](../deploy/compose.yaml) | Profile A for `docker compose` and `podman compose`, the one-off admin commands, and a commented PostgreSQL variant |
 | [`Caddyfile`](../deploy/Caddyfile) | The TLS proxy: certificate from ACME, everything forwarded to `rizzy-vault` |
 | [`rizzy-vault.env.example`](../deploy/rizzy-vault.env.example) | The settings `compose.yaml` reads; copy it to `deploy/.env` |
+| [`quadlet/`](../deploy/quadlet/) | Podman Quadlet units for the same profile A, systemd-managed and rootless ([§13](#13-podman-quadlet-systemd-managed-rootless)) |
 
 The server keeps two kinds of data, on two volumes, with **different backup targets** ([ADR 0010](adr/0010-server-shape.md) §4, [INV-50](THREAT_MODEL.md#8-security-invariants)):
 
@@ -49,7 +51,7 @@ Never put both into one backup, one archive or one volume.
 **Not in this build** (M1 is in progress):
 - A verified image build with the web vault. [`deploy/Containerfile`](../deploy/Containerfile) now builds the web vault (`apps/web`, M1 step 5) and embeds it with the `embed-web` feature ([ADR 0010](adr/0010-server-shape.md) §4): a `wasm` stage (wasm-bindgen-cli at the locked version, `cargo xtask build-wasm`), a `web` stage (Node.js 24, pnpm, `pnpm install --frozen-lockfile`, `pnpm run build`), then the server. That image build has not been run end to end yet; until it has, check that `/` of a new image serves the web vault, not the fixed "no web vault in this build" page. To build a binary with it from source instead: `pnpm install --frozen-lockfile`, `pnpm run build:wasm` (needs `wasm-bindgen-cli` at the locked version), `pnpm run build`, then `cargo build --locked --release -p rizzy-server --bin rizzy-vault --features embed-web`. The API is complete for the M1 clients.
 - PostgreSQL as a supported setup (M3). This build runs every M1 role on it, the `worker` included (one active worker per database, the others wait as standbys), but its PostgreSQL tests are not run in CI yet, and the PostgreSQL side of the instance lock, of `restore`, `migrate` and `secrets rotate` ([§9](#9-restore)) has not been run against a real PostgreSQL server at all. Do not rely on it before M3.
-- The admin panel and API (M3), `notify`, `icons` (M3), `smtp` (M6), Quadlet units (M3), signed images (M8).
+- The admin panel and API (M3), `notify`, `icons` (M3), `smtp` (M6), signed images (M8). Quadlet units are covered by this build ([§13](#13-podman-quadlet-systemd-managed-rootless)), written without a Podman install to test them against — see that section's "Unverified" list.
 
 **Core dumps are off.** A crash must never write the server's memory (keys, the OPAQUE secrets, session state) to disk ([INV-60](THREAT_MODEL.md#8-security-invariants), [ADR 0024](adr/0024-core-dump-disabling-rustix.md)). Before it reads its configuration, `rizzy-vault` sets its core-file limit (`RLIMIT_CORE`) to 0 and, on Linux, marks itself non-dumpable (`PR_SET_DUMPABLE` 0); it reads both back and refuses to start (exit 1, `cannot disable core dumps: ...` on stderr) if either did not take. There is no setting to turn this off. As defence in depth, [`compose.yaml`](../deploy/compose.yaml) also sets `ulimits: core: 0` on every container; under systemd, set `LimitCORE=0` in the unit. On the host, the kernel's `core_pattern` is global to all containers: if it pipes to a crash collector (`systemd-coredump`, `apport`, `abrt`) and `fs.suid_dumpable` is 2, check that the collector stores nothing for this container ([AR-10](THREAT_MODEL.md#9-accepted-risks-and-out-of-scope); whether such a collector can still capture a non-dumpable process is unverified).
 
@@ -67,7 +69,7 @@ docker compose build              # or: podman compose build
 
 There is no published image yet: CI builds the image for `linux/amd64` and `linux/arm64` on every pull request but pushes nothing, and its publish jobs stay off unless the project owner enables them (they would push unsigned development builds to `ghcr.io`; signed images are M8). `docker compose build` builds `localhost/rizzy-vault:dev` from the repository ([`deploy/Containerfile`](../deploy/Containerfile)). Building needs network access to the base images' registry (`docker.io`), to crates.io (`index.crates.io`, `static.crates.io`), to the npm registry (`registry.npmjs.org`, for pnpm and the web vault's locked JavaScript dependencies), and to `static.rust-lang.org`: the repository's `rust-toolchain.toml` pins a toolchain with `rustfmt`, `clippy` and the `wasm32-unknown-unknown` target, and rustup downloads whatever of it the base image lacks. Behind an egress allow-list or a registry mirror, allow all four. For both architectures at once: `docker buildx build --platform linux/amd64,linux/arm64 -f deploy/Containerfile -t <name> ..` (from `deploy/`), or `podman build --platform linux/amd64,linux/arm64 --manifest <name> -f deploy/Containerfile ..`.
 
-Every command in this guide runs from `deploy/`. With Podman, replace `docker` by `podman`.
+Every command in this guide runs from `deploy/`. With Podman, replace `docker` by `podman`. To run this same image under systemd instead of `podman compose`, see [§13](#13-podman-quadlet-systemd-managed-rootless); build the image here first either way.
 
 ## 3. First run
 
@@ -276,6 +278,8 @@ To run the migration as its own step (for example to see it succeed before servi
 
 If the upgraded server does not start, keep the old image, restore the pre-upgrade backup ([§9](#9-restore)), and report the problem.
 
+Under the Quadlet units ([§13](#13-podman-quadlet-systemd-managed-rootless)), replace the `docker compose stop/up` pair above with `systemctl --user stop/start rizzy-vault.service`; the backup, `migrate` and restore commands are unchanged (they run next to the server, or with it stopped, regardless of what starts it).
+
 ## 8. Backup
 
 **What to back up:**
@@ -462,6 +466,8 @@ docker volume rm rizzy-drill-data rizzy-drill-secrets
 
 The server writes one JSON object per line to stderr: `ts_ms`, `level`, `event`, and fields that are integers or fixed strings. By construction it never logs secrets, tokens, request bodies, headers, login names, file paths or IP addresses ([INV-48](THREAT_MODEL.md#8-security-invariants)). Retention is the container runtime's: `compose.yaml` keeps at most 5 files of 10 MB (`json-file` driver); change `logging` there. Rootless Podman may ignore some of these options; check `podman inspect` and set `log_size_max` in `containers.conf` if needed.
 
+The web vault's Settings → "What the server stores" tells your users what the server holds for their account and how long it is kept, including that this server's logs hold no IP addresses, that your reverse proxy may log them, and that your backups keep deleted data until they expire ([AR-11](THREAT_MODEL.md#9-accepted-risks-and-out-of-scope)). Keep your proxy logging and backup retention ([§8](#8-backup)) in line with what you tell them.
+
 ## 12. Checklist
 
 - [ ] `RIZZY_ORIGIN` is the exact `https://` origin users type, and will not change.
@@ -475,3 +481,124 @@ The server writes one JSON object per line to stderr: `ts_ms`, `level`, `event`,
 - [ ] The manual drill of [§10](#10-the-restore-drill) passed this month.
 - [ ] Base images are pinned by digest if you build your own image.
 - [ ] The host's crash collector (if `core_pattern` pipes to one) stores no dumps of the rizzy-vault container ([§1](#1-what-you-run)).
+
+## 13. Podman Quadlet (systemd-managed, rootless)
+
+[ROADMAP §4.9](ROADMAP.md#49-server-self-hosting--ops-m1-onward) (Should, M3): Podman Quadlet units, systemd-managed and rootless, for the same profile A `compose.yaml` runs ([§1](#1-what-you-run)). The units are in [`deploy/quadlet/`](../deploy/quadlet/): `rizzy-vault.container`, `rizzy-vault-proxy.container`, four `.volume` files and one `.network` file, plus `rizzy-vault.env.example` and `rizzy-vault-proxy.env.example`. They cover the two long-running services only — `rizzy-vault` (`api,web,worker`) and the Caddy proxy — the same two `compose.yaml` runs without the `admin` profile. The one-off admin commands (`secrets init`, `secrets rotate`, `secrets retire-setups`, `backup-secrets`, `migrate`, `restore`) stay plain `podman run --rm` invocations under systemd too; see "Admin one-offs" below.
+
+**These units were written without a Podman install to test them against in this environment.** Every key used is believed correct from `podman-systemd.unit(5)`, but none of it has been loaded by a real `systemd --user`, generated into a unit by `/usr/lib/systemd/user-generators/podman-system-generator`, or started. Treat the "Unverified" list at the end of this section as a to-do before you rely on this in production, not as a formality.
+
+**Install (rootless):**
+
+```sh
+mkdir -p ~/.config/containers/systemd
+cp deploy/quadlet/*.container deploy/quadlet/*.volume deploy/quadlet/*.network ~/.config/containers/systemd/
+cp deploy/Caddyfile ~/.config/containers/systemd/Caddyfile
+cp deploy/quadlet/rizzy-vault.env.example ~/.config/containers/systemd/rizzy-vault.env
+cp deploy/quadlet/rizzy-vault-proxy.env.example ~/.config/containers/systemd/rizzy-vault-proxy.env
+$EDITOR ~/.config/containers/systemd/rizzy-vault.env ~/.config/containers/systemd/rizzy-vault-proxy.env
+(cd deploy && docker compose build)   # or podman compose build / podman build — §2 still builds the image
+systemctl --user daemon-reload
+loginctl enable-linger "$USER"      # so the units run without an active login session
+systemctl --user start rizzy-vault-data-volume.service rizzy-vault-secrets-volume.service
+# Create the secrets once, the same as compose.yaml's secrets-init (ADR 0010 §4). The flags
+# repeat compose.yaml's `x-hardening` anchor, which every one-off service uses too (see "Admin
+# one-offs" below for the rest of them, with the same flags):
+podman run --rm --network=none -v rizzy-vault-secrets:/run/rizzy-secrets \
+  --user 65532:65532 --read-only --cap-drop=all --security-opt=no-new-privileges:true \
+  localhost/rizzy-vault:dev secrets init
+systemctl --user enable --now rizzy-vault.service rizzy-vault-proxy.service
+journalctl --user -u rizzy-vault.service -f
+```
+
+These files never live inside this repository's working tree, so there is nothing for this repository's `.gitignore` to cover there one way or the other (its `.env` / `.env.*` patterns are literal basenames anyway, and would not match `rizzy-vault.env` or `rizzy-vault-proxy.env`). They hold no secret values in profile A regardless: `RIZZY_ORIGIN`, `RIZZY_DOMAIN` and the rest are not sensitive — see [`deploy/quadlet/rizzy-vault.env.example`](../deploy/quadlet/rizzy-vault.env.example) and [`rizzy-vault-proxy.env.example`](../deploy/quadlet/rizzy-vault-proxy.env.example).
+
+**Why two env files, not one.** `compose.yaml`'s `.env` is read only while `docker compose`/`podman compose` parses the YAML's `${VAR}` placeholders — it never becomes a container's own environment except for the handful of names each service's `environment:` block repeats. Quadlet has no such substitution step: a unit file's `Image=`, `PublishPort=`, `Subnet=` and `IP=` are literal, edited directly (a drop-in file under `rizzy-vault.container.d/` also works, for example to change `Image=` without touching the shipped file). `EnvironmentFile=` is the one place that *does* mirror compose's `environment:` block: it passes every `NAME=value` line in the file straight into that one container's process environment, the way compose passes `RIZZY_ORIGIN` etc. into `rizzy-vault` and `RIZZY_DOMAIN` into `proxy`. So `rizzy-vault.env` holds only what the `rizzy-vault` service's `environment:` block reads, and `rizzy-vault-proxy.env` only what `proxy`'s does — checked against `crates/rizzy-server/src/config.rs`, which looks up each `RIZZY_*` name individually from the environment rather than rejecting ones it does not recognise (that refusal is for the `--config` file format only, [§4](#4-configuration-reference)), so an extra unrelated variable in either file would be harmless, but keeping them separate keeps each file an honest match for one container.
+
+**Mapping from `compose.yaml`,** so every hardened property has a named equivalent here:
+
+| `compose.yaml` (`rizzy-vault` service, under `x-hardening`) | Quadlet key |
+|---|---|
+| `image:` | `Image=` (literal; edit the line or add a drop-in, no `${VAR:-default}`) |
+| `command: ["serve"]` | `Exec=serve` |
+| `read_only: true` | `ReadOnly=true` |
+| `cap_drop: [ALL]`, no `cap_add` | `DropCapability=ALL`, no `AddCapability=` |
+| `security_opt: ["no-new-privileges:true"]` | `NoNewPrivileges=true` |
+| `user: "65532:65532"` | `User=65532` + `Group=65532` |
+| `ulimits: core: 0` | `[Service] LimitCORE=0` (already named by this guide's [§1](#1-what-you-run), for "under systemd") |
+| `tmpfs: [/tmp:size=64m,mode=1777]` | `Tmpfs=/tmp:size=64m,mode=1777`, with `ReadOnlyTmpfs=false` so nothing else gets an implicit tmpfs |
+| `restart: unless-stopped` | `[Service] Restart=always` (covers crashes the same way `unless-stopped` does, and an explicit stop doesn't trigger either; diverges on a reboot after that stop — see the note below the table) |
+| `stop_grace_period: 40s` | `[Service] TimeoutStopSec=40` |
+| `expose: ["8080"]`, no host port | no `PublishPort=` |
+| `volumes: data:/data`, `secrets:/run/rizzy-secrets:ro` | `Volume=rizzy-vault-data.volume:/data`, `Volume=rizzy-vault-secrets.volume:/run/rizzy-secrets:ro` |
+| `networks: edge:` | `Network=rizzy-vault-edge.network` |
+| healthcheck | none either way — see below |
+
+**`Restart=always` does not keep a deliberately stopped service down across a reboot, unlike `unless-stopped`.** Within one boot the two match: neither restarts after an operator's own stop (`docker stop` / `systemctl --user stop`). They diverge at the next reboot or login: Docker remembers that an `unless-stopped` container was manually stopped and leaves it stopped across a daemon restart, but systemd's `Restart=` only governs what happens after the *service's own* exit (a crash or kill), not whether an *enabled* unit starts at the next boot — `rizzy-vault.service` is enabled (`[Install] WantedBy=default.target`, started with `systemctl --user enable --now` above), so it starts again at the next boot or login regardless of a prior manual stop. An operator who wants it to stay down after a reboot must also `systemctl --user disable rizzy-vault.service` (and `rizzy-vault-proxy.service`), not just stop it.
+
+`proxy` is **not** under `compose.yaml`'s `x-hardening` anchor, so `rizzy-vault-proxy.container` carries none of the hardening keys above either; that mirrors the file, it is not an oversight. Its own mapping: `ports: 8080:80, 8443:443` → two `PublishPort=` lines; `networks.edge.ipam_address` (the fixed proxy address `compose.yaml` gives `RIZZY_TRUSTED_PROXIES` something to name) → `IP=172.30.87.10` on a `.network` file carrying the matching `Subnet=`; the bind-mounted `Caddyfile` → a `Volume=` line to the same unmodified file; `caddy-data`/`caddy-config` → their own `.volume` files; `depends_on: [rizzy-vault]` → `[Unit] After=rizzy-vault.service` with no `Requires=`, so a stopped `rizzy-vault.service` does not pull the proxy down too, matching compose's plain (conditionless) `depends_on`.
+
+**Health check.** Neither `compose.yaml` nor these units define one: [§1](#1-what-you-run) and [§6](#6-tls-the-reverse-proxy-and-ports) already say why — the distroless image has no shell and no HTTP client to run a check with. Monitor `GET https://<domain>/api/meta` from outside the container, as compose-based installs already do.
+
+**Logging differs from `compose.yaml`, on purpose.** `compose.yaml` sets the `json-file` driver with `max-size: 10m`, `max-file: 5` ([§11](#11-logs)); that is a Docker-specific driver and option set with no Podman equivalent. These units set none, so Podman's own default under systemd (`journald`) applies: `journalctl --user -u rizzy-vault.service` reads it, and retention is `journald`'s own (`SystemMaxUse=` etc. in `~/.config/systemd/journald@user.conf` or the system `journald.conf`, depending on your distribution's user-journal setup), not the container runtime's.
+
+**Auto-update is off by default.** [THREAT_MODEL.md Q-17](THREAT_MODEL.md#10-open-questions-for-the-owner) is still an open question, not a decided one (unlike the "Decided" rows around it): it recommends shipping Quadlet units with `podman auto-update` **off** until signed images and a verifying `policy.json` exist — [ROADMAP §4.9](ROADMAP.md#49-server-self-hosting--ops-m1-onward) lists "Signed images (cosign), SBOM, provenance" as a Should, M8; [§1](#1-what-you-run) already names it as not in this build. No Accepted ADR covers the signing mechanism yet, so this guide does not name one. [AR-22](THREAT_MODEL.md#9-accepted-risks-and-out-of-scope) tracks the interim risk as opt-in only, "with the trade-off stated where it is enabled." Both unit files carry a commented-out `AutoUpdate=registry` line rather than an active one. Turning it on needs two things, deliberately, so a stray edit cannot turn it on by itself:
+1. Uncomment `AutoUpdate=registry` in the unit (and `systemctl --user daemon-reload`).
+2. Enable the timer that actually checks: `systemctl --user enable --now podman-auto-update.timer`. Nothing updates until this runs, label or no label.
+
+> **Gap: the trade-off is accepted by you, not decided by this project.** Before M8, an instance with auto-update on installs whatever the image registry serves under that tag on the next timer run, with no signature check ([A10](THREAT_MODEL.md#a10-compromised-ci-or-release-credentials)) — a compromised registry account or release job reaches it, and it then serves a possibly-backdoored web vault to every user of that instance ([§4.2.1](THREAT_MODEL.md#421-the-web-vault-delivery-problem)). It also conflicts with pinning images by digest ([§7.17](THREAT_MODEL.md#717-distribution-channels-m1-onward)), which this guide otherwise recommends. Decide this with that trade-off in view, not by habit.
+
+Also: `rizzy-vault.container`'s default `Image=localhost/rizzy-vault:dev` is a local build with no registry behind it at all ([§2](#2-install): "There is no published image yet"). `AutoUpdate=registry` has nothing to check against for that tag, so it is a no-op there regardless of the timer, until `Image=` names a real registry reference. The Caddy proxy's image is already a real registry reference, so its own `AutoUpdate=registry` line would do something the moment it is enabled — which is exactly why it stays commented out by the same default, not left on because "it's just Caddy."
+
+**Admin one-offs.** Systemd units are the wrong shape for a command meant to run once and exit; these stay `podman run --rm`, matching each `compose.yaml` one-off service ([§4](#4-configuration-reference) "Commands") with the matching volumes. Every one of them carries `--network=none` and the same `--read-only --cap-drop=all --security-opt=no-new-privileges:true --user 65532:65532` flags `compose.yaml`'s `x-hardening` anchor gives every one-off service there — including `secrets init` above — not only the one shown with them spelled out below. `migrate` and `restore` also carry `--tmpfs /tmp:size=64m,mode=1777`, matching the `tmpfs:` `compose.yaml` gives those two services only; the rest have no tmpfs, matching `compose.yaml` too:
+
+```sh
+# secrets rotate / retire-setups (server stopped first; swap the trailing command for either):
+systemctl --user stop rizzy-vault.service
+podman run --rm --network=none -v rizzy-vault-data:/data -v rizzy-vault-secrets:/run/rizzy-secrets \
+  --user 65532:65532 --read-only --cap-drop=all --security-opt=no-new-privileges:true \
+  localhost/rizzy-vault:dev secrets rotate
+systemctl --user start rizzy-vault.service
+
+# migrate (server stopped first). Unlike secrets rotate, compose.yaml's `migrate` service
+# mounts no secrets volume, and does carry --tmpfs:
+systemctl --user stop rizzy-vault.service
+podman run --rm --network=none -v rizzy-vault-data:/data --tmpfs /tmp:size=64m,mode=1777 \
+  --user 65532:65532 --read-only --cap-drop=all --security-opt=no-new-privileges:true \
+  localhost/rizzy-vault:dev migrate
+systemctl --user start rizzy-vault.service
+
+# backup-secrets, with the passphrase on stdin, secrets volume read-only is enough. The
+# staging directory needs the same owner and mode as §5's rootful example, done the rootless
+# way (§5 already shows `podman unshare chown` for this):
+mkdir -p ~/rizzy-backup-secrets
+podman unshare chown 65532:65532 ~/rizzy-backup-secrets && chmod 0700 ~/rizzy-backup-secrets
+podman run --rm -i --network=none -v rizzy-vault-secrets:/run/rizzy-secrets:ro \
+  -v ~/rizzy-backup-secrets:/backup --user 65532:65532 --read-only --cap-drop=all \
+  --security-opt=no-new-privileges:true localhost/rizzy-vault:dev backup-secrets \
+  --out /backup/rizzy-secrets-backup.json --passphrase-file - < ~/rizzy-backup-passphrase
+mv ~/rizzy-backup-secrets/rizzy-secrets-backup.json /somewhere/safe/rizzy-secrets-$(date +%F).json
+
+# backup (server running): no one-off, it runs next to the server, as §8 already does.
+podman exec rizzy-vault rizzy-vault backup --out - > "rizzy-data-$(date +%Y%m%dT%H%M%S).rvbackup"
+
+# restore (server stopped first), reading from stdin, as compose.yaml's `restore` service:
+podman run --rm -i --network=none -v rizzy-vault-data:/data -v rizzy-vault-secrets:/run/rizzy-secrets:ro \
+  --tmpfs /tmp:size=64m,mode=1777 --user 65532:65532 --read-only --cap-drop=all \
+  --security-opt=no-new-privileges:true localhost/rizzy-vault:dev restore --in -
+```
+
+`backup` needs none of this: it runs inside the already-networked, already-hardened `rizzy-vault` container through `exec`, the same as under `compose.yaml`.
+
+**Rootful.** The system-wide path is `/etc/containers/systemd/` instead of `~/.config/containers/systemd/`, `systemctl` instead of `systemctl --user`, `[Install] WantedBy=multi-user.target` instead of `default.target`, no `loginctl enable-linger`, and `podman run` as root for the admin one-offs. Not tested here either way; the rootless path above is what [ROADMAP §4.9](ROADMAP.md#49-server-self-hosting--ops-m1-onward) actually asks for.
+
+**Unverified** (no Podman available in this environment to confirm any of it — check each against `man 5 podman-systemd.unit` on your host before depending on it):
+- Whether `systemctl --user disable` on a Quadlet-generated `.service` behaves like disabling an ordinary unit — clearing the boot-time want so it does not start again at the next boot or login — or whether Quadlet's generator re-establishes that want on the next `daemon-reload`/generator run regardless of the disable.
+- The minimum Podman version for `VolumeName=` and `NetworkName=`; without them the generated volume/network names would be `systemd-<unit-name>` instead of the `rizzy-vault-*` names this guide and its backup commands use by name.
+- Whether `%h` expands inside a Quadlet `Volume=`/`EnvironmentFile=` path value, as used above, or needs to be replaced with a literal home-directory path.
+- `IP=` used together with a `Network=` reference to a `.network` file that itself sets `Subnet=` — the exact supported combination.
+- `[Service] LimitCORE=0`, `Restart=always` and `TimeoutStopSec=40` passing through into the generated unit's `[Service]` section unchanged (this one is plain systemd syntax, so it is the least likely of this list to be wrong).
+- `ReadOnlyTmpfs=false` next to an explicit `Tmpfs=/tmp:...` line — that the two combine to "only `/tmp` is writable, with these exact options" and not something broader or narrower.
+- That `DropCapability=ALL` accepts that spelling (as opposed to lowercase `all`) the same way `cap_drop: [ALL]` does in `compose.yaml`.
+- The exact generated systemd unit names Quadlet derives from these file names (assumed here: `<name>.container` → `<name>.service`, `<name>.volume` → `<name>-volume.service`, `<name>.network` → `<name>-network.service`), and that Quadlet adds `Requires=`/`After=` for the `Volume=`/`Network=` references on its own, without this guide spelling them out.
+- The entire auto-update path once enabled: that `AutoUpdate=registry` plus `podman-auto-update.timer` actually re-pulls and restarts the service, and what it does on a failed pull or a failed new-image start (rollback behaviour).

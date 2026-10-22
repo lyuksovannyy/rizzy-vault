@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // Loads `@rizzy-vault/core`'s wasm module for the handful of tests that cross-check this app's
 // own copies of core values (`generator-constants.ts` module docs) against the real thing.
 // Tests run in Node (`vite.config.ts`'s `test.environment`), not the vault page, so importing

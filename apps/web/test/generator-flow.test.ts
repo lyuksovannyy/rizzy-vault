@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 // `generator-flow.ts`'s mapping from UI options to the core's calls, apart from React
 // (`export-flow.test.ts`'s pattern): a normal option change reaches the real core and comes
 // back as a value of the shape asked for; an impossible combination is refused with exactly

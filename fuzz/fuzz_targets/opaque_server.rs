@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Fuzzes the server side of the OPAQUE wrapper (CRYPTO.md §5, §15 item 7). M1, the
 //! registration upload, KE1 and KE3 arrive in unauthenticated API bodies (§11.1 step 4, §11.2
 //! steps 3 and 5). The stored record, the sealed login state and the server setup come back

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Shared helpers of the integration tests: a tokio runtime, temporary directories, and a
 //! fixture dump that fills every backed-up table.
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The replay window of a device-authenticated session, at its edges, through the database
 //! (ADR 0028 item 5 "Replay window"; CRYPTO.md §5.10).
 

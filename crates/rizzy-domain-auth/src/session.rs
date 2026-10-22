@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Sessions after authentication (CRYPTO.md §5.10; threat model INV-8, INV-52).
 //!
 //! - **Tokens.** Every session gets a random 32-byte bearer token from the injected CSPRNG.

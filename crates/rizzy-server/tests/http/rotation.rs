@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Key rotation end to end over HTTP ([ADR 0025]; CRYPTO.md §11.6, §11.8): real clients
 //! (`rizzy-client`, the dev-only edge ADR 0016 §4 owner decision 4 admits) sign up, log in,
 //! enrol, authenticate their devices, write items, sync, and rotate through the router, over the
@@ -69,7 +71,7 @@ pub(crate) enum Auth<'a> {
     Device(&'a mut DeviceSession, &'a UnlockedDevice),
 }
 
-/// Sends `method path` with `body`.
+/// Sends `method path` with `body`, and records the exchange ([`Server::record`]).
 pub(crate) async fn call(
     server: &Server,
     method: &str,
@@ -77,7 +79,10 @@ pub(crate) async fn call(
     body: Vec<u8>,
     auth: Auth<'_>,
 ) -> Reply {
-    server.send(request(method, path, body, auth)).await
+    let sent = body.clone();
+    let reply = server.send(request(method, path, body, auth)).await;
+    server.record(path, &sent, &reply);
+    reply
 }
 
 /// The request `method path` with `body`, authenticated by `auth`.
