@@ -76,7 +76,7 @@
 //! | 12 configuration | [`config`], [`cli`] |
 //! | 13 secrets file | [`secrets_file`], [`secrets_backup`] |
 //! | 14 `GET /api/meta`, `Rizzy-Client` | [`http::api::meta`], [`http::headers::client_refused`] |
-//! | 15 web role paths | [`http::web`] |
+//! | 15 web role paths, as [ADR 0049] supersedes it (the route table) | [`http::web`] |
 //!
 //! The constants clients share (paths, header names, body limits, platform names) are
 //! `rizzy-proto`'s. **This crate's readings where the ADR is silent**, each documented where it
@@ -84,8 +84,7 @@
 //! `Retry-After` ([`http::api::RETRY_AFTER_FALLBACK_SECS`]); the `Rizzy-Client` and
 //! `X-Forwarded-For` checks run on the 27 `/api/v1` endpoints, before the session check, and
 //! not on `GET /api/meta`; a repeated `Authorization`, signing or `Content-Length` field line
-//! is refused; another method on a path the web role serves is a plain `405`; with
-//! `embed-web`, the web vault's fixed asset paths besides item 15's two (reported); a
+//! is refused; a
 //! `request_counter` above `i64::MAX` is refused (`rizzy-domain-auth`); the setting
 //! `RIZZY_RECOVERY_WAIT_HOURS` (ADR 0008 decision 5), which item 12's list does not name
 //! ([`config`]).
@@ -129,6 +128,7 @@
 //!
 //! [ADR 0002]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0002-own-protocol.md
 //! [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
+//! [ADR 0049]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0049-web-role-route-table.md
 //! [ADR 0010]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0010-server-shape.md
 //! [ADR 0011]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0011-storage.md
 //! [ADR 0021]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0021-server-compaction.md
