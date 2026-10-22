@@ -626,6 +626,9 @@ class InlineMenu {
     const frame = document.createElement("iframe");
     this.#frame = frame;
     frame.setAttribute("data-rizzy-inline-menu", "");
+    // The frame's accessible name (WCAG 4.1.2, axe "frame-title"; e2e/a11y.spec.ts): a constant,
+    // the same whatever the menu holds, so it tells the page nothing about the candidates.
+    frame.title = "rizzy-vault autofill";
     const anchorRect = anchor.getBoundingClientRect();
     // Frozen once, here, never re-derived from `anchor` again (`menu-visibility.ts`'s own doc on
     // why `computeExpectedRect` clamps into the viewport): this is both the frame's real

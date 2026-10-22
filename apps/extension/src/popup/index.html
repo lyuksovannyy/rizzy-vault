@@ -10,6 +10,14 @@
          unstyled. Wiring it needs the same `assetFileNames`/CSP care apps/web's vite.config.ts
          gives its one CSS file, which this change did not attempt to duplicate correctly
          without a real build to verify it against. -->
+    <style>
+      /* WCAG 2.2 SC 2.5.8 (target size, AA; e2e/a11y.spec.ts): the browser's default button
+         is about 21px tall in this unstyled popup; every button is at least 24px square. */
+      button {
+        min-height: 24px;
+        min-width: 24px;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
