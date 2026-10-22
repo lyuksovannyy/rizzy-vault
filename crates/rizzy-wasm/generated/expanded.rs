@@ -31,7 +31,7 @@
 //! |---|---|
 //! | [`SignupFlow`], [`EmergencyKit`] | signup of a web-vault account (CRYPTO.md §11.1, kind 4) |
 //! | [`LoginFlow`] | an OPAQUE login with an optional second factor; also a session's re-authentication |
-//! | [`Session`] | the unlocked session: sync driver, items, TOTP, export, import, devices, 2FA, lock |
+//! | [`Session`], [`AttachmentView`] | the unlocked session: sync driver, items, attachments (ADR 0054), TOTP, export, import, devices, 2FA, lock |
 //! | [`ItemDraft`], [`ItemSummary`], [`FieldView`] | item edits and views |
 //! | [`HttpRequest`], [`meta_request`], [`check_meta`], [`expect_no_content`] | the requests JavaScript sends and the answers it hands back |
 //! | [`generate_password_with_options`] (`generatePasswordWithOptions`), [`generate_passphrase_with_options`] (`generatePassphraseWithOptions`), [`password_entropy`] (`passwordEntropy`), [`passphrase_entropy`] (`passphraseEntropy`), [`generator_limits`] (`generatorLimits`), [`GeneratorLimits`], [`Generated`] | the generator, every option ([`generator`]) |
