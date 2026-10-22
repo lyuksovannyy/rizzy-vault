@@ -33,6 +33,12 @@
 //! Then the `worker` task starts ([`crate::worker`]) and, for `api` or `web`, the listener.
 //! A `web`-only process opens no database and reads no secrets.
 //!
+//! **The admin listener** ([ADR 0060] §2). Whenever the `api` role runs, a second listener
+//! binds `RIZZY_ADMIN_LISTEN` (default `127.0.0.1:8081`) and serves
+//! [`crate::http::admin_panel::router`], concurrently with the public one and under the same
+//! limits and shutdown. A start whose admin address cannot be bound fails
+//! ([`ServeError::AdminListener`]); a process without `api` binds no admin listener.
+//!
 //! **One active `worker` per database** ([ADR 0010] §2). With `PostgreSQL` the worker takes a
 //! session-level advisory lock on a dedicated connection outside the pool, through
 //! `rizzy-storage` (`rizzy-server` holds no sqlx, [ADR 0016] R5), and runs jobs only while it
@@ -63,7 +69,7 @@
 //!
 //! # Shutdown
 //!
-//! On `SIGINT` or `SIGTERM` the listener stops accepting, in-flight requests finish, the
+//! On `SIGINT` or `SIGTERM` the listeners stop accepting, in-flight requests finish, the
 //! worker finishes its current step, releases its leader lock and stops, and the database pools
 //! close (which also releases the `SQLite` writer lock). The wait for in-flight requests is
 //! bounded ([`ServeLimits::shutdown_grace`], 30 s): connections still open then are dropped, so
@@ -82,6 +88,7 @@
 //! [ADR 0021]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0021-server-compaction.md
 //! [ADR 0023]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0023-logical-backup-format.md
 //! [ADR 0048]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0048-per-account-storage-quota.md
+//! [ADR 0060]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0060-admin-panel-stack-boundary.md
 
 use core::fmt;
 use std::future::Future;
@@ -150,6 +157,8 @@ pub enum ServeError {
     Usage(UsageError),
     /// The listener could not be bound, or serving failed.
     Listener(std::io::ErrorKind),
+    /// The admin listener (`RIZZY_ADMIN_LISTEN`, ADR 0060 §2) could not be bound.
+    AdminListener(std::io::ErrorKind),
     /// The `PostgreSQL` instance lock was refused in this mode ([ADR 0023] §5 step 1): a server
     /// found an admin command holding it exclusively, or an admin command found a server
     /// process (or another admin command) holding it.
@@ -181,6 +190,7 @@ impl fmt::Display for ServeError {
             Self::Auth(e) => write!(f, "startup check: {e}"),
             Self::Usage(e) => write!(f, "startup backfill: {e}"),
             Self::Listener(kind) => write!(f, "listener: {kind}"),
+            Self::AdminListener(kind) => write!(f, "admin listener (RIZZY_ADMIN_LISTEN): {kind}"),
             Self::InstanceLockRefused(InstanceLockMode::Shared) => f.write_str(
                 "the database's instance lock is held exclusively: an admin command (restore, \
                  migrate, secrets rotate or secrets retire-setups) is running against it; start \
@@ -444,6 +454,47 @@ pub async fn open_services(config: &Config) -> Result<Services, ServeError> {
     })
 }
 
+/// Binds the public listener and, when the `api` role runs, the admin listener (module docs),
+/// logging each port.
+async fn bind_listeners(config: &Config) -> Result<(TcpListener, Option<TcpListener>), ServeError> {
+    let listener = TcpListener::bind(config.listen)
+        .await
+        .map_err(|e| ServeError::Listener(e.kind()))?;
+    let port = listener.local_addr().map_or(0, |a| a.port());
+    log::info("listening", &[Field::U64("port", u64::from(port))]);
+    if !config.roles.api {
+        return Ok((listener, None));
+    }
+    let admin = TcpListener::bind(config.admin_listen)
+        .await
+        .map_err(|e| ServeError::AdminListener(e.kind()))?;
+    let port = admin.local_addr().map_or(0, |a| a.port());
+    log::info("admin_listening", &[Field::U64("port", u64::from(port))]);
+    Ok((listener, Some(admin)))
+}
+
+/// Serves `app` on `listener` and the admin router on `admin`, if any, until one shutdown signal
+/// stops both.
+async fn serve_listeners(listener: TcpListener, app: Router, admin: Option<TcpListener>) {
+    let (signal_tx, signal_rx) = watch::channel(false);
+    let public = serve_http(listener, app, signalled(signal_rx.clone()));
+    let admin = async move {
+        if let Some(admin) = admin {
+            serve_http(admin, http::admin_panel::router(), signalled(signal_rx)).await;
+        }
+    };
+    let signal = async move {
+        shutdown_signal().await;
+        let _receivers_gone = signal_tx.send(true);
+    };
+    tokio::join!(public, admin, signal);
+}
+
+/// Resolves once `signal` holds `true`, or its sender is gone.
+async fn signalled(mut signal: watch::Receiver<bool>) {
+    let _closed = signal.wait_for(|stop| *stop).await;
+}
+
 /// Resolves on `SIGINT` (Ctrl-C) or, on Unix, `SIGTERM`.
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -661,17 +712,13 @@ pub async fn serve(config: Config) -> Result<(), ServeError> {
             None
         };
         let app = http::router(api, config.roles.web);
-        match tokio::net::TcpListener::bind(config.listen).await {
-            Ok(listener) => {
-                let port = listener.local_addr().map_or(0, |a| a.port());
-                log::info("listening", &[Field::U64("port", u64::from(port))]);
-                tokio::select! {
-                    () = serve_http(listener, app, shutdown_signal()) => Ok(()),
-                    // Dropping the serving future drops the listener and every connection.
-                    () = &mut lost => Err(ServeError::InstanceLockLost),
-                }
-            }
-            Err(e) => Err(ServeError::Listener(e.kind())),
+        match bind_listeners(&config).await {
+            Ok((listener, admin)) => tokio::select! {
+                () = serve_listeners(listener, app, admin) => Ok(()),
+                // Dropping the serving future drops the listeners and every connection.
+                () = &mut lost => Err(ServeError::InstanceLockLost),
+            },
+            Err(e) => Err(e),
         }
     } else {
         tokio::select! {

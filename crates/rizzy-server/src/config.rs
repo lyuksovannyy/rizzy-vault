@@ -49,6 +49,12 @@
 //!   number of bytes, default 5 GiB (5 368 709 120), at least 256 MiB, no maximum (the
 //!   operator's disk is the limit). One number for every account; no per-account override.
 //!
+//! - **The admin listener** ([ADR 0060] §2): `RIZZY_ADMIN_LISTEN`, parsed like
+//!   `RIZZY_LISTEN`, default `127.0.0.1:8081` (loopback, never `0.0.0.0`). It always binds
+//!   while the `api` role runs, so ADR 0010 §1's "Admin API and metrics bind a separate
+//!   listener" holds; the reverse proxy and the compose examples do not expose it. ADR 0028
+//!   item 12 does not list this setting: its name follows `RIZZY_LISTEN`'s.
+//!
 //! Every value has a default except the canonical origin, which the `api` and `worker` roles
 //! require (both build the auth domain, which binds the origin into OPAQUE and every
 //! device signature).
@@ -56,6 +62,7 @@
 //! [ADR 0010]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0010-server-shape.md
 //! [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
 //! [ADR 0048]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0048-per-account-storage-quota.md
+//! [ADR 0060]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0060-admin-panel-stack-boundary.md
 
 use core::fmt;
 use std::collections::BTreeMap;
@@ -78,6 +85,8 @@ pub const CONFIG: &str = "RIZZY_CONFIG";
 pub const ORIGIN: &str = "RIZZY_ORIGIN";
 /// The public listener of `api` and `web`.
 pub const LISTEN: &str = "RIZZY_LISTEN";
+/// The admin listener of the `api` role (ADR 0060 §2), never part of the public one.
+pub const ADMIN_LISTEN: &str = "RIZZY_ADMIN_LISTEN";
 /// The data volume: the `SQLite` file and its pre-migration copy (ADR 0010 §4).
 pub const DATA_DIR: &str = "RIZZY_DATA_DIR";
 /// A `postgres://` URL; without it the database is `SQLite` in the data directory (ADR 0011
@@ -106,6 +115,7 @@ pub const KEYS: &[&str] = &[
     ROLES,
     ORIGIN,
     LISTEN,
+    ADMIN_LISTEN,
     DATA_DIR,
     DATABASE_URL,
     SECRETS_FILE,
@@ -168,6 +178,10 @@ pub const MAX_CONFIG_FILE_LEN: usize = 64 * 1024;
 /// The default listener: loopback only, an unprivileged port (ADR 0010 §4). A container sets
 /// `RIZZY_LISTEN=0.0.0.0:8080` behind its reverse proxy.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8080";
+
+/// The default admin listener: loopback only, never `0.0.0.0` (ADR 0060 §2). Nothing exposes
+/// it; an operator reaches it over a tunnel or VPN.
+pub const DEFAULT_ADMIN_LISTEN: &str = "127.0.0.1:8081";
 
 /// The default data directory, the container's data volume.
 pub const DEFAULT_DATA_DIR: &str = "/data";
@@ -347,6 +361,8 @@ pub struct Config {
     pub origin: Option<ServerOrigin>,
     /// The public listener.
     pub listen: SocketAddr,
+    /// The admin listener, bound whenever the `api` role runs (ADR 0060 §2).
+    pub admin_listen: SocketAddr,
     /// The data directory.
     pub data_dir: PathBuf,
     /// The database.
@@ -507,6 +523,14 @@ impl fmt::Debug for Sources<'_> {
 }
 
 impl Sources<'_> {
+    /// The listener address `key`, or `default` when it is unset.
+    fn socket_addr(&self, key: &'static str, default: &str) -> Result<SocketAddr, ConfigError> {
+        self.get(key)?
+            .unwrap_or_else(|| default.to_owned())
+            .parse::<SocketAddr>()
+            .map_err(|_| ConfigError::Invalid(key))
+    }
+
     /// The value of `key`: the environment if set, else the file.
     fn get(&self, key: &'static str) -> Result<Option<String>, ConfigError> {
         if let Some(value) = (self.env)(key) {
@@ -584,11 +608,8 @@ impl Config {
             }
             None => None,
         };
-        let listen = sources
-            .get(LISTEN)?
-            .unwrap_or_else(|| DEFAULT_LISTEN.to_owned())
-            .parse::<SocketAddr>()
-            .map_err(|_| ConfigError::Invalid(LISTEN))?;
+        let listen = sources.socket_addr(LISTEN, DEFAULT_LISTEN)?;
+        let admin_listen = sources.socket_addr(ADMIN_LISTEN, DEFAULT_ADMIN_LISTEN)?;
         let data_dir = PathBuf::from(
             sources
                 .get(DATA_DIR)?
@@ -653,6 +674,7 @@ impl Config {
             roles,
             origin,
             listen,
+            admin_listen,
             data_dir,
             database,
             secrets_file,
@@ -798,6 +820,7 @@ mod tests {
         assert_eq!(config.roles, Roles::DEFAULT);
         assert_eq!(config.signup, SignupMode::Closed);
         assert_eq!(config.listen.to_string(), DEFAULT_LISTEN);
+        assert_eq!(config.admin_listen.to_string(), DEFAULT_ADMIN_LISTEN);
         assert!(matches!(config.database, DatabaseConfig::Sqlite(_)));
 
         let none = env_of(&[]);
@@ -889,6 +912,43 @@ mod tests {
             env: &env,
             roles_flag: None,
         })
+    }
+
+    /// ADR 0060 §2: the admin listener defaults to loopback port 8081, never `0.0.0.0`; it is
+    /// parsed like `RIZZY_LISTEN`, and a value that is not a socket address refuses the
+    /// configuration, naming the setting.
+    #[test]
+    fn admin_listen_is_loopback_by_default_and_parsed_like_listen() {
+        let default = from_env(&[]).unwrap().admin_listen;
+        assert_eq!(default.to_string(), "127.0.0.1:8081");
+        assert!(default.ip().is_loopback());
+        assert_ne!(default, from_env(&[]).unwrap().listen);
+        assert_eq!(
+            from_env(&[(ADMIN_LISTEN, "127.0.0.1:0")])
+                .unwrap()
+                .admin_listen
+                .to_string(),
+            "127.0.0.1:0"
+        );
+        assert_eq!(
+            from_env(&[(ADMIN_LISTEN, "[::1]:9091")])
+                .unwrap()
+                .admin_listen
+                .to_string(),
+            "[::1]:9091"
+        );
+        for bad in [
+            &[(ADMIN_LISTEN, "")],
+            &[(ADMIN_LISTEN, "localhost:8081")],
+            &[(ADMIN_LISTEN, "127.0.0.1")],
+            &[(ADMIN_LISTEN, "8081")],
+        ] {
+            assert_eq!(
+                from_env(bad).unwrap_err(),
+                ConfigError::Invalid(ADMIN_LISTEN),
+                "{bad:?}"
+            );
+        }
     }
 
     /// ADR 0028 item 10, open question 6: a public origin is HTTPS.

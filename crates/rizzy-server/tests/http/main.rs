@@ -18,6 +18,10 @@
 //! download, retries and conflicts, exact chunk lengths and indices, another account's id, the
 //! 25 MiB cap and the quota answered `quota_exceeded`, and the counter released at delete.
 //!
+//! The admin listener's boundary (`admin_panel`, ADR 0060 §1, §2): its own router under its own
+//! CSP, every path a plain `404` at M3, a vault session reaching nothing there, and `/admin/...`
+//! a plain `404` on the public listener.
+//!
 //! ADR 0028's HTTP conventions are pinned by `conventions` (the error table and `Retry-After`,
 //! the one `401`, `Content-Length`, no CORS and no compression, the trusted-proxy rule,
 //! `/api/meta` and `Rizzy-Client`, the web role's paths) and `signing` (over a real socket:
@@ -31,6 +35,7 @@
 )]
 
 mod account;
+mod admin_panel;
 mod attachments;
 mod attack;
 mod common;
