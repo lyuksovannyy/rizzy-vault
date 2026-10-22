@@ -17,6 +17,10 @@
 // options after every change (debounced) so a value the user has not generated yet still shows
 // its bit count and, for an impossible combination, the core's own refusal message
 // (`generatorErrorMessage`) instead of a UI-invented one.
+//
+// A generated value can be checked against known breaches (ADR 0053; `PasswordHealth.tsx`):
+// the value, already shown here, crosses to the Worker as bytes it zeroes, and only a
+// 5-character hash prefix leaves the browser.
 import type { ClassRule, Generated, GeneratorCheck, PassphraseOptions, PasswordOptions } from "@rizzy-vault/core";
 import { SecretField } from "@rizzy-vault/ui";
 import { useEffect, useRef, useState } from "react";
@@ -25,6 +29,7 @@ import { codeOf } from "../core-client.ts";
 import { GENERATOR_LIMITS } from "../generator-constants.ts";
 import { checkEntropy, generateValue } from "../generator-flow.ts";
 import { messageFor } from "../messages.ts";
+import { BreachCheckButton } from "./PasswordHealth.tsx";
 import type { VaultContext } from "./VaultView.tsx";
 import { useAction } from "./common.tsx";
 
@@ -268,6 +273,13 @@ export function GeneratorPane(props: { readonly ctx: VaultContext }) {
         <div className="generated">
           <SecretField label="Generated" name="generated" value={result.value} initiallyRevealed />
           <p className="muted">About {Math.floor(result.entropyBits)} bits of entropy.</p>
+          <BreachCheckButton
+            key={result.value}
+            check={() =>
+              ctx.client.call("breachCheckPassword", new TextEncoder().encode(result.value))
+            }
+            testId="generator-breach-result"
+          />
           <button
             type="button"
             className="secondary"

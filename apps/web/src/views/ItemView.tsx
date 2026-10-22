@@ -15,9 +15,13 @@
 // A Secure Note's notes, and only those, render from their Markdown (`NoteMarkdown.tsx`; ADR
 // 0062 §2, INV-88). Every other item type's notes stay plain text, and Copy always copies the
 // stored source (§12).
+//
+// A login's password offers "Check for breaches" (ADR 0053; `PasswordHealth.tsx`): the Worker
+// reads the password inside the core and sends only a 5-character hash prefix, so the check
+// needs no reveal and puts no value on this thread.
 import type { FieldView, HistoryEntry, ItemSummary, TotpCode } from "@rizzy-vault/core";
 import { ConfirmDialog, IconStarFilled, IconStarOutline, SecretField, TypeIcon, useToast } from "@rizzy-vault/ui";
-import { useEffect, useId, useState } from "react";
+import { type ReactNode, useEffect, useId, useState } from "react";
 
 import { codeOf } from "../core-client.ts";
 import {
@@ -38,6 +42,7 @@ import { ConflictChooser } from "./ConflictChooser.tsx";
 import { ItemHistory } from "./ItemHistory.tsx";
 import { LargeType } from "./LargeType.tsx";
 import { NoteMarkdown } from "./NoteMarkdown.tsx";
+import { BreachCheckButton } from "./PasswordHealth.tsx";
 import { PasswordHistory } from "./PasswordHistory.tsx";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText, useAction } from "./common.tsx";
@@ -57,6 +62,8 @@ function FieldValue(props: {
   /** The refresh after a conflict resolution (`ConflictChooser.tsx`); `undefined` when the
    * item cannot be written (read-only vault, trashed item), so the chooser only shows. */
   readonly onResolved?: ((message: string) => Promise<void>) | undefined;
+  /** Shown under the value: the password's breach check (`PasswordHealth.tsx`). */
+  readonly extra?: ReactNode;
 }) {
   const { ctx, id, field, label } = props;
   const [revealed, setRevealed] = useState<string | undefined>();
@@ -139,6 +146,7 @@ function FieldValue(props: {
         )}
       </span>
       <ErrorText code={error} />
+      {props.extra}
       {field.conflict && choosing && (
         <ConflictChooser ctx={ctx} id={id} field={field} label={label} onResolved={props.onResolved} />
       )}
@@ -377,6 +385,14 @@ export function ItemView(props: {
             markdown={summary.itemType === "note" && f.key === "item.notes"}
             onLargeType={f.key === "login.password" ? setLargeType : undefined}
             onResolved={resolved}
+            extra={
+              f.key === "login.password" && f.concealed ? (
+                <BreachCheckButton
+                  check={() => ctx.client.call("breachCheckItem", id)}
+                  testId="item-breach-result"
+                />
+              ) : undefined
+            }
           />
         ))}
       {summary.itemType === "ssh-key" && !grouped.fixed.some((f) => f.key === "ssh.port") && (

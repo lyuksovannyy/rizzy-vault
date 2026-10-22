@@ -24,6 +24,7 @@ import {
   IconLock,
   IconMenu,
   IconSettings,
+  IconShield,
   IconStarFilled,
   IconTag,
   IconTransfer,
@@ -48,6 +49,7 @@ import { GeneratorPane } from "./GeneratorPane.tsx";
 import { ItemsPane, type Scope } from "./ItemsPane.tsx";
 import { NoticesPanel } from "./NoticesPanel.tsx";
 import { OnboardingView } from "./OnboardingView.tsx";
+import { PasswordHealthPane } from "./PasswordHealth.tsx";
 import { SettingsView } from "./SettingsView.tsx";
 import { ShortcutsHelp } from "./ShortcutsHelp.tsx";
 import { TransferPane } from "./TransferPane.tsx";
@@ -79,6 +81,7 @@ const ITEM_FILTERS: readonly { readonly scope: Scope; readonly label: string; re
  * view, alongside Appearance. */
 const OTHER_SECTIONS = [
   { id: "generator", label: "Generator", icon: <IconGenerator /> },
+  { id: "health", label: "Password health", icon: <IconShield /> },
   { id: "transfer", label: "Export and import", icon: <IconTransfer /> },
 ] as const;
 
@@ -546,6 +549,7 @@ export function VaultView(props: {
           )}
           {section === "trash" && <ItemsPane ctx={ctx} trash scope={ALL_SCOPE} newItemSignal={0} />}
           {section === "generator" && <GeneratorPane ctx={ctx} />}
+          {section === "health" && <PasswordHealthPane ctx={ctx} onOpenItem={openItemFromPalette} />}
           {section === "transfer" && <TransferPane ctx={ctx} />}
           {section === "settings" && <SettingsView ctx={ctx} onOpenGuide={() => chooseSection("guide")} />}
           {section === "guide" && (
