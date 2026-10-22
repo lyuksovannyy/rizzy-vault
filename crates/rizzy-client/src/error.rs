@@ -171,6 +171,11 @@ pub enum ClientError {
     /// A settings edit would pass a limit of ADR 0042 §3–§4: more than 64 user groups, more
     /// than 1,024 disabled global groups, or a settings entry over 1 MiB. Nothing was written.
     SettingsLimitReached,
+    /// A file over the 25 MiB attachment cap (ADR 0054 §2). Nothing was written or sent.
+    AttachmentTooLarge,
+    /// A downloaded attachment did not verify: a chunk missing, extra, out of place or failing
+    /// to decrypt (INV-78, INV-79). Nothing was assembled; the partial data is wiped.
+    AttachmentIncomplete,
     /// An internal step failed that the inputs cannot cause: a sealing, signing, encoding or
     /// derivation call that is unreachable for valid state. No detail is kept on purpose.
     Internal,
@@ -224,6 +229,8 @@ impl ClientError {
             Self::SettingsUpdateRequired => "settings_update_required",
             Self::EquivalenceDomainRejected => "equivalence_domain_rejected",
             Self::SettingsLimitReached => "settings_limit_reached",
+            Self::AttachmentTooLarge => "attachment_too_large",
+            Self::AttachmentIncomplete => "attachment_incomplete",
             Self::Internal => "internal",
         }
     }
@@ -303,6 +310,8 @@ impl fmt::Display for ClientError {
                 "a group domain must be a registrable domain, not a public suffix or a subdomain"
             }
             Self::SettingsLimitReached => "the account settings are at a size limit",
+            Self::AttachmentTooLarge => "the file is larger than the 25 MiB attachment limit",
+            Self::AttachmentIncomplete => "the attachment did not download completely",
             Self::Internal => "internal error",
         })
     }
@@ -365,6 +374,8 @@ mod tests {
             ClientError::SettingsUpdateRequired,
             ClientError::EquivalenceDomainRejected,
             ClientError::SettingsLimitReached,
+            ClientError::AttachmentTooLarge,
+            ClientError::AttachmentIncomplete,
             ClientError::Internal,
         ];
         let mut codes: Vec<&str> = all.iter().map(|e| e.code()).collect();

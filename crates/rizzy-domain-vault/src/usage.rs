@@ -8,7 +8,11 @@
 //! snapshot, the same framing plus its header, container, envelope and carried wrap. It is the
 //! same on both engines, unlike an engine's row encoding, and it is only what THREAT_MODEL §3.4
 //! already marks Visible: lengths, never contents. The counted rows are every row of every
-//! table this crate owns that holds bytes: today `vault_ops` and `vault_snapshots`.
+//! table this crate owns that holds bytes: `vault_ops`, `vault_snapshots`, and since [ADR 0054]
+//! `vault_attachments` with `vault_attachment_chunks`. An attachment counts its wrap plus every
+//! chunk envelope its declared size implies (`total_plaintext_len + 90` per chunk), charged in
+//! full at `attachments/create` and released at `attachments/delete` or by the 24 h sweep
+//! ([`crate::attachments`]).
 //!
 //! **Where it is charged** (§3): the counter is `rizzy-storage`'s
 //! ([`rizzy_storage::quota`]); this crate charges it inside the account-locked transactions it
@@ -32,6 +36,7 @@
 //! transaction; `rizzy-server` seeds and corrects `rizzy-storage`'s counter from them.
 //!
 //! [ADR 0048]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0048-per-account-storage-quota.md
+//! [ADR 0054]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0054-attachments-envelope-and-api.md
 //! [`ErrorCode::QuotaExceeded`]: rizzy_proto::error::ErrorCode::QuotaExceeded
 
 use rizzy_core::ids::AccountId;
@@ -131,13 +136,21 @@ pub(crate) fn credit(freed: u64) -> i64 {
 ///
 /// # Errors
 /// [`VaultError::Storage`]; [`VaultError::Corrupt`] for a negative count.
-pub async fn counted_bytes(conn: Conn<'_>, account_id: AccountId) -> Result<u64, VaultError> {
-    let tables = repo::account_row_lengths(conn, account_id).await?;
-    Ok(tables.iter().fold(0u64, |total, t| {
+pub async fn counted_bytes(mut conn: Conn<'_>, account_id: AccountId) -> Result<u64, VaultError> {
+    let reborrowed = match &mut conn {
+        Conn::Sqlite(c) => Conn::Sqlite(c),
+        Conn::Postgres(c) => Conn::Postgres(c),
+    };
+    let tables = repo::account_row_lengths(reborrowed, account_id).await?;
+    let records = tables.iter().fold(0u64, |total, t| {
         total
             .saturating_add(t.rows.saturating_mul(len(STATEMENT_FRAME)))
             .saturating_add(t.bytes)
-    }))
+    });
+    // ADR 0054 §5–§6: each attachment counts its wrap and every chunk envelope its declared size
+    // implies, the figure `attachments/create` charged (crate::attachments).
+    let attachments = crate::attachments::account_attachment_bytes(conn, account_id).await?;
+    Ok(records.saturating_add(attachments))
 }
 
 /// Every account that owns a vault, ascending, on the caller's connection.

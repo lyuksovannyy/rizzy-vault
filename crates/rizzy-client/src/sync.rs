@@ -1623,12 +1623,22 @@ impl VaultSync {
     /// `Ok(None)` when none is held or every held key is stale: the writer then generates a
     /// fresh item key at the current `vault_key_epoch`, carries its wrap with the op, and the
     /// merge makes a full snapshot due ([`OwnWrite::fresh_item_key`](rizzy_sync::merge::OwnWrite)).
-    fn writer_key(&self, item: ItemId) -> Option<&ItemKey> {
+    pub(crate) fn writer_key(&self, item: ItemId) -> Option<&ItemKey> {
         self.item_keys.get(&item).and_then(|keys| {
             keys.iter()
                 .rev()
                 .find(|k| !k.is_stale(self.vault_key.epoch()))
         })
+    }
+
+    /// The held item key of `item` whose derived id is `key_id`, current or old (CRYPTO.md
+    /// §11.6 reader rule): an `ATTACHMENT_KEY_WRAP` is never re-wrapped, so it may name an old
+    /// one (ADR 0054 §3).
+    pub(crate) fn item_key_by_id(&self, item: ItemId, key_id: &SymmetricKeyId) -> Option<&ItemKey> {
+        self.item_keys
+            .get(&item)?
+            .iter()
+            .find(|k| k.matches_key_id(key_id))
     }
 
     /// Writes one own op on `item` (ADR 0012 §2–§4, ADR 0018 §3; CRYPTO.md §8.4, §10.2):

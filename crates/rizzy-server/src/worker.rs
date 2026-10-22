@@ -22,8 +22,15 @@
 //!    items, until it is empty or [`MAX_COMPACTION_BATCHES`] batches ran. Each item is its own
 //!    transaction under the account lock; a failing item is logged by vault and item id and
 //!    moved to the back of the queue (`rizzy_domain_vault::VaultDomain::run_compaction`).
+//!
+//!    4b. **Unfinished attachment uploads** (ADR 0054 §7, the role table's "scheduled
+//!    deletion"): attachments created more than 24 h ago whose stored chunks are still fewer
+//!    than their chunk count are deleted, each in its own account-locked transaction that
+//!    releases its counted bytes (`rizzy_domain_vault::VaultDomain::sweep_attachments`, at most
+//!    256 per run). A complete attachment no item references is not caught (ADR 0054 "Owner
+//!    answers" 3).
 //! 5. **`SQLite` space** (ADR 0011 "`SQLite` settings", `auto_vacuum`): `PRAGMA
-//!    incremental_vacuum` when step 1 or 4 deleted anything.
+//!    incremental_vacuum` when step 1, 4 or 4b deleted anything.
 //! 6. **The pre-migration copy** (ADR 0011 point 9: "`worker` deletes the copy 24 h after the
 //!    migrated server started and passed its startup self-check"): deleted once 24 h have
 //!    passed since this process passed its startup self-check ([`PreMigrationCopy`]). The
@@ -132,6 +139,8 @@ pub struct RunReport {
     pub snapshots_dropped: usize,
     /// Items whose compaction failed.
     pub compaction_failures: usize,
+    /// Unfinished attachment uploads deleted by the 24 h sweep (ADR 0054 §7).
+    pub attachments_swept: u64,
     /// Whether the pre-migration copy was deleted.
     pub copy_removed: bool,
     /// Whether the run stopped because the leader lock was lost (module docs); the steps after
@@ -490,8 +499,24 @@ pub async fn run_once(
             }
         }
     }
-    let deleted =
-        report.auth_rows_purged > 0 || report.bodies_deleted > 0 || report.snapshots_dropped > 0;
+    // ADR 0054 §7: unfinished attachment uploads older than 24 h, with their quota.
+    if !still_leader(leader).await {
+        return RunReport {
+            leadership_lost: true,
+            ..report
+        };
+    }
+    match api.vault.sweep_attachments(now).await {
+        Ok(swept) => report.attachments_swept = swept,
+        Err(e) => log::error(
+            "worker_attachment_sweep_failed",
+            &[Field::Error("error", &e)],
+        ),
+    }
+    let deleted = report.auth_rows_purged > 0
+        || report.bodies_deleted > 0
+        || report.snapshots_dropped > 0
+        || report.attachments_swept > 0;
     if deleted && db.engine() == Engine::Sqlite {
         // SQLite: the leader is the writer lock, which cannot be lost while `db` lives; no
         // check is needed before this step.

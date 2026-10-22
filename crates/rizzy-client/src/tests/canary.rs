@@ -207,7 +207,7 @@ fn canary_key_bytes_and_device_envelopes_never_reach_the_server() {
 }
 
 /// Whether `haystack` contains `needle`.
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+pub(super) fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
@@ -244,7 +244,7 @@ fn base64(alphabet: &[u8; 64], bytes: &[u8]) -> Vec<u8> {
 /// Every form of `secret` the canary searches for: raw, lower- and upper-case hex, and base64
 /// in the standard and URL alphabets at each of the three byte alignments, so that the secret
 /// is found inside a longer encoded value too, padded or not.
-fn forms(secret: &[u8]) -> Vec<Vec<u8>> {
+pub(super) fn forms(secret: &[u8]) -> Vec<Vec<u8>> {
     let hex = to_hex(secret);
     let mut out = vec![
         secret.to_vec(),
