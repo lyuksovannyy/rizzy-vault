@@ -32,6 +32,7 @@
 //! | [`LoginFlow`] | an OPAQUE login with an optional second factor; also a session's re-authentication |
 //! | [`Session`], [`AttachmentView`] | the unlocked session: sync driver, items, attachments (ADR 0054), TOTP, export, import, devices, 2FA, lock |
 //! | [`ItemDraft`], [`ItemSummary`], [`FieldView`] | item edits and views |
+//! | [`autofill::CustomFieldAutofillView`], [`autofill::AutofillOffer`], [`autofill::FillValues`], [`autofill::SaveRowView`] | autocomplete-driven autofill (ADR 0076): the editor's id states, the offer's disclosure, one fill's values, the save dialog's rows |
 //! | [`HttpRequest`], [`meta_request`], [`check_meta`], [`expect_no_content`] | the requests JavaScript sends and the answers it hands back |
 //! | [`generate_password_with_options`] (`generatePasswordWithOptions`), [`generate_passphrase_with_options`] (`generatePassphraseWithOptions`), [`password_entropy`] (`passwordEntropy`), [`passphrase_entropy`] (`passphraseEntropy`), [`generator_limits`] (`generatorLimits`), [`GeneratorLimits`], [`Generated`] | the generator, every option ([`generator`]) |
 //! | [`TotpCode`], [`EncryptedExport`], [`ImportReport`], [`DeviceView`], [`TwoFactorEnrolment`] | results |
@@ -91,6 +92,7 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
+pub mod autofill;
 pub mod device;
 pub mod error;
 pub mod generator;

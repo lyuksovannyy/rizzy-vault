@@ -932,6 +932,103 @@ impl DeviceSession {
         Ok(items::fields(vault, item))
     }
 
+    /// What each custom field's autocomplete id does, in list order (ADR 0076 §2.5).
+    ///
+    /// # Errors
+    /// As [`DeviceSession::item`].
+    #[wasm_bindgen(js_name = customFieldAutofill)]
+    pub fn custom_field_autofill(
+        &self,
+        id: &str,
+    ) -> Result<Vec<crate::autofill::CustomFieldAutofillView>, CoreError> {
+        crate::autofill::custom_field_autofill(self.vault_ref()?, id)
+    }
+
+    /// The offer of one inline-menu candidate (ADR 0076 §4.1): whether it fills a TOTP code,
+    /// and which custom fields it fills for the page's custom `tokens` (Display Names and
+    /// flags only, never a value).
+    ///
+    /// # Errors
+    /// As `DeviceSession::vault_ref`; `invalid_input` for an id that is not 32 hex digits.
+    #[wasm_bindgen(js_name = autofillOffer)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen hands this exported call ownership of the JS array as Vec<String>"
+    )]
+    pub fn autofill_offer(
+        &self,
+        id: &str,
+        tokens: Vec<String>,
+    ) -> Result<crate::autofill::AutofillOffer, CoreError> {
+        crate::autofill::autofill_offer(self.vault_ref()?, id, &tokens)
+    }
+
+    /// The values of one fill click (ADR 0076 §4.2): one coarse call. `only` is `username`,
+    /// `password`, `totp` or none; `tokens` and `elements` are the offer record's custom
+    /// tokens and the element ids it recorded for them. The TOTP code is computed here at
+    /// `now_ms`; the secret never crosses.
+    ///
+    /// # Errors
+    /// As `DeviceSession::vault_ref`; `invalid_input` for a bad id, `only` or lists of
+    /// different lengths; `unknown_item` unless the item is an Active Login.
+    #[wasm_bindgen(js_name = fillPlan)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one coarse call: the offer record's scope, flat, as wasm-bindgen passes it"
+    )]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen hands this exported call ownership of the JS arrays and strings"
+    )]
+    pub fn fill_plan(
+        &self,
+        id: &str,
+        only: Option<String>,
+        totp: bool,
+        tokens: Vec<String>,
+        elements: Vec<String>,
+        username_token: Option<String>,
+        password_token: Option<String>,
+        now_ms: u64,
+    ) -> Result<crate::autofill::FillValues, CoreError> {
+        crate::autofill::fill_plan(
+            self.vault_ref()?,
+            id,
+            &crate::autofill::FillArgs {
+                only: only.as_deref(),
+                totp,
+                tokens: &tokens,
+                elements: &elements,
+                username_token: username_token.as_deref(),
+                password_token: password_token.as_deref(),
+            },
+            now_ms,
+        )
+    }
+
+    /// The save dialog's custom-field rows (ADR 0076 §5.3) for a new item (`id` absent) or an
+    /// update of `id`: `tokens`, `values` and `masked` (1 for a `type=password` input) are
+    /// the captured fields, parallel. No value crosses back.
+    ///
+    /// # Errors
+    /// As `DeviceSession::vault_ref`; `invalid_input` for a bad id or lists of different
+    /// lengths.
+    #[wasm_bindgen(js_name = customSavePlan)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen hands this exported call ownership of the JS arrays"
+    )]
+    pub fn custom_save_plan(
+        &self,
+        id: Option<String>,
+        tokens: Vec<String>,
+        values: Vec<String>,
+        masked: Vec<u8>,
+    ) -> Result<Vec<crate::autofill::SaveRowView>, CoreError> {
+        let values: Vec<Zeroizing<String>> = values.into_iter().map(Zeroizing::new).collect();
+        crate::autofill::save_plan(self.vault_ref()?, id.as_deref(), &tokens, &values, &masked)
+    }
+
     /// One field's value as text, concealed or not: call it only on the user's request.
     ///
     /// # Errors
