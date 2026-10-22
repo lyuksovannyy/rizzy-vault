@@ -40,6 +40,17 @@ crypto and store decision still happens inside `DurableSession`/`rizzy-wasm`).
   but it is not nothing: a slow enough network, or a form that resolves synchronously, can hit
   it. A full fix is an on-load "is there a pending offer for my origin?" check the content
   script runs on every page, which this change does not add.
+- **Accessibility audit (M3, ADR 0014 §5):** `e2e/a11y.spec.ts` runs axe-core's WCAG 2.x A/AA
+  and best-practice rules, and a Chromium accessibility-tree check (`e2e/a11y.ts`, the same
+  checks as `apps/web/e2e/a11y.ts`), over the options page, the popup's set-up, items, item,
+  generator and locked views, and a login page with the inline-menu iframe in it. It is the one
+  extension spec CI runs (self-contained, a few seconds). Found and fixed by it: the inline-menu
+  iframe had no accessible name (now a constant `title`, the same whatever the menu holds) and
+  its content sat outside any landmark, and buttons in the unstyled popup and the menu were
+  under WCAG 2.2's 24px target size. Not covered: real screen readers, Firefox, and keyboard
+  use of the extension: whether a keyboard user can reach the inline menu from the page's field
+  and fill from it is not checked (its buttons accept any trusted click, keyboard activation
+  included, but nothing tests the way there).
 - **Not attempted:** Firefox Playwright coverage (no automatable unpacked-extension flow, same
   as before — this also means `pushApplyFill`'s direct-`ext.tabs` branch, the one Firefox's
   `background-page.ts` actually takes, has no e2e coverage of its own; only the Chromium relay
