@@ -72,13 +72,18 @@
 //!
 //! # Readings (conservative, where ADR 0027 §2 leaves a detail open)
 //!
-//! - **A write the new item may not make.** `check_carried` refuses a known key of another
-//!   item type and the keys an M1 client never writes (`uri/<id>/match`,
-//!   `share/<id>/secret`). Such a register is left out and counted
+//! - **A key of another item type** (`check_carried` refuses it with `WrongItemType`: a
+//!   `ssh.host` on a Login, a `card.number` on an Identity) **skips the whole item**, like any
+//!   other per-item write failure ([ADR 0055] owner answer 4, option (a): ADR 0027 §2 step 4,
+//!   "Per-item refusals do not refuse the file"). Since ADR 0055 assigned the `ssh.`, `api.`,
+//!   `license.`, `wifi.` and `bank.` keys, they are known keys of their own types, so this
+//!   now covers them too; before, they were reserved and carried on any type.
+//! - **A key this client never writes** (`share/<id>/secret`, M5's; `check_carried` refuses
+//!   it with `NotWritable`). Such a register is left out and counted
 //!   ([`PayloadImport::fields_not_carried`]); the item is still imported. `rizzy-core` treats
-//!   those keys the same way in a restore or duplicate as a new item.
+//!   it the same way in a restore or duplicate as a new item.
 //! - **Which items are skipped.** An item without a valid `item.type`, of a type this client
-//!   does not support, or of the vault-settings type (which a writer never exports, and which
+//!   does not support, holding a key of another item type (above), or of the vault-settings type (which a writer never exports, and which
 //!   is never imported as an item), and an item the import path refuses because it would be
 //!   oversize as a new item.
 //! - **Which history is carried.** Only history entries that are a non-empty Text, since
@@ -88,6 +93,7 @@
 //!   live snapshot data.
 //!
 //! [ADR 0027]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0027-export-payload.md
+//! [ADR 0055]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0055-m3-item-type-field-keys.md
 
 use core::fmt;
 
@@ -417,9 +423,10 @@ fn new_item<R: CryptoRng + ?Sized>(entry: &PayloadEntry<'_>, rng: &mut R) -> Opt
                 FieldKey::parse(key.as_bytes()).ok()?,
                 Value::copy_from_encoded(shown.value).ok()?,
             )),
-            Err(WriteError::NotWritable | WriteError::WrongItemType) => {
+            Err(WriteError::NotWritable) => {
                 item.fields_lost = item.fields_lost.saturating_add(1);
             }
+            // `WrongItemType` among them: ADR 0055 owner answer 4 skips the whole item.
             Err(_) => return None,
         }
     }
