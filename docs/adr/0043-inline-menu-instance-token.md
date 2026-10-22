@@ -99,6 +99,22 @@ can still vouch for.
    `runtime.sendMessage`/`onMessage` and targeted `postMessage` identically today (V) — no new,
    version-gated API, so no separate support spike is needed.
 
+### Owner answers at acceptance (2026-10-22)
+
+The owner accepted this ADR as drafted; the recommendations of "Open questions for the owner" stand:
+
+1. The safety-net TTL is 30 minutes.
+2. There is no separate rate limit for register/revoke.
+3. The check covers exactly the three message kinds of point 4, and any later extension-origin-iframe
+   sender class uses the same check from the start.
+4. Yes, conservatively: a `revoke_iframe_instance` takes effect at the background only once any
+   in-flight request bearing that token has settled. A measurement of real click→blur ordering may
+   later relax this to immediate revocation.
+
+The accepting change sets the status lines of ADR 0036 (§4, first bullet, in part: row 1 of "What
+this ADR supersedes") and ADR 0040 (point 1 in part, point 3 in part: rows 2–3), and their index
+rows.
+
 ## Consequences
 
 ### Positive
