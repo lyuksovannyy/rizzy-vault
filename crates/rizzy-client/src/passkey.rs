@@ -31,7 +31,8 @@
 //! [ADR 0037]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0037-url-matching-and-autofill-rules.md
 //! [ADR 0039]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0039-passkeys-vault-and-extension.md
 
-use rizzy_core::passkey::{Es256SigningKey, client_data_hash};
+use rizzy_core::item::schema::{PASSKEY_ALG_EDDSA, PASSKEY_ALG_ES256};
+use rizzy_core::passkey::{EdDsaSigningKey, Es256SigningKey, client_data_hash};
 use rizzy_core::rng::CryptoRng;
 use rizzy_match::{NormalizedUrl, Scheme, normalize_domain, suffix};
 
@@ -205,6 +206,45 @@ pub fn create_credential<R: CryptoRng + ?Sized>(
     })
 }
 
+/// A stored passkey's signing key, of either algorithm `passkey/<id>/alg` names (ADR 0039 §1:
+/// 1 = ES256, 2 = `EdDSA`). This project creates ES256 credentials only (ADR 0039 §2); an
+/// `EdDSA` one can come in through a CXF import (ADR 0074 §3), and signs with
+/// [`EdDsaSigningKey`] (ADR 0074 Context: "raw-message sign"), never as a P-256 scalar.
+#[derive(Debug)]
+pub enum PasskeySigningKey {
+    /// ES256 (COSE `-7`): DER-encoded ECDSA signatures.
+    Es256(Es256SigningKey),
+    /// `EdDSA` with Ed25519 (COSE `-8`): raw 64-byte signatures.
+    EdDsa(EdDsaSigningKey),
+}
+
+impl PasskeySigningKey {
+    /// Rebuilds the key of a stored passkey from its `alg` and decrypted `private_key`.
+    ///
+    /// # Errors
+    /// [`ClientError::InvalidInput`] for another `alg`, or bytes that are not a key of it.
+    pub fn from_stored(alg: u16, private_key: &[u8]) -> Result<Self, ClientError> {
+        match alg {
+            PASSKEY_ALG_ES256 => Es256SigningKey::from_bytes(private_key)
+                .map(Self::Es256)
+                .map_err(|_| ClientError::InvalidInput),
+            PASSKEY_ALG_EDDSA => EdDsaSigningKey::from_seed(private_key)
+                .map(Self::EdDsa)
+                .map_err(|_| ClientError::InvalidInput),
+            _ => Err(ClientError::InvalidInput),
+        }
+    }
+
+    /// The assertion signature over `message`: DER for ES256 (`WebAuthn` L3 §6.5.6, as
+    /// [`Es256SigningKey::sign_der`]), the raw 64 bytes for `EdDSA`.
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, ClientError> {
+        match self {
+            Self::Es256(key) => key.sign_der(message).map_err(internal),
+            Self::EdDsa(key) => key.sign(message).map(|s| s.to_vec()).map_err(internal),
+        }
+    }
+}
+
 /// Everything one `navigator.credentials.get()` ceremony produces (ADR 0039 §2).
 #[derive(Debug)]
 pub struct Assertion {
@@ -225,8 +265,9 @@ pub struct Assertion {
     pub client_data_json: Vec<u8>,
     /// `authenticatorData`, for the caller to hand back to the page verbatim.
     pub authenticator_data: Vec<u8>,
-    /// The DER-encoded ECDSA signature over `authenticatorData ‖ SHA-256(clientDataJSON)`
-    /// ([`Es256SigningKey::sign_der`]).
+    /// The signature over `authenticatorData ‖ SHA-256(clientDataJSON)`: DER-encoded ECDSA
+    /// for ES256 ([`Es256SigningKey::sign_der`]); the raw 64-byte Ed25519 signature for an
+    /// imported `EdDSA` passkey ([`PasskeySigningKey`]). The name predates `EdDSA`.
     pub signature_der: Vec<u8>,
 }
 
@@ -257,6 +298,48 @@ pub fn get_assertion(
     rp_id: &str,
     challenge: &[u8],
 ) -> Result<Assertion, ClientError> {
+    assertion(
+        |message| signing_key.sign_der(message).map_err(internal),
+        credential_id,
+        user_handle,
+        origin,
+        rp_id,
+        challenge,
+    )
+}
+
+/// [`get_assertion`] for a stored passkey of either algorithm ([`PasskeySigningKey`]): what
+/// the hosts call, after reading `passkey/<id>/alg` and `/private_key`.
+///
+/// # Errors
+/// As [`get_assertion`].
+pub fn get_assertion_with(
+    signing_key: &PasskeySigningKey,
+    credential_id: &[u8],
+    user_handle: &[u8],
+    origin: &str,
+    rp_id: &str,
+    challenge: &[u8],
+) -> Result<Assertion, ClientError> {
+    assertion(
+        |message| signing_key.sign(message),
+        credential_id,
+        user_handle,
+        origin,
+        rp_id,
+        challenge,
+    )
+}
+
+/// The ceremony of [`get_assertion`], signing with `sign`.
+fn assertion(
+    sign: impl FnOnce(&[u8]) -> Result<Vec<u8>, ClientError>,
+    credential_id: &[u8],
+    user_handle: &[u8],
+    origin: &str,
+    rp_id: &str,
+    challenge: &[u8],
+) -> Result<Assertion, ClientError> {
     let verified = verify_rp_id(origin, rp_id)?;
     let origin_string = wire::origin_string(&verified.origin);
 
@@ -267,7 +350,7 @@ pub fn get_assertion(
     message.extend_from_slice(&authenticator_data);
     message.extend_from_slice(&client_data_hash(&client_data_json));
 
-    let signature_der = signing_key.sign_der(&message).map_err(internal)?;
+    let signature_der = sign(&message)?;
 
     Ok(Assertion {
         credential_id: credential_id.to_vec(),
@@ -434,8 +517,78 @@ mod ceremony_tests {
     use chacha20::ChaCha20Rng;
     use rand_core::SeedableRng as _;
 
-    use super::{create_credential, get_assertion};
+    use super::{PasskeySigningKey, create_credential, get_assertion, get_assertion_with};
     use crate::error::ClientError;
+
+    /// An imported `EdDSA` passkey (ADR 0074 §3) signs its assertion with Ed25519, raw 64 bytes,
+    /// verifiable under the key derived from its seed; ES256 through the same entry point still
+    /// signs DER; any other `alg` is refused.
+    #[test]
+    fn eddsa_and_es256_stored_keys_sign_assertions_with_their_own_algorithm() {
+        // RFC 8032 §7.1 TEST 1's seed.
+        let seed = [
+            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
+            0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
+            0x1c, 0xae, 0x7f, 0x60,
+        ];
+        let key = PasskeySigningKey::from_stored(2, &seed).unwrap();
+        let assertion = get_assertion_with(
+            &key,
+            b"cred",
+            b"user",
+            "https://example.com",
+            "example.com",
+            b"challenge",
+        )
+        .unwrap();
+        assert_eq!(assertion.signature_der.len(), 64);
+        let mut message = assertion.authenticator_data.clone();
+        message.extend_from_slice(&rizzy_core::passkey::client_data_hash(
+            &assertion.client_data_json,
+        ));
+        rizzy_core::passkey::EdDsaSigningKey::from_seed(&seed)
+            .unwrap()
+            .verifying_key()
+            .verify(&message, &assertion.signature_der)
+            .unwrap();
+
+        let mut rng = ChaCha20Rng::seed_from_u64(9);
+        let created =
+            create_credential(&mut rng, "https://example.com", "example.com", b"r").unwrap();
+        let stored = created.signing_key.to_bytes();
+        let key = PasskeySigningKey::from_stored(1, stored.expose_secret()).unwrap();
+        let assertion = get_assertion_with(
+            &key,
+            b"cred",
+            b"user",
+            "https://example.com",
+            "example.com",
+            b"challenge",
+        )
+        .unwrap();
+        let mut message = assertion.authenticator_data.clone();
+        message.extend_from_slice(&rizzy_core::passkey::client_data_hash(
+            &assertion.client_data_json,
+        ));
+        created
+            .signing_key
+            .verifying_key()
+            .verify_der(&message, &assertion.signature_der)
+            .unwrap();
+
+        assert_eq!(
+            PasskeySigningKey::from_stored(3, &seed).unwrap_err(),
+            ClientError::InvalidInput
+        );
+        assert_eq!(
+            PasskeySigningKey::from_stored(2, &seed[..31]).unwrap_err(),
+            ClientError::InvalidInput
+        );
+        assert_eq!(
+            PasskeySigningKey::from_stored(1, &[0u8; 32]).unwrap_err(),
+            ClientError::InvalidInput
+        );
+    }
 
     #[test]
     fn create_credential_rejects_an_origin_that_fails_inv_64() {
