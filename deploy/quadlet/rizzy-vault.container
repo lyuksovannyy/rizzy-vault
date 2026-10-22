@@ -42,7 +42,8 @@ Group=65532
 
 Network=rizzy-vault-edge.network
 # No PublishPort=: compose.yaml only `expose`s 8080 to the proxy container on the edge
-# network, it is never bound to a host port.
+# network, it is never bound to a host port. The admin listener (RIZZY_ADMIN_LISTEN, default
+# 127.0.0.1:8081, the container's own loopback) is neither exposed nor published (ADR 0060 §2).
 
 Volume=rizzy-vault-data.volume:/data
 # Read-only for the server: it never writes the secrets file (ADR 0010 §4).

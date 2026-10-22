@@ -51,7 +51,7 @@ Never put both into one backup, one archive or one volume.
 **Not in this build** (M1 is in progress):
 - A verified image build with the web vault. [`deploy/Containerfile`](../deploy/Containerfile) now builds the web vault (`apps/web`, M1 step 5) and embeds it with the `embed-web` feature ([ADR 0010](adr/0010-server-shape.md) §4): a `wasm` stage (wasm-bindgen-cli at the locked version, `cargo xtask build-wasm`), a `web` stage (Node.js 24, pnpm, `pnpm install --frozen-lockfile`, `pnpm run build`), then the server. That image build has not been run end to end yet; until it has, check that `/` of a new image serves the web vault, not the fixed "no web vault in this build" page. To build a binary with it from source instead: `pnpm install --frozen-lockfile`, `pnpm run build:wasm` (needs `wasm-bindgen-cli` at the locked version), `pnpm run build`, then `cargo build --locked --release -p rizzy-server --bin rizzy-vault --features embed-web`. The API is complete for the M1 clients.
 - PostgreSQL as a supported setup (M3). This build runs every M1 role on it, the `worker` included (one active worker per database, the others wait as standbys), but its PostgreSQL tests are not run in CI yet, and the PostgreSQL side of the instance lock, of `restore`, `migrate` and `secrets rotate` ([§9](#9-restore)) has not been run against a real PostgreSQL server at all. Do not rely on it before M3.
-- The admin panel and API (M3), `notify`, `icons` (M3), `smtp` (M6), signed images (M8). Quadlet units are covered by this build ([§13](#13-podman-quadlet-systemd-managed-rootless)), written without a Podman install to test them against — see that section's "Unverified" list.
+- The admin panel (M3; only its separate listener is in this build, serving nothing yet, [§6](#the-admin-listener)), metrics, `notify`, `icons` (M3), `smtp` (M6), signed images (M8). Quadlet units are covered by this build ([§13](#13-podman-quadlet-systemd-managed-rootless)), written without a Podman install to test them against — see that section's "Unverified" list.
 
 **Core dumps are off.** A crash must never write the server's memory (keys, the OPAQUE secrets, session state) to disk ([INV-60](THREAT_MODEL.md#8-security-invariants), [ADR 0024](adr/0024-core-dump-disabling-rustix.md)). Before it reads its configuration, `rizzy-vault` sets its core-file limit (`RLIMIT_CORE`) to 0 and, on Linux, marks itself non-dumpable (`PR_SET_DUMPABLE` 0); it reads both back and refuses to start (exit 1, `cannot disable core dumps: ...` on stderr) if either did not take. There is no setting to turn this off. As defence in depth, [`compose.yaml`](../deploy/compose.yaml) also sets `ulimits: core: 0` on every container; under systemd, set `LimitCORE=0` in the unit. On the host, the kernel's `core_pattern` is global to all containers: if it pipes to a crash collector (`systemd-coredump`, `apport`, `abrt`) and `fs.suid_dumpable` is 2, check that the collector stores nothing for this container ([AR-10](THREAT_MODEL.md#9-accepted-risks-and-out-of-scope); whether such a collector can still capture a non-dumpable process is unverified).
 
@@ -88,9 +88,9 @@ docker compose up -d
 docker compose logs rizzy-vault
 ```
 
-A healthy start logs `database_created` (first start only) and `listening`. A start that fails logs why and exits; see [§4](#4-configuration-reference) for configuration errors (exit code 2). The server refuses to start if the secrets file is inside the data directory, if it does not fit the database (a different setup, a missing data key), or, with SQLite, if another process holds the database's writer lock (with PostgreSQL: while `restore`, `migrate`, `secrets rotate` or `secrets retire-setups` holds the instance lock, [§9](#9-restore)), or if the secrets file holds an OPAQUE setup the database marks retired ([§5](#5-the-secrets-file)).
+A healthy start logs `database_created` (first start only), `listening` and `admin_listening` ([§6](#the-admin-listener)). A start that fails logs why and exits; see [§4](#4-configuration-reference) for configuration errors (exit code 2). The server refuses to start if the secrets file is inside the data directory, if it does not fit the database (a different setup, a missing data key), or, with SQLite, if another process holds the database's writer lock (with PostgreSQL: while `restore`, `migrate`, `secrets rotate` or `secrets retire-setups` holds the instance lock, [§9](#9-restore)), or if the secrets file holds an OPAQUE setup the database marks retired ([§5](#5-the-secrets-file)).
 
-**Create the first accounts.** Signup is `closed` by default, and the admin panel that issues invites comes in M3. Until then:
+**Create the first accounts.** Signup is `closed` by default, and invite-only signup is not in this build (it needs its own design decision, [§6](#the-admin-listener)). Until then:
 
 1. set `RIZZY_SIGNUP=open` in `.env` and `docker compose up -d` (the container restarts with the new value);
 2. create the accounts from the clients;
@@ -98,7 +98,7 @@ A healthy start logs `database_created` (first start only) and `listening`. A st
 
 While signup is open, anyone who reaches the server can create an account (rate-limited per source and per name, [CRYPTO.md §5.9](CRYPTO.md#59-account-enumeration)). Keep that window short, or restrict the proxy to your own addresses for it (Caddy's `remote_ip` matcher).
 
-**The bootstrap token** ([INV-69](THREAT_MODEL.md#8-security-invariants)) is in the secrets file. This build never prints or logs it; its only reader is the M3 admin API, which shows it once. Nothing to do with it now.
+**The bootstrap token** ([INV-69](THREAT_MODEL.md#8-security-invariants)) is in the secrets file. This build never prints or logs it, and nothing reads it yet: its reader will be the admin login on the admin listener ([§6](#the-admin-listener)), which is not in this build. Nothing to do with it now.
 
 ## 4. Configuration reference
 
@@ -109,6 +109,7 @@ Settings are `RIZZY_*` names. Each comes from the environment, or from a configu
 | `RIZZY_ORIGIN` | – (required by `api` and `worker`) | The canonical origin clients use, for example `https://vault.example.com` or `https://vault.example.com:8443`. It is bound into OPAQUE and every device signature: **changing it later locks every account out**. It must be an `https://` origin: the server refuses to start with an `http://` one, unless the host is `localhost` or a loopback address (`127.0.0.1`, `[::1]`), which is for local testing only. |
 | `RIZZY_ROLES` | `api,web,worker` | Comma-separated roles. `notify`, `icons` and `smtp` are refused in this build. |
 | `RIZZY_LISTEN` | `127.0.0.1:8080` (the image sets `0.0.0.0:8080`) | The HTTP listener of `api` and `web`. Plain HTTP: always behind the TLS proxy. |
+| `RIZZY_ADMIN_LISTEN` | `127.0.0.1:8081` | The admin listener ([§6](#the-admin-listener)), bound whenever the `api` role runs; a start whose address is taken fails. Never publish it or route the proxy to it. |
 | `RIZZY_DATA_DIR` | `/data` | The data volume: `rizzy-vault.sqlite3`, its WAL, its lock file, and the pre-migration copy. |
 | `RIZZY_DATABASE_URL` | – (SQLite in the data directory) | A `postgres://` URL. Not supported before M3 (see `compose.yaml`). It may carry the password; it is never logged or printed. It is the one setting that can hold a secret: a configuration file that holds it must be readable by the server's user only (the server does not check the file's mode). |
 | `RIZZY_SECRETS_FILE` | `/run/rizzy-secrets/secrets.json` | The secrets file. Must resolve outside the data directory, or the server refuses to start. |
@@ -232,6 +233,18 @@ TLS ends at the reverse proxy, a second container ([ADR 0010](adr/0010-server-sh
 - **Serve on 8443**: `RIZZY_ORIGIN=https://<domain>:8443`. Caddy's automatic certificate needs ports 80 or 443 reachable from the internet for the ACME challenge, so on high ports you need a DNS-challenge Caddy build or your own certificate (`tls /path/cert.pem /path/key.pem` in the `Caddyfile`).
 
 Whichever you choose, `RIZZY_ORIGIN` must be exactly the origin users type, and it must not change afterwards.
+
+### The admin listener
+
+The server has a second listener for operators, separate from the public one ([ADR 0060](adr/0060-admin-panel-stack-boundary.md) §2, [ADR 0010](adr/0010-server-shape.md) §1). Whenever the `api` role runs, it binds `RIZZY_ADMIN_LISTEN`, by default `127.0.0.1:8081`: loopback only, never `0.0.0.0`. A process without `api` (`--roles web`, `--roles worker`) binds none. A healthy start logs `admin_listening` with its port after `listening`; if the address is taken, the start fails with `admin listener (RIZZY_ADMIN_LISTEN): ...`. Under compose and Quadlet the default address is the container's own loopback, so nothing outside the container reaches it.
+
+The two listeners share no route. Admin paths (`/admin/...`) do not exist on the public listener and answer its plain `404`, and the public API does not exist on the admin listener, so a vault login or session can never act as an admin credential there. Every answer of the admin listener carries its own strict Content-Security-Policy: no script at all, styles and images from the same origin, forms posting only to the same origin, no framing.
+
+**What it serves in this build: nothing yet.** Every request answers `404`. The admin panel's screens (user list, disable a user, the signup mode, SMTP settings for notifications) are designed ([ADR 0060](adr/0060-admin-panel-stack-boundary.md) §1, §4) but none ships before its admin login does. That login (separate admin credentials, the bootstrap token from [§3](#3-first-run), a second factor; [INV-69](THREAT_MODEL.md#8-security-invariants)) needs its own design decision first.
+
+> **Gap.** No admin panel, admin login or metrics endpoint is served yet. Until then you manage the instance with the settings in [§4](#4-configuration-reference) (`RIZZY_SIGNUP`, `RIZZY_ACCOUNT_QUOTA_BYTES`, `RIZZY_RECOVERY_WAIT_HOURS`) and a restart, and with the admin commands in [§5](#5-the-secrets-file) and [§8](#8-backup). Invite-only signup is not available: `RIZZY_SIGNUP` is `closed` or `open`.
+
+**Reaching it, once it serves something.** Do not publish `RIZZY_ADMIN_LISTEN`'s port and do not route the reverse proxy to it: `compose.yaml` and the Quadlet files do neither. Reach it only over an SSH tunnel or a VPN to the host. An admin listener exposed to the internet loses the protection this split gives and falls back on the admin login's own defences alone.
 
 **What `rv` needs from the certificate** ([ADR 0030](adr/0030-client-tls-rv.md)). The command-line client speaks **TLS 1.3 only** (Caddy offers it by default; a proxy configured for TLS 1.2 alone is refused) and checks the certificate against Mozilla's root CAs built into `rv`, not the operating system's store. A certificate from a public CA, such as Caddy's automatic one, needs nothing more. With your own certificate (the `tls /path/cert.pem /path/key.pem` line above) issued by a **private CA**, users give `rv` that CA's certificate with `--ca-file <path>` or `RIZZY_CLI_CA_FILE` ([rv.md](rv.md#tls-and-a-private-ca)); it then replaces the public roots for them. The certificate must name the host (or IP address) of `RIZZY_ORIGIN`.
 
@@ -481,6 +494,7 @@ The web vault's Settings → "What the server stores" tells your users what the 
 
 ## 12. Checklist
 
+- [ ] `RIZZY_ADMIN_LISTEN` is a loopback address (the default), its port is not published, and the proxy does not route to it ([§6](#the-admin-listener)).
 - [ ] `RIZZY_ORIGIN` is the exact `https://` origin users type, and will not change.
 - [ ] The secrets volume is mounted read-only into the server and is not inside the data volume.
 - [ ] A `backup-secrets` file **and** an encrypted copy of `secrets.json` exist, stored apart from the database backups; the passphrase is stored safely.
