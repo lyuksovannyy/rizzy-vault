@@ -441,6 +441,12 @@ Parked post-1.0 by [ADR 0022](adr/0022-server-mode-only.md): Server mode is the 
   - The web vault (kind 4) keeps short-lived bearer tokens. The OPAQUE `session_key` is not used for this.
   - Without it, a stolen bearer token, or a device-auth session relayed through intercepted TLS, would give ciphertext access and destructive calls until the session ends. That is the residual risk the owner declined to accept on 2026-09-25.
 - **Server-side 2FA** (TOTP in M1, [§11.15](#1115-totp-m1); WebAuthn in M3, [§11.17](#1117-webauthn-2fa-m3)) gates *server access only*. It never enters key derivation. An attacker who defeats 2FA still needs the password and the SK to decrypt anything.
+- **Ending sessions** (M3, [ADR 0075](adr/0075-session-listing-and-ending.md)). An account lists its live sessions and ends them through four `POST` endpoints under `/api/v1/sessions`:
+  - the caller's own session (sign-out, any session kind);
+  - one other session;
+  - all other password and recovery sessions.
+  
+  Ending one session or all others needs a fresh OPAQUE session (`FRESH_SESSION_MS`) or the session of a usable durable device. Device sessions are never ended this way: an unlocked device re-authenticates with its key at once, so suspending the device stays the control that shuts it out. An ended token gets the same `401` as an unknown token. Nothing in this flow touches a key.
 
 ### 5.11 Server-side encryption (not zero knowledge)
 
