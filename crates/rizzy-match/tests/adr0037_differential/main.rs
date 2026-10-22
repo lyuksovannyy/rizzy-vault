@@ -699,66 +699,47 @@ mod relational {
 }
 
 // ---------------------------------------------------------------------------------------------
-// A spec-gap probe: ADR 0037/0038's text never says an equivalence-group domain string must not
-// look like an IP literal. `normalize_domain` runs IDNA domain-to-ASCII, which has no concept of
-// an IP address, so nothing stops a group from containing one. This is reported as a finding,
-// not asserted as a hard failure, since the ADR text does not forbid it (see the harness write-up).
+// Formerly a pinned spec-gap probe: ADR 0037/0038's text never said an equivalence-group domain
+// string must not look like an IP literal, and `EquivalenceGroup::new` accepted one. ADR 0044
+// (Accepted) closes it: every member must be a domain (never an IP literal) equal to its own
+// registrable domain. Both probes are un-ignored and flipped, as ADR 0044 "Tests required" asks.
 // ---------------------------------------------------------------------------------------------
 
 mod equivalence_ip_probe {
     use super::*;
 
-    /// Spec gap, not a `rizzy-match` violation: ADR 0037/0038's text never says an
-    /// equivalence-group domain string must not look like an IP literal, and
-    /// `EquivalenceGroup::new` normalises each member through `normalize_domain`
-    /// (`idna::domain_to_ascii_cow`), which has no concept of an IP address and accepts
-    /// `"192.168.1.1"` as three ordinary numeric labels. `#[ignore]`d per the task's pattern for
-    /// a pinned finding, so a future tightening of `EquivalenceGroup::new` does not have to
-    /// also remember to touch this file — the ignored test simply starts failing, which is the
-    /// signal to delete it.
+    /// ADR 0044 rule 1: an IP literal is never a group member, in any IPv4 notation the WHATWG
+    /// host parser reads as one, nor as an IPv6 literal.
     #[test]
-    #[ignore = "spec gap: EquivalenceGroup::new accepts an IP-literal-shaped domain string; \
-                ADR 0037/0038 do not say it should not. Not re-run by `cargo test`"]
-    fn equivalence_group_can_contain_an_ip_literal_looking_domain_string() {
-        let built = EquivalenceGroup::new(
+    fn equivalence_group_refuses_an_ip_literal_member() {
+        for literal in ["192.168.1.1", "2130706433", "0x7f.1", "[::1]", "::1"] {
+            let built = EquivalenceGroup::new(
+                GroupId::from_bytes([0xAA; 16]),
+                [literal, "evil.example"],
+                false,
+            );
+            assert!(
+                built.is_err(),
+                "EquivalenceGroup::new must refuse the IP literal {literal:?} (ADR 0044 rule 1)"
+            );
+        }
+    }
+
+    /// The consequence the old probe demonstrated: a page reached by an IP literal matching a
+    /// URI saved at an unrelated domain through a group bridging the two. No such group can be
+    /// built any more, so under every view that can exist the pair is `NoMatch`.
+    #[test]
+    fn no_group_lets_an_ip_literal_page_match_an_unrelated_domain_uri() {
+        let group = EquivalenceGroup::new(
             GroupId::from_bytes([0xAA; 16]),
             ["192.168.1.1", "evil.example"],
             false,
         );
         assert!(
-            built.is_ok(),
-            "EquivalenceGroup::new unexpectedly rejected an IP-literal-shaped domain string; \
-             if this is now intentional, the probe below (and the finding it backs) is stale"
+            group.is_err(),
+            "the bridging group must not be constructible"
         );
-    }
-
-    /// The concrete consequence, also `#[ignore]`d: if such a group is ever active, a page
-    /// reached by that IP literal gets a Base-domain match against a URI saved at the grouped
-    /// (unrelated) domain — via the equivalence branch INV-38's own text literally allows,
-    /// since it does not distinguish an IP-literal member from a domain member.
-    ///
-    /// Severity, for the write-up: **low**, and this is a spec gap, not an INV-38 violation —
-    /// INV-38's text permits a different registrable domain to match "through … a user group"
-    /// without qualification, and `equivalence.rs`'s own doc comment already scopes a
-    /// user-defined group as "never community-reviewed, the account owner's own risk." The
-    /// finding does not need the IP literal at all to matter: the same owner, once talked into
-    /// adding a user-defined group (`THREAT_MODEL` A6's named attacker capability, "get the user
-    /// to add an equivalence rule"), could group `evil.example` directly with `bank.com` — a
-    /// strictly stronger result than this IP-literal corner, and one this test does not need to
-    /// demonstrate separately since it is just `BaseDomain` equivalence working as the ADR
-    /// describes it, between two ordinary domains, by design.
-    #[test]
-    #[ignore = "spec gap: an equivalence group may bridge an IP literal and a domain; see \
-                equivalence_group_can_contain_an_ip_literal_looking_domain_string. Not re-run \
-                by `cargo test`"]
-    fn such_a_group_lets_an_ip_literal_page_match_an_unrelated_domain_uri() {
-        let group = EquivalenceGroup::new(
-            GroupId::from_bytes([0xAA; 16]),
-            ["192.168.1.1", "evil.example"],
-            false,
-        )
-        .expect("see equivalence_group_can_contain_an_ip_literal_looking_domain_string");
-        let global = vec![group];
+        let global: Vec<EquivalenceGroup> = group.into_iter().collect();
         let disabled = BTreeSet::new();
         let user = vec![];
         let view = EquivalenceView::new(&global, &disabled, &user);
@@ -772,12 +753,7 @@ mod equivalence_ip_probe {
             MatchMode::BaseDomain,
             &view,
         );
-        assert_eq!(
-            outcome,
-            MatchOutcome::Match(MatchedVia::Equivalence(GroupId::from_bytes([0xAA; 16]))),
-            "an IP-literal/domain equivalence pair is expected to match today (the finding); if \
-             this now returns NoMatch, the gate has been tightened and this test should change"
-        );
+        assert_eq!(outcome, MatchOutcome::NoMatch);
     }
 }
 

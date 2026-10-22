@@ -12,7 +12,9 @@
 //!      ‖ u64 published_at_ms               informational only
 //!      ‖ u16 n ‖ n × group                 sorted by group_id, no duplicate group_id
 //! group = 16  group_id                     random, assigned once, never reused
-//!       ‖ u16 m ‖ m × str(domain)          2 ≤ m, A-label, sorted bytewise, no duplicates
+//!       ‖ u16 m ‖ m × str(domain)          2 ≤ m, A-label, sorted bytewise, no duplicates;
+//!                                          each its own registrable domain, never an IP
+//!                                          literal (ADR 0044; [`is_valid_member`])
 //!       ‖ u8  flag_third_party_hostable    0 normally; 1 only for a PSL-split suffix
 //! ```
 //!
@@ -37,6 +39,7 @@ use crate::error::{
     EquivalenceListError, MAX_GROUP_DOMAINS, MAX_GROUPS, MAX_HOST_LEN, MAX_LIST_LEN,
 };
 use crate::normalize::normalize_domain;
+use crate::suffix;
 
 /// `format_version` of every equivalence list this build accepts (ADR 0038 §1).
 pub const FORMAT_VERSION: u16 = 1;
@@ -64,6 +67,35 @@ impl GroupId {
     }
 }
 
+/// Whether an already-normalised domain may be a member of an [`EquivalenceGroup`]
+/// ([ADR 0044], which replaces ADR 0038 §1's `group` member clause).
+///
+/// 1. **No IP literal.** The `url` crate's WHATWG host parser, the same classification
+///    [`crate::normalize::NormalizedUrl::parse`] relies on, must classify the string as a
+///    domain. This refuses dotted IPv4 and also the dotless, octal and hex notations
+///    (`2130706433`, `0x7f.1`) a dotted-quad check would miss, and it runs *before* rule 2 so
+///    a dotless decimal IPv4 never reaches rule 2's dotless fallback. An IPv6 literal never gets
+///    here at all: [`normalize_domain`] already denies `:`, `[` and `]`. A string the host
+///    parser refuses outright (for example `foo.123`, which "ends in a number" but is no valid
+///    IPv4 address) is refused too: no page URL can ever have that host, so the member could
+///    never match anything, and refusing it is the "only ever refuse more" side.
+/// 2. **Registrable domain, exactly.** The domain must equal its own registrable domain as
+///    `NormalizedUrl::parse` computes one: [`suffix::registrable_domain`] (eTLD+1 under the
+///    compiled-in PSL snapshot), or the host itself when it has no dot. A bare multi-label
+///    suffix (`co.uk`) and a subdomain (`mail.example.com`) are refused; a dotless intranet
+///    name (`nas`) is accepted, since the gate compares it as its own registrable domain.
+///
+/// [ADR 0044]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0044-equivalence-group-member-rules.md
+#[must_use]
+pub fn is_valid_member(domain: &str) -> bool {
+    if !matches!(url::Host::parse(domain), Ok(url::Host::Domain(_))) {
+        return false;
+    }
+    let registrable = suffix::registrable_domain(domain)
+        .or_else(|| (!domain.contains('.')).then(|| domain.to_owned()));
+    registrable.as_deref() == Some(domain)
+}
+
 /// One equivalence group: two or more registrable domains that are the same login, with the
 /// PSL-split exception flag (ADR 0038 §1, §4 point 3).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,9 +117,13 @@ impl EquivalenceGroup {
     /// case or with a trailing dot; the stored form is always the canonical A-label.
     ///
     /// # Errors
-    /// [`EquivalenceListError::Malformed`] if a domain does not normalise, there are fewer than
-    /// two domains or more than [`MAX_GROUP_DOMAINS`], or two domains normalise to the same
-    /// value.
+    /// [`EquivalenceListError::Malformed`] if a domain does not normalise, breaks a member rule
+    /// of [ADR 0044] (an IP literal, or a string that is not its own registrable domain: a bare
+    /// public suffix such as `co.uk` or a subdomain such as `mail.example.com`; see
+    /// [`is_valid_member`]), there are fewer than two domains or more than
+    /// [`MAX_GROUP_DOMAINS`], or two domains normalise to the same value.
+    ///
+    /// [ADR 0044]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0044-equivalence-group-member-rules.md
     pub fn new(
         id: GroupId,
         domains: impl IntoIterator<Item = impl AsRef<str>>,
@@ -97,6 +133,9 @@ impl EquivalenceGroup {
             .into_iter()
             .map(|d| normalize_domain(d.as_ref()).map_err(|_| EquivalenceListError::Malformed))
             .collect::<Result<_, _>>()?;
+        if !normalized.iter().all(|d| is_valid_member(d)) {
+            return Err(EquivalenceListError::Malformed);
+        }
         let supplied_len = normalized.len();
         normalized.sort();
         normalized.dedup();
@@ -179,6 +218,11 @@ impl EquivalenceGroup {
             // accepted encoding per domain (mirrors `rizzy-core`'s "decoders are strict"
             // rule).
             if normalize_domain(domain).as_deref() != Ok(domain) {
+                return Err(EquivalenceListError::Malformed);
+            }
+            // ADR 0044: the same member rules `new` applies, so a hand-built wire group cannot
+            // smuggle in a member `new` would refuse.
+            if !is_valid_member(domain) {
                 return Err(EquivalenceListError::Malformed);
             }
             if let Some(prev) = &previous
@@ -665,11 +709,178 @@ mod tests {
         assert_eq!(view.same_group("youtube.com", "youtu.be"), None);
     }
 
+    // --- ADR 0044: member rules ---------------------------------------------------------------
+
+    /// Hostile members every group refuses (ADR 0044 "Tests required"): IPv4 in dotted and in the
+    /// dotless/octal/hex notations the WHATWG host parser also reads as IPv4, IPv6 literals, a
+    /// bare public suffix (ICANN and private section) and subdomains.
+    const HOSTILE_MEMBERS: &[&str] = &[
+        "192.168.1.1",
+        "10.0.1.1",
+        "127.0.0.1",
+        "2130706433",
+        "0x7f000001",
+        "0177.0.0.1",
+        "0x7f.1",
+        "192.168.1.1.",
+        "::1",
+        "[::1]",
+        "2001:db8::1",
+        "[2001:db8::1]",
+        "::ffff:192.168.1.1",
+        "co.uk",
+        "github.io",
+        "mail.example.com",
+        "www.example.com",
+        "a.b.example.co.uk",
+        "foo.github.io.example",
+        "foo.123",
+        "www.xn--bcher-kva.example",
+        "www.bücher.example",
+    ];
+
+    #[test]
+    fn group_rejects_ip_literals_suffixes_and_subdomains() {
+        for bad in HOSTILE_MEMBERS {
+            assert_eq!(
+                EquivalenceGroup::new(gid(1), [*bad, "example.org"], false),
+                Err(EquivalenceListError::Malformed),
+                "{bad:?} must not be a group member"
+            );
+        }
+    }
+
+    #[test]
+    fn dotless_decimal_ipv4_is_refused_before_the_dotless_fallback() {
+        // Rule 1 must run first: rule 2's dotless fallback would otherwise accept this string
+        // as its own registrable domain, exactly like `nas`.
+        assert!(!"2130706433".contains('.'));
+        assert!(!is_valid_member("2130706433"));
+        assert!(is_valid_member("nas"));
+    }
+
+    #[test]
+    fn group_accepts_registrable_domains_and_dotless_names() {
+        for good in [
+            "example.com",
+            "example.co.uk",
+            "foo.github.io",
+            "xn--bcher-kva.example",
+            "nas",
+            "localhost",
+        ] {
+            let built = EquivalenceGroup::new(gid(1), [good, "example.org"], false);
+            assert!(built.is_ok(), "{good:?} must be accepted");
+        }
+        // An IDNA U-label normalises to its A-label first, and that A-label is checked.
+        let idn = EquivalenceGroup::new(gid(1), ["BÜCHER.example", "example.org"], false).unwrap();
+        assert_eq!(idn.domains(), ["example.org", "xn--bcher-kva.example"]);
+    }
+
+    /// A wire group (bypassing `new`) with the given, already sorted, members.
+    fn wire_group(domains: &[&str]) -> Vec<u8> {
+        let mut out = vec![0x42; 16];
+        rizzy_core::encoding::put_u16(&mut out, u16::try_from(domains.len()).unwrap());
+        for domain in domains {
+            rizzy_core::encoding::put_str(&mut out, domain).unwrap();
+        }
+        rizzy_core::encoding::put_u8(&mut out, 0);
+        out
+    }
+
+    #[test]
+    fn decode_rejects_a_hand_built_group_with_a_bad_member() {
+        // Control: the same shape with valid members decodes.
+        let ok = wire_group(&["example.com", "nas"]);
+        assert!(EquivalenceGroup::decode(&mut Reader::new(&ok)).is_ok());
+        for bad in HOSTILE_MEMBERS {
+            // Only members already in canonical form can reach the new rule (the decoder
+            // rejects a non-canonical spelling first); both orders keep the pair sorted.
+            let mut members = [*bad, "zz.example"];
+            members.sort_unstable();
+            let wire = wire_group(&members);
+            assert_eq!(
+                EquivalenceGroup::decode(&mut Reader::new(&wire)),
+                Err(EquivalenceListError::Malformed),
+                "{bad:?} must not decode as a group member"
+            );
+        }
+    }
+
+    #[test]
+    fn a_signed_list_with_a_bad_member_is_malformed_not_skipped() {
+        // ADR 0044 "A PSL bump ...": reject the whole list, never skip the group. A valid group
+        // next to a bad one still makes the whole ctx `Malformed`.
+        let mut ctx = Vec::new();
+        rizzy_core::encoding::put_u16(&mut ctx, FORMAT_VERSION);
+        ctx.extend_from_slice(&1u32.to_be_bytes());
+        ctx.extend_from_slice(&0u64.to_be_bytes());
+        rizzy_core::encoding::put_u16(&mut ctx, 2);
+        let mut good = vec![0x01; 16];
+        rizzy_core::encoding::put_u16(&mut good, 2);
+        rizzy_core::encoding::put_str(&mut good, "apple.com").unwrap();
+        rizzy_core::encoding::put_str(&mut good, "icloud.com").unwrap();
+        rizzy_core::encoding::put_u8(&mut good, 0);
+        ctx.extend_from_slice(&good);
+        ctx.extend_from_slice(&wire_group(&["co.uk", "example.com"]));
+        assert_eq!(
+            EquivalenceList::decode_ctx(&ctx).unwrap_err(),
+            EquivalenceListError::Malformed
+        );
+    }
+
     proptest::proptest! {
         #[test]
         fn verify_never_panics(bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..2048)) {
             let key = [0x11u8; 32];
             let _ = EquivalenceList::verify(&bytes, &key, 0);
+        }
+
+        /// Every IPv4 address, in dotted-quad, decimal, hex and dotted-octal notation, is refused.
+        #[test]
+        fn no_ipv4_notation_is_a_member(addr in proptest::prelude::any::<u32>()) {
+            let [a, b, c, d] = addr.to_be_bytes();
+            for spelling in [
+                format!("{a}.{b}.{c}.{d}"),
+                format!("{addr}"),
+                format!("0x{addr:x}"),
+                format!("0{a:o}.0{b:o}.0{c:o}.0{d:o}"),
+            ] {
+                proptest::prop_assert!(!is_valid_member(&spelling), "{spelling}");
+                proptest::prop_assert!(
+                    EquivalenceGroup::new(gid(1), [spelling.as_str(), "example.org"], false).is_err()
+                );
+            }
+        }
+
+        /// Every IPv6 address, bracketed or not, is refused.
+        #[test]
+        fn no_ipv6_literal_is_a_member(segments in proptest::prelude::any::<[u16; 8]>()) {
+            let addr = core::net::Ipv6Addr::from(segments);
+            for spelling in [format!("{addr}"), format!("[{addr}]")] {
+                proptest::prop_assert!(
+                    EquivalenceGroup::new(gid(1), [spelling.as_str(), "example.org"], false).is_err(),
+                    "{spelling}"
+                );
+            }
+        }
+
+        /// Whatever `new` accepts is exactly the registrable domain `NormalizedUrl::parse`
+        /// computes for a page at that host, and never an IP literal: the member can match a page.
+        #[test]
+        fn every_accepted_member_is_a_pages_own_registrable_domain(
+            labels in proptest::collection::vec("[a-z0-9\\-]{1,8}", 1..4),
+            tld in proptest::sample::select(vec!["com", "co.uk", "github.io", "example", "xn--p1ai", "jp", "123"]),
+        ) {
+            let candidate = format!("{}.{tld}", labels.join("."));
+            if let Ok(group) = EquivalenceGroup::new(gid(1), [candidate.as_str(), "example.org"], false) {
+                for member in group.domains() {
+                    proptest::prop_assert!(member.parse::<core::net::IpAddr>().is_err());
+                    let page = crate::normalize::NormalizedUrl::parse(&format!("https://{member}/"));
+                    let page = page.map_err(|e| proptest::test_runner::TestCaseError::fail(format!("{member}: {e:?}")))?;
+                    proptest::prop_assert_eq!(page.registrable_domain(), Some(member.as_str()));
+                }
+            }
         }
     }
 }
