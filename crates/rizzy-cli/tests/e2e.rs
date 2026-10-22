@@ -1823,6 +1823,27 @@ fn create_note(rv: &Rv, name: &str) -> String {
         .clone()
 }
 
+/// ADR 0048 §5: `rv unlock` prints the storage use the server reports with the account answer,
+/// in whole bytes, against the instance's quota (the default 5 GiB here).
+#[test]
+fn unlock_prints_the_storage_use_the_server_reports() {
+    let server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("qa");
+    sign_up(&a, &origin, "quotauser");
+    create_note(&a, "counted");
+    a.ok(&["sync"], &[]);
+    let unlocked = a.ok(&["unlock"], &[]);
+    let line = unlocked.printed("storage:");
+    let (used, rest) = line.split_once(" of ").unwrap();
+    assert!(used.parse::<u64>().unwrap() > 0, "{line}");
+    assert_eq!(rest, "5368709120 bytes, as reported by the server");
+    assert_eq!(
+        unlocked.printed("online:"),
+        "yes, the account state verified"
+    );
+}
+
 /// ADR 0026 §4 step 7 and the owner's decision on open question 5, through `rv`: a cache file
 /// put back from an older copy (a restored image, a copied profile) raises the alarm at the
 /// next Fetch, the alarm survives a restart, nothing is written or signed under it, and the
