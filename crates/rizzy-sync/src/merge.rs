@@ -352,6 +352,33 @@ impl Refusal {
             | Self::PurgeKeyContradicts { dot } => Some(*dot),
         }
     }
+
+    /// Whether the client holds the cover instead of reporting the refusal at once (ADR 0050
+    /// §2): only [`Refusal::PurgeAboveCut`], which a paged Fetch can cause by serving the
+    /// tombstone in a page before the header of the Purge it records. Every other refusal names
+    /// a real protocol violation and is final.
+    #[must_use]
+    pub const fn holds_cover(&self) -> bool {
+        matches!(self, Self::PurgeAboveCut)
+    }
+}
+
+/// A cover the merge refused only as [`Refusal::PurgeAboveCut`] and keeps to retry
+/// ([`ItemMerge::hold_claim`]; ADR 0050 §2, §3). Its plaintext is zeroized on drop.
+struct HeldClaim {
+    /// The cover's verified header.
+    header: SnapshotHeader,
+    /// Its decrypted snapshot data, as `rizzy-client` opened it.
+    data: SecretBytes,
+}
+
+impl Clone for HeldClaim {
+    fn clone(&self) -> Self {
+        Self {
+            header: self.header.clone(),
+            data: SecretBytes::copy_from_slice(self.data.expose_secret()),
+        }
+    }
 }
 
 impl fmt::Debug for Refusal {
@@ -598,6 +625,9 @@ pub struct ItemMerge {
     surfaced: BTreeSet<Dot>,
     /// The `key_id` of every item key in the item's wrap set.
     wrap_keys: BTreeSet<[u8; ID_LEN]>,
+    /// The cover held for a retry, if any ([`ItemMerge::hold_claim`]): one per item, for the
+    /// life of the response sequence that served it (ADR 0050 §3, "Risks").
+    held: Option<HeldClaim>,
 }
 
 impl fmt::Debug for ItemMerge {
@@ -627,6 +657,7 @@ impl ItemMerge {
             unresolved: BTreeSet::new(),
             surfaced: BTreeSet::new(),
             wrap_keys: BTreeSet::new(),
+            held: None,
         }
     }
 
@@ -912,6 +943,53 @@ impl ItemMerge {
             }),
             claim_cuts,
         })
+    }
+
+    /// Keeps a verified cover of the item that [`ItemMerge::absorb_snapshot`] refused only as
+    /// [`Refusal::PurgeAboveCut`] ([`Refusal::holds_cover`]), with its decrypted data, so the
+    /// client can retry the same absorption, unchanged, once the causal layer's chains advance
+    /// (ADR 0050 §2, §3). Nothing of it is taken: the state, the covered VV and "Snapshots are
+    /// claims" (ADR 0018 §3) are untouched. One cover per item; a later one replaces it.
+    ///
+    /// # Errors
+    /// [`MergeError::WrongItem`] or [`MergeError::UnsupportedSchema`] for a cover this merge
+    /// never absorbs; nothing is kept then.
+    pub fn hold_claim(
+        &mut self,
+        header: SnapshotHeader,
+        data: SecretBytes,
+    ) -> Result<(), MergeError> {
+        self.check_record(header.item_id, header.item_schema_version)?;
+        self.held = Some(HeldClaim { header, data });
+        Ok(())
+    }
+
+    /// The held cover ([`ItemMerge::hold_claim`]): its header and decrypted data, to parse and
+    /// pass to [`ItemMerge::absorb_snapshot`] again.
+    #[must_use]
+    pub fn held_claim(&self) -> Option<(&SnapshotHeader, &SecretBytes)> {
+        self.held.as_ref().map(|h| (&h.header, &h.data))
+    }
+
+    /// Whether the held cover changes nothing any more: the item VV covers its whole covered VV,
+    /// so a cover absorbed since dominates it (ADR 0050 §2; ADR 0018 §3: "a dominated snapshot
+    /// changes nothing"). `false` when no cover is held.
+    #[must_use]
+    pub fn held_claim_moot(&self) -> bool {
+        self.held.as_ref().is_some_and(|h| {
+            matches!(
+                self.state.vv.compare(&h.header.covered),
+                VvOrdering::Equal | VvOrdering::Greater
+            )
+        })
+    }
+
+    /// Takes the held cover out, if any: to retry it (and [`ItemMerge::hold_claim`] it again if
+    /// the retry is refused as [`Refusal::PurgeAboveCut`] again), or to drop it because it is
+    /// moot, was refused for another reason, or its response sequence ended (ADR 0050 §2). A
+    /// dropped plaintext is zeroized.
+    pub fn take_held_claim(&mut self) -> Option<(SnapshotHeader, SecretBytes)> {
+        self.held.take().map(|h| (h.header, h.data))
     }
 
     /// Ends a Fetch for this item, once the response's ops are applied: if a snapshot whose

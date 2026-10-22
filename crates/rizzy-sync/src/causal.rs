@@ -61,16 +61,22 @@
 //! 2. **Plan** ([`VaultLog::plan_covers`]): the first pass of the chain check, with the
 //!    response's covers counting; it names the covers to absorb and the cut.
 //! 3. **Absorb** (the merge): each named cover, cut to [`CoverPlan::cut_of`];
-//!    [`VaultLog::record_absorbed`] for each one the merge accepted.
+//!    [`VaultLog::record_absorbed`] for each one the merge accepted, and
+//!    [`VaultLog::hold_cover`] for each one it refused only as `Refusal::PurgeAboveCut`
+//!    (ADR 0050 §2), whose plaintext the merge keeps.
 //! 4. **Commit** ([`VaultLog::commit`]): the second pass, in which a bodiless header counts only
 //!    against a snapshot the replica accepted; links are accepted, the cursor advances, and
-//!    gaps, duplicates and rejections are reported.
+//!    gaps, duplicates and rejections are reported. If it accepted a link and a cover is held,
+//!    the merge retries each held cover under [`VaultLog::held_plan`] (ADR 0050 §2):
+//!    [`VaultLog::record_absorbed`] when it takes it, [`VaultLog::release_hold`] when it is
+//!    moot or refused for another reason.
 //! 5. **Deliver** ([`VaultLog::take_deliveries`]): the ops to apply now, in order.
 //!
 //! Later, when a waiting body becomes verifiable (its item key's wrap arrives, CRYPTO.md §11.6
 //! reader rule), [`VaultLog::body_verified`] or [`VaultLog::body_rejected`], then
-//! [`VaultLog::take_deliveries`] again. After the last page of a Fetch:
-//! [`VaultLog::complete_fetch_reports`] and [`VaultLog::waiting`]. The Fetch request carries
+//! [`VaultLog::take_deliveries`] again. After the last page of a Fetch: a last retry of the held
+//! covers, [`VaultLog::end_holds`], then [`VaultLog::complete_fetch_reports`] and
+//! [`VaultLog::waiting`]. The Fetch request carries
 //! [`VaultLog::cursor`].
 //!
 //! # Terms
@@ -81,9 +87,9 @@
 //! - **Link:** a header this log accepted into its chain. Links are accepted only in chain
 //!   order from the head, so the accepted links of a chain are a prefix of it.
 //! - **Head:** the `device_seq` of the chain's last link, 0 if none.
-//! - **Cursor entry:** the head, unless a link's body was rejected after it was accepted and no
-//!   snapshot covers it yet; then the link before that one, so that the next Fetch serves the
-//!   rejected link again (reading 8). The cursor sent with a Fetch is every entry, the own
+//! - **Cursor entry:** the head, unless a link's body was rejected after it was accepted, or
+//!   its hold lapsed, and no snapshot covers it yet; then the link before that one, so that the
+//!   next Fetch serves that link again (reading 8; ADR 0050 §2). A held link does not stop it. The cursor sent with a Fetch is every entry, the own
 //!   device's included (ADR 0012 §7 "Fetch": "the highest `device_seq` it has per device").
 //! - **Settled VV** of an item: the join of the dots of the ops delivered on it and the parts
 //!   of absorbed snapshots the merge took ([`VaultLog::record_absorbed`]), each cut to the
@@ -108,7 +114,26 @@
 //! - a bodiless header counts only if a snapshot of that item covers its dot, else it is a gap;
 //! - "nothing past the gap is applied": a chain's walk stops at its first gap, and the cursor
 //!   stays before it, so the next Fetch asks again. A cover's part past a gap is never
-//!   recorded (reading 7).
+//!   recorded (reading 7). The one exception is a held cover (below).
+//!
+//! **Held covers** ([ADR 0050] §2, proposed INV-74). A page carries the covers of its own
+//! bodiless headers only, and the server cannot see which purge a tombstone records (G-1), so a
+//! tombstone cover can arrive in a page that does not yet carry, in any chain, the header of
+//! the Purge it records. The merge then refuses it as `Refusal::PurgeAboveCut`, a refusal that
+//! is a paging artifact while the response sequence (every page up to a `complete` one) may
+//! still deliver that header. The client then holds the cover instead of giving it up
+//! ([`VaultLog::hold_cover`]): a bodiless header (or one with a rejected body) that only a held
+//! cover covers becomes a **held link**, so its chain's walk, head and cursor go past it
+//! instead of ending in a gap, but its dot does not join the settled VV, so the link stays
+//! unsettled and nothing that waits for it (the chain's later fresh deliveries, reading 1, and
+//! every op whose causal context names it) is delivered. Whenever a chain advances the client
+//! retries the merge's absorption of the held cover under [`VaultLog::held_plan`], and
+//! [`VaultLog::record_absorbed`] settles the held links when it succeeds. A hold the client
+//! gives up ([`VaultLog::release_hold`]) or that the response sequence leaves unresolved
+//! ([`VaultLog::end_holds`]) *lapses*: its links count as gaps again, the cursor entry drops
+//! below the first of them so the next Fetch serves it again with its cover, and
+//! [`VaultLog::complete_fetch_reports`] reports the gap, exactly as before ADR 0050. At most
+//! [`MAX_HELD_ITEMS`] items hold a cover at once; past that a refusal is final at once.
 //!
 //! **Causal delivery** ([`VaultLog::take_deliveries`], ADR 0012 §4 step 2). An op with a
 //! verified body is delivered fresh when every earlier link of its chain is settled and its
@@ -201,6 +226,7 @@
 //!
 //! [ADR 0012]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0012-sync-engine.md
 //! [ADR 0021]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0021-server-compaction.md
+//! [ADR 0050]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0050-paged-fetch-tombstone-boundary.md
 
 use core::fmt;
 use core::ops::Bound;
@@ -220,6 +246,12 @@ pub mod own;
 pub use author::{AuthorRefusal, AuthorStatus, check_op_author, check_snapshot_author};
 pub use behind::{Behind, ServerView};
 pub use own::{OwnError, RestoreGeneration, StalePlan};
+
+/// The most items that may hold a cover at once ([`VaultLog::hold_cover`]; ADR 0050 "Risks":
+/// "past an explicit per-sequence cap on distinct held items … a client reports the gap
+/// immediately instead of holding it"). Each holds at most one snapshot plaintext, in the
+/// merge.
+pub const MAX_HELD_ITEMS: usize = 256;
 
 /// What the client knows about one served op's body after verifying it (ADR 0012 §4 step 1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -440,10 +472,14 @@ pub enum WaitReason {
     /// Its body was rejected after it waited ([`VaultLog::body_rejected`]) and no snapshot
     /// covers it yet; the cursor sits before it, so the next Fetch serves it again (reading 8).
     Rejected,
-    /// It was accepted bodiless and its cover no longer counts. Unreachable through this API,
-    /// which accepts a bodiless header only behind a cover; kept so that a link never waits
-    /// without a reason.
+    /// It was accepted bodiless (or with a rejected body) and its cover no longer counts: its
+    /// hold lapsed ([`VaultLog::release_hold`], [`VaultLog::end_holds`]; ADR 0050 §2). The
+    /// cursor sits before it, so the next Fetch serves it again. A link accepted behind a
+    /// cover the merge took never waits for this reason.
     Uncovered,
+    /// It was accepted behind a cover the merge holds ([`VaultLog::hold_cover`]; ADR 0050 §2)
+    /// and no cover the merge took covers it yet. Not missing data until the hold lapses.
+    Held,
     /// An earlier link of its chain is not settled (reading 1).
     Chain {
         /// The chain's first unsettled link.
@@ -509,6 +545,9 @@ pub struct VaultLog {
     dirty: BTreeSet<ItemId>,
     /// The items that absorbed a cover since the last commit, which checks them (reading 7).
     absorbed: BTreeSet<ItemId>,
+    /// Per item, the header of the cover the merge refused only as `Refusal::PurgeAboveCut`
+    /// and holds for the current response sequence ([`VaultLog::hold_cover`]; ADR 0050 §2).
+    holds: BTreeMap<ItemId, SnapshotHeader>,
     /// The revocation cut-offs this device knows: `last_accepted_device_seq` per revoked
     /// device.
     cutoffs: BTreeMap<DeviceId, u64>,
@@ -555,6 +594,15 @@ enum LinkState {
     Rejected,
     /// Accepted without a body behind a cover; never delivered.
     Bodiless,
+    /// Accepted without a body (or with a rejected one) behind a cover the merge refused only
+    /// as `Refusal::PurgeAboveCut` and holds ([`VaultLog::hold_cover`]; ADR 0050 §2): a link
+    /// for the chain walk and the cursor, unsettled until a cover the merge takes covers it.
+    /// Never delivered.
+    Held,
+    /// A [`LinkState::Held`] link whose hold ended unresolved ([`VaultLog::release_hold`],
+    /// [`VaultLog::end_holds`]): as a link whose body was rejected after it waited, the cursor
+    /// entry drops below it until a cover settles it (reading 8). Never delivered.
+    Lapsed,
     /// Handed to the merge (or, on the own chain, written by this device).
     Delivered,
     /// Past its device's revocation cut-off and undelivered when the revocation was learned;
@@ -578,6 +626,13 @@ impl LinkState {
 /// bodiless header, or one whose body was rejected (reading 4).
 const fn needs_cover(body: BodyStatus) -> bool {
     matches!(body, BodyStatus::Bodiless | BodyStatus::Rejected)
+}
+
+/// Whether a link in this state, unless a snapshot covers it, keeps its chain's cursor entry
+/// below it and is taken again when served again: a body rejected after it waited (reading 8),
+/// or a lapsed hold (ADR 0050 §2).
+const fn serves_again(state: LinkState) -> bool {
+    matches!(state, LinkState::Rejected | LinkState::Lapsed)
 }
 
 /// Whether the item's settled VV covers the header's dot.
@@ -633,8 +688,8 @@ fn ready_remove(ready: &mut ReadyIndex, item_id: ItemId, dot: Dot) {
 struct Walk<'a> {
     /// The headers that extend the chain, in chain order.
     accepted: Vec<&'a ServedOp>,
-    /// Headers equal to a held link whose body was rejected and that no snapshot covers: served
-    /// again for it (reading 8).
+    /// Headers equal to a held link whose body was rejected, or whose hold lapsed, and that no
+    /// snapshot covers: served again for it (reading 8; ADR 0050 §2).
     reserved: Vec<&'a ServedOp>,
     /// Duplicates, equivocations, rejections and the gap that ended the walk, if any.
     reports: Vec<Report>,
@@ -653,6 +708,7 @@ impl VaultLog {
             ready: BTreeMap::new(),
             dirty: BTreeSet::new(),
             absorbed: BTreeSet::new(),
+            holds: BTreeMap::new(),
             cutoffs: BTreeMap::new(),
             uploads: own::Uploads::default(),
         }
@@ -695,8 +751,20 @@ impl VaultLog {
             .links
             .range(chain.frontier..)
             .map(|(_, l)| l)
-            .find(|l| l.state == LinkState::Rejected && !covered(&self.items, &l.header))
+            .find(|l| serves_again(l.state) && !covered(&self.items, &l.header))
             .map_or(chain.head, |l| l.header.vault_prev_seq)
+    }
+
+    /// Whether a cover the merge holds covers the header (ADR 0050 §2): one of the header's
+    /// item, of this vault, whose author is within any revocation cut-off this log knows (the
+    /// checks [`VaultLog::plan_covers`] makes of a served cover, made again since a revocation
+    /// may have been learned since).
+    fn held_covers(&self, header: &OpHeader) -> bool {
+        self.holds.get(&header.item_id).is_some_and(|c| {
+            c.vault_id == self.vault_id
+                && check_snapshot_author(c, self.cutoff(c.author)).is_ok()
+                && c.covered.covers(header.dot)
+        })
     }
 
     /// Every chain's head, as a vector.
@@ -768,7 +836,8 @@ impl VaultLog {
                 .iter()
                 .any(|c| counts_cover(c) && c.item_id == h.item_id && c.covered.covers(h.dot))
         };
-        let counts = |h: &OpHeader| covered(&self.items, h) || served_cover(h);
+        let counts =
+            |h: &OpHeader| covered(&self.items, h) || served_cover(h) || self.held_covers(h);
         let mut bodiless: Vec<&OpHeader> = Vec::new();
         let mut links = Vec::new();
         let mut cut = self.heads();
@@ -820,7 +889,9 @@ impl VaultLog {
     /// Call it for a cover of `plan.absorb` that the merge accepted, never for one it refused,
     /// and before [`VaultLog::commit`] of the same response: a bodiless header counts only
     /// against a snapshot the replica accepted (reading 3), and the commit checks what was
-    /// recorded against the heads it reaches ([`Report::SettledPastHead`]).
+    /// recorded against the heads it reaches ([`Report::SettledPastHead`]). For a held cover
+    /// the merge took on a retry, call it after that commit, with [`VaultLog::held_plan`]
+    /// (ADR 0050 §2), whose cut is the heads, so nothing past a head is recorded.
     pub fn record_absorbed(
         &mut self,
         plan: &CoverPlan,
@@ -834,17 +905,97 @@ impl VaultLog {
         recorded
     }
 
+    /// Holds `cover`, a cover of [`CoverPlan::absorb`] that the merge refused only as
+    /// `Refusal::PurgeAboveCut` (ADR 0050 §2; ADR 0018 §3 "Snapshots are claims"): the response
+    /// sequence may still deliver the header of the Purge it records. Until the hold ends, a
+    /// bodiless header (or one with a rejected body) of its item that it covers counts in the
+    /// chain check as a held link: its chain goes past it, but its dot does not join the settled
+    /// VV, so nothing that waits for it is delivered. One cover per item: a second one replaces
+    /// the first (links already held under the first stay held until they settle or lapse).
+    ///
+    /// Call it before [`VaultLog::commit`] of the same response, as
+    /// [`VaultLog::record_absorbed`], and only for a refusal of that one kind: every other
+    /// refusal names a real protocol violation and stays final. Returns `false`, and holds
+    /// nothing, for a cover of another vault or past its author's revocation cut-off, and when
+    /// [`MAX_HELD_ITEMS`] other items already hold one: the refusal is then final at once, as
+    /// before ADR 0050.
+    pub fn hold_cover(&mut self, cover: &SnapshotHeader) -> bool {
+        let counts = cover.vault_id == self.vault_id
+            && check_snapshot_author(cover, self.cutoff(cover.author)).is_ok();
+        let room = self.holds.contains_key(&cover.item_id) || self.holds.len() < MAX_HELD_ITEMS;
+        if counts && room {
+            self.holds.insert(cover.item_id, cover.clone());
+        }
+        counts && room
+    }
+
+    /// The items that hold a cover ([`VaultLog::hold_cover`]), in order.
+    pub fn held_items(&self) -> impl Iterator<Item = ItemId> + '_ {
+        self.holds.keys().copied()
+    }
+
+    /// The plan to retry a held cover under (ADR 0050 §2: "`ItemMerge::absorb_snapshot` is
+    /// retried, unchanged, against the same verified cover whenever any device's chain in the
+    /// vault log advances"): no cover to absorb from a response, and the cut at every chain's
+    /// head, which the commit moved past each held link. Pass its [`CoverPlan::cut`] as the
+    /// merge's bound, and the plan itself to [`VaultLog::record_absorbed`] when the merge takes
+    /// the cover; then [`VaultLog::release_hold`].
+    #[must_use]
+    pub fn held_plan(&self) -> CoverPlan {
+        CoverPlan {
+            absorb: Vec::new(),
+            links: Vec::new(),
+            cut: self.heads(),
+            refused: Vec::new(),
+        }
+    }
+
+    /// Ends the hold of `item_id`'s cover: the merge took it (and
+    /// [`VaultLog::record_absorbed`] settled what it covers), a cover the merge took made it
+    /// moot, or the merge refused it for another reason. Every held link of the item that no
+    /// snapshot covers lapses: the cursor entry drops below it so the next Fetch serves it
+    /// again with its cover, and [`VaultLog::complete_fetch_reports`] reports it. Returns
+    /// whether a cover was held.
+    pub fn release_hold(&mut self, item_id: ItemId) -> bool {
+        let held = self.holds.remove(&item_id).is_some();
+        self.lapse(|link| link.header.item_id == item_id);
+        held
+    }
+
+    /// Ends every hold, at the end of a response sequence (the page whose `complete` is true),
+    /// after the client's last retry: every held link that no snapshot covers lapses, as
+    /// [`VaultLog::release_hold`] (ADR 0050 §2: "A hold that is still unresolved once the
+    /// response sequence completes … is reported now"). Call it before
+    /// [`VaultLog::complete_fetch_reports`].
+    pub fn end_holds(&mut self) {
+        self.holds.clear();
+        self.lapse(|_| true);
+    }
+
+    /// Lapses every held link that `which` names and no snapshot covers.
+    fn lapse(&mut self, which: impl Fn(&Link) -> bool) {
+        let Self { chains, items, .. } = self;
+        for chain in chains.values_mut() {
+            for link in chain.links.range_mut(chain.frontier..).map(|(_, l)| l) {
+                if link.state == LinkState::Held && which(link) && !covered(items, &link.header) {
+                    link.state = LinkState::Lapsed;
+                }
+            }
+        }
+    }
+
     /// The second pass of the chain check over one response, which accepts its links (ADR 0012
     /// §7 "Chain check after compaction", INV-27).
     ///
     /// Call it with the same `ops` as [`VaultLog::plan_covers`], after the absorptions. Per
     /// device, from the head, in `device_seq` order: duplicates and equivocations are reported
     /// and skipped; a revoked device's header past its cut-off, a header that does not link, and
-    /// a bodiless header (or one with a rejected body) that its item's settled VV does not cover
-    /// each end the chain's walk with a report; every header before that becomes a link, and the
-    /// head moves to the last one. A held link whose body was rejected, served again, takes the
-    /// new verdict on its body or counts behind a cover, and is reported as a gap again if
-    /// neither settles it (reading 8). Headers of another vault, and of the own device, are
+    /// a bodiless header (or one with a rejected body) that neither its item's settled VV nor a
+    /// held cover ([`VaultLog::hold_cover`]) covers each end the chain's walk with a report;
+    /// every header before that becomes a link, a held one if only a held cover covers it (ADR
+    /// 0050 §2), and the head moves to the last one. A held link whose body was rejected, or
+    /// whose hold lapsed, served again, takes the new verdict on its body or counts behind a
+    /// cover, settled or held, and is reported as a gap again if none does (reading 8). Headers of another vault, and of the own device, are
     /// reported and skipped (reading 5). Last, every item that absorbed a cover since the
     /// previous commit is checked against the heads reached ([`Report::SettledPastHead`],
     /// reading 7).
@@ -856,27 +1007,37 @@ impl VaultLog {
         let groups = self.group(ops, &mut reports);
         let mut accepted = Vec::new();
         for (device, served) in groups {
-            let walk = self.walk(device, &served, &|h| covered(&self.items, h));
+            let walk = self.walk(device, &served, &|h| {
+                covered(&self.items, h) || self.held_covers(h)
+            });
             reports.extend(walk.reports);
             for op in walk.reserved {
                 self.serve_again(op, &mut reports);
             }
             for op in walk.accepted {
                 accepted.push(op.header.dot);
-                self.accept_link(op.header.clone(), LinkState::from_body(op.body));
+                // A header that only a held cover covers is a held link (ADR 0050 §2).
+                let state = if needs_cover(op.body) && !covered(&self.items, &op.header) {
+                    LinkState::Held
+                } else {
+                    LinkState::from_body(op.body)
+                };
+                self.accept_link(op.header.clone(), state);
             }
         }
         self.check_absorbed(&mut reports);
         Commit { accepted, reports }
     }
 
-    /// A held link whose body was rejected, served again (reading 8): a verified body makes it
-    /// ready, a waiting one makes it wait; otherwise it stays rejected, settled only if a
-    /// snapshot covers it, and is reported again if none does.
+    /// A held link whose body was rejected, or whose hold lapsed, served again (reading 8; ADR
+    /// 0050 §2): a verified body makes it ready, a waiting one makes it wait; otherwise it is
+    /// settled if a snapshot covers it, held again if only a held cover covers it, and reported
+    /// again if none does.
     fn serve_again(&mut self, op: &ServedOp, reports: &mut Vec<Report>) {
         let header = &op.header;
         let dot = header.dot;
         let is_covered = covered(&self.items, header);
+        let is_held = !is_covered && self.held_covers(header);
         let Some(link) = self
             .chains
             .get_mut(&dot.device_id())
@@ -885,7 +1046,7 @@ impl VaultLog {
             return;
         };
         // The same record may be served twice in one response; only the first counts.
-        if link.state != LinkState::Rejected {
+        if !serves_again(link.state) {
             return;
         }
         match op.body {
@@ -898,7 +1059,9 @@ impl VaultLog {
                 if op.body == BodyStatus::Rejected {
                     reports.push(Report::RejectedBody { dot });
                 }
-                if !is_covered {
+                if is_held {
+                    link.state = LinkState::Held;
+                } else if !is_covered {
                     reports.push(Report::Gap {
                         device: dot.device_id(),
                         after: header.vault_prev_seq,
@@ -993,7 +1156,8 @@ impl VaultLog {
                 let reason = match (link.state, first_unsettled) {
                     (LinkState::Waiting, _) => Some(WaitReason::Body),
                     (LinkState::Rejected, _) => Some(WaitReason::Rejected),
-                    (LinkState::Bodiless, _) => Some(WaitReason::Uncovered),
+                    (LinkState::Held, _) => Some(WaitReason::Held),
+                    (LinkState::Bodiless | LinkState::Lapsed, _) => Some(WaitReason::Uncovered),
                     (_, Some(first)) => Some(WaitReason::Chain {
                         first_unsettled: first,
                     }),
@@ -1068,8 +1232,9 @@ impl VaultLog {
     ///   authors"; CRYPTO.md §11.8 step 4). That text is for one vault per account, as in M1:
     ///   `device_seq` counts ops in every vault, so with more vaults a chain may legitimately
     ///   end below the cut-off, and ADR 0021 leaves the per-vault bound to M9.
-    /// - For every link whose body was rejected after it waited and that no snapshot covers, a
-    ///   [`GapCause::Uncovered`] gap after its `vault_prev_seq` (reading 8).
+    /// - For every link whose body was rejected after it waited, or whose hold lapsed or is
+    ///   still open, and that no snapshot covers, a [`GapCause::Uncovered`] gap after its
+    ///   `vault_prev_seq` (reading 8; ADR 0050 §2: an unresolved hold "is reported now").
     /// - For every link whose body is still not verifiable, [`Report::Unverifiable`].
     /// - For every held op whose causal context names a dot that cannot be settled from what
     ///   arrived, a [`Report::MissingPredecessor`] (ADR 0012 §4 step 2): the dot is above its
@@ -1092,11 +1257,15 @@ impl VaultLog {
         for w in self.waiting() {
             match w.reason {
                 WaitReason::Body => out.push(Report::Unverifiable { dot: w.dot }),
-                WaitReason::Rejected | WaitReason::Uncovered => out.push(Report::Gap {
-                    device: w.dot.device_id(),
-                    after: self.header(w.dot).map_or(0, |h| h.vault_prev_seq),
-                    cause: GapCause::Uncovered { dot: w.dot },
-                }),
+                // A hold still open after the last page is reported as if it had lapsed
+                // (ADR 0050 §2: "reported now"); [`VaultLog::end_holds`] lapses it.
+                WaitReason::Rejected | WaitReason::Uncovered | WaitReason::Held => {
+                    out.push(Report::Gap {
+                        device: w.dot.device_id(),
+                        after: self.header(w.dot).map_or(0, |h| h.vault_prev_seq),
+                        cause: GapCause::Uncovered { dot: w.dot },
+                    });
+                }
                 WaitReason::Context { missing } if !self.can_settle(w.item_id, missing) => {
                     out.push(Report::MissingPredecessor {
                         waiting: w.dot,
@@ -1178,7 +1347,7 @@ impl VaultLog {
                 let held_link = chain.and_then(|c| c.links.get(&dot.seq()));
                 if let Some(link) = held_link
                     && link.header == *h
-                    && link.state == LinkState::Rejected
+                    && serves_again(link.state)
                     && !covered(&self.items, h)
                 {
                     reserved.push(op);
