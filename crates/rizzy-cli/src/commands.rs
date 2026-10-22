@@ -168,9 +168,30 @@ async fn run_command(invocation: Invocation, env: &mut Env<'_>) -> Result<(), Cl
             let device = Device::open(env).await?;
             item_list(&device, env.ui, trash)
         }
+        Command::ItemSearch { query, trash } => {
+            let mut device = Device::open(env).await?;
+            let found = device.search(&query).await?;
+            print_items(&device, env.ui, &found, Some(trash))
+        }
+        Command::ItemRecent { limit } => {
+            let mut device = Device::open(env).await?;
+            // Purged items lose their row; a trashed one keeps it and shows as such.
+            let used = device.recent(limit).await?;
+            print_items(&device, env.ui, &used, None)
+        }
+        Command::CacheReindex => {
+            let mut device = Device::open(env).await?;
+            let rows = device.reindex().await?;
+            env.ui.note(&format!(
+                "Rebuilt the search index: {rows} items. The record of recently used items was \
+                 cleared."
+            ));
+            Ok(())
+        }
         Command::ItemShow { item, reveal } => {
-            let device = Device::open(env).await?;
-            item_show(&device, env.ui, &item, reveal)
+            let mut device = Device::open(env).await?;
+            let shown = item_show(&device, env.ui, &item, reveal)?;
+            device.record_use(shown).await
         }
         Command::ItemCreate { item_type, fields } => {
             Box::pin(item_create(env, &item_type, &fields)).await
@@ -206,8 +227,9 @@ async fn run_command(invocation: Invocation, env: &mut Env<'_>) -> Result<(), Cl
         }
         Command::Generate(options) => generate(env.ui, options),
         Command::Totp(item) => {
-            let device = Device::open(env).await?;
-            totp(&device, env.ui, &item)
+            let mut device = Device::open(env).await?;
+            let shown = totp(&device, env.ui, &item)?;
+            device.record_use(shown).await
         }
         Command::Export { out, name, format } => Box::pin(export(env, &out, &name, format)).await,
         Command::Import { input, format } => Box::pin(import(env, &input, format)).await,
@@ -455,8 +477,52 @@ fn item_list(device: &Device, ui: &mut dyn Ui, trash: bool) -> Result<(), CliErr
     Ok(())
 }
 
-/// `item show`.
-fn item_show(device: &Device, ui: &mut dyn Ui, item: &str, reveal: bool) -> Result<(), CliError> {
+/// The items of `ids` as `item list` prints them, in the given order: with `trash` set, only
+/// those in (`Some(true)`) or out of (`Some(false)`) the trash; with `None`, both, a trashed
+/// one marked. An id the vault does not show (purged since, or the vault-settings item) is
+/// skipped.
+fn print_items(
+    device: &Device,
+    ui: &mut dyn Ui,
+    ids: &[ItemId],
+    trash: Option<bool>,
+) -> Result<(), CliError> {
+    let vault = device.vault();
+    for item in ids {
+        let trashed = match vault.item_lifecycle(*item) {
+            ItemLifecycle::Active => false,
+            ItemLifecycle::Trashed => true,
+            _ => continue,
+        };
+        if trash.is_some_and(|t| t != trashed)
+            || vault.item_type(*item) == Some(ItemType::VAULT_SETTINGS)
+        {
+            continue;
+        }
+        let name = text_field(vault, *item, ITEM_NAME).unwrap_or_default();
+        let mark = if trashed && trash.is_none() {
+            "  (in the trash)"
+        } else {
+            ""
+        };
+        let line = Zeroizing::new(format!(
+            "{}  {:<16}  {}{mark}",
+            hex(item.as_bytes()),
+            type_name(vault.item_type(*item)),
+            name.as_str()
+        ));
+        ui.print(&line)?;
+    }
+    Ok(())
+}
+
+/// `item show`; returns the item shown, for the use record (ADR 0056 §2).
+fn item_show(
+    device: &Device,
+    ui: &mut dyn Ui,
+    item: &str,
+    reveal: bool,
+) -> Result<ItemId, CliError> {
     let vault = device.vault();
     let item = resolve_item(vault, item)?;
     ui.print(&format!("id:    {}", hex(item.as_bytes())))?;
@@ -521,7 +587,7 @@ fn item_show(device: &Device, ui: &mut dyn Ui, item: &str, reveal: bool) -> Resu
         ui.print(&line)?;
     }
     print_password_history(vault, ui, item, reveal)?;
-    Ok(())
+    Ok(item)
 }
 
 /// The password-history section of `item show` (gap 01; ADR 0012 §5 "Password history is the
@@ -962,7 +1028,8 @@ fn generator_usage(e: GeneratorError) -> CliError {
 
 /// `totp`: the current code of an item's `login.totp`, which holds an `otpauth://` URI or a
 /// bare Base32 secret (then SHA-1, 6 digits, 30 s; CRYPTO.md §11.15).
-fn totp(device: &Device, ui: &mut dyn Ui, item: &str) -> Result<(), CliError> {
+/// `totp`; returns the item, for the use record (ADR 0056 §2: a code copied from it).
+fn totp(device: &Device, ui: &mut dyn Ui, item: &str) -> Result<ItemId, CliError> {
     let vault = device.vault();
     let item = resolve_item(vault, item)?;
     let bad = || CliError::BadInput("the item's one-time-code secret is not valid");
@@ -987,7 +1054,8 @@ fn totp(device: &Device, ui: &mut dyn Ui, item: &str) -> Result<(), CliError> {
     let code = params.code_at(&secret, seconds).map_err(|_| bad())?;
     let period = u64::from(params.period.get());
     ui.note(&format!("valid for {} s", period - seconds % period));
-    ui.print(&code.to_digits())
+    ui.print(&code.to_digits())?;
+    Ok(item)
 }
 
 /// `export` (ADR 0027 §5; CRYPTO.md §11.14; owner decision 2026-10-05): the cache as it is, to

@@ -13,8 +13,9 @@
 //! The account's lock, the cache rows, `store::load::open` (format, meta rows, the
 //! device-state record), then, in stage 2, the stored `register/finish` again (ADR 0026 §2
 //! "Signup pending"); the master password; the offline unlock (one Argon2id run); the load,
-//! which verifies every row like a server's answer. Nothing so far needs the network: the
-//! vault reads offline.
+//! which verifies every row like a server's answer; then the `item_index` rows the merge implies
+//! are committed (ADR 0056 §4: a corrupt table is rebuilt alone, never failing the load).
+//! Nothing so far needs the network: the vault reads offline.
 //!
 //! # Going online ([`Device::online`]; CRYPTO.md §11.3 step 2)
 //!
@@ -119,7 +120,7 @@ use rizzy_client::credentials::PendingCredentialChange;
 use rizzy_client::device::{DeviceState, UnlockedDevice};
 use rizzy_client::export::gate::ExportGate;
 use rizzy_client::healing::{self, HeldAccount};
-use rizzy_client::items::TRASH_RETENTION_MS;
+use rizzy_client::items::{ItemId, TRASH_RETENTION_MS};
 use rizzy_client::login::{LoggedIn, LoginInput, start_login};
 use rizzy_client::reregister::start_device_reregistration;
 use rizzy_client::rizzy_proto::account::{AccountStateQuery, AccountView, DeviceGrantsResponse};
@@ -150,6 +151,7 @@ use rizzy_client::session::{
 };
 use rizzy_client::sessions::SessionList;
 use rizzy_client::store::floors::Floors;
+use rizzy_client::store::index;
 use rizzy_client::store::load::{self, Loaded};
 use rizzy_client::store::record::{DeviceRecord, Stage};
 use rizzy_client::store::rows::{Alarm, Changeset, Write};
@@ -464,6 +466,10 @@ impl Device {
     /// [`ClientError::WrongPasswordOrSecretKey`], [`ClientError::CacheCorrupt`],
     /// [`ClientError::CacheUpdateRequired`] and [`ClientError::LocalUnlockUnavailable`] as
     /// [`CliError::Client`]; the transport's errors when a pending signup is resent.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the steps of an open in the order the specs fix, the ADR 0056 reconcile last"
+    )]
     pub async fn open(env: &mut Env<'_>) -> Result<Self, CliError> {
         let account = pick_account(env)?;
         // ADR 0026 §3: "directory 0700", also when `rv` did not create it.
@@ -537,10 +543,12 @@ impl Device {
             device: state,
             account: loaded_account,
             authors,
-            vaults,
+            mut vaults,
             alarms,
             floors,
         } = load::load(&rows, &record, &unlocked, now_ms())?;
+        // ADR 0056 §4: the index rows the merge implies (a corrupt table rebuilt), committed.
+        let index_writes = index::reconcile(&rows, &mut vaults);
         let pending_commit = rows.pending_commit.take();
         drop(rows);
         let mut vaults = vaults.into_iter();
@@ -548,7 +556,7 @@ impl Device {
         let (Some(vault), None) = (vaults.next(), vaults.next()) else {
             return Err(CliError::Client(ClientError::CacheCorrupt));
         };
-        Ok(Self {
+        let mut device = Self {
             lock: Some(lock),
             db: Some(db),
             sign_outs: env.sign_outs.clone(),
@@ -571,7 +579,9 @@ impl Device {
             reregistered: false,
             password,
             rng: os_rng(),
-        })
+        };
+        device.commit(index_writes).await?;
+        Ok(device)
     }
 
     /// Builds the device of a fresh signup or enrolment, whose cache `db` was just created
@@ -594,6 +604,8 @@ impl Device {
     ) -> Result<Self, CliError> {
         let record = state.record(Stage::Committed)?;
         vault.persist();
+        // ADR 0056 §4: a new cache's index starts empty and is filled by the next step.
+        index::track_new(&mut vault);
         Ok(Self {
             lock: Some(lock),
             db: Some(db),
@@ -649,6 +661,58 @@ impl Device {
     #[must_use]
     pub const fn alarms(&self) -> &BTreeSet<Alarm> {
         &self.alarms
+    }
+
+    /// Records that the user used `item` on this device (ADR 0056 §2: viewed it or copied a
+    /// field from it): its `item_index` row's `last_used_ms` and `use_count`. Local only; no
+    /// op is written and nothing is sent. Nothing for an item without a row.
+    ///
+    /// # Errors
+    /// The commit's.
+    pub async fn record_use(&mut self, item: ItemId) -> Result<(), CliError> {
+        self.flush().await?;
+        match index::record_use(&self.vault, item, now_ms()) {
+            Some(write) => self.commit(core::iter::once(write).collect()).await,
+            None => Ok(()),
+        }
+    }
+
+    /// The items whose `item_index` row matches `query`, most recently used first; the empty
+    /// query lists every row in that order (ADR 0056 §5).
+    ///
+    /// # Errors
+    /// [`CliError::Database`].
+    pub async fn search(&mut self, query: &str) -> Result<Vec<ItemId>, CliError> {
+        self.db
+            .as_mut()
+            .ok_or(CliError::Client(ClientError::Internal))?
+            .search(query, usize::MAX)
+            .await
+    }
+
+    /// The items used on this device, most recent first, at most `limit` (ADR 0056 §2).
+    ///
+    /// # Errors
+    /// [`CliError::Database`].
+    pub async fn recent(&mut self, limit: usize) -> Result<Vec<ItemId>, CliError> {
+        self.db
+            .as_mut()
+            .ok_or(CliError::Client(ClientError::Internal))?
+            .recent(limit)
+            .await
+    }
+
+    /// Drops and rebuilds the `item_index` table from the vault (ADR 0056 §4, `rv cache
+    /// reindex`); every use counter is lost. Returns the number of rows.
+    ///
+    /// # Errors
+    /// The commit's.
+    pub async fn reindex(&mut self) -> Result<usize, CliError> {
+        self.flush().await?;
+        let writes = index::reindex(core::slice::from_mut(&mut self.vault));
+        let rows = writes.writes().len().saturating_sub(1);
+        self.commit(writes).await?;
+        Ok(rows)
     }
 
     /// Fails with the first alarm, if any is raised: the device is read-only.

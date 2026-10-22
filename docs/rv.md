@@ -23,6 +23,8 @@ Each account has one SQLite file, `<account id>.sqlite3`, and a lock file next t
 
 **Exclude this directory from backups and file-sync tools** (Time Machine, iCloud Drive, Dropbox, rsync jobs, home-directory snapshots). The file holds this device's Secret Key in the clear and the vault keys wrapped under the master password ([ADR 0026](adr/0026-client-device-state-and-cache.md) §2). A copy of it lets whoever holds the copy guess the master password offline (threat model INV-61). `rv` does not set the exclusion for you.
 
+The file also holds the **search index** in the clear ([ADR 0056](adr/0056-local-index-recently-used-search.md)): for every item, its name, username, website addresses, tag names, text custom fields, card holder and brand, and identity names, lower-cased, plus when you last used the item on this device and how often. Anyone who can read the file, or a backup copy of it, reads these **without any password**. It never holds a password, a one-time-code secret, a card number, code or PIN, a hidden custom field, a Secure Note's body or imported password history. This is one more reason to keep the directory out of backups.
+
 Do not restore the file from a copy either. If `rv` finds that the server has seen newer requests or edits from this device than the file knows, it raises the alarm "device state outdated", goes read-only, and asks you to enrol again: `rv device forget`, then `rv login`.
 
 Only one `rv` runs on an account at a time; a second one waits up to two seconds for the first to finish, then fails with "in use".
@@ -84,6 +86,9 @@ rv item history 3fa2           # every field's history; --reveal shows the old v
 rv item restore-history 3fa2 --field login.password --entry <id>
 rv generate --length 24        # or --words 6
 rv totp 3fa2
+rv item search ивана           # name, username, websites, tags, text custom fields; any case
+rv item recent                 # the items you viewed here, most recent first; --limit <n>
+rv cache reindex               # rebuilds the search index, forgets the use history
 ```
 
 Every command asks for the master password: nothing unlocked outlives the process. A command that changes something writes it to the local file first and then uploads it. If the server is not reachable the change stays queued and the next `rv sync` sends it.
@@ -104,6 +109,8 @@ URIs and custom fields are list elements: `item show` prints each with its eleme
 - **Deleted on X while it was being edited on Y**: the edit wins, so the item stays in the list. The notice stays until the item is next changed.
 
 Devices are named by kind and the first 16 digits of their id, a prefix of the full id `rv device list` prints (which `device revoke` also accepts in place of the full id). `rv` cannot remember that it already showed a notice: every command is its own process, and keeping that mark in the local file would change the file's format, which needs a new decision ([ADR 0026](adr/0026-client-device-state-and-cache.md)) first. So every `rv sync` repeats the notices that still hold.
+
+**Search and recently used** ([ADR 0056](adr/0056-local-index-recently-used-search.md)). `rv item search <query>` finds the items whose name, or one of whose username, website addresses, tag names, text custom fields (label or value), card holder and brand, or identity title, first, middle and last name, company and e-mail, contains the query, ignoring case (Unicode-aware: `ИВАН` finds `Иван`). It is a plain substring match: `%` and `_` are ordinary characters. A Secure Note is found by its title only, never by its body, and nothing concealed is ever searched. The new item types (SSH key, API credential, software license, Wi-Fi, bank account) are found by their name only, until a later decision names which of their fields are safe to index. Without a query it lists every item; results come most recently used first, then by name. `--trash` searches the trash instead. `rv item recent` lists the items you viewed with `item show` or `totp` on this device, most recent first (20 unless `--limit` says otherwise), a trashed one marked. The search runs on this device only, over the index in its local file; the server never sees a query, and when you used an item is never synced or sent. The use history is lost with `rv cache reindex` (for when search results look wrong), when an item is deleted permanently, or with the local file.
 
 Item types: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`, `software-license`, `wifi`, `bank-account`, `passkey`. Field keys are those of the item schema ([ADR 0018](adr/0018-item-record-encoding.md)), for example `item.name`, `item.notes`, `login.username`, `login.password`, `login.totp`, `card.number`.
 
