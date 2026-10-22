@@ -650,7 +650,11 @@ fn account_usage_counter() {
             .await
             .unwrap();
         crate::common::exercise_quota(&db).await;
-        exec(&db, "DELETE FROM auth_accounts WHERE id = x'a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2'").await;
+        exec(
+            &db,
+            "DELETE FROM auth_accounts WHERE id = x'a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2'",
+        )
+        .await;
         let mut r = db.begin_read().await.unwrap();
         assert_eq!(
             rizzy_storage::quota::accounts(r.conn()).await.unwrap(),

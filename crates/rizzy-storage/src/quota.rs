@@ -149,7 +149,12 @@ pub async fn accounts(conn: Conn<'_>) -> Result<Vec<[u8; 16]>, Error> {
 }
 
 /// Writes `value` as the counter of `account_id`.
-async fn put(tx: &mut WriteTx, account_id: &[u8; 16], value: i64, now_ms: i64) -> Result<(), Error> {
+async fn put(
+    tx: &mut WriteTx,
+    account_id: &[u8; 16],
+    value: i64,
+    now_ms: i64,
+) -> Result<(), Error> {
     crate::on_engine!(tx.conn(), |c| sqlx::query(USAGE_PUT)
         .bind(&account_id[..])
         .bind(value)

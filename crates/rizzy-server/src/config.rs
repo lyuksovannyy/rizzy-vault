@@ -1009,10 +1009,7 @@ mod tests {
     #[test]
     fn the_account_quota_is_at_least_256_mib() {
         const O: (&str, &str) = (ORIGIN, "https://vault.example.com");
-        assert_eq!(
-            from_env(&[O]).unwrap().account_quota_bytes,
-            5_368_709_120
-        );
+        assert_eq!(from_env(&[O]).unwrap().account_quota_bytes, 5_368_709_120);
         for (text, expected) in [
             ("268435456", 256 << 20),
             ("5368709120", 5 << 30),

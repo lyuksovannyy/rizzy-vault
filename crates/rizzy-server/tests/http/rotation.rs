@@ -283,7 +283,7 @@ pub(crate) struct Client {
     /// Its device session.
     pub(crate) session: DeviceSession,
     /// The personal vault.
-    vault: VaultSync,
+    pub(crate) vault: VaultSync,
     /// The account's authors.
     authors: Authors,
 }

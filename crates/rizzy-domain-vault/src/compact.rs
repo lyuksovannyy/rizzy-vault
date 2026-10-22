@@ -77,8 +77,8 @@ impl<D: DeviceDirectory> VaultDomain<D> {
             let sizes = repo::item_snapshot_sizes(tx.conn(), vault_id, item_id).await?;
             for store_seq in &plan.drop_snapshots {
                 let stored = sizes.get(store_seq).copied().unwrap_or(0);
-                let counted = u64::try_from(STATEMENT_FRAME.saturating_add(stored))
-                    .unwrap_or(u64::MAX);
+                let counted =
+                    u64::try_from(STATEMENT_FRAME.saturating_add(stored)).unwrap_or(u64::MAX);
                 freed = freed.saturating_add(counted);
             }
         }

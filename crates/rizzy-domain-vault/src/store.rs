@@ -125,7 +125,10 @@ impl Session {
     /// The counted bytes `snapshot` adds once stored ([`store_snapshot`] drops a wrap below the
     /// current epoch).
     pub(crate) fn snapshot_bytes(&self, snapshot: &VerifiedSnapshot) -> u64 {
-        snapshot_bytes(snapshot, current_wrap(self, snapshot.header.vault_key_epoch))
+        snapshot_bytes(
+            snapshot,
+            current_wrap(self, snapshot.header.vault_key_epoch),
+        )
     }
 }
 

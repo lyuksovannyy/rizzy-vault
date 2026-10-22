@@ -22,7 +22,8 @@
 //!    `rizzy-vault restore --in <file>` into an empty database.
 //! 6. **Start again.** The startup checks pass; the database reads back exactly as backed up;
 //!    the restore generation is new (ADR 0021 §2) and every account is in a reconciliation
-//!    epoch of that generation (INV-59).
+//!    epoch of that generation (INV-59). The storage counter, seeded at the first start, comes
+//!    back with the rows and matches them (ADR 0048 §4).
 //! 7. **Refusals.** A second `restore` into the restored (non-empty) database; a fresh secrets
 //!    file next to the restored database (CRYPTO.md §5.8), both at startup and by `restore`
 //!    into an empty database, which it leaves empty (ADR 0023 §5 step 4); a damaged backup
@@ -367,6 +368,8 @@ fn populated(secrets_path: &Path) -> Dump {
             "vault_device_cursors",
             vec![vec![v1(), d1(), blob(35, 26), int(35)]],
         ),
+        // No counter row: the first start's backfill seeds it from the vault rows (ADR 0048 §4).
+        ("storage_account_usage", Vec::new()),
     ];
     let tables: Vec<TableDump> = TABLES
         .iter()
@@ -410,6 +413,28 @@ async fn restore_state(db: &Database) -> (RestoreGeneration, Vec<([u8; 16], Rest
         .collect();
     tx.finish().await.unwrap();
     (generation, epochs)
+}
+
+/// The first account's storage counter, asserted equal to the true sum of its vault rows (ADR
+/// 0048 §4).
+async fn usage(db: &Database) -> u64 {
+    let account = [ACCOUNTS[0]; 16];
+    let mut tx = db.begin_read().await.unwrap();
+    let counter = rizzy_storage::quota::bytes_used(tx.conn(), &account)
+        .await
+        .unwrap();
+    let truth = rizzy_domain_vault::usage::counted_bytes(
+        tx.conn(),
+        rizzy_domain_auth::types::AccountId::from_bytes(account),
+    )
+    .await
+    .unwrap();
+    tx.finish().await.unwrap();
+    assert_eq!(
+        counter, truth,
+        "the storage counter does not match the rows"
+    );
+    counter
 }
 
 /// Stops a started server: closes the pools, which releases the writer lock.
@@ -503,6 +528,9 @@ fn backup_wipe_restore_drill() {
         }
         let services = open_services(&config).await.unwrap();
         assert_eq!(restore_state(&services.db).await, (before, Vec::new()));
+        // ADR 0048 §4: the start seeded the account's storage counter from its vault rows.
+        let seeded = usage(&services.db).await;
+        assert!(seeded > 0);
 
         // 2. Back up next to the running server: `backup` on a read-only reader, and the
         //    encrypted secrets backup. `restore` cannot run next to it.
@@ -606,6 +634,8 @@ fn backup_wipe_restore_drill() {
         assert_eq!(accounts, ACCOUNTS.map(|a| [a; 16]).to_vec());
         assert!(epochs.iter().all(|(_, g)| *g == after));
         assert_eq!(services.db.dump().await.unwrap(), backup);
+        // ADR 0048 §4: the restored counter matches the restored rows.
+        assert_eq!(usage(&services.db).await, seeded);
         stop(services).await;
 
         // 7. Refusals.

@@ -286,7 +286,10 @@ pub(crate) fn fixture() -> Dump {
             "vault_device_cursors",
             vec![vec![v1(), d1(), blob(33, 26), int(34)]],
         ),
-        ("storage_account_usage", vec![vec![a1(), int(1_234), int(35)]]),
+        (
+            "storage_account_usage",
+            vec![vec![a1(), int(1_234), int(35)]],
+        ),
     ];
     // Keep the fixture in TABLES order, and make sure it covers every table.
     let tables: Vec<TableDump> = TABLES
@@ -343,7 +346,11 @@ pub(crate) async fn exercise_quota(db: &rizzy_storage::Database) {
     let (a1, a2) = (id(ACCOUNT_1), id(ACCOUNT_2));
     let mut r = db.begin_read().await.unwrap();
     assert_eq!(bytes_used(r.conn(), &a1).await.unwrap(), 1_234);
-    assert_eq!(bytes_used(r.conn(), &a2).await.unwrap(), 0, "no row reads as 0");
+    assert_eq!(
+        bytes_used(r.conn(), &a2).await.unwrap(),
+        0,
+        "no row reads as 0"
+    );
     assert_eq!(accounts(r.conn()).await.unwrap(), vec![a1]);
     r.finish().await.unwrap();
 
