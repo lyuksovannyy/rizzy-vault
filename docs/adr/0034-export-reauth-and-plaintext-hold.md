@@ -1,6 +1,6 @@
 # ADR 0034: Re-authentication before every export and a hold before plaintext export
 
-- Status: Accepted
+- Status: Partially superseded by [ADR 0074](0074-passkey-cxf-import-export.md) (point 3 in part)
 - Date: 2026-10-05
 - Deciders: project owner
 - Milestone: M1
