@@ -19,7 +19,10 @@ import {
   type FromContentScript,
   type PasskeyCreateRequestMessage,
   type PasskeyGetRequestMessage,
+  type RegisterIframeInstanceMessage,
+  type RevokeIframeInstanceMessage,
   type SavePromptResolvedMessage,
+  isInstanceToken,
   MAX_ALGS,
   MAX_ALLOW_CREDENTIALS,
   MAX_FIELDS_PER_REPORT,
@@ -209,6 +212,18 @@ function parsePasskeyGetRequest(body: Record<string, unknown>): PasskeyGetReques
   };
 }
 
+/** ADR 0043 point 2: the one field either iframe-instance message carries, a canonical v4 UUID
+ * ({@link isInstanceToken}), nothing else. */
+function parseIframeInstance(
+  type: "register_iframe_instance" | "revoke_iframe_instance",
+  body: Record<string, unknown>,
+): RegisterIframeInstanceMessage | RevokeIframeInstanceMessage {
+  if (!isInstanceToken(body["instanceToken"])) {
+    throw new MessageRejected(`${type}: instanceToken`);
+  }
+  return { type, instanceToken: body["instanceToken"] };
+}
+
 /**
  * Validates and narrows a raw message claimed to come from a content script. Throws
  * {@link MessageRejected} for anything that does not exactly match one known shape within its
@@ -235,6 +250,10 @@ export function parseFromContentScript(raw: unknown): FromContentScript {
       return parsePasskeyCreateRequest(raw);
     case "passkey_get_request":
       return parsePasskeyGetRequest(raw);
+    case "register_iframe_instance":
+      return parseIframeInstance("register_iframe_instance", raw);
+    case "revoke_iframe_instance":
+      return parseIframeInstance("revoke_iframe_instance", raw);
     default:
       throw new MessageRejected(`unknown type: ${String(raw["type"])}`);
   }

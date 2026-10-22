@@ -132,7 +132,11 @@ does:
    matcher for that sender's own tab URL and requires the claimed item to be among the result
    (`core-host/content-handler.ts`'s `selectFillCandidate`), re-checking the equivalence-only
    second confirmation there too rather than trusting the iframe's UI alone. The revealed values
-   are pushed to the content script as `apply_fill`, never back to the iframe. See
+   are pushed to the content script as `apply_fill`, never back to the iframe. Since ADR 0043
+   the sender check alone is not enough either: the request must also carry the per-instance
+   token the content script registered for that exact iframe and delivered to it only in its
+   show `postMessage` (`core-host/iframe-instance.ts`), so a clone of the menu resource elsewhere
+   in the tab is refused. See
    [ADR 0036](../../docs/adr/0036-browser-extension-architecture-and-key-custody.md) §4's
    "chosen-fill request" bullet (added the same day) for the full rationale, and
    `test/sender.test.ts`/`test/content-handler.test.ts`/`test/listener-routing.test.ts` for the
@@ -291,7 +295,8 @@ the confirm dialog.**
   trusted click (`event.isTrusted`) is the only thing that can approve or pick a candidate; the
   ceremony is bound to the tab/origin at offer time and re-checked at approval time
   (`passkey-ceremony.ts`'s `take()`), so a navigation invalidates it (unlike the save prompt,
-  which survives one).
+  which survives one). The approval or decline also carries the consent iframe's own ADR 0043
+  instance token, an independent check beside `ceremonyToken`.
 - **Long-lived context** (`core-context.ts`'s `offerPasskeyCreate`/`offerPasskeyGet`/
   `approvePasskeyCeremony`): calls `createPasskey` + `addPasskey`/`editItem` + `sync()` for a
   create, or `DurableSession.passkeyAssertion` for a sign-in. Any failure (a Rust

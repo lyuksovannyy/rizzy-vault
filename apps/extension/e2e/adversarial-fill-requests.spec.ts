@@ -40,7 +40,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { type BrowserContext, type Page, chromium, test as base, expect } from "@playwright/test";
+import { type BrowserContext, type Frame, type Locator, type Page, chromium, test as base, expect } from "@playwright/test";
 
 import { TEST_ACCOUNT_PASSWORD, createLoginItem, signUp } from "./account.ts";
 import { type RunningServer, startServer } from "./server.ts";
@@ -3831,7 +3831,7 @@ test("an ordinary, brief, unrelated View Transition elsewhere on the page does n
 // same way, a live device, a real click, Chromium with IntersectionObserver v2 disabled
 // context-wide as a PROXY for Firefox's total lack of it). Two bypasses reproduced and are now
 // fixed; one (the cloned-resource sender bypass, and its two same-root-cause variants) reproduced
-// but is NOT fixed here — see the dedicated comment above that test.
+// and was blocked on an ADR, now closed by ADR 0043 — see the dedicated comment above that test.
 //
 // A stacking-context-escaping ancestor (`isolation: isolate`, or `opacity` anything other than
 // EXACTLY 1) plus a low-`z-index` decoy appended as a sibling of `<body>` (reported critical,
@@ -4135,111 +4135,393 @@ test("an ordinary decorative body::after (position: absolute, modest z-index) do
   }
 });
 
-// Sixth adversarial round. Reported bypass (critical) — NOT a Gate A/B/C occlusion gap, and NOT
-// fixed here. `src/inline-menu/index.html` is `web_accessible_resources` to ANY http(s) origin
-// (`manifest.chromium.json`), with no instance/frame identity check of any kind: the background's
-// `isInlineMenuSender` (`messaging/sender.ts:120-123`) authorizes a privileged request (reveal a
-// credential, generate a password) from ANY document whose `sender.id`/`sender.origin` are this
-// extension's own — never checking WHICH `<iframe>` sent it, or whether it is the one
-// `content-script.ts` itself constructed. A hostile page can embed a SECOND, attacker-controlled
+// Sixth adversarial round. Reported bypass (critical), CLOSED by ADR 0043 — NOT a Gate A/B/C
+// occlusion gap. `src/inline-menu/index.html` is `web_accessible_resources` to ANY http(s) origin
+// (`manifest.chromium.json`), and the background's `isInlineMenuSender` (`messaging/sender.ts`)
+// authorizes a request from ANY document whose `sender.id`/`sender.origin` are this extension's
+// own — never WHICH `<iframe>` sent it. A hostile page can embed a SECOND, attacker-controlled
 // iframe pointing at that exact same resource; its "Generate password" button
-// (`inline-menu/main.ts`, built unconditionally, independent of any `postMessage` from a real
-// content script) needs one ordinary trusted click — the attacker's OWN iframe, styled however
-// they like, so none of Gates A/B/C (which only ever instrument the ONE iframe
-// `content-script.ts`'s own `InlineMenu` constructor builds) are even in play. The generated
-// value is pushed to the TAB's content script as `apply_fill`
-// (`content-handler.ts`'s `handleInlineMenuGeneratePasswordRequest`) and written into whatever
-// field the REAL `InlineMenu` instance is anchored to (`activeFillTargets.passwordField`) —
-// gated only on THAT instance's own Gate B (`content-script.ts`'s `apply_fill` listener), which
-// is trivially satisfied whenever the real menu is just sitting on the page unattacked (the
-// ordinary case: any page with a password field shows the real menu and its "Generate password"
-// button unconditionally, `wireInlineMenu`'s own doc, "gap 32").
+// (`inline-menu/main.ts`, built unconditionally) needs one ordinary trusted click on the
+// attacker's OWN iframe, so none of Gates A/B/C (which only ever instrument the ONE iframe
+// `content-script.ts`'s own `InlineMenu` builds) are in play. Before ADR 0043 the generated value
+// was pushed to the TAB's content script as `apply_fill` and written into the REAL `InlineMenu`'s
+// anchored field — REPRODUCED against the real built extension (Chromium, Gates A/B/C at their
+// post-sixth-round state), kept as a `test.fixme` until an ADR existed.
 //
-// REPRODUCED against the real built extension (confirmed by direct probe, Chromium, Gates A/B/C
-// all left at their default/fixed post-sixth-round state — this path never touches any of them):
-// a real trusted Playwright click on the CLONED iframe's own "Generate password" button caused a
-// freshly generated password to land in the page's own `#pass` field, with no interaction with
-// the real inline-menu iframe at all.
+// FIXED (ADR 0043): the content script mints a per-instance token for each iframe it builds,
+// registers it with the background over its own trusted channel, and hands it to that iframe
+// only inside the targeted show `postMessage`; the background refuses every inline-menu-sender
+// message whose token has no live registration for the sender's own tab
+// (`core-host/listener.ts`, `core-host/iframe-instance.ts`). A clone is never fed one. The two
+// reports riding the same root cause close with it: a clone's forged `inline_menu_fill_chosen`
+// (and its forgeable title/username/savedHost/pageHost display) and a passkey-consent clone, which
+// reaches the same sender class and now needs the consent iframe's own token beside
+// `ceremonyToken` (ADR 0043 point 6).
 //
-// NOT FIXED: closing this needs the background to tell the real inline-menu iframe apart from an
-// attacker's clone of the same extension-origin resource — a frame-identity or per-instance-token
-// concept `isInlineMenuSender`/ADR 0040's message shape does not have today. That is an
-// authentication/protocol change (CLAUDE.md's ADR gate: "Never implement … authentication,
-// protocol … without [an Accepted ADR]"), which is the owner's call, not a bypass-triage fix —
-// the exact same reasoning this file already applied to the second adversarial round's
-// "unrelated DOM mutation racing a rebuild" report ("threading the clicked instance's identity
-// through `apply_fill` would change ADR 0040's message shape, which needs an Accepted ADR
-// change, not a bypass triage"). Left as `test.fixme`, with the full reproduction kept (not
-// emptied out) for whoever picks up the ADR work, and reported to the owner as BLOCKED rather
-// than silently left out. Two related reports ride the identical root cause and are not given
-// their own test: `inline_menu_fill_chosen`'s informational fields (title/username/savedHost/
-// pageHost) are equally forgeable from the same cloned iframe for a genuinely-matching itemId on
-// the attacker's own domain (the mechanical two-click/itemId-membership gate is unaffected,
-// matching this file's own existing analysis, but the cross-domain warning TEXT the user is
-// shown is not), and `src/passkey-consent/index.html` reaches the exact same `isInlineMenuSender`
-// sender class on identical terms (`core-host/listener.ts`'s own comment on reusing it "as-is").
-// Fixing the root cause fixes all three; none of the three is fixable piecemeal within this
-// task's ADR gate.
-//
-// Verified green (this test body runs and the attack succeeds, i.e. the assertions below pass)
-// by temporarily changing `test.fixme` to `test` and running it alone, as of this commit. If a
-// future run of it this way FAILS, re-read this comment before assuming the bug is fixed: a
-// failure here could equally mean the test itself bit-rotted (selector/button name/helper
-// signature drift) rather than the sender model changing — confirm which by reproducing the
-// mechanism fresh against whatever code exists then, not by trusting this test's pass/fail alone.
-test.fixme(
-  "a cloned iframe pointing at the extension's own inline-menu resource can trigger password generation into the real page field — blocked on an ADR (isInlineMenuSender has no frame-identity concept; ADR 0040 would need to change)",
-  async ({ context, extensionId, server }) => {
-    const page = await startLoginPageServer();
-    try {
-      const setupPage = await context.newPage();
-      const secretKey = await signUp(setupPage, server.origin, "bypassclonediframe");
-      await setupPage.close(); // no saved item needed — the generator works with zero candidates
+// The tests after this one cover ADR 0043 point 7's other cases. Several need a REAL token to
+// replay. No page script can ever read one (that is the fix), so the test harness itself records
+// the tokens the content script delivers to extension-origin frames, with an init script
+// ({@link captureInstanceTokens}), and then replays them from an extension-origin document in the
+// tab with `chrome.runtime.sendMessage` — i.e. it models an attacker who somehow got a token,
+// strictly stronger than anything a hostile page can actually do.
 
-      const popup = await enrol(context, extensionId, server, "bypassclonediframe", secretKey);
-      await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
-      await popup.close();
+/** The one refusal every rejected inline-menu-sender message gets (ADR 0043 point 4). */
+const INSTANCE_REFUSED = { type: "content_error", code: "inline_menu_fill_chosen: malformed request" };
 
-      const visit = await context.newPage();
-      await visit.goto(`http://127.0.0.1:${page.port}/`);
-      // The REAL menu renders unconditionally for any detected password field, even with zero
-      // saved candidates (`wireInlineMenu`'s own doc, "gap 32") — no click or focus needed, just
-      // like every other test in this file that waits for `iframe[data-rizzy-inline-menu]`.
-      await expect(visit.locator("iframe[data-rizzy-inline-menu]")).toHaveCount(1, { timeout: 15_000 });
-      await visit.waitForTimeout(150);
-
-      // The attacker's OWN iframe, pointing at the exact same extension resource, visible and
-      // clickable (no occlusion trick needed — Gates A/B/C never run against this iframe at all).
-      // Positioned away from the real target field on purpose: overlapping it would make this
-      // test's OWN clone trip `content-script.ts`'s unrelated, legitimate `isTopmost` occlusion
-      // check on the FIELD itself (ADR 0037 §5's "no hidden/invisible field fill"), which would
-      // make the real menu fail to rebuild for a reason that has nothing to do with the
-      // sender-identity bug this test is about — confirmed by direct probe: an overlapping clone
-      // position breaks reproduction via that confound, not via any fix.
-      await visit.evaluate((extId) => {
-        const clone = document.createElement("iframe");
-        clone.id = "rizzy-test-hostile-clone";
-        clone.src = `chrome-extension://${extId}/src/inline-menu/index.html`;
-        Object.assign(clone.style, { position: "fixed", right: "0", bottom: "0", width: "320px", height: "160px", zIndex: "1" });
-        document.body.appendChild(clone);
-      }, extensionId);
-
-      // The clone's own insertion is a real (non-"own-overlay") DOM mutation, so
-      // `content-script.ts`'s field-redetection debounce (250ms) tears down and rebuilds the
-      // REAL menu once before settling — confirmed by direct probe (see the comment above this
-      // test) — so this waits past that rebuild, not just past the click round trip.
-      const clone = visit.frameLocator("iframe#rizzy-test-hostile-clone");
-      const generateButton = clone.getByRole("button", { name: "Generate password" });
-      await expect(generateButton).toBeVisible({ timeout: 15_000 });
-      await visit.waitForTimeout(600);
-      await generateButton.click();
-      await visit.waitForTimeout(800);
-
-      const generated = await visit.locator("#pass").inputValue();
-      expect(generated.length).toBeGreaterThan(8);
-      await visit.close();
-    } finally {
-      await page.stop();
+/** Test-only (see the comment above): in every extension-origin frame of `context`, records each
+ * `instanceToken` a show message delivers, in arrival order, before the page's own listener runs. */
+async function captureInstanceTokens(context: BrowserContext): Promise<void> {
+  await context.addInitScript(() => {
+    if (location.protocol !== "chrome-extension:") {
+      return;
     }
-  },
-);
+    const seen: string[] = [];
+    (globalThis as unknown as { rizzyTestTokens: string[] }).rizzyTestTokens = seen;
+    window.addEventListener("message", (event) => {
+      const token = (event.data as { instanceToken?: unknown } | null)?.instanceToken;
+      if (typeof token === "string") {
+        seen.push(token);
+      }
+    });
+  });
+}
+
+async function frameOf(visit: Page, selector: string): Promise<Frame> {
+  const handle = await visit.locator(selector).elementHandle({ timeout: 15_000 });
+  const frame = await handle?.contentFrame();
+  if (frame === null || frame === undefined) {
+    throw new Error(`adversarial test setup: no frame for ${selector}`);
+  }
+  return frame;
+}
+
+/** The real inline-menu iframe's one delivered token, once its show message has arrived. */
+async function realMenuToken(visit: Page): Promise<{ frame: Frame; token: string }> {
+  const frame = await frameOf(visit, "iframe[data-rizzy-inline-menu]");
+  let tokens: string[] = [];
+  await expect
+    .poll(
+      async () => {
+        tokens = await frame.evaluate(() => (globalThis as unknown as { rizzyTestTokens?: string[] }).rizzyTestTokens ?? []);
+        return tokens.length;
+      },
+      { timeout: 15_000 },
+    )
+    .toBe(1);
+  const token = tokens[0];
+  if (token === undefined) {
+    throw new Error("adversarial test setup: the real menu received no instance token");
+  }
+  return { frame, token };
+}
+
+/** Sends `message` to the background from `frame`, an extension-origin document in the tab — the
+ * exact sender class `isInlineMenuSender` admits — and returns the answer. */
+async function sendFromExtensionFrame(frame: Frame, message: Record<string, unknown>): Promise<unknown> {
+  return frame.evaluate(
+    (m) => (globalThis as unknown as { chrome: { runtime: { sendMessage(msg: unknown): Promise<unknown> } } }).chrome.runtime.sendMessage(m),
+    message,
+  );
+}
+
+/** Embeds the attacker's own clone of the inline-menu resource directly in the page, positioned
+ * away from the real target field on purpose: overlapping it would trip `content-script.ts`'s
+ * unrelated, legitimate `isTopmost` check on the FIELD itself and make the real menu fail to
+ * rebuild — a confound, not the sender-identity question these tests are about (confirmed by
+ * direct probe when the fixme was written). */
+async function embedClone(visit: Page, extensionId: string): Promise<void> {
+  await visit.evaluate((extId) => {
+    const clone = document.createElement("iframe");
+    clone.id = "rizzy-test-hostile-clone";
+    clone.src = `chrome-extension://${extId}/src/inline-menu/index.html`;
+    Object.assign(clone.style, { position: "fixed", right: "0", bottom: "0", width: "320px", height: "160px", zIndex: "1" });
+    document.body.appendChild(clone);
+  }, extensionId);
+}
+
+async function enrolledVisit(
+  context: BrowserContext,
+  extensionId: string,
+  server: RunningServer,
+  loginName: string,
+  port: number,
+  item?: { title: string; username: string; password: string },
+): Promise<Page> {
+  const setupPage = await context.newPage();
+  const secretKey = await signUp(setupPage, server.origin, loginName);
+  if (item !== undefined) {
+    await createLoginItem(setupPage, { ...item, websiteUrl: `http://127.0.0.1:${port}/` });
+  }
+  await setupPage.close();
+  const popup = await enrol(context, extensionId, server, loginName, secretKey);
+  await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+  await popup.close();
+  const visit = await context.newPage();
+  await visit.goto(`http://127.0.0.1:${port}/`);
+  // The REAL menu renders for any detected password field, even with zero saved candidates
+  // (`wireInlineMenu`'s own doc, "gap 32").
+  await expect(visit.locator("iframe[data-rizzy-inline-menu]")).toHaveCount(1, { timeout: 15_000 });
+  return visit;
+}
+
+/** A real trusted click at the centre of `locator`'s own box (the pattern every positive control
+ * in this file uses), after Gate A has had its first good samples. */
+async function realClick(visit: Page, locator: Locator): Promise<void> {
+  await expect(locator).toBeVisible({ timeout: 15_000 });
+  await visit.waitForTimeout(150);
+  const box = await locator.boundingBox();
+  if (box === null) {
+    throw new Error("adversarial test setup: could not read a button's bounding box");
+  }
+  await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+}
+
+test("a cloned iframe pointing at the extension's own inline-menu resource can no longer trigger password generation into the real page field (ADR 0043)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    const visit = await enrolledVisit(context, extensionId, server, "bypassclonediframe", page.port);
+    await visit.waitForTimeout(150);
+    await embedClone(visit, extensionId);
+
+    // The clone's own insertion is a real (non-"own-overlay") DOM mutation, so the real menu is
+    // torn down and rebuilt once (250ms debounce) before settling; wait past that.
+    const generateButton = visit.frameLocator("iframe#rizzy-test-hostile-clone").getByRole("button", { name: "Generate password" });
+    await expect(generateButton).toBeVisible({ timeout: 15_000 });
+    await visit.waitForTimeout(600);
+    await generateButton.click();
+    await visit.waitForTimeout(800);
+    await expect(visit.locator("#pass")).toHaveValue("");
+
+    // Positive control: the REAL menu's own generator still fills, so the refusal above is the
+    // token check, not a broken generator.
+    await realClick(visit, visit.frameLocator("iframe[data-rizzy-inline-menu]").getByRole("button", { name: "Generate password" }));
+    await expect.poll(async () => (await visit.locator("#pass").inputValue()).length, { timeout: 15_000 }).toBeGreaterThan(8);
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+test("a clone nested inside an unrelated third-party subframe is refused the same way (ADR 0043 point 7)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  // The "third party": a different origin (`localhost` vs. the page's `127.0.0.1`) whose own
+  // document embeds the clone — the nesting depth sender information alone cannot see through.
+  const thirdParty: Server = createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end(
+      "<!doctype html><html><body>" +
+        `<iframe id="nested-clone" src="chrome-extension://${extensionId}/src/inline-menu/index.html" style="width:300px;height:200px;border:0"></iframe>` +
+        "</body></html>",
+    );
+  });
+  await new Promise<void>((resolve) => thirdParty.listen(0, "127.0.0.1", resolve));
+  const address = thirdParty.address();
+  const thirdPartyPort = typeof address === "object" && address !== null ? address.port : 0;
+  try {
+    const visit = await enrolledVisit(context, extensionId, server, "bypassnestedclone", page.port);
+    await visit.waitForTimeout(150);
+    await visit.evaluate((url) => {
+      const frame = document.createElement("iframe");
+      frame.id = "rizzy-test-third-party";
+      frame.src = url;
+      Object.assign(frame.style, { position: "fixed", right: "0", bottom: "0", width: "320px", height: "220px", border: "0", zIndex: "1" });
+      document.body.appendChild(frame);
+    }, `http://localhost:${thirdPartyPort}/ad`);
+
+    const generateButton = visit
+      .frameLocator("iframe#rizzy-test-third-party")
+      .frameLocator("iframe#nested-clone")
+      .getByRole("button", { name: "Generate password" });
+    await expect(generateButton).toBeVisible({ timeout: 15_000 });
+    await visit.waitForTimeout(600);
+    await generateButton.click();
+    await visit.waitForTimeout(800);
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+    await new Promise<void>((resolve) => {
+      thirdParty.closeAllConnections();
+      thirdParty.close(() => resolve());
+    });
+  }
+});
+
+test("a replayed token from a destroyed instance is refused, and a rebuild mints a fresh one (ADR 0043 points 5, 7)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    await captureInstanceTokens(context);
+    const visit = await enrolledVisit(context, extensionId, server, "replaydestroyed", page.port);
+    const first = await realMenuToken(visit);
+
+    // An unrelated DOM mutation: `wireInlineMenu` destroys the first instance (revoking its
+    // token) and builds a second one.
+    await visit.evaluate(() => document.body.appendChild(document.createElement("div")));
+    await expect.poll(async () => (await frameOf(visit, "iframe[data-rizzy-inline-menu]")) !== first.frame, { timeout: 15_000 }).toBe(true);
+    const second = await realMenuToken(visit);
+    expect(second.token).not.toBe(first.token);
+
+    // The destroyed instance's token, replayed from the live, real extension-origin iframe in the
+    // same tab: refused, for each privileged kind, and nothing is written.
+    expect(await sendFromExtensionFrame(second.frame, { type: "inline_menu_generate_password_chosen", instanceToken: first.token })).toEqual(
+      INSTANCE_REFUSED,
+    );
+    expect(
+      await sendFromExtensionFrame(second.frame, { type: "passkey_ceremony_declined", instanceToken: first.token, ceremonyToken: "invented" }),
+    ).toEqual(INSTANCE_REFUSED);
+    // Never registered at all (what a clone could at best invent): the same refusal.
+    expect(
+      await sendFromExtensionFrame(second.frame, { type: "inline_menu_generate_password_chosen", instanceToken: "3b241101-e2bb-4255-8caf-4136c566a962" }),
+    ).toEqual(INSTANCE_REFUSED);
+    await visit.waitForTimeout(300);
+    await expect(visit.locator("#pass")).toHaveValue("");
+
+    // Positive control: the live instance's own token is honoured.
+    expect(await sendFromExtensionFrame(second.frame, { type: "inline_menu_generate_password_chosen", instanceToken: second.token })).toEqual({
+      type: "inline_menu_generate_password_dispatched",
+    });
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+test("a token registered for a different tab is refused (cross-instance, ADR 0043 point 7)", async ({ context, extensionId, server }) => {
+  const page = await startLoginPageServer();
+  try {
+    await captureInstanceTokens(context);
+    const tabA = await enrolledVisit(context, extensionId, server, "crosstabtoken", page.port);
+    const a = await realMenuToken(tabA);
+    const tabB = await context.newPage();
+    await tabB.goto(`http://127.0.0.1:${page.port}/`);
+    const b = await realMenuToken(tabB);
+
+    expect(await sendFromExtensionFrame(b.frame, { type: "inline_menu_generate_password_chosen", instanceToken: a.token })).toEqual(INSTANCE_REFUSED);
+    await tabB.waitForTimeout(300);
+    await expect(tabB.locator("#pass")).toHaveValue("");
+    await expect(tabA.locator("#pass")).toHaveValue("");
+
+    // Each tab's own token still works for that tab alone.
+    expect(await sendFromExtensionFrame(b.frame, { type: "inline_menu_generate_password_chosen", instanceToken: b.token })).toEqual({
+      type: "inline_menu_generate_password_dispatched",
+    });
+    await expect(tabA.locator("#pass")).toHaveValue("");
+    await tabA.close();
+    await tabB.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+test("teardown revokes the token before a later message can use it: after a pick and after a blur (ADR 0043 point 5)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    await captureInstanceTokens(context);
+    const visit = await enrolledVisit(context, extensionId, server, "teardownrevokes", page.port, {
+      title: "Teardown Target",
+      username: "teardown-user@example.com",
+      password: "teardown-target-password",
+    });
+
+    // Pick path: a real click fills, then the iframe's own pick message tears the menu down.
+    const picked = await realMenuToken(visit);
+    await realClick(visit, visit.frameLocator("iframe[data-rizzy-inline-menu]").getByRole("button", { name: "Teardown Target", exact: false }));
+    await expect(visit.locator("#pass")).toHaveValue("teardown-target-password", { timeout: 15_000 });
+    await expect(visit.locator("iframe[data-rizzy-inline-menu]")).toHaveCount(0, { timeout: 15_000 });
+
+    // An extension-origin document to replay from: the clone (its insertion also rebuilds a new
+    // real menu, with a new token).
+    await embedClone(visit, extensionId);
+    const clone = await frameOf(visit, "iframe#rizzy-test-hostile-clone");
+    // Cleared without focusing either field (`fill` would focus the anchor, which the blur half
+    // below needs to control itself).
+    await visit.evaluate(() => {
+      for (const id of ["user", "pass"]) {
+        (document.getElementById(id) as HTMLInputElement).value = "";
+      }
+    });
+    expect(
+      await sendFromExtensionFrame(clone, { type: "inline_menu_fill_chosen", instanceToken: picked.token, itemId: "unknown", confirmedEquivalence: false }),
+    ).toEqual(INSTANCE_REFUSED);
+    expect(await sendFromExtensionFrame(clone, { type: "inline_menu_generate_password_chosen", instanceToken: picked.token })).toEqual(INSTANCE_REFUSED);
+
+    // Blur path: focus moving off the anchor field destroys the rebuilt menu, revoking its token.
+    const blurred = await realMenuToken(visit);
+    expect(blurred.token).not.toBe(picked.token);
+    await visit.locator("#pass").focus();
+    await visit.locator("#user").focus();
+    await expect(visit.locator("iframe[data-rizzy-inline-menu]")).toHaveCount(0, { timeout: 15_000 });
+    await expect
+      .poll(async () => sendFromExtensionFrame(clone, { type: "inline_menu_generate_password_chosen", instanceToken: blurred.token }), { timeout: 5_000 })
+      .toEqual(INSTANCE_REFUSED);
+    await visit.waitForTimeout(300);
+    await expect(visit.locator("#pass")).toHaveValue("");
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+
+test("a real click still fills while a rebuild is pending, and the rebuilt menu fills with its fresh token (ADR 0043 point 5, Open question 4)", async ({
+  context,
+  extensionId,
+  server,
+}) => {
+  const page = await startLoginPageServer();
+  try {
+    await captureInstanceTokens(context);
+    const visit = await enrolledVisit(context, extensionId, server, "rebuildrace", page.port, {
+      title: "Rebuild Race Target",
+      username: "rebuildrace-user@example.com",
+      password: "rebuildrace-target-password",
+    });
+    const before = await realMenuToken(visit);
+    const candidate = visit.frameLocator("iframe[data-rizzy-inline-menu]").getByRole("button", { name: "Rebuild Race Target", exact: false });
+    await expect(candidate).toBeVisible({ timeout: 15_000 });
+    await visit.waitForTimeout(150);
+    const box = await candidate.boundingBox();
+    if (box === null) {
+      throw new Error("adversarial test setup: could not read the real candidate's bounding box");
+    }
+    // An unrelated mutation schedules a destroy-and-rebuild (250ms debounce, then a round trip),
+    // and the real click lands while it is pending: the click's own request, and the revoke the
+    // rebuild sends, race each other at the background.
+    await visit.evaluate(() => document.body.appendChild(document.createElement("div")));
+    await visit.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(visit.locator("#pass")).toHaveValue("rebuildrace-target-password", { timeout: 15_000 });
+    await expect(visit.locator("#user")).toHaveValue("rebuildrace-user@example.com");
+
+    // After it settles (the pick tore the clicked menu down; the pending rebuild then built a new
+    // one): the new menu holds a fresh token and a real click on it fills again.
+    await visit.evaluate(() => {
+      for (const id of ["user", "pass"]) {
+        (document.getElementById(id) as HTMLInputElement).value = "";
+      }
+    });
+    await visit.waitForTimeout(700);
+    const after = await realMenuToken(visit);
+    expect(after.token).not.toBe(before.token);
+    await realClick(visit, visit.frameLocator("iframe[data-rizzy-inline-menu]").getByRole("button", { name: "Rebuild Race Target", exact: false }));
+    await expect(visit.locator("#pass")).toHaveValue("rebuildrace-target-password", { timeout: 15_000 });
+    await visit.close();
+  } finally {
+    await page.stop();
+  }
+});
+

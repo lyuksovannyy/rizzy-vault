@@ -19,6 +19,7 @@
 import {
   isApplyPasskeyResultMessage,
   type ApplyPasskeyResultMessage,
+  type FromContentScript,
   type PasskeyCreateRequestMessage,
   type PasskeyGetRequestMessage,
   type ToContentScript,
@@ -29,6 +30,7 @@ import {
   type PasskeyRequestFromPage,
   type PasskeyResponseToPage,
 } from "./passkey-protocol.ts";
+import { mintInstanceToken } from "./instance-token.ts";
 import { PASSKEY_CONSENT_SHOW, isPasskeyConsentDoneMessage, type PasskeyConsentShowMessage } from "../passkey-consent/protocol.ts";
 
 if (window.top === window) {
@@ -45,7 +47,10 @@ function installPasskeyRelay(): void {
    * owns `ceremonyToken`; the page-world shim mints and owns `nonce`; this map is the one place
    * that ties them together, and the only state this file keeps about an in-flight ceremony. */
   const nonceByCeremonyToken = new Map<string, string>();
-  let consentFrame: HTMLIFrameElement | undefined;
+  /** The one consent iframe currently shown, and the teardown that removes it AND revokes its
+   * ADR 0043 instance token — every removal path goes through `teardown`, never a bare
+   * `frame.remove()`, so no token outlives the iframe it was minted for. */
+  let consent: { readonly frame: HTMLIFrameElement; readonly teardown: () => void } | undefined;
 
   window.addEventListener("message", (event) => {
     if (event.source !== window || !isPasskeyRequestFromPage(event.data)) {
@@ -93,8 +98,19 @@ function installPasskeyRelay(): void {
     });
   }
 
-  function showConsent(offer: PasskeyConsentShowMessage): void {
-    consentFrame?.remove();
+  function showConsent(offer: Omit<PasskeyConsentShowMessage, "instanceToken">): void {
+    consent?.teardown();
+    // ADR 0043 points 1-2: one token per consent-iframe instance, minted and registered before
+    // `src` is set below. Delivered only in the targeted show `postMessage` (point 3), and only
+    // once the background has confirmed the registration, so the iframe can never hold a token
+    // the background does not yet vouch for. A refused registration shows nothing and falls the
+    // page back to its own native ceremony, exactly like any other refusal here.
+    const instanceToken = mintInstanceToken();
+    const registered = sendToBackground({ type: "register_iframe_instance", instanceToken }).then(
+      (answer) => answer?.type === "iframe_instance_done",
+      () => false,
+    );
+    let tornDown = false;
     const frame = document.createElement("iframe");
     frame.setAttribute("data-rizzy-passkey-consent", "");
     frame.style.position = "fixed";
@@ -108,28 +124,53 @@ function installPasskeyRelay(): void {
     frame.addEventListener(
       "load",
       () => {
-        frame.contentWindow?.postMessage(offer, menuOrigin);
+        void registered.then((ok) => {
+          if (ok && !tornDown) {
+            frame.contentWindow?.postMessage({ ...offer, instanceToken } satisfies PasskeyConsentShowMessage, menuOrigin);
+          }
+        });
       },
       { once: true },
     );
+    // ADR 0043 point 5: the consent iframe's teardown revokes its token. Sent only once the
+    // registration itself has settled, so the revoke can never overtake it at the background.
+    const teardown = (): void => {
+      if (tornDown) {
+        return;
+      }
+      tornDown = true;
+      window.removeEventListener("message", onMessage);
+      frame.remove();
+      if (consent?.frame === frame) {
+        consent = undefined;
+      }
+      void registered.then(() => sendToBackground({ type: "revoke_iframe_instance", instanceToken })).catch(() => undefined);
+    };
     const onMessage = (event: MessageEvent) => {
       if (event.source !== frame.contentWindow || event.origin !== menuOrigin || !isPasskeyConsentDoneMessage(event.data)) {
         return;
       }
-      window.removeEventListener("message", onMessage);
-      frame.remove();
-      if (consentFrame === frame) {
-        consentFrame = undefined;
-      }
+      teardown();
     };
     window.addEventListener("message", onMessage);
+    void registered.then((ok) => {
+      if (ok || tornDown) {
+        return;
+      }
+      teardown();
+      const nonce = nonceByCeremonyToken.get(offer.ceremonyToken);
+      if (nonce !== undefined) {
+        nonceByCeremonyToken.delete(offer.ceremonyToken);
+        replyToPage({ type: PASSKEY_PAGE_RESPONSE, nonce, outcome: "fallback" });
+      }
+    });
     // `src` set before attaching, same documented ordering fix `content-script.ts`'s own
     // `InlineMenu` constructor uses, and for the identical reason (a detached iframe's first
     // `src` assignment queues exactly one navigation, avoiding the double-`load` race that
     // ordering fixed there).
     frame.src = consentUrl();
     document.body.appendChild(frame);
-    consentFrame = frame;
+    consent = { frame, teardown };
   }
 
   const ext = typeof chrome !== "undefined" ? chrome : browser;
@@ -154,10 +195,9 @@ function installPasskeyRelay(): void {
     replyToPage(response);
     // The consent iframe tears itself down on settling (its own `respond`'s teardown message),
     // but a result can arrive before that message's own round trip completes — removing it here
-    // too is idempotent (`showConsent`'s `onMessage` guards `consentFrame === frame`) and makes
-    // sure the overlay never outlives the ceremony it was for.
-    consentFrame?.remove();
-    consentFrame = undefined;
+    // too is idempotent (`showConsent`'s `teardown` runs once per frame) and makes sure the
+    // overlay, and its ADR 0043 instance token, never outlive the ceremony they were for.
+    consent?.teardown();
   }
 
   function replyToPage(response: PasskeyResponseToPage): void {
@@ -165,7 +205,7 @@ function installPasskeyRelay(): void {
   }
 }
 
-function sendToBackground(message: PasskeyCreateRequestMessage | PasskeyGetRequestMessage): Promise<ToContentScript | undefined> {
+function sendToBackground(message: FromContentScript): Promise<ToContentScript | undefined> {
   const ext = typeof chrome !== "undefined" ? chrome : browser;
   if (ext === undefined) {
     return Promise.resolve(undefined);

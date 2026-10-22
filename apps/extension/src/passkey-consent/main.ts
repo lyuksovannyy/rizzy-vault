@@ -45,21 +45,33 @@ function render(offer: PasskeyConsentShowMessage): void {
   prompt.appendChild(heading);
 
   if (offer.kind === "create") {
-    prompt.appendChild(button(offer.rpName ?? offer.rpId, () => void respond(offer, approvedMessage(offer.ceremonyToken))));
+    prompt.appendChild(button(offer.rpName ?? offer.rpId, () => void respond(offer, approvedMessage(offer))));
   } else {
     for (const candidate of offer.candidates ?? []) {
       prompt.appendChild(
         button(`${candidate.itemTitle} (${candidate.userName})`, () =>
-          void respond(offer, approvedMessage(offer.ceremonyToken, candidate.passkeyRef)),
+          void respond(offer, approvedMessage(offer, candidate.passkeyRef)),
         ),
       );
     }
   }
-  prompt.appendChild(button("Not now", () => void respond(offer, { type: "passkey_ceremony_declined", ceremonyToken: offer.ceremonyToken })));
+  prompt.appendChild(
+    button("Not now", () =>
+      void respond(offer, { type: "passkey_ceremony_declined", instanceToken: offer.instanceToken, ceremonyToken: offer.ceremonyToken }),
+    ),
+  );
 }
 
-function approvedMessage(ceremonyToken: string, chosenPasskeyRef?: string): PasskeyCeremonyMessage {
-  return { type: "passkey_ceremony_approved", ceremonyToken, ...(chosenPasskeyRef !== undefined ? { chosenPasskeyRef } : {}) };
+/** Both tokens travel together, each its own check at the background: `instanceToken` (ADR 0043,
+ * "is this the consent iframe the content script built") and `ceremonyToken` (ADR 0039 §2, "is
+ * this the ceremony the background offered"), never one in place of the other (ADR 0043 point 6). */
+function approvedMessage(offer: PasskeyConsentShowMessage, chosenPasskeyRef?: string): PasskeyCeremonyMessage {
+  return {
+    type: "passkey_ceremony_approved",
+    instanceToken: offer.instanceToken,
+    ceremonyToken: offer.ceremonyToken,
+    ...(chosenPasskeyRef !== undefined ? { chosenPasskeyRef } : {}),
+  };
 }
 
 function button(label: string, onClick: (event: MouseEvent) => void): HTMLButtonElement {
