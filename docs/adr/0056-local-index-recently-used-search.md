@@ -82,6 +82,18 @@ Known-answer and property tests, [ADR 0026](0026-client-device-state-and-cache.m
 5. THREAT_MODEL.md AR-14's entry gains, after "the CLI (and its state file in the user's own backups)": "and, from M3, its `item_index` (ADR 0056)."
 6. CRYPTO.md §8.4's `LOCAL_CACHE_INDEX` row, "First used" cell: "M3" → "reserved; not used by ADR 0056." §4.2's and §4.3's "Local index key (M3)" row label, in each table: → "Local index key (reserved; ADR 0056 does not use it)."
 
+### Owner answers at acceptance (2026-10-22)
+
+The owner accepted this ADR as drafted; the recommendations of "Open questions for the owner" stand:
+
+1. `item.notes` is not indexed in M3. Secure Notes get title-only search until a length-capped version is proposed separately.
+2. Cleartext is accepted for M3 desktop, where INV-61 gives a real exclusion mechanism. It is accepted for `rv` too, as a knowingly larger cost, since INV-61 is documentation-only for the CLI. The `LOCAL_CACHE_INDEX` route is not taken.
+3. FTS5 is deferred, to revisit with M3 performance data.
+4. The browser extension's IndexedDB cache keeps its M2 plain item list. This ADR commits only `rv` and `rizzy-ffi`.
+5. The §2 allow-list grows for ADR 0055's M3 item types by a short amendment, once ADR 0055 names which of its fields are display-safe. Until then those items are findable only by `item.name`. ADR 0055, accepted the same day, names no display-safe field, so that amendment is still to be written.
+
+Of the §7 "On acceptance" edits, all six are made in the accepting change: ADR 0026's status line and index row; THREAT_MODEL.md A8, AST-19, AST-7 and AR-14; CRYPTO.md §8.4, §4.2 and §4.3. The same change adds INV-80 (THREAT_MODEL.md §8.9), which §7 does not list but this ADR allocates for THREAT_MODEL.
+
 ## Consequences
 
 ### Positive

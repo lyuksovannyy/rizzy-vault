@@ -185,7 +185,7 @@ Versions are the latest stable releases as of 2026-09-25 (fact sheet). Audit sta
 | Mail secret key (M6) | X25519 | CSPRNG | `MAIL_SECRET_KEY` under the account key | User request, full rotation (`mail_key_epoch + 1`) |
 | Recovery code | 16 B | CSPRNG | Emergency Kit only | On every use, and on every account-key rotation unless the user re-types the current code, which is not offered after an SK change, a recovery or "kit exposed" ([§11.6](#116-key-rotation) step 5) |
 | Share secret (M5) | 32 B | CSPRNG per share | URL fragment; the owner's item data (encrypted) | Never. A share is a snapshot; revoke it and create a new one |
-| Local index key (M3) | 32 B | HKDF(account key, device) | Never stored | With the account key |
+| Local index key (reserved; ADR 0056 does not use it) | 32 B | HKDF(account key, device) | Never stored | With the account key |
 
 **Where each wrapped-key object lives.** This table is authoritative; [ADR 0011](adr/0011-storage.md) and [ADR 0012](adr/0012-sync-engine.md) follow it.
 
@@ -198,7 +198,7 @@ Versions are the latest stable releases as of 2026-09-25 (fact sheet). Audit sta
 | `ACCOUNT_KEY_DEVICE_GRANT`, `PASSWORD_VERIFIER_GRANT` | Server, `auth` domain, until the recipient device acknowledges it ([§10.1](#101-hpke-key-wrapping)) |
 | `VAULT_KEY_SELF_GRANT` | Server, `vault` domain |
 | `ITEM_KEY_WRAP` | Server, `vault` domain: the current wrap set, one row per `(vault_id, item_id, item_key_id)`, holding the wrap under the vault's current `vault_key_epoch`. A wrap that arrives inside an op or snapshot record fills that row and is also kept with the record. A rotation upload overwrites the row ([§11.6](#116-key-rotation) step 9). From then on the server serves that record without its wrap but with the signed wrap hash, which it keeps for as long as it keeps the record |
-| `ATTACHMENT_KEY_WRAP` (M3) | With the attachment; the M3 attachments ADR decides |
+| `ATTACHMENT_KEY_WRAP` (M3) | Server, `vault` domain: the `vault_attachments` row for that `attachment_id`; read back only via `attachments/get` ([ADR 0054](adr/0054-attachments-envelope-and-api.md) §6) |
 
 Wrapped-key objects travel with a cleartext locator (ids, epochs and, for `ITEM_KEY_WRAP`, the item key's id) so that the server can file them. The locator is never trusted: the reader rebuilds the AAD context from where it expected the object, and checks the unwrapped key's derived id against the envelope that uses it.
 
@@ -217,7 +217,7 @@ All HKDF is HKDF-SHA-256. The output length is in bytes.
 | `local_unlock_key` | `a = Argon2id(P = pw_in, S = device_salt, kdf_id, T = 32)`, then `HKDF(ikm = a, salt = empty, info = LABEL("unlock-key/local") ‖ 0x00 ‖ account_id ‖ device_id, L)` | 32 |
 | Envelope subkey and commitment | `okm = HKDF(ikm = K, salt = nonce, info = LABEL("envelope/xchacha20poly1305") ‖ 0x00 ‖ aad, 64)`. `k_enc = okm[0..32]`, `commitment = okm[32..64]` ([§8.3](#83-key-commitment)) | 64 |
 | Relay key, reserved (parked, ADR 0022) | `HKDF(ikm = account_key, salt = empty, info = LABEL("relay-key") ‖ 0x00 ‖ account_id ‖ u32(account_key_epoch), L)` | 32 |
-| Local index key (M3) | `HKDF(ikm = account_key, salt = empty, info = LABEL("local-index-key") ‖ 0x00 ‖ account_id ‖ device_id, L)` | 32 |
+| Local index key (reserved; ADR 0056 does not use it) | `HKDF(ikm = account_key, salt = empty, info = LABEL("local-index-key") ‖ 0x00 ‖ account_id ‖ device_id, L)` | 32 |
 | Recovery wrap key | `HKDF(ikm = recovery_code, salt = empty, info = LABEL("recovery/wrap-key") ‖ 0x00, L)` | 32 |
 | Recovery auth token | `HKDF(ikm = recovery_code, salt = empty, info = LABEL("recovery/auth-token") ‖ 0x00, L)`. The server stores `SHA-256(token)` | 32 |
 | Share passphrase key (M5) | `Argon2id(P = UTF-8(NFC(passphrase)), S = share_id, kdf_id = 1, T = 32)` | 32 |
@@ -649,7 +649,7 @@ The purpose is **not transmitted**. The reader rebuilds `u16(purpose) ‖ ctx` f
 | `ITEM_KEY_WRAP` | 0x0030 | vault key / 0x01 | vault_id ‖ item_id ‖ u32 vault_key_epoch (of the wrapping vault key). Plaintext: `u8 wrap_version = 1 ‖ u32 created_vault_key_epoch ‖ item_key (32)` | M1 |
 | `ITEM_OP` | 0x0031 | item key / 0x01 | vault_id ‖ item_id ‖ u16 item_schema_version ‖ op_id ‖ device_id ‖ u64 device_seq ‖ u64 hlc ‖ SHA-256(canonical op header) | M1 |
 | `ITEM_SNAPSHOT` | 0x0032 | item key / 0x01 | vault_id ‖ item_id ‖ u16 item_schema_version ‖ snapshot_id ‖ SHA-256(canonical snapshot header) | M1 |
-| `ATTACHMENT_CHUNK` | 0x0033 | attachment key / 0x03 (reserved) | defined by the M3 attachments ADR | M3 |
+| `ATTACHMENT_CHUNK` | 0x0033 | attachment key / 0x01 | vault_id ‖ item_id ‖ attachment_id ‖ u32 chunk_index ‖ u32 chunk_count ([ADR 0054](adr/0054-attachments-envelope-and-api.md) §1) | M3 |
 | `ATTACHMENT_KEY_WRAP` | 0x0034 | item key / 0x01 | vault_id ‖ item_id ‖ attachment_id | M3 |
 | `RELAY_BATCH` | 0x0040 | relay key / 0x01 | account_id ‖ sender device_id ‖ u64 batch_seq ‖ u32 account_key_epoch | reserved (parked, ADR 0022) |
 | `PAIRING_TRANSFER` | 0x0041 | pairing key / 0x01 | pairing_id ‖ u8 direction (1 = new→existing, 2 = existing→new) ‖ u32 message_index. Only the three messages before the SAS ([§11.7](#117-new-device-in-on-device-mode)) | reserved (parked, ADR 0022) |
@@ -659,7 +659,7 @@ The purpose is **not transmitted**. The reader rebuilds `u16(purpose) ‖ ctx` f
 | `MAIL_MESSAGE` | 0x0060 | recipient mail X25519 / 0x10 | account_id ‖ alias_id ‖ message_id ‖ u64 received_at_ms | M6 |
 | `EXPORT_FILE` | 0x0070 | export file key / 0x01 | export_id ‖ u64 created_at_ms ‖ u16 kdf_id ‖ export_salt | M1 |
 | `BACKUP_FILE` | 0x0071 | backup key / 0x01 | defined by the M8 backup ADR | M8 |
-| `LOCAL_CACHE_INDEX` | 0x0090 | local index key / 0x01 | account_id ‖ device_id | M3 |
+| `LOCAL_CACHE_INDEX` | 0x0090 | local index key / 0x01 | account_id ‖ device_id | reserved; not used by [ADR 0056](adr/0056-local-index-recently-used-search.md) |
 | `SERVER_TOTP_SECRET` | 0x0100 | server data subkey / 0x01, **server only** ([§5.11](#511-server-side-encryption-not-zero-knowledge)) | account_id ‖ u32 totp_credential_seq | M1 |
 | `SERVER_LOGIN_STATE` | 0x0101 | server data subkey / 0x01, **server only** | login_id ‖ credential_identifier (16) ‖ u64 expires_at_ms | M1 |
 | `SERVER_SECRETS_BACKUP` | 0x0102 | server-secrets backup key / 0x01, **server only** | backup_id ‖ u64 created_at_ms ‖ u16 kdf_id ‖ backup_salt | M1 |
@@ -672,7 +672,7 @@ The purpose is **not transmitted**. The reader rebuilds `u16(purpose) ‖ ctx` f
 
 **Item keys and staleness.** The `ITEM_KEY_WRAP` plaintext carries the epoch in which the item key was *created*, and re-wrapping during a rotation copies it unchanged. It never exceeds the `vault_key_epoch` of the wrapping vault key: the writer refuses such a wrap, and the reader rejects it, as it rejects a `wrap_version` other than 1. That makes "this item key predates the last rotation" an authenticated fact that any device holding the vault key can read, rather than server metadata or one device's memory. The writer and reader rules are in [§11.6](#116-key-rotation). The item key's own key id is derived from the key ([§4.4](#44-identifiers-epochs-and-key-ids)); a reader checks that it equals the `key_id` in the op or snapshot envelope header.
 
-**Attachment keys (M3).** Each attachment has its own random key, wrapped under the item key with `ATTACHMENT_KEY_WRAP`, so an attachment can be shared or deleted without touching the item's other data. The chunked envelope (algorithm 0x03) is the M3 attachments ADR's to define.
+**Attachment keys (M3).** Each attachment has its own random key, wrapped under the item key with `ATTACHMENT_KEY_WRAP`, so an attachment can be shared or deleted without touching the item's other data. Each chunk is an ordinary algorithm-0x01 envelope under purpose `ATTACHMENT_CHUNK`, and `chunk_count` is derived from the item's `attachment/<id>/size`, never read from the server ([ADR 0054](adr/0054-attachments-envelope-and-api.md) §1). Algorithm 0x03 stays reserved and undefined.
 
 **Why item AAD has no `account_id`.** Vaults become shareable between accounts in M9, so an item belongs to a vault, not to an account. `vault_id` is 128 random bits and each vault key belongs to exactly one vault, so moving an item's ciphertext into another account's vault already fails: wrong `vault_id`, wrong key. This meets the intent of threat-model INV-13 without binding items to one owner.
 
@@ -712,7 +712,7 @@ padded_len = max(256, Padmé(4 + data_len))
 - `header` = bytes `[0, 18)`.
 - `aad = header ‖ u16(purpose) ‖ ctx`.
 - Overhead: **90 bytes**.
-- M1 limit: plaintext ≤ 16 MiB. Larger objects, i.e. attachments, use the reserved chunked algorithm 0x03 from M3. "Plaintext" is the AEAD input: for a framed purpose, the whole frame ([§8.5](#85-plaintext-framing-and-padding)). The parser rejects a longer envelope before any crypto.
+- M1 limit: plaintext ≤ 16 MiB. Attachments (M3) are split into chunks of at most 512 KiB, each its own 0x01 envelope ([ADR 0054](adr/0054-attachments-envelope-and-api.md)). "Plaintext" is the AEAD input: for a framed purpose, the whole frame ([§8.5](#85-plaintext-framing-and-padding)). The parser rejects a longer envelope before any crypto.
 
 ### 9.2 HPKE envelope (algorithms 0x10 and 0x12)
 
@@ -752,7 +752,7 @@ HPKE envelopes carry **no** separate commitment. The key comes from a Diffie-Hel
 | 0x00 | invalid | always rejected |
 | **0x01** | XChaCha20-Poly1305 with the HKDF-SHA-256 UtC + HtE commitment ([§8.3](#83-key-commitment)) | **M1**: encrypt and decrypt |
 | 0x02 | AES-256-GCM-SIV with the same commitment | reserved, not implemented |
-| 0x03 | chunked/streaming variant of 0x01 for attachments | reserved for the M3 ADR |
+| 0x03 | undefined | reserved; undefined; a real streaming/incremental AEAD needs its own ADR and CRYPTO.md section ([ADR 0054](adr/0054-attachments-envelope-and-api.md)) |
 | **0x10** | HPKE Base, DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / ChaCha20Poly1305 | **M1**: encrypt and decrypt |
 | 0x11 | HPKE Base, X-Wing (X25519 + ML-KEM-768) / HKDF-SHA256 / ChaCha20Poly1305 | reserved, post-1.0 |
 | **0x12** | HPKE PSK mode, DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / ChaCha20Poly1305 | **M1**: encrypt and decrypt (device grants) |

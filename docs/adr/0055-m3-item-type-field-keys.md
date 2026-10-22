@@ -40,6 +40,17 @@ All 22 keys are Text, "stored as entered"; every prefix's numeric-looking attrib
 
 **5. Test vectors.** CRYPTO.md §15 item 1 already provides for this: "Vectors for M3, M5 and M6 constructions are added in the milestone that ships them" (V, read, §15 item 1). No vectors are added now; a create of each new type, each concealed field and the `ssh.port`-absent default are added when M3 implements these types, following ADR 0018 §12's pattern.
 
+### Owner answers at acceptance (2026-10-22)
+
+The owner accepted this ADR as drafted; the recommendations of "Open questions for the owner" stand:
+
+1. ADR 0018 §7's "Concealed by default" bullet is extended by each shipping ADR, as ADR 0039 did. It is not consolidated by a supersession.
+2. The dead `ItemTypeClass::ReservedM3` variant is dropped, and `item_type_registry`'s table in `crates/rizzy-core/src/item/tests.rs` is updated in the same change.
+3. `license.expires` is Text for M3.
+4. Option (a): a carried field that `check_carried` rejects with `WrongItemType` skips the whole item, like any other per-item write failure. No supersession is needed.
+
+Of the "On acceptance" edits, item 1 (AST-23 in THREAT_MODEL.md §2) is made in the accepting change. Dropping `ReservedM3` (open question 2) is code, for the implementation.
+
 ## Consequences
 
 ### Positive

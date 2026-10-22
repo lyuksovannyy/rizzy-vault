@@ -63,7 +63,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0004 | [Key derivation: Argon2id and the Secret Key](0004-key-derivation-argon2id-secret-key.md) | Accepted | M1 |
 | 0005 | [Symmetric encryption: AEAD and key commitment](0005-symmetric-encryption-aead.md) | Accepted | M1 |
 | 0006 | [Key hierarchy, per-user keypairs and key wrapping](0006-key-hierarchy.md) | Partially superseded by [0022](0022-server-mode-only.md) (point 1 in part, point 11 in part, Risks in part) | M1 |
-| 0007 | [Versioned ciphertext envelope and crypto agility](0007-ciphertext-envelope.md) | Accepted | M1 |
+| 0007 | [Versioned ciphertext envelope and crypto agility](0007-ciphertext-envelope.md) | Partially superseded by [0054](0054-attachments-envelope-and-api.md) (§3 in part) | M1 |
 | 0008 | [Account recovery: Emergency Kit](0008-account-recovery.md) | Partially superseded by [0022](0022-server-mode-only.md) (point 7) | M1 |
 | 0009 | [Cryptographic dependency and memory-hygiene policy](0009-crypto-dependency-policy.md) | Partially superseded by [0019](0019-native-clients.md) ("RNG rules" in part); [0052](0052-icon-proxy-role.md) (Amendments, 2026-10-05 entry, "Where it is applied" in part) | M1 |
 | 0010 | [Server shape: modular monolith with roles](0010-server-shape.md) | Partially superseded by [0022](0022-server-mode-only.md) (§1 in part); [0053](0053-hibp-breach-check-egress.md) (§1 in part) | M1 (`api`, `web`, `worker`) / M3 (`notify`, `icons`) / M6 (`smtp`) |
@@ -74,7 +74,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0015 | [Desktop shell: Tauri](0015-desktop-tauri.md) | Superseded by [0019](0019-native-clients.md) | M3 |
 | 0016 | [Workspace layout and crate boundaries](0016-workspace-layout.md) | Partially superseded by [0022](0022-server-mode-only.md) (§3 in part); [0019](0019-native-clients.md) (§3 in part, R2 in part, R5, R6, R7 in part, §5 in part, §7, Risks in part, Alternatives considered in part) | M0 (rules, current crates) / M1–M9 (planned crates) |
 | 0017 | [Licensing and contribution terms](0017-licensing.md) | Accepted | M0 |
-| 0018 | [Item-record encoding: canonical binary layout and the M1 item schema](0018-item-record-encoding.md) | Accepted | M1 |
+| 0018 | [Item-record encoding: canonical binary layout and the M1 item schema](0018-item-record-encoding.md) | Partially superseded by [0076](0076-autocomplete-driven-autofill.md) (§7 in part) | M1 |
 | 0019 | [Native desktop and mobile clients in separate repositories](0019-native-clients.md) | Accepted | M3 (desktop) / M7 (mobile) |
 | 0020 | [Record architecture decisions, with partial supersession](0020-partial-supersession.md) | Accepted | M0 |
 | 0021 | [Server-side compaction with concurrent snapshots](0021-server-compaction.md) | Partially superseded by [0032](0032-healing-rotation-after-backup.md) (§9 "Healing request" in part); [0050](0050-paged-fetch-tombstone-boundary.md) (§4 "Covers" in part) | M1 (server; Accepted before step 3) |
@@ -82,7 +82,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0023 | [Logical database backup file format](0023-logical-backup-format.md) | Accepted | M1 |
 | 0024 | [Disabling core dumps through rustix](0024-core-dump-disabling-rustix.md) | Accepted | M1 (server, `rv`) / M3 (bindings) |
 | 0025 | [Key rotation upload: the vault half and the rotation cut-off](0025-rotation-vault-half.md) | Accepted | M1 |
-| 0026 | [Client device state and encrypted local cache](0026-client-device-state-and-cache.md) | Partially superseded by [0051](0051-equivalence-list-version-persistence.md) (§3 in part) | M1 (`rv`) / M2 (extension) / M3 (`rizzy-ffi`) |
+| 0026 | [Client device state and encrypted local cache](0026-client-device-state-and-cache.md) | Partially superseded by [0051](0051-equivalence-list-version-persistence.md) (§3 in part); [0056](0056-local-index-recently-used-search.md) (§1 in part, §3 in part); [0057](0057-device-state-v2-keystore.md) (§1 row "Device-state record"; §4 step 5) | M1 (`rv`) / M2 (extension) / M3 (`rizzy-ffi`) |
 | 0027 | [Export payload encoding and plaintext export](0027-export-payload.md) | Partially superseded by [0034](0034-export-reauth-and-plaintext-hold.md) (§5 in part) | M1 |
 | 0028 | [`/api/v1` HTTP conventions](0028-api-v1-http-conventions.md) | Partially superseded by [0031](0031-retiring-old-opaque-setups.md) (item 3 in part); [0032](0032-healing-rotation-after-backup.md) (item 3 in part); [0048](0048-per-account-storage-quota.md) (item 3 in part, item 12 in part); [0049](0049-web-role-route-table.md) (item 10 in part, item 15); [0052](0052-icon-proxy-role.md) (item 1 in part); [0075](0075-session-listing-and-ending.md) (item 1 in part) | M1 |
 | 0029 | [KeePass KDBX import: legacy primitives in `rizzy-import`](0029-kdbx-import.md) | Accepted | M3 |
@@ -92,11 +92,11 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0033 | [Protocol Buffers encoding for client–server messages](0033-protobuf-api-encoding.md) | Proposed | M1 (JSON only) / M3 (trigger re-checked) |
 | 0034 | [Re-authentication before every export and a hold before plaintext export](0034-export-reauth-and-plaintext-hold.md) | Accepted | M1 |
 | 0035 | [A private CA file holds CA certificates only](0035-ca-file-ca-certificates-only.md) | Accepted | M1 |
-| 0036 | [Browser extension: architecture and key custody](0036-browser-extension-architecture-and-key-custody.md) | Partially superseded by [0040](0040-extension-fill-request-from-inline-menu.md) (§4, first bullet, in part); [0043](0043-inline-menu-instance-token.md) (§4, first bullet, in part) | M2 |
+| 0036 | [Browser extension: architecture and key custody](0036-browser-extension-architecture-and-key-custody.md) | Partially superseded by [0040](0040-extension-fill-request-from-inline-menu.md) (§4, first bullet, in part); [0043](0043-inline-menu-instance-token.md) (§4, first bullet, in part); [0076](0076-autocomplete-driven-autofill.md) (§4 in part) | M2 |
 | 0037 | [URL matching and autofill rules](0037-url-matching-and-autofill-rules.md) | Accepted | M2 |
 | 0038 | [Equivalent-domain list: format, signing and governance](0038-equivalent-domain-list.md) | Partially superseded by [0044](0044-equivalence-group-member-rules.md) (§1 in part) | M2 |
 | 0039 | [Passkeys in the vault and in the browser extension](0039-passkeys-vault-and-extension.md) | Accepted | M2 |
-| 0040 | [The extension's fill request comes from the inline menu, not the content script](0040-extension-fill-request-from-inline-menu.md) | Partially superseded by [0043](0043-inline-menu-instance-token.md) (point 1 in part, point 3 in part) | M2 |
+| 0040 | [The extension's fill request comes from the inline menu, not the content script](0040-extension-fill-request-from-inline-menu.md) | Partially superseded by [0043](0043-inline-menu-instance-token.md) (point 1 in part, point 3 in part); [0076](0076-autocomplete-driven-autofill.md) (point 2; "What this ADR supersedes" in part) | M2 |
 | 0041 | [Approving the `p256` crate for ES256 (ECDSA P-256) in passkeys](0041-p256-crate-approval.md) | Accepted | M2 |
 | 0042 | [ACCOUNT_SETTINGS plaintext: canonical layout and the M2 matching section](0042-account-settings-matching-layout.md) | Accepted | M2 |
 | 0043 | [A per-instance token for the inline-menu and passkey-consent iframes](0043-inline-menu-instance-token.md) | Accepted | M2 |
