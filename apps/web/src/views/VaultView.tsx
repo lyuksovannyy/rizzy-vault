@@ -521,6 +521,12 @@ export function VaultView(props: {
           onDismiss={(gone) => setNotices((held) => held.filter((n) => noticeKey(n) !== noticeKey(gone)))}
         />
         <section className="vault-body">
+          {/* The item list has no visible title of its own (the sidebar marks the current
+              filter), so a screen-reader user gets the page's one level-one heading here; every
+              other section's view starts with its own visible h1. */}
+          {(section === "items" || section === "trash") && (
+            <h1 className="sr-only">{section === "trash" ? "Trash" : scopeTitle(scope)}</h1>
+          )}
           {section === "items" && (
             <ItemsPane
               ctx={ctx}
@@ -563,6 +569,14 @@ export function VaultView(props: {
       />
     </div>
   );
+}
+
+/** The item list's heading for `scope`: the sidebar label of the same filter. */
+function scopeTitle(scope: Scope): string {
+  if (scope.kind === "tag") {
+    return `Tag: ${scope.tag}`;
+  }
+  return ITEM_FILTERS.find((f) => scopeEquals(f.scope, scope))?.label ?? "Items";
 }
 
 /** Whether two item-list scopes are the same filter (module docs above `Scope`). */

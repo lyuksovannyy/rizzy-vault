@@ -15,7 +15,7 @@
 // this module declares the same three string values rather than importing the type, so the
 // caller's `@rizzy-vault/core` objects pass through structurally without this package naming
 // that dependency.
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
 
 /** A character class rule ("excluded" | "included" | "required"), `rizzy-core`'s own `ClassRule`. */
 export type GeneratorClassRule = "excluded" | "included" | "required";
@@ -98,6 +98,7 @@ function ClassRow(props: {
 export function PasswordGenerateSlot(props: PasswordGenerateSlotProps) {
   const [open, setOpen] = useState(false);
   const uid = useId();
+  const toggleRef = useRef<HTMLButtonElement>(null);
   const { passwordOptions: p, passphraseOptions: ph, limits } = props;
 
   const setPasswordOption = <K extends keyof GeneratorPasswordOptions>(
@@ -110,7 +111,21 @@ export function PasswordGenerateSlot(props: PasswordGenerateSlotProps) {
   ) => props.onPassphraseOptionsChange({ ...ph, [key]: value });
 
   return (
-    <span className="password-generate-slot" data-field={props.fieldName}>
+    <span
+      className="password-generate-slot"
+      data-field={props.fieldName}
+      // Escape closes the open popover, from the gear or any control inside it, and returns the
+      // focus to the gear, as the other popovers here do (the shortcuts help lists "Esc: Close
+      // a dialog or popover"). Stopped here so the editor around it does not also see it.
+      onKeyDown={(e) => {
+        if (open && e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          setOpen(false);
+          toggleRef.current?.focus();
+        }
+      }}
+    >
       <button
         type="button"
         className="secondary small"
@@ -122,6 +137,7 @@ export function PasswordGenerateSlot(props: PasswordGenerateSlotProps) {
       <button
         type="button"
         className="secondary small icon-button"
+        ref={toggleRef}
         aria-label="Generator settings"
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}

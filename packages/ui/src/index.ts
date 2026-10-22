@@ -31,7 +31,8 @@ export {
   IconUnknown,
   TypeIcon,
 } from "./icons.tsx";
-export { ConfirmDialog, type ConfirmDialogProps, nextFocusIndex } from "./ConfirmDialog.tsx";
+export { ConfirmDialog, type ConfirmDialogProps } from "./ConfirmDialog.tsx";
+export { nextFocusIndex, trapTab } from "./focusTrap.ts";
 export { isAnyModalOpen, setModalOpen } from "./modalRegistry.ts";
 export {
   TOAST_DURATION_MS,
