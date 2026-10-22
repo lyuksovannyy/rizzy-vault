@@ -93,6 +93,7 @@
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
 pub mod autofill;
+pub mod breach;
 pub mod device;
 pub mod error;
 pub mod generator;
@@ -108,6 +109,7 @@ mod signup;
 pub mod store;
 pub mod sync;
 
+pub use breach::{BreachCheck, BreachVerdict};
 pub use device::{DeviceSession, EnrolFlow};
 pub use error::CoreError;
 pub use generator::{
