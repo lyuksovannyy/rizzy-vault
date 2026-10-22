@@ -39,6 +39,7 @@
 //! | [`TotpCode`], [`EncryptedExport`], [`ImportReport`], [`DeviceView`], [`TwoFactorEnrolment`] | results |
 //! | [`create_passkey`] (`createPasskey`), [`CreatedPasskey`], [`Session::passkey_assertion`] (`passkeyAssertion`), [`PasskeyAssertion`] | `WebAuthn` passkey registration and assertion ([`passkey`]; ADR 0039) |
 //! | [`plaintext_export_warning`], [`plaintext_export_phrase`] | the frozen texts of ADR 0027 §5 |
+//! | [`cxf_export_warning`] | the CXF passkey export's own warning (ADR 0074 §2) |
 //! | [`plaintext_export_hold_ms`], [`detect_import_format`] | the hold after the plaintext warning; recognising an import file (owner decision 2026-10-05) |
 //! | [`CoreError`] | the one thrown error: a stable code ([`error`]) |
 //!
@@ -5305,14 +5306,13 @@ pub mod device {
     use rizzy_client::matching::{
         EquivalenceGroup, startup_equivalence_groups,
     };
-    use rizzy_client::passkey::get_assertion;
+    use rizzy_client::passkey::{PasskeySigningKey, get_assertion_with};
     use rizzy_client::rizzy_core::item::key::ElementId;
     use rizzy_client::rizzy_core::item::schema::{
         ATTR_ALG, ATTR_CREATED_MS, ATTR_CREDENTIAL_ID, ATTR_PRIVATE_KEY,
         ATTR_RP_ID, ATTR_USER_HANDLE, LIST_PASSKEY,
     };
     use rizzy_client::rizzy_core::item::value::ValueRef;
-    use rizzy_client::rizzy_core::passkey::Es256SigningKey;
     use rizzy_client::rizzy_core::sign::DeviceKind;
     use rizzy_client::rizzy_proto::auth::{
         DeviceAuthFinishResponse, DeviceAuthStartResponse,
@@ -11142,7 +11142,7 @@ pub mod device {
         #[doc =
         " As [`DeviceSession::item`]; `invalid_input` when `passkey_id` is not a valid element"]
         #[doc =
-        " id, the item has no such passkey, or its stored key is not a valid 32-byte scalar;"]
+        " id, the item has no such passkey, or its stored `alg` and key are not a valid ES256 scalar or `EdDSA` seed;"]
         #[doc =
         " otherwise whatever `get_assertion` returns (`rp_id_rejected` for INV-64)."]
         #[doc = ""]
@@ -11191,7 +11191,7 @@ pub mod device {
                     #[doc =
                     " As [`DeviceSession::item`]; `invalid_input` when `passkey_id` is not a valid element"]
                     #[doc =
-                    " id, the item has no such passkey, or its stored key is not a valid 32-byte scalar;"]
+                    " id, the item has no such passkey, or its stored `alg` and key are not a valid ES256 scalar or `EdDSA` seed;"]
                     #[doc =
                     " otherwise whatever `get_assertion` returns (`rp_id_rejected` for INV-64)."]
                     #[doc = ""]
@@ -11376,7 +11376,7 @@ pub mod device {
                     #[doc =
                     " As [`DeviceSession::item`]; `invalid_input` when `passkey_id` is not a valid element"]
                     #[doc =
-                    " id, the item has no such passkey, or its stored key is not a valid 32-byte scalar;"]
+                    " id, the item has no such passkey, or its stored `alg` and key are not a valid ES256 scalar or `EdDSA` seed;"]
                     #[doc =
                     " otherwise whatever `get_assertion` returns (`rp_id_rejected` for INV-64)."]
                     #[doc = ""]
@@ -11416,7 +11416,7 @@ pub mod device {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\rDeviceSession\x18V Produces a `WebAuthn` assertion for one stored passkey (`passkey/<passkey_id>/\xe2\x80\xa6` onU item `id`, ADR 0039 \xc2\xa71, \xc2\xa72; [`crate::passkey`] module docs \xe2\x80\x94 the extension's own` durable-device path there: this crate's other passkey call, [`crate::passkey::create_passkey`],N needs no session at all). The stored private key is read and used here, neverR returned: only the resulting [`PasskeyAssertion`] crosses to JavaScript, the sameS pattern [`DeviceSession::reveal_field`] uses for a different concealed field (text? there; this one is never text-revealable at all, module docs).\0Y `origin` must be the browser-verified origin \xe2\x80\x94 the extension's background script readsI it from the browser's own sender information, never from the interceptedY `navigator.credentials.get()` call's relayed payload ([ADR 0036] \xc2\xa74; [`crate::passkey`]S module docs, \"What this does not decide\"); `rp_id` is the page's requested `rpId`,K already defaulted by the caller to `origin`'s host if the page omitted it.\0\t # ErrorsU As [`DeviceSession::item`]; `invalid_input` when `passkey_id` is not a valid elementS id, the item has no such passkey, or its stored key is not a valid 32-byte scalar;J otherwise whatever `get_assertion` returns (`rp_id_rejected` for INV-64).\0X This call does **not** check `passkey_id` against the page's `allowCredentials` \xe2\x80\x94 theT extension's background filters [`DeviceSession::passkey_candidates`]'s result firstA (gap 35(b) in the M2 gap audit; [`crate::passkey`] module docs).\0\x82\x01 [ADR 0036]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0036-browser-extension-architecture-and-key-custody.md\0\x05\x02id\0\0\0\npasskey_id\0\0\0\x06origin\0\0\0\x05rp_id\0\0\0\tchallenge\0\0\0\0\0\x10passkeyAssertion\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\rDeviceSession\x18V Produces a `WebAuthn` assertion for one stored passkey (`passkey/<passkey_id>/\xe2\x80\xa6` onU item `id`, ADR 0039 \xc2\xa71, \xc2\xa72; [`crate::passkey`] module docs \xe2\x80\x94 the extension's own` durable-device path there: this crate's other passkey call, [`crate::passkey::create_passkey`],N needs no session at all). The stored private key is read and used here, neverR returned: only the resulting [`PasskeyAssertion`] crosses to JavaScript, the sameS pattern [`DeviceSession::reveal_field`] uses for a different concealed field (text? there; this one is never text-revealable at all, module docs).\0Y `origin` must be the browser-verified origin \xe2\x80\x94 the extension's background script readsI it from the browser's own sender information, never from the interceptedY `navigator.credentials.get()` call's relayed payload ([ADR 0036] \xc2\xa74; [`crate::passkey`]S module docs, \"What this does not decide\"); `rp_id` is the page's requested `rpId`,K already defaulted by the caller to `origin`'s host if the page omitted it.\0\t # ErrorsU As [`DeviceSession::item`]; `invalid_input` when `passkey_id` is not a valid elementl id, the item has no such passkey, or its stored `alg` and key are not a valid ES256 scalar or `EdDSA` seed;J otherwise whatever `get_assertion` returns (`rp_id_rejected` for INV-64).\0X This call does **not** check `passkey_id` against the page's `allowCredentials` \xe2\x80\x94 theT extension's background filters [`DeviceSession::passkey_candidates`]'s result firstA (gap 35(b) in the M2 gap audit; [`crate::passkey`] module docs).\0\x82\x01 [ADR 0036]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0036-browser-extension-architecture-and-key-custody.md\0\x05\x02id\0\0\0\npasskey_id\0\0\0\x06origin\0\0\0\x05rp_id\0\0\0\tchallenge\0\0\0\0\0\x10passkeyAssertion\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -11459,18 +11459,27 @@ pub mod device {
                     };
             let credential_id = bytes_field(ATTR_CREDENTIAL_ID)?;
             let user_handle = bytes_field(ATTR_USER_HANDLE)?;
+            let alg_key =
+                element.key(LIST_PASSKEY, ATTR_ALG).map_err(|_| bad())?;
+            let Ok(ValueRef::Enum(alg)) =
+                vault.field_value(item,
+                                alg_key.as_str()).ok_or_else(bad)?.decode() else {
+                    return Err(bad());
+                };
             let private_key_key =
                 element.key(LIST_PASSKEY,
                             ATTR_PRIVATE_KEY).map_err(|_| bad())?;
             let signing_key =
                 match vault.field_value(item,
                                     private_key_key.as_str()).ok_or_else(bad)?.decode() {
-                    Ok(ValueRef::Bytes(bytes)) =>
-                        Es256SigningKey::from_bytes(bytes).map_err(|_| bad())?,
+                    Ok(ValueRef::Bytes(bytes)) => {
+                        PasskeySigningKey::from_stored(alg,
+                                    bytes).map_err(|_| bad())?
+                    }
                     _ => return Err(bad()),
                 };
             let assertion =
-                get_assertion(&signing_key, &credential_id, &user_handle,
+                get_assertion_with(&signing_key, &credential_id, &user_handle,
                         origin, rp_id, challenge)?;
             Ok(assertion.into())
         }
@@ -35780,6 +35789,7 @@ pub mod session {
     use rizzy_client::account::VerifiedAccount;
     use rizzy_client::attachments::{AttachmentDownload, AttachmentUpload};
     use rizzy_client::device::UnlockedDevice;
+    use rizzy_client::export::cxf::CXF_EXPORT_WARNING;
     use rizzy_client::export::detect::{DetectedFormat, detect_format};
     use rizzy_client::export::gate::{self, ExportGate, check_export_password};
     use rizzy_client::export::plaintext::{
@@ -35792,7 +35802,7 @@ pub mod session {
         EquivalenceGroup, FrameContext, ItemUri, SavedUri,
         decide_with_settings, global_equivalence_groups, vault_item_uris,
     };
-    use rizzy_client::passkey::get_assertion;
+    use rizzy_client::passkey::{PasskeySigningKey, get_assertion_with};
     use rizzy_client::rizzy_core::ids::{AccountId, AttachmentId};
     use rizzy_client::rizzy_core::item::key::ElementId;
     use rizzy_client::rizzy_core::item::schema::{
@@ -35800,7 +35810,6 @@ pub mod session {
         ATTR_RP_ID, ATTR_USER_HANDLE, LIST_PASSKEY, LOGIN_PASSWORD, LOGIN_TOTP,
     };
     use rizzy_client::rizzy_core::item::value::ValueRef;
-    use rizzy_client::rizzy_core::passkey::Es256SigningKey;
     use rizzy_client::rizzy_core::sign::DeviceKind;
     use rizzy_client::rizzy_core::totp::{OtpAuthUri, TotpParams, TotpSecret};
     use rizzy_client::rizzy_import::{self, Format};
@@ -44938,7 +44947,7 @@ pub mod session {
         #[doc =
         " As [`Session::item`]; `invalid_input` when `passkey_id` is not a valid element id, the"]
         #[doc =
-        " item has no such passkey, or its stored key is not a valid 32-byte scalar; otherwise"]
+        " item has no such passkey, or its stored `alg` and key are not a valid ES256 scalar or `EdDSA` seed; otherwise"]
         #[doc =
         " whatever `get_assertion` returns (`rp_id_rejected` for INV-64)."]
         pub fn passkey_assertion(&self, id: &str, passkey_id: &str,
@@ -44978,7 +44987,7 @@ pub mod session {
                     #[doc =
                     " As [`Session::item`]; `invalid_input` when `passkey_id` is not a valid element id, the"]
                     #[doc =
-                    " item has no such passkey, or its stored key is not a valid 32-byte scalar; otherwise"]
+                    " item has no such passkey, or its stored `alg` and key are not a valid ES256 scalar or `EdDSA` seed; otherwise"]
                     #[doc =
                     " whatever `get_assertion` returns (`rp_id_rejected` for INV-64)."]
                     #[export_name = "session_passkeyAssertion_e09cc0eb35f8b583"]
@@ -45152,7 +45161,7 @@ pub mod session {
                     #[doc =
                     " As [`Session::item`]; `invalid_input` when `passkey_id` is not a valid element id, the"]
                     #[doc =
-                    " item has no such passkey, or its stored key is not a valid 32-byte scalar; otherwise"]
+                    " item has no such passkey, or its stored `alg` and key are not a valid ES256 scalar or `EdDSA` seed; otherwise"]
                     #[doc =
                     " whatever `get_assertion` returns (`rp_id_rejected` for INV-64)."]
                     #[no_mangle]
@@ -45182,7 +45191,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\x14V Produces a `WebAuthn` assertion for one stored passkey (`passkey/<passkey_id>/\xe2\x80\xa6` onY item `id`, ADR 0039 \xc2\xa71, \xc2\xa72; [`crate::passkey`] module docs). The stored private key isW read and used here, never returned: only the resulting [`PasskeyAssertion`] crosses toU JavaScript, the same pattern [`Session::totp`] uses for a different concealed field.X [`PasskeyAssertion::user_handle`] is read back the same way `credential_id` already was! (gap 35(a) in the M2 gap audit).\0- `origin` must be the browser-verified originU ([`rizzy_client::passkey`]'s `verify_rp_id` scope-boundary docs \xe2\x80\x94 this call cannotX establish that itself, [`crate::passkey`] module docs); `rp_id` is the page's requestedS `rpId`, already defaulted by the caller to `origin`'s host if the page omitted it.\0Y This call does **not** check `passkey_id` against the page's `allowCredentials` \xe2\x80\x94 that; is the caller's job, done *before* this call, by filteringV [`Session::passkey_candidates`]'s result (gap 35(b); [`crate::passkey`] module docs).\0\t # ErrorsW As [`Session::item`]; `invalid_input` when `passkey_id` is not a valid element id, theU item has no such passkey, or its stored key is not a valid 32-byte scalar; otherwise@ whatever `get_assertion` returns (`rp_id_rejected` for INV-64).\0\x05\x02id\0\0\0\npasskey_id\0\0\0\x06origin\0\0\0\x05rp_id\0\0\0\tchallenge\0\0\0\0\0\x10passkeyAssertion\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\x14V Produces a `WebAuthn` assertion for one stored passkey (`passkey/<passkey_id>/\xe2\x80\xa6` onY item `id`, ADR 0039 \xc2\xa71, \xc2\xa72; [`crate::passkey`] module docs). The stored private key isW read and used here, never returned: only the resulting [`PasskeyAssertion`] crosses toU JavaScript, the same pattern [`Session::totp`] uses for a different concealed field.X [`PasskeyAssertion::user_handle`] is read back the same way `credential_id` already was! (gap 35(a) in the M2 gap audit).\0- `origin` must be the browser-verified originU ([`rizzy_client::passkey`]'s `verify_rp_id` scope-boundary docs \xe2\x80\x94 this call cannotX establish that itself, [`crate::passkey`] module docs); `rp_id` is the page's requestedS `rpId`, already defaulted by the caller to `origin`'s host if the page omitted it.\0Y This call does **not** check `passkey_id` against the page's `allowCredentials` \xe2\x80\x94 that; is the caller's job, done *before* this call, by filteringV [`Session::passkey_candidates`]'s result (gap 35(b); [`crate::passkey`] module docs).\0\t # ErrorsW As [`Session::item`]; `invalid_input` when `passkey_id` is not a valid element id, then item has no such passkey, or its stored `alg` and key are not a valid ES256 scalar or `EdDSA` seed; otherwise@ whatever `get_assertion` returns (`rp_id_rejected` for INV-64).\0\x05\x02id\0\0\0\npasskey_id\0\0\0\x06origin\0\0\0\x05rp_id\0\0\0\tchallenge\0\0\0\0\0\x10passkeyAssertion\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -45225,18 +45234,27 @@ pub mod session {
                     };
             let credential_id = bytes_field(ATTR_CREDENTIAL_ID)?;
             let user_handle = bytes_field(ATTR_USER_HANDLE)?;
+            let alg_key =
+                element.key(LIST_PASSKEY, ATTR_ALG).map_err(|_| bad())?;
+            let Ok(ValueRef::Enum(alg)) =
+                vault.field_value(item,
+                                alg_key.as_str()).ok_or_else(bad)?.decode() else {
+                    return Err(bad());
+                };
             let private_key_key =
                 element.key(LIST_PASSKEY,
                             ATTR_PRIVATE_KEY).map_err(|_| bad())?;
             let signing_key =
                 match vault.field_value(item,
                                     private_key_key.as_str()).ok_or_else(bad)?.decode() {
-                    Ok(ValueRef::Bytes(bytes)) =>
-                        Es256SigningKey::from_bytes(bytes).map_err(|_| bad())?,
+                    Ok(ValueRef::Bytes(bytes)) => {
+                        PasskeySigningKey::from_stored(alg,
+                                    bytes).map_err(|_| bad())?
+                    }
                     _ => return Err(bad()),
                 };
             let assertion =
-                get_assertion(&signing_key, &credential_id, &user_handle,
+                get_assertion_with(&signing_key, &credential_id, &user_handle,
                         origin, rp_id, challenge)?;
             Ok(assertion.into())
         }
@@ -45623,6 +45641,334 @@ pub mod session {
                     items: exported.items,
                     unresolved: exported.unresolved.len(),
                 })
+        }
+        #[doc =
+        " The number of passkeys a CXF export would hold now (ADR 0074 §2), for the dialog."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `locked`; `export_oversize_items`."]
+        pub fn cxf_export_passkeys(&self) -> Result<usize, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The number of passkeys a CXF export would hold now (ADR 0074 §2), for the dialog."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`; `export_oversize_items`."]
+                    #[export_name =
+                    "session_cxfExportPasskeys_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_cxfExportPasskeys(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<usize, CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.cxf_export_passkeys();
+                                            _ret
+                                        }
+                                    });
+                        <Result<usize, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The number of passkeys a CXF export would hold now (ADR 0074 §2), for the dialog."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`; `export_oversize_items`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_cxfExportPasskeys_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Result<usize, CoreError> as WasmDescribe>::describe();
+                        <Result<usize, CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x04S The number of passkeys a CXF export would hold now (ADR 0074 \xc2\xa72), for the dialog.\0\t # Errors# `locked`; `export_oversize_items`.\0\0\0\0\x11cxfExportPasskeys\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            Ok(self.inner()?.vault.cxf_export_passkeys()?)
+        }
+        #[doc =
+        " The vault\'s passkeys as a CXF export file (ADR 0074 §2): a CXF document sealed under a"]
+        #[doc =
+        " new password for that file (`rizzy-vault-cxf-export`). Gated like a plaintext export:"]
+        #[doc =
+        " a re-authentication confirmed within [`REAUTH_WINDOW_MS`], [`cxf_export_warning`] shown"]
+        #[doc =
+        " ([`Session::plaintext_warning_shown`]) and its hold over, and `typed_phrase` exactly"]
+        #[doc =
+        " [`plaintext_export_phrase`]; spends them. Ciphertext: the host saves the bytes as a"]
+        #[doc =
+        " download. No bare, unencrypted CXF export exists (ADR 0074 owner answer 4)."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " `locked`; `invalid_input` for an empty export password or one with an unassigned code"]
+        #[doc =
+        " point (checked first, so it spends nothing); `reauth_required`;"]
+        #[doc =
+        " `plaintext_export_not_acknowledged`; `plaintext_export_hold`; `export_oversize_items`;"]
+        #[doc =
+        " `export_too_large`. `export_password` is UTF-8 bytes, zeroed on return"]
+        #[doc = " ([`crate::secret`])."]
+        pub fn export_cxf(&mut self, typed_phrase: &str,
+            export_password: &mut [u8], now_ms: u64)
+            -> Result<CxfExport, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The vault\'s passkeys as a CXF export file (ADR 0074 §2): a CXF document sealed under a"]
+                    #[doc =
+                    " new password for that file (`rizzy-vault-cxf-export`). Gated like a plaintext export:"]
+                    #[doc =
+                    " a re-authentication confirmed within [`REAUTH_WINDOW_MS`], [`cxf_export_warning`] shown"]
+                    #[doc =
+                    " ([`Session::plaintext_warning_shown`]) and its hold over, and `typed_phrase` exactly"]
+                    #[doc =
+                    " [`plaintext_export_phrase`]; spends them. Ciphertext: the host saves the bytes as a"]
+                    #[doc =
+                    " download. No bare, unencrypted CXF export exists (ADR 0074 owner answer 4)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `locked`; `invalid_input` for an empty export password or one with an unassigned code"]
+                    #[doc =
+                    " point (checked first, so it spends nothing); `reauth_required`;"]
+                    #[doc =
+                    " `plaintext_export_not_acknowledged`; `plaintext_export_hold`; `export_oversize_items`;"]
+                    #[doc =
+                    " `export_too_large`. `export_password` is UTF-8 bytes, zeroed on return"]
+                    #[doc = " ([`crate::secret`])."]
+                    #[export_name = "session_exportCxf_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_exportCxf(me:
+                            <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg3_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg3_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg3_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg3_4:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<CxfExport, CoreError>
+                            as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let mut me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            let mut arg2 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let arg2 = &mut *arg2;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg3 =
+                                                unsafe {
+                                                    <u64 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
+                                                };
+                                            let _ret = me.export_cxf(arg1, arg2, arg3);
+                                            _ret
+                                        }
+                                    });
+                        <Result<CxfExport, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The vault\'s passkeys as a CXF export file (ADR 0074 §2): a CXF document sealed under a"]
+                    #[doc =
+                    " new password for that file (`rizzy-vault-cxf-export`). Gated like a plaintext export:"]
+                    #[doc =
+                    " a re-authentication confirmed within [`REAUTH_WINDOW_MS`], [`cxf_export_warning`] shown"]
+                    #[doc =
+                    " ([`Session::plaintext_warning_shown`]) and its hold over, and `typed_phrase` exactly"]
+                    #[doc =
+                    " [`plaintext_export_phrase`]; spends them. Ciphertext: the host saves the bytes as a"]
+                    #[doc =
+                    " download. No bare, unencrypted CXF export exists (ADR 0074 owner answer 4)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `locked`; `invalid_input` for an empty export password or one with an unassigned code"]
+                    #[doc =
+                    " point (checked first, so it spends nothing); `reauth_required`;"]
+                    #[doc =
+                    " `plaintext_export_not_acknowledged`; `plaintext_export_hold`; `export_oversize_items`;"]
+                    #[doc =
+                    " `export_too_large`. `export_password` is UTF-8 bytes, zeroed on return"]
+                    #[doc = " ([`crate::secret`])."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_exportCxf_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(3u32);
+                        <&str as WasmDescribe>::describe();
+                        <&mut [u8] as WasmDescribe>::describe();
+                        <u64 as WasmDescribe>::describe();
+                        <Result<CxfExport, CoreError> as WasmDescribe>::describe();
+                        <Result<CxfExport, CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\rX The vault's passkeys as a CXF export file (ADR 0074 \xc2\xa72): a CXF document sealed under aV new password for that file (`rizzy-vault-cxf-export`). Gated like a plaintext export:X a re-authentication confirmed within [`REAUTH_WINDOW_MS`], [`cxf_export_warning`] shownU ([`Session::plaintext_warning_shown`]) and its hold over, and `typed_phrase` exactlyT [`plaintext_export_phrase`]; spends them. Ciphertext: the host saves the bytes as aL download. No bare, unencrypted CXF export exists (ADR 0074 owner answer 4).\0\t # ErrorsV `locked`; `invalid_input` for an empty export password or one with an unassigned code@ point (checked first, so it spends nothing); `reauth_required`;W `plaintext_export_not_acknowledged`; `plaintext_export_hold`; `export_oversize_items`;G `export_too_large`. `export_password` is UTF-8 bytes, zeroed on return\x15 ([`crate::secret`]).\0\x03\x0ctyped_phrase\0\0\0\x0fexport_password\0\0\0\x06now_ms\0\0\0\0\0\texportCxf\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let export_password = take_secret(export_password)?;
+            let inner = self.inner_mut()?;
+            check_export_password(&export_password)?;
+            if !inner.gate.reauth_fresh(now_ms) {
+                return Err(ClientError::ReauthRequired.into());
+            }
+            let ack = PlaintextExportAck::from_typed_phrase(typed_phrase)?;
+            let auth = inner.gate.authorize_plaintext(now_ms)?;
+            let exported =
+                inner.vault.export_cxf(&mut inner.rng, auth, ack,
+                        &export_password, now_ms)?;
+            Ok(CxfExport { file: exported.file, passkeys: exported.passkeys })
         }
         #[doc =
         " The ids of the items that stop an export (too large to encode; ADR 0027 §1). Empty"]
@@ -46790,8 +47136,9 @@ pub mod session {
         #[doc =
         " `format` is one of `bitwarden-json`, `1pux`, `keepass-xml`, `csv`, `chrome-csv`,"]
         #[doc =
-        " `firefox-csv`, `rizzy-json`, `aliasvault-csv`, `aliasvault-avux`. The report has counts"]
-        #[doc = " only (INV-48)."]
+        " `firefox-csv`, `rizzy-json`, `aliasvault-csv`, `aliasvault-avux`, `cxf-json` (a bare"]
+        #[doc =
+        " CXF passkey file, ADR 0074 §3). The report has counts only (INV-48)."]
         #[doc = ""]
         #[doc = " # Errors"]
         #[doc =
@@ -46809,8 +47156,9 @@ pub mod session {
                     #[doc =
                     " `format` is one of `bitwarden-json`, `1pux`, `keepass-xml`, `csv`, `chrome-csv`,"]
                     #[doc =
-                    " `firefox-csv`, `rizzy-json`, `aliasvault-csv`, `aliasvault-avux`. The report has counts"]
-                    #[doc = " only (INV-48)."]
+                    " `firefox-csv`, `rizzy-json`, `aliasvault-csv`, `aliasvault-avux`, `cxf-json` (a bare"]
+                    #[doc =
+                    " CXF passkey file, ADR 0074 §3). The report has counts only (INV-48)."]
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
@@ -46917,8 +47265,9 @@ pub mod session {
                     #[doc =
                     " `format` is one of `bitwarden-json`, `1pux`, `keepass-xml`, `csv`, `chrome-csv`,"]
                     #[doc =
-                    " `firefox-csv`, `rizzy-json`, `aliasvault-csv`, `aliasvault-avux`. The report has counts"]
-                    #[doc = " only (INV-48)."]
+                    " `firefox-csv`, `rizzy-json`, `aliasvault-csv`, `aliasvault-avux`, `cxf-json` (a bare"]
+                    #[doc =
+                    " CXF passkey file, ADR 0074 §3). The report has counts only (INV-48)."]
                     #[doc = ""]
                     #[doc = " # Errors"]
                     #[doc =
@@ -46951,7 +47300,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\tS Imports a file of another product, or our own plaintext JSON export, as new items.Q `format` is one of `bitwarden-json`, `1pux`, `keepass-xml`, `csv`, `chrome-csv`,X `firefox-csv`, `rizzy-json`, `aliasvault-csv`, `aliasvault-avux`. The report has counts\x0f only (INV-48).\0\t # ErrorsX `locked`; `wrong_state` while a sync runs; `unknown_format`; `invalid_input` for a fileS over [`MAX_IMPORT_FILE_LEN`]; `import_failed` when the file as a whole is refused;\r `read_only`.\0\x03\x06format\0\0\0\x04file\0\0\0\x06now_ms\0\0\0\0\0\nimportFile\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\tS Imports a file of another product, or our own plaintext JSON export, as new items.Q `format` is one of `bitwarden-json`, `1pux`, `keepass-xml`, `csv`, `chrome-csv`,U `firefox-csv`, `rizzy-json`, `aliasvault-csv`, `aliasvault-avux`, `cxf-json` (a bareF CXF passkey file, ADR 0074 \xc2\xa73). The report has counts only (INV-48).\0\t # ErrorsX `locked`; `wrong_state` while a sync runs; `unknown_format`; `invalid_input` for a fileS over [`MAX_IMPORT_FILE_LEN`]; `import_failed` when the file as a whole is refused;\r `read_only`.\0\x03\x06format\0\0\0\x04file\0\0\0\x06now_ms\0\0\0\0\0\nimportFile\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -46988,6 +47337,7 @@ pub mod session {
                     "rizzy-json" => Format::RizzyPlaintextJson,
                     "aliasvault-csv" => Format::AliasVaultCsv,
                     "aliasvault-avux" => Format::AliasVaultAvux,
+                    "cxf-json" => Format::CxfJson,
                     _ => return Err(CoreError::new(UNKNOWN_FORMAT)),
                 };
             if file.len() > MAX_IMPORT_FILE_LEN {
@@ -47008,6 +47358,222 @@ pub mod session {
                     collapsed_conflicts: counts.collapsed_conflicts,
                     history_not_carried: counts.dropped_history,
                     fields_not_carried: counts.dropped_fields,
+                    credentials_skipped: counts.skipped_credentials,
+                })
+        }
+        #[doc =
+        " Imports our own CXF passkey export (`rizzy-vault-cxf-export`, ADR 0074 §2–§3) with its"]
+        #[doc =
+        " export password, one new Login item per passkey. The report has counts only (INV-48)."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " `locked`; `wrong_state` while a sync runs; `invalid_input` for a file over"]
+        #[doc =
+        " [`MAX_IMPORT_FILE_LEN`]; `invalid_export_file` (another tag or payload version"]
+        #[doc =
+        " included); `export_decryption_failed`; `export_update_required`; `read_only`."]
+        #[doc =
+        " `export_password` is UTF-8 bytes, zeroed on return whatever the outcome"]
+        #[doc = " ([`crate::secret`])."]
+        pub fn import_cxf_encrypted(&mut self, file: &[u8],
+            export_password: &mut [u8], now_ms: u64)
+            -> Result<ImportReport, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Imports our own CXF passkey export (`rizzy-vault-cxf-export`, ADR 0074 §2–§3) with its"]
+                    #[doc =
+                    " export password, one new Login item per passkey. The report has counts only (INV-48)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `locked`; `wrong_state` while a sync runs; `invalid_input` for a file over"]
+                    #[doc =
+                    " [`MAX_IMPORT_FILE_LEN`]; `invalid_export_file` (another tag or payload version"]
+                    #[doc =
+                    " included); `export_decryption_failed`; `export_update_required`; `read_only`."]
+                    #[doc =
+                    " `export_password` is UTF-8 bytes, zeroed on return whatever the outcome"]
+                    #[doc = " ([`crate::secret`])."]
+                    #[export_name =
+                    "session_importCxfEncrypted_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_importCxfEncrypted(me:
+                            <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg3_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg3_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg3_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg3_4:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<ImportReport,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let mut me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            let mut arg2 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let arg2 = &mut *arg2;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg3 =
+                                                unsafe {
+                                                    <u64 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
+                                                };
+                                            let _ret = me.import_cxf_encrypted(arg1, arg2, arg3);
+                                            _ret
+                                        }
+                                    });
+                        <Result<ImportReport, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Imports our own CXF passkey export (`rizzy-vault-cxf-export`, ADR 0074 §2–§3) with its"]
+                    #[doc =
+                    " export password, one new Login item per passkey. The report has counts only (INV-48)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `locked`; `wrong_state` while a sync runs; `invalid_input` for a file over"]
+                    #[doc =
+                    " [`MAX_IMPORT_FILE_LEN`]; `invalid_export_file` (another tag or payload version"]
+                    #[doc =
+                    " included); `export_decryption_failed`; `export_update_required`; `read_only`."]
+                    #[doc =
+                    " `export_password` is UTF-8 bytes, zeroed on return whatever the outcome"]
+                    #[doc = " ([`crate::secret`])."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_importCxfEncrypted_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(3u32);
+                        <&[u8] as WasmDescribe>::describe();
+                        <&mut [u8] as WasmDescribe>::describe();
+                        <u64 as WasmDescribe>::describe();
+                        <Result<ImportReport, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<ImportReport, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\t[ Imports our own CXF passkey export (`rizzy-vault-cxf-export`, ADR 0074 \xc2\xa72\xe2\x80\x93\xc2\xa73) with itsV export password, one new Login item per passkey. The report has counts only (INV-48).\0\t # ErrorsK `locked`; `wrong_state` while a sync runs; `invalid_input` for a file overO [`MAX_IMPORT_FILE_LEN`]; `invalid_export_file` (another tag or payload versionN included); `export_decryption_failed`; `export_update_required`; `read_only`.H `export_password` is UTF-8 bytes, zeroed on return whatever the outcome\x15 ([`crate::secret`]).\0\x03\x04file\0\0\0\x0fexport_password\0\0\0\x06now_ms\0\0\0\0\0\x12importCxfEncrypted\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let export_password = take_secret(export_password)?;
+            if file.len() > MAX_IMPORT_FILE_LEN {
+                return Err(ClientError::InvalidInput.into());
+            }
+            let inner = self.writable()?;
+            let done =
+                inner.vault.import_cxf_encrypted(&mut inner.rng,
+                        &inner.unlocked, file, &export_password, now_ms)?;
+            Ok(ImportReport {
+                    imported: done.imported.len(),
+                    skipped: done.skipped.len().saturating_add(done.counts.skipped_items),
+                    warnings: done.warnings.len(),
+                    collapsed_conflicts: done.counts.collapsed_conflicts,
+                    history_not_carried: done.counts.dropped_history,
+                    fields_not_carried: done.counts.dropped_fields,
+                    credentials_skipped: done.counts.skipped_credentials,
                 })
         }
         #[doc =
@@ -47209,6 +47775,7 @@ pub mod session {
                     collapsed_conflicts: done.collapsed_fields,
                     history_not_carried: done.history_not_carried,
                     fields_not_carried: done.fields_not_carried,
+                    credentials_skipped: 0,
                 })
         }
         #[doc =
@@ -50276,6 +50843,89 @@ pub mod session {
     }
     #[allow(dead_code)]
     #[doc =
+    " The warning shown before a CXF passkey export (ADR 0074 §2 \"Warning\": its own text, not"]
+    #[doc =
+    " [`plaintext_export_warning`]\'s), under the same gate: re-authentication, the hold, and the"]
+    #[doc = " typed [`plaintext_export_phrase`] (owner answer 3)."]
+    #[must_use]
+    pub fn cxf_export_warning() -> String { CXF_EXPORT_WARNING.to_owned() }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " The warning shown before a CXF passkey export (ADR 0074 §2 \"Warning\": its own text, not"]
+            #[doc =
+            " [`plaintext_export_warning`]\'s), under the same gate: re-authentication, the hold, and the"]
+            #[doc = " typed [`plaintext_export_phrase`] (owner answer 3)."]
+            #[must_use]
+            #[export_name = "cxfExportWarning_e09cc0eb35f8b583"]
+            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_cxfExportWarning()
+                ->
+                    wasm_bindgen::convert::WasmRet<<String as
+                    wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                const _: () = {};
+                let _ret =
+                    wasm_bindgen::__rt::maybe_catch_unwind(||
+                            { { let _ret = cxf_export_warning(); _ret } });
+                <String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " The warning shown before a CXF passkey export (ADR 0074 §2 \"Warning\": its own text, not"]
+            #[doc =
+            " [`plaintext_export_warning`]\'s), under the same gate: re-authentication, the hold, and the"]
+            #[doc = " typed [`plaintext_export_phrase`] (owner answer 3)."]
+            #[must_use]
+            #[no_mangle]
+            #[doc(hidden)]
+            pub extern "C-unwind" fn __wbindgen_describe_cxfExportWarning_e09cc0eb35f8b583() {
+                use wasm_bindgen::describe::*;
+                wasm_bindgen::__rt::link_mem_intrinsics();
+                inform(FUNCTION);
+                inform(0);
+                inform(0u32);
+                <String as WasmDescribe>::describe();
+                <String as WasmDescribe>::describe();
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\x01\0\x03Y The warning shown before a CXF passkey export (ADR 0074 \xc2\xa72 \"Warning\": its own text, not[ [`plaintext_export_warning`]'s), under the same gate: re-authentication, the hold, and the4 typed [`plaintext_export_phrase`] (owner answer 3).\0\0\0\0\x10cxfExportWarning\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    #[allow(dead_code)]
+    #[doc =
     " The frozen warning shown before a plaintext export (ADR 0027 §5)."]
     #[must_use]
     pub fn plaintext_export_warning() -> String {
@@ -50514,9 +51164,11 @@ pub mod session {
     #[doc =
     " `rizzy_client::export::detect`): `rizzy-encrypted` (open it with"]
     #[doc =
-    " [`Session::import_encrypted`] and the file\'s password), an [`Session::import_file`] format"]
+    " [`Session::import_encrypted`] and the file\'s password), `rizzy-cxf-encrypted` (our CXF"]
     #[doc =
-    " name, `rizzy-csv` (our plaintext CSV export, which cannot be imported), or `unknown` (the"]
+    " passkey export, ADR 0074 §2: open it with [`Session::import_cxf_encrypted`] and the file\'s"]
+    #[doc =
+    " password), an [`Session::import_file`] format name (`cxf-json` for a bare CXF file), `rizzy-csv` (our plaintext CSV export, which cannot be imported), or `unknown` (the"]
     #[doc =
     " host asks the user to name the format). A file over [`MAX_IMPORT_FILE_LEN`] is `unknown`."]
     #[doc = " The answer names a kind only, never a byte of the file."]
@@ -50528,6 +51180,8 @@ pub mod session {
             } else {
                 match detect_format(file) {
                     Some(DetectedFormat::RizzyEncrypted) => "rizzy-encrypted",
+                    Some(DetectedFormat::RizzyCxfEncrypted) =>
+                        "rizzy-cxf-encrypted",
                     Some(DetectedFormat::RizzyPlaintextCsv) => "rizzy-csv",
                     Some(DetectedFormat::Import(format)) =>
                         match format {
@@ -50540,6 +51194,7 @@ pub mod session {
                             Format::RizzyPlaintextJson => "rizzy-json",
                             Format::AliasVaultCsv => "aliasvault-csv",
                             Format::AliasVaultAvux => "aliasvault-avux",
+                            Format::CxfJson => "cxf-json",
                             _ => "unknown",
                         },
                     _ => "unknown",
@@ -50555,9 +51210,11 @@ pub mod session {
             #[doc =
             " `rizzy_client::export::detect`): `rizzy-encrypted` (open it with"]
             #[doc =
-            " [`Session::import_encrypted`] and the file\'s password), an [`Session::import_file`] format"]
+            " [`Session::import_encrypted`] and the file\'s password), `rizzy-cxf-encrypted` (our CXF"]
             #[doc =
-            " name, `rizzy-csv` (our plaintext CSV export, which cannot be imported), or `unknown` (the"]
+            " passkey export, ADR 0074 §2: open it with [`Session::import_cxf_encrypted`] and the file\'s"]
+            #[doc =
+            " password), an [`Session::import_file`] format name (`cxf-json` for a bare CXF file), `rizzy-csv` (our plaintext CSV export, which cannot be imported), or `unknown` (the"]
             #[doc =
             " host asks the user to name the format). A file over [`MAX_IMPORT_FILE_LEN`] is `unknown`."]
             #[doc =
@@ -50610,9 +51267,11 @@ pub mod session {
             #[doc =
             " `rizzy_client::export::detect`): `rizzy-encrypted` (open it with"]
             #[doc =
-            " [`Session::import_encrypted`] and the file\'s password), an [`Session::import_file`] format"]
+            " [`Session::import_encrypted`] and the file\'s password), `rizzy-cxf-encrypted` (our CXF"]
             #[doc =
-            " name, `rizzy-csv` (our plaintext CSV export, which cannot be imported), or `unknown` (the"]
+            " passkey export, ADR 0074 §2: open it with [`Session::import_cxf_encrypted`] and the file\'s"]
+            #[doc =
+            " password), an [`Session::import_file`] format name (`cxf-json` for a bare CXF file), `rizzy-csv` (our plaintext CSV export, which cannot be imported), or `unknown` (the"]
             #[doc =
             " host asks the user to name the format). A file over [`MAX_IMPORT_FILE_LEN`] is `unknown`."]
             #[doc =
@@ -50639,7 +51298,7 @@ pub mod session {
             const _ENCODED_BYTES: &[u8] =
                 {
                     const _CHUNK_SLICES: [&[u8]; 1usize] =
-                        [b"\x01\0\x06T The format of an import file, recognised from its bytes (owner decision 2026-10-05;A `rizzy_client::export::detect`): `rizzy-encrypted` (open it with[ [`Session::import_encrypted`] and the file's password), an [`Session::import_file`] formatZ name, `rizzy-csv` (our plaintext CSV export, which cannot be imported), or `unknown` (theZ host asks the user to name the format). A file over [`MAX_IMPORT_FILE_LEN`] is `unknown`.8 The answer names a kind only, never a byte of the file.\0\x01\x04file\0\0\0\0\0\x12detectImportFormat\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        [b"\x01\0\x07T The format of an import file, recognised from its bytes (owner decision 2026-10-05;A `rizzy_client::export::detect`): `rizzy-encrypted` (open it withW [`Session::import_encrypted`] and the file's password), `rizzy-cxf-encrypted` (our CXF\\ passkey export, ADR 0074 \xc2\xa72: open it with [`Session::import_cxf_encrypted`] and the file's\xa9\x01 password), an [`Session::import_file`] format name (`cxf-json` for a bare CXF file), `rizzy-csv` (our plaintext CSV export, which cannot be imported), or `unknown` (theZ host asks the user to name the format). A file over [`MAX_IMPORT_FILE_LEN`] is `unknown`.8 The answer names a kind only, never a byte of the file.\0\x01\x04file\0\0\0\0\0\x12detectImportFormat\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                     #[allow(long_running_const_eval)]
                     const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                     #[allow(long_running_const_eval)]
@@ -51209,6 +51868,498 @@ pub mod session {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             u32::try_from(self.period_s).unwrap_or(u32::MAX)
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    #[wasm_bindgen()]
+    #[__wasm_bindgen_retried]
+    #[doc =
+    " A CXF passkey export (ADR 0074 §2): the file\'s bytes and how many passkeys it holds."]
+    pub struct CxfExport {
+        #[doc = " The file (ciphertext)."]
+        file: Vec<u8>,
+        #[doc = " Passkeys exported."]
+        passkeys: usize,
+    }
+    #[automatically_derived]
+    impl ::core::fmt::Debug for CxfExport {
+        #[inline]
+        fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+            ::core::fmt::Formatter::debug_struct_field2_finish(f, "CxfExport",
+                "file", &self.file, "passkeys", &&self.passkeys)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsConstructor for CxfExport { }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for CxfExport {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsStaticProperty for CxfExport { }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribe for CxfExport {
+        fn describe() {
+            use wasm_bindgen::describe::*;
+            inform(RUST_STRUCT);
+            inform(9u32);
+            inform(67u32);
+            inform(120u32);
+            inform(102u32);
+            inform(69u32);
+            inform(120u32);
+            inform(112u32);
+            inform(111u32);
+            inform(114u32);
+            inform(116u32);
+            inform(27u32);
+            inform(114u32);
+            inform(105u32);
+            inform(122u32);
+            inform(122u32);
+            inform(121u32);
+            inform(45u32);
+            inform(119u32);
+            inform(97u32);
+            inform(115u32);
+            inform(109u32);
+            inform(45u32);
+            inform(101u32);
+            inform(48u32);
+            inform(57u32);
+            inform(99u32);
+            inform(99u32);
+            inform(48u32);
+            inform(101u32);
+            inform(98u32);
+            inform(51u32);
+            inform(53u32);
+            inform(102u32);
+            inform(56u32);
+            inform(98u32);
+            inform(53u32);
+            inform(56u32);
+            inform(51u32);
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::IntoWasmAbi for CxfExport {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CxfExport>>;
+        fn into_abi(self) -> Self::Abi {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+            WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self))) as
+                    *mut WasmRefCell<CxfExport>)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::FromWasmAbi for CxfExport {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CxfExport>>;
+        unsafe fn from_abi(js: Self::Abi) -> Self {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+            use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+            let ptr = js.into_ptr();
+            assert_not_null(ptr);
+            let rc = Rc::from_raw(ptr);
+            match Rc::try_unwrap(rc) {
+                Ok(cell) => cell.into_inner(),
+                Err(_) =>
+                    wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::core::convert::From<CxfExport> for
+        wasm_bindgen::JsValue {
+        fn from(value: CxfExport) -> Self {
+            let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_cxfexport_new_e09cc0eb35f8b583"]
+                fn __wbg_cxfexport_new(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CxfExport>>)
+                -> u32;
+            }
+            unsafe {
+                <wasm_bindgen::JsValue as
+                        wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_cxfexport_new(ptr))
+            }
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[export_name = "__wbg_cxfexport_free_e09cc0eb35f8b583"]
+            #[doc(hidden)]
+            pub unsafe extern "C-unwind" fn __wbg_cxfexport_free(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CxfExport>>,
+                allow_delayed: u32) {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                if allow_delayed != 0 {
+                    let ptr = ptr.into_ptr();
+                    wasm_bindgen::__rt::assert_not_null(ptr);
+                    drop(Rc::from_raw(ptr));
+                } else {
+                    let _ =
+                        <CxfExport as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                }
+            }
+        };
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefFromWasmAbi for CxfExport {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CxfExport>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<CxfExport>;
+        unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRef::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefMutFromWasmAbi for CxfExport {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CxfExport>>;
+        type Anchor = wasm_bindgen::__rt::RcRefMut<CxfExport>;
+        unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRefMut::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::LongRefFromWasmAbi for CxfExport {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CxfExport>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<CxfExport>;
+        unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            <Self as wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionIntoWasmAbi for CxfExport {
+        #[inline]
+        fn none() -> Self::Abi {
+            <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CxfExport>>>::null()
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionFromWasmAbi for CxfExport {
+        #[inline]
+        fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::TryFromJsValue for CxfExport {
+        fn try_from_js_value(value: wasm_bindgen::JsValue)
+            ->
+                wasm_bindgen::__rt::core::result::Result<Self,
+                wasm_bindgen::JsValue> {
+            Self::try_from_js_value_ref(&value).ok_or(value)
+        }
+        fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+            -> wasm_bindgen::__rt::core::option::Option<Self> {
+            let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_cxfexport_unwrap_e09cc0eb35f8b583"]
+                fn __wbg_cxfexport_unwrap(ptr: u32)
+                ->
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CxfExport>>;
+            }
+            let ptr = unsafe { __wbg_cxfexport_unwrap(idx) };
+            if ptr.is_null() {
+                wasm_bindgen::__rt::core::option::Option::None
+            } else {
+                unsafe {
+                    wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                }
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribeVector for CxfExport {
+        fn describe_vector() {
+            use wasm_bindgen::describe::*;
+            inform(VECTOR);
+            <CxfExport as wasm_bindgen::describe::WasmDescribe>::describe();
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorIntoWasmAbi for CxfExport {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::IntoWasmAbi>::Abi;
+        fn vector_into_abi(vector:
+                wasm_bindgen::__rt::alloc::boxed::Box<[CxfExport]>)
+            -> Self::Abi {
+            wasm_bindgen::convert::js_value_vector_into_abi(vector)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorFromWasmAbi for CxfExport {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::FromWasmAbi>::Abi;
+        unsafe fn vector_from_abi(js: Self::Abi)
+            -> wasm_bindgen::__rt::alloc::boxed::Box<[CxfExport]> {
+            wasm_bindgen::convert::js_value_vector_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\x01\tCxfExport\0\x01V A CXF passkey export (ADR 0074 \xc2\xa72): the file's bytes and how many passkeys it holds.\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    impl CxfExport {
+        #[doc = " The file\'s bytes."]
+        #[must_use]
+        pub fn file(&self) -> Vec<u8> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The file\'s bytes."]
+                    #[must_use]
+                    #[export_name = "cxfexport_file_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_CxfExport_file(me:
+                            <CxfExport as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Vec<u8> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<CxfExport>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<CxfExport>();
+                                            let me =
+                                                unsafe {
+                                                    <CxfExport as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.file();
+                                            _ret
+                                        }
+                                    });
+                        <Vec<u8> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The file\'s bytes."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_cxfexport_file_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Vec<u8> as WasmDescribe>::describe();
+                        <Vec<u8> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\tCxfExport\x01\x12 The file's bytes.\0\0\0\0\x04file\x01\x01\0\0\0\0\x01\0\x02\x04file\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.file.clone()
+        }
+        #[doc = " Passkeys exported."]
+        #[must_use]
+        pub fn passkeys(&self) -> usize {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Passkeys exported."]
+                    #[must_use]
+                    #[export_name = "cxfexport_passkeys_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_CxfExport_passkeys(me:
+                            <CxfExport as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<usize as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<CxfExport>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<CxfExport>();
+                                            let me =
+                                                unsafe {
+                                                    <CxfExport as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.passkeys();
+                                            _ret
+                                        }
+                                    });
+                        <usize as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Passkeys exported."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_cxfexport_passkeys_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <usize as WasmDescribe>::describe();
+                        <usize as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\tCxfExport\x01\x13 Passkeys exported.\0\0\0\0\x08passkeys\x01\x01\0\0\0\0\x01\0\x02\x08passkeys\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.passkeys
         }
     }
     #[automatically_derived]
@@ -51865,6 +53016,11 @@ pub mod session {
         history_not_carried: usize,
         #[doc = " Fields not carried."]
         fields_not_carried: usize,
+        #[doc =
+        " CXF credentials not imported: of another type than a passkey, or a passkey that could"]
+        #[doc =
+        " not be read (ADR 0074 §1, §3). Zero for the other formats."]
+        credentials_skipped: usize,
     }
     #[automatically_derived]
     #[doc(hidden)]
@@ -51885,11 +53041,12 @@ pub mod session {
         fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
             let names: &'static _ =
                 &["imported", "skipped", "warnings", "collapsed_conflicts",
-                            "history_not_carried", "fields_not_carried"];
+                            "history_not_carried", "fields_not_carried",
+                            "credentials_skipped"];
             let values: &[&dyn ::core::fmt::Debug] =
                 &[&self.imported, &self.skipped, &self.warnings,
                             &self.collapsed_conflicts, &self.history_not_carried,
-                            &&self.fields_not_carried];
+                            &self.fields_not_carried, &&self.credentials_skipped];
             ::core::fmt::Formatter::debug_struct_fields_finish(f,
                 "ImportReport", names, values)
         }
@@ -51905,6 +53062,7 @@ pub mod session {
                 collapsed_conflicts: ::core::default::Default::default(),
                 history_not_carried: ::core::default::Default::default(),
                 fields_not_carried: ::core::default::Default::default(),
+                credentials_skipped: ::core::default::Default::default(),
             }
         }
     }
@@ -51915,10 +53073,11 @@ pub mod session {
         #[inline]
         fn eq(&self, other: &ImportReport) -> bool {
             self.imported == other.imported && self.skipped == other.skipped
-                            && self.warnings == other.warnings &&
-                        self.collapsed_conflicts == other.collapsed_conflicts &&
-                    self.history_not_carried == other.history_not_carried &&
-                self.fields_not_carried == other.fields_not_carried
+                                && self.warnings == other.warnings &&
+                            self.collapsed_conflicts == other.collapsed_conflicts &&
+                        self.history_not_carried == other.history_not_carried &&
+                    self.fields_not_carried == other.fields_not_carried &&
+                self.credentials_skipped == other.credentials_skipped
         }
     }
     #[automatically_derived]
@@ -52195,6 +53354,101 @@ pub mod session {
                 flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
         };
     impl ImportReport {
+        #[doc = " CXF credentials not imported (ADR 0074 §1, §3)."]
+        #[must_use]
+        pub fn credentials_skipped(&self) -> usize {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " CXF credentials not imported (ADR 0074 §1, §3)."]
+                    #[must_use]
+                    #[export_name =
+                    "importreport_credentialsSkipped_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_ImportReport_credentialsSkipped(me:
+                            <ImportReport as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<usize as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<ImportReport>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<ImportReport>();
+                                            let me =
+                                                unsafe {
+                                                    <ImportReport as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.credentials_skipped();
+                                            _ret
+                                        }
+                                    });
+                        <usize as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " CXF credentials not imported (ADR 0074 §1, §3)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_importreport_credentialsSkipped_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <usize as WasmDescribe>::describe();
+                        <usize as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0cImportReport\x012 CXF credentials not imported (ADR 0074 \xc2\xa71, \xc2\xa73).\0\0\0\0\x12credentialsSkipped\x01\x01\0\0\0\0\x01\0\x02\x12credentialsSkipped\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.credentials_skipped
+        }
         #[doc = " Items imported."]
         #[must_use]
         pub fn imported(&self) -> usize {
@@ -61245,10 +62499,10 @@ pub use matching::{
 };
 pub use passkey::{CreatedPasskey, PasskeyAssertion, create_passkey};
 pub use session::{
-    AttachmentView, DeviceView, EncryptedExport, ImportReport, Notice,
-    Session, SessionRow, TotpCode, TwoFactorEnrolment, detect_import_format,
-    ends_session_on_unauthorized, others_ended_notice,
-    plaintext_export_hold_ms, plaintext_export_phrase,
+    AttachmentView, CxfExport, DeviceView, EncryptedExport, ImportReport,
+    Notice, Session, SessionRow, TotpCode, TwoFactorEnrolment,
+    cxf_export_warning, detect_import_format, ends_session_on_unauthorized,
+    others_ended_notice, plaintext_export_hold_ms, plaintext_export_phrase,
     plaintext_export_warning, session_ended_by_you_notice,
     session_ended_notice,
 };

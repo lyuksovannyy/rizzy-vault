@@ -38,6 +38,7 @@
 //! | [`TotpCode`], [`EncryptedExport`], [`ImportReport`], [`DeviceView`], [`TwoFactorEnrolment`] | results |
 //! | [`create_passkey`] (`createPasskey`), [`CreatedPasskey`], [`Session::passkey_assertion`] (`passkeyAssertion`), [`PasskeyAssertion`] | `WebAuthn` passkey registration and assertion ([`passkey`]; ADR 0039) |
 //! | [`plaintext_export_warning`], [`plaintext_export_phrase`] | the frozen texts of ADR 0027 §5 |
+//! | [`cxf_export_warning`] | the CXF passkey export's own warning (ADR 0074 §2) |
 //! | [`plaintext_export_hold_ms`], [`detect_import_format`] | the hold after the plaintext warning; recognising an import file (owner decision 2026-10-05) |
 //! | [`CoreError`] | the one thrown error: a stable code ([`error`]) |
 //!
@@ -122,10 +123,11 @@ pub use login::LoginFlow;
 pub use matching::{GlobalEquivalence, MatchDecision, decide_match_candidates, normalize_page_url};
 pub use passkey::{CreatedPasskey, PasskeyAssertion, create_passkey};
 pub use session::{
-    AttachmentView, DeviceView, EncryptedExport, ImportReport, Notice, Session, SessionRow,
-    TotpCode, TwoFactorEnrolment, detect_import_format, ends_session_on_unauthorized,
-    others_ended_notice, plaintext_export_hold_ms, plaintext_export_phrase,
-    plaintext_export_warning, session_ended_by_you_notice, session_ended_notice,
+    AttachmentView, CxfExport, DeviceView, EncryptedExport, ImportReport, Notice, Session,
+    SessionRow, TotpCode, TwoFactorEnrolment, cxf_export_warning, detect_import_format,
+    ends_session_on_unauthorized, others_ended_notice, plaintext_export_hold_ms,
+    plaintext_export_phrase, plaintext_export_warning, session_ended_by_you_notice,
+    session_ended_notice,
 };
 pub use signup::{EmergencyKit, SignupFlow};
 pub use store::{KvRow, cache_store_names};

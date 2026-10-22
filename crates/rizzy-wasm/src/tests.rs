@@ -204,6 +204,16 @@ fn import_files_are_recognised_by_kind_only() {
     );
     assert_eq!(detect_import_format(b"hello\n"), "unknown");
     assert_eq!(detect_import_format(b""), "unknown");
+    // CXF (ADR 0074): our sealed passkey export, and a bare CXF document.
+    assert_eq!(
+        detect_import_format(br#"{"format":"rizzy-vault-cxf-export","version":1}"#),
+        "rizzy-cxf-encrypted"
+    );
+    assert_eq!(
+        detect_import_format(br#"{"version":{"major":1,"minor":0},"timestamp":1,"accounts":[]}"#),
+        "cxf-json"
+    );
+    assert!(crate::session::cxf_export_warning().starts_with("Once decrypted"));
 }
 
 #[test]
