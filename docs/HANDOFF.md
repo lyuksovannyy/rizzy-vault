@@ -30,7 +30,19 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
     - Server smoke: `migrate`, start and `/api/meta` work, with all 28 tables created. A second server process runs alongside, as ADR 0023 §5's shared instance lock intends.
     - Not yet covered on PostgreSQL: the web e2e, which needs per-server databases in `apps/web/e2e/server.ts`, and `restore`/`secrets rotate` end to end.
     - To rerun: `RIZZY_TEST_POSTGRES_URL=… ~/rizzy-wt/bin/gate.sh` adds the PG steps.
-- **What is left for agents:** every §6 row is now done or blocked. Accessibility CI needs owner calls (a CI edit, plus a dependency such as axe-core). The rest of M3 waits on the §3 Proposed ADRs (0048, 0052–0062, 0075). The owner's review batch (§3) is the bottleneck.
+- **Owner decisions of 2026-10-21/22 (in session):**
+  - ADR 0042 is Accepted, and is being implemented in `wip/m2-settings`.
+  - The dependency bumps are approved (ADR 0009 amendment of 2026-10-21).
+  - Accessibility CI is unblocked and integrated: axe and CDP audits of every web and extension screen, a keyboard-only walk, the WCAG AA floor for token pairs, and `generate-tokens --check` in CI. axe-core 4.14.0 is a new devDependency (MPL-2.0). The `ci.yml` edits have not yet run on GitHub Actions.
+  - Signing is authorized: "sign it". The signed branch and PR to `main` are prepared at the end of the session (see §1, last bullet).
+  - Autocomplete-driven autofill was requested. It needs a new item key and fill-contract changes, so it is drafted as **ADR 0076 (Proposed)**. It also needs a ROADMAP row (its open question 1).
+- **"Keep both" (owner question, rephrased).** When two devices change the same field before they sync, the field ends up holding two values at once. The ADRs define "pick one": choose a value, and the others stay only in history. "Keep both" is named in the ROADMAP, but no ADR says where the second value lives, because a field such as a password holds exactly one value. The implementation keeps the shown value in the field and turns each other value into a new field on the same item ("Password (from <device>)", hidden like the original), or a new website entry for URLs. Other shapes are possible:
+  - a duplicate item holding the other value;
+  - a field that keeps several values side by side (a format change);
+  - no "keep both" at all.
+  
+  Each choice has trade-offs: duplicates if two devices both pick "keep both"; booleans and choice fields cannot be kept twice; extra fields clutter the item. The owner chooses whether the current shape stays.
+- **What is left for agents:** every §6 row is done or blocked. The rest of M3 waits on the §3 Proposed ADRs (0043–0076, minus the Accepted 0042), and the owner's review of them is the bottleneck.
 - The gap-numbered audit (`docs/handoff/gap-audit.json`), which older gap ids below trace back to, still lives only on branch `wip/client-m1`. Keep that branch; its code is superseded by the commits in §2. `wip/match-core` (one unfinished commit off `main`) is likewise superseded and kept only for reference.
 
 ## 2. Done since the last rewrite
