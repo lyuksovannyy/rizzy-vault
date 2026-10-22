@@ -10,8 +10,12 @@ use std::collections::BTreeMap;
 
 use rizzy_core::item::key::ElementId;
 use rizzy_core::item::schema::{
-    ATTR_KIND, ATTR_LABEL, ATTR_ORDER, ATTR_VALUE, CARD_NUMBER, IMPORT_CREATED_MS, ITEM_FAVORITE,
-    ITEM_NAME, ITEM_NOTES, ITEM_TYPE, LIST_FIELD, LIST_URI, LOGIN_TOTP, VAULT_NAME, WriteSource,
+    API_ENDPOINT, API_KEY, API_NAME, API_SECRET, ATTR_KIND, ATTR_LABEL, ATTR_ORDER, ATTR_VALUE,
+    BANK_ACCOUNT_HOLDER, BANK_ACCOUNT_NUMBER, BANK_ACCOUNT_TYPE, BANK_NAME, BANK_ROUTING_NUMBER,
+    CARD_NUMBER, IMPORT_CREATED_MS, ITEM_FAVORITE, ITEM_NAME, ITEM_NOTES, ITEM_TYPE,
+    LICENSE_EXPIRES, LICENSE_KEY, LICENSE_NAME, LICENSE_SEATS, LIST_FIELD, LIST_URI, LOGIN_TOTP,
+    SSH_HOST, SSH_PASSPHRASE, SSH_PORT, SSH_PRIVATE_KEY, SSH_PUBLIC_KEY, SSH_USERNAME, VAULT_NAME,
+    WIFI_PASSWORD, WIFI_SECURITY_TYPE, WIFI_SSID, WriteSource,
 };
 use rizzy_core::item::tag::tag_key;
 use rizzy_core::item::value::SortKey;
@@ -184,7 +188,8 @@ fn without_import_keys(fields: &BTreeMap<String, Vec<u8>>) -> BTreeMap<String, V
 /// The vault every round trip exports: a login with a password history, a URI, a tag, a
 /// hidden custom field and a favourite flag; a trashed note; a card with an unknown key, a
 /// reserved key and an unsupported value (as a newer client would leave them); an identity;
-/// the vault-settings item and a purged item, neither of which is exported.
+/// one item of each M3 type of ADR 0055, every key of its type set; the vault-settings item
+/// and a purged item, neither of which is exported.
 fn populated(seed: u64) -> (Fixture, ItemId) {
     let mut f = fixture(seed);
     let uri = ElementId::generate(&mut f.rng);
@@ -232,7 +237,8 @@ fn populated(seed: u64) -> (Fixture, ItemId) {
 
     // A newer client's keys and an unsupported value, carried into the vault as they are.
     let newer = k("newer.thing");
-    let reserved = k("ssh.private_key");
+    // Still reserved after ADR 0055, which assigns `ssh.private_key` but not this one (§2).
+    let reserved = k("ssh.key_type");
     let raw = Value::copy_from_encoded(&[0x7f, 0x01, 0x02]).unwrap();
     let bad_text = Value::copy_from_encoded(&[0x01, 0xff, 0xfe]).unwrap();
     let name = k(ITEM_NAME);
@@ -269,6 +275,7 @@ fn populated(seed: u64) -> (Fixture, ItemId) {
         ],
         T0 + 30,
     );
+    create_m3_items(&mut f);
     f.create(
         ItemType::VAULT_SETTINGS,
         &[(&k(VAULT_NAME), &text("Personal"))],
@@ -284,6 +291,85 @@ fn populated(seed: u64) -> (Fixture, ItemId) {
     (f, bank)
 }
 
+/// An M3 item of [`m3_items`]: its type, title, and `(key, text)` of each field.
+type M3Item = (ItemType, &'static str, Vec<(&'static str, &'static str)>);
+
+/// Creates the items of [`m3_items`] in `f`'s vault.
+fn create_m3_items(f: &mut Fixture) {
+    for (at, (item_type, name, keys)) in (T0 + 31..).zip(m3_items()) {
+        let keys: Vec<(SchemaKey, Value)> = keys
+            .iter()
+            .map(|(key, value)| (k(key), text(value)))
+            .collect();
+        let mut fields: Vec<(&SchemaKey, &Value)> = keys.iter().map(|(k, v)| (k, v)).collect();
+        let title = (k(ITEM_NAME), text(name));
+        fields.push((&title.0, &title.1));
+        f.create(item_type, &fields, at);
+    }
+}
+
+/// One item of each M3 type (ADR 0055 §1): its type, title, and every key of the type with a
+/// value, the concealed ones included.
+fn m3_items() -> [M3Item; 5] {
+    [
+        (
+            ItemType::SSH_KEY,
+            "SSH",
+            vec![
+                (SSH_HOST, "git.example.com"),
+                (SSH_PORT, "2222"),
+                (SSH_USERNAME, "git"),
+                (
+                    SSH_PRIVATE_KEY,
+                    "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n",
+                ),
+                (SSH_PUBLIC_KEY, "ssh-ed25519 AAAA alice@example.com"),
+                (SSH_PASSPHRASE, "hunter2"),
+            ],
+        ),
+        (
+            ItemType::API_CREDENTIAL,
+            "API",
+            vec![
+                (API_NAME, "Example API"),
+                (API_KEY, "AKIAEXAMPLE"),
+                (API_SECRET, "s3cr3t"),
+                (API_ENDPOINT, "https://api.example.com"),
+            ],
+        ),
+        (
+            ItemType::SOFTWARE_LICENSE,
+            "License",
+            vec![
+                (LICENSE_NAME, "Editor"),
+                (LICENSE_KEY, "ABCD-EFGH"),
+                (LICENSE_SEATS, "5"),
+                (LICENSE_EXPIRES, "2027-12-31"),
+            ],
+        ),
+        (
+            ItemType::WIFI,
+            "WiFi",
+            vec![
+                (WIFI_SSID, "home-net"),
+                (WIFI_PASSWORD, "correct horse"),
+                (WIFI_SECURITY_TYPE, "WPA2"),
+            ],
+        ),
+        (
+            ItemType::BANK_ACCOUNT,
+            "Bank account",
+            vec![
+                (BANK_NAME, "Example Bank"),
+                (BANK_ACCOUNT_HOLDER, "Alice"),
+                (BANK_ACCOUNT_NUMBER, "DE89370400440532013000"),
+                (BANK_ROUTING_NUMBER, "COBADEFFXXX"),
+                (BANK_ACCOUNT_TYPE, "Checking"),
+            ],
+        ),
+    ]
+}
+
 /// Checks that vault `b`, which imported an export of vault `a`, displays what `a` displays.
 fn assert_same_vault(a: &Fixture, b: &Fixture, bank: ItemId) {
     let mut exported = displayed(&a.vault);
@@ -293,7 +379,17 @@ fn assert_same_vault(a: &Fixture, b: &Fixture, bank: ItemId) {
     let imported = displayed(&b.vault);
     assert_eq!(
         exported.keys().collect::<Vec<_>>(),
-        ["Bank \"main\"", "Me", "Old note", "Visa"]
+        [
+            "API",
+            "Bank \"main\"",
+            "Bank account",
+            "License",
+            "Me",
+            "Old note",
+            "SSH",
+            "Visa",
+            "WiFi"
+        ]
     );
     assert_eq!(
         imported.keys().collect::<Vec<_>>(),
@@ -314,7 +410,18 @@ fn assert_same_vault(a: &Fixture, b: &Fixture, bank: ItemId) {
     let visa = &imported["Visa"].1;
     assert_eq!(visa["newer.thing"], [0x7f, 0x01, 0x02]);
     assert_eq!(visa["newer.text"], [0x01, 0xff, 0xfe]);
-    assert_eq!(visa["ssh.private_key"], [0x01, b'x']);
+    assert_eq!(visa["ssh.key_type"], [0x01, b'x']);
+    // Each M3 item, of its own type, with every key of its type (ADR 0055).
+    for (item_type, name, keys) in m3_items() {
+        let fields = &imported[name].1;
+        assert_eq!(
+            fields[ITEM_TYPE],
+            Value::enumeration(item_type.id()).expose_secret()
+        );
+        for (key, value) in keys {
+            assert_eq!(fields[key], text(value).expose_secret(), "{name}: {key}");
+        }
+    }
     // The created time of the exported state, and the password history, newest first.
     let bank_fields = &imported["Bank \"main\""].1;
     let created = a.vault.merge(bank).unwrap().times().created_ms.unwrap();
@@ -347,7 +454,8 @@ fn encrypted_export_round_trips_into_a_new_vault() {
         .vault
         .export_encrypted(&mut a.rng, test_auth().0, "export pw", T0 + 100)
         .unwrap();
-    assert_eq!(export.items, 4);
+    // The four M1 items and the five M3 items of ADR 0055.
+    assert_eq!(export.items, 9);
     assert!(export.unresolved.is_empty());
     // One vault state gives one payload.
     assert_eq!(
@@ -381,7 +489,7 @@ fn encrypted_export_round_trips_into_a_new_vault() {
         .vault
         .import_encrypted(&mut b.rng, &b.unlocked, &export.file, "export pw", T0 + 200)
         .unwrap();
-    assert_eq!(report.imported.len(), 4);
+    assert_eq!(report.imported.len(), 9);
     assert_eq!(
         report,
         PayloadImport {
@@ -392,11 +500,11 @@ fn encrypted_export_round_trips_into_a_new_vault() {
     // New item ids, and ops of the importing device only.
     let old: Vec<ItemId> = a.vault.item_ids();
     assert!(report.imported.iter().all(|id| !old.contains(id)));
-    assert_eq!(b.vault.item_ids().len(), 4);
+    assert_eq!(b.vault.item_ids().len(), 9);
     assert_same_vault(&a, &b, bank);
-    // Four create ops and the trash op, all stored by the server.
-    assert_eq!(b.vault.next_device_seq(), 6);
-    assert_eq!(b.sync(), 5);
+    // Nine create ops and the trash op, all stored by the server.
+    assert_eq!(b.vault.next_device_seq(), 11);
+    assert_eq!(b.sync(), 10);
     // Exporting the importing vault again gives the same displayed values.
     let again = b
         .vault
@@ -442,7 +550,21 @@ fn plaintext_json_round_trips_into_a_new_vault() {
     )));
     assert!(doc.ends_with("]}\n]}\n"));
     assert!(!doc.contains('\r'));
-    assert_eq!(doc.lines().count(), 6);
+    // The head, nine items (four M1, five M3) and the tail.
+    assert_eq!(doc.lines().count(), 11);
+    for piece in [
+        r#""type":5,"#,
+        r#"{"key":"ssh.private_key","value":{"text":"-----BEGIN OPENSSH PRIVATE KEY-----\u000aAAAA\u000a"}}"#,
+        r#""type":6,"#,
+        r#"{"key":"api.secret","value":{"text":"s3cr3t"}}"#,
+        r#""type":7,"#,
+        r#""type":8,"#,
+        r#"{"key":"wifi.password","value":{"text":"correct horse"}}"#,
+        r#""type":9,"#,
+        r#"{"key":"bank.routing_number","value":{"text":"COBADEFFXXX"}}"#,
+    ] {
+        assert!(doc.contains(piece), "{piece}");
+    }
     for piece in [
         r#"{"key":"item.name","value":{"text":"Bank \"main\""}}"#,
         r#"{"key":"item.favorite","value":{"bool":true}}"#,
@@ -464,15 +586,15 @@ fn plaintext_json_round_trips_into_a_new_vault() {
     let read = import(Format::RizzyPlaintextJson, json.expose_secret(), &mut b.rng).unwrap();
     assert_eq!(read.warnings, []);
     assert_eq!(read.counts, rizzy_import::Counts::default());
-    assert_eq!(read.items.len(), 4);
+    assert_eq!(read.items.len(), 9);
     let done = b
         .vault
         .import_items(&mut b.rng, &b.unlocked, &read.items, T0 + 200)
         .unwrap();
-    assert_eq!(done.imported.len(), 4);
+    assert_eq!(done.imported.len(), 9);
     assert!(done.skipped.is_empty());
     assert_same_vault(&a, &b, bank);
-    assert_eq!(b.sync(), 5);
+    assert_eq!(b.sync(), 10);
 }
 
 #[test]
@@ -522,22 +644,23 @@ fn plaintext_csv_is_rfc_4180_and_counts_its_losses() {
         ]
     );
     // The login (custom field, password history) and the card (unknown keys, unsupported
-    // values) lose data; the trashed note is left out; the identity is complete.
+    // values) lose data; the trashed note and the five M3 items (ADR 0027 §4: "other types
+    // are left out of CSV") are left out; the identity is complete.
     let loss = a.vault.csv_export_loss().unwrap();
     assert_eq!(
         loss,
         CsvLoss {
             rows: 3,
             lossy_rows: 2,
-            left_out: 1,
+            left_out: 6,
         }
     );
-    assert_eq!(loss.items_losing_data(), 3);
+    assert_eq!(loss.items_losing_data(), 8);
     assert_eq!(
         csv_export_warning(loss.items_losing_data()),
         "Do not open this file in a spreadsheet program: a cell that begins with =, +, - or @ \
          can run as a formula, and saving from a spreadsheet can change your passwords. CSV \
-         leaves out custom fields, password history, conflicting values and trashed items; 3 \
+         leaves out custom fields, password history, conflicting values and trashed items; 8 \
          items lose data. The JSON export is complete."
     );
     assert_eq!(
@@ -713,12 +836,16 @@ fn import_splits_an_item_over_consecutive_ops_and_keeps_the_limits() {
     let name = k(ITEM_NAME);
     let number = k(CARD_NUMBER);
     let kind = k(ITEM_TYPE);
+    let ssh_host = k(SSH_HOST);
     let (a, login_type, cleared) = (text("a"), Value::enumeration(1), Value::cleared());
     for (item_type, writes) in [
         // The vault-settings type and an unsupported type are never imported as an item.
         (ItemType::VAULT_SETTINGS, vec![carried(&name, &a)]),
-        (ItemType::SSH_KEY, vec![carried(&name, &a)]),
-        // A key twice; a key of another item type; a blank field; another type's `item.type`.
+        (ItemType::from_id(0x000B), vec![carried(&name, &a)]),
+        // A key twice; a key of another item type (an M1 key on an M3 type and an M3 key on
+        // an M1 type, ADR 0055 §1); a blank field; another type's `item.type`.
+        (ItemType::SSH_KEY, vec![carried(&number, &a)]),
+        (ItemType::LOGIN, vec![carried(&ssh_host, &a)]),
         (
             ItemType::LOGIN,
             vec![carried(&name, &a), carried(&name, &a)],
@@ -1039,13 +1166,15 @@ fn payload_import_flattens_conflicts_and_reports_what_it_left() {
         text("x"),
     );
     let card = text("4111");
+    let bank = text("Bank");
+    let share_secret = [[0x02].as_slice(), &[0x5a; 32]].concat();
     let entries = [
         // A Login: a conflict on `item.name`, a password history with a cleared entry, the
-        // history of another field, a key of another item type, `match`, an unknown key.
+        // history of another field, a share secret (M5's: never written), `match`, an unknown
+        // key.
         LiveSnapshot::new(
             vec![
                 lifecycle(&[0x01]),
-                register(CARD_NUMBER, vec![entry(1, 1, 5_000, &card)]),
                 register(
                     ITEM_NAME,
                     vec![entry(1, 2, 6_000, &a), entry(2, 1, 9_000, &b)],
@@ -1054,6 +1183,10 @@ fn payload_import_flattens_conflicts_and_reports_what_it_left() {
                 register(LOGIN_PASSWORD, vec![entry(1, 4, 8_000, &new)]),
                 register(LOGIN_USERNAME, vec![entry(1, 4, 8_000, &[])]),
                 register("newer.key", vec![entry(1, 1, 5_000, &[0x7f, 0x09])]),
+                register(
+                    "share/5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a/secret",
+                    vec![entry(1, 1, 5_000, &share_secret)],
+                ),
                 register(
                     "uri/00112233445566778899aabbccddeeff/match",
                     vec![entry(1, 1, 5_000, &[0x05, 0x00, 0x02])],
@@ -1080,7 +1213,7 @@ fn payload_import_flattens_conflicts_and_reports_what_it_left() {
             ],
             Vec::new(),
         ),
-        // The vault-settings type, a reserved type, and an item without a valid type.
+        // The vault-settings type, an unassigned type, and an item without a valid type.
         LiveSnapshot::new(
             vec![
                 lifecycle(&[0x01]),
@@ -1091,7 +1224,7 @@ fn payload_import_flattens_conflicts_and_reports_what_it_left() {
         LiveSnapshot::new(
             vec![
                 lifecycle(&[0x01]),
-                register(ITEM_TYPE, vec![entry(1, 1, 5_000, &[0x05, 0x00, 0x09])]),
+                register(ITEM_TYPE, vec![entry(1, 1, 5_000, &[0x05, 0x00, 0x0b])]),
             ],
             Vec::new(),
         ),
@@ -1099,6 +1232,35 @@ fn payload_import_flattens_conflicts_and_reports_what_it_left() {
             vec![
                 lifecycle(&[0x01]),
                 register(ITEM_NAME, vec![entry(1, 1, 5_000, &x)]),
+            ],
+            Vec::new(),
+        ),
+        // A key of another item type skips the whole item (ADR 0055 owner answer 4): an M3
+        // key on a Login, and an M1 key on an Identity.
+        LiveSnapshot::new(
+            vec![
+                lifecycle(&[0x01]),
+                register(ITEM_NAME, vec![entry(1, 1, 5_000, &x)]),
+                register(ITEM_TYPE, vec![entry(1, 1, 5_000, &[0x05, 0x00, 0x01])]),
+                register("ssh.host", vec![entry(1, 1, 5_000, &x)]),
+            ],
+            Vec::new(),
+        ),
+        LiveSnapshot::new(
+            vec![
+                lifecycle(&[0x01]),
+                register(CARD_NUMBER, vec![entry(1, 1, 5_000, &card)]),
+                register(ITEM_TYPE, vec![entry(1, 1, 5_000, &[0x05, 0x00, 0x04])]),
+            ],
+            Vec::new(),
+        ),
+        // A Bank account (ADR 0055): imported with its concealed field.
+        LiveSnapshot::new(
+            vec![
+                lifecycle(&[0x01]),
+                register("bank.account_number", vec![entry(1, 1, 5_000, &card)]),
+                register(ITEM_NAME, vec![entry(1, 1, 5_000, &bank)]),
+                register(ITEM_TYPE, vec![entry(1, 1, 5_000, &[0x05, 0x00, 0x09])]),
             ],
             Vec::new(),
         ),
@@ -1122,11 +1284,10 @@ fn payload_import_flattens_conflicts_and_reports_what_it_left() {
     assert_eq!(
         preview_payload(payload.expose_secret(), &mut ChaCha20Rng::seed_from_u64(1)).unwrap(),
         PayloadPreview {
-            importable: 2,
-            skipped_items: 3,
+            importable: 3,
+            skipped_items: 5,
             collapsed_fields: 1,
             history_not_carried: 2,
-            // `card.number` on a Login; `uri/<id>/match` now carries (ADR 0037, Accepted, M2).
             fields_not_carried: 1,
         }
     );
@@ -1140,15 +1301,16 @@ fn payload_import_flattens_conflicts_and_reports_what_it_left() {
         report,
         PayloadImport {
             imported: report.imported.clone(),
-            skipped_items: 3,
+            skipped_items: 5,
             collapsed_fields: 1,
             // The history of `item.name`, and the cleared password entry.
             history_not_carried: 2,
-            // `card.number` on a Login; `uri/<id>/match` now carries (ADR 0037, Accepted, M2).
+            // `share/<id>/secret`; `uri/<id>/match` now carries (ADR 0037, Accepted, M2), and
+            // a key of another item type skips its item instead (ADR 0055 owner answer 4).
             fields_not_carried: 1,
         }
     );
-    assert_eq!(report.imported.len(), 2);
+    assert_eq!(report.imported.len(), 3);
     assert!(!format!("{report:?}").contains("old1"));
     let shown = displayed(&f.vault);
     // The displayed value of the conflict: the higher HLC.
@@ -1172,9 +1334,14 @@ fn payload_import_flattens_conflicts_and_reports_what_it_left() {
         [("old2".to_owned(), 7_000), ("old1".to_owned(), 5_000)]
     );
     assert_eq!(shown["x"].0, ItemLifecycle::Trashed);
+    assert_eq!(shown["Bank"].1["bank.account_number"], card);
+    assert_eq!(
+        f.vault.item_type(report.imported[2]),
+        Some(ItemType::BANK_ACCOUNT)
+    );
     // The new item has no conflict: one create op of this device.
     assert!(!f.vault.field_conflicts(report.imported[0], ITEM_NAME));
-    assert_eq!(f.vault.next_device_seq(), 4);
+    assert_eq!(f.vault.next_device_seq(), 5);
 }
 
 #[test]
