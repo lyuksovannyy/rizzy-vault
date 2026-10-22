@@ -1158,6 +1158,7 @@ fn rizzy_json_reads_every_value_type() {
         import.counts,
         crate::Counts {
             skipped_items: 0,
+            skipped_credentials: 0,
             ignored_members: 0,
             collapsed_conflicts: 1,
             // Two past the fiftieth, one that is not a text, two of another field.
@@ -1581,6 +1582,7 @@ fn rizzy_json_unknown_members_and_unwritable_fields() {
         import.counts,
         crate::Counts {
             skipped_items: 0,
+            skipped_credentials: 0,
             // Root: `later`, the second `version`. Item 0: `extra`, the second `type`, `note`,
             // `hint`, `device`.
             ignored_members: 7,
