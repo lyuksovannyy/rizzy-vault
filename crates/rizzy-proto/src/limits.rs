@@ -147,6 +147,29 @@ pub const MAX_SESSIONS_LISTED: usize = 256;
 /// `GET /api/meta` (ADR 0002 point 3).
 pub const MAX_META_ENTRIES: usize = 32;
 
+/// Format limit: plaintext bytes per attachment chunk, 512 KiB ([ADR 0054] §2). Mirrors
+/// `rizzy_core::attachment::CHUNK_SIZE`; the server tests compare the two.
+///
+/// [ADR 0054]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0054-attachments-envelope-and-api.md
+pub const ATTACHMENT_CHUNK_SIZE: usize = 524_288;
+
+/// Format limit: the largest attachment, 25 MiB of plaintext ([ADR 0054] §2), so at most 50
+/// chunks. The server refuses a larger declared size at `attachments/create` with
+/// `quota_exceeded` (ADR 0054 "Owner answers" 5).
+///
+/// [ADR 0054]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0054-attachments-envelope-and-api.md
+pub const MAX_ATTACHMENT_LEN: u64 = 26_214_400;
+
+/// Format limit: the longest `ATTACHMENT_CHUNK` envelope, a full chunk under the symmetric
+/// envelope: `CHUNK_SIZE + 90` bytes (ADR 0054 §6), about 699 KiB as base64url, so an upload or
+/// download body stays under [`MAX_BODY_LEN`].
+pub const MAX_ATTACHMENT_CHUNK_ENVELOPE_LEN: usize =
+    ATTACHMENT_CHUNK_SIZE + SYMMETRIC_ENVELOPE_OVERHEAD;
+
+/// Format limit: an `ATTACHMENT_KEY_WRAP` envelope is exactly a 32-byte key under the
+/// symmetric envelope, 122 bytes (CRYPTO.md §8.4, §9.1).
+pub const ATTACHMENT_KEY_WRAP_LEN: usize = 32 + SYMMETRIC_ENVELOPE_OVERHEAD;
+
 /// The body limit of every endpoint except the three below: 1 MiB (ADR 0028 item 7). It bounds
 /// the unauthenticated requests (signup, login, device authentication, recovery) and the account
 /// requests.

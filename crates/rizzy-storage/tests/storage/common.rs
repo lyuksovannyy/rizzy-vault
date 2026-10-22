@@ -286,6 +286,26 @@ pub(crate) fn fixture() -> Dump {
             "vault_device_cursors",
             vec![vec![v1(), d1(), blob(33, 26), int(34)]],
         ),
+        // ADR 0054 §5: one attachment of 524 289 bytes (two chunks), both chunks stored.
+        (
+            "vault_attachments",
+            vec![vec![
+                idv(40),
+                v1(),
+                idv(41),
+                blob(42, 122),
+                int(524_289),
+                int(2),
+                int(43),
+            ]],
+        ),
+        (
+            "vault_attachment_chunks",
+            vec![
+                vec![idv(40), int(0), blob(44, 524_378)],
+                vec![idv(40), int(1), blob(45, 91)],
+            ],
+        ),
         (
             "storage_account_usage",
             vec![vec![a1(), int(1_234), int(35)]],

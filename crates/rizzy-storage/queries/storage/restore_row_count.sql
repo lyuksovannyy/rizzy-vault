@@ -27,6 +27,8 @@ SELECT
   + (SELECT COUNT(*) FROM vault_snapshots)
   + (SELECT COUNT(*) FROM vault_compaction_queue)
   + (SELECT COUNT(*) FROM vault_device_cursors)
+  + (SELECT COUNT(*) FROM vault_attachments)
+  + (SELECT COUNT(*) FROM vault_attachment_chunks)
   + (SELECT COUNT(*) FROM storage_meta)
   + (SELECT COUNT(*) FROM storage_reconciliation)
   + (SELECT COUNT(*) FROM storage_account_usage)
