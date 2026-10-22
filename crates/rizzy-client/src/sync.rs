@@ -34,6 +34,20 @@
 //! CRYPTO.md §10.2 rule (c) and §11.8 step 4. Then the `causal` cycle: plan, absorb, commit,
 //! deliver.
 //!
+//! # Paged responses (ADR 0050)
+//!
+//! A page carries the covers of its own bodiless headers only, so a tombstone can arrive in a
+//! page before the header of the Purge it records, on its chain or another device's. A cover
+//! the merge refuses only as `PurgeAboveCut` is held for the rest of the response sequence
+//! (every page up to a `complete` one), not given up: the log links its headers so the cursor
+//! moves on, nothing that waits for them is applied, and the absorption is retried, unchanged,
+//! after each page whose commit advanced a chain and once more on the complete page
+//! ([`FetchOutcome::held_covers`]). A cover taken on a retry is journaled like any absorbed
+//! one. One still held when the sequence completes is given up (a refused cover, and a gap in
+//! the reports), and the next Fetch serves its headers again. A hold is kept in memory only:
+//! a restart in the middle of a sequence starts the next one from the persisted cursor (ADR
+//! 0050 open question 1).
+//!
 //! # Upload
 //!
 //! Own ops go up in chain order, then the own snapshots whose own entry is acknowledged (the
