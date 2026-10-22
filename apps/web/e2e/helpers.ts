@@ -88,6 +88,19 @@ export async function newItem(page: Page, typeLabel: string): Promise<void> {
 }
 
 /** Locks the vault through the account menu (redesign slice 2, item 5). */
+/** Closes every toast that is showing, tolerating one that times out on its own meanwhile
+ * (`TOAST_DURATION_MS`), and waits until none is left. */
+export async function dismissToasts(page: Page): Promise<void> {
+  const dismiss = page.locator("button.toast-dismiss");
+  for (let i = 0; i < 10 && (await dismiss.count()) > 0; i += 1) {
+    await dismiss
+      .first()
+      .click({ timeout: 2_000 })
+      .catch(() => undefined);
+  }
+  await expect(dismiss).toHaveCount(0);
+}
+
 export async function lockVault(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Account menu" }).click();
   await page.getByRole("menuitem", { name: "Lock" }).click();
