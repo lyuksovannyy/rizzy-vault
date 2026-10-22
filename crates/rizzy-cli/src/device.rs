@@ -209,7 +209,7 @@ struct PendingSignOut {
 /// `sessions/current/end` when a command exits: best effort, no retry." Each [`Device`] that
 /// authenticated leaves one here when it is dropped, signed with its device key then;
 /// [`crate::commands::run`] sends them once the command is over, each bounded by
-/// [`SIGN_OUT_TIMEOUT`], and ignores every failure (the session then lapses at its TTL).
+/// five seconds, and ignores every failure (the session then lapses at its TTL).
 #[derive(Clone, Default)]
 pub struct SignOuts(Arc<Mutex<Vec<PendingSignOut>>>);
 
