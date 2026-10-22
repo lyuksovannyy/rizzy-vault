@@ -210,8 +210,24 @@ detail side by side, unchanged. Covered by `e2e/phone.spec.ts` at 375×812.
   action — every M1 session is an OPAQUE login with no durable session to sign out of beyond
   locking (module docs above).
 - **Settings** (`SettingsView.tsx`): one sidebar entry grouping Two-factor (`TwoFactorPane.tsx`,
-  unchanged), Devices (`DevicesPane.tsx`, unchanged), a new Appearance group (below),
-  "What the server stores" (below) and "Getting started", which re-opens the guide below.
+  unchanged), Devices (`DevicesPane.tsx`, unchanged), Website matching (below), a new
+  Appearance group (below), "What the server stores" (below) and "Getting started", which
+  re-opens the guide below.
+
+### Website matching (ADR 0037 §6–§7, ADR 0042)
+
+`src/views/MatchingPane.tsx`, helpers in `src/match-settings.ts`: the account-level match default
+(the mode every website whose own match is "Account default" uses), the account's own
+equivalence groups (add: two or more domains, each a site's own registrable domain — a public
+suffix such as `co.uk` or a subdomain such as `www.example.com` is refused with
+`equivalence_domain_rejected`; remove), the signed global list's groups with a Turn off / Turn on
+switch each (none today: no signed list ships yet, and the pane says so), and "Check a website",
+which asks the core what autofill would offer on an address under these settings. All of it is
+the account's encrypted `ACCOUNT_SETTINGS`, committed with a new signed account state; the core
+reads, checks and writes it (`VaultSession.changeMatchSettings`). The server takes a settings
+change only within five minutes of the login (a fresh OPAQUE session, CRYPTO.md §11 "Replacing
+credentials"); later, the change fails with "Log in again to do this." Covered by
+`e2e/match-settings.spec.ts` and `test/match-settings.test.ts`.
 
 ### What the server stores (transparency, ROADMAP §4.5)
 
