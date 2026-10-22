@@ -198,6 +198,10 @@ fn account_view(rows: &CacheRows) -> Result<AccountView, ClientError> {
         grants.push(vault.self_grant.clone());
     }
     Ok(AccountView {
+        // The storage counter (ADR 0048 §5) is the server's live figure, never cached: a view
+        // rebuilt from the cache has none (0 reads as unknown).
+        bytes_used: 0,
+        quota_bytes: 0,
         account_state: state,
         bundles: List::new(statements(kind::BUNDLE)?).map_err(|_| corrupt)?,
         device_certificates: List::new(statements(kind::CERTIFICATE)?).map_err(|_| corrupt)?,

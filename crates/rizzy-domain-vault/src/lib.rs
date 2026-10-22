@@ -142,6 +142,7 @@ mod repo;
 pub mod rotation;
 mod store;
 pub mod upload;
+pub mod usage;
 
 pub use authors::{
     AccountKeyState, AuthorCertificate, AuthorStatus, Authors, DeviceDirectory, DirectoryError,
@@ -152,6 +153,7 @@ pub use error::{HealingError, VaultError};
 pub use fetch::{FetchOutcome, IntegrityError, PAGE_BYTES, PAGE_MAX_OPS};
 pub use keys::create_vault;
 pub use port::PersonalVaultOutcome;
+pub use usage::Quota;
 
 /// The vault domain: a database handle, the `auth` domain's certificates through
 /// [`DeviceDirectory`], and the event bus. Cheap to share behind an `Arc`; every call opens its
@@ -165,6 +167,8 @@ pub struct VaultDomain<D> {
     bus: Bus,
     /// The byte budget of one Fetch page, ops and covers together ([`fetch`]).
     page_bytes: usize,
+    /// The per-account storage quota and its headroom ([`usage`], ADR 0048).
+    quota: Quota,
 }
 
 impl<D> fmt::Debug for VaultDomain<D> {
@@ -189,7 +193,18 @@ impl<D: DeviceDirectory> VaultDomain<D> {
             directory,
             bus,
             page_bytes: PAGE_BYTES,
+            quota: Quota {
+                quota_bytes: rizzy_storage::quota::DEFAULT_QUOTA_BYTES,
+                headroom_bytes: rizzy_proto::limits::DEFAULT_UPLOAD_BODY_LEN as u64,
+            },
         }
+    }
+
+    /// The same domain with `quota` instead of [`Quota::default`] (ADR 0048 §1, §3).
+    #[must_use]
+    pub const fn with_quota(mut self, quota: Quota) -> Self {
+        self.quota = quota;
+        self
     }
 
     /// The same domain with a Fetch page budget of `bytes` (ops and covers together, see
@@ -211,6 +226,11 @@ impl<D> VaultDomain<D> {
     /// The byte budget of one Fetch page.
     pub(crate) const fn page_bytes(&self) -> usize {
         self.page_bytes
+    }
+
+    /// The per-account storage quota and its headroom.
+    pub(crate) const fn quota(&self) -> Quota {
+        self.quota
     }
 
     /// The certificate source.

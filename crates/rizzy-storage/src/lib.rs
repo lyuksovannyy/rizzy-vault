@@ -94,6 +94,7 @@ pub mod leader_lock;
 pub mod lock;
 pub mod meta;
 pub mod migrate;
+pub mod quota;
 pub mod tables;
 pub mod writer_lock;
 

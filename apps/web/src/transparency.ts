@@ -9,12 +9,13 @@
 // mail (M6) and the `icons` role are not built, so a row for them would describe data that is
 // not there.
 //
-// No server-reported numbers. No Accepted ADR defines an endpoint, a response type or fields
-// for a server-side report (ADR 0028 item 1 lists `GET /api/v1/devices/grants` as the only
-// `GET` under `/api/v1/`; item 14's `/api/meta` holds "nothing about any account"), so the
-// counts below are the ones this browser already has from the vault it fetched: what the
-// server sent, which is what it stores only on an honest server (THREAT_MODEL §4, A2). Byte
-// sizes need such an endpoint, or ADR 0048's `bytes_used` (Proposed), first.
+// One server-reported number: the storage usage ADR 0048 §5 adds to every account answer
+// (`bytes_used`, `quota_bytes`), shown as the server's word and labelled so (`usageText`).
+// Otherwise no Accepted ADR defines an endpoint, a response type or fields for a server-side
+// report (ADR 0028 item 1 lists `GET /api/v1/devices/grants` as the only `GET` under
+// `/api/v1/`; item 14's `/api/meta` holds "nothing about any account"), so the counts below
+// are the ones this browser already has from the vault it fetched: what the server sent, which
+// is what it stores only on an honest server (THREAT_MODEL §4, A2).
 
 /** One kind of data the server holds, and how. */
 export interface StoredRow {
@@ -82,6 +83,36 @@ export interface LocalCounts {
 export interface CountRow {
   readonly label: string;
   readonly value: number;
+}
+
+/** A byte count in binary units, one decimal from KiB up: "512 bytes", "1.5 MiB". */
+export function formatBytes(bytes: number): string {
+  const units = ["KiB", "MiB", "GiB", "TiB", "PiB"];
+  if (!Number.isFinite(bytes) || bytes < 1024) {
+    return `${Math.max(0, Math.floor(Number.isFinite(bytes) ? bytes : 0))} bytes`;
+  }
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(1)} ${units[unit]}`;
+}
+
+/** The storage usage the server reported, the account's bytes and the instance's quota. */
+export interface Usage {
+  readonly bytesUsed: number;
+  readonly quotaBytes: number;
+}
+
+/**
+ * The usage line: "1.5 MiB of 5.0 GiB (0%)". The percentage is rounded down and not capped: an
+ * account may pass its quota by up to one upload (ADR 0048 §3, the headroom) or after a restore.
+ */
+export function usageText(usage: Usage): string {
+  const percent = usage.quotaBytes > 0 ? Math.floor((usage.bytesUsed * 100) / usage.quotaBytes) : 0;
+  return `${formatBytes(usage.bytesUsed)} of ${formatBytes(usage.quotaBytes)} (${percent}%)`;
 }
 
 /** The counts table's rows, in display order. */

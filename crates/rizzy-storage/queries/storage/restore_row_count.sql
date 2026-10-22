@@ -29,3 +29,4 @@ SELECT
   + (SELECT COUNT(*) FROM vault_device_cursors)
   + (SELECT COUNT(*) FROM storage_meta)
   + (SELECT COUNT(*) FROM storage_reconciliation)
+  + (SELECT COUNT(*) FROM storage_account_usage)

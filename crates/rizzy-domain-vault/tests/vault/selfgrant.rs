@@ -155,8 +155,10 @@ fn a_lagging_self_grant_is_repaired_with_its_wrap_set() {
             &[new_row],
             "the carried row replaced, the other row below the epoch deleted"
         );
-        // The record wraps below the new epoch are gone; the signed hashes stay.
+        // The record wraps below the new epoch are gone; the signed hashes stay. Their bytes are
+        // credited, so the counter is still the rows' sum (ADR 0048 §2).
         assert!(ops_of(&pages).iter().all(|op| op.key_wrap.is_none()));
+        env.counted().await;
         // The stale-epoch reference is the healed epoch again.
         let stale = sign_op(&a, VAULT, &OpSpec::new(item(1), 3, 2));
         assert_eq!(

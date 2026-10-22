@@ -24,7 +24,11 @@
 //! 6. **Build the domains**: the auth domain with the configured origin and signup mode, the
 //!    vault domain with the in-process event bus ([`rizzy_bus`]). The auth domain first fills
 //!    the `account_key_epoch` of every credential and recovery row that has none from the
-//!    account's current signed state (ADR 0032 §4; migration 0005 cannot read the state).
+//!    account's current signed state (ADR 0032 §4; migration 0005 cannot read the state). Then
+//!    the storage counter of every account that owns a vault and has none yet is seeded from
+//!    the vault domain's rows ([ADR 0048] §4, [`crate::usage::backfill`]; migration 0006 cannot
+//!    read a `vault_` table), and the vault domain gets the configured quota, with the upload
+//!    limit as its headroom (§3).
 //!
 //! Then the `worker` task starts ([`crate::worker`]) and, for `api` or `web`, the listener.
 //! A `web`-only process opens no database and reads no secrets.
@@ -77,6 +81,7 @@
 //! [ADR 0016]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0016-workspace-layout.md
 //! [ADR 0021]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0021-server-compaction.md
 //! [ADR 0023]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0023-logical-backup-format.md
+//! [ADR 0048]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0048-per-account-storage-quota.md
 
 use core::fmt;
 use std::future::Future;
@@ -93,7 +98,7 @@ use rand_core::Rng as _;
 use rizzy_bus::Bus;
 use rizzy_domain_auth::secrets::StartupCheckError;
 use rizzy_domain_auth::{AuthConfig, AuthError, AuthService, ConfigError, SignupPolicy};
-use rizzy_domain_vault::VaultDomain;
+use rizzy_domain_vault::{Quota, VaultDomain};
 use rizzy_storage::meta::ensure_restore_generation;
 use rizzy_storage::{
     Database, Engine, InstanceLock, InstanceLockMode, PostgresOptions, RestoreGeneration,
@@ -110,6 +115,7 @@ use crate::http::{self, api::Api};
 use crate::log::{self, Field};
 use crate::secrets_file::{self, SecretsFileError};
 use crate::sys::{now_ms, os_rng};
+use crate::usage::{self, UsageError};
 use crate::worker;
 
 /// How often a server process on `PostgreSQL` checks that it still holds the instance lock
@@ -140,6 +146,8 @@ pub enum ServeError {
     AuthConfig(ConfigError),
     /// The auth domain failed during the startup checks.
     Auth(AuthError),
+    /// The storage counter's first-startup backfill failed (ADR 0048 §4).
+    Usage(UsageError),
     /// The listener could not be bound, or serving failed.
     Listener(std::io::ErrorKind),
     /// The `PostgreSQL` instance lock was refused in this mode ([ADR 0023] §5 step 1): a server
@@ -171,6 +179,7 @@ impl fmt::Display for ServeError {
             Self::SecretsMismatch(e) => write!(f, "the secrets do not fit the database: {e}"),
             Self::AuthConfig(e) => write!(f, "auth configuration: {e}"),
             Self::Auth(e) => write!(f, "startup check: {e}"),
+            Self::Usage(e) => write!(f, "startup backfill: {e}"),
             Self::Listener(kind) => write!(f, "listener: {kind}"),
             Self::InstanceLockRefused(InstanceLockMode::Shared) => f.write_str(
                 "the database's instance lock is held exclusively: an admin command (restore, \
@@ -379,6 +388,7 @@ pub async fn open_services(config: &Config) -> Result<Services, ServeError> {
         SignupMode::Open => SignupPolicy::Open,
     };
     auth_config.recovery_wait_ms = config.recovery_wait_ms;
+    auth_config.account_quota_bytes = config.account_quota_bytes;
     if config.recovery_wait_ms == 0 {
         // ADR 0008 decision 5 allows 0; the threat model keeps it for single-account
         // instances (Q-15). Nothing enforces that here, so the operator is told.
@@ -401,8 +411,25 @@ pub async fn open_services(config: &Config) -> Result<Services, ServeError> {
             )],
         );
     }
+    // ADR 0048 §4: every account that owns a vault and has no storage counter yet (after
+    // migration 0006, every existing one) is seeded from its rows before anything is served.
+    let seeded = usage::backfill(&db, i64::try_from(now_ms()).unwrap_or(i64::MAX))
+        .await
+        .map_err(ServeError::Usage)?;
+    if seeded > 0 {
+        log::info(
+            "storage_usage_seeded",
+            &[Field::U64(
+                "accounts",
+                u64::try_from(seeded).unwrap_or(u64::MAX),
+            )],
+        );
+    }
     let bus = Bus::default();
-    let vault = VaultDomain::new(db.clone(), AuthDirectory, bus.clone());
+    let vault = VaultDomain::new(db.clone(), AuthDirectory, bus.clone()).with_quota(Quota {
+        quota_bytes: config.account_quota_bytes,
+        headroom_bytes: u64::try_from(config.max_upload_bytes).unwrap_or(u64::MAX),
+    });
     Ok(Services {
         api: Arc::new(Api::new(
             auth,

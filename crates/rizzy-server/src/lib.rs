@@ -150,4 +150,5 @@ pub mod secrets_backup;
 pub mod secrets_file;
 pub mod server;
 pub mod sys;
+pub mod usage;
 pub mod worker;

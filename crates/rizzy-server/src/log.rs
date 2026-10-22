@@ -6,6 +6,10 @@
 //! `event` and the fields of the call. The event name and every field name are `&'static str`
 //! written in this crate's source, and a field value is one of [`Field`]'s kinds:
 //! - an integer or a fixed `&'static str` from the source;
+//! - [`Field::Id`]: a 16-byte account id as lowercase hex, for the storage counter's
+//!   correction (ADR 0048 §4: "logging the account id and the correction, never content"). An
+//!   id is a random identifier the client chose, Visible metadata (`THREAT_MODEL` §3.4); it is
+//!   no secret and says nothing about the account's content;
 //! - [`Field::Error`]: the `Display` of an error type whose docs promise it carries no value
 //!   (`rizzy_domain_auth::AuthError`, `rizzy_domain_vault::VaultError` and its reports,
 //!   `rizzy_storage::Error`, this crate's own errors), each call site reviewed as such.
@@ -72,6 +76,8 @@ pub enum Field<'a> {
     U64(&'static str, u64),
     /// A constant from this crate's source: a role, a method, a route template, an outcome.
     Str(&'static str, &'static str),
+    /// A 16-byte account id, written as 32 lowercase hex digits (module docs).
+    Id(&'static str, &'a [u8; 16]),
     /// The `Display` of an error type documented to carry no value (module docs).
     Error(&'static str, &'a dyn fmt::Display),
 }
@@ -81,9 +87,20 @@ impl fmt::Debug for Field<'_> {
         match self {
             Self::U64(k, v) => write!(f, "{k}={v}"),
             Self::Str(k, v) => write!(f, "{k}={v}"),
+            Self::Id(k, v) => write!(f, "{k}={}", hex(v)),
             Self::Error(k, v) => write!(f, "{k}={v}"),
         }
     }
+}
+
+/// An id as lowercase hex.
+fn hex(id: &[u8; 16]) -> String {
+    use fmt::Write as _;
+    let mut out = String::with_capacity(32);
+    for b in id {
+        let _infallible = write!(out, "{b:02x}");
+    }
+    out
 }
 
 /// The level in force; unset means [`Level::Info`].
@@ -112,6 +129,7 @@ pub fn render(ts_ms: u64, level: Level, event: &'static str, fields: &[Field<'_>
         let (key, value) = match field {
             Field::U64(k, v) => (*k, Value::from(*v)),
             Field::Str(k, v) => (*k, Value::from(*v)),
+            Field::Id(k, v) => (*k, Value::from(hex(v))),
             Field::Error(k, v) => (*k, Value::from(v.to_string())),
         };
         line.insert(key.to_owned(), value);
@@ -167,6 +185,7 @@ mod tests {
                 Field::U64("status", 503),
                 Field::Str("role", "api"),
                 Field::Error("error", &err),
+                Field::Id("account", &[0xa1; 16]),
             ],
         );
         let parsed: Value = serde_json::from_str(&line).unwrap();
@@ -176,6 +195,7 @@ mod tests {
         assert_eq!(parsed["status"], 503);
         assert_eq!(parsed["role"], "api");
         assert_eq!(parsed["error"], err.to_string());
+        assert_eq!(parsed["account"], "a1".repeat(16));
         assert!(!line.contains('\n'));
     }
 

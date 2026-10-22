@@ -117,6 +117,7 @@ function info(s: VaultSession): SessionInfo {
     deviceId: s.deviceId,
     readOnly: s.readOnly,
     unsentChanges: s.unsentChanges,
+    storageUsage: s.storageUsage,
   };
 }
 

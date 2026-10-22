@@ -13,6 +13,8 @@ describe("messages", () => {
     expect(messageFor("core_crashed")).toContain("Reload");
     // ADR 0032 §4: a login refused after a restore says what to do, without any value.
     expect(messageFor("server_credentials_stale")).toContain("restored from a backup");
+    // ADR 0048 §5: an upload past the account's storage quota.
+    expect(messageFor("server_quota_exceeded")).toContain("storage limit");
     expect(messageFor("something_new")).toBe("Something went wrong (something_new).");
   });
 

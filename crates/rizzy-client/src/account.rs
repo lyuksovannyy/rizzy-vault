@@ -161,6 +161,38 @@ pub struct VerifiedAccount {
     /// The served objects this answer verified, as served, for the cache
     /// ([`crate::store::account_writes`], ADR 0026 §1 "Account objects").
     pub(crate) served: ServedObjects,
+    /// The account's storage usage as the server reported it (ADR 0048 §5), if it did.
+    pub(crate) usage: Option<StorageUsage>,
+}
+
+/// The account's storage usage as the server reports it with every account answer (ADR 0048
+/// §5): its counted bytes and the instance's quota.
+///
+/// **Not verified.** Nothing signs these two numbers; they are the server's word, shown to the
+/// user for information only and never used for a decision. A server that lies about them can
+/// at most mislead the display; uploads it refuses still answer `quota_exceeded`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StorageUsage {
+    /// The account's counted bytes.
+    pub bytes_used: u64,
+    /// The instance's per-account quota.
+    pub quota_bytes: u64,
+}
+
+impl StorageUsage {
+    /// The usage of `view`: `None` when the view carries no quota (a view rebuilt from the
+    /// cache, which never stores these numbers).
+    #[must_use]
+    pub const fn of_view(view: &AccountView) -> Option<Self> {
+        if view.quota_bytes == 0 {
+            None
+        } else {
+            Some(Self {
+                bytes_used: view.bytes_used,
+                quota_bytes: view.quota_bytes,
+            })
+        }
+    }
 }
 
 /// The objects of a verified account answer that the cache keeps as served (ADR 0026 §1):
@@ -263,6 +295,13 @@ impl VerifiedAccount {
     #[must_use]
     pub const fn settings(&self) -> Option<&AccountSettings> {
         self.settings.as_ref()
+    }
+
+    /// The storage usage the server reported with this answer (ADR 0048 §5); unverified, for
+    /// display only ([`StorageUsage`]).
+    #[must_use]
+    pub const fn usage(&self) -> Option<StorageUsage> {
+        self.usage
     }
 
     /// Takes the vault key of `vault_id` out of this answer, to build that vault's
@@ -449,6 +488,7 @@ pub(crate) fn verify_account_view(
     let served = ServedObjects::of_view(view, &vault_keys)?;
     Ok(VerifiedAccount {
         served,
+        usage: StorageUsage::of_view(view),
         account_id,
         pin: AccountPin {
             bundle: public.bundle,

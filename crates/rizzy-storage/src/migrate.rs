@@ -88,6 +88,16 @@ pub const MIGRATIONS: &[MigrationFile] = &[
         sqlite: include_str!("../migrations/sqlite/0005_auth_credential_epochs.sql"),
         postgres: include_str!("../migrations/postgres/0005_auth_credential_epochs.sql"),
     },
+    // ADR 0048 §4 ("raises the backup `schema_version` to 6"). Its file name `0007` assumed
+    // the sibling ADR 0047 took `0006` first; 0047 is still Proposed, so this one takes the next
+    // free number: a backup's `schema_version` must name the shape of its dump, which a later
+    // lower version slotted in under it would break.
+    MigrationFile {
+        version: 6,
+        description: "storage_account_usage",
+        sqlite: include_str!("../migrations/sqlite/0006_storage_account_usage.sql"),
+        postgres: include_str!("../migrations/postgres/0006_storage_account_usage.sql"),
+    },
 ];
 
 /// This release's schema version: the last migration's version. A logical backup is stamped

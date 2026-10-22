@@ -45,12 +45,17 @@
 //!   and logs a warning at startup). ADR 0028 item 12 does not list this setting: the name and
 //!   the unit are this crate's choice, reported to the owner.
 //!
+//! - **The per-account storage quota** ([ADR 0048] §1): `RIZZY_ACCOUNT_QUOTA_BYTES`, a whole
+//!   number of bytes, default 5 GiB (5 368 709 120), at least 256 MiB, no maximum (the
+//!   operator's disk is the limit). One number for every account; no per-account override.
+//!
 //! Every value has a default except the canonical origin, which the `api` and `worker` roles
 //! require (both build the auth domain, which binds the origin into OPAQUE and every
 //! device signature).
 //!
 //! [ADR 0010]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0010-server-shape.md
 //! [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
+//! [ADR 0048]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0048-per-account-storage-quota.md
 
 use core::fmt;
 use std::collections::BTreeMap;
@@ -93,6 +98,8 @@ pub const WORKER_INTERVAL_SECS: &str = "RIZZY_WORKER_INTERVAL_SECS";
 pub const MAX_UPLOAD_BYTES: &str = "RIZZY_MAX_UPLOAD_BYTES";
 /// The recovery waiting period, in whole hours (ADR 0008 decision 5, CRYPTO.md §11.9 step 2).
 pub const RECOVERY_WAIT_HOURS: &str = "RIZZY_RECOVERY_WAIT_HOURS";
+/// The per-account storage quota, in bytes (ADR 0048 §1).
+pub const ACCOUNT_QUOTA_BYTES: &str = "RIZZY_ACCOUNT_QUOTA_BYTES";
 
 /// Every setting name the file and the environment accept.
 pub const KEYS: &[&str] = &[
@@ -108,6 +115,7 @@ pub const KEYS: &[&str] = &[
     WORKER_INTERVAL_SECS,
     MAX_UPLOAD_BYTES,
     RECOVERY_WAIT_HOURS,
+    ACCOUNT_QUOTA_BYTES,
 ];
 
 /// The settings a configuration file holds, by name.
@@ -185,6 +193,12 @@ pub const DEFAULT_MAX_UPLOAD_BYTES: usize = DEFAULT_UPLOAD_BODY_LEN;
 
 /// The largest upload body limit an operator may set: 256 MiB.
 pub const MAX_MAX_UPLOAD_BYTES: usize = MAX_UPLOAD_BODY_LEN;
+
+/// The default per-account storage quota: 5 GiB (ADR 0048 §1).
+pub const DEFAULT_ACCOUNT_QUOTA_BYTES: u64 = rizzy_storage::quota::DEFAULT_QUOTA_BYTES;
+
+/// The smallest per-account storage quota an operator may set: 256 MiB (ADR 0048 §1).
+pub const MIN_ACCOUNT_QUOTA_BYTES: u64 = rizzy_storage::quota::MIN_QUOTA_BYTES;
 
 /// The default recovery waiting period: 72 h (ADR 0008 decision 5: "After a **72 h** wait,
 /// admin-configurable from 0 to 30 days, the server releases `E_rec`").
@@ -349,9 +363,23 @@ pub struct Config {
     pub worker_interval: Duration,
     /// The upload body limit.
     pub max_upload_bytes: usize,
+    /// The per-account storage quota (ADR 0048 §1); the upload limit is its headroom (§3).
+    pub account_quota_bytes: u64,
     /// The recovery waiting period in milliseconds, 0 to 30 days (ADR 0008 decision 5): how
     /// long after a valid recovery code the server releases `E_rec`.
     pub recovery_wait_ms: u64,
+}
+
+/// `RIZZY_ACCOUNT_QUOTA_BYTES` (ADR 0048 §1): whole bytes, at least
+/// [`MIN_ACCOUNT_QUOTA_BYTES`], no maximum; [`DEFAULT_ACCOUNT_QUOTA_BYTES`] when unset.
+fn account_quota(sources: &Sources<'_>) -> Result<u64, ConfigError> {
+    match sources.get(ACCOUNT_QUOTA_BYTES)? {
+        None => Ok(DEFAULT_ACCOUNT_QUOTA_BYTES),
+        Some(text) => match text.parse::<u64>() {
+            Ok(n) if n >= MIN_ACCOUNT_QUOTA_BYTES => Ok(n),
+            _ => Err(ConfigError::Invalid(ACCOUNT_QUOTA_BYTES)),
+        },
+    }
 }
 
 /// A configuration the server refuses. `Display` names the setting, never its value (the
@@ -613,6 +641,7 @@ impl Config {
                 _ => return Err(ConfigError::Invalid(MAX_UPLOAD_BYTES)),
             },
         };
+        let account_quota_bytes = account_quota(sources)?;
         let recovery_wait_ms = match sources.get(RECOVERY_WAIT_HOURS)? {
             None => DEFAULT_RECOVERY_WAIT_MS,
             Some(text) => match text.parse::<u64>() {
@@ -632,6 +661,7 @@ impl Config {
             log_level,
             worker_interval,
             max_upload_bytes,
+            account_quota_bytes,
             recovery_wait_ms,
         })
     }
@@ -970,6 +1000,38 @@ mod tests {
             assert_eq!(
                 from_env(pairs).unwrap_err(),
                 ConfigError::Invalid(MAX_UPLOAD_BYTES),
+                "{bad}"
+            );
+        }
+    }
+
+    /// ADR 0048 §1: `RIZZY_ACCOUNT_QUOTA_BYTES`, default 5 GiB, at least 256 MiB, no maximum.
+    #[test]
+    fn the_account_quota_is_at_least_256_mib() {
+        const O: (&str, &str) = (ORIGIN, "https://vault.example.com");
+        assert_eq!(
+            from_env(&[O]).unwrap().account_quota_bytes,
+            5_368_709_120
+        );
+        for (text, expected) in [
+            ("268435456", 256 << 20),
+            ("5368709120", 5 << 30),
+            ("18446744073709551615", u64::MAX),
+        ] {
+            let pairs: &'static [(&str, &str)] =
+                Box::leak(Box::new([O, (ACCOUNT_QUOTA_BYTES, text)]));
+            assert_eq!(
+                from_env(pairs).unwrap().account_quota_bytes,
+                expected,
+                "{text}"
+            );
+        }
+        for bad in ["268435455", "0", "", "5GiB", "-1", "18446744073709551616"] {
+            let pairs: &'static [(&str, &str)] =
+                Box::leak(Box::new([O, (ACCOUNT_QUOTA_BYTES, bad)]));
+            assert_eq!(
+                from_env(pairs).unwrap_err(),
+                ConfigError::Invalid(ACCOUNT_QUOTA_BYTES),
                 "{bad}"
             );
         }

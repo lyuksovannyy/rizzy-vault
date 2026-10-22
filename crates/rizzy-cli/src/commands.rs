@@ -400,6 +400,10 @@ async fn unlock(env: &mut Env<'_>) -> Result<(), CliError> {
         "items:    {}",
         visible_items(device.vault(), false).len()
     ))?;
+    // ADR 0048 §5: the server's figure, not verified; shown only when this run went online.
+    if let Some(usage) = device.usage() {
+        env.ui.print(&format!("storage:  {}", usage_text(usage)))?;
+    }
     for alarm in device.alarms() {
         env.ui.print(&format!("ALARM:    {}", alarm_text(*alarm)))?;
     }
@@ -410,6 +414,15 @@ async fn unlock(env: &mut Env<'_>) -> Result<(), CliError> {
             .print("online:   no, the server was not reached; the local copy is unlocked"),
         Err(e) => Err(e),
     }
+}
+
+/// The usage line of `unlock`: bytes used of the quota, as the server reported them, in whole
+/// bytes so a script reads them exactly (`12345 of 5368709120 bytes, as reported by the server`).
+pub(crate) fn usage_text(usage: rizzy_client::account::StorageUsage) -> String {
+    format!(
+        "{} of {} bytes, as reported by the server",
+        usage.bytes_used, usage.quota_bytes
+    )
 }
 
 /// `item list`.

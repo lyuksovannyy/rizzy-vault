@@ -113,7 +113,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use rizzy_client::ClientError;
-use rizzy_client::account::{CertifiedDevice, RevokedDevice, VerifiedAccount};
+use rizzy_client::account::{CertifiedDevice, RevokedDevice, StorageUsage, VerifiedAccount};
 use rizzy_client::credentials::PendingCredentialChange;
 use rizzy_client::device::{DeviceState, UnlockedDevice};
 use rizzy_client::export::gate::ExportGate;
@@ -359,6 +359,9 @@ pub struct Device {
     session: Option<DeviceSession>,
     /// Whether the account answer was verified in this run.
     refreshed: bool,
+    /// The storage usage the server reported with the last answer adopted in this run (ADR
+    /// 0048 §5); unverified, for display only, and never stored.
+    usage: Option<StorageUsage>,
     /// Whether this run authenticated with the reconciliation objects (a restored server that
     /// did not know this device).
     reconciled: bool,
@@ -489,6 +492,7 @@ impl Device {
             alarms,
             session: None,
             refreshed: false,
+            usage: None,
             reconciled: false,
             reregistered: false,
             password,
@@ -532,6 +536,7 @@ impl Device {
             alarms: BTreeSet::new(),
             session: None,
             refreshed: false,
+            usage: None,
             reconciled: false,
             reregistered: false,
             password,
@@ -555,6 +560,13 @@ impl Device {
     #[must_use]
     pub fn devices(&self) -> (&[CertifiedDevice], &[RevokedDevice]) {
         (&self.certificates, &self.revocations)
+    }
+
+    /// The storage usage the server reported with the account answer adopted in this run (ADR
+    /// 0048 §5), if one was: the server's word, for display only.
+    #[must_use]
+    pub const fn usage(&self) -> Option<StorageUsage> {
+        self.usage
     }
 
     /// The alarms raised.
@@ -1040,6 +1052,7 @@ impl Device {
             self.vault.set_read_only(!self.alarms.is_empty());
         }
         changeset.append(store::account_writes(&account));
+        self.usage = account.usage();
         self.authors = Authors::from_account(&account)?;
         self.certificates = account.certificates().to_vec();
         self.revocations = account.revocations().to_vec();

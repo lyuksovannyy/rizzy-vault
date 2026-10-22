@@ -92,6 +92,18 @@ const VAULT_CLAMPED_VVS: &str = include_str!("../queries/vault_clamped_vvs.sql")
 const WRAP_OVERWRITE: &str = include_str!("../queries/wrap_overwrite.sql");
 /// See `queries/wrap_delete.sql`.
 const WRAP_DELETE: &str = include_str!("../queries/wrap_delete.sql");
+/// See `queries/op_body_len.sql`.
+const OP_BODY_LEN: &str = include_str!("../queries/op_body_len.sql");
+/// See `queries/ops_wraps_len_below.sql`.
+const OPS_WRAPS_LEN_BELOW: &str = include_str!("../queries/ops_wraps_len_below.sql");
+/// See `queries/snapshots_wraps_len_below.sql`.
+const SNAPSHOTS_WRAPS_LEN_BELOW: &str = include_str!("../queries/snapshots_wraps_len_below.sql");
+/// See `queries/usage_ops.sql`.
+const USAGE_OPS: &str = include_str!("../queries/usage_ops.sql");
+/// See `queries/usage_snapshots.sql`.
+const USAGE_SNAPSHOTS: &str = include_str!("../queries/usage_snapshots.sql");
+/// See `queries/usage_accounts.sql`.
+const USAGE_ACCOUNTS: &str = include_str!("../queries/usage_accounts.sql");
 /// See `queries/ops_clear_wraps.sql`.
 const OPS_CLEAR_WRAPS: &str = include_str!("../queries/ops_clear_wraps.sql");
 /// See `queries/snapshots_clear_wraps.sql`.
@@ -970,12 +982,41 @@ pub(crate) async fn delete_wrap(
         .map(|r| r.rows_affected()))?)
 }
 
+/// Above every `vault_key_epoch` (a `u32`): "below" it selects every record.
+const ALL_EPOCHS: i64 = 1 << 32;
+
+/// The summed length of the wraps carried with the vault's ops and snapshots below `epoch`
+/// (an SQL integer: [`ALL_EPOCHS`] for every record).
+async fn record_wraps_len(
+    mut conn: Conn<'_>,
+    vault_id: VaultId,
+    epoch: i64,
+) -> Result<u64, VaultError> {
+    let mut total: u64 = 0;
+    for query in [OPS_WRAPS_LEN_BELOW, SNAPSHOTS_WRAPS_LEN_BELOW] {
+        let c = match &mut conn {
+            Conn::Sqlite(c) => Conn::Sqlite(c),
+            Conn::Postgres(c) => Conn::Postgres(c),
+        };
+        let len: i64 = on_engine!(c, |c| sqlx::query(query)
+            .bind(&vault_id.as_bytes()[..])
+            .bind(epoch)
+            .fetch_one(&mut *c)
+            .await
+            .and_then(|row| row.try_get(0)))?;
+        total = total.saturating_add(sql_to_u64(len, "the length of carried wraps")?);
+    }
+    Ok(total)
+}
+
 /// Drops the wrap carried with every op and snapshot of the vault (the superseded wraps of a
-/// rotation, ADR 0025 §3 step 5). The signed wrap hashes stay.
+/// rotation, ADR 0025 §3 step 5). The signed wrap hashes stay. Returns the wraps' summed
+/// length, which the storage counter is credited (ADR 0048 §2).
 pub(crate) async fn clear_record_wraps(
     mut conn: Conn<'_>,
     vault_id: VaultId,
-) -> Result<(), VaultError> {
+) -> Result<u64, VaultError> {
+    let freed = record_wraps_len(reborrow(&mut conn), vault_id, ALL_EPOCHS).await?;
     for query in [OPS_CLEAR_WRAPS, SNAPSHOTS_CLEAR_WRAPS] {
         let c = match &mut conn {
             Conn::Sqlite(c) => Conn::Sqlite(c),
@@ -987,18 +1028,19 @@ pub(crate) async fn clear_record_wraps(
             .await
             .map(|_| ()))?;
     }
-    Ok(())
+    Ok(freed)
 }
 
 /// Drops the wrap carried with every op and snapshot of the vault whose header names a
 /// `vault_key_epoch` below `epoch` (healing step 3b, ADR 0032 §3): those wraps are under a vault
 /// key the healed rotation superseded. Records at `epoch` keep theirs. The signed wrap hashes
-/// stay.
+/// stay. Returns the wraps' summed length, which the storage counter is credited (ADR 0048 §2).
 pub(crate) async fn clear_record_wraps_below(
     mut conn: Conn<'_>,
     vault_id: VaultId,
     epoch: u32,
-) -> Result<(), VaultError> {
+) -> Result<u64, VaultError> {
+    let freed = record_wraps_len(reborrow(&mut conn), vault_id, u32_to_sql(epoch)).await?;
     for query in [OPS_CLEAR_WRAPS_BELOW, SNAPSHOTS_CLEAR_WRAPS_BELOW] {
         let c = match &mut conn {
             Conn::Sqlite(c) => Conn::Sqlite(c),
@@ -1011,5 +1053,81 @@ pub(crate) async fn clear_record_wraps_below(
             .await
             .map(|_| ()))?;
     }
-    Ok(())
+    Ok(freed)
+}
+
+/// A second use of one connection.
+fn reborrow<'a>(conn: &'a mut Conn<'_>) -> Conn<'a> {
+    match conn {
+        Conn::Sqlite(c) => Conn::Sqlite(c),
+        Conn::Postgres(c) => Conn::Postgres(c),
+    }
+}
+
+/// The length of the body of the item's op at `dot`, `0` when it has none or no such op.
+pub(crate) async fn op_body_len(
+    conn: Conn<'_>,
+    vault_id: VaultId,
+    item_id: ItemId,
+    dot: Dot,
+) -> Result<u64, VaultError> {
+    let seq = u64_to_sql(dot.seq(), "vault_ops.device_seq")?;
+    let len: Option<i64> = on_engine!(conn, |c| sqlx::query(OP_BODY_LEN)
+        .bind(&vault_id.as_bytes()[..])
+        .bind(&dot.device_id().as_bytes()[..])
+        .bind(seq)
+        .bind(&item_id.as_bytes()[..])
+        .fetch_optional(&mut *c)
+        .await
+        .and_then(|row| row.map(|r| r.try_get(0)).transpose()))?;
+    len.map_or(Ok(0), |l| Ok(sql_to_u64(l, "the length of an op body")?))
+}
+
+/// The rows of one table counted for an account: their number and their summed column lengths.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RowLengths {
+    /// The number of rows.
+    pub(crate) rows: u64,
+    /// The summed lengths of the counted columns.
+    pub(crate) bytes: u64,
+}
+
+/// The account's op rows and snapshot rows, in that order (ADR 0048 §2, §4).
+pub(crate) async fn account_row_lengths(
+    mut conn: Conn<'_>,
+    account_id: AccountId,
+) -> Result<[RowLengths; 2], VaultError> {
+    let mut out = [RowLengths::default(); 2];
+    for (slot, query) in out.iter_mut().zip([USAGE_OPS, USAGE_SNAPSHOTS]) {
+        let (rows, bytes): (i64, i64) = on_engine!(reborrow(&mut conn), |c| sqlx::query(query)
+            .bind(&account_id.as_bytes()[..])
+            .fetch_one(&mut *c)
+            .await
+            .and_then(|row| Ok::<_, sqlx::Error>((row.try_get(0)?, row.try_get(1)?))))?;
+        *slot = RowLengths {
+            rows: sql_to_u64(rows, "a counted row number")?,
+            bytes: sql_to_u64(bytes, "a counted length")?,
+        };
+    }
+    Ok(out)
+}
+
+/// Every account that owns a vault, ascending.
+pub(crate) async fn vault_accounts(conn: Conn<'_>) -> Result<Vec<AccountId>, VaultError> {
+    let rows: Vec<Vec<u8>> = on_engine!(conn, |c| {
+        let mut out = Vec::new();
+        for row in sqlx::query(USAGE_ACCOUNTS).fetch_all(&mut *c).await? {
+            out.push(row.try_get(0)?);
+        }
+        out
+    });
+    rows.into_iter()
+        .map(|id| {
+            <[u8; 16]>::try_from(id.as_slice())
+                .map(AccountId::from_bytes)
+                .map_err(|_| VaultError::Corrupt {
+                    what: "vault_vaults.account_id",
+                })
+        })
+        .collect()
 }

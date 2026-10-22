@@ -201,6 +201,11 @@ impl fmt::Display for CliError {
         match self {
             Self::Usage(what) => write!(f, "{what}"),
             Self::Client(e) => write!(f, "{e} ({})", e.code()),
+            // ADR 0048 §3: an upload past the account's storage quota. The op stays unsent on
+            // this device and is sent again by the next `rv sync`.
+            Self::Server(ErrorCode::QuotaExceeded) => f.write_str(
+                "the server refused: quota_exceeded (this account has reached its storage limit on the server; the change stays on this device, unsent, until the operator raises RIZZY_ACCOUNT_QUOTA_BYTES)",
+            ),
             Self::Server(code) => write!(f, "the server refused: {}", code_name(*code)),
             Self::RateLimited(Some(seconds)) => write!(
                 f,

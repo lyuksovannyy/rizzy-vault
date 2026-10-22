@@ -35,13 +35,15 @@ pub(crate) enum ViewScope {
     Since(AccountStateQuery),
 }
 
-/// Builds the view of an account from a verified trust and its verified devices.
+/// Builds the view of an account from a verified trust and its verified devices, with the
+/// account's counted bytes and the instance's `quota_bytes` (ADR 0048 §5).
 pub(crate) async fn build<V: VaultPort>(
     vault: &V,
     mut conn: Conn<'_>,
     trust: &AccountTrust,
     devices: &Devices,
     scope: ViewScope,
+    quota_bytes: u64,
 ) -> Result<AccountView, AuthError> {
     let bundles: Vec<Vec<u8>> = match scope {
         ViewScope::Current => vec![trust.head_wire()?.to_vec()],
@@ -83,6 +85,9 @@ pub(crate) async fn build<V: VaultPort>(
             trust.state.account_key_epoch,
         )
         .await?;
+    // ADR 0048 §5: the counter is `rizzy-storage`'s, read on the same connection.
+    let bytes_used =
+        rizzy_storage::quota::bytes_used(reborrow(&mut conn), trust.account_id.as_bytes()).await?;
     Ok(AccountView {
         account_state: Bytes::new(trust.state_wire.clone()).map_err(over_limit)?,
         bundles: List::new(bundles).map_err(over_limit)?,
@@ -110,6 +115,8 @@ pub(crate) async fn build<V: VaultPort>(
             envelope: Bytes::new(e_id).map_err(over_limit)?,
         },
         vault_self_grants: List::new(grants).map_err(over_limit)?,
+        bytes_used,
+        quota_bytes,
     })
 }
 
@@ -141,6 +148,7 @@ impl<V: VaultPort> AuthService<V> {
             &trust,
             &devices,
             ViewScope::Since(query),
+            self.config.account_quota_bytes,
         )
         .await?;
         tx.finish().await?;

@@ -191,8 +191,9 @@ pub enum UploadResult {
     /// the client treats it as an acknowledgement (ADR 0021 §9 "Already stored").
     AlreadyStored,
     /// Refused, with the reason: [`ErrorCode::StaleEpoch`], [`ErrorCode::RecordConflict`],
-    /// [`ErrorCode::PrevSeqMismatch`], or [`ErrorCode::InvalidRequest`] for a record that fails
-    /// parsing, signature or author checks.
+    /// [`ErrorCode::PrevSeqMismatch`], [`ErrorCode::QuotaExceeded`] for a record past the
+    /// account's storage quota and headroom (ADR 0048 §3), or [`ErrorCode::InvalidRequest`] for
+    /// a record that fails parsing, signature or author checks.
     Rejected {
         /// The reason.
         error: ErrorCode,
