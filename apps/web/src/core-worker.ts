@@ -262,6 +262,7 @@ async function run(m: CallMessage): Promise<unknown> {
     items: () => current().items(bool(a[0])),
     item: () => current().item(str(a[0])),
     fields: () => current().fields(str(a[0])),
+    customFieldAutofill: () => current().customFieldAutofill(str(a[0])),
     reveal: () => current().reveal(str(a[0]), str(a[1])),
     createItem: () => current().createItem(str(a[0]) as never, a[1] as never),
     editItem: () => current().editItem(str(a[0]), a[1] as never),
