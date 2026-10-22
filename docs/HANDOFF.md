@@ -73,7 +73,23 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
   9. ADR 0052 question 7: whether `blob:` goes into `img-src` depends on the implementation's browser test.
   10. Possible gap, unverified: in ADR 0071, `plaintext_len` is in no chunk's AAD, and the ADR's claim that the commitment catches an edit is unchecked.
   11. 0059 keeps webauthn-rs' `attestation` feature on for provenance, while 0058 verifies no attestation. That looks consistent but should be checked.
-- **What is left for agents:** implementing the ADRs accepted on 2026-10-22, in waves (see the goal).
+- **Implemented from the 2026-10-22 batch (wave 1, each full-gated and integrated):**
+  - **ADR 0048, storage quota:**
+    - `quota_exceeded` (409) and the `AccountView` usage fields.
+    - Migration **0006** / schema_version 6. The ADR text says both 0007 and "schema_version 6", so 0006 was used; when ADR 0047 is accepted, it takes the next free number.
+    - Startup backfill and daily reconciliation.
+    - Usage shown in Settings → What the server stores, and in `rv unlock`.
+    - Beyond the letter of §2: rotation and heal-3b also credit the deleted wrap bytes, so the counter stays the sum of the rows.
+  - **ADR 0049, web route table:** M1 rows only; `/s/<id>` is refused, since M5 is after v1.0.
+  - **ADR 0050, paged Fetch covers:** the held covers. The `ContextNotSettled` residual in §7 was already fixed (`d295b99`); that bullet is stale.
+    - **New residual:** with paging during the drain, convergence family 7 at seed `27×0x9e3779b97f4a7c15` reports honest disagreements with no cover held. It also happens on the pre-ADR baseline, so the generated families keep an unpaged drain. It needs its own investigation.
+    - `spikes/merge-model` was not extended (it models no paging).
+  - **ADR 0044, member rules:** user groups keep refusing dotless names (see 0044 question 1).
+  - **ADR 0051, equivalence-list version floor:** cache format 2.
+  - **ADR 0043, iframe instance tokens:** the expired-token case is unit-tested only; Firefox was not run.
+  - **Bindings:** `unsafe` went from 1063 to 1080, all generator glue.
+  - **`gate.sh`:** the workspace test step now always runs on SQLite, and the PG steps get their own database.
+- **What is left for agents:** the rest of the 2026-10-22 batch, in waves (0075, 0055 and 0062 running).
 - The gap-numbered audit (`docs/handoff/gap-audit.json`), which older gap ids below trace back to, still lives only on branch `wip/client-m1`. Keep that branch; its code is superseded by the commits in §2. `wip/match-core` (one unfinished commit off `main`) is likewise superseded and kept only for reference.
 
 ## 2. Done since the last rewrite
