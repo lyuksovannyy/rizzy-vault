@@ -159,6 +159,18 @@ pub enum ClientError {
     /// holds another record at an own dot. A restored image or a copied profile. The device is
     /// read-only; the one resolution is removal and a new enrolment.
     DeviceStateOutdated,
+    /// The account settings were written by a newer rizzy-vault: their `format_version` is not
+    /// the one this build knows (ADR 0042 §2: "parked and reported 'update required', like an
+    /// unknown `item_schema_version`"). Matching uses no account setting and no settings
+    /// write is made until the client is updated.
+    SettingsUpdateRequired,
+    /// A domain of a new user-defined equivalence group is not a registrable domain: a bare
+    /// public suffix (`co.uk`, `github.io`) or a subdomain (`www.example.com`) (ADR 0042 §4).
+    /// Nothing was written.
+    EquivalenceDomainRejected,
+    /// A settings edit would pass a limit of ADR 0042 §3–§4: more than 64 user groups, more
+    /// than 1,024 disabled global groups, or a settings entry over 1 MiB. Nothing was written.
+    SettingsLimitReached,
     /// An internal step failed that the inputs cannot cause: a sealing, signing, encoding or
     /// derivation call that is unreachable for valid state. No detail is kept on purpose.
     Internal,
@@ -209,6 +221,9 @@ impl ClientError {
             Self::LocalUnlockUnavailable => "local_unlock_unavailable",
             Self::DeviceStateOutdated => "device_state_outdated",
             Self::SetupRetired => "setup_retired",
+            Self::SettingsUpdateRequired => "settings_update_required",
+            Self::EquivalenceDomainRejected => "equivalence_domain_rejected",
+            Self::SettingsLimitReached => "settings_limit_reached",
             Self::Internal => "internal",
         }
     }
@@ -281,6 +296,13 @@ impl fmt::Display for ClientError {
             Self::SetupRetired => {
                 "the server refused the registration again after it was restarted; try later"
             }
+            Self::SettingsUpdateRequired => {
+                "the account settings were written by a newer rizzy-vault; update required"
+            }
+            Self::EquivalenceDomainRejected => {
+                "a group domain must be a registrable domain, not a public suffix or a subdomain"
+            }
+            Self::SettingsLimitReached => "the account settings are at a size limit",
             Self::Internal => "internal error",
         })
     }
@@ -340,6 +362,9 @@ mod tests {
             ClientError::LocalUnlockUnavailable,
             ClientError::DeviceStateOutdated,
             ClientError::SetupRetired,
+            ClientError::SettingsUpdateRequired,
+            ClientError::EquivalenceDomainRejected,
+            ClientError::SettingsLimitReached,
             ClientError::Internal,
         ];
         let mut codes: Vec<&str> = all.iter().map(|e| e.code()).collect();
