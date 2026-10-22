@@ -1,6 +1,6 @@
 # ADR 0048: Per-account storage quota and its wire error code
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M1

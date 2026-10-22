@@ -1,6 +1,6 @@
 # ADR 0056: M3 local index: recently-used tracking and client-side search
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M3 (`rv`, `rizzy-ffi`)

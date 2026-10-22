@@ -1,6 +1,6 @@
 # ADR 0055: M3 item types: field keys for SSH key, API credential, software license, Wi-Fi and bank account
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M3
