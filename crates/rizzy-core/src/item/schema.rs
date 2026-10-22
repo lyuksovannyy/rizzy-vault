@@ -21,11 +21,22 @@
 //! | `pwhist/<id>/value` · `/ms` | Text · U64 | Login | any | no (see below) |
 //! | `card.holder`, `.number`, `.brand`, `.exp_month`, `.exp_year`, `.code`, `.pin` | Text | Card | any | number, code, PIN |
 //! | `identity.` + 18 names | Text | Identity | any | `ssn`, `passport_number` |
+//! | `ssh.host`, `.port`, `.username`, `.private_key`, `.public_key`, `.passphrase` | Text | SSH key | any | `private_key`, `passphrase` |
+//! | `api.name`, `.key`, `.secret`, `.endpoint` | Text | API credential | any | `key`, `secret` |
+//! | `license.name`, `.key`, `.seats`, `.expires` | Text | Software license | any | `key` |
+//! | `wifi.ssid`, `.password`, `.security_type` | Text | Wi-Fi | any | `password` |
+//! | `bank.bank_name`, `.account_holder`, `.account_number`, `.routing_number`, `.account_type` | Text | Bank account | any | `account_number`, `routing_number` |
 //! | `vault.name`, `vault.icon` | Text | Vault settings | any | no |
 //!
-//! Keys under the reserved prefixes (`ssh.`, `api.`, `license.`, `wifi.`, `bank.`, `passkey.`,
-//! `passkey/`, `attachment/`, and `share/` attributes other than `secret`) are
-//! [`KeyClass::Reserved`]; every other grammar key is [`KeyClass::Unknown`], and so is a
+//! The `ssh.`, `api.`, `license.`, `wifi.` and `bank.` rows are [ADR 0055] §1's (Accepted
+//! 2026-10-22), added the way §7 adds a key: "a line in the ADR that ships it, never a version
+//! bump". Every one is Text, "stored as entered": `ssh.port`, `license.seats` and
+//! `license.expires` follow `card.exp_month`'s precedent, not U64. `ssh.port` absent means
+//! [`SSH_DEFAULT_PORT`] (`22`), a display default and not a stored value.
+//!
+//! Keys under the reserved prefixes (`passkey.`, `attachment/`, `share/` attributes other than
+//! `secret`, and every key under `ssh.`, `api.`, `license.`, `wifi.` or `bank.` that ADR 0055
+//! does not assign) are [`KeyClass::Reserved`]; every other grammar key is [`KeyClass::Unknown`], and so is a
 //! `tag/<hex>` key whose hex is not a name [`super::tag::tag_key`] could have produced
 //! (ADR 0018 §7: UTF-8, NFC, no Cc; see [`super::tag`]). Both are carried byte for byte by the
 //! record layer and exported unchanged (ADR 0018 §11). An M1 writer never invents a value for
@@ -35,7 +46,9 @@
 //!
 //! **Concealment** is the ADR 0018 §7 list: `login.password`, `login.totp`, `card.number`,
 //! `card.code`, `card.pin`, `identity.ssn`, `identity.passport_number`, hidden custom fields and
-//! `share/…`. The same fields are left out of an M5 share unless chosen. The list does not name
+//! `share/…`; extended, as ADR 0039 did for `passkey/<id>/private_key`, by ADR 0055 §4 (owner
+//! answer 1) with `ssh.private_key`, `ssh.passphrase`, `api.key`, `api.secret`, `license.key`,
+//! `wifi.password`, `bank.account_number` and `bank.routing_number`. The same fields are left out of an M5 share unless chosen. The list does not name
 //! `pwhist/<id>/value`, the imported password history, so this registry does not conceal it;
 //! that omission is reported to the owner rather than decided here.
 //!
@@ -90,6 +103,7 @@
 //!
 //! [ADR 0027]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0027-export-payload.md
 //! [ADR 0037]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0037-url-matching-and-autofill-rules.md
+//! [ADR 0055]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0055-m3-item-type-field-keys.md
 //!
 //! **`uri/<id>/match` is writable from M2** (ADR 0037, Accepted, assigns its enum values
 //! `0x0000`–`0x0006`; unassigned values above that are still accepted here, as any other Enum
@@ -175,6 +189,76 @@ pub const IDENTITY_SSN: &str = "identity.ssn";
 pub const IDENTITY_PASSPORT_NUMBER: &str = "identity.passport_number";
 /// `identity.drivers_license`: Text.
 pub const IDENTITY_DRIVERS_LICENSE: &str = "identity.drivers_license";
+/// `ssh.host`: Text, the host the key logs in to (SSH key; ADR 0055 §1).
+pub const SSH_HOST: &str = "ssh.host";
+/// `ssh.port`: Text, as entered. Absent means [`SSH_DEFAULT_PORT`], a display default and
+/// never a stored value (ADR 0055 §1, like `item.favorite` absent meaning false).
+pub const SSH_PORT: &str = "ssh.port";
+/// `ssh.username`: Text.
+pub const SSH_USERNAME: &str = "ssh.username";
+/// `ssh.private_key`: Text, the private key as entered (PEM or OpenSSH armour). Concealed.
+pub const SSH_PRIVATE_KEY: &str = "ssh.private_key";
+/// `ssh.public_key`: Text.
+pub const SSH_PUBLIC_KEY: &str = "ssh.public_key";
+/// `ssh.passphrase`: Text, the private key's passphrase. Concealed.
+pub const SSH_PASSPHRASE: &str = "ssh.passphrase";
+/// `api.name`: Text, the service the credential is for (distinct from `item.name`, the
+/// user's title of the item; ADR 0055 §1).
+pub const API_NAME: &str = "api.name";
+/// `api.key`: Text, the key or key id. Concealed.
+pub const API_KEY: &str = "api.key";
+/// `api.secret`: Text. Concealed.
+pub const API_SECRET: &str = "api.secret";
+/// `api.endpoint`: Text, as entered. Never opened or filled by the client: it is a value,
+/// not a website (the `uri` list is Login's).
+pub const API_ENDPOINT: &str = "api.endpoint";
+/// `license.name`: Text, the product (distinct from `item.name`; ADR 0055 §1).
+pub const LICENSE_NAME: &str = "license.name";
+/// `license.key`: Text, the license key. Concealed.
+pub const LICENSE_KEY: &str = "license.key";
+/// `license.seats`: Text, as entered (Text, like `card.exp_month`; ADR 0055 §1).
+pub const LICENSE_SEATS: &str = "license.seats";
+/// `license.expires`: Text, as entered (ADR 0055 owner answer 3: Text for M3).
+pub const LICENSE_EXPIRES: &str = "license.expires";
+/// `wifi.ssid`: Text, the network name.
+pub const WIFI_SSID: &str = "wifi.ssid";
+/// `wifi.password`: Text. Concealed.
+pub const WIFI_PASSWORD: &str = "wifi.password";
+/// `wifi.security_type`: Text, as entered (for example "WPA2"); no enum is defined.
+pub const WIFI_SECURITY_TYPE: &str = "wifi.security_type";
+/// `bank.bank_name`: Text, the institution (distinct from `item.name`; ADR 0055 §1).
+pub const BANK_NAME: &str = "bank.bank_name";
+/// `bank.account_holder`: Text.
+pub const BANK_ACCOUNT_HOLDER: &str = "bank.account_holder";
+/// `bank.account_number`: Text, as entered (an IBAN or a local number). Concealed.
+pub const BANK_ACCOUNT_NUMBER: &str = "bank.account_number";
+/// `bank.routing_number`: Text, as entered (a routing number, sort code or BIC). Concealed.
+pub const BANK_ROUTING_NUMBER: &str = "bank.routing_number";
+/// `bank.account_type`: Text, as entered (for example "Checking"); no enum is defined.
+pub const BANK_ACCOUNT_TYPE: &str = "bank.account_type";
+
+/// What an absent `ssh.port` displays as: `22` (ADR 0055 §1). A display default only: no
+/// writer stores it on the user's behalf, and a create op leaves the field out when the user
+/// typed nothing.
+pub const SSH_DEFAULT_PORT: &str = "22";
+
+/// What an SSH key's `ssh.port` shows (ADR 0055 §1). `displayed` is the encoded value the
+/// register displays (ADR 0018 §6), `None` when the item has no such register.
+///
+/// - No register, or one that displays Cleared: [`SSH_DEFAULT_PORT`]. Cleared is "the field
+///   has no value" (ADR 0018 §6), the same as absent.
+/// - A Text: that text, as entered (`ssh.port` is Text, never parsed as a number).
+/// - Anything else: `None`, shown as "unsupported value" (ADR 0018 §6), never as the default,
+///   so a newer client's value is not silently replaced by `22` on screen.
+#[must_use]
+pub fn ssh_port(displayed: Option<&[u8]>) -> Option<&str> {
+    match displayed.map(|value| read_value(Expected::Text, value)) {
+        None | Some(Some(ValueRef::Cleared)) => Some(SSH_DEFAULT_PORT),
+        Some(Some(ValueRef::Text(text))) => Some(text),
+        Some(_) => None,
+    }
+}
+
 /// `vault.name`: Text, the vault's name (vault settings).
 pub const VAULT_NAME: &str = "vault.name";
 /// `vault.icon`: Text, an identifier from the client's icon set (vault settings).
@@ -432,11 +516,22 @@ const LOGIN: Applies = Applies::Only(SupportedType::Login);
 const CARD: Applies = Applies::Only(SupportedType::Card);
 /// Identity-only.
 const IDENTITY: Applies = Applies::Only(SupportedType::Identity);
+/// SSH-key-only (ADR 0055 §1).
+const SSH: Applies = Applies::Only(SupportedType::SshKey);
+/// API-credential-only (ADR 0055 §1).
+const API: Applies = Applies::Only(SupportedType::ApiCredential);
+/// Software-license-only (ADR 0055 §1).
+const LICENSE: Applies = Applies::Only(SupportedType::SoftwareLicense);
+/// Wi-Fi-only (ADR 0055 §1).
+const WIFI: Applies = Applies::Only(SupportedType::Wifi);
+/// Bank-account-only (ADR 0055 §1).
+const BANK: Applies = Applies::Only(SupportedType::BankAccount);
 /// Vault-settings-only.
 const VAULT: Applies = Applies::Only(SupportedType::VaultSettings);
 
-/// Every fixed key of the M1 schema, with its entry (ADR 0018 §7).
-pub const FIXED_KEYS: [(&str, KeySpec); 35] = [
+/// Every fixed key of the schema, with its entry: ADR 0018 §7's 35, and ADR 0055 §1's 22 for
+/// the M3 types (8 of them concealed, ADR 0055 §3–§4).
+pub const FIXED_KEYS: [(&str, KeySpec); 57] = [
     (
         ITEM_TYPE,
         spec(
@@ -494,18 +589,43 @@ pub const FIXED_KEYS: [(&str, KeySpec); 35] = [
     (IDENTITY_SSN, secret_text(IDENTITY)),
     (IDENTITY_PASSPORT_NUMBER, secret_text(IDENTITY)),
     (IDENTITY_DRIVERS_LICENSE, text(IDENTITY)),
+    (SSH_HOST, text(SSH)),
+    (SSH_PORT, text(SSH)),
+    (SSH_USERNAME, text(SSH)),
+    (SSH_PRIVATE_KEY, secret_text(SSH)),
+    (SSH_PUBLIC_KEY, text(SSH)),
+    (SSH_PASSPHRASE, secret_text(SSH)),
+    (API_NAME, text(API)),
+    (API_KEY, secret_text(API)),
+    (API_SECRET, secret_text(API)),
+    (API_ENDPOINT, text(API)),
+    (LICENSE_NAME, text(LICENSE)),
+    (LICENSE_KEY, secret_text(LICENSE)),
+    (LICENSE_SEATS, text(LICENSE)),
+    (LICENSE_EXPIRES, text(LICENSE)),
+    (WIFI_SSID, text(WIFI)),
+    (WIFI_PASSWORD, secret_text(WIFI)),
+    (WIFI_SECURITY_TYPE, text(WIFI)),
+    (BANK_NAME, text(BANK)),
+    (BANK_ACCOUNT_HOLDER, text(BANK)),
+    (BANK_ACCOUNT_NUMBER, secret_text(BANK)),
+    (BANK_ROUTING_NUMBER, secret_text(BANK)),
+    (BANK_ACCOUNT_TYPE, text(BANK)),
     (VAULT_NAME, text(VAULT)),
     (VAULT_ICON, text(VAULT)),
 ];
 
 /// The namespaces reserved for the M3 item types (ADR 0018 §7, "Reserved prefixes"): fixed
-/// keys `ssh.…`, `api.…`, `license.…`, `wifi.…` and `bank.…`.
+/// keys `ssh.…`, `api.…`, `license.…`, `wifi.…` and `bank.…`. ADR 0055 §1 assigns 22 keys
+/// under them ([`FIXED_KEYS`]); every other key under these prefixes (a later `ssh.key_type`,
+/// say) stays reserved (ADR 0055 §2).
 const M3_TYPE_NAMESPACES: [&str; 5] = ["ssh", "api", "license", "wifi", "bank"];
 
 /// What a reserved key is reserved for (ADR 0018 §7, "Reserved prefixes").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ReservedFor {
-    /// `ssh.`, `api.`, `license.`, `wifi.`, `bank.`: the M3 item types.
+    /// `ssh.`, `api.`, `license.`, `wifi.`, `bank.`: the M3 item types, for every key under
+    /// them that ADR 0055 §1 does not assign.
     M3Types,
     /// `attachment/`: the M3 attachments ADR.
     M3Attachments,

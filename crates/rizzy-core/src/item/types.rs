@@ -9,7 +9,7 @@
 //! |---|---|---|
 //! | `0x0000` | invalid | – |
 //! | `0x0001`–`0x0004` | Login, Secure Note, Card, Identity | M1 |
-//! | `0x0005`–`0x0009` | SSH key, API credential, Software license, Wi-Fi, Bank account | M3, reserved |
+//! | `0x0005`–`0x0009` | SSH key, API credential, Software license, Wi-Fi, Bank account | M3 (ADR 0055 §2) |
 //! | `0x000A`–`0xEFFF` | unassigned; each needs an ADR line | – |
 //! | `0xF001` | Vault settings (system type) | M1 |
 //! | `0xF000`, `0xF002`–`0xFFFF` | reserved for system types | – |
@@ -19,6 +19,12 @@
 //! passkey ADR," to pick one. ADR 0039 picked the list (see [`super::schema::LIST_PASSKEY`])
 //! and released `0x000A` back to unassigned; it stays permanently retired in practice (ADR 0039
 //! Negative consequences), even though an unassigned id is nominally reusable.
+//!
+//! **The M3 types** (ADR 0055 §2, Accepted 2026-10-22). `0x0005`–`0x0009` moved from "M3,
+//! reserved" to assigned, each a [`SupportedType`] variant whose fields are ADR 0055 §1's
+//! (`super::schema`). The `ReservedM3` class they mapped to before is gone (ADR 0055 owner
+//! answer 2): no id reaches it any more. A client built before ADR 0055 still shows these items as
+//! "Unsupported item", as below, and carries their keys byte for byte.
 //!
 //! **Unknown types** (ADR 0018 §8). An item whose type this client does not support (a reserved
 //! or unassigned id, `0x0000`, or no valid `item.type` at all) shows as "Unsupported item, update
@@ -68,15 +74,15 @@ impl ItemType {
     pub const CARD: Self = Self(0x0003);
     /// `0x0004`: Identity (M1).
     pub const IDENTITY: Self = Self(0x0004);
-    /// `0x0005`: SSH key (M3, reserved).
+    /// `0x0005`: SSH key (M3, ADR 0055).
     pub const SSH_KEY: Self = Self(0x0005);
-    /// `0x0006`: API credential (M3, reserved).
+    /// `0x0006`: API credential (M3, ADR 0055).
     pub const API_CREDENTIAL: Self = Self(0x0006);
-    /// `0x0007`: Software license (M3, reserved).
+    /// `0x0007`: Software license (M3, ADR 0055).
     pub const SOFTWARE_LICENSE: Self = Self(0x0007);
-    /// `0x0008`: Wi-Fi (M3, reserved).
+    /// `0x0008`: Wi-Fi (M3, ADR 0055).
     pub const WIFI: Self = Self(0x0008);
-    /// `0x0009`: Bank account (M3, reserved).
+    /// `0x0009`: Bank account (M3, ADR 0055).
     pub const BANK_ACCOUNT: Self = Self(0x0009);
     /// `0xF001`: Vault settings, a system type (M1).
     pub const VAULT_SETTINGS: Self = Self(0xF001);
@@ -113,14 +119,18 @@ impl ItemType {
             0x0002 => ItemTypeClass::Supported(SupportedType::SecureNote),
             0x0003 => ItemTypeClass::Supported(SupportedType::Card),
             0x0004 => ItemTypeClass::Supported(SupportedType::Identity),
-            0x0005..=0x0009 => ItemTypeClass::ReservedM3,
+            0x0005 => ItemTypeClass::Supported(SupportedType::SshKey),
+            0x0006 => ItemTypeClass::Supported(SupportedType::ApiCredential),
+            0x0007 => ItemTypeClass::Supported(SupportedType::SoftwareLicense),
+            0x0008 => ItemTypeClass::Supported(SupportedType::Wifi),
+            0x0009 => ItemTypeClass::Supported(SupportedType::BankAccount),
             0x000A..=0xEFFF => ItemTypeClass::Unassigned,
             0xF001 => ItemTypeClass::Supported(SupportedType::VaultSettings),
             _ => ItemTypeClass::ReservedSystem,
         }
     }
 
-    /// The M1 type this id names, or `None` for every type this client shows as "Unsupported
+    /// The supported type this id names, or `None` for every type this client shows as "Unsupported
     /// item" (ADR 0018 §8, "Unknown type").
     #[must_use]
     pub const fn supported(self) -> Option<SupportedType> {
@@ -131,15 +141,13 @@ impl ItemType {
     }
 }
 
-/// What an [`ItemType`] id means to this (M1) client. `Debug` does not print it.
+/// What an [`ItemType`] id means to this client. `Debug` does not print it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ItemTypeClass {
     /// `0x0000`.
     Invalid,
-    /// An M1 type or the vault-settings system type.
+    /// An M1 or M3 type, or the vault-settings system type.
     Supported(SupportedType),
-    /// `0x0005`–`0x0009`, the M3 types.
-    ReservedM3,
     /// `0x000A`–`0xEFFF`: no ADR assigns it yet. `0x000A` itself was the standalone passkey
     /// candidate ADR 0018 reserved and ADR 0039 released back here (ADR 0039 §1).
     Unassigned,
@@ -153,8 +161,8 @@ impl fmt::Debug for ItemTypeClass {
     }
 }
 
-/// The item types an M1 client supports: it shows them and offers field edits. `Debug` does
-/// not print it.
+/// The item types this client supports: it shows them and offers field edits. The M1 types,
+/// the M3 types of ADR 0055 §2 and the vault-settings system type. `Debug` does not print it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SupportedType {
     /// Login: username, password, TOTP, URIs, password history.
@@ -165,6 +173,16 @@ pub enum SupportedType {
     Card,
     /// Identity.
     Identity,
+    /// SSH key (`0x0005`): `ssh.` fields (ADR 0055 §1).
+    SshKey,
+    /// API credential (`0x0006`): `api.` fields (ADR 0055 §1).
+    ApiCredential,
+    /// Software license (`0x0007`): `license.` fields (ADR 0055 §1).
+    SoftwareLicense,
+    /// Wi-Fi (`0x0008`): `wifi.` fields (ADR 0055 §1).
+    Wifi,
+    /// Bank account (`0x0009`): `bank.` fields (ADR 0055 §1).
+    BankAccount,
     /// Vault settings: name and icon of the vault; a system type.
     VaultSettings,
 }
@@ -184,6 +202,11 @@ impl SupportedType {
             Self::SecureNote => ItemType::SECURE_NOTE,
             Self::Card => ItemType::CARD,
             Self::Identity => ItemType::IDENTITY,
+            Self::SshKey => ItemType::SSH_KEY,
+            Self::ApiCredential => ItemType::API_CREDENTIAL,
+            Self::SoftwareLicense => ItemType::SOFTWARE_LICENSE,
+            Self::Wifi => ItemType::WIFI,
+            Self::BankAccount => ItemType::BANK_ACCOUNT,
             Self::VaultSettings => ItemType::VAULT_SETTINGS,
         }
     }
