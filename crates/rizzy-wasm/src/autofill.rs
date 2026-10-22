@@ -5,10 +5,10 @@
 //!
 //! | Call | What crosses to JavaScript |
 //! |---|---|
-//! | [`custom_field_autofill`] (`Session.customFieldAutofill`, `DeviceSession.customFieldAutofill`) | per custom field: its element id, what its autocomplete id does, and for a shadowed one the winner's id and Display Name (the editor shows both anyway) |
-//! | [`autofill_offer`] (`DeviceSession.autofillOffer`) | whether the item fills a TOTP code, and per page token the Display Name, the concealed flag and the element id the offer records. Never a value |
-//! | [`fill_plan`] (`DeviceSession.fillPlan`) | the values of one fill click: username, password, the current TOTP code (never the secret), custom values by token |
-//! | [`save_plan`] (`DeviceSession.customSavePlan`) | the save dialog's rows: kind, element id, Display Name, flags. Never a value |
+//! | `custom_field_autofill` (`Session.customFieldAutofill`, `DeviceSession.customFieldAutofill`) | per custom field: its element id, what its autocomplete id does, and for a shadowed one the winner's id and Display Name (the editor shows both anyway) |
+//! | `autofill_offer` (`DeviceSession.autofillOffer`) | whether the item fills a TOTP code, and per page token the Display Name, the concealed flag and the element id the offer records. Never a value |
+//! | `fill_plan` (`DeviceSession.fillPlan`) | the values of one fill click: username, password, the current TOTP code (never the secret), custom values by token |
+//! | `save_plan` (`DeviceSession.customSavePlan`) | the save dialog's rows: kind, element id, Display Name, flags. Never a value |
 //!
 //! [ADR 0076]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0076-autocomplete-driven-autofill.md
 
