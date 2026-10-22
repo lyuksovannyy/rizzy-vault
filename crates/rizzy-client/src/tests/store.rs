@@ -45,6 +45,8 @@ fn copy_rows(rows: &CacheRows) -> CacheRows {
         wraps: rows.wraps.clone(),
         ops: rows.ops.clone(),
         snapshots: rows.snapshots.clone(),
+        item_index: rows.item_index.clone(),
+        item_index_unreadable: rows.item_index_unreadable,
     }
 }
 
@@ -2349,4 +2351,50 @@ fn a_heal_acknowledges_the_own_ops_the_restored_server_holds() {
     b.upload(&mut server, &mut rng);
     b.assert_loads();
     assert_crash_safe(&b.cache.history, &[&b.unlocked]);
+}
+
+/// ADR 0056 §4, §6: the `item_index` writes of every step pass the floors and commit with the
+/// step; the load never reads the table, so a corrupt one (a bad UTF-8 row, or a table the host
+/// could not read) leaves every other table's load unaffected, and only that table is rebuilt.
+#[test]
+fn a_corrupt_item_index_never_fails_the_load() {
+    use crate::store::index;
+
+    let mut rng = ChaCha20Rng::seed_from_u64(5640);
+    let mut server = Server::new(5641);
+    let (mut dev, _, _) = Dev::signed_up(&mut server, &mut rng);
+    index::track_new(&mut dev.vault);
+    dev.fetch(&server);
+    let item = dev.create(&mut rng, "x");
+    dev.upload(&mut server, &mut rng);
+    assert_eq!(dev.cache.rows.item_index.len(), 1);
+    assert_eq!(dev.cache.rows.item_index[0].item_id, item.to_bytes());
+    dev.assert_loads();
+
+    // A reload of an intact table reconciles to nothing.
+    let mut loaded = dev.reload();
+    assert!(index::reconcile(&dev.cache.rows, &mut loaded.vaults).is_empty());
+
+    for unreadable in [false, true] {
+        let mut rows = copy_rows(&dev.cache.rows);
+        if unreadable {
+            rows.item_index.clear();
+            rows.item_index_unreadable = true;
+        } else {
+            rows.item_index[0].display_name = Zeroizing::new(vec![0xFF]);
+        }
+        let mut loaded = load_rows(&rows, &dev.unlocked).unwrap();
+        assert_same_vault(&dev.vault, &loaded.vaults[0]);
+        let writes = index::reconcile(&rows, &mut loaded.vaults);
+        assert!(matches!(writes.writes()[0], Write::IndexReset));
+        loaded.floors.admit(&writes).unwrap();
+        let before = copy_rows(&rows);
+        rows.apply(&writes);
+        assert_eq!(rows.item_index.len(), 1);
+        assert!(!rows.item_index_unreadable);
+        // Nothing but the index changed.
+        assert_eq!(rows.ops.len(), before.ops.len());
+        assert_eq!(rows.meta, before.meta);
+        assert_eq!(rows.objects.len(), before.objects.len());
+    }
 }
