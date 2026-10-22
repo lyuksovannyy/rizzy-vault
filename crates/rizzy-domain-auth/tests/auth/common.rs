@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chacha20::ChaCha20Rng;
 use chacha20::rand_core::SeedableRng as _;
@@ -46,7 +46,7 @@ use rizzy_proto::objects::{
 use rizzy_proto::recovery::RecoveryVault;
 use rizzy_proto::vault::SeqVector;
 use rizzy_proto::wire::{Bytes, Fixed, Id, List, SessionToken, Text};
-use rizzy_storage::{Conn, Database, SqliteOptions, WriteTx, WriterLock};
+use rizzy_storage::{Conn, Database, PostgresOptions, SqliteOptions, WriteTx, WriterLock};
 
 /// The server's canonical origin in every test.
 pub(crate) const ORIGIN: &str = "https://vault.example.com";
@@ -266,7 +266,22 @@ pub(crate) struct Env {
     pub(crate) now: u64,
     /// The client's source address.
     pub(crate) source: Vec<u8>,
+    /// This test's turn on the shared PostgreSQL database ([`Env::on_either_engine`]), released
+    /// on drop. Last, so it is dropped after the handles above.
+    pub(crate) _postgres_turn: Option<PostgresTurn>,
 }
+
+/// A test's turn on the shared PostgreSQL database, released on drop.
+pub(crate) struct PostgresTurn {
+    /// The held lock.
+    _guard: MutexGuard<'static, ()>,
+}
+
+/// The PostgreSQL database [`Env::on_either_engine`] uses instead of SQLite when set.
+const POSTGRES_URL_VAR: &str = "RIZZY_TEST_POSTGRES_URL";
+
+/// Serialises the tests on PostgreSQL: they share the one database the URL names.
+static POSTGRES_LOCK: Mutex<()> = Mutex::new(());
 
 /// The origin.
 pub(crate) fn origin() -> ServerOrigin {
@@ -287,6 +302,48 @@ impl Env {
         let db = Database::open_sqlite(&SqliteOptions::new(&path), lock)
             .await
             .unwrap();
+        Self::over(db, dir, None, seed, adjust).await
+    }
+
+    /// As [`Env::with_config`], on PostgreSQL when `RIZZY_TEST_POSTGRES_URL` names a database
+    /// the tests may **wipe** (owned by the connecting role; ADR 0011 point 3, both engines):
+    /// the tests take turns on it, and each drops and re-creates its `public` schema first. For
+    /// example `RIZZY_TEST_POSTGRES_URL=postgres://rizzy:rizzy@localhost/rizzy_test cargo test
+    /// -p rizzy-domain-auth --test auth sessions`. On SQLite otherwise.
+    pub(crate) async fn on_either_engine(seed: u64, adjust: impl FnOnce(&mut AuthConfig)) -> Self {
+        let url = match std::env::var(POSTGRES_URL_VAR) {
+            Ok(url) if !url.is_empty() => url,
+            _ => return Self::with_config(seed, adjust).await,
+        };
+        let turn = PostgresTurn {
+            _guard: POSTGRES_LOCK.lock().unwrap_or_else(PoisonError::into_inner),
+        };
+        let db = Database::open_postgres(&PostgresOptions::from_url(&url).unwrap())
+            .await
+            .unwrap();
+        let mut tx = db.begin_write().await.unwrap();
+        for statement in [
+            "DROP SCHEMA IF EXISTS public CASCADE",
+            "CREATE SCHEMA public",
+        ] {
+            rizzy_storage::on_engine!(tx.conn(), |c| sqlx::query(statement)
+                .execute(&mut *c)
+                .await
+                .map(|_| ())
+                .unwrap());
+        }
+        tx.commit().await.unwrap();
+        Self::over(db, TempDir::new(), Some(turn), seed, adjust).await
+    }
+
+    /// A new server over the empty database `db`.
+    async fn over(
+        db: Database,
+        dir: TempDir,
+        postgres_turn: Option<PostgresTurn>,
+        seed: u64,
+        adjust: impl FnOnce(&mut AuthConfig),
+    ) -> Self {
         db.migrate().await.unwrap();
         let mut rng = ChaCha20Rng::seed_from_u64(seed);
         let secrets = Arc::new(ServerSecrets::generate(&mut rng));
@@ -311,6 +368,7 @@ impl Env {
             rng,
             now: T0,
             source: b"192.0.2.1".to_vec(),
+            _postgres_turn: postgres_turn,
         }
     }
 

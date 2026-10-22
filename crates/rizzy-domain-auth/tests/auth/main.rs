@@ -15,6 +15,7 @@
 //! | `lag` | the lag rule and the credentials that need the user after a restore: `credentials_stale` after KE3, `reregister`, the startup fill, the recovery repair, `E_id` and settings in healing step 2 (ADR 0032 §3–§4) |
 //! | `restore` | the reconciliation epoch after a restore: its end, its limit, the device-set check (INV-59) |
 //! | `single_use` | login states and challenges used once on every path; no login across a credential change (§5.10, §5.11, INV-59) |
+//! | `sessions` | listing and ending sessions: the caller and target rules, device sessions left alone, the race with a password change, INV-7 (ADR 0075) |
 //! | `secrets` | the startup checks and what the database never holds (INV-8, INV-50) |
 //! | `setups` | retiring old OPAQUE setups: the `reregister` flag, the echoed `setup_id`, the two steps of `retire-setups`, the startup refusal, an account left on a retired setup (ADR 0031) |
 //! | `data_key` | after a data-key rotation: TOTP rows re-sealed under the account lock, the old key dropped once no row names it (§5.11 "Rotation") |
@@ -38,6 +39,7 @@ mod restore;
 mod revocation;
 mod second_factor;
 mod secrets;
+mod sessions;
 mod setups;
 mod single_use;
 mod state;

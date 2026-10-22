@@ -12,7 +12,8 @@
 //!
 //! # Paths and methods (item 1)
 //!
-//! The 27 endpoints of [`paths`], all under [`crate::meta::API_V1_PREFIX`]. Every one is `POST`
+//! The 31 endpoints of [`paths`], all under [`crate::meta::API_V1_PREFIX`]: ADR 0028's 27 and
+//! the four `sessions` endpoints of ADR 0075 §2. Every one is `POST`
 //! except [`paths::DEVICES_GRANTS`], which is `GET` (and `HEAD`); `GET /api/meta` is the one
 //! unversioned endpoint. A request body never goes in a URL, and `v1` defines no query
 //! parameter, so a client sends no query.
@@ -130,6 +131,14 @@ pub mod paths {
     pub const TOTP_ENROL_CONFIRM: &str = "/api/v1/totp/enrol/confirm";
     /// TOTP removal.
     pub const TOTP_DISABLE: &str = "/api/v1/totp/disable";
+    /// The account's live sessions (ADR 0075 §2, R1).
+    pub const SESSIONS_LIST: &str = "/api/v1/sessions/list";
+    /// Sign-out: ends the caller's own session (ADR 0075 R2).
+    pub const SESSIONS_CURRENT_END: &str = "/api/v1/sessions/current/end";
+    /// Ends one session of the account by `session_id` (ADR 0075 R3).
+    pub const SESSIONS_END: &str = "/api/v1/sessions/end";
+    /// Ends every other OPAQUE and recovery-only session of the account (ADR 0075 R4).
+    pub const SESSIONS_OTHERS_END: &str = "/api/v1/sessions/others/end";
     /// Vault upload.
     pub const VAULT_UPLOAD: &str = "/api/v1/vault/upload";
     /// Vault Fetch.
@@ -138,7 +147,7 @@ pub mod paths {
     pub const VAULT_HEAL: &str = "/api/v1/vault/heal";
 
     /// Every `/api/v1` path, in the order above.
-    pub const ALL: [&str; 27] = [
+    pub const ALL: [&str; 31] = [
         REGISTER_START,
         REGISTER_FINISH,
         LOGIN_START,
@@ -163,6 +172,10 @@ pub mod paths {
         TOTP_ENROL_START,
         TOTP_ENROL_CONFIRM,
         TOTP_DISABLE,
+        SESSIONS_LIST,
+        SESSIONS_CURRENT_END,
+        SESSIONS_END,
+        SESSIONS_OTHERS_END,
         VAULT_UPLOAD,
         VAULT_FETCH,
         VAULT_HEAL,
@@ -191,7 +204,7 @@ mod tests {
         let mut sorted = paths::ALL.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), 27);
+        assert_eq!(sorted.len(), 31);
         for path in paths::ALL {
             assert!(path.starts_with(API_V1_PREFIX), "{path}");
             // Nothing a proxy or a URL library would rewrite, and no query.

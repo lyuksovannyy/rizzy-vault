@@ -137,6 +137,12 @@ pub const MAX_RECORDS: usize = 4096;
 /// request (CRYPTO.md §4.2), about one per item.
 pub const MAX_ITEM_KEY_WRAPS: usize = 65_536;
 
+/// Count limit: sessions in one `sessions/list` answer ([ADR 0075] §3). The server lists at most
+/// this many, newest first, and sets `truncated` when the account has more live sessions.
+///
+/// [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md
+pub const MAX_SESSIONS_LISTED: usize = 256;
+
 /// Count limit (this crate's choice): API versions and minimum client versions in
 /// `GET /api/meta` (ADR 0002 point 3).
 pub const MAX_META_ENTRIES: usize = 32;

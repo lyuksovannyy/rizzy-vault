@@ -13,7 +13,7 @@
 //! vault half goes to the vault domain's type through [`VaultPort::rotation_from_wire`]. A
 //! request with both `recovery` and `recovery_rewrap` is refused: they are exclusive.
 
-use rizzy_core::ids::DeviceId;
+use rizzy_core::ids::{DeviceId, SessionId};
 use rizzy_core::rng::CryptoRng;
 use rizzy_proto::change::{
     CommitChangeRequest, DeviceSuspensionRequest, ReregisterStartRequest, ReregisterStartResponse,
@@ -22,6 +22,7 @@ use rizzy_proto::change::{
 use rizzy_proto::recovery::{
     RecoveryCancelResponse, RecoveryCompleteResponse, RecoveryRequest, RecoveryStartResponse,
 };
+use rizzy_proto::session::EndSessionRequest;
 use rizzy_proto::totp::{
     TotpDisableRequest, TotpEnrolConfirmRequest, TotpEnrolStartResponse, TotpSecretBytes,
 };
@@ -251,5 +252,19 @@ impl<V: VaultPort> AuthService<V> {
     ) -> Result<(), AuthError> {
         self.totp_disable(session, req.code.expose_secret(), now_ms)
             .await
+    }
+
+    /// [`AuthService::end_session`] from its request (ADR 0075 R3).
+    ///
+    /// # Errors
+    /// As [`AuthService::end_session`].
+    pub async fn end_session_request(
+        &self,
+        session: &Session,
+        req: &EndSessionRequest,
+        now_ms: u64,
+    ) -> Result<(), AuthError> {
+        let target = SessionId::from_bytes(req.session_id.to_bytes());
+        self.end_session(session, target, now_ms).await
     }
 }
