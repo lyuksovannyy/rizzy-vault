@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use rizzy_cli::CliError;
 use rizzy_cli::args::parse;
 use rizzy_cli::commands::run;
-use rizzy_cli::device::Env;
+use rizzy_cli::device::{Env, SignOuts};
 use rizzy_cli::ui::Ui;
 use rizzy_client::ClientError;
 use rizzy_client::rizzy_proto::error::ErrorCode;
@@ -470,6 +470,7 @@ impl Rv {
                     account: None,
                     trust: rizzy_cli::tls::Trust::default(),
                     ui: &mut script,
+                    sign_outs: SignOuts::default(),
                 };
                 self.runtime.block_on(run(invocation, &mut env))
             }
