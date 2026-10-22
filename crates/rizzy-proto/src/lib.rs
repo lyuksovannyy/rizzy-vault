@@ -102,6 +102,7 @@
 pub mod account;
 pub mod attachments;
 pub mod auth;
+pub mod breach;
 pub mod change;
 pub mod error;
 pub mod http;

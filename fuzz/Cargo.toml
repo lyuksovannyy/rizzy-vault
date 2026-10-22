@@ -100,6 +100,9 @@
 #   passkey_ceremony   rizzy-client's WebAuthn passkey ceremonies (ADR 0039 §1, §2, §4): never
 #                      panic on an attacker/relying-party-controlled origin, rpId or challenge;
 #                      a created credential's assertion signature verifies under its own key
+#   breach_range       the breach-check range response (CRYPTO.md §11.16, ADR 0053): rizzy-proto's
+#                      bounded `SUFFIX:COUNT` parser on arbitrary bytes and JSON, and
+#                      rizzy-client's constant-time verdict over what it accepts
 #
 # The `import_*` targets share `fuzz_targets/import_common/mod.rs` (the checks on an import
 # result and a counting RNG), included with `#[path]`; it is not a target.
@@ -296,6 +299,13 @@ bench = false
 [[bin]]
 name = "sync_causal"
 path = "fuzz_targets/sync_causal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "breach_range"
+path = "fuzz_targets/breach_range.rs"
 test = false
 doc = false
 bench = false
