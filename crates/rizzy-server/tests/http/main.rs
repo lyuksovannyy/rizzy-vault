@@ -10,6 +10,8 @@
 //! setups end to end (`setups`, ADR 0031). The per-account storage quota (`quota`, ADR 0048): the
 //! exact boundary, `quota_exceeded` on the wire, the reconciliation and the backfill. Threat model INV-1 over captured request bodies
 //! (`password_equivalents`): registration, login and password change send only OPAQUE messages.
+//! A paged Fetch splitting a tombstone cover from its purge across a small page budget, end to
+//! end with `rizzy-client` (`paged_fetch`, ADR 0050).
 //!
 //! ADR 0028's HTTP conventions are pinned by `conventions` (the error table and `Retry-After`,
 //! the one `401`, `Content-Length`, no CORS and no compression, the trusted-proxy rule,
@@ -29,6 +31,7 @@ mod common;
 mod conventions;
 mod headers;
 mod limits;
+mod paged_fetch;
 mod password_equivalents;
 mod quota;
 mod recovery;
