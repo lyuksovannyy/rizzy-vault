@@ -5,7 +5,8 @@
 //!
 //! # Endpoints
 //!
-//! [ADR 0028] item 1 freezes this table for `v1`: the 27 endpoints under `/api/v1/`, grouped by
+//! [ADR 0028] item 1 freezes this table for `v1`: the 27 endpoints under `/api/v1/`, and the four
+//! of the tenth resource, `sessions`, that [ADR 0075] §2 adds (31 in all), grouped by
 //! resource, verb last; `POST` for everything, including reads that carry a body, and `GET`
 //! (and `HEAD`) only for `GET /api/v1/devices/grants`. The path strings are `rizzy-proto`'s
 //! (`http::paths`), shared with every client. The router matches them byte for byte: a path
@@ -39,6 +40,10 @@
 //! | `POST /api/v1/totp/enrol/start` | no body → `TotpEnrolStartResponse` | OPAQUE or device (fresh OPAQUE; checked by the domain) |
 //! | `POST /api/v1/totp/enrol/confirm` | `TotpEnrolConfirmRequest` → 204 | OPAQUE or device (fresh OPAQUE; checked by the domain) |
 //! | `POST /api/v1/totp/disable` | `TotpDisableRequest` → 204 | OPAQUE or device (fresh OPAQUE; checked by the domain) |
+//! | `POST /api/v1/sessions/list` | no body → `SessionListResponse` | OPAQUE or device |
+//! | `POST /api/v1/sessions/current/end` | no body → 204 | any (OPAQUE, device or recovery-only) |
+//! | `POST /api/v1/sessions/end` | `EndSessionRequest` → 204 | fresh OPAQUE or device (checked by the domain) |
+//! | `POST /api/v1/sessions/others/end` | no body → 204 | fresh OPAQUE or device (checked by the domain) |
 //! | `POST /api/v1/vault/upload` | `UploadRequest` → `UploadResponse` | OPAQUE or device |
 //! | `POST /api/v1/vault/fetch` | `FetchRequest` → `FetchResponse` | OPAQUE or device |
 //! | `POST /api/v1/vault/heal` | `HealingRequest` → `HealingResponse` | OPAQUE or device |
@@ -367,6 +372,14 @@ pub enum Endpoint {
     TotpEnrolConfirm,
     /// TOTP removal.
     TotpDisable,
+    /// The account's live sessions (ADR 0075 R1).
+    SessionsList,
+    /// Sign-out of the caller's own session (ADR 0075 R2).
+    SessionsCurrentEnd,
+    /// Ending one session by id (ADR 0075 R3).
+    SessionsEnd,
+    /// Ending every other OPAQUE and recovery-only session (ADR 0075 R4).
+    SessionsOthersEnd,
     /// Vault upload.
     Upload,
     /// Vault Fetch.
@@ -402,6 +415,10 @@ impl Endpoint {
         Self::TotpEnrolStart,
         Self::TotpEnrolConfirm,
         Self::TotpDisable,
+        Self::SessionsList,
+        Self::SessionsCurrentEnd,
+        Self::SessionsEnd,
+        Self::SessionsOthersEnd,
         Self::Upload,
         Self::Fetch,
         Self::Heal,
@@ -435,6 +452,10 @@ impl Endpoint {
             Self::TotpEnrolStart => paths::TOTP_ENROL_START,
             Self::TotpEnrolConfirm => paths::TOTP_ENROL_CONFIRM,
             Self::TotpDisable => paths::TOTP_DISABLE,
+            Self::SessionsList => paths::SESSIONS_LIST,
+            Self::SessionsCurrentEnd => paths::SESSIONS_CURRENT_END,
+            Self::SessionsEnd => paths::SESSIONS_END,
+            Self::SessionsOthersEnd => paths::SESSIONS_OTHERS_END,
             Self::Upload => paths::VAULT_UPLOAD,
             Self::Fetch => paths::VAULT_FETCH,
             Self::Heal => paths::VAULT_HEAL,
@@ -469,13 +490,17 @@ impl Endpoint {
             | Self::PublishAccountState
             | Self::PublishGrants
             | Self::ReregisterStart
-            | Self::CommitChange => SessionNeed::Required,
+            | Self::CommitChange
+            | Self::SessionsCurrentEnd => SessionNeed::Required,
             Self::SuspendDevice
             | Self::UnsuspendDevice
             | Self::RecoveryCancel
             | Self::TotpEnrolStart
             | Self::TotpEnrolConfirm
             | Self::TotpDisable
+            | Self::SessionsList
+            | Self::SessionsEnd
+            | Self::SessionsOthersEnd
             | Self::Upload
             | Self::Fetch
             | Self::Heal => SessionNeed::NotRecovery,
@@ -485,7 +510,10 @@ impl Endpoint {
     /// The body-size limit: [`BODY_LIMIT`], the configured upload limit for upload, healing and
     /// the account commit (which carries a rotation's re-wrapped wrap set, ADR 0025 §1),
     /// and 0 for the endpoints that take no body (the `GET` endpoint, recovery cancel and TOTP
-    /// enrolment start).
+    /// enrolment start). The empty-body `sessions` endpoints keep [`BODY_LIMIT`], as [ADR 0075]
+    /// §2 says ("The default body limit (`MAX_BODY_LEN`) applies"); their body is not read.
+    ///
+    /// [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md
     #[must_use]
     pub const fn body_limit(self, max_upload_bytes: usize) -> usize {
         match self {
@@ -1086,6 +1114,21 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
                 .map_err(ae)?;
             Ok(Reply::Empty)
         }
+        Endpoint::SessionsList => json(&auth.list_sessions(need()?, now).await.map_err(ae)?),
+        Endpoint::SessionsCurrentEnd => {
+            auth.end_current_session(need()?, now).await.map_err(ae)?;
+            Ok(Reply::Empty)
+        }
+        Endpoint::SessionsEnd => {
+            auth.end_session_request(need()?, &parse(&body)?, now)
+                .await
+                .map_err(ae)?;
+            Ok(Reply::Empty)
+        }
+        Endpoint::SessionsOthersEnd => {
+            auth.end_other_sessions(need()?, now).await.map_err(ae)?;
+            Ok(Reply::Empty)
+        }
         Endpoint::Upload => json(
             &api.vault
                 .upload(need()?.account_id, &parse(&body)?, now)
@@ -1172,6 +1215,10 @@ mod tests {
             | Endpoint::TotpEnrolStart
             | Endpoint::TotpEnrolConfirm
             | Endpoint::TotpDisable
+            | Endpoint::SessionsList
+            | Endpoint::SessionsCurrentEnd
+            | Endpoint::SessionsEnd
+            | Endpoint::SessionsOthersEnd
             | Endpoint::Upload
             | Endpoint::Fetch
             | Endpoint::Heal => true,
@@ -1180,7 +1227,7 @@ mod tests {
 
     #[test]
     fn all_is_complete_and_paths_unique() {
-        assert_eq!(Endpoint::ALL.len(), 27);
+        assert_eq!(Endpoint::ALL.len(), 31);
         assert!(Endpoint::ALL.iter().all(|e| listed(*e)));
         let unique: HashSet<_> = Endpoint::ALL.iter().copied().map(Endpoint::path).collect();
         assert_eq!(unique.len(), Endpoint::ALL.len());
@@ -1372,12 +1419,20 @@ mod tests {
             Endpoint::TotpEnrolStart,
             Endpoint::TotpEnrolConfirm,
             Endpoint::TotpDisable,
+            Endpoint::SessionsList,
+            Endpoint::SessionsEnd,
+            Endpoint::SessionsOthersEnd,
             Endpoint::Upload,
             Endpoint::Fetch,
             Endpoint::Heal,
         ] {
             assert_eq!(e.session(), SessionNeed::NotRecovery, "{e:?}");
         }
+        // Sign-out takes any session, the recovery-only one included (ADR 0075 R2).
+        assert_eq!(
+            Endpoint::SessionsCurrentEnd.session(),
+            SessionNeed::Required
+        );
         // The recovery commit and re-registration take the recovery-only session; the domain
         // applies their rules (CRYPTO.md §11.9 step 5).
         assert_eq!(Endpoint::CommitChange.session(), SessionNeed::Required);
@@ -1429,5 +1484,50 @@ mod tests {
         assert_eq!(body_deadline(BODY_LIMIT), Duration::from_secs(46));
         assert_eq!(MAX_CONCURRENT_LARGE_BODIES, 8);
         assert_eq!(LARGE_BODY_WAIT, Duration::from_secs(10));
+    }
+
+    /// ADR 0075 §11 "HTTP": the module table's rows are the router's endpoints, with their
+    /// methods and session needs ("none", "optional", "… OPAQUE or device …" refuses the
+    /// recovery-only session before the domain, every other row needs a session).
+    #[test]
+    fn the_module_table_is_the_router() {
+        let source = include_str!("api.rs");
+        let mut table: Vec<(String, String, SessionNeed)> = source
+            .lines()
+            .filter_map(|l| l.strip_prefix("//! | `"))
+            .filter_map(|row| {
+                let (route, rest) = row.split_once('`')?;
+                let (method, path) = route.split_once(' ')?;
+                if !path.starts_with("/api/v1/") {
+                    return None;
+                }
+                let session = rest.rsplit('|').nth(1)?.trim();
+                let need = if session == "none" {
+                    SessionNeed::None
+                } else if session.starts_with("optional") {
+                    SessionNeed::Optional
+                } else if session.starts_with("OPAQUE or device")
+                    || session.starts_with("fresh OPAQUE or device")
+                {
+                    SessionNeed::NotRecovery
+                } else {
+                    SessionNeed::Required
+                };
+                Some((method.to_owned(), path.to_owned(), need))
+            })
+            .collect();
+        let mut router: Vec<(String, String, SessionNeed)> = Endpoint::ALL
+            .iter()
+            .map(|e| {
+                let method = match e.method() {
+                    HttpMethod::Get => "GET",
+                    HttpMethod::Post => "POST",
+                };
+                (method.to_owned(), e.path().to_owned(), e.session())
+            })
+            .collect();
+        table.sort_by(|a, b| a.1.cmp(&b.1));
+        router.sort_by(|a, b| a.1.cmp(&b.1));
+        assert_eq!(table, router);
     }
 }
