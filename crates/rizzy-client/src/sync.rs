@@ -115,7 +115,7 @@ use rizzy_proto::vault::{
 };
 use rizzy_proto::wire::List;
 use rizzy_sync::causal::{
-    AuthorStatus, BodyStatus, Report, RestoreGeneration, ServedOp, ServerView, VaultLog,
+    AuthorStatus, BodyStatus, CoverPlan, Report, RestoreGeneration, ServedOp, ServerView, VaultLog,
     check_op_author, check_snapshot_author,
 };
 use rizzy_sync::dot::Dot;
@@ -245,8 +245,15 @@ pub struct FetchOutcome {
     pub applied: usize,
     /// Covers absorbed.
     pub absorbed: usize,
-    /// Covers the merge refused ("Snapshots are claims").
+    /// Covers the merge refused ("Snapshots are claims"), and held covers given up: refused on a
+    /// retry for another reason, or still unresolved when the response sequence completed (ADR
+    /// 0050 §2).
     pub refused_covers: usize,
+    /// Covers the merge refused only as `Refusal::PurgeAboveCut` and that this driver holds
+    /// across the pages of the response sequence instead (ADR 0050 §2): the header of the Purge
+    /// such a tombstone records may come in a later page. A held cover the merge takes on a
+    /// retry counts in [`FetchOutcome::absorbed`] then.
+    pub held_covers: usize,
     /// Records dropped before the chain check: unknown signer, bad signature, foreign vault,
     /// author checks.
     pub dropped: usize,
@@ -306,6 +313,20 @@ struct Settled {
     accepted: Vec<Dot>,
     /// The indexes, into the verified covers, of the covers the merge absorbed.
     absorbed: Vec<usize>,
+    /// The indexes, into the verified covers, of the covers the merge holds (ADR 0050 §2).
+    held: Vec<usize>,
+    /// The items whose held cover the merge took on a retry (ADR 0050 §2).
+    retried: Vec<ItemId>,
+}
+
+/// What the merge did with one cover ([`VaultSync::absorb_cover`]).
+enum Absorb {
+    /// Absorbed, and recorded in the log.
+    Taken,
+    /// Refused only as `Refusal::PurgeAboveCut`: to hold (ADR 0050 §2).
+    Hold,
+    /// Refused for another reason, or not absorbable: final.
+    Refused,
 }
 
 /// What the journal last wrote of the values that live in `cache_meta` and `vaults`, so that a
@@ -391,6 +412,12 @@ pub struct VaultSync {
     /// they wrote or absorbed"). A healing request sends them verbatim as the covers of the
     /// headers it sends without a body.
     held_covers: Vec<(SnapshotHeader, SnapshotRecord)>,
+    /// Per item, the cover the merge holds for a retry in the current response sequence (ADR
+    /// 0050 §2; the plaintext is the merge's, [`ItemMerge::held_claim`]): its record, and whether
+    /// its carried wrap matched the signed hash, to journal and hold it like any absorbed cover
+    /// once the merge takes it. In memory only (ADR 0050 §2: "ADR 0026's cache gains no new
+    /// row").
+    pending_covers: BTreeMap<ItemId, (SnapshotHeader, SnapshotRecord, bool)>,
     /// The server's heads h(V, d) in the last Fetch page, for the healing request's ranges.
     server_heads: Option<VersionVector>,
     /// The item-key wraps of this vault at the held vault key's epoch that this device got
@@ -496,6 +523,7 @@ impl VaultSync {
             answered: BTreeMap::new(),
             held_ops: BTreeMap::new(),
             held_covers: Vec::new(),
+            pending_covers: BTreeMap::new(),
             server_heads: None,
             known_wraps: BTreeMap::new(),
             served_wraps: BTreeSet::new(),
@@ -1039,7 +1067,13 @@ impl VaultSync {
                 None => outcome.dropped += 1,
             }
         }
-        let settled = self.settle(&mut served, &covers, now_ms, &mut outcome)?;
+        let settled = self.settle(
+            &mut served,
+            &covers,
+            response.complete,
+            now_ms,
+            &mut outcome,
+        )?;
         // The rows of what was accepted (ADR 0026 §4 step 2): every accepted op statement with
         // the body and wrap that matched its signed hashes, every absorbed snapshot record.
         // The same records are held in memory for a healing request (ADR 0021 §9).
@@ -1064,6 +1098,7 @@ impl VaultSync {
                 }
             }
         }
+        self.keep_pending_covers(&settled, &covers, &cover_records);
         if response.complete {
             outcome.reports.extend(self.log.complete_fetch_reports());
         }
@@ -1130,7 +1165,9 @@ impl VaultSync {
 
     /// Steps 2–5 of the causal cycle for verified ops and covers: plan, absorb, commit,
     /// deliver. Shared by [`VaultSync::apply_fetch`] and [`VaultSync::restore`], so a cache
-    /// load runs the same code as a Fetch (ADR 0026 §4 step 5).
+    /// load runs the same code as a Fetch (ADR 0026 §4 step 5). `complete` says the page ends
+    /// its response sequence (a cache load is one whole sequence): held covers are retried once
+    /// more and then given up (ADR 0050 §2).
     ///
     /// # Errors
     /// As [`VaultSync::apply_fetch`].
@@ -1138,6 +1175,7 @@ impl VaultSync {
         &mut self,
         served: &mut [ServedOp],
         covers: &[(SnapshotHeader, SecretBytes)],
+        complete: bool,
         now_ms: u64,
         outcome: &mut FetchOutcome,
     ) -> Result<Settled, ClientError> {
@@ -1155,62 +1193,24 @@ impl VaultSync {
                     .map_err(|_| ClientError::InvalidServerResponse)?;
             }
         }
-        // 3. Absorb.
+        // 3. Absorb. A cover refused only as `PurgeAboveCut` is held, not given up: the
+        //    header of the Purge it records may come in a later page (ADR 0050 §2).
         let mut touched = BTreeSet::new();
         for &i in &plan.absorb {
             let Some((header, plaintext)) = covers.get(i) else {
                 continue;
             };
-            let Ok(data) = parse_snapshot(&header.covered, plaintext.expose_secret()) else {
-                continue;
-            };
-            let item = header.item_id;
-            let page_bodies: Vec<(&OpHeader, SymmetricKeyId, &SecretBytes)> = served
-                .iter()
-                .filter(|s| s.header.item_id == item && s.body == BodyStatus::Verified)
-                .filter_map(|s| {
-                    let (key_id, body) = self.bodies.get(&s.header.dot)?;
-                    Some((&s.header, *key_id, body))
-                })
-                .collect();
-            let parsed: Vec<(&OpHeader, SymmetricKeyId, rizzy_sync::record::OpData<'_>)> =
-                page_bodies
-                    .iter()
-                    .filter_map(|(h, k, b)| Some((*h, *k, parse_op(b.expose_secret()).ok()?)))
-                    .collect();
-            let with: Vec<OpInput<'_>> = parsed
-                .iter()
-                .map(|(h, k, d)| OpInput {
-                    header: h,
-                    key_id: *k,
-                    data: d,
-                })
-                .collect();
-            let merge = Self::merge_mut(&mut self.items, &self.item_keys, item);
-            match merge.absorb_snapshot(
-                SnapshotInput {
-                    header,
-                    data: &data,
-                },
-                &with,
-                Some(&plan.cut),
-            ) {
-                Ok(absorption) => match absorption.outcome {
-                    AbsorbOutcome::Absorbed(absorbed) => {
-                        let taken = merge.covered().clone();
-                        self.log.record_absorbed(&plan, item, &taken);
-                        if let Some(hlc) = absorbed.receive_hlc
-                            && let Ok(receipt) = self.clock.receive(hlc, now_ms)
-                        {
-                            self.clock = receipt.clock;
-                        }
-                        touched.insert(item);
-                        outcome.absorbed += 1;
-                        settled.absorbed.push(i);
-                    }
-                    AbsorbOutcome::Refused(_) => outcome.refused_covers += 1,
-                },
-                Err(_) => outcome.refused_covers += 1,
+            match self.absorb_cover(&plan, header, plaintext, served, now_ms, &mut touched) {
+                Some(Absorb::Taken) => {
+                    outcome.absorbed += 1;
+                    settled.absorbed.push(i);
+                }
+                Some(Absorb::Hold) if self.hold(header, plaintext) => {
+                    outcome.held_covers += 1;
+                    settled.held.push(i);
+                }
+                Some(Absorb::Hold | Absorb::Refused) => outcome.refused_covers += 1,
+                None => {}
             }
         }
         // 4. Commit.
@@ -1223,6 +1223,14 @@ impl VaultSync {
                     .map_err(|_| ClientError::InvalidServerResponse)?;
             }
         }
+        // ADR 0050 §2: the held covers are retried whenever a chain advanced, and once more at
+        // the end of the response sequence, after which an unresolved one is given up.
+        if !commit.accepted.is_empty() || complete {
+            self.retry_holds(served, now_ms, &mut touched, outcome, &mut settled);
+        }
+        if complete {
+            self.end_holds(outcome);
+        }
         settled.accepted = commit.accepted;
         // 5. Deliver.
         outcome.applied += self.deliver(now_ms, &mut touched);
@@ -1233,6 +1241,181 @@ impl VaultSync {
             }
         }
         Ok(settled)
+    }
+
+    /// Absorbs one verified cover under `plan` (ADR 0018 §3 "Snapshots are claims"), with the
+    /// verified bodies of this page on its item, and records what the merge took. `None` if
+    /// its data does not parse.
+    fn absorb_cover(
+        &mut self,
+        plan: &CoverPlan,
+        header: &SnapshotHeader,
+        plaintext: &SecretBytes,
+        served: &[ServedOp],
+        now_ms: u64,
+        touched: &mut BTreeSet<ItemId>,
+    ) -> Option<Absorb> {
+        let data = parse_snapshot(&header.covered, plaintext.expose_secret()).ok()?;
+        let item = header.item_id;
+        let page_bodies: Vec<(&OpHeader, SymmetricKeyId, &SecretBytes)> = served
+            .iter()
+            .filter(|s| s.header.item_id == item && s.body == BodyStatus::Verified)
+            .filter_map(|s| {
+                let (key_id, body) = self.bodies.get(&s.header.dot)?;
+                Some((&s.header, *key_id, body))
+            })
+            .collect();
+        let parsed: Vec<(&OpHeader, SymmetricKeyId, rizzy_sync::record::OpData<'_>)> = page_bodies
+            .iter()
+            .filter_map(|(h, k, b)| Some((*h, *k, parse_op(b.expose_secret()).ok()?)))
+            .collect();
+        let with: Vec<OpInput<'_>> = parsed
+            .iter()
+            .map(|(h, k, d)| OpInput {
+                header: h,
+                key_id: *k,
+                data: d,
+            })
+            .collect();
+        let merge = Self::merge_mut(&mut self.items, &self.item_keys, item);
+        let Ok(absorption) = merge.absorb_snapshot(
+            SnapshotInput {
+                header,
+                data: &data,
+            },
+            &with,
+            Some(&plan.cut),
+        ) else {
+            return Some(Absorb::Refused);
+        };
+        match absorption.outcome {
+            AbsorbOutcome::Absorbed(absorbed) => {
+                let taken = merge.covered().clone();
+                self.log.record_absorbed(plan, item, &taken);
+                if let Some(hlc) = absorbed.receive_hlc
+                    && let Ok(receipt) = self.clock.receive(hlc, now_ms)
+                {
+                    self.clock = receipt.clock;
+                }
+                touched.insert(item);
+                Some(Absorb::Taken)
+            }
+            AbsorbOutcome::Refused(refusal) if refusal.holds_cover() => Some(Absorb::Hold),
+            AbsorbOutcome::Refused(_) => Some(Absorb::Refused),
+        }
+    }
+
+    /// Holds a cover the merge refused only as `PurgeAboveCut` (ADR 0050 §2): the log counts it
+    /// for the chain check and the merge keeps its plaintext for a retry. `false` when the log
+    /// holds nothing more (its cap, `MAX_HELD_ITEMS`): the refusal is then final.
+    fn hold(&mut self, header: &SnapshotHeader, plaintext: &SecretBytes) -> bool {
+        if !self.log.hold_cover(header) {
+            return false;
+        }
+        let data = SecretBytes::copy_from_slice(plaintext.expose_secret());
+        let held = Self::merge_mut(&mut self.items, &self.item_keys, header.item_id)
+            .hold_claim(header.clone(), data)
+            .is_ok();
+        if !held {
+            self.log.release_hold(header.item_id);
+        }
+        held
+    }
+
+    /// Retries every held cover, unchanged, under the log's held plan (ADR 0050 §2): the merge
+    /// takes it, holds it again (still `PurgeAboveCut`), or refuses it for another reason, which
+    /// is final. A held cover that a cover absorbed since dominates is moot and dropped.
+    fn retry_holds(
+        &mut self,
+        served: &[ServedOp],
+        now_ms: u64,
+        touched: &mut BTreeSet<ItemId>,
+        outcome: &mut FetchOutcome,
+        settled: &mut Settled,
+    ) {
+        let items: Vec<ItemId> = self.log.held_items().collect();
+        if items.is_empty() {
+            return;
+        }
+        let plan = self.log.held_plan();
+        for item in items {
+            let claim = self.items.get_mut(&item).and_then(|merge| {
+                let moot = merge.held_claim_moot();
+                merge.take_held_claim().filter(|_| !moot)
+            });
+            let Some((header, plaintext)) = claim else {
+                self.log.release_hold(item);
+                continue;
+            };
+            match self.absorb_cover(&plan, &header, &plaintext, served, now_ms, touched) {
+                Some(Absorb::Taken) => {
+                    self.log.release_hold(item);
+                    outcome.absorbed += 1;
+                    settled.retried.push(item);
+                }
+                Some(Absorb::Hold) => {
+                    let held = self
+                        .items
+                        .get_mut(&item)
+                        .is_some_and(|merge| merge.hold_claim(header, plaintext).is_ok());
+                    if !held {
+                        self.log.release_hold(item);
+                        outcome.refused_covers += 1;
+                    }
+                }
+                Some(Absorb::Refused) | None => {
+                    self.log.release_hold(item);
+                    outcome.refused_covers += 1;
+                }
+            }
+        }
+    }
+
+    /// Keeps the record of each cover the merge holds with it, and journals and holds, as any
+    /// absorbed cover, each one the merge took on a retry (ADR 0050 §2). `covers` and
+    /// `cover_records` are the page's verified covers, by the indexes `settled` names.
+    fn keep_pending_covers(
+        &mut self,
+        settled: &Settled,
+        covers: &[(SnapshotHeader, SecretBytes)],
+        cover_records: &[(&SnapshotRecord, bool)],
+    ) {
+        for index in &settled.held {
+            if let (Some((header, _)), Some((record, wrap))) =
+                (covers.get(*index), cover_records.get(*index))
+            {
+                self.pending_covers
+                    .insert(header.item_id, (header.clone(), (*record).clone(), *wrap));
+            }
+        }
+        for item in &settled.retried {
+            if let Some((header, record, wrap)) = self.pending_covers.remove(item) {
+                self.hold_cover(&header, &record, wrap);
+                if self.journal.is_some() {
+                    let row = self.snapshot_row(&header, &record, wrap, own::SERVED);
+                    self.record(|| Write::PutSnapshot(row));
+                }
+            }
+        }
+        let held: BTreeSet<ItemId> = self.log.held_items().collect();
+        self.pending_covers.retain(|item, _| held.contains(item));
+    }
+
+    /// Gives up every held cover at the end of a response sequence (ADR 0050 §2: "A hold that is
+    /// still unresolved once the response sequence completes … is reported now"): each counts as
+    /// a refused cover, and its links lapse into the gap the complete-Fetch reports name.
+    fn end_holds(&mut self, outcome: &mut FetchOutcome) {
+        for item in self.log.held_items().collect::<Vec<_>>() {
+            if self
+                .items
+                .get_mut(&item)
+                .and_then(ItemMerge::take_held_claim)
+                .is_some()
+            {
+                outcome.refused_covers += 1;
+            }
+        }
+        self.log.end_holds();
     }
 
     /// Re-tries the bodies that waited for their item key. A body served in the page being
@@ -2464,7 +2647,7 @@ impl VaultSync {
         }
         let mut outcome = FetchOutcome::default();
         let settled = vault
-            .settle(&mut served, &covers, now_ms, &mut outcome)
+            .settle(&mut served, &covers, true, now_ms, &mut outcome)
             .map_err(|_| corrupt)?;
         // The records held for a healing request, as a Fetch holds them.
         for (op, (record, wrap)) in served.iter().zip(&served_records) {
