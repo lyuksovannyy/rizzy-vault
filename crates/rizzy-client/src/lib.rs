@@ -49,6 +49,7 @@
 //! | [`two_factor`] | CRYPTO.md §5.10, §11.15 | Server-side 2FA enrolment (the otpauth URI) and removal requests |
 //! | [`session`] | CRYPTO.md §5.10; ADR 0012 §7 "A device enrolled after the backup" | Device authentication (also certificate-carrying, after a restore) and request signing |
 //! | [`sessions`] | ADR 0075 §5, §6, §8, §9 | Listing and ending sessions: the rows, which may be ended, sign-out, the ended-session rule |
+//! | [`attachments`] | ADR 0054 §1–§4, §7; INV-78, INV-79 | Encrypted attachments: the item op first, the sealed upload, the download verified against the item's own size and assembled only complete, deletion |
 //! | [`healing`] | ADR 0012 §7 steps 1–3 as ADR 0032 §1–§4 replace them; ADR 0021 §9 "Server behind" | Account-side restore healing: the older-chain rollback, the bundle chain, the newest `account-state` with `E_id` and the settings, the self-grants of step 3b; the recovery repair; the reconciliation objects |
 //! | [`matching`] | ADR 0037, ADR 0038 | URL matching for autofill, over `rizzy-match` |
 //! | [`settings`] | ADR 0042; ADR 0037 §6–§7 | The `ACCOUNT_SETTINGS` plaintext: its record, reading it, and changing the match default and equivalence groups by whole-record replace |
