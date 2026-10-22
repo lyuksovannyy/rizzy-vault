@@ -571,6 +571,102 @@ button.row.selected {
   gap: var(--space-1);
 }
 
+/* A Secure Note's notes rendered from their Markdown (NoteMarkdown.tsx; ADR 0062 §8): every
+   element carries one of these fixed classes and nothing from the note. Code blocks wrap
+   rather than scroll, so the rendered note never holds a scrollable region that would need
+   its own keyboard focus. */
+.md-note {
+  min-width: 0;
+  white-space: normal;
+}
+
+.md-note > :first-child {
+  margin-top: 0;
+}
+
+.md-note > :last-child {
+  margin-bottom: 0;
+}
+
+.md-h1,
+.md-h2,
+.md-h3,
+.md-h4,
+.md-h5,
+.md-h6 {
+  margin: var(--space-3) 0 var(--space-1);
+  line-height: 1.25;
+}
+
+.md-h1 {
+  font-size: 1.5rem;
+}
+
+.md-h2 {
+  font-size: 1.3rem;
+}
+
+.md-h3 {
+  font-size: 1.15rem;
+}
+
+.md-h4,
+.md-h5,
+.md-h6 {
+  font-size: 1rem;
+}
+
+.md-p,
+.md-ul,
+.md-ol,
+.md-pre,
+.md-blockquote {
+  margin: var(--space-2) 0;
+}
+
+.md-ul,
+.md-ol {
+  padding-left: var(--space-6);
+}
+
+.md-code,
+.md-pre {
+  font-family: var(--font-mono);
+  background: var(--color-bg);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-1);
+}
+
+.md-code {
+  padding: 0 var(--space-1);
+}
+
+.md-pre {
+  padding: var(--space-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.md-pre-code {
+  font-family: inherit;
+}
+
+.md-blockquote {
+  padding-left: var(--space-3);
+  border-left: 3px solid var(--color-border);
+}
+
+.md-blockquote > .md-p {
+  margin: var(--space-1) 0;
+}
+
+.md-hr {
+  border: 0;
+  border-top: 1px solid var(--color-border);
+  margin: var(--space-3) 0;
+}
+
 /* The conflict chooser (ConflictChooser.tsx): a full-width box under the conflicting field. */
 .conflict-chooser {
   flex: 1 1 100%;
