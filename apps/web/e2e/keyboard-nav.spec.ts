@@ -15,6 +15,7 @@ import { expect, test } from "@playwright/test";
 
 import { tabTo } from "./a11y.ts";
 import { MARKDOWN_NOTE, PASSWORD, newItem, signUp, watch } from "./helpers.ts";
+import { M3_TYPES, fieldLine, inEditorOrder } from "./m3-types.ts";
 import { type RunningServer, startServer } from "./server.ts";
 
 let server: RunningServer;
@@ -260,5 +261,52 @@ test("keyboard: a Secure Note rendered from Markdown", async ({ page, context })
   await tabTo(page, button("Cancel"));
   await kb.press("Enter");
   await expect(page.getByRole("heading", { name: "Keys note" })).toBeVisible();
+  expect(problems).toEqual([]);
+});
+
+test("keyboard only: create, view and reveal each M3 item type (ADR 0055)", async ({ page }) => {
+  const { problems } = watch(page);
+  const kb = page.keyboard;
+  await signUp(page, server.origin, "keyboardm3");
+  for (const t of M3_TYPES) {
+    // The "New item" menu, the type's entry, every field of its editor, Save.
+    await tabTo(page, page.getByRole("button", { name: /New item/ }));
+    await kb.press("Enter");
+    await tabTo(page, page.getByRole("menuitem", { name: t.menu, exact: true }));
+    await kb.press("Enter");
+    await expect(page.getByRole("heading", { name: t.heading })).toBeVisible();
+    await tabTo(page, page.getByLabel("Title", { exact: true }));
+    await kb.type(t.title);
+    for (const f of inEditorOrder(t)) {
+      await tabTo(page, page.getByLabel(f.label, { exact: true }));
+      // A textarea takes Enter as a line break, which is how a multi-line key is typed.
+      for (const [i, line] of f.value.split("\n").entries()) {
+        if (i > 0) {
+          await kb.press("Enter");
+        }
+        await kb.type(line);
+      }
+    }
+    await tabTo(page, page.getByRole("button", { name: "Save" }));
+    await kb.press("Enter");
+    await expect(page.getByRole("heading", { name: t.title })).toBeVisible();
+    // Each concealed value: Reveal shows exactly what was typed; Copy is reachable too.
+    for (const f of inEditorOrder(t).filter((x) => t.concealed.includes(x))) {
+      const line = fieldLine(page, f.key);
+      await tabTo(page, line.getByRole("button", { name: "Reveal" }));
+      await kb.press("Enter");
+      await expect(line.locator("[data-secret-field]")).toHaveValue(f.value);
+      await tabTo(page, line.locator(".field-actions").getByRole("button", { name: "Hide" }));
+      await kb.press("Enter");
+      await expect(line.locator(".masked")).toBeVisible();
+      await tabTo(page, line.getByRole("button", { name: "Copy" }));
+    }
+    // The type's sidebar filter, by keyboard (backwards: it sits before the list).
+    await tabTo(page, page.getByRole("button", { name: t.menu, exact: true }), { backwards: true });
+    await kb.press("Enter");
+    await expect(page.locator(".row-title")).toHaveText([t.title]);
+    await tabTo(page, page.getByRole("button", { name: "All items", exact: true }), { backwards: true });
+    await kb.press("Enter");
+  }
   expect(problems).toEqual([]);
 });

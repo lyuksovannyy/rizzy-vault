@@ -19,7 +19,7 @@ import { type KeyboardEvent, useCallback, useEffect, useRef, useState } from "re
 
 import { codeOf } from "../core-client.ts";
 import { useDismissableMenu } from "../dismissable-menu.ts";
-import { CREATABLE_TYPES, compareFavoriteFirst, matches } from "../fields.ts";
+import { CREATABLE_TYPES, compareFavoriteFirst, matches, typeLabel } from "../fields.ts";
 import { moveListSelection } from "../shortcuts.ts";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText } from "./common.tsx";
@@ -282,7 +282,7 @@ export function ItemsPane(props: {
                   </span>
                   <span className="row-text">
                     <span className="row-title">{i.title === "" ? "(untitled)" : i.title}</span>
-                    <span className="row-sub">{i.username ?? i.itemType}</span>
+                    <span className="row-sub">{i.username ?? typeLabel(i.itemType)}</span>
                   </span>
                   {i.favorite ? (
                     <span className="row-favorite" aria-label="favorite">

@@ -19,7 +19,18 @@ import { ConfirmDialog, IconStarFilled, IconStarOutline, SecretField, TypeIcon, 
 import { useEffect, useId, useState } from "react";
 
 import { codeOf } from "../core-client.ts";
-import { type Element, type Grouped, group, labelOf, matchModeLabel } from "../fields.ts";
+import {
+  type Element,
+  type Grouped,
+  SSH_DEFAULT_PORT,
+  canEditFields,
+  group,
+  isMultiline,
+  labelOf,
+  matchModeLabel,
+  orderFixed,
+  typeLabel,
+} from "../fields.ts";
 import { SafeLink, SafeOpenButton } from "../SafeLink.tsx";
 import { ConflictChooser } from "./ConflictChooser.tsx";
 import { ItemHistory } from "./ItemHistory.tsx";
@@ -65,7 +76,13 @@ function FieldValue(props: {
     <div className="field" data-field={field.key}>
       {field.concealed ? (
         revealed !== undefined ? (
-          <SecretField label={label} name={field.key} value={revealed} initiallyRevealed />
+          <SecretField
+            label={label}
+            name={field.key}
+            value={revealed}
+            initiallyRevealed
+            {...(isMultiline(field.key) ? { multiline: true } : {})}
+          />
         ) : (
           <>
             <span className="field-label">{label}</span>
@@ -344,8 +361,8 @@ export function ItemView(props: {
           </button>
         )}
       </div>
-      <p className="muted">{summary.itemType}</p>
-      {grouped.fixed
+      <p className="muted">{typeLabel(summary.itemType)}</p>
+      {orderFixed(summary.itemType, grouped.fixed)
         // The name is the title; it gets a row of its own only to resolve a conflict.
         .filter((f) => f.key !== "item.name" || f.conflict)
         .map((f) => (
@@ -360,6 +377,13 @@ export function ItemView(props: {
             onResolved={resolved}
           />
         ))}
+      {summary.itemType === "ssh-key" && !grouped.fixed.some((f) => f.key === "ssh.port") && (
+        // ADR 0055 §1: no `ssh.port` means port 22, a display default that is never stored.
+        <div className="field" data-field="ssh.port">
+          <span className="field-label">{labelOf("ssh.port")}</span>
+          <span className="field-value">{SSH_DEFAULT_PORT} (default)</span>
+        </div>
+      )}
       {summary.hasTotp && !summary.trashed && <TotpLine ctx={ctx} id={id} />}
       {grouped.uris.map((u) => {
         const v = u.attributes.get("value");
@@ -423,9 +447,12 @@ export function ItemView(props: {
             </>
           ) : (
             <>
-              <button type="button" disabled={busy} onClick={props.onEdit}>
-                Edit
-              </button>
+              {canEditFields(summary.itemType) && (
+                // ADR 0018 §8: an unsupported type offers no field edits; trash still works.
+                <button type="button" disabled={busy} onClick={props.onEdit}>
+                  Edit
+                </button>
+              )}
               <button type="button" className="secondary" disabled={busy} onClick={() => setConfirming({ kind: "trash" })}>
                 Move to trash
               </button>

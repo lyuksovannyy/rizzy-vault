@@ -215,6 +215,18 @@ code {
   font-family: var(--font-mono);
 }
 
+/* A multi-line secret (an SSH private key, ADR 0055): a textarea, masked until "Show"
+ * (`SecretField`'s module docs). */
+.secret-field-row textarea.secret-multiline {
+  font-family: var(--font-mono);
+  flex: 1;
+  min-width: 0;
+}
+
+.secret-masked {
+  -webkit-text-security: disc;
+}
+
 .caps-lock-hint {
   color: var(--color-warning-text);
   background: var(--color-warning-bg);

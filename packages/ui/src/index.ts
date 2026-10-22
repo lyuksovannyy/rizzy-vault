@@ -7,7 +7,9 @@ export { SecretField, SECRET_INPUT_ATTRIBUTES, type SecretFieldProps } from "./S
 export {
   IconAccount,
   IconAllItems,
+  IconApiCredential,
   IconBack,
+  IconBankAccount,
   IconCard,
   IconChevronDown,
   IconClose,
@@ -23,12 +25,15 @@ export {
   IconSearch,
   IconSettings,
   IconShield,
+  IconSoftwareLicense,
+  IconSshKey,
   IconStarFilled,
   IconStarOutline,
   IconTag,
   IconTransfer,
   IconTrash,
   IconUnknown,
+  IconWifi,
   TypeIcon,
 } from "./icons.tsx";
 export { ConfirmDialog, type ConfirmDialogProps } from "./ConfirmDialog.tsx";

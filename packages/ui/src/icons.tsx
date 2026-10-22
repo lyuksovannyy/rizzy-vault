@@ -92,6 +92,66 @@ export function IconIdentity(props: IconProps) {
   );
 }
 
+/** An SSH key (ADR 0055): a terminal prompt. */
+export function IconSshKey(props: IconProps) {
+  return base(
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M7 9l3 3-3 3M12 15h5" />
+    </>,
+    props,
+  );
+}
+
+/** An API credential (ADR 0055): code brackets. */
+export function IconApiCredential(props: IconProps) {
+  return base(
+    <>
+      <path d="M8 6l-6 6 6 6M16 6l6 6-6 6" />
+      <path d="M14 4l-4 16" />
+    </>,
+    props,
+  );
+}
+
+/** A software license (ADR 0055): a certificate with a seal. */
+export function IconSoftwareLicense(props: IconProps) {
+  return base(
+    <>
+      <path d="M4 4h16v11H4z" />
+      <path d="M8 8h8M8 11h4" />
+      <circle cx="16" cy="17" r="2.5" />
+      <path d="M14.5 19l-1 3 2.5-1.2 2.5 1.2-1-3" />
+    </>,
+    props,
+  );
+}
+
+/** A Wi-Fi network (ADR 0055): signal arcs. */
+export function IconWifi(props: IconProps) {
+  return base(
+    <>
+      <path d="M2 8.5a15 15 0 0 1 20 0" />
+      <path d="M5 12a10.5 10.5 0 0 1 14 0" />
+      <path d="M8.5 15.5a5.5 5.5 0 0 1 7 0" />
+      <path d="M12 19h.01" />
+    </>,
+    props,
+  );
+}
+
+/** A bank account (ADR 0055): a bank building. */
+export function IconBankAccount(props: IconProps) {
+  return base(
+    <>
+      <path d="M3 9l9-5 9 5z" />
+      <path d="M5 10v7M9.5 10v7M14.5 10v7M19 10v7" />
+      <path d="M3 20h18" />
+    </>,
+    props,
+  );
+}
+
 /** An unrecognised item type. */
 export function IconUnknown(props: IconProps) {
   return base(
@@ -114,6 +174,16 @@ export function TypeIcon(props: IconProps & { readonly type: IconItemType | "unk
       return <IconCard className={props.className} />;
     case "identity":
       return <IconIdentity className={props.className} />;
+    case "ssh-key":
+      return <IconSshKey className={props.className} />;
+    case "api-credential":
+      return <IconApiCredential className={props.className} />;
+    case "software-license":
+      return <IconSoftwareLicense className={props.className} />;
+    case "wifi":
+      return <IconWifi className={props.className} />;
+    case "bank-account":
+      return <IconBankAccount className={props.className} />;
     default:
       return <IconUnknown className={props.className} />;
   }
