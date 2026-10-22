@@ -12,9 +12,13 @@ import {
   isApplyFillMessage,
   isInlineMenuFillRequestMessage,
   isInlineMenuGeneratePasswordRequestMessage,
+  isInstanceToken,
   isRelayApplyFillMessage,
 } from "../src/messaging/contract.ts";
 import { MessageRejected, parseFromContentScript } from "../src/messaging/validate.ts";
+
+/** A canonical v4 UUID, the only shape an ADR 0043 `instanceToken` may have. */
+const TOKEN = "3b241101-e2bb-4255-8caf-4136c566a962";
 
 describe("parseFromContentScript: accepts well-formed messages", () => {
   it("fields_detected with a password and a username field", () => {
@@ -42,6 +46,18 @@ describe("parseFromContentScript: accepts well-formed messages", () => {
       passwordValue: "s3cret",
     };
     expect(parseFromContentScript(message)).toEqual(message);
+  });
+
+  // ADR 0043 point 2: the two iframe-instance messages, the token their only field.
+  it("register_iframe_instance and revoke_iframe_instance", () => {
+    expect(parseFromContentScript({ type: "register_iframe_instance", instanceToken: TOKEN })).toEqual({
+      type: "register_iframe_instance",
+      instanceToken: TOKEN,
+    });
+    expect(parseFromContentScript({ type: "revoke_iframe_instance", instanceToken: TOKEN, extra: "dropped" })).toEqual({
+      type: "revoke_iframe_instance",
+      instanceToken: TOKEN,
+    });
   });
 
   it("check_save_prompt", () => {
@@ -116,6 +132,16 @@ describe("parseFromContentScript: refuses bad input", () => {
     expect(() => parseFromContentScript({ type: "fields_detected" })).toThrow(MessageRejected);
   });
 
+  it("an iframe-instance message whose instanceToken is missing or not a canonical v4 UUID", () => {
+    for (const type of ["register_iframe_instance", "revoke_iframe_instance"]) {
+      expect(() => parseFromContentScript({ type })).toThrow(MessageRejected);
+      expect(() => parseFromContentScript({ type, instanceToken: 7 })).toThrow(MessageRejected);
+      expect(() => parseFromContentScript({ type, instanceToken: TOKEN.toUpperCase() })).toThrow(MessageRejected);
+      expect(() => parseFromContentScript({ type, instanceToken: `${TOKEN}0` })).toThrow(MessageRejected);
+      expect(() => parseFromContentScript({ type, instanceToken: "x".repeat(70_000) })).toThrow(MessageRejected);
+    }
+  });
+
   it("check_save_prompt missing pageUrl", () => {
     expect(() => parseFromContentScript({ type: "check_save_prompt" })).toThrow(MessageRejected);
   });
@@ -146,18 +172,31 @@ describe("parseFromContentScript: refuses bad input", () => {
 
 describe("isInlineMenuFillRequestMessage", () => {
   it("accepts a well-formed request", () => {
-    expect(isInlineMenuFillRequestMessage({ type: "inline_menu_fill_chosen", itemId: "item-1", confirmedEquivalence: false })).toBe(
-      true,
-    );
+    expect(
+      isInlineMenuFillRequestMessage({ type: "inline_menu_fill_chosen", instanceToken: TOKEN, itemId: "item-1", confirmedEquivalence: false }),
+    ).toBe(true);
+  });
+
+  // ADR 0043 point 3: the token is required and shape-validated first.
+  it("rejects a missing or malformed instanceToken", () => {
+    const base = { type: "inline_menu_fill_chosen", itemId: "item-1", confirmedEquivalence: false };
+    expect(isInlineMenuFillRequestMessage(base)).toBe(false);
+    expect(isInlineMenuFillRequestMessage({ ...base, instanceToken: "tok-1" })).toBe(false);
+    expect(isInlineMenuFillRequestMessage({ ...base, instanceToken: null })).toBe(false);
   });
 
   it("rejects a missing confirmedEquivalence", () => {
-    expect(isInlineMenuFillRequestMessage({ type: "inline_menu_fill_chosen", itemId: "item-1" })).toBe(false);
+    expect(isInlineMenuFillRequestMessage({ type: "inline_menu_fill_chosen", instanceToken: TOKEN, itemId: "item-1" })).toBe(false);
   });
 
   it("rejects an itemId over its own length budget", () => {
     expect(
-      isInlineMenuFillRequestMessage({ type: "inline_menu_fill_chosen", itemId: "a".repeat(257), confirmedEquivalence: true }),
+      isInlineMenuFillRequestMessage({
+        type: "inline_menu_fill_chosen",
+        instanceToken: TOKEN,
+        itemId: "a".repeat(257),
+        confirmedEquivalence: true,
+      }),
     ).toBe(false);
   });
 
@@ -168,7 +207,7 @@ describe("isInlineMenuFillRequestMessage", () => {
 
   // Multi-step login pages (ROADMAP §4.4 M3): `only` narrows a fill to one field kind.
   it("accepts only: username or password, and rejects any other value", () => {
-    const base = { type: "inline_menu_fill_chosen", itemId: "item-1", confirmedEquivalence: false };
+    const base = { type: "inline_menu_fill_chosen", instanceToken: TOKEN, itemId: "item-1", confirmedEquivalence: false };
     expect(isInlineMenuFillRequestMessage({ ...base, only: "username" })).toBe(true);
     expect(isInlineMenuFillRequestMessage({ ...base, only: "password" })).toBe(true);
     expect(isInlineMenuFillRequestMessage({ ...base, only: "both" })).toBe(false);
@@ -178,19 +217,42 @@ describe("isInlineMenuFillRequestMessage", () => {
 });
 
 // Gap 32 in the M2 gap audit: the generator's own privileged request, same validator pattern as
-// `isInlineMenuFillRequestMessage` above, but with no fields beyond `type` to bound.
+// `isInlineMenuFillRequestMessage` above, with no fields beyond `type` and `instanceToken`.
 describe("isInlineMenuGeneratePasswordRequestMessage", () => {
   it("accepts a well-formed request", () => {
-    expect(isInlineMenuGeneratePasswordRequestMessage({ type: "inline_menu_generate_password_chosen" })).toBe(true);
+    expect(isInlineMenuGeneratePasswordRequestMessage({ type: "inline_menu_generate_password_chosen", instanceToken: TOKEN })).toBe(true);
+  });
+
+  it("rejects a missing or malformed instanceToken (ADR 0043)", () => {
+    expect(isInlineMenuGeneratePasswordRequestMessage({ type: "inline_menu_generate_password_chosen" })).toBe(false);
+    expect(isInlineMenuGeneratePasswordRequestMessage({ type: "inline_menu_generate_password_chosen", instanceToken: "x" })).toBe(false);
   });
 
   it("rejects the wrong type tag", () => {
-    expect(isInlineMenuGeneratePasswordRequestMessage({ type: "inline_menu_fill_chosen" })).toBe(false);
+    expect(isInlineMenuGeneratePasswordRequestMessage({ type: "inline_menu_fill_chosen", instanceToken: TOKEN })).toBe(false);
   });
 
   it("rejects a non-object", () => {
     expect(isInlineMenuGeneratePasswordRequestMessage(null)).toBe(false);
     expect(isInlineMenuGeneratePasswordRequestMessage("inline_menu_generate_password_chosen")).toBe(false);
+  });
+});
+
+describe("isInstanceToken", () => {
+  it("accepts exactly a lowercase canonical v4 UUID", () => {
+    expect(isInstanceToken(TOKEN)).toBe(true);
+    expect(isInstanceToken(crypto.randomUUID())).toBe(true);
+  });
+
+  it("refuses anything else", () => {
+    expect(isInstanceToken(TOKEN.toUpperCase())).toBe(false);
+    expect(isInstanceToken("3b241101-e2bb-1255-8caf-4136c566a962")).toBe(false); // version 1, not 4
+    expect(isInstanceToken("3b241101-e2bb-4255-7caf-4136c566a962")).toBe(false); // variant bits wrong
+    expect(isInstanceToken(TOKEN.replaceAll("-", ""))).toBe(false);
+    expect(isInstanceToken(` ${TOKEN}`)).toBe(false);
+    expect(isInstanceToken("")).toBe(false);
+    expect(isInstanceToken(undefined)).toBe(false);
+    expect(isInstanceToken({ toString: () => TOKEN })).toBe(false);
   });
 });
 

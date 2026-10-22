@@ -20,7 +20,7 @@
 // independent message (`passkey_ceremony_approved`/`passkey_ceremony_declined`,
 // `messaging/contract.ts`) the consent iframe sends straight to the long-lived context, never
 // through this `postMessage` channel and never relayed by the content script.
-import { MAX_FIELD_VALUE_LEN, MAX_RP_ID_LEN, MAX_RP_NAME_LEN, MAX_TITLE_LEN, MAX_USER_NAME_LEN } from "../messaging/contract.ts";
+import { MAX_FIELD_VALUE_LEN, MAX_RP_ID_LEN, MAX_RP_NAME_LEN, MAX_TITLE_LEN, MAX_USER_NAME_LEN, isInstanceToken } from "../messaging/contract.ts";
 
 export const PASSKEY_CONSENT_SHOW = "rizzy-passkey-consent-show";
 export const PASSKEY_CONSENT_DONE = "rizzy-passkey-consent-done";
@@ -36,6 +36,10 @@ export interface PasskeyConsentShowMessage {
   /** The embedding page's origin, used only as this message's own reply-time `postMessage`
    * target (`inline-menu/protocol.ts`'s identical field, same reasoning). */
   readonly pageOrigin: string;
+  /** ADR 0043 point 3: this consent iframe instance's own token, exactly as
+   * `inline-menu/protocol.ts`'s `InlineMenuShowMessage.instanceToken`. Sent back beside
+   * `ceremonyToken`, never in place of it (ADR 0043 point 6). */
+  readonly instanceToken: string;
   readonly ceremonyToken: string;
   readonly kind: "create" | "get";
   readonly rpId: string;
@@ -65,7 +69,7 @@ export function isPasskeyConsentShowMessage(value: unknown): value is PasskeyCon
     return false;
   }
   const v = value as Record<string, unknown>;
-  if (v["type"] !== PASSKEY_CONSENT_SHOW || !isBoundedString(v["pageOrigin"], MAX_FIELD_VALUE_LEN) || !isBoundedString(v["ceremonyToken"], 256)) {
+  if (v["type"] !== PASSKEY_CONSENT_SHOW || !isBoundedString(v["pageOrigin"], MAX_FIELD_VALUE_LEN) || !isInstanceToken(v["instanceToken"]) || !isBoundedString(v["ceremonyToken"], 256)) {
     return false;
   }
   if (v["kind"] !== "create" && v["kind"] !== "get") {

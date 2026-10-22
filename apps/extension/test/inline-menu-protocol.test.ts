@@ -14,11 +14,15 @@ import {
   isInlineMenuShowMessage,
 } from "../src/inline-menu/protocol.ts";
 
+/** An ADR 0043 instance token: a canonical v4 UUID. */
+const TOKEN = "3b241101-e2bb-4255-8caf-4136c566a962";
+
 describe("isInlineMenuShowMessage", () => {
   it("accepts a well-formed show message with candidates", () => {
     const message = {
       type: INLINE_MENU_SHOW,
       pageOrigin: "https://example.com",
+      instanceToken: TOKEN,
       pageHost: "example.com",
       candidates: [
         { itemId: "item-1", title: "Example", username: "alice", needsWarning: false, savedHost: "example.com" },
@@ -29,17 +33,26 @@ describe("isInlineMenuShowMessage", () => {
 
   // Multi-step login pages (ROADMAP §4.4 M3): the step's one field, passed on to the fill request.
   it("accepts only: username or password, and refuses any other value", () => {
-    const base = { type: INLINE_MENU_SHOW, pageOrigin: "https://example.com", pageHost: "example.com", candidates: [] };
+    const base = { type: INLINE_MENU_SHOW, pageOrigin: "https://example.com", instanceToken: TOKEN, pageHost: "example.com", candidates: [] };
     expect(isInlineMenuShowMessage({ ...base, only: "username" })).toBe(true);
     expect(isInlineMenuShowMessage({ ...base, only: "password" })).toBe(true);
     expect(isInlineMenuShowMessage({ ...base, only: "email" })).toBe(false);
     expect(isInlineMenuShowMessage({ ...base, only: 1 })).toBe(false);
   });
 
+  // ADR 0043 point 3: the show message is the one channel the instance token travels.
+  it("refuses a missing or malformed instanceToken", () => {
+    const base = { type: INLINE_MENU_SHOW, pageOrigin: "https://example.com", pageHost: "example.com", candidates: [] };
+    expect(isInlineMenuShowMessage(base)).toBe(false);
+    expect(isInlineMenuShowMessage({ ...base, instanceToken: "tok-1" })).toBe(false);
+    expect(isInlineMenuShowMessage({ ...base, instanceToken: TOKEN.toUpperCase() })).toBe(false);
+  });
+
   it("refuses a candidate missing needsWarning", () => {
     const message = {
       type: INLINE_MENU_SHOW,
       pageOrigin: "https://example.com",
+      instanceToken: TOKEN,
       pageHost: "example.com",
       candidates: [{ itemId: "item-1", title: "Example", username: "alice", savedHost: "example.com" }],
     };
@@ -50,6 +63,7 @@ describe("isInlineMenuShowMessage", () => {
     const message = {
       type: INLINE_MENU_SHOW,
       pageOrigin: "https://example.com",
+      instanceToken: TOKEN,
       pageHost: "example.com",
       candidates: [{ itemId: "item-1", title: "Example", username: "alice", needsWarning: false }],
     };
@@ -60,6 +74,7 @@ describe("isInlineMenuShowMessage", () => {
     const message = {
       type: INLINE_MENU_SHOW,
       pageOrigin: "https://example.com",
+      instanceToken: TOKEN,
       pageHost: "example.com",
       candidates: [
         {
@@ -79,6 +94,7 @@ describe("isInlineMenuShowMessage", () => {
       isInlineMenuShowMessage({
         type: INLINE_MENU_SHOW,
         pageOrigin: "https://example.com",
+        instanceToken: TOKEN,
         pageHost: "example.com",
         candidates: [],
       }),
@@ -97,6 +113,7 @@ describe("isInlineMenuShowMessage", () => {
       isInlineMenuShowMessage({
         type: INLINE_MENU_SHOW,
         pageOrigin: "https://example.com",
+        instanceToken: TOKEN,
         pageHost: "example.com",
         candidates,
       }),
@@ -107,6 +124,7 @@ describe("isInlineMenuShowMessage", () => {
     const message = {
       type: INLINE_MENU_SHOW,
       pageOrigin: "https://example.com",
+      instanceToken: TOKEN,
       pageHost: "example.com",
       candidates: [{ itemId: "x" }],
     };

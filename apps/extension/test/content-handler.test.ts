@@ -108,6 +108,7 @@ describe("handleInlineMenuFillRequest", () => {
     const ext = { tabs: { sendMessage: async () => undefined } } as unknown as WebExtNamespace;
     const response = await handleInlineMenuFillRequest(ext, 1, "https://example.com/login", {
       type: "inline_menu_fill_chosen",
+      instanceToken: "3b241101-e2bb-4255-8caf-4136c566a962",
       itemId: "item-1",
       confirmedEquivalence: false,
     });
@@ -118,6 +119,7 @@ describe("handleInlineMenuFillRequest", () => {
     const ext = { tabs: { sendMessage: async () => undefined } } as unknown as WebExtNamespace;
     const response = await handleInlineMenuFillRequest(ext, 1, "not-a-url", {
       type: "inline_menu_fill_chosen",
+      instanceToken: "3b241101-e2bb-4255-8caf-4136c566a962",
       itemId: "item-1",
       confirmedEquivalence: false,
     });

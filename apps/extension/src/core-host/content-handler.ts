@@ -19,8 +19,10 @@ import {
   offerPasskeyCreate,
   offerPasskeyGet,
   offerSavePrompt,
+  registerIframeInstance,
   resolveSavePrompt,
   revealCredentialsForFill,
+  revokeIframeInstance,
 } from "./core-context.ts";
 import type {
   ApplyFillMessage,
@@ -212,6 +214,24 @@ export async function handleContentScriptRequest(
         return refused("passkey_get_request: the device is locked, or no stored passkey matches this rpId");
       }
       return { type: "passkey_offer", ceremonyToken: offer.ceremonyToken, kind: "get", rpId: offer.rpId, candidates: offer.candidates };
+    }
+    case "register_iframe_instance": {
+      // ADR 0043 point 2: bound to the browser-vouched tab and origin only. A content script
+      // with no tab id has nothing to bind to, and a token already held (a collision or a
+      // replayed registration) is never rebound.
+      if (trustedTabId === undefined || !registerIframeInstance(message.instanceToken, trustedTabId, trustedOrigin)) {
+        return refused("register_iframe_instance: refused");
+      }
+      return { type: "iframe_instance_done" };
+    }
+    case "revoke_iframe_instance": {
+      // ADR 0043 point 5. Answered the same whether or not anything was revoked: only the
+      // registering tab can revoke its own token (`iframe-instance.ts`), and the content script
+      // has nothing to do differently either way.
+      if (trustedTabId !== undefined) {
+        revokeIframeInstance(message.instanceToken, trustedTabId);
+      }
+      return { type: "iframe_instance_done" };
     }
   }
 }

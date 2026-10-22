@@ -234,10 +234,12 @@ const SEEDS: Readonly<Record<string, () => unknown>> = {
     challengeB64: "AAAA",
     allowCredentialIdsB64: ["AAAA"],
   }),
-  inlineMenuFillRequest: () => ({ type: "inline_menu_fill_chosen", itemId: "item-1", confirmedEquivalence: false }),
-  inlineMenuGeneratePasswordRequest: () => ({ type: "inline_menu_generate_password_chosen" }),
-  passkeyCeremonyApproved: () => ({ type: "passkey_ceremony_approved", ceremonyToken: "ct-1", chosenPasskeyRef: "ref-1" }),
-  passkeyCeremonyDeclined: () => ({ type: "passkey_ceremony_declined", ceremonyToken: "ct-1" }),
+  registerIframeInstance: () => ({ type: "register_iframe_instance", instanceToken: "3b241101-e2bb-4255-8caf-4136c566a962" }),
+  revokeIframeInstance: () => ({ type: "revoke_iframe_instance", instanceToken: "3b241101-e2bb-4255-8caf-4136c566a962" }),
+  inlineMenuFillRequest: () => ({ type: "inline_menu_fill_chosen", instanceToken: "3b241101-e2bb-4255-8caf-4136c566a962", itemId: "item-1", confirmedEquivalence: false }),
+  inlineMenuGeneratePasswordRequest: () => ({ type: "inline_menu_generate_password_chosen", instanceToken: "3b241101-e2bb-4255-8caf-4136c566a962" }),
+  passkeyCeremonyApproved: () => ({ type: "passkey_ceremony_approved", instanceToken: "3b241101-e2bb-4255-8caf-4136c566a962", ceremonyToken: "ct-1", chosenPasskeyRef: "ref-1" }),
+  passkeyCeremonyDeclined: () => ({ type: "passkey_ceremony_declined", instanceToken: "3b241101-e2bb-4255-8caf-4136c566a962", ceremonyToken: "ct-1" }),
   applyFill: () => ({ type: "apply_fill", values: { username: "alice", password: "s3cret" } }),
   relayApplyFill: () => ({ type: "relay_apply_fill", tabId: 7, values: { password: "s3cret" } }),
   applyPasskeyResultOk: () => ({
@@ -250,6 +252,7 @@ const SEEDS: Readonly<Record<string, () => unknown>> = {
   inlineMenuShow: () => ({
     type: "rizzy-inline-menu-show",
     pageOrigin: "https://example.com",
+    instanceToken: "3b241101-e2bb-4255-8caf-4136c566a962",
     pageHost: "example.com",
     candidates: [{ itemId: "i1", title: "Example", username: "alice", needsWarning: false, savedHost: "example.com" }],
   }),
@@ -311,8 +314,34 @@ function assertNoPrototypePollution(label: string): void {
  * budgets — never against `validate.ts`'s/the protocol file's internal branches — so this stays
  * an independent oracle, not a mirror of the implementation it is fuzzing. Throws (a test
  * failure) on violation; the "oracle self-check" test below proves it does. */
+/** ADR 0043's instance-token shape, written out independently of `contract.ts`'s own pattern:
+ * 36 characters, 8-4-4-4-12 lowercase hex groups, version nibble 4, variant 8/9/a/b. */
+function isCanonicalV4(token: unknown): boolean {
+  if (typeof token !== "string" || token.length !== 36) {
+    return false;
+  }
+  const groups = token.split("-");
+  const hex = (s: string) => [...s].every((ch) => "0123456789abcdef".includes(ch));
+  return (
+    groups.length === 5 &&
+    groups.map((g) => g.length).join(",") === "8,4,4,4,12" &&
+    groups.every(hex) &&
+    token[14] === "4" &&
+    "89ab".includes(token[19] ?? "")
+  );
+}
+
 function checkAcceptedInvariant(name: string, value: unknown): void {
   const v = value as Record<string, unknown>;
+  if (
+    (name === "isInlineMenuFillRequestMessage" ||
+      name === "isInlineMenuGeneratePasswordRequestMessage" ||
+      name === "isPasskeyCeremonyMessage" ||
+      name === "isInlineMenuShowMessage") &&
+    !isCanonicalV4(v["instanceToken"])
+  ) {
+    throw new Error(`${name}: accepted an instanceToken that is not a canonical v4 UUID (ADR 0043)`);
+  }
   switch (name) {
     case "isInlineMenuFillRequestMessage":
       if (typeof v["itemId"] !== "string" || v["itemId"].length > 256) {
@@ -432,7 +461,7 @@ function checkAcceptedInvariant(name: string, value: unknown): void {
       break;
     }
     case "isInlineMenuGeneratePasswordRequestMessage":
-      break; // no fields beyond `type` to bound.
+      break; // no fields beyond `type` and `instanceToken` (checked above) to bound.
     default:
       throw new Error(`fuzz harness: no accepted-invariant wired for ${name} — add one before trusting its fuzz coverage`);
   }
@@ -446,6 +475,9 @@ function checkParsedInvariant(value: FromContentScript): void {
   const approxSize = JSON.stringify(value).length;
   if (approxSize > MAX_MESSAGE_BYTES) {
     throw new Error(`parseFromContentScript: accepted a message over MAX_MESSAGE_BYTES (INV-40)`);
+  }
+  if ((value.type === "register_iframe_instance" || value.type === "revoke_iframe_instance") && !isCanonicalV4(value.instanceToken)) {
+    throw new Error(`parseFromContentScript: accepted an instanceToken that is not a canonical v4 UUID (ADR 0043)`);
   }
   if ("pageUrl" in value && (typeof value.pageUrl !== "string" || value.pageUrl.length > MAX_URL_LEN)) {
     throw new Error(`parseFromContentScript: accepted pageUrl out of bound`);

@@ -45,7 +45,7 @@
 //     `inline_menu_fill_chosen` message that would have to follow only ever carries the real
 //     `itemId` the real iframe's own click handler holds — a forged show message cannot make
 //     the iframe send that for an id it never really rendered a trusted click for.
-import { MAX_CANDIDATES, MAX_FIELD_VALUE_LEN, MAX_HOST_LEN, MAX_TITLE_LEN, type FillScope } from "../messaging/contract.ts";
+import { MAX_CANDIDATES, MAX_FIELD_VALUE_LEN, MAX_HOST_LEN, MAX_TITLE_LEN, isInstanceToken, type FillScope } from "../messaging/contract.ts";
 
 export const INLINE_MENU_SHOW = "rizzy-inline-menu-show";
 export const INLINE_MENU_PICK = "rizzy-inline-menu-pick";
@@ -71,6 +71,14 @@ export interface InlineMenuShowMessage {
   /** The embedding page's origin, used only as this message's own `postMessage` target when
    * the iframe later replies — never trusted as an identity claim beyond that. */
   readonly pageOrigin: string;
+  /** ADR 0043 point 3: the token the content script minted for, and registered with the
+   * background for, this one iframe instance. This targeted message is the only place it ever
+   * travels — never `src`, an attribute, or anything else a page sharing the tab's frame tree
+   * can read — and the iframe sends it back with every privileged request
+   * (`messaging/contract.ts`'s `InlineMenuFillRequestMessage`). A page that forges this message
+   * (the forgeable direction, module docs) can only invent a token, which the background refuses;
+   * a clone of this resource is never sent one at all. */
+  readonly instanceToken: string;
   /** The page's own exact normalised host, A-label form (ADR 0037 §5 "Exact host shown"; gap
    * 31 in the M2 gap audit): the menu always shows this, matching or not, so the user can
    * notice an unexpected match. Computed by `rizzy-match`, never by this module. */
@@ -117,6 +125,7 @@ export function isInlineMenuShowMessage(value: unknown): value is InlineMenuShow
   if (
     v["type"] !== INLINE_MENU_SHOW ||
     !isBoundedString(v["pageOrigin"], MAX_FIELD_VALUE_LEN) ||
+    !isInstanceToken(v["instanceToken"]) ||
     !isBoundedString(v["pageHost"], MAX_HOST_LEN) ||
     !(v["only"] === undefined || v["only"] === "username" || v["only"] === "password")
   ) {

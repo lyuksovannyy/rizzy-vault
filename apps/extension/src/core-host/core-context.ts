@@ -34,6 +34,7 @@ import {
 } from "./bindings.ts";
 import { ExtensionCache } from "../cache/idb.ts";
 import { AutoLockTimer, readAutoLockMs } from "./lifecycle.ts";
+import { createIframeInstanceStore } from "./iframe-instance.ts";
 import {
   type PasskeyCeremonyRequest,
   createPasskeyCeremonyStore,
@@ -101,6 +102,7 @@ async function lock(ext: WebExtNamespace): Promise<void> {
   pendingSavePrompts.clear();
   savePromptLocations.clear();
   passkeyCeremonies.clear();
+  iframeInstances.clear();
   if (hasSessionStorage(ext)) {
     await clearUnlockedSnapshot(ext);
   }
@@ -302,6 +304,33 @@ export async function generatePasswordForFill(): Promise<string> {
  * module docs) — cleared on lock, alongside every other in-memory secret-adjacent state this
  * long-lived context holds (`lock`, above). */
 const passkeyCeremonies = createPasskeyCeremonyStore();
+
+/** The inline-menu/passkey-consent iframe instance tokens (ADR 0043; `core-host/iframe-instance.ts`'s
+ * own module docs) — cleared on lock like {@link passkeyCeremonies}. A registration needs no
+ * unlocked session (the iframe shows nothing privileged while locked anyway, and every request it
+ * could send is refused while locked regardless), so these four never check `session`. */
+const iframeInstances = createIframeInstanceStore();
+
+/** `register_iframe_instance` (ADR 0043 point 2): `tabId`/`trustedOrigin` are the browser-vouched
+ * sender info of the content script that minted `instanceToken`. */
+export function registerIframeInstance(instanceToken: string, tabId: number, trustedOrigin: string): boolean {
+  return iframeInstances.register(instanceToken, tabId, trustedOrigin, Date.now());
+}
+
+/** `revoke_iframe_instance` (ADR 0043 point 5). */
+export function revokeIframeInstance(instanceToken: string, tabId: number): void {
+  iframeInstances.revoke(instanceToken, tabId);
+}
+
+/** The use-time check (ADR 0043 point 4), for `listener.ts`'s `isInlineMenuSender` branch:
+ * every `true` must be paired with one {@link releaseIframeInstance} once that request settles. */
+export function acquireIframeInstance(instanceToken: string, liveTabId: number): boolean {
+  return iframeInstances.acquire(instanceToken, liveTabId, Date.now());
+}
+
+export function releaseIframeInstance(instanceToken: string): void {
+  iframeInstances.release(instanceToken);
+}
 
 /** `content-handler.ts`'s `passkey_create_request` handling (ADR 0039 §2): registers a pending
  * "save a passkey" ceremony and returns what the consent UI needs to display, or `undefined`
