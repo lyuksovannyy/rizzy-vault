@@ -133,6 +133,7 @@ const FILES: [VectorFile; 8] = [
             ("derivation", "fingerprint", 1),
             ("derivation", "device-set", 3),
             ("derivation", "settings", 2),
+            ("derivation", "server/db-backup", 1),
         ],
     },
     VectorFile {
@@ -162,6 +163,7 @@ const FILES: [VectorFile; 8] = [
             ("envelope", "SERVER_TOTP_SECRET", 1),
             ("envelope", "SERVER_LOGIN_STATE", 1),
             ("envelope", "SERVER_SECRETS_BACKUP", 1),
+            ("envelope", "SERVER_DB_BACKUP", 1),
         ],
     },
     VectorFile {
