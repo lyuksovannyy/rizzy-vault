@@ -338,5 +338,9 @@ mod tests {
         };
         assert!(!tls.refuses_commit() && !tls.outcome_unknown());
         assert!(tls.to_string().contains("https://vault.example.com"));
+        // ADR 0048: the quota refusal names the code and what the user can do.
+        let quota = CliError::Server(ErrorCode::QuotaExceeded).to_string();
+        assert!(quota.contains("quota_exceeded") && quota.contains("RIZZY_ACCOUNT_QUOTA_BYTES"));
+        assert!(!CliError::Server(ErrorCode::QuotaExceeded).refuses_commit());
     }
 }
