@@ -1,6 +1,6 @@
 # ADR 0050: Paged Fetch: tombstone covers that can span a page boundary
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M1

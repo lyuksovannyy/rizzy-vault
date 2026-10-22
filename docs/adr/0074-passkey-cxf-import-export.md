@@ -1,6 +1,6 @@
 # ADR 0074: Passkey import/export via the FIDO Credential Exchange Format (CXF)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M8

@@ -1,6 +1,6 @@
 # ADR 0043: A per-instance token for the inline-menu and passkey-consent iframes
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M2

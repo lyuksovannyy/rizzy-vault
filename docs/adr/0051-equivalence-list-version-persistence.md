@@ -1,6 +1,6 @@
 # ADR 0051: Persisting the highest accepted equivalence-list version
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M2

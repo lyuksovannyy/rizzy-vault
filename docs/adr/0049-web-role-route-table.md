@@ -1,6 +1,6 @@
 # ADR 0049: Web role: a fixed, enumerable route table (compiled-in assets + share links)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M1

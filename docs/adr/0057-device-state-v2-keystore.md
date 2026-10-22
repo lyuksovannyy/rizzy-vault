@@ -1,6 +1,6 @@
 # ADR 0057: Device-state record version 2: OS-keystore-backed local unlock (`E_ks`)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M3
