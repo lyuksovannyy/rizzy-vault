@@ -109,13 +109,16 @@ pub const FORMAT_VERSION: u8 = 0x01;
 /// of the AAD of every envelope (INV-9).
 pub const HEADER_LEN: usize = 18;
 
-/// Algorithm ids (CRYPTO.md §9.4). Only registered ids exist as values; `0x00`, `0x14`–`0x1F`,
-/// the test-only `0xF0`–`0xFE` and `0xFF` are rejected by [`AlgId::from_u8`].
+/// Algorithm ids (CRYPTO.md §9.4). Only registered ids exist as values; `0x00`, the reserved,
+/// undefined `0x03` ([ADR 0054]: attachments use `0x01`, and a streaming AEAD would need its own
+/// ADR), `0x14`–`0x1F`, the test-only `0xF0`–`0xFE` and `0xFF` are rejected by
+/// [`AlgId::from_u8`].
+///
+/// [ADR 0054]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0054-attachments-envelope-and-api.md
 ///
 /// Registered is not the same as usable: only `0x01`, `0x10` and `0x12` are implemented in M1
 /// ([`AlgId::is_implemented`]). The reserved ids exist so that the registry, the purpose table
-/// and the parser can name them. No purpose can seal or open with them yet (`ATTACHMENT_CHUNK`
-/// names `0x03` but has no context type), and no layout parses them.
+/// and the parser can name them. No purpose seals or opens with them, and no layout parses them.
 /// Whether an algorithm is acceptable for a given object is decided by the purpose's decrypt
 /// allow-list ([`Purpose`]), never by this enum alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -126,8 +129,6 @@ pub enum AlgId {
     XChaCha20Poly1305Committed = 0x01,
     /// `0x02`: AES-256-GCM-SIV with the same commitment. Reserved, not implemented.
     Aes256GcmSivCommitted = 0x02,
-    /// `0x03`: chunked/streaming variant of `0x01` for attachments. Reserved for the M3 ADR.
-    ChunkedXChaCha20Poly1305 = 0x03,
     /// `0x10`: HPKE Base mode, DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / `ChaCha20Poly1305`. M1.
     HpkeBaseX25519 = 0x10,
     /// `0x11`: HPKE Base mode with X-Wing. Reserved, post-1.0.
@@ -148,8 +149,6 @@ pub enum AlgId {
 pub enum AlgFamily {
     /// Symmetric committing AEAD.
     Symmetric,
-    /// Chunked symmetric (M3).
-    Chunked,
     /// HPKE Base mode.
     HpkeBase,
     /// HPKE PSK mode.
@@ -158,10 +157,9 @@ pub enum AlgFamily {
 
 impl AlgId {
     /// Every registered algorithm id, implemented or reserved, in id order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 6] = [
         Self::XChaCha20Poly1305Committed,
         Self::Aes256GcmSivCommitted,
-        Self::ChunkedXChaCha20Poly1305,
         Self::HpkeBaseX25519,
         Self::HpkeBaseXWing,
         Self::HpkePskX25519,
@@ -184,7 +182,6 @@ impl AlgId {
         match value {
             0x01 => Some(Self::XChaCha20Poly1305Committed),
             0x02 => Some(Self::Aes256GcmSivCommitted),
-            0x03 => Some(Self::ChunkedXChaCha20Poly1305),
             0x10 => Some(Self::HpkeBaseX25519),
             0x11 => Some(Self::HpkeBaseXWing),
             0x12 => Some(Self::HpkePskX25519),
@@ -193,13 +190,12 @@ impl AlgId {
         }
     }
 
-    /// The algorithm's family: symmetric (`0x01`, `0x02`), chunked (`0x03`), HPKE Base
+    /// The algorithm's family: symmetric (`0x01`, `0x02`), HPKE Base
     /// (`0x10`, `0x11`) or HPKE PSK (`0x12`, `0x13`).
     #[must_use]
     pub const fn family(self) -> AlgFamily {
         match self {
             Self::XChaCha20Poly1305Committed | Self::Aes256GcmSivCommitted => AlgFamily::Symmetric,
-            Self::ChunkedXChaCha20Poly1305 => AlgFamily::Chunked,
             Self::HpkeBaseX25519 | Self::HpkeBaseXWing => AlgFamily::HpkeBase,
             Self::HpkePskX25519 | Self::HpkePskXWing => AlgFamily::HpkePsk,
         }

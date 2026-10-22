@@ -157,8 +157,6 @@ fn m1_allow_lists_match_crypto_md_9_5() {
             &[AlgId::HpkePskX25519]
         } else if base.contains(&p) {
             &[AlgId::HpkeBaseX25519]
-        } else if p == Purpose::AttachmentChunk {
-            &[AlgId::ChunkedXChaCha20Poly1305]
         } else {
             &[AlgId::XChaCha20Poly1305Committed]
         };
@@ -250,7 +248,8 @@ fn algorithm_registry_matches_crypto_md_9_4() {
     let registered: Vec<u8> = (0..=u8::MAX)
         .filter(|v| AlgId::from_u8(*v).is_some())
         .collect();
-    assert_eq!(registered, [0x01, 0x02, 0x03, 0x10, 0x11, 0x12, 0x13]);
+    // `0x03` is reserved and undefined (ADR 0054, "What this ADR supersedes"): no value.
+    assert_eq!(registered, [0x01, 0x02, 0x10, 0x11, 0x12, 0x13]);
     for alg in AlgId::ALL {
         assert_eq!(AlgId::from_u8(alg.to_u8()), Some(alg));
     }
@@ -1432,9 +1431,15 @@ fn check_order_is_length_version_allow_list() {
         parse_for_purpose(&ok, Purpose::ServerTotpSecret.client_decrypt_allow_list()),
         Err(DecryptError)
     );
-    // Reserved algorithm purposes cannot be parsed for decryption yet.
+    // ATTACHMENT_CHUNK is an ordinary `{0x01}` purpose (ADR 0054 §1), and `0x03` is undefined.
+    assert!(parse_for_purpose(&ok, Purpose::AttachmentChunk.client_decrypt_allow_list()).is_ok());
+    let mut undefined = ok.clone();
+    undefined[1] = 0x03;
     assert_eq!(
-        parse_for_purpose(&ok, Purpose::AttachmentChunk.client_decrypt_allow_list()),
+        parse_for_purpose(
+            &undefined,
+            Purpose::AttachmentChunk.client_decrypt_allow_list()
+        ),
         Err(DecryptError)
     );
 }
