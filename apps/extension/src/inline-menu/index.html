@@ -13,7 +13,8 @@
          fit now happens inside this document instead: `html`/`body` fill the fixed outer frame
          exactly and never grow past it, and `#list` scrolls its own overflow. */
       html,
-      body {
+      body,
+      main {
         margin: 0;
         height: 100%;
         overflow: hidden;
@@ -27,6 +28,11 @@
       body:has(#step-note:not(:empty)) #list {
         max-height: calc(100% - 84px);
       }
+      /* WCAG 2.2 SC 2.5.8 (target size, AA; e2e/a11y.spec.ts): the browser's default button is
+         about 21px tall; every button here is at least 24px. */
+      button {
+        min-height: 24px;
+      }
     </style>
   </head>
   <body>
@@ -39,6 +45,10 @@
     <!-- ADR 0037 §5 "Exact host shown": the page's own exact normalised host, always shown,
          matching or not (gap 31 in the M2 gap audit). Filled by `main.ts` as plain text only,
          never as a link or anything else `innerHTML` could parse as markup. -->
+    <!-- One main landmark holds the whole menu (axe "region": all content in a landmark), named
+         so it stays distinct from the embedding page's own main landmark (axe
+         "landmark-unique"). -->
+    <main aria-label="rizzy-vault autofill">
     <div id="page-host"></div>
     <!-- Multi-step login pages (ROADMAP §4.4 M3): says which one field this step fills, as plain
          text set by `main.ts`; empty on a one-page form. -->
@@ -48,6 +58,7 @@
          password field, not only in the popup (ROADMAP §4.4) — on the same trusted click as
          every other button here (INV-36), never anything a page script can synthesize. -->
     <div id="generate"></div>
+    </main>
     <script type="module" src="./main.ts"></script>
   </body>
 </html>
