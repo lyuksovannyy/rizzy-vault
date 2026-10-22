@@ -32,13 +32,23 @@ import {
   trustedOriginOf,
 } from "../messaging/sender.ts";
 import { MessageRejected, parseFromContentScript } from "../messaging/validate.ts";
-import { isInlineMenuFillRequestMessage, isInlineMenuGeneratePasswordRequestMessage, isPasskeyCeremonyMessage } from "../messaging/contract.ts";
+import {
+  isInlineMenuFillRequestMessage,
+  isInlineMenuGeneratePasswordRequestMessage,
+  isInlineMenuOfferRequestMessage,
+  isPasskeyCeremonyMessage,
+  isSaveDialogRequestMessage,
+  isSaveDialogResolveMessage,
+} from "../messaging/contract.ts";
 import type { ContentScriptForward, PopupRequest, PopupResponse, ToContentScript } from "../messaging/contract.ts";
 import {
   handleContentScriptRequest,
   handleInlineMenuFillRequest,
   handleInlineMenuGeneratePasswordRequest,
+  handleInlineMenuOfferRequest,
   handlePasskeyCeremonyApproval,
+  handleSaveDialogRequest,
+  handleSaveDialogResolve,
 } from "./content-handler.ts";
 import { acquireIframeInstance, handlePopupRequest, lockFromIdleState, releaseIframeInstance, startCoreContext } from "./core-context.ts";
 import { DEFAULT_AUTO_LOCK_MS } from "./lifecycle.ts";
@@ -170,6 +180,18 @@ export function installCoreContextListener(ext: WebExtNamespace, options: Instal
         // as the fill request below, for the generator instead of a saved item's
         // credentials — see `handleInlineMenuGeneratePasswordRequest`'s own doc.
         return admit(message.instanceToken, () => handleInlineMenuGeneratePasswordRequest(ext, tabId, tabUrl), "inline_menu_generate_password_chosen: failed");
+      }
+      if (isInlineMenuOfferRequestMessage(message)) {
+        // ADR 0076 §4.1 step 2, reconciled with ADR 0043: the offer request carries the
+        // iframe's instance token, admitted like every other privileged iframe request.
+        return admit(message.instanceToken, () => handleInlineMenuOfferRequest(tabId, tabUrl, message), "inline_menu_offer_request: failed");
+      }
+      if (isSaveDialogRequestMessage(message)) {
+        // ADR 0076 §5.2: the extension-origin save dialog fetches its choices from here directly.
+        return admit(message.instanceToken, () => handleSaveDialogRequest(message), "save_dialog_request: failed");
+      }
+      if (isSaveDialogResolveMessage(message)) {
+        return admit(message.instanceToken, () => handleSaveDialogResolve(message), "save_dialog_resolve: failed");
       }
       if (!isInlineMenuFillRequestMessage(message)) {
         sendResponse({ type: "content_error", code: INLINE_MENU_SENDER_REFUSED } satisfies ToContentScript);

@@ -16,12 +16,15 @@
 // `itemId` it names of its own accord. The actual DOM write (`applyFill`, below) still runs
 // here, since this is the only context with the real `HTMLInputElement`s.
 import {
+  MAX_CAPTURED_FIELDS,
   MAX_FIELD_VALUE_LEN,
   isApplyFillMessage,
   type CandidatesMessage,
   type CheckSavePromptMessage,
   type CredentialsSubmittedMessage,
   type FieldDescriptor,
+  type CapturedCustomField,
+  type FillOnly,
   type FillScope,
   type FillValues,
   type FromContentScript,
@@ -30,7 +33,9 @@ import {
   type ToContentScript,
 } from "../messaging/contract.ts";
 import { INLINE_MENU_SHOW, isInlineMenuPickMessage, type InlineMenuShowMessage } from "../inline-menu/protocol.ts";
-import { NO_FORM, detectLoginStep, stepFillScope, type InputFacts } from "./login-step.ts";
+import { SAVE_DIALOG_SHOW, isSaveDialogDoneMessage, type SaveDialogShowMessage } from "../save-dialog/protocol.ts";
+import { NO_FORM, detectLoginStep, menuAllowed, stepScope, type InputFacts, type LoginStep } from "./login-step.ts";
+import { parseAutocomplete } from "../messaging/autocomplete.ts";
 import { isOwnOverlayElement, pageMutations } from "./own-overlay-mutation.ts";
 import { mintInstanceToken } from "./instance-token.ts";
 import {
@@ -129,13 +134,15 @@ function installContentScript(): void {
   };
 
   function wireInlineMenu(answer: CandidatesMessage, step: DetectedStep): void {
-    const { usernameField, passwordField, only } = step;
+    const { usernameField, passwordField, totpField, form, scope } = step;
     menu?.destroy();
     activeFillTargets = undefined;
     // The menu anchors on the password field when the step has one (the one-page form, as
     // before, and the password-only step), else on the identifier-first step's username field.
-    const anchor = passwordField ?? usernameField;
-    if (anchor === null || !anchor.isConnected) {
+    const anchor = passwordField ?? usernameField ?? totpField;
+    // ADR 0076 §1.3 rule (g): a TOTP-only step gets a menu only when a candidate for this page
+    // can produce a code — the main defence against over-detection.
+    if (anchor === null || !anchor.isConnected || !menuAllowed(step.kind, answer.candidates)) {
       menu = undefined;
       return;
     }
@@ -146,7 +153,7 @@ function installContentScript(): void {
     // skip entirely. `activeFillTargets` is still needed either way: the generator's own
     // `apply_fill` push (`values: { password }`, no `username`) lands through the exact same
     // `activeFillTargets.passwordField` lookup a real fill does.
-    activeFillTargets = { usernameField, passwordField };
+    activeFillTargets = { usernameField, passwordField, totpField, form };
     // `InlineMenu` no longer tells this script which candidate was picked (ADR 0036 §4's new
     // bullet): the iframe itself sends the fill request straight to the background
     // (`inline-menu/main.ts`), as the one sender the background grants a decrypted credential to
@@ -154,10 +161,12 @@ function installContentScript(): void {
     // indirectly, as an `apply_fill` push the background sends back to *this* tab once it has
     // validated that request — never as anything the iframe tells this content script directly,
     // which a compromised content script could otherwise have spoofed by itself.
-    menu = new InlineMenu(anchor, answer.candidates, answer.pageHost, only);
+    // ADR 0076 §1.2 (owner answer 5): a `new-password` field is never the target of a saved
+    // password; its menu offers the generator only.
+    menu = new InlineMenu(anchor, step.kind === "new_password" ? [] : answer.candidates, answer.pageHost, scope);
   }
 
-  let savePrompt: SavePromptBanner | undefined;
+  let savePrompt: SavePromptBanner | SaveDialog | undefined;
 
   // Shows `answer` as the save/update banner when the background actually offered one,
   // replacing whatever banner (if any) is already showing. Shared by the immediate response to
@@ -169,9 +178,12 @@ function installContentScript(): void {
       return;
     }
     savePrompt?.destroy();
-    savePrompt = new SavePromptBanner(answer, () => {
+    // ADR 0076 §5.2: custom-field choices only in the extension-origin dialog; the page-DOM
+    // banner saves username and password only, as before.
+    const done = () => {
       savePrompt = undefined;
-    });
+    };
+    savePrompt = answer.dialog === true ? new SaveDialog(answer, done) : new SavePromptBanner(answer, done);
   };
 
   // ROADMAP §4.4 "save/update on submit": a capturing listener so a page's own `stopPropagation`
@@ -187,11 +199,15 @@ function installContentScript(): void {
       if (passwordField === null || passwordField.value === "") {
         return;
       }
+      // ADR 0076 §5.1: the submitted form's custom-token fields, at most 8. Their values are
+      // offered only in the extension-origin save dialog (§5.2), never in the page-DOM banner.
+      const customFields = captureCustomFields(passwordField.form, [usernameField, passwordField]);
       void sendToBackground({
         type: "credentials_submitted",
         pageUrl: location.href,
         ...(usernameField !== null && usernameField.value !== "" ? { usernameValue: usernameField.value } : {}),
         passwordValue: passwordField.value,
+        ...(customFields.length > 0 ? { customFields } : {}),
       } satisfies CredentialsSubmittedMessage).then(showSavePromptIfOffered);
     },
     true,
@@ -299,12 +315,19 @@ function installContentScript(): void {
 interface FillTargets {
   readonly usernameField: HTMLInputElement | null;
   readonly passwordField: HTMLInputElement | null;
+  /** The step's TOTP target (ADR 0076 §1.2–§1.3), if any. */
+  readonly totpField: HTMLInputElement | null;
+  /** The step's form, where custom values go (ADR 0076 §4.4); `null` for form-less fields. */
+  readonly form: HTMLFormElement | null;
 }
 
 /** One detection pass's result: the step's own fields, the `only` scope its menu carries, and
  * the field report the background gets (ADR 0036 §4 "detected-field reports"). */
 interface DetectedStep extends FillTargets {
-  readonly only: FillScope | undefined;
+  readonly kind: LoginStep["kind"];
+  readonly only: FillOnly | undefined;
+  /** ADR 0076 §4.1: the step's fill scope, handed to the inline-menu iframe. */
+  readonly scope: FillScope;
   readonly fields: readonly FieldDescriptor[];
 }
 
@@ -314,8 +337,8 @@ function revealsField(next: DetectedStep | undefined, prev: DetectedStep | undef
   if (next === undefined) {
     return false;
   }
-  const before = prev === undefined ? [] : [prev.usernameField, prev.passwordField];
-  return [next.usernameField, next.passwordField].some((field) => field !== null && !before.includes(field));
+  const before = prev === undefined ? [] : [prev.usernameField, prev.passwordField, prev.totpField];
+  return [next.usernameField, next.passwordField, next.totpField].some((field) => field !== null && !before.includes(field));
 }
 
 /** Tags the accepted step's field(s) with `data-rizzy-field` (`username`/`password`; the submit
@@ -323,8 +346,9 @@ function revealsField(next: DetectedStep | undefined, prev: DetectedStep | undef
 function tagStep(step: DetectedStep | undefined): void {
   const usernameField = step?.usernameField ?? null;
   const passwordField = step?.passwordField ?? null;
+  const totpField = step?.totpField ?? null;
   for (const el of document.querySelectorAll<HTMLInputElement>("input[data-rizzy-field]")) {
-    if (el !== usernameField && el !== passwordField) {
+    if (el !== usernameField && el !== passwordField && el !== totpField) {
       delete el.dataset["rizzyField"];
     }
   }
@@ -332,7 +356,10 @@ function tagStep(step: DetectedStep | undefined): void {
     usernameField.dataset["rizzyField"] = "username";
   }
   if (passwordField !== null) {
-    passwordField.dataset["rizzyField"] = "password";
+    passwordField.dataset["rizzyField"] = step?.kind === "new_password" ? "new-password" : "password";
+  }
+  if (totpField !== null) {
+    totpField.dataset["rizzyField"] = "totp";
   }
 }
 
@@ -372,7 +399,7 @@ function detectStep(): DetectedStep | undefined {
   const facts: InputFacts[] = elements.map((el) => {
     const type = el.type.toLowerCase();
     // Layout reads (`isVisible`) only for the types the heuristic can ever choose.
-    const relevant = type === "password" || type === "text" || type === "email" || type === "tel";
+    const relevant = type === "password" || type === "text" || type === "email" || type === "tel" || type === "number";
     const labels = el.labels === null ? [] : Array.from(el.labels, (l) => (l.textContent ?? "").slice(0, MAX_HINT_LEN));
     return {
       type,
@@ -381,6 +408,10 @@ function detectStep(): DetectedStep | undefined {
       visible: relevant && isVisible(el),
       editable: !el.readOnly && !el.disabled,
       form: el.form === null ? NO_FORM : (forms.get(el.form) ?? NO_FORM),
+      // ADR 0076 §1.3 rule (d).
+      inputMode: (el.getAttribute("inputmode") ?? "").toLowerCase(),
+      maxLength: el.maxLength,
+      minLength: el.minLength,
     };
   });
   const formHint = (form: number): string => {
@@ -408,6 +439,8 @@ function detectStep(): DetectedStep | undefined {
   }
   const usernameField = "username" in step ? (elements[step.username] ?? null) : null;
   const passwordField = "password" in step ? (elements[step.password] ?? null) : null;
+  const totpField = "totp" in step && step.totp !== undefined ? (elements[step.totp] ?? null) : null;
+  const anchorField = passwordField ?? usernameField ?? totpField;
   const fields: FieldDescriptor[] = [];
   for (const [el, kind] of [
     [usernameField, "username"],
@@ -425,7 +458,17 @@ function detectStep(): DetectedStep | undefined {
       ...(kind === "username" && el.value !== "" ? { currentValue: el.value.slice(0, MAX_FIELD_VALUE_LEN) } : {}),
     });
   }
-  return { usernameField, passwordField, only: stepFillScope(step), fields };
+  const scope = stepScope(facts, step);
+  return {
+    kind: step.kind,
+    usernameField,
+    passwordField,
+    totpField,
+    form: anchorField?.form ?? null,
+    only: scope.only,
+    scope,
+    fields,
+  };
 }
 
 function isVisible(el: HTMLElement): boolean {
@@ -480,24 +523,52 @@ function stableFieldId(el: HTMLInputElement): string {
   return id;
 }
 
-function applyFill(values: FillValues, { usernameField, passwordField }: FillTargets): void {
-  // Mapped by kind, not by `fieldId` (ADR 0040: the background never sees or
-  // names a `fieldId`, only `username`/`password`) — `usernameField`/`passwordField` are exactly
-  // the field(s) `wireInlineMenu` tagged when the inline menu was shown for them, so there is
-  // nothing left to look up by id. On a multi-step login page (`login-step.ts`) one of them is
-  // `null`: a value for a field this step does not have is dropped here, never written anywhere
+function applyFill(values: FillValues, { usernameField, passwordField, totpField, form }: FillTargets): void {
+  // Mapped by kind and token, not by `fieldId` (ADR 0040, ADR 0076 §4.4: the background never
+  // sees or names a `fieldId`) — the role fields are exactly the ones `wireInlineMenu` tagged
+  // when the inline menu was shown for them. On a multi-step login page (`login-step.ts`) a
+  // role this step does not have is `null`: its value is dropped here, never written anywhere
   // else (and the long-lived context does not send it in the first place, `only`).
-  const targets: ReadonlyArray<readonly [HTMLInputElement | null, string | undefined]> = [
-    [usernameField, values.username],
-    [passwordField, values.password],
+  //
+  // ADR 0076 §4.4: a custom value goes into the first field of the step's form, in document
+  // order, whose *current* parsed token equals its token (a page that renamed a token since the
+  // menu showed gets nothing for it); a role target that carries a token gets that token's custom
+  // value if one arrived, else the role value.
+  const custom = new Map((values.custom ?? []).map((c) => [c.token, c.value] as const));
+  const written = new Set<HTMLInputElement>();
+  const roleValue = (field: HTMLInputElement | null, roleValueOf: string | undefined): string | undefined => {
+    if (field === null) {
+      return undefined;
+    }
+    const token = currentToken(field);
+    if (token !== undefined && custom.has(token)) {
+      const value = custom.get(token);
+      custom.delete(token);
+      return value;
+    }
+    return roleValueOf;
+  };
+  const targets: Array<readonly [HTMLInputElement | null, string | undefined]> = [
+    [usernameField, roleValue(usernameField, values.username)],
+    [passwordField, roleValue(passwordField, values.password)],
+    [totpField, values.totp],
   ];
+  for (const [token, value] of custom) {
+    const field = Array.from(document.querySelectorAll("input"))
+      .slice(0, MAX_INPUTS_SCANNED)
+      .find((el) => el.form === form && !written.has(el) && el !== usernameField && el !== passwordField && el !== totpField && currentToken(el) === token);
+    if (field !== undefined) {
+      written.add(field);
+      targets.push([field, value]);
+    }
+  }
   for (const [target, value] of targets) {
     if (target === null || value === undefined) {
       continue;
     }
     // A page can detach, disable or lock a field between detection and fill; none of those is
     // a field the user can see being filled.
-    if (!target.isConnected || target.readOnly || target.disabled) {
+    if (!target.isConnected || target.readOnly || target.disabled || target.type === "hidden") {
       continue;
     }
     // THREAT_MODEL.md row "T" (page scripts rearrange forms between click and fill): "re-check
@@ -512,6 +583,36 @@ function applyFill(values: FillValues, { usernameField, passwordField }: FillTar
     target.dispatchEvent(new Event("input", { bubbles: true }));
     target.dispatchEvent(new Event("change", { bubbles: true }));
   }
+}
+
+/** The custom token an input's `autocomplete` carries right now (ADR 0076 §1.1 rule 5). */
+function currentToken(el: HTMLInputElement): string | undefined {
+  const parsed = parseAutocomplete(el.getAttribute("autocomplete"));
+  return parsed.kind === "custom" ? parsed.token : undefined;
+}
+
+/** The submitted form's custom-token fields (ADR 0076 §5.1): visible, editable `<input>`s that
+ * parse to custom(t), never `type=hidden`, not the captured username or password, with a
+ * non-empty value of at most 4096 code units; distinct tokens, at most 8. */
+function captureCustomFields(form: HTMLFormElement | null, exclude: readonly (HTMLInputElement | null)[]): CapturedCustomField[] {
+  const out: CapturedCustomField[] = [];
+  if (form === null) {
+    return out;
+  }
+  for (const el of Array.from(form.querySelectorAll("input")).slice(0, MAX_INPUTS_SCANNED)) {
+    if (out.length >= MAX_CAPTURED_FIELDS) {
+      break;
+    }
+    if (exclude.includes(el) || el.type === "hidden" || el.readOnly || el.disabled || el.value === "" || el.value.length > MAX_FIELD_VALUE_LEN) {
+      continue;
+    }
+    const token = currentToken(el);
+    if (token === undefined || out.some((o) => o.token === token) || !isVisible(el)) {
+      continue;
+    }
+    out.push({ token, value: el.value, masked: el.type === "password" });
+  }
+  return out;
 }
 
 function sendToBackground(message: FromContentScript): Promise<ToContentScript | undefined> {
@@ -635,7 +736,7 @@ class InlineMenu {
   #deepOccluderCandidates: Element[] = [];
   readonly #deepOccluderObserver: MutationObserver;
 
-  constructor(anchor: HTMLInputElement, candidates: CandidatesMessage["candidates"], pageHost: string, only: FillScope | undefined) {
+  constructor(anchor: HTMLInputElement, candidates: CandidatesMessage["candidates"], pageHost: string, scope: FillScope) {
     const instanceToken = mintInstanceToken();
     this.#instanceToken = instanceToken;
     this.#registered = sendToBackground({ type: "register_iframe_instance", instanceToken }).then(
@@ -726,8 +827,10 @@ class InlineMenu {
                 username: c.username,
                 needsWarning: c.needsWarning,
                 savedHost: c.savedHost,
+                hasTotp: c.hasTotp,
               })),
-              ...(only === undefined ? {} : { only }),
+              ...(scope.only === undefined ? {} : { only: scope.only }),
+              scope,
             } satisfies InlineMenuShowMessage,
             menuOrigin,
           );
@@ -1280,6 +1383,91 @@ class SavePromptBanner {
   destroy(): void {
     this.#el.remove();
   }
+}
+
+/**
+ * The extension-origin save dialog (ADR 0076 §5.2): shown instead of the page-DOM banner when
+ * the submitted form's custom fields give rows. Built like the inline menu: an iframe of this
+ * extension's own page, which the page cannot script, registered with an ADR 0043 instance token
+ * that travels only in the targeted show message. The dialog fetches its rows from the long-lived
+ * context by the save-prompt token and answers it there directly; this script only places the
+ * iframe and removes it when the dialog says it is done.
+ */
+class SaveDialog {
+  readonly #frame: HTMLIFrameElement;
+  readonly #instanceToken: string;
+  readonly #registered: Promise<boolean>;
+  readonly #onMessage: (event: MessageEvent) => void;
+  #destroyed = false;
+
+  constructor(offer: SavePromptOfferedMessage, onDone: () => void) {
+    const instanceToken = mintInstanceToken();
+    this.#instanceToken = instanceToken;
+    this.#registered = sendToBackground({ type: "register_iframe_instance", instanceToken }).then(
+      (answer) => answer?.type === "iframe_instance_done",
+      () => false,
+    );
+    const frame = document.createElement("iframe");
+    this.#frame = frame;
+    frame.setAttribute("data-rizzy-save-dialog", "");
+    frame.title = "rizzy-vault: save login";
+    frame.style.position = "fixed";
+    frame.style.right = "16px";
+    frame.style.bottom = "16px";
+    frame.style.width = "360px";
+    frame.style.height = "300px";
+    frame.style.border = "1px solid #888";
+    frame.style.background = "#fff";
+    frame.style.zIndex = String(MAX_Z_INDEX);
+    frame.src = saveDialogUrl();
+    const pageOrigin = location.origin;
+    const dialogOrigin = new URL(saveDialogUrl()).origin;
+    frame.addEventListener(
+      "load",
+      () => {
+        void this.#registered.then((registered) => {
+          if (!registered || this.#destroyed) {
+            return;
+          }
+          frame.contentWindow?.postMessage(
+            { type: SAVE_DIALOG_SHOW, pageOrigin, instanceToken, token: offer.token } satisfies SaveDialogShowMessage,
+            dialogOrigin,
+          );
+        });
+      },
+      { once: true },
+    );
+    this.#onMessage = (event) => {
+      if (event.source !== frame.contentWindow || event.origin !== dialogOrigin || !isSaveDialogDoneMessage(event.data)) {
+        return;
+      }
+      this.destroy();
+      onDone();
+    };
+    window.addEventListener("message", this.#onMessage);
+    document.documentElement.appendChild(frame);
+  }
+
+  destroy(): void {
+    if (this.#destroyed) {
+      return;
+    }
+    this.#destroyed = true;
+    window.removeEventListener("message", this.#onMessage);
+    this.#frame.remove();
+    const instanceToken = this.#instanceToken;
+    void this.#registered
+      .then(() => sendToBackground({ type: "revoke_iframe_instance", instanceToken }))
+      .catch(() => undefined);
+  }
+}
+
+function saveDialogUrl(): string {
+  const ext = typeof chrome !== "undefined" ? chrome : browser;
+  if (ext === undefined) {
+    throw new Error("save-dialog: no WebExtension runtime (chrome/browser) in this content script");
+  }
+  return ext.runtime.getURL("src/save-dialog/index.html");
 }
 
 function inlineMenuUrl(): string {

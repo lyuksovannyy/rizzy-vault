@@ -33,7 +33,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["src/inline-menu/index.html", "src/passkey-consent/index.html", "src/content/passkey-page-shim.js"],
+      "resources": ["src/inline-menu/index.html", "src/passkey-consent/index.html", "src/save-dialog/index.html", "src/content/passkey-page-shim.js"],
       "matches": ["http://*/*", "https://*/*"]
     }
   ],

@@ -12,7 +12,10 @@
 import {
   approvePasskeyCeremony,
   checkPendingSavePromptByLocation,
+  createOffer,
   declinePasskeyCeremony,
+  fillValuesFor,
+  hasTotpFor,
   generatePasswordForFill,
   itemSummaryFor,
   matchCandidatesFor,
@@ -20,19 +23,28 @@ import {
   offerPasskeyGet,
   offerSavePrompt,
   registerIframeInstance,
+  resolveSaveDialog,
   resolveSavePrompt,
   revealCredentialsForFill,
   revokeIframeInstance,
+  saveDialogChoices,
+  takeOffer,
 } from "./core-context.ts";
 import type {
   ApplyFillMessage,
   ApplyPasskeyResultMessage,
   ContentErrorMessage,
-  FillScope,
+  FillOnly,
   FillValues,
   FromContentScript,
   InlineMenuFillRequestMessage,
   InlineMenuFillResponse,
+  InlineMenuOfferRequestMessage,
+  InlineMenuOfferResponse,
+  SaveDialogChoicesResponse,
+  SaveDialogRequestMessage,
+  SaveDialogResolveMessage,
+  SaveDialogResolveResponse,
   InlineMenuGeneratePasswordResponse,
   PasskeyCeremonyMessage,
   PasskeyCeremonyResponse,
@@ -143,7 +155,7 @@ export async function handleContentScriptRequest(
       // lookup (e.g. deleted mid-request) is dropped rather than shown blank.
       const candidates = result.candidates.flatMap((c) => {
         const summary = itemSummaryFor(c.itemId);
-        return summary === undefined ? [] : [{ itemId: c.itemId, ...summary, needsWarning: c.needsWarning, savedHost: c.savedHost }];
+        return summary === undefined ? [] : [{ itemId: c.itemId, ...summary, needsWarning: c.needsWarning, savedHost: c.savedHost, hasTotp: hasTotpFor(c.itemId) }];
       });
       return { type: "candidates", pageHost: result.pageHost, candidates, warnings: result.warnings };
     }
@@ -151,7 +163,7 @@ export async function handleContentScriptRequest(
       if (!pageUrlMatchesSender(message.pageUrl, trustedOrigin)) {
         return { type: "content_error", code: "credentials_submitted: pageUrl does not match the sender's own origin" };
       }
-      const offer = offerSavePrompt(message.pageUrl, message.usernameValue, message.passwordValue, trustedTabId);
+      const offer = offerSavePrompt(message.pageUrl, message.usernameValue, message.passwordValue, trustedTabId, message.customFields);
       if (offer === undefined) {
         return refused("credentials_submitted: the device is locked, or nothing worth saving was captured");
       }
@@ -315,7 +327,7 @@ export function selectFillCandidate(
  * password on a password-only step. `undefined` when the step's one field is a username the
  * item does not have — nothing to fill, so nothing is sent.
  */
-export function narrowFillValues(revealed: { readonly username?: string; readonly password: string }, only: FillScope | undefined): FillValues | undefined {
+export function narrowFillValues(revealed: { readonly username?: string; readonly password: string }, only: FillOnly | undefined): FillValues | undefined {
   switch (only) {
     case undefined:
       return revealed;
@@ -323,6 +335,9 @@ export function narrowFillValues(revealed: { readonly username?: string; readonl
       return revealed.username === undefined ? undefined : { username: revealed.username };
     case "password":
       return { password: revealed.password };
+    case "totp":
+      // ADR 0076 §4.2: a TOTP-only fill exists only as the answer to an offer (`offerId`).
+      return undefined;
   }
 }
 
@@ -353,9 +368,32 @@ export async function handleInlineMenuFillRequest(
   if (result === undefined) {
     return refused("inline_menu_fill_chosen: the device is locked");
   }
+  // ADR 0076 §4.2: with an `offerId`, the scope is the offer record's, never the message's. The
+  // record is used up by this take, refused or not.
+  const record =
+    message.offerId === undefined ? undefined : takeOffer(message.offerId, tabId, tabUrl, message.itemId, message.only);
+  if (typeof record === "string") {
+    return refused("inline_menu_fill_chosen: offer " + record);
+  }
   const selection = selectFillCandidate(result.candidates, message.itemId, message.confirmedEquivalence);
   if (!selection.ok) {
     return refused(selection.code);
+  }
+  if (record !== undefined) {
+    let offered: FillValues | undefined;
+    try {
+      offered = fillValuesFor(message.itemId, record);
+    } catch {
+      return refused("inline_menu_fill_chosen: the chosen item cannot be filled");
+    }
+    if (offered === undefined) {
+      return refused("inline_menu_fill_chosen: nothing of the chosen item fills this step");
+    }
+    await pushApplyFill(ext, tabId, offered);
+    return { type: "inline_menu_fill_dispatched" };
+  }
+  if (message.only === "totp") {
+    return refused("inline_menu_fill_chosen: a TOTP-only fill needs an offer");
   }
   const revealed = revealCredentialsForFill(message.itemId);
   if (revealed === undefined) {
@@ -398,4 +436,53 @@ export async function handleInlineMenuGeneratePasswordRequest(
   }
   await pushApplyFill(ext, tabId, { password });
   return { type: "inline_menu_generate_password_dispatched" };
+}
+
+/**
+ * Handles an {@link InlineMenuOfferRequestMessage} from the inline-menu iframe (ADR 0076 §4.1
+ * step 3), routed like the fill request (`listener.ts`: an inline-menu sender whose ADR 0043
+ * instance token is admitted). Recomputes the candidates for the sender tab's browser-vouched
+ * URL (ADR 0040 point 3), records the offer, and answers the iframe — never the content
+ * script — with each candidate's disclosure: Display Names and flags, never a value.
+ */
+export function handleInlineMenuOfferRequest(tabId: number, tabUrl: string, message: InlineMenuOfferRequestMessage): Promise<InlineMenuOfferResponse> {
+  let origin: string;
+  try {
+    origin = new URL(tabUrl).origin;
+  } catch {
+    return Promise.resolve(refused("inline_menu_offer_request: the sender's tab URL does not parse"));
+  }
+  const result = matchCandidatesFor(tabUrl, { isTopFrame: true, frameOrigin: origin });
+  if (result === undefined) {
+    return Promise.resolve(refused("inline_menu_offer_request: the device is locked"));
+  }
+  const offer = createOffer(
+    tabId,
+    tabUrl,
+    message.scope,
+    result.candidates.map((c) => c.itemId),
+  );
+  if (offer === undefined) {
+    return Promise.resolve(refused("inline_menu_offer_request: the device is locked"));
+  }
+  return Promise.resolve({ type: "inline_menu_offer", offerId: offer.offerId, pageHost: result.pageHost, candidates: offer.candidates });
+}
+
+/** Handles a {@link SaveDialogRequestMessage} from the extension-origin save dialog (ADR 0076
+ * §5.2): the rows for its save-prompt token, fetched from here directly, never via the page. */
+export function handleSaveDialogRequest(message: SaveDialogRequestMessage): Promise<SaveDialogChoicesResponse> {
+  const choices = saveDialogChoices(message.token);
+  if (choices === undefined) {
+    return Promise.resolve(refused("save_dialog_request: unknown or already-resolved token"));
+  }
+  return Promise.resolve({ type: "save_dialog_choices", ...choices });
+}
+
+/** Handles a {@link SaveDialogResolveMessage}: the user's choice in the dialog (ADR 0076 §5.3). */
+export async function handleSaveDialogResolve(message: SaveDialogResolveMessage): Promise<SaveDialogResolveResponse> {
+  const resolved = await resolveSaveDialog(message.token, message.action, message.rows);
+  if (!resolved) {
+    return refused("save_dialog_resolve: unknown or already-resolved token");
+  }
+  return { type: "save_prompt_done" };
 }

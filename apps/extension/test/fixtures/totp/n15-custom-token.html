@@ -1,0 +1,12 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- ADR 0076 §1.3–§1.4 fixture: a custom token on a code-looking field is never a TOTP target -->
+<html lang="en">
+  <head><meta charset="utf-8" /><title>a custom token on a code-looking field is never a TOTP target</title></head>
+  <body>
+    <form id="f" action="/2fa">
+      <input id="member" name="otp" type="text" autocomplete="member-no" inputmode="numeric" maxlength="6" />
+      <button type="submit">Verify</button>
+    </form>
+  </body>
+</html>

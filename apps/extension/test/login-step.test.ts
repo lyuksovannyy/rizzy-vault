@@ -48,7 +48,8 @@ const EXPECTED: Readonly<Record<string, ReturnType<typeof stepOf>>> = {
   "newsletter.html": undefined,
   "signup-email.html": undefined,
   "contact-form.html": undefined,
-  "one-time-code.html": undefined,
+  // ADR 0076 §1.2: a `one-time-code` field is the TOTP target of a TOTP-only step.
+  "one-time-code.html": { kind: "totp" },
   "webauthn-identifier.html": { kind: "username", username: "user" },
   "disabled-password.html": { kind: "username", username: "user" },
 };

@@ -24,6 +24,8 @@
 
 /** Bytes, as `JSON.stringify(message).length` approximates (ASCII-biased, intentionally loose:
  * it only has to reject pathological input, not measure exactly). */
+import { isCustomToken } from "./autocomplete.ts";
+
 export const MAX_MESSAGE_BYTES = 64 * 1024;
 export const MAX_URL_LEN = 2048;
 export const MAX_FIELD_VALUE_LEN = 4096;
@@ -79,6 +81,16 @@ export interface CredentialsSubmittedMessage {
   readonly pageUrl: string;
   readonly usernameValue?: string;
   readonly passwordValue?: string;
+  /** ADR 0076 §5.1: visible, editable custom-token inputs of the submitted form, ≤ 8. */
+  readonly customFields?: readonly CapturedCustomField[];
+}
+
+/** One captured custom field (ADR 0076 §5.1). */
+export interface CapturedCustomField {
+  readonly token: string;
+  readonly value: string;
+  /** `type=password`. */
+  readonly masked: boolean;
 }
 
 /** The content script's answer to a {@link SavePromptOfferedMessage} it showed the user: the
@@ -227,11 +239,43 @@ export interface InlineMenuFillRequestMessage {
   readonly instanceToken: string;
   readonly itemId: string;
   readonly confirmedEquivalence: boolean;
-  readonly only?: FillScope;
+  readonly only?: FillOnly;
+  /** ADR 0076 §4.2: the offer this click answers. With it, the scope comes from the long-lived
+   * context's own offer record, never from this message. */
+  readonly offerId?: string;
 }
 
 /** The one field kind a multi-step login step fills ({@link InlineMenuFillRequestMessage.only}). */
-export type FillScope = "username" | "password";
+export type FillOnly = "username" | "password" | "totp";
+
+/** One detected step's fill scope (ADR 0076 §4.1), as the content script hands it to the
+ * inline-menu iframe and the iframe to the long-lived context in an offer request. Every member
+ * is a claim of the (untrusted) content script; the long-lived context only ever uses it to
+ * narrow what crosses, never to widen it. */
+export interface FillScope {
+  /** Today's narrowing; `"totp"` is a TOTP-only step. */
+  readonly only?: FillOnly;
+  /** The step also has a TOTP target (`only` absent, `"username"` or `"password"`). */
+  readonly totp?: true;
+  /** Distinct custom tokens on the step's visible, editable fields, document order, ≤ 16. */
+  readonly custom?: readonly string[];
+  /** The custom token the step's username target carries (also in `custom`). */
+  readonly usernameToken?: string;
+  /** Likewise for the password target. */
+  readonly passwordToken?: string;
+}
+
+/** ADR 0076 §4.1: at most 16 custom tokens per scope, 16 disclosures per candidate. */
+export const MAX_SCOPE_TOKENS = 16;
+/** ADR 0076 §5.1: at most 8 captured custom fields per submitted form. */
+export const MAX_CAPTURED_FIELDS = 8;
+/** ADR 0076 §4.1: a Display Name in an offer is at most 256 characters. */
+export const MAX_OFFER_LABEL_LEN = 256;
+
+/** ADR 0076 §4.3 / §4.4: an offer id is 16 random bytes, lowercase hex. */
+export function isOfferId(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{32}$/.test(value);
+}
 
 /** The values one fill pushes to the content script, by kind (never by field id): at least one
  * of the two. A one-page form gets both (or the password alone when the item has no username);
@@ -240,6 +284,135 @@ export type FillScope = "username" | "password";
 export interface FillValues {
   readonly username?: string;
   readonly password?: string;
+  /** The current TOTP code (ADR 0076 §4.4): 6–8 digits, never the secret. */
+  readonly totp?: string;
+  /** Custom values by page token (ADR 0076 §4.4): 1–16 entries, distinct tokens. */
+  readonly custom?: readonly { readonly token: string; readonly value: string }[];
+}
+
+/** The iframe → long-lived context offer request (ADR 0076 §4.1 step 2), validated as an
+ * inline-menu sender (ADR 0040 point 1) whose ADR 0043 instance token the background admits. */
+export interface InlineMenuOfferRequestMessage {
+  readonly type: "inline_menu_offer_request";
+  readonly instanceToken: string;
+  readonly scope: FillScope;
+}
+
+/** One candidate of an {@link InlineMenuOfferMessage}: what a click on its row would fill
+ * besides username and password. Display Names only, never a value. */
+export interface OfferCandidate {
+  readonly itemId: string;
+  readonly fillsTotp: boolean;
+  readonly customFill: readonly { readonly label: string; readonly concealed: boolean }[];
+}
+
+/** The long-lived context's answer to the iframe, never the content script (ADR 0076 §4.1
+ * step 3). The offer record behind `offerId` stays in the long-lived context's memory. */
+export interface InlineMenuOfferMessage {
+  readonly type: "inline_menu_offer";
+  readonly offerId: string;
+  readonly pageHost: string;
+  readonly candidates: readonly OfferCandidate[];
+}
+
+export type InlineMenuOfferResponse = InlineMenuOfferMessage | ContentErrorMessage;
+
+/** The save dialog → long-lived context request for its rows (ADR 0076 §5.2), by save-prompt
+ * token, from the extension-origin dialog iframe (an inline-menu-class sender whose ADR 0043
+ * instance token the background admits). */
+export interface SaveDialogRequestMessage {
+  readonly type: "save_dialog_request";
+  readonly instanceToken: string;
+  readonly token: string;
+}
+
+/** One row the save dialog shows (ADR 0076 §5.3). Never a value. */
+export interface SaveDialogRowView {
+  readonly index: number;
+  readonly kind: "add" | "update";
+  readonly label: string;
+  readonly concealed: boolean;
+  readonly checked: boolean;
+}
+
+/** The answer to a {@link SaveDialogRequestMessage}. */
+export interface SaveDialogChoicesMessage {
+  readonly type: "save_dialog_choices";
+  readonly suggestion: "save" | "update";
+  readonly itemTitle?: string;
+  readonly pageHost: string;
+  readonly rows: readonly SaveDialogRowView[];
+}
+
+export type SaveDialogChoicesResponse = SaveDialogChoicesMessage | ContentErrorMessage;
+
+/** The user's answer in the save dialog, on a trusted click (ADR 0076 §5.3): the action, and the
+ * rows they ticked with the Display Name left in each (used for "add" rows only). */
+export interface SaveDialogResolveMessage {
+  readonly type: "save_dialog_resolve";
+  readonly instanceToken: string;
+  readonly token: string;
+  readonly action: "save" | "update" | "dismiss";
+  readonly rows: readonly { readonly index: number; readonly label: string }[];
+}
+
+export type SaveDialogResolveResponse = SavePromptDoneMessage | ContentErrorMessage;
+
+/** Validates a raw {@link SaveDialogRequestMessage}. */
+export function isSaveDialogRequestMessage(value: unknown): value is SaveDialogRequestMessage {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  return (
+    v["type"] === "save_dialog_request" &&
+    isInstanceToken(v["instanceToken"]) &&
+    isBoundedString(v["token"], 256) &&
+    hasOnlyKeys(v, ["type", "instanceToken", "token"])
+  );
+}
+
+/** Validates a raw {@link SaveDialogResolveMessage}: at most 8 rows (one per captured field),
+ * distinct indexes 0–7, Display Names of at most 256 characters. */
+export function isSaveDialogResolveMessage(value: unknown): value is SaveDialogResolveMessage {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  if (
+    v["type"] !== "save_dialog_resolve" ||
+    !isInstanceToken(v["instanceToken"]) ||
+    !isBoundedString(v["token"], 256) ||
+    (v["action"] !== "save" && v["action"] !== "update" && v["action"] !== "dismiss") ||
+    !hasOnlyKeys(v, ["type", "instanceToken", "token", "action", "rows"])
+  ) {
+    return false;
+  }
+  const rows = v["rows"];
+  if (!Array.isArray(rows) || rows.length > MAX_CAPTURED_FIELDS) {
+    return false;
+  }
+  const seen = new Set<number>();
+  for (const row of rows as unknown[]) {
+    if (typeof row !== "object" || row === null || Array.isArray(row)) {
+      return false;
+    }
+    const r = row as Record<string, unknown>;
+    const index = r["index"];
+    if (
+      !hasOnlyKeys(r, ["index", "label"]) ||
+      typeof index !== "number" ||
+      !Number.isInteger(index) ||
+      index < 0 ||
+      index >= MAX_CAPTURED_FIELDS ||
+      seen.has(index) ||
+      !isBoundedString(r["label"], MAX_OFFER_LABEL_LEN)
+    ) {
+      return false;
+    }
+    seen.add(index);
+  }
+  return true;
 }
 
 /** Acknowledges a successful {@link InlineMenuFillRequestMessage}: never carries the revealed
@@ -405,6 +578,9 @@ export interface MatchCandidateSummary {
    * `@rizzy-vault/core`'s `MatchCandidate.savedHost` (ADR 0037 §5 "Exact host shown"; gap 31
    * in the M2 gap audit): "the saved site" in the inline menu's equivalence-only warning. */
   readonly savedHost: string;
+  /** ADR 0076 §4.1: the item holds a valid time-based `login.totp` (a non-secret flag, like
+   * `needsWarning`); the content script opens a menu at a TOTP-only step only if one has it. */
+  readonly hasTotp: boolean;
 }
 
 export interface CandidatesMessage {
@@ -424,6 +600,9 @@ export interface CandidatesMessage {
  * §4.4: "save/update on submit" means *offering*, not writing without the user's choice). */
 export interface SavePromptOfferedMessage {
   readonly type: "save_prompt";
+  /** ADR 0076 §5.2: captured custom fields give rows, so the content script shows the
+   * extension-origin save dialog instead of the page-DOM banner. */
+  readonly dialog?: true;
   readonly token: string;
   readonly suggestion: "save" | "update";
   /** The matching item's title, only set when `suggestion` is `"update"`. */
@@ -540,8 +719,120 @@ export function isInlineMenuFillRequestMessage(value: unknown): value is InlineM
     isInstanceToken(v["instanceToken"]) &&
     isBoundedString(v["itemId"], 256) &&
     typeof v["confirmedEquivalence"] === "boolean" &&
-    (v["only"] === undefined || v["only"] === "username" || v["only"] === "password")
+    (v["only"] === undefined || isFillOnly(v["only"])) &&
+    (v["offerId"] === undefined || isOfferId(v["offerId"])) &&
+    // ADR 0076 §4.2: a TOTP-only fill exists only as the answer to an offer.
+    !(v["only"] === "totp" && v["offerId"] === undefined) &&
+    hasOnlyKeys(v, ["type", "instanceToken", "itemId", "confirmedEquivalence", "only", "offerId"])
   );
+}
+
+export function isFillOnly(value: unknown): value is FillOnly {
+  return value === "username" || value === "password" || value === "totp";
+}
+
+function hasOnlyKeys(v: Record<string, unknown>, keys: readonly string[]): boolean {
+  return Object.keys(v).every((k) => keys.includes(k));
+}
+
+/** A list of distinct custom tokens (grammar, not reserved), 1–16 long (ADR 0076 §4.4). */
+function isTokenList(value: unknown): value is readonly string[] {
+  return (
+    Array.isArray(value) &&
+    value.length >= 1 &&
+    value.length <= MAX_SCOPE_TOKENS &&
+    value.every((t) => isCustomToken(t)) &&
+    new Set(value).size === value.length
+  );
+}
+
+/** Validates a {@link FillScope} (ADR 0076 §4.4 "the scope and offer messages get the same
+ * treatment"): known members only, `totp` only with a non-TOTP `only`, tokens valid, distinct
+ * and at most 16, the role tokens among them. */
+export function isFillScope(value: unknown): value is FillScope {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  if (!hasOnlyKeys(v, ["only", "totp", "custom", "usernameToken", "passwordToken"])) {
+    return false;
+  }
+  if (v["only"] !== undefined && !isFillOnly(v["only"])) {
+    return false;
+  }
+  if (v["totp"] !== undefined && (v["totp"] !== true || v["only"] === "totp")) {
+    return false;
+  }
+  if (v["custom"] !== undefined && !isTokenList(v["custom"])) {
+    return false;
+  }
+  const custom = (v["custom"] as readonly string[] | undefined) ?? [];
+  for (const key of ["usernameToken", "passwordToken"] as const) {
+    if (v[key] !== undefined && (!isCustomToken(v[key]) || !custom.includes(v[key]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Validates a raw {@link InlineMenuOfferRequestMessage}; same gate as
+ * {@link isInlineMenuFillRequestMessage}. */
+export function isInlineMenuOfferRequestMessage(value: unknown): value is InlineMenuOfferRequestMessage {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  return (
+    v["type"] === "inline_menu_offer_request" &&
+    isInstanceToken(v["instanceToken"]) &&
+    isFillScope(v["scope"]) &&
+    hasOnlyKeys(v, ["type", "instanceToken", "scope"]) &&
+    approximateSize(v) <= MAX_MESSAGE_BYTES
+  );
+}
+
+/** Validates an {@link InlineMenuOfferMessage} — the iframe checks the long-lived context's
+ * answer before rendering it, as every boundary bounds what it reads. */
+export function isInlineMenuOfferMessage(value: unknown): value is InlineMenuOfferMessage {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  if (v["type"] !== "inline_menu_offer" || !isOfferId(v["offerId"]) || !isBoundedString(v["pageHost"], MAX_HOST_LEN)) {
+    return false;
+  }
+  const candidates = v["candidates"];
+  if (!Array.isArray(candidates) || candidates.length > MAX_CANDIDATES) {
+    return false;
+  }
+  return candidates.every((c: unknown) => {
+    if (typeof c !== "object" || c === null) {
+      return false;
+    }
+    const cc = c as Record<string, unknown>;
+    const fills = cc["customFill"];
+    return (
+      isBoundedString(cc["itemId"], 256) &&
+      typeof cc["fillsTotp"] === "boolean" &&
+      Array.isArray(fills) &&
+      fills.length <= MAX_SCOPE_TOKENS &&
+      fills.every(
+        (f: unknown) =>
+          typeof f === "object" &&
+          f !== null &&
+          isBoundedString((f as Record<string, unknown>)["label"], MAX_OFFER_LABEL_LEN) &&
+          typeof (f as Record<string, unknown>)["concealed"] === "boolean",
+      )
+    );
+  });
+}
+
+function approximateSize(value: unknown): number {
+  try {
+    return JSON.stringify(value).length;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
 }
 
 /** Validates a raw message claimed to be an {@link InlineMenuGeneratePasswordRequestMessage} —
@@ -575,17 +866,47 @@ export function isPasskeyCeremonyMessage(value: unknown): value is PasskeyCeremo
 /** Shared by {@link isApplyFillMessage} and {@link isRelayApplyFillMessage}: both carry the
  * exact same `values` shape (username/password by kind, never by field id), at least one of the
  * two present. */
-function isFillValues(value: unknown): value is FillValues {
-  if (typeof value !== "object" || value === null) {
+export function isFillValues(value: unknown): value is FillValues {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
   }
   const v = value as Record<string, unknown>;
-  if (v["username"] === undefined && v["password"] === undefined) {
+  // INV-40 / ADR 0076 §4.4: at least one member, known members only, each bounded, the code
+  // 6–8 digits, custom values keyed by valid, distinct, unreserved tokens, the whole under the
+  // message cap. Keyed by kind and token, never by DOM field id.
+  if (!hasOnlyKeys(v, ["username", "password", "totp", "custom"])) {
     return false;
+  }
+  if (v["username"] === undefined && v["password"] === undefined && v["totp"] === undefined && v["custom"] === undefined) {
+    return false;
+  }
+  if (v["totp"] !== undefined && !(typeof v["totp"] === "string" && /^[0-9]{6,8}$/.test(v["totp"]))) {
+    return false;
+  }
+  if (v["custom"] !== undefined) {
+    const custom = v["custom"];
+    if (!Array.isArray(custom) || custom.length < 1 || custom.length > MAX_SCOPE_TOKENS) {
+      return false;
+    }
+    const tokens: unknown[] = [];
+    for (const entry of custom as unknown[]) {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+        return false;
+      }
+      const e = entry as Record<string, unknown>;
+      if (!hasOnlyKeys(e, ["token", "value"]) || !isCustomToken(e["token"]) || !isBoundedString(e["value"], MAX_FIELD_VALUE_LEN)) {
+        return false;
+      }
+      tokens.push(e["token"]);
+    }
+    if (new Set(tokens).size !== tokens.length) {
+      return false;
+    }
   }
   return (
     (v["password"] === undefined || isBoundedString(v["password"], MAX_FIELD_VALUE_LEN)) &&
-    (v["username"] === undefined || isBoundedString(v["username"], MAX_FIELD_VALUE_LEN))
+    (v["username"] === undefined || isBoundedString(v["username"], MAX_FIELD_VALUE_LEN)) &&
+    approximateSize(v) <= MAX_MESSAGE_BYTES
   );
 }
 

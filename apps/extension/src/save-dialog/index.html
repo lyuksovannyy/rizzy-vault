@@ -1,0 +1,28 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>rizzy-vault: save login</title>
+  </head>
+  <body>
+    <!-- The extension-origin save dialog (ADR 0076 §5.2): loaded by `content-script.ts` into an
+         iframe it injects into the page, like `inline-menu/index.html`. The embedding page has no
+         same-origin access to this document: it cannot read or script it, so it cannot tick a
+         custom-field row or click "Save" here. The rows come from the long-lived context
+         directly, by the save-prompt token, never through the page. -->
+    <main id="dialog" aria-labelledby="dialog-title">
+      <h1 id="dialog-title" style="font-size: 1rem; margin: 0 0 0.5rem"></h1>
+      <p id="dialog-host" style="margin: 0 0 0.5rem; font-size: 0.85rem"></p>
+      <fieldset id="rows" style="border: 0; margin: 0; padding: 0" hidden>
+        <legend style="font-size: 0.9rem">Custom fields</legend>
+      </fieldset>
+      <div style="margin-top: 0.75rem">
+        <button type="button" id="save"></button>
+        <button type="button" id="dismiss">Not now</button>
+      </div>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

@@ -12,6 +12,7 @@
 // type and fit its own length budget. A message that fails any check is refused whole: this
 // module never repairs or truncates a bad message.
 import {
+  type CapturedCustomField,
   type CheckSavePromptMessage,
   type CredentialsSubmittedMessage,
   type FieldDescriptor,
@@ -25,6 +26,7 @@ import {
   isInstanceToken,
   MAX_ALGS,
   MAX_ALLOW_CREDENTIALS,
+  MAX_CAPTURED_FIELDS,
   MAX_FIELDS_PER_REPORT,
   MAX_FIELD_VALUE_LEN,
   MAX_MESSAGE_BYTES,
@@ -34,6 +36,7 @@ import {
   MAX_URL_LEN,
   MAX_USER_NAME_LEN,
 } from "./contract.ts";
+import { isCustomToken } from "./autocomplete.ts";
 
 export class MessageRejected extends Error {
   constructor(reason: string) {
@@ -131,12 +134,40 @@ function parseCredentialsSubmitted(body: Record<string, unknown>): CredentialsSu
   if (body["passwordValue"] !== undefined && !isBoundedString(body["passwordValue"], MAX_FIELD_VALUE_LEN)) {
     throw new MessageRejected("credentials_submitted: passwordValue");
   }
+  const customFields = parseCapturedCustomFields(body["customFields"]);
   const out: CredentialsSubmittedMessage = { type: "credentials_submitted", pageUrl: body["pageUrl"] };
   return {
     ...out,
     ...(body["usernameValue"] !== undefined ? { usernameValue: body["usernameValue"] as string } : {}),
     ...(body["passwordValue"] !== undefined ? { passwordValue: body["passwordValue"] as string } : {}),
+    ...(customFields !== undefined ? { customFields } : {}),
   };
+}
+
+/** ADR 0076 §5.1: at most 8 entries, each a valid unreserved custom token (distinct), a
+ * non-empty value of at most 4096 code units, and a boolean `masked`; nothing else. */
+function parseCapturedCustomFields(value: unknown): readonly CapturedCustomField[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.length > MAX_CAPTURED_FIELDS) {
+    throw new MessageRejected("credentials_submitted: customFields");
+  }
+  const out: CapturedCustomField[] = [];
+  for (const entry of value as unknown[]) {
+    if (!isPlainObject(entry) || Object.keys(entry).some((k) => k !== "token" && k !== "value" && k !== "masked")) {
+      throw new MessageRejected("credentials_submitted: customFields entry");
+    }
+    const { token, value: v, masked } = entry;
+    if (!isCustomToken(token) || typeof masked !== "boolean" || !isBoundedString(v, MAX_FIELD_VALUE_LEN) || v === "") {
+      throw new MessageRejected("credentials_submitted: customFields entry");
+    }
+    if (out.some((o) => o.token === token)) {
+      throw new MessageRejected("credentials_submitted: duplicate custom token");
+    }
+    out.push({ token, value: v, masked });
+  }
+  return out;
 }
 
 function parseCheckSavePrompt(body: Record<string, unknown>): CheckSavePromptMessage {
