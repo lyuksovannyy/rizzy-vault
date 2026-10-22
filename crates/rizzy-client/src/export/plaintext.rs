@@ -582,7 +582,14 @@ fn csv_row<'a>(live: &LiveSnapshot<'a>, keys: &[&'static str]) -> Option<CsvRow<
         SupportedType::SecureNote => "note",
         SupportedType::Card => "card",
         SupportedType::Identity => "identity",
-        SupportedType::VaultSettings => return None,
+        // ADR 0027 §4: "other types are left out of CSV"; the M3 types of ADR 0055 are such
+        // types (the JSON form carries them whole).
+        SupportedType::SshKey
+        | SupportedType::ApiCredential
+        | SupportedType::SoftwareLicense
+        | SupportedType::Wifi
+        | SupportedType::BankAccount
+        | SupportedType::VaultSettings => return None,
     };
     let mut row = CsvRow {
         kind,
