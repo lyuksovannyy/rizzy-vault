@@ -381,6 +381,51 @@ writes only that step's own field(s):
   page, so a two-page sign-in is not offered for saving (the password page has no username to
   save with it); Firefox is not automated (as everywhere in this file).
 
+### M3: autocomplete-driven autofill (ADR 0076)
+
+The page's `autocomplete` attribute now decides each field's role, the inline menu fills a
+saved login's TOTP code on a 2FA step, and a custom field the user gave an *autocomplete id* in
+the web vault fills the page field whose `autocomplete` is exactly that id.
+
+| Field | Role |
+|---|---|
+| `username`, or the `webauthn` flag | the identifier (strong signal) |
+| `email`, `tel`, `tel-national` | the identifier (weak signal, as before) |
+| `current-password` | the password target |
+| `new-password` | never filled with a saved password; its menu offers the generator only |
+| `one-time-code` (text, tel, number, password) | the TOTP target, unless its own hints say SMS, phone or e-mail |
+| any other WHATWG name (`cc-csc`, `postal-code`, …) | none |
+| none or `off` | the old heuristics, then the strict TOTP heuristic |
+| a custom token (`member-no`) | the old heuristics, and a custom target |
+
+- **Detection** is [`src/messaging/autocomplete.ts`](src/messaging/autocomplete.ts) (the parser and
+  the reserved set, which `test/autocomplete.test.ts` checks against `rizzy-core`'s) and
+  [`src/content/login-step.ts`](src/content/login-step.ts) (roles, the TOTP heuristic and the
+  step's fill scope). The TOTP heuristic needs every rule of ADR 0076 §1.3; each §1.4 negative case
+  (card security codes, SMS and e-mail codes, PINs, postal codes, phones, captcha/coupon/backup
+  codes, split-digit boxes, a lone "code", sign-up and checkout forms, hidden fields) is an HTML
+  fixture in [`test/fixtures/totp/`](test/fixtures/totp). A TOTP-only step opens a menu only when a
+  candidate for the page holds a time-based secret.
+- **Offer, then fill.** The inline-menu iframe asks the long-lived context for an offer
+  (`inline_menu_offer_request`, with its ADR 0043 instance token). The answer, sent to the iframe
+  only, says per candidate whether a click fills a code and which custom fields it fills, by
+  Display Name; the row shows "Also fills: one-time code · Member no. · PIN (hidden)" before the
+  click. A fill that names the offer (`offerId`: 16 random bytes, single use, 120 s, bound to the
+  tab and page URL, at most 4 per tab, dropped on lock) takes its scope from the offer record,
+  never from the message, and its values from one `rizzy-wasm` call: the TOTP code is computed
+  there and the secret never leaves it.
+- **The content script writes** the code into the step's TOTP target and each custom value into
+  the first field of the step's form whose *current* token matches, re-checking every target as
+  before. A page that renames a token after the menu showed gets nothing for it.
+- **Saving custom fields.** At submit, up to 8 visible custom-token fields of the form are
+  captured. When they give a row, the extension-origin save dialog
+  ([`src/save-dialog/`](src/save-dialog)) replaces the page-DOM banner: it fetches its rows from the
+  long-lived context by the save-prompt token, new text fields start ticked and hidden fields and
+  updates unticked, an empty Display Name cannot be saved, and only a real click answers it. A
+  save never changes an existing field's id. The banner still saves username and password only.
+- **Not done:** TOTP and custom fill from the popup (ADR 0076 owner answer 9); filling
+  split-digit code boxes.
+
 ## Architecture
 
 ```

@@ -1247,6 +1247,7 @@ One implementation in `rizzy-core` serves two uses: codes for items that hold a 
 - **Item TOTP secrets** stay in item data, encrypted like any other field, and are held in `Zeroizing` buffers while in use.
 - **Server 2FA.** The secret is sealed as `SERVER_TOTP_SECRET` ([§5.11](#511-server-side-encryption-not-zero-knowledge)). The server computes the codes of the current time step and of one step either side (±1) and compares each with the submitted code using `ct_eq`. It accepts a matching step only if that step is above the last step it accepted for that credential, and stores the accepted step in the same transaction as the login. So every step at or below the last accepted one is rejected, including an older step whose code was never used. If several steps match, the highest is accepted.
 - **Neither kind of TOTP feeds key derivation** ([§5.10](#510-sessions-after-authentication)).
+- **Autofill of item codes** ([ADR 0076](adr/0076-autocomplete-driven-autofill.md) §4.2). `rizzy-client`'s fill plan computes the code of the current step only (no look-ahead) at the long-lived context's clock, through this implementation. Only the 6–8 digit code crosses to the extension; the secret never leaves `rizzy-wasm`. An HOTP URI fills nothing.
 
 ### 11.16 Breach check (HIBP k-anonymity, M3)
 
@@ -1411,7 +1412,7 @@ All of this lands with the code in M1. None of it is optional.
    - RFC 7748 (X25519), RFC 8032 (Ed25519)
    - RFC 9180 (HPKE, through hpke's `kat` test data for our suite, in Base and PSK mode)
    - RFC 9807 (OPAQUE, through opaque-ke's test vectors)
-   - RFC 2202 (HMAC-SHA-1), RFC 4226 Appendix D and RFC 6238 Appendix B (HOTP and TOTP, all three algorithms)
+   - RFC 2202 (HMAC-SHA-1), RFC 4226 Appendix D and RFC 6238 Appendix B (HOTP and TOTP, all three algorithms). The RFC 6238 vectors also run through `rizzy-client`'s autofill fill plan ([ADR 0076](adr/0076-autocomplete-driven-autofill.md) §10)
 3. **Wycheproof.** Run the Wycheproof suites for XChaCha20-Poly1305, ChaCha20-Poly1305, HKDF-SHA-256, HMAC-SHA-256, HMAC-SHA-1, X25519 and Ed25519 at a pinned commit of the repository. File names are to be confirmed in M1 (U).
 4. **Property tests** (proptest):
    - encrypt/decrypt round-trips for all purposes;

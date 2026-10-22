@@ -25,6 +25,7 @@ const host = byId("dialog-host", HTMLElement);
 const rowsBox = byId("rows", HTMLFieldSetElement);
 const saveButton = byId("save", HTMLButtonElement);
 const dismissButton = byId("dismiss", HTMLButtonElement);
+const errorLine = byId("dialog-error", HTMLElement);
 
 let replyOrigin: string | undefined;
 let instanceToken: string | undefined;
@@ -114,17 +115,22 @@ window.addEventListener("message", (event) => {
   if (event.source !== window.parent || !isSaveDialogShowMessage(event.data)) {
     return;
   }
-  replyOrigin = event.data.pageOrigin;
-  instanceToken = event.data.instanceToken;
-  promptToken = event.data.token;
+  // The page can post a show message too (the forgeable direction, `protocol.ts`). A show
+  // message is adopted only once the long-lived context answers it with real choices, which a
+  // forged instance token or prompt token never gets: a forgery cannot replace the dialog's
+  // state, only fail.
+  const shown = event.data;
   const ext = runtime();
   if (ext === undefined) {
     return;
   }
   void ext.runtime
-    .sendMessage({ type: "save_dialog_request", instanceToken, token: promptToken } satisfies SaveDialogRequestMessage)
+    .sendMessage({ type: "save_dialog_request", instanceToken: shown.instanceToken, token: shown.token } satisfies SaveDialogRequestMessage)
     .then((answer: unknown) => {
       if (isChoices(answer)) {
+        replyOrigin = shown.pageOrigin;
+        instanceToken = shown.instanceToken;
+        promptToken = shown.token;
         render(answer);
       }
     })
@@ -149,8 +155,17 @@ function finish(action: "save" | "update" | "dismiss", event: MouseEvent): void 
   void ext.runtime
     .sendMessage({ type: "save_dialog_resolve", instanceToken: token, token: prompt, action, rows } satisfies SaveDialogResolveMessage)
     .catch(() => undefined)
-    .finally(() => {
-      window.parent.postMessage({ type: SAVE_DIALOG_DONE }, origin);
+    .then((answer: unknown) => {
+      const done = typeof answer === "object" && answer !== null && (answer as Record<string, unknown>)["type"] === "save_prompt_done";
+      if (done || action === "dismiss") {
+        window.parent.postMessage({ type: SAVE_DIALOG_DONE }, origin);
+        return;
+      }
+      // The prompt is gone either way (it is answered once); say so instead of vanishing.
+      errorLine.textContent = "Could not save this login. Open rizzy-vault to add it by hand.";
+      const code = typeof answer === "object" && answer !== null ? (answer as Record<string, unknown>)["code"] : undefined;
+      errorLine.dataset["code"] = typeof code === "string" ? code.slice(0, 200) : "no_answer";
+      dismissButton.disabled = false;
     });
 }
 
