@@ -12,8 +12,8 @@
 //!
 //! # Paths and methods (item 1)
 //!
-//! The 31 endpoints of [`paths`], all under [`crate::meta::API_V1_PREFIX`]: ADR 0028's 27 and
-//! the four `sessions` endpoints of ADR 0075 §2. Every one is `POST`
+//! The 36 endpoints of [`paths`], all under [`crate::meta::API_V1_PREFIX`]: ADR 0028's 27, the
+//! four `sessions` endpoints of ADR 0075 §2 and the five `attachments` endpoints of ADR 0054 §6. Every one is `POST`
 //! except [`paths::DEVICES_GRANTS`], which is `GET` (and `HEAD`); `GET /api/meta` is the one
 //! unversioned endpoint. A request body never goes in a URL, and `v1` defines no query
 //! parameter, so a client sends no query.
@@ -145,9 +145,19 @@ pub mod paths {
     pub const VAULT_FETCH: &str = "/api/v1/vault/fetch";
     /// Vault restore healing.
     pub const VAULT_HEAL: &str = "/api/v1/vault/heal";
+    /// Declare an attachment and store its key wrap (ADR 0054 §6).
+    pub const ATTACHMENTS_CREATE: &str = "/api/v1/attachments/create";
+    /// An attachment's key wrap (ADR 0054 §6).
+    pub const ATTACHMENTS_GET: &str = "/api/v1/attachments/get";
+    /// Store one chunk envelope (ADR 0054 §6).
+    pub const ATTACHMENTS_UPLOAD_CHUNK: &str = "/api/v1/attachments/upload-chunk";
+    /// Fetch one chunk envelope (ADR 0054 §6).
+    pub const ATTACHMENTS_DOWNLOAD_CHUNK: &str = "/api/v1/attachments/download-chunk";
+    /// Delete an attachment and release its quota (ADR 0054 §7).
+    pub const ATTACHMENTS_DELETE: &str = "/api/v1/attachments/delete";
 
     /// Every `/api/v1` path, in the order above.
-    pub const ALL: [&str; 31] = [
+    pub const ALL: [&str; 36] = [
         REGISTER_START,
         REGISTER_FINISH,
         LOGIN_START,
@@ -179,6 +189,11 @@ pub mod paths {
         VAULT_UPLOAD,
         VAULT_FETCH,
         VAULT_HEAL,
+        ATTACHMENTS_CREATE,
+        ATTACHMENTS_GET,
+        ATTACHMENTS_UPLOAD_CHUNK,
+        ATTACHMENTS_DOWNLOAD_CHUNK,
+        ATTACHMENTS_DELETE,
     ];
 }
 
@@ -204,7 +219,7 @@ mod tests {
         let mut sorted = paths::ALL.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), 31);
+        assert_eq!(sorted.len(), 36);
         for path in paths::ALL {
             assert!(path.starts_with(API_V1_PREFIX), "{path}");
             // Nothing a proxy or a URL library would rewrite, and no query.

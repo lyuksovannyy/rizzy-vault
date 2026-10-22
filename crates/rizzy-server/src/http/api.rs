@@ -660,7 +660,13 @@ fn auth_code(endpoint: Endpoint, e: &AuthError) -> Failure {
 
 /// The code of a vault-domain error; a failure other than a refusal is logged first.
 fn vault_code(endpoint: Endpoint, e: &VaultError) -> ErrorCode {
-    if !matches!(e, VaultError::NotFound | VaultError::Invalid) {
+    if !matches!(
+        e,
+        VaultError::NotFound
+            | VaultError::Invalid
+            | VaultError::RecordConflict
+            | VaultError::QuotaExceeded
+    ) {
         log::error(
             "vault_failure",
             &[

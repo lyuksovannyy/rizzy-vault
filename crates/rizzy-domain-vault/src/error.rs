@@ -48,6 +48,12 @@ pub enum VaultError {
     /// way to page them (see the crate docs, "Open wire details"), so the Fetch fails rather
     /// than returning a truncated wrap set.
     WrapSetTooLarge,
+    /// Another attachment or chunk is already stored under the same id or index (ADR 0054 §6:
+    /// "a conflicting one is `record_conflict`"); answered `record_conflict`.
+    RecordConflict,
+    /// An attachment's declared size passes the 25 MiB cap or the account's remaining quota
+    /// (ADR 0054 §6, ADR 0048 §5); answered `quota_exceeded`.
+    QuotaExceeded,
 }
 
 impl VaultError {
@@ -58,6 +64,8 @@ impl VaultError {
             Self::NotFound => ErrorCode::NotFound,
             Self::Invalid => ErrorCode::InvalidRequest,
             Self::StateConflict => ErrorCode::StateConflict,
+            Self::RecordConflict => ErrorCode::RecordConflict,
+            Self::QuotaExceeded => ErrorCode::QuotaExceeded,
             Self::Storage(_)
             | Self::Directory(_)
             | Self::NoRestoreGeneration
@@ -80,6 +88,8 @@ impl fmt::Display for VaultError {
             Self::NoRestoreGeneration => f.write_str("the database has no restore generation"),
             Self::Corrupt { what } => write!(f, "stored row malformed: {what}"),
             Self::WrapSetTooLarge => f.write_str("the wrap set does not fit one Fetch response"),
+            Self::RecordConflict => f.write_str("another record is stored under this id"),
+            Self::QuotaExceeded => f.write_str("the attachment exceeds the cap or the quota"),
         }
     }
 }

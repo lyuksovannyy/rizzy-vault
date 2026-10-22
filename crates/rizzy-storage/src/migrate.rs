@@ -98,6 +98,15 @@ pub const MIGRATIONS: &[MigrationFile] = &[
         sqlite: include_str!("../migrations/sqlite/0006_storage_account_usage.sql"),
         postgres: include_str!("../migrations/postgres/0006_storage_account_usage.sql"),
     },
+    // ADR 0054 §5: the attachment tables. Raises the backup `schema_version` to 7 (ADR 0023:
+    // a dump is stamped with the last applied migration, and restored only by the release that
+    // wrote it).
+    MigrationFile {
+        version: 7,
+        description: "vault_attachments",
+        sqlite: include_str!("../migrations/sqlite/0007_vault_attachments.sql"),
+        postgres: include_str!("../migrations/postgres/0007_vault_attachments.sql"),
+    },
 ];
 
 /// This release's schema version: the last migration's version. A logical backup is stamped
