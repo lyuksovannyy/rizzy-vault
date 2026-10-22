@@ -29805,9 +29805,10 @@ pub mod session {
     //!   refresh ([`crate::sync`]). The host syncs before it lists them, as `rv device list` reads
     //!   `account/state` first.
     use core::fmt;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use rizzy_client::ClientError;
     use rizzy_client::account::VerifiedAccount;
+    use rizzy_client::attachments::{AttachmentDownload, AttachmentUpload};
     use rizzy_client::device::UnlockedDevice;
     use rizzy_client::export::detect::{DetectedFormat, detect_format};
     use rizzy_client::export::gate::{self, ExportGate, check_export_password};
@@ -29822,7 +29823,7 @@ pub mod session {
         decide_with_settings, global_equivalence_groups, vault_item_uris,
     };
     use rizzy_client::passkey::get_assertion;
-    use rizzy_client::rizzy_core::ids::AccountId;
+    use rizzy_client::rizzy_core::ids::{AccountId, AttachmentId};
     use rizzy_client::rizzy_core::item::key::ElementId;
     use rizzy_client::rizzy_core::item::schema::{
         ATTR_ALG, ATTR_CREATED_MS, ATTR_CREDENTIAL_ID, ATTR_PRIVATE_KEY,
@@ -29865,6 +29866,3067 @@ pub mod session {
     use crate::rng::{Rng, os_rng};
     use crate::secret::take_secret;
     use crate::sync::{Ctx, Signer, SyncDriver};
+    mod attachments {
+        //! Encrypted attachments for the web vault ([ADR 0054]; `rizzy_client::attachments`).
+        //!
+        //! ```text
+        //! const id = session.addAttachment(itemId, name, mime, bytes, now)    // the item op is written
+        //! send(session.attachmentCreateRequest(id))                            // attachments/create
+        //! for i in 0..session.attachmentChunkCount(id): send(session.attachmentUploadChunkRequest(id, i))
+        //! session.attachmentUploadDone(id)
+        //!
+        //! const n = session.attachmentDownloadStart(itemId, id)                // n from the item's size
+        //! session.attachmentGetResponse(id, ...send(session.attachmentGetRequest(id)))
+        //! for i in 0..n: session.attachmentDownloadChunkResponse(id, i, ...send(…ChunkRequest(id, i)))
+        //! const file = session.attachmentDownloadFinish(id)                    // only if every chunk opened
+        //!
+        //! send(session.attachmentDeleteRequest(id)); session.removeAttachment(itemId, id, now)
+        //! ```
+        //!
+        //! Every request is built here and every answer verified here; JavaScript only carries bytes.
+        //! The finished file crosses to JavaScript as a byte array, the one copy a download needs; like
+        //! a plaintext export, it cannot be wiped once there (ADR 0013 §4 "Honest limit").
+        //!
+        //! [ADR 0054]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0054-attachments-envelope-and-api.md
+        use rizzy_client::ClientError;
+        use rizzy_client::attachments::{AttachmentInfo, delete_request};
+        use rizzy_client::rizzy_core::ids::AttachmentId;
+        use rizzy_client::rizzy_proto::attachments::{
+            DownloadChunkResponse, GetAttachmentResponse,
+        };
+        use rizzy_client::rizzy_proto::http::paths;
+        use wasm_bindgen::prelude::wasm_bindgen;
+        use super::Session;
+        use crate::error::{CoreError, CoreResult};
+        use crate::http::{self, HttpRequest};
+        use crate::items::{self, hex, parse_id};
+        /// An attachment id from its 32 hex digits.
+        fn attachment_id(text: &str) -> CoreResult<AttachmentId> {
+            Ok(AttachmentId::from_bytes(parse_id(text)?))
+        }
+        #[wasm_bindgen()]
+        #[__wasm_bindgen_retried]
+        #[doc =
+        " One attachment an item lists: id, name, media type and size. Item data, for display."]
+        pub struct AttachmentView {
+            #[doc = " The id, 32 hex digits."]
+            id: String,
+            #[doc = " The file name."]
+            name: String,
+            #[doc = " The declared media type."]
+            mime: String,
+            #[doc = " The size in bytes."]
+            size: u64,
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::__rt::marker::SupportsConstructor for
+            AttachmentView {
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for
+            AttachmentView {
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::__rt::marker::SupportsStaticProperty for
+            AttachmentView {
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::describe::WasmDescribe for AttachmentView {
+            fn describe() {
+                use wasm_bindgen::describe::*;
+                inform(RUST_STRUCT);
+                inform(14u32);
+                inform(65u32);
+                inform(116u32);
+                inform(116u32);
+                inform(97u32);
+                inform(99u32);
+                inform(104u32);
+                inform(109u32);
+                inform(101u32);
+                inform(110u32);
+                inform(116u32);
+                inform(86u32);
+                inform(105u32);
+                inform(101u32);
+                inform(119u32);
+                inform(27u32);
+                inform(114u32);
+                inform(105u32);
+                inform(122u32);
+                inform(122u32);
+                inform(121u32);
+                inform(45u32);
+                inform(119u32);
+                inform(97u32);
+                inform(115u32);
+                inform(109u32);
+                inform(45u32);
+                inform(101u32);
+                inform(48u32);
+                inform(57u32);
+                inform(99u32);
+                inform(99u32);
+                inform(48u32);
+                inform(101u32);
+                inform(98u32);
+                inform(51u32);
+                inform(53u32);
+                inform(102u32);
+                inform(56u32);
+                inform(98u32);
+                inform(53u32);
+                inform(56u32);
+                inform(51u32);
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::IntoWasmAbi for AttachmentView {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AttachmentView>>;
+            fn into_abi(self) -> Self::Abi {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+                WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self)))
+                        as *mut WasmRefCell<AttachmentView>)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::FromWasmAbi for AttachmentView {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AttachmentView>>;
+            unsafe fn from_abi(js: Self::Abi) -> Self {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+                use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+                let ptr = js.into_ptr();
+                assert_not_null(ptr);
+                let rc = Rc::from_raw(ptr);
+                match Rc::try_unwrap(rc) {
+                    Ok(cell) => cell.into_inner(),
+                    Err(_) =>
+                        wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+                }
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::__rt::core::convert::From<AttachmentView> for
+            wasm_bindgen::JsValue {
+            fn from(value: AttachmentView) -> Self {
+                let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+                #[link(wasm_import_module = "__wbindgen_placeholder__")]
+                extern "C" {
+                    #[link_name = "__wbg_attachmentview_new_e09cc0eb35f8b583"]
+                    fn __wbg_attachmentview_new(ptr:
+                        wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AttachmentView>>)
+                    -> u32;
+                }
+                unsafe {
+                    <wasm_bindgen::JsValue as
+                            wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_attachmentview_new(ptr))
+                }
+            }
+        }
+        #[automatically_derived]
+        const _: () =
+            {
+                #[export_name = "__wbg_attachmentview_free_e09cc0eb35f8b583"]
+                #[doc(hidden)]
+                pub unsafe extern "C-unwind" fn __wbg_attachmentview_free(ptr:
+                        wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AttachmentView>>,
+                    allow_delayed: u32) {
+                    use wasm_bindgen::__rt::alloc::rc::Rc;
+                    if allow_delayed != 0 {
+                        let ptr = ptr.into_ptr();
+                        wasm_bindgen::__rt::assert_not_null(ptr);
+                        drop(Rc::from_raw(ptr));
+                    } else {
+                        let _ =
+                            <AttachmentView as
+                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                    }
+                }
+            };
+        #[automatically_derived]
+        impl wasm_bindgen::convert::RefFromWasmAbi for AttachmentView {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AttachmentView>>;
+            type Anchor = wasm_bindgen::__rt::RcRef<AttachmentView>;
+            unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                let js = js.into_ptr();
+                wasm_bindgen::__rt::assert_not_null(js);
+                Rc::increment_strong_count(js);
+                let rc = Rc::from_raw(js);
+                wasm_bindgen::__rt::RcRef::new(rc)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::RefMutFromWasmAbi for AttachmentView {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AttachmentView>>;
+            type Anchor = wasm_bindgen::__rt::RcRefMut<AttachmentView>;
+            unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                let js = js.into_ptr();
+                wasm_bindgen::__rt::assert_not_null(js);
+                Rc::increment_strong_count(js);
+                let rc = Rc::from_raw(js);
+                wasm_bindgen::__rt::RcRefMut::new(rc)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::LongRefFromWasmAbi for AttachmentView {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AttachmentView>>;
+            type Anchor = wasm_bindgen::__rt::RcRef<AttachmentView>;
+            unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+                <Self as
+                        wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::OptionIntoWasmAbi for AttachmentView {
+            #[inline]
+            fn none() -> Self::Abi {
+                <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AttachmentView>>>::null()
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::OptionFromWasmAbi for AttachmentView {
+            #[inline]
+            fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::TryFromJsValue for AttachmentView {
+            fn try_from_js_value(value: wasm_bindgen::JsValue)
+                ->
+                    wasm_bindgen::__rt::core::result::Result<Self,
+                    wasm_bindgen::JsValue> {
+                Self::try_from_js_value_ref(&value).ok_or(value)
+            }
+            fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+                -> wasm_bindgen::__rt::core::option::Option<Self> {
+                let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+                #[link(wasm_import_module = "__wbindgen_placeholder__")]
+                extern "C" {
+                    #[link_name =
+                    "__wbg_attachmentview_unwrap_e09cc0eb35f8b583"]
+                    fn __wbg_attachmentview_unwrap(ptr: u32)
+                    ->
+                        wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AttachmentView>>;
+                }
+                let ptr = unsafe { __wbg_attachmentview_unwrap(idx) };
+                if ptr.is_null() {
+                    wasm_bindgen::__rt::core::option::Option::None
+                } else {
+                    unsafe {
+                        wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                    }
+                }
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::describe::WasmDescribeVector for AttachmentView {
+            fn describe_vector() {
+                use wasm_bindgen::describe::*;
+                inform(VECTOR);
+                <AttachmentView as
+                        wasm_bindgen::describe::WasmDescribe>::describe();
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::VectorIntoWasmAbi for AttachmentView {
+            type Abi =
+                <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]>
+                as wasm_bindgen::convert::IntoWasmAbi>::Abi;
+            fn vector_into_abi(vector:
+                    wasm_bindgen::__rt::alloc::boxed::Box<[AttachmentView]>)
+                -> Self::Abi {
+                wasm_bindgen::convert::js_value_vector_into_abi(vector)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::VectorFromWasmAbi for AttachmentView {
+            type Abi =
+                <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]>
+                as wasm_bindgen::convert::FromWasmAbi>::Abi;
+            unsafe fn vector_from_abi(js: Self::Abi)
+                -> wasm_bindgen::__rt::alloc::boxed::Box<[AttachmentView]> {
+                wasm_bindgen::convert::js_value_vector_from_abi(js)
+            }
+        }
+        #[automatically_derived]
+        const _: () =
+            {
+                use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                static _INCLUDED_FILES: &[&str] = &[];
+                const _ENCODED_BYTES: &[u8] =
+                    {
+                        const _CHUNK_SLICES: [&[u8]; 1usize] =
+                            [b"\0\0\0\x01\x0eAttachmentView\0\x01U One attachment an item lists: id, name, media type and size. Item data, for display.\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        #[allow(long_running_const_eval)]
+                        const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                        #[allow(long_running_const_eval)]
+                        const _CHUNKS: [u8; _CHUNK_LEN] =
+                            flat_byte_slices(_CHUNK_SLICES);
+                        const _LEN_BYTES: [u8; 4] =
+                            (_CHUNK_LEN as u32).to_le_bytes();
+                        const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                        #[allow(long_running_const_eval)]
+                        const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                            flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                        &_ENCODED_BYTES
+                    };
+                const _PREFIX_JSON_BYTES: &[u8] =
+                    b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                const _PREFIX_JSON_BYTES_LEN: usize =
+                    _PREFIX_JSON_BYTES.len();
+                const _LEN: usize =
+                    _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                #[link_section = "__wasm_bindgen_unstable"]
+                #[allow(long_running_const_eval)]
+                static _GENERATED: [u8; _LEN] =
+                    flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+            };
+        impl core::fmt::Debug for AttachmentView {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>)
+                -> core::fmt::Result {
+                f.debug_struct("AttachmentView").field("size",
+                        &self.size).finish_non_exhaustive()
+            }
+        }
+        impl AttachmentView {
+            /// The view of a listed attachment.
+            fn of(info: &AttachmentInfo) -> Self {
+                Self {
+                    id: hex(&info.attachment_id.to_bytes()),
+                    name: info.name.as_str().to_owned(),
+                    mime: info.mime.as_str().to_owned(),
+                    size: info.size,
+                }
+            }
+        }
+        impl AttachmentView {
+            #[doc = " The attachment id, 32 hex digits."]
+            #[must_use]
+            pub fn id(&self) -> String {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The attachment id, 32 hex digits."]
+                        #[must_use]
+                        #[export_name = "attachmentview_id_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_AttachmentView_id(me:
+                                <AttachmentView as
+                                wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<String as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () =
+                                {
+                                    let _:
+                                            wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<AttachmentView>;
+                                };
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<AttachmentView>();
+                                                let me =
+                                                    unsafe {
+                                                        <AttachmentView as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.id();
+                                                _ret
+                                            }
+                                        });
+                            <String as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The attachment id, 32 hex digits."]
+                        #[must_use]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_attachmentview_id_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <String as WasmDescribe>::describe();
+                            <String as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x0eAttachmentView\x01\" The attachment id, 32 hex digits.\0\0\0\0\x02id\x01\x01\0\0\0\0\x01\0\x02\x02id\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                self.id.clone()
+            }
+            #[doc = " The file name, as entered."]
+            #[must_use]
+            pub fn name(&self) -> String {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The file name, as entered."]
+                        #[must_use]
+                        #[export_name = "attachmentview_name_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_AttachmentView_name(me:
+                                <AttachmentView as
+                                wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<String as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () =
+                                {
+                                    let _:
+                                            wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<AttachmentView>;
+                                };
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<AttachmentView>();
+                                                let me =
+                                                    unsafe {
+                                                        <AttachmentView as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.name();
+                                                _ret
+                                            }
+                                        });
+                            <String as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The file name, as entered."]
+                        #[must_use]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_attachmentview_name_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <String as WasmDescribe>::describe();
+                            <String as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x0eAttachmentView\x01\x1b The file name, as entered.\0\0\0\0\x04name\x01\x01\0\0\0\0\x01\0\x02\x04name\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                self.name.clone()
+            }
+            #[doc = " The declared media type."]
+            #[must_use]
+            pub fn mime(&self) -> String {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The declared media type."]
+                        #[must_use]
+                        #[export_name = "attachmentview_mime_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_AttachmentView_mime(me:
+                                <AttachmentView as
+                                wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<String as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () =
+                                {
+                                    let _:
+                                            wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<AttachmentView>;
+                                };
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<AttachmentView>();
+                                                let me =
+                                                    unsafe {
+                                                        <AttachmentView as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.mime();
+                                                _ret
+                                            }
+                                        });
+                            <String as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The declared media type."]
+                        #[must_use]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_attachmentview_mime_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <String as WasmDescribe>::describe();
+                            <String as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x0eAttachmentView\x01\x19 The declared media type.\0\0\0\0\x04mime\x01\x01\0\0\0\0\x01\0\x02\x04mime\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                self.mime.clone()
+            }
+            #[doc = " The plaintext size in bytes."]
+            #[must_use]
+            pub fn size(&self) -> u64 {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The plaintext size in bytes."]
+                        #[must_use]
+                        #[export_name = "attachmentview_size_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_AttachmentView_size(me:
+                                <AttachmentView as
+                                wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<u64 as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () =
+                                {
+                                    let _:
+                                            wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<AttachmentView>;
+                                };
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<AttachmentView>();
+                                                let me =
+                                                    unsafe {
+                                                        <AttachmentView as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.size();
+                                                _ret
+                                            }
+                                        });
+                            <u64 as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The plaintext size in bytes."]
+                        #[must_use]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_attachmentview_size_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <u64 as WasmDescribe>::describe();
+                            <u64 as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x0eAttachmentView\x01\x1d The plaintext size in bytes.\0\0\0\0\x04size\x01\x01\0\0\0\0\x01\0\x02\x04size\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                self.size
+            }
+        }
+        #[automatically_derived]
+        const _: () =
+            {
+                use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                static _INCLUDED_FILES: &[&str] = &[];
+                const _ENCODED_BYTES: &[u8] =
+                    {
+                        const _CHUNK_SLICES: [&[u8]; 1usize] =
+                            [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        #[allow(long_running_const_eval)]
+                        const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                        #[allow(long_running_const_eval)]
+                        const _CHUNKS: [u8; _CHUNK_LEN] =
+                            flat_byte_slices(_CHUNK_SLICES);
+                        const _LEN_BYTES: [u8; 4] =
+                            (_CHUNK_LEN as u32).to_le_bytes();
+                        const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                        #[allow(long_running_const_eval)]
+                        const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                            flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                        &_ENCODED_BYTES
+                    };
+                const _PREFIX_JSON_BYTES: &[u8] =
+                    b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                const _PREFIX_JSON_BYTES_LEN: usize =
+                    _PREFIX_JSON_BYTES.len();
+                const _LEN: usize =
+                    _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                #[link_section = "__wasm_bindgen_unstable"]
+                #[allow(long_running_const_eval)]
+                static _GENERATED: [u8; _LEN] =
+                    flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+            };
+        impl Session {
+            #[doc = " The attachments of an item, in list order."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " `locked`; `invalid_input` for a malformed id."]
+            pub fn attachments(&self, id: &str)
+                -> Result<Vec<AttachmentView>, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The attachments of an item, in list order."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`; `invalid_input` for a malformed id."]
+                        #[export_name = "session_attachments_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachments(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<Vec<AttachmentView>,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.attachments(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<Vec<AttachmentView>, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The attachments of an item, in list order."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`; `invalid_input` for a malformed id."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachments_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<Vec<AttachmentView>, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<Vec<AttachmentView>, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x04+ The attachments of an item, in list order.\0\t # Errors. `locked`; `invalid_input` for a malformed id.\0\x01\x02id\0\0\0\0\0\x0battachments\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let item = items::item_id(id)?;
+                Ok(self.inner()?.vault.attachments(item).iter().map(AttachmentView::of).collect())
+            }
+            #[doc =
+            " Adds a file to an item: writes the item op naming it (ADR 0054 §7), wraps a fresh"]
+            #[doc =
+            " attachment key and seals every chunk. Returns the new attachment\'s id; its requests follow."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `wrong_state` while a sync runs; `attachment_too_large` over 25 MiB;"]
+            #[doc =
+            " `invalid_input` for an empty or overlong name or media type; `read_only`;"]
+            #[doc = " `unknown_item`."]
+            pub fn add_attachment(&mut self, id: &str, name: &str, mime: &str,
+                data: &[u8], now_ms: u64) -> Result<String, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Adds a file to an item: writes the item op naming it (ADR 0054 §7), wraps a fresh"]
+                        #[doc =
+                        " attachment key and seals every chunk. Returns the new attachment\'s id; its requests follow."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` while a sync runs; `attachment_too_large` over 25 MiB;"]
+                        #[doc =
+                        " `invalid_input` for an empty or overlong name or media type; `read_only`;"]
+                        #[doc = " `unknown_item`."]
+                        #[export_name = "session_addAttachment_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_addAttachment(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg3_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg3_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg3_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg3_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg4_1:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg4_2:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg4_3:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg4_4:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg5_1:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg5_2:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg5_3:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg5_4:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<String, CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                let arg2 = &*arg2;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg3 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                                arg3_3, arg3_4))
+                                                    };
+                                                let arg3 = &*arg3;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                                let arg4 =
+                                                    unsafe {
+                                                        <[u8] as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                                arg4_3, arg4_4))
+                                                    };
+                                                let arg4 = &*arg4;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                                let arg5 =
+                                                    unsafe {
+                                                        <u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg5_1, arg5_2,
+                                                                arg5_3, arg5_4))
+                                                    };
+                                                let _ret = me.add_attachment(arg1, arg2, arg3, arg4, arg5);
+                                                _ret
+                                            }
+                                        });
+                            <Result<String, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Adds a file to an item: writes the item op naming it (ADR 0054 §7), wraps a fresh"]
+                        #[doc =
+                        " attachment key and seals every chunk. Returns the new attachment\'s id; its requests follow."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` while a sync runs; `attachment_too_large` over 25 MiB;"]
+                        #[doc =
+                        " `invalid_input` for an empty or overlong name or media type; `read_only`;"]
+                        #[doc = " `unknown_item`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_addAttachment_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(5u32);
+                            <&str as WasmDescribe>::describe();
+                            <&str as WasmDescribe>::describe();
+                            <&str as WasmDescribe>::describe();
+                            <&[u8] as WasmDescribe>::describe();
+                            <u64 as WasmDescribe>::describe();
+                            <Result<String, CoreError> as WasmDescribe>::describe();
+                            <Result<String, CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x07S Adds a file to an item: writes the item op naming it (ADR 0054 \xc2\xa77), wraps a fresh\\ attachment key and seals every chunk. Returns the new attachment's id; its requests follow.\0\t # ErrorsO `locked`; `wrong_state` while a sync runs; `attachment_too_large` over 25 MiB;J `invalid_input` for an empty or overlong name or media type; `read_only`;\x10 `unknown_item`.\0\x05\x02id\0\0\0\x04name\0\0\0\x04mime\0\0\0\x04data\0\0\0\x06now_ms\0\0\0\0\0\raddAttachment\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let item = items::item_id(id)?;
+                let inner = self.writable()?;
+                let upload =
+                    inner.vault.add_attachment(&mut inner.rng, &inner.unlocked,
+                            item, name, mime, data, now_ms)?;
+                let attachment = upload.attachment_id();
+                inner.uploads.insert(attachment, upload);
+                Ok(hex(&attachment.to_bytes()))
+            }
+            #[doc =
+            " The `attachments/create` request of an attachment being uploaded."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `invalid_input` for an id with no upload in progress."]
+            pub fn attachment_create_request(&self, attachment: &str)
+                -> Result<HttpRequest, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `attachments/create` request of an attachment being uploaded."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no upload in progress."]
+                        #[export_name =
+                        "session_attachmentCreateRequest_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentCreateRequest(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.attachment_create_request(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<HttpRequest, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `attachments/create` request of an attachment being uploaded."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no upload in progress."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentCreateRequest_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x04B The `attachments/create` request of an attachment being uploaded.\0\t # Errors@ `locked`; `invalid_input` for an id with no upload in progress.\0\x01\nattachment\0\0\0\0\0\x17attachmentCreateRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let inner = self.inner()?;
+                let upload =
+                    inner.uploads.get(&attachment_id(attachment)?).ok_or(ClientError::InvalidInput)?;
+                HttpRequest::post(paths::ATTACHMENTS_CREATE,
+                    &upload.create_request(), Some(&inner.token))
+            }
+            #[doc =
+            " How many chunks an attachment being uploaded or downloaded has."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `invalid_input` for an id with no transfer in progress."]
+            pub fn attachment_chunk_count(&self, attachment: &str)
+                -> Result<u32, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " How many chunks an attachment being uploaded or downloaded has."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no transfer in progress."]
+                        #[export_name =
+                        "session_attachmentChunkCount_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentChunkCount(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<u32, CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.attachment_chunk_count(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<u32, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " How many chunks an attachment being uploaded or downloaded has."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no transfer in progress."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentChunkCount_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<u32, CoreError> as WasmDescribe>::describe();
+                            <Result<u32, CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x04@ How many chunks an attachment being uploaded or downloaded has.\0\t # ErrorsB `locked`; `invalid_input` for an id with no transfer in progress.\0\x01\nattachment\0\0\0\0\0\x14attachmentChunkCount\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let inner = self.inner()?;
+                let id = attachment_id(attachment)?;
+                if let Some(upload) = inner.uploads.get(&id) {
+                    return Ok(upload.chunk_count());
+                }
+                Ok(inner.downloads.get(&id).ok_or(ClientError::InvalidInput)?.chunk_count())
+            }
+            #[doc =
+            " The `attachments/upload-chunk` request of chunk `index`."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `invalid_input` for an id with no upload in progress or an index past the"]
+            #[doc = " last chunk."]
+            pub fn attachment_upload_chunk_request(&self, attachment: &str,
+                index: u32) -> Result<HttpRequest, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `attachments/upload-chunk` request of chunk `index`."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no upload in progress or an index past the"]
+                        #[doc = " last chunk."]
+                        #[export_name =
+                        "session_attachmentUploadChunkRequest_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentUploadChunkRequest(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u32>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <u32 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u32 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                let _ret = me.attachment_upload_chunk_request(arg1, arg2);
+                                                _ret
+                                            }
+                                        });
+                            <Result<HttpRequest, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `attachments/upload-chunk` request of chunk `index`."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no upload in progress or an index past the"]
+                        #[doc = " last chunk."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentUploadChunkRequest_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(2u32);
+                            <&str as WasmDescribe>::describe();
+                            <u32 as WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x059 The `attachments/upload-chunk` request of chunk `index`.\0\t # ErrorsT `locked`; `invalid_input` for an id with no upload in progress or an index past the\x0c last chunk.\0\x02\nattachment\0\0\0\x05index\0\0\0\0\0\x1cattachmentUploadChunkRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let inner = self.inner()?;
+                let upload =
+                    inner.uploads.get(&attachment_id(attachment)?).ok_or(ClientError::InvalidInput)?;
+                HttpRequest::post(paths::ATTACHMENTS_UPLOAD_CHUNK,
+                    &upload.chunk_request(index)?, Some(&inner.token))
+            }
+            #[doc =
+            " Forgets an upload: its requests were sent, or the host gave up on them (the item then"]
+            #[doc =
+            " names an attachment the server lacks; its download answers `not_found`, ADR 0054 §7)."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " `locked`; `invalid_input` for a malformed id."]
+            pub fn attachment_upload_done(&mut self, attachment: &str)
+                -> Result<(), CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Forgets an upload: its requests were sent, or the host gave up on them (the item then"]
+                        #[doc =
+                        " names an attachment the server lacks; its download answers `not_found`, ADR 0054 §7)."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`; `invalid_input` for a malformed id."]
+                        #[export_name =
+                        "session_attachmentUploadDone_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentUploadDone(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.attachment_upload_done(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<(), CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Forgets an upload: its requests were sent, or the host gave up on them (the item then"]
+                        #[doc =
+                        " names an attachment the server lacks; its download answers `not_found`, ADR 0054 §7)."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`; `invalid_input` for a malformed id."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentUploadDone_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05V Forgets an upload: its requests were sent, or the host gave up on them (the item thenW names an attachment the server lacks; its download answers `not_found`, ADR 0054 \xc2\xa77).\0\t # Errors. `locked`; `invalid_input` for a malformed id.\0\x01\nattachment\0\0\0\0\0\x14attachmentUploadDone\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let id = attachment_id(attachment)?;
+                self.inner_mut()?.uploads.remove(&id);
+                Ok(())
+            }
+            #[doc =
+            " Starts downloading an attachment of an item; returns its chunk count, derived from the"]
+            #[doc = " size the item records (never from the server)."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `unknown_item` if the item does not list it; `invalid_input`."]
+            pub fn attachment_download_start(&mut self, id: &str,
+                attachment: &str) -> Result<u32, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Starts downloading an attachment of an item; returns its chunk count, derived from the"]
+                        #[doc = " size the item records (never from the server)."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `unknown_item` if the item does not list it; `invalid_input`."]
+                        #[export_name =
+                        "session_attachmentDownloadStart_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentDownloadStart(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<u32, CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                let arg2 = &*arg2;
+                                                let _ret = me.attachment_download_start(arg1, arg2);
+                                                _ret
+                                            }
+                                        });
+                            <Result<u32, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Starts downloading an attachment of an item; returns its chunk count, derived from the"]
+                        #[doc = " size the item records (never from the server)."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `unknown_item` if the item does not list it; `invalid_input`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentDownloadStart_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(2u32);
+                            <&str as WasmDescribe>::describe();
+                            <&str as WasmDescribe>::describe();
+                            <Result<u32, CoreError> as WasmDescribe>::describe();
+                            <Result<u32, CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05W Starts downloading an attachment of an item; returns its chunk count, derived from the/ size the item records (never from the server).\0\t # ErrorsH `locked`; `unknown_item` if the item does not list it; `invalid_input`.\0\x02\x02id\0\0\0\nattachment\0\0\0\0\0\x17attachmentDownloadStart\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let item = items::item_id(id)?;
+                let attachment = attachment_id(attachment)?;
+                let inner = self.inner_mut()?;
+                let download = inner.vault.begin_download(item, attachment)?;
+                let count = download.chunk_count();
+                inner.downloads.insert(attachment, download);
+                Ok(count)
+            }
+            #[doc = " The `attachments/get` request of a download."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `invalid_input` for an id with no download in progress."]
+            pub fn attachment_get_request(&self, attachment: &str)
+                -> Result<HttpRequest, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The `attachments/get` request of a download."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no download in progress."]
+                        #[export_name =
+                        "session_attachmentGetRequest_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentGetRequest(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.attachment_get_request(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<HttpRequest, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The `attachments/get` request of a download."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no download in progress."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentGetRequest_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x04- The `attachments/get` request of a download.\0\t # ErrorsB `locked`; `invalid_input` for an id with no download in progress.\0\x01\nattachment\0\0\0\0\0\x14attachmentGetRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let inner = self.inner()?;
+                let download =
+                    inner.downloads.get(&attachment_id(attachment)?).ok_or(ClientError::InvalidInput)?;
+                HttpRequest::post(paths::ATTACHMENTS_GET,
+                    &download.get_request(), Some(&inner.token))
+            }
+            #[doc =
+            " Reads the `attachments/get` answer: the wrap, opened with the item key its header names."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `invalid_input`; the server\'s code (`server_not_found` for an attachment the"]
+            #[doc =
+            " server does not hold); `invalid_server_response` for a wrap no held key opens."]
+            pub fn attachment_get_response(&mut self, attachment: &str,
+                status: u16, body: &[u8]) -> Result<(), CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Reads the `attachments/get` answer: the wrap, opened with the item key its header names."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input`; the server\'s code (`server_not_found` for an attachment the"]
+                        #[doc =
+                        " server does not hold); `invalid_server_response` for a wrap no held key opens."]
+                        #[export_name =
+                        "session_attachmentGetResponse_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentGetResponse(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg3_1:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg3_2:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg3_3:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg3_4:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u16>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <u16 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u16 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                                let arg3 =
+                                                    unsafe {
+                                                        <[u8] as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                                arg3_3, arg3_4))
+                                                    };
+                                                let arg3 = &*arg3;
+                                                let _ret = me.attachment_get_response(arg1, arg2, arg3);
+                                                _ret
+                                            }
+                                        });
+                            <Result<(), CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Reads the `attachments/get` answer: the wrap, opened with the item key its header names."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input`; the server\'s code (`server_not_found` for an attachment the"]
+                        #[doc =
+                        " server does not hold); `invalid_server_response` for a wrap no held key opens."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentGetResponse_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(3u32);
+                            <&str as WasmDescribe>::describe();
+                            <u16 as WasmDescribe>::describe();
+                            <&[u8] as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05Y Reads the `attachments/get` answer: the wrap, opened with the item key its header names.\0\t # ErrorsW `locked`; `invalid_input`; the server's code (`server_not_found` for an attachment theO server does not hold); `invalid_server_response` for a wrap no held key opens.\0\x03\nattachment\0\0\0\x06status\0\0\0\x04body\0\0\0\0\0\x15attachmentGetResponse\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let id = attachment_id(attachment)?;
+                let answer: GetAttachmentResponse = http::json(status, body)?;
+                let inner = self.inner_mut()?;
+                let download =
+                    inner.downloads.get_mut(&id).ok_or(ClientError::InvalidInput)?;
+                inner.vault.accept_attachment_key(download, &answer)?;
+                Ok(())
+            }
+            #[doc =
+            " The `attachments/download-chunk` request of chunk `index`."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `invalid_input` for an id with no download or an index past the last chunk."]
+            pub fn attachment_download_chunk_request(&self, attachment: &str,
+                index: u32) -> Result<HttpRequest, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `attachments/download-chunk` request of chunk `index`."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no download or an index past the last chunk."]
+                        #[export_name =
+                        "session_attachmentDownloadChunkRequest_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentDownloadChunkRequest(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u32>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <u32 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u32 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                let _ret = me.attachment_download_chunk_request(arg1, arg2);
+                                                _ret
+                                            }
+                                        });
+                            <Result<HttpRequest, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `attachments/download-chunk` request of chunk `index`."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no download or an index past the last chunk."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentDownloadChunkRequest_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(2u32);
+                            <&str as WasmDescribe>::describe();
+                            <u32 as WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x04; The `attachments/download-chunk` request of chunk `index`.\0\t # ErrorsV `locked`; `invalid_input` for an id with no download or an index past the last chunk.\0\x02\nattachment\0\0\0\x05index\0\0\0\0\0\x1eattachmentDownloadChunkRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let inner = self.inner()?;
+                let download =
+                    inner.downloads.get(&attachment_id(attachment)?).ok_or(ClientError::InvalidInput)?;
+                HttpRequest::post(paths::ATTACHMENTS_DOWNLOAD_CHUNK,
+                    &download.chunk_request(index)?, Some(&inner.token))
+            }
+            #[doc =
+            " Reads the answer for chunk `index` and opens it against this client\'s own layout."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `invalid_input`; the server\'s code; `attachment_incomplete` for a chunk that"]
+            #[doc = " does not open where it was asked for."]
+            pub fn attachment_download_chunk_response(&mut self,
+                attachment: &str, index: u32, status: u16, body: &[u8])
+                -> Result<(), CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Reads the answer for chunk `index` and opens it against this client\'s own layout."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input`; the server\'s code; `attachment_incomplete` for a chunk that"]
+                        #[doc = " does not open where it was asked for."]
+                        #[export_name =
+                        "session_attachmentDownloadChunkResponse_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentDownloadChunkResponse(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg3_1:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg3_2:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg3_3:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg3_4:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg4_1:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg4_2:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg4_3:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg4_4:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u32>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <u32 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u32 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u16>();
+                                                let arg3 =
+                                                    unsafe {
+                                                        <u16 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u16 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                                arg3_3, arg3_4))
+                                                    };
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                                let arg4 =
+                                                    unsafe {
+                                                        <[u8] as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                                arg4_3, arg4_4))
+                                                    };
+                                                let arg4 = &*arg4;
+                                                let _ret =
+                                                    me.attachment_download_chunk_response(arg1, arg2, arg3,
+                                                        arg4);
+                                                _ret
+                                            }
+                                        });
+                            <Result<(), CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Reads the answer for chunk `index` and opens it against this client\'s own layout."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input`; the server\'s code; `attachment_incomplete` for a chunk that"]
+                        #[doc = " does not open where it was asked for."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentDownloadChunkResponse_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(4u32);
+                            <&str as WasmDescribe>::describe();
+                            <u32 as WasmDescribe>::describe();
+                            <u16 as WasmDescribe>::describe();
+                            <&[u8] as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05R Reads the answer for chunk `index` and opens it against this client's own layout.\0\t # ErrorsW `locked`; `invalid_input`; the server's code; `attachment_incomplete` for a chunk that& does not open where it was asked for.\0\x04\nattachment\0\0\0\x05index\0\0\0\x06status\0\0\0\x04body\0\0\0\0\0\x1fattachmentDownloadChunkResponse\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let id = attachment_id(attachment)?;
+                let answer: DownloadChunkResponse = http::json(status, body)?;
+                let inner = self.inner_mut()?;
+                let download =
+                    inner.downloads.get_mut(&id).ok_or(ClientError::InvalidInput)?;
+                download.accept_response(index, &answer)?;
+                Ok(())
+            }
+            #[doc =
+            " The verified file, only when every chunk opened (INV-79). The download is forgotten"]
+            #[doc = " either way."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `invalid_input` for an id with no download; `attachment_incomplete`."]
+            pub fn attachment_download_finish(&mut self, attachment: &str)
+                -> Result<Vec<u8>, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The verified file, only when every chunk opened (INV-79). The download is forgotten"]
+                        #[doc = " either way."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no download; `attachment_incomplete`."]
+                        #[export_name =
+                        "session_attachmentDownloadFinish_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentDownloadFinish(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<Vec<u8>, CoreError>
+                                as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.attachment_download_finish(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<Vec<u8>, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The verified file, only when every chunk opened (INV-79). The download is forgotten"]
+                        #[doc = " either way."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no download; `attachment_incomplete`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentDownloadFinish_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<Vec<u8>, CoreError> as WasmDescribe>::describe();
+                            <Result<Vec<u8>, CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05T The verified file, only when every chunk opened (INV-79). The download is forgotten\x0c either way.\0\t # ErrorsO `locked`; `invalid_input` for an id with no download; `attachment_incomplete`.\0\x01\nattachment\0\0\0\0\0\x18attachmentDownloadFinish\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let id = attachment_id(attachment)?;
+                let download =
+                    self.inner_mut()?.downloads.remove(&id).ok_or(ClientError::InvalidInput)?;
+                let file = download.finish()?;
+                Ok(file.as_slice().to_vec())
+            }
+            #[doc = " Forgets a download without assembling it."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " `locked`; `invalid_input` for a malformed id."]
+            pub fn attachment_download_abort(&mut self, attachment: &str)
+                -> Result<(), CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " Forgets a download without assembling it."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`; `invalid_input` for a malformed id."]
+                        #[export_name =
+                        "session_attachmentDownloadAbort_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentDownloadAbort(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.attachment_download_abort(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<(), CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " Forgets a download without assembling it."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`; `invalid_input` for a malformed id."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentDownloadAbort_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x04* Forgets a download without assembling it.\0\t # Errors. `locked`; `invalid_input` for a malformed id.\0\x01\nattachment\0\0\0\0\0\x17attachmentDownloadAbort\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let id = attachment_id(attachment)?;
+                self.inner_mut()?.downloads.remove(&id);
+                Ok(())
+            }
+            #[doc =
+            " The `attachments/delete` request. Send it before [`Session::remove_attachment`]; a"]
+            #[doc = " `server_not_found` answer means it is gone already."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " `locked`; `invalid_input` for a malformed id."]
+            pub fn attachment_delete_request(&self, attachment: &str)
+                -> Result<HttpRequest, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `attachments/delete` request. Send it before [`Session::remove_attachment`]; a"]
+                        #[doc =
+                        " `server_not_found` answer means it is gone already."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`; `invalid_input` for a malformed id."]
+                        #[export_name =
+                        "session_attachmentDeleteRequest_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentDeleteRequest(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.attachment_delete_request(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<HttpRequest, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `attachments/delete` request. Send it before [`Session::remove_attachment`]; a"]
+                        #[doc =
+                        " `server_not_found` answer means it is gone already."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`; `invalid_input` for a malformed id."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentDeleteRequest_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05S The `attachments/delete` request. Send it before [`Session::remove_attachment`]; a4 `server_not_found` answer means it is gone already.\0\t # Errors. `locked`; `invalid_input` for a malformed id.\0\x01\nattachment\0\0\0\0\0\x17attachmentDeleteRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let inner = self.inner()?;
+                HttpRequest::post(paths::ATTACHMENTS_DELETE,
+                    &delete_request(attachment_id(attachment)?),
+                    Some(&inner.token))
+            }
+            #[doc =
+            " Removes an attachment from an item: clears its fields in one edit."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `wrong_state` while a sync runs; `unknown_item` if the item does not list"]
+            #[doc = " it; `read_only`."]
+            pub fn remove_attachment(&mut self, id: &str, attachment: &str,
+                now_ms: u64) -> Result<(), CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Removes an attachment from an item: clears its fields in one edit."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` while a sync runs; `unknown_item` if the item does not list"]
+                        #[doc = " it; `read_only`."]
+                        #[export_name = "session_removeAttachment_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_removeAttachment(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg3_1:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg3_2:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg3_3:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg3_4:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                let arg2 = &*arg2;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                                let arg3 =
+                                                    unsafe {
+                                                        <u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                                arg3_3, arg3_4))
+                                                    };
+                                                let _ret = me.remove_attachment(arg1, arg2, arg3);
+                                                _ret
+                                            }
+                                        });
+                            <Result<(), CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Removes an attachment from an item: clears its fields in one edit."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` while a sync runs; `unknown_item` if the item does not list"]
+                        #[doc = " it; `read_only`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_removeAttachment_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(3u32);
+                            <&str as WasmDescribe>::describe();
+                            <&str as WasmDescribe>::describe();
+                            <u64 as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05C Removes an attachment from an item: clears its fields in one edit.\0\t # ErrorsT `locked`; `wrong_state` while a sync runs; `unknown_item` if the item does not list\x11 it; `read_only`.\0\x03\x02id\0\0\0\nattachment\0\0\0\x06now_ms\0\0\0\0\0\x10removeAttachment\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let item = items::item_id(id)?;
+                let attachment = attachment_id(attachment)?;
+                let inner = self.writable()?;
+                inner.vault.remove_attachment(&mut inner.rng, &inner.unlocked,
+                        item, attachment, now_ms)?;
+                Ok(())
+            }
+        }
+        #[automatically_derived]
+        const _: () =
+            {
+                use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                static _INCLUDED_FILES: &[&str] = &[];
+                const _ENCODED_BYTES: &[u8] =
+                    {
+                        const _CHUNK_SLICES: [&[u8]; 1usize] =
+                            [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        #[allow(long_running_const_eval)]
+                        const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                        #[allow(long_running_const_eval)]
+                        const _CHUNKS: [u8; _CHUNK_LEN] =
+                            flat_byte_slices(_CHUNK_SLICES);
+                        const _LEN_BYTES: [u8; 4] =
+                            (_CHUNK_LEN as u32).to_le_bytes();
+                        const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                        #[allow(long_running_const_eval)]
+                        const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                            flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                        &_ENCODED_BYTES
+                    };
+                const _PREFIX_JSON_BYTES: &[u8] =
+                    b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                const _PREFIX_JSON_BYTES_LEN: usize =
+                    _PREFIX_JSON_BYTES.len();
+                const _LEN: usize =
+                    _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                #[link_section = "__wasm_bindgen_unstable"]
+                #[allow(long_running_const_eval)]
+                static _GENERATED: [u8; _LEN] =
+                    flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+            };
+    }
+    pub use attachments::AttachmentView;
     /// How long a re-authentication allows one export: 5 minutes (module docs;
     /// `rizzy_client::export::gate::REAUTH_WINDOW_MS`).
     pub const REAUTH_WINDOW_MS: u64 = gate::REAUTH_WINDOW_MS;
@@ -29921,6 +32983,10 @@ pub mod session {
         global_groups: Vec<EquivalenceGroup>,
         /// The last `sessions/list` answer (ADR 0075), so that an end names only a listed row.
         sessions: Option<SessionList>,
+        /// Attachments sealed and not yet fully sent, by id (ADR 0054; [`attachments`]).
+        uploads: BTreeMap<AttachmentId, AttachmentUpload>,
+        /// Attachments being downloaded and verified, by id.
+        downloads: BTreeMap<AttachmentId, AttachmentDownload>,
     }
     #[wasm_bindgen()]
     #[__wasm_bindgen_retried]
@@ -30224,6 +33290,8 @@ pub mod session {
                                 settings_pending: None,
                                 global_groups: global_equivalence_groups(0).0,
                                 sessions: None,
+                                uploads: BTreeMap::new(),
+                                downloads: BTreeMap::new(),
                             })),
                 })
         }
@@ -51937,8 +55005,8 @@ pub use matching::{
 };
 pub use passkey::{CreatedPasskey, PasskeyAssertion, create_passkey};
 pub use session::{
-    DeviceView, EncryptedExport, ImportReport, Notice, Session, SessionRow,
-    TotpCode, TwoFactorEnrolment, detect_import_format,
+    AttachmentView, DeviceView, EncryptedExport, ImportReport, Notice,
+    Session, SessionRow, TotpCode, TwoFactorEnrolment, detect_import_format,
     ends_session_on_unauthorized, others_ended_notice,
     plaintext_export_hold_ms, plaintext_export_phrase,
     plaintext_export_warning, session_ended_by_you_notice,

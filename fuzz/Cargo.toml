@@ -63,6 +63,9 @@
 #                      agreement with the encrypted export's strict reader
 #   client_device_state rizzy-client's device-state record codec (ADR 0026 §2): arbitrary bytes,
 #                      and the lifecycle steps on every record that parses
+#   client_attachment_reassembly rizzy-client's attachment download (ADR 0054 §8): wraps,
+#                      indices and chunk envelopes a hostile server serves; assembles only
+#                      exactly every chunk in its place, byte for byte
 #   client_cache_load  rizzy-client's cache loader (ADR 0026 §3-§6): the rows of a valid cache
 #                      mutated in every column, then opened and loaded
 #   client_account_settings rizzy-client's ACCOUNT_SETTINGS record parser and rizzy-match's
@@ -433,6 +436,13 @@ bench = false
 [[bin]]
 name = "client_item_index"
 path = "fuzz_targets/client_item_index.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_attachment_reassembly"
+path = "fuzz_targets/client_attachment_reassembly.rs"
 test = false
 doc = false
 bench = false
