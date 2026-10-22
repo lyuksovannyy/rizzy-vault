@@ -40,7 +40,7 @@ import {
   handleInlineMenuGeneratePasswordRequest,
   handlePasskeyCeremonyApproval,
 } from "./content-handler.ts";
-import { handlePopupRequest, lockFromIdleState, startCoreContext } from "./core-context.ts";
+import { acquireIframeInstance, handlePopupRequest, lockFromIdleState, releaseIframeInstance, startCoreContext } from "./core-context.ts";
 import { DEFAULT_AUTO_LOCK_MS } from "./lifecycle.ts";
 
 function isPopupRequest(value: unknown): value is PopupRequest {
@@ -60,6 +60,14 @@ function isPopupRequest(value: unknown): value is PopupRequest {
     type === "get_status"
   );
 }
+
+/** The one refusal code every rejected inline-menu-sender message gets, a malformed message and
+ * a missing, unknown, expired, revoked or other-tab `instanceToken` alike (ADR 0043 point 4:
+ * "the same `content_error` shape already used for every other rejection on this path — same
+ * code, same timing"). A clone learns nothing from it about why, or about candidate count or
+ * liveness. It is the code a message without any `instanceToken` already got before ADR 0043,
+ * since such a message matches none of the three shapes. */
+const INLINE_MENU_SENDER_REFUSED = "inline_menu_fill_chosen: malformed request";
 
 function isContentScriptForward(value: unknown): value is ContentScriptForward {
   return typeof value === "object" && value !== null && (value as { type?: unknown }).type === "cs_request";
@@ -132,23 +140,39 @@ export function installCoreContextListener(ext: WebExtNamespace, options: Instal
         sendResponse({ type: "content_error", code: "inline_menu_sender: no tab" } satisfies ToContentScript);
         return true;
       }
-      if (isPasskeyCeremonyMessage(message)) {
-        void handlePasskeyCeremonyApproval(ext, tabId, tabUrl, message)
+      // ADR 0043 point 4, one shared check for all three message kinds below (its Open
+      // question 3): `sender` alone cannot tell the real iframe apart from a clone of the same
+      // extension resource elsewhere in this tab's frame tree, so each message must also carry
+      // the `instanceToken` the content script registered for this exact tab and delivered only
+      // to the iframe it built. The shape is validated first (each guard requires a canonical
+      // token); then a live, unexpired, unrevoked registration for exactly `sender.tab.id` must
+      // exist. Refused synchronously with {@link INLINE_MENU_SENDER_REFUSED}, before any handler
+      // or matcher runs. An admitted request counts as in flight until it settles, so a
+      // teardown's revoke racing it never pulls the token out from under it (ADR 0043 point 5,
+      // Open question 4) — while refusing every later message bearing that token at once.
+      const admit = (instanceToken: string, run: () => Promise<unknown>, failCode: string): true => {
+        if (!acquireIframeInstance(instanceToken, tabId)) {
+          sendResponse({ type: "content_error", code: INLINE_MENU_SENDER_REFUSED } satisfies ToContentScript);
+          return true;
+        }
+        void run()
           .then(sendResponse)
-          .catch(() => sendResponse({ type: "content_error", code: "passkey_ceremony: failed" } satisfies ToContentScript));
+          .catch(() => sendResponse({ type: "content_error", code: failCode } satisfies ToContentScript))
+          .finally(() => releaseIframeInstance(instanceToken));
         return true;
+      };
+      if (isPasskeyCeremonyMessage(message)) {
+        // `ceremonyToken` stays its own, independent check inside the handler (ADR 0043 point 6).
+        return admit(message.instanceToken, () => handlePasskeyCeremonyApproval(ext, tabId, tabUrl, message), "passkey_ceremony: failed");
       }
       if (isInlineMenuGeneratePasswordRequestMessage(message)) {
         // Gap 32 in the M2 gap audit: the same trusted-click/never-back-to-the-iframe pattern
-        // as the fill request just above, for the generator instead of a saved item's
+        // as the fill request below, for the generator instead of a saved item's
         // credentials — see `handleInlineMenuGeneratePasswordRequest`'s own doc.
-        void handleInlineMenuGeneratePasswordRequest(ext, tabId, tabUrl)
-          .then(sendResponse)
-          .catch(() => sendResponse({ type: "content_error", code: "inline_menu_generate_password_chosen: failed" } satisfies ToContentScript));
-        return true;
+        return admit(message.instanceToken, () => handleInlineMenuGeneratePasswordRequest(ext, tabId, tabUrl), "inline_menu_generate_password_chosen: failed");
       }
       if (!isInlineMenuFillRequestMessage(message)) {
-        sendResponse({ type: "content_error", code: "inline_menu_fill_chosen: malformed request" } satisfies ToContentScript);
+        sendResponse({ type: "content_error", code: INLINE_MENU_SENDER_REFUSED } satisfies ToContentScript);
         return true;
       }
       // `.catch` here, not left to an unhandled rejection: unlike the content-script branch
@@ -159,10 +183,8 @@ export function installCoreContextListener(ext: WebExtNamespace, options: Instal
       // rather than settle with a refusal — found exactly this way fixing this change, when an
       // earlier, unrelated bug (ADR 0040: `chrome.tabs` is unavailable inside a
       // `chrome.offscreen` document, see `types/webext.d.ts`) produced the identical symptom.
-      void handleInlineMenuFillRequest(ext, tabId, tabUrl, message)
-        .then(sendResponse)
-        .catch(() => sendResponse({ type: "content_error", code: "inline_menu_fill_chosen: failed" } satisfies ToContentScript));
-      return true; // keeps the channel open for the async `sendResponse` above.
+      // `admit` returns `true`, keeping the channel open for its async `sendResponse`.
+      return admit(message.instanceToken, () => handleInlineMenuFillRequest(ext, tabId, tabUrl, message), "inline_menu_fill_chosen: failed");
     }
     if (!isOwnExtensionPage(sender, ext.runtime.id)) {
       return undefined;

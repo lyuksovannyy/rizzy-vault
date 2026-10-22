@@ -73,6 +73,10 @@ let pageHost = "";
  * `InlineMenuShowMessage.only`): passed on in {@link requestFill}, and `"username"` hides the
  * generator, which has no password field to fill on an identifier-first step. */
 let only: FillScope | undefined;
+/** This instance's own token (ADR 0043 point 3), from the latest show message: sent back with
+ * every privileged request, never shown, stored nowhere else. `undefined` until a show message
+ * arrives, and then neither request is sent at all. */
+let instanceToken: string | undefined;
 
 window.addEventListener("message", (event) => {
   // `event.source`/`event.origin` are set by the browser from the real sending window and
@@ -87,6 +91,7 @@ window.addEventListener("message", (event) => {
     return;
   }
   replyOrigin = event.data.pageOrigin;
+  instanceToken = event.data.instanceToken;
   pageHost = event.data.pageHost;
   // Plain text only (`textContent`, never `innerHTML`): `pageHost` is an A-label host string
   // `rizzy-match` produced, but this document still treats every cross-boundary string as
@@ -206,12 +211,14 @@ function renderCandidate(candidate: InlineMenuCandidate): HTMLElement {
  * or the user trying again, is what recovers from it. */
 async function requestFill(itemId: string, confirmedEquivalence: boolean): Promise<void> {
   const ext = typeof chrome !== "undefined" ? chrome : browser;
-  if (ext === undefined) {
+  const token = instanceToken;
+  if (ext === undefined || token === undefined) {
     return;
   }
   try {
     await ext.runtime.sendMessage({
       type: "inline_menu_fill_chosen",
+      instanceToken: token,
       itemId,
       confirmedEquivalence,
       ...(only === undefined ? {} : { only }),
@@ -255,12 +262,14 @@ iov2Observer?.observe(generateButton);
  */
 async function requestGeneratePassword(): Promise<void> {
   const ext = typeof chrome !== "undefined" ? chrome : browser;
-  if (ext === undefined) {
+  const token = instanceToken;
+  if (ext === undefined || token === undefined) {
     return;
   }
   try {
     await ext.runtime.sendMessage({
       type: "inline_menu_generate_password_chosen",
+      instanceToken: token,
     } satisfies InlineMenuGeneratePasswordRequestMessage);
   } catch {
     // The background/offscreen document was unreachable (e.g. mid-restart): nothing to do.

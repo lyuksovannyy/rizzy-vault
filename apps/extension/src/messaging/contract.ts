@@ -5,8 +5,10 @@
 // is a plain, serializable object (structured-clone safe, no class instances, no functions),
 // so it survives `chrome.runtime.sendMessage` unchanged. ADR 0036 §4 rules this file encodes:
 //
-// - the content script sends only: detected-field reports, a chosen fill request (after the
-//   user picks a candidate), and submitted-credential reports for save/update prompts;
+// - the content script sends only: detected-field reports, submitted-credential reports for
+//   save/update prompts, and a per-instance registration/revocation message for an inline-menu
+//   or passkey-consent iframe it is about to build or tear down (ADR 0043); the chosen fill
+//   request comes from the inline-menu iframe itself (ADR 0040);
 // - it never asks for or receives the master password, the Secret Key, or any decrypted item
 //   field beyond the one value it was told to fill;
 // - the core replies to a fill with only the chosen candidate's values, never a candidate list
@@ -148,13 +150,51 @@ export interface PasskeyGetRequestMessage {
   readonly allowCredentialIdsB64: readonly string[];
 }
 
+/**
+ * The content script is about to build an inline-menu or passkey-consent iframe (ADR 0043 points
+ * 1-2): `instanceToken` is the one it just minted (`crypto.randomUUID()`) for that one iframe
+ * instance, before setting its `src`. Sent over the ordinary content-script channel, so the
+ * background binds it to the browser-vouched `sender.tab.id` and origin (`isContentScriptSender`/
+ * `trustedOriginOf`), never to anything this message claims; it carries no URL at all. The token
+ * then reaches the iframe only in the targeted show `postMessage` (`InlineMenuShowMessage`/
+ * `PasskeyConsentShowMessage`), and every privileged message from that iframe must carry it back
+ * ({@link InlineMenuFillRequestMessage}, {@link InlineMenuGeneratePasswordRequestMessage},
+ * {@link PasskeyCeremonyMessage}).
+ */
+export interface RegisterIframeInstanceMessage {
+  readonly type: "register_iframe_instance";
+  readonly instanceToken: string;
+}
+
+/** The content script tore that iframe down (ADR 0043 point 5: a pick, a blur, a rebuild, a
+ * settled passkey ceremony). Only the registering tab's own revoke is honoured
+ * (`core-host/iframe-instance.ts`). */
+export interface RevokeIframeInstanceMessage {
+  readonly type: "revoke_iframe_instance";
+  readonly instanceToken: string;
+}
+
 export type FromContentScript =
   | FieldsDetectedMessage
   | CredentialsSubmittedMessage
   | SavePromptResolvedMessage
   | CheckSavePromptMessage
   | PasskeyCreateRequestMessage
-  | PasskeyGetRequestMessage;
+  | PasskeyGetRequestMessage
+  | RegisterIframeInstanceMessage
+  | RevokeIframeInstanceMessage;
+
+/** The exact string length of a v4 UUID in its canonical form (`crypto.randomUUID()`). */
+export const INSTANCE_TOKEN_LEN = 36;
+
+const INSTANCE_TOKEN_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/** Whether `value` has the exact shape of an `instanceToken` (ADR 0043 point 3: "shape-validated
+ * first"): a lowercase canonical v4 UUID, the only form `crypto.randomUUID()` produces. Length
+ * is checked before the pattern runs, so an oversized string never reaches the regex. */
+export function isInstanceToken(value: unknown): value is string {
+  return typeof value === "string" && value.length === INSTANCE_TOKEN_LEN && INSTANCE_TOKEN_PATTERN.test(value);
+}
 
 /**
  * The user picked a candidate in the extension-origin inline menu, on a trusted gesture
@@ -181,6 +221,10 @@ export type FromContentScript =
  */
 export interface InlineMenuFillRequestMessage {
   readonly type: "inline_menu_fill_chosen";
+  /** ADR 0043 point 3: the token the content script registered for this exact iframe instance
+   * and delivered to it only in its own {@link InlineMenuShowMessage}-shaped `postMessage`. A
+   * clone of the inline-menu resource elsewhere in the tab never has one. */
+  readonly instanceToken: string;
   readonly itemId: string;
   readonly confirmedEquivalence: boolean;
   readonly only?: FillScope;
@@ -217,6 +261,8 @@ export interface InlineMenuFillDispatchedMessage {
  */
 export interface InlineMenuGeneratePasswordRequestMessage {
   readonly type: "inline_menu_generate_password_chosen";
+  /** ADR 0043 point 3, exactly as {@link InlineMenuFillRequestMessage.instanceToken}. */
+  readonly instanceToken: string;
 }
 
 /** Acknowledges a successful {@link InlineMenuGeneratePasswordRequestMessage}: never carries the
@@ -246,6 +292,10 @@ export interface InlineMenuGeneratePasswordDispatchedMessage {
  */
 export interface PasskeyCeremonyApprovedMessage {
   readonly type: "passkey_ceremony_approved";
+  /** ADR 0043 point 3: the consent iframe instance's own token, delivered in its
+   * `PasskeyConsentShowMessage`. An independent layer beside `ceremonyToken`, never in place
+   * of it (ADR 0043 point 6). */
+  readonly instanceToken: string;
   readonly ceremonyToken: string;
   readonly chosenPasskeyRef?: string;
 }
@@ -253,6 +303,7 @@ export interface PasskeyCeremonyApprovedMessage {
 /** The user declined, in the same consent UI, on the same trusted-gesture requirement. */
 export interface PasskeyCeremonyDeclinedMessage {
   readonly type: "passkey_ceremony_declined";
+  readonly instanceToken: string;
   readonly ceremonyToken: string;
 }
 
@@ -427,6 +478,14 @@ export interface ContentErrorMessage {
 /** Acknowledges a {@link SavePromptResolvedMessage} whose action actually wrote or dismissed
  * something (as opposed to failing outright, which still answers with {@link ContentErrorMessage}
  * so the content script can tell "saved" apart from "the device is locked"). */
+/** Acknowledges a {@link RegisterIframeInstanceMessage} or {@link RevokeIframeInstanceMessage}.
+ * A registration the background refused (a token it already holds) is answered with a
+ * {@link ContentErrorMessage} instead, and the content script then never shows that iframe its
+ * candidates or offer. */
+export interface IframeInstanceDoneMessage {
+  readonly type: "iframe_instance_done";
+}
+
 export interface SavePromptDoneMessage {
   readonly type: "save_prompt_done";
 }
@@ -446,6 +505,7 @@ export type ToContentScript =
   | SavePromptDoneMessage
   | NoPendingSavePromptMessage
   | PasskeyOfferMessage
+  | IframeInstanceDoneMessage
   | ContentErrorMessage;
 
 /** `core-host/listener.ts`'s answer to an {@link InlineMenuFillRequestMessage} — never a
@@ -477,6 +537,7 @@ export function isInlineMenuFillRequestMessage(value: unknown): value is InlineM
   const v = value as Record<string, unknown>;
   return (
     v["type"] === "inline_menu_fill_chosen" &&
+    isInstanceToken(v["instanceToken"]) &&
     isBoundedString(v["itemId"], 256) &&
     typeof v["confirmedEquivalence"] === "boolean" &&
     (v["only"] === undefined || v["only"] === "username" || v["only"] === "password")
@@ -485,9 +546,13 @@ export function isInlineMenuFillRequestMessage(value: unknown): value is InlineM
 
 /** Validates a raw message claimed to be an {@link InlineMenuGeneratePasswordRequestMessage} —
  * same gate as {@link isInlineMenuFillRequestMessage}'s own doc explains. The message carries no
- * fields beyond `type`, so there is nothing else to bound. */
+ * fields beyond `type` and its `instanceToken` (ADR 0043), so there is nothing else to bound. */
 export function isInlineMenuGeneratePasswordRequestMessage(value: unknown): value is InlineMenuGeneratePasswordRequestMessage {
-  return typeof value === "object" && value !== null && (value as Record<string, unknown>)["type"] === "inline_menu_generate_password_chosen";
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  return v["type"] === "inline_menu_generate_password_chosen" && isInstanceToken(v["instanceToken"]);
 }
 
 /** Validates a raw message claimed to be a {@link PasskeyCeremonyMessage} — only
@@ -498,7 +563,7 @@ export function isPasskeyCeremonyMessage(value: unknown): value is PasskeyCeremo
     return false;
   }
   const v = value as Record<string, unknown>;
-  if (!isBoundedString(v["ceremonyToken"], 256)) {
+  if (!isInstanceToken(v["instanceToken"]) || !isBoundedString(v["ceremonyToken"], 256)) {
     return false;
   }
   if (v["type"] === "passkey_ceremony_declined") {
@@ -677,6 +742,9 @@ export const MESSAGE_TYPES = [
   "credentials_submitted",
   "save_prompt_resolved",
   "check_save_prompt",
+  "register_iframe_instance",
+  "revoke_iframe_instance",
+  "iframe_instance_done",
   "inline_menu_fill_chosen",
   "inline_menu_fill_dispatched",
   "apply_fill",

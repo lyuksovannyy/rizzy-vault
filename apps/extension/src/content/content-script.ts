@@ -32,6 +32,7 @@ import {
 import { INLINE_MENU_SHOW, isInlineMenuPickMessage, type InlineMenuShowMessage } from "../inline-menu/protocol.ts";
 import { NO_FORM, detectLoginStep, stepFillScope, type InputFacts } from "./login-step.ts";
 import { isOwnOverlayElement, pageMutations } from "./own-overlay-mutation.ts";
+import { mintInstanceToken } from "./instance-token.ts";
 import {
   MAX_Z_INDEX,
   type ChainStyleSample,
@@ -579,6 +580,18 @@ const INLINE_MENU_HEIGHT_PX = 220;
  * all independent of `candidates`). */
 class InlineMenu {
   readonly #frame: HTMLIFrameElement;
+  /** ADR 0043: this instance's own token, minted before `#frame`'s `src` is set (point 1),
+   * registered with the background over the content-script channel (point 2), delivered to the
+   * iframe only inside the targeted show `postMessage` (point 3), and revoked by
+   * {@link destroy} (point 5). Never written to the DOM. A rebuild is a new instance, so a new
+   * token. */
+  readonly #instanceToken: string;
+  /** Settles `true` once the background confirmed the registration, `false` if it refused it
+   * or was unreachable. The show message waits for it, so the iframe never holds a token the
+   * background does not yet vouch for; the revoke waits for it too, so it can never overtake
+   * the registration it cancels. */
+  readonly #registered: Promise<boolean>;
+  #destroyed = false;
   readonly #onMessage: (event: MessageEvent) => void;
   readonly #onBlur: () => void;
   readonly #expectedRect: Rect;
@@ -623,6 +636,12 @@ class InlineMenu {
   readonly #deepOccluderObserver: MutationObserver;
 
   constructor(anchor: HTMLInputElement, candidates: CandidatesMessage["candidates"], pageHost: string, only: FillScope | undefined) {
+    const instanceToken = mintInstanceToken();
+    this.#instanceToken = instanceToken;
+    this.#registered = sendToBackground({ type: "register_iframe_instance", instanceToken }).then(
+      (answer) => answer?.type === "iframe_instance_done",
+      () => false,
+    );
     const frame = document.createElement("iframe");
     this.#frame = frame;
     frame.setAttribute("data-rizzy-inline-menu", "");
@@ -687,22 +706,32 @@ class InlineMenu {
     frame.addEventListener(
       "load",
       () => {
-        frame.contentWindow?.postMessage(
-          {
-            type: INLINE_MENU_SHOW,
-            pageOrigin,
-            pageHost,
-            candidates: candidates.map((c) => ({
-              itemId: c.itemId,
-              title: c.title,
-              username: c.username,
-              needsWarning: c.needsWarning,
-              savedHost: c.savedHost,
-            })),
-            ...(only === undefined ? {} : { only }),
-          } satisfies InlineMenuShowMessage,
-          menuOrigin,
-        );
+        void this.#registered.then((registered) => {
+          // A refused registration shows nothing at all: every click on it would be refused
+          // anyway, and an empty frame is the same outer geometry either way (INV-37).
+          if (!registered || this.#destroyed) {
+            return;
+          }
+          // Targeted at this exact iframe's own window and origin, never broadcast: the one
+          // channel `instanceToken` ever travels (ADR 0043 point 3).
+          frame.contentWindow?.postMessage(
+            {
+              type: INLINE_MENU_SHOW,
+              pageOrigin,
+              instanceToken,
+              pageHost,
+              candidates: candidates.map((c) => ({
+                itemId: c.itemId,
+                title: c.title,
+                username: c.username,
+                needsWarning: c.needsWarning,
+                savedHost: c.savedHost,
+              })),
+              ...(only === undefined ? {} : { only }),
+            } satisfies InlineMenuShowMessage,
+            menuOrigin,
+          );
+        });
       },
       { once: true },
     );
@@ -967,6 +996,19 @@ class InlineMenu {
     }
     window.removeEventListener("message", this.#onMessage);
     this.#frame.remove();
+    // ADR 0043 point 5: a pick, a blur and `wireInlineMenu`'s destroy-and-rebuild all end here,
+    // so all three revoke this instance's token, once. Sent only after the registration settled,
+    // so the revoke cannot overtake it. A blur or rebuild does not wait for a click in flight
+    // (this script cannot see one); the background instead keeps an already-admitted request
+    // running to its end and refuses only later ones (`core-host/iframe-instance.ts`; ADR 0043
+    // Open question 4).
+    if (!this.#destroyed) {
+      this.#destroyed = true;
+      const instanceToken = this.#instanceToken;
+      void this.#registered
+        .then(() => sendToBackground({ type: "revoke_iframe_instance", instanceToken }))
+        .catch(() => undefined);
+    }
   }
 
   /** GATE B (`menu-visibility.ts`'s own module doc): the authoritative, causally-after-click
