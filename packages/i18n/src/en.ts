@@ -38,6 +38,9 @@ export const en = {
     "The server was restored from a backup and does not take this login yet. Open rizzy-vault on a device that is already set up for this account (it repairs the server with your master password), then log in again.",
   "errors.server_quota_exceeded":
     "This account has reached its storage limit on this server, so the server did not save the latest change. Ask the server's operator for more space.",
+  "errors.attachment_too_large": "That file is larger than 25 MiB, the most an attachment can hold.",
+  "errors.attachment_incomplete":
+    "The attachment did not download completely or failed its check, so it was not saved. Try again; if it keeps failing, the server may not hold all of it.",
   "errors.transport_failed": "Cannot reach the server. Check the connection and try again.",
   "errors.response_too_large": "The server's answer was too large.",
   "errors.locked": "The vault is locked.",
@@ -97,6 +100,20 @@ export const en = {
   "login.createAccount": "Create an account",
 
   // ---- Second factor at login (apps/web/src/views/TotpDialog.tsx) ----
+  // ---- Attachments (ADR 0054) ----
+  "attachments.heading": "Attachments",
+  "attachments.empty": "No attachments.",
+  "attachments.add": "Attach a file",
+  "attachments.limit": "Up to 25 MiB per file. Files are encrypted before they leave this browser.",
+  "attachments.adding": "Encrypting and uploading {name}…",
+  "attachments.added": "Attached {name}.",
+  "attachments.download": "Download {name}",
+  "attachments.downloaded": "Downloaded {name}.",
+  "attachments.delete": "Delete {name}",
+  "attachments.deleteTitle": "Delete this attachment?",
+  "attachments.deleteDescription": "{name} will be removed from this item and from the server. This cannot be undone.",
+  "attachments.deleteConfirm": "Delete attachment",
+  "attachments.deleted": "Deleted {name}.",
   "totp.title": "Two-factor code",
   "totp.prompt": "Enter the current code from your authenticator app.",
   "totp.code": "Code",

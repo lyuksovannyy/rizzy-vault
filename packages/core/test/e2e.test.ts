@@ -1312,6 +1312,15 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     await a.sync();
     expect(a.attachments(item)).toEqual([]);
     await expect(a.downloadAttachment(item, id)).rejects.toMatchObject({ code: "unknown_item" });
+
+    // Deleting an item for good: its attachments go from the server first; a repeat is quiet.
+    const second = await a.addAttachment(item, "second.txt", "text/plain", new Uint8Array([1, 2, 3]));
+    a.trashItem(item);
+    expect(a.attachments(item).map((x) => x.id)).toEqual([second]);
+    await a.deleteAttachmentsOf(item);
+    await a.deleteAttachmentsOf(item);
+    a.purgeItem(item);
+    await a.sync();
     a.lock();
     b.lock();
   });
