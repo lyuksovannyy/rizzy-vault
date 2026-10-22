@@ -27,6 +27,8 @@
 //! - [`security`]: the pure decision functions of ADR 0037 §5.
 //! - [`equivalence`]: the signed global equivalence list's format, verification and the
 //!   merged [`equivalence::EquivalenceView`].
+//! - [`settings`]: the account's matching settings, tag `0x0001` of the `ACCOUNT_SETTINGS`
+//!   plaintext (ADR 0042 §3–§4): the match default, disabled global groups and user groups.
 //! - [`error`]: every error type and size bound.
 //!
 //! # No compiled-in global list yet
@@ -44,9 +46,11 @@ pub mod error;
 pub mod modes;
 pub mod normalize;
 pub mod security;
+pub mod settings;
 pub mod suffix;
 
 pub use equivalence::{EquivalenceGroup, EquivalenceList, EquivalenceView, GroupId};
-pub use error::{DomainError, EquivalenceListError, NormalizeError};
+pub use error::{DomainError, EquivalenceListError, MatchingSettingsError, NormalizeError};
 pub use modes::{EffectiveMode, MatchMode, MatchOutcome, MatchedVia, decide};
 pub use normalize::{NormalizedUrl, Scheme, normalize_domain};
+pub use settings::{MatchingSettings, user_group};
