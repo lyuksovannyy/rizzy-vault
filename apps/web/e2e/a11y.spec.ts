@@ -7,12 +7,13 @@
 // theme, forced colours (Windows High Contrast emulation) and at phone width. The conflict
 // chooser's state is audited in `conflict.spec.ts`; the Sessions section with two sessions, its
 // end dialog, its log-in-again form and the login after a session was ended in
-// `sessions.spec.ts`; keyboard-only use of these same screens is `keyboard-nav.spec.ts`.
+// `sessions.spec.ts`; keyboard-only use of these same screens is `keyboard-nav.spec.ts`. A
+// Secure Note rendered from its Markdown (ADR 0062) is audited in every one of those modes too.
 import { expect, test } from "@playwright/test";
 import { createHmac } from "node:crypto";
 
 import { expectAccessible, expectFocusTrapped } from "./a11y.ts";
-import { PASSWORD, logIn, lockVault, newItem, signUp, signUpToGuide, watch } from "./helpers.ts";
+import { MARKDOWN_NOTE, PASSWORD, logIn, lockVault, newItem, signUp, signUpToGuide, watch } from "./helpers.ts";
 import { type RunningServer, startServer } from "./server.ts";
 
 let server: RunningServer;
@@ -249,5 +250,32 @@ test("a11y: dark theme, forced colours and phone width", async ({ page }) => {
   await lockVault(page);
   await expectAccessible(page, "phone: unlock");
   await logIn(page, undefined, secretKey);
+  expect(problems).toEqual([]);
+});
+
+test("a11y: a Secure Note rendered from Markdown, in light, dark, forced colours and phone width", async ({ page }) => {
+  const { problems } = watch(page);
+  await signUp(page, server.origin, "a11ynote");
+  await newItem(page, "Secure note");
+  await page.getByLabel("Title").fill("Audit note");
+  await page.getByLabel("Notes").fill(MARKDOWN_NOTE);
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("heading", { name: "Audit note" })).toBeVisible();
+  const rendered = page.locator('[data-field="item.notes"] .md-note');
+  await expect(rendered.getByRole("heading", { name: "Wi-Fi and alarm", level: 1 })).toBeVisible();
+  await expect(rendered.getByRole("heading", { name: "Six", level: 6 })).toBeVisible();
+  await expect(rendered.getByRole("list")).toHaveCount(2);
+  await expectAccessible(page, "item view: Secure Note rendered from Markdown");
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expectAccessible(page, "item view: Secure Note rendered from Markdown (dark)");
+  for (const colorScheme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme, forcedColors: "active" });
+    await expectAccessible(page, `item view: Secure Note rendered from Markdown (forced colours, ${colorScheme})`, {
+      forcedColors: true,
+    });
+  }
+  await page.emulateMedia({ colorScheme: "light", forcedColors: "none" });
+  await page.setViewportSize({ width: 375, height: 812 });
+  await expectAccessible(page, "item view: Secure Note rendered from Markdown (phone width)");
   expect(problems).toEqual([]);
 });
