@@ -86,6 +86,7 @@
 //!   random 16-byte ids of ADR 0018 §7 ([`key::ElementId`]);
 //! - "all" in the ADR 0018 §7 table includes the vault-settings type ([`schema::Applies::All`]).
 
+pub mod autocomplete;
 pub mod display;
 pub mod key;
 pub mod order;
