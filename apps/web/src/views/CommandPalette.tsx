@@ -29,7 +29,7 @@
 // the reset instead of trying to win the race.
 import type { ItemSummary } from "@rizzy-vault/core";
 import { IconSearch, TypeIcon, useToast } from "@rizzy-vault/ui";
-import { type KeyboardEvent, type ReactNode, useEffect, useId, useMemo, useRef, useState } from "react";
+import { type KeyboardEvent, type ReactNode, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { type PaletteItemAction, actionLabel, itemRowsFor, matchesLabel } from "../palette.ts";
 import { moveListSelection } from "../shortcuts.ts";
@@ -99,8 +99,18 @@ function Dialog(props: {
   const previouslyFocused = useRef<Element | null>(null);
   const listboxId = useId();
 
-  useEffect(() => {
+  // Focus the input before the browser handles the next input event, not a frame later: a
+  // `requestAnimationFrame` here left a window in which keys typed right after Ctrl/Cmd+K went
+  // to <body> and were lost (seen with a busy main thread). The layout effect runs in the same
+  // commit that mounts the input, and before the effect below, so `previouslyFocused` is read
+  // first there (refs set during render are not available yet; activeElement is read in the
+  // layout effect instead).
+  useLayoutEffect(() => {
     previouslyFocused.current = document.activeElement;
+    inputRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
     let live = true;
     // Active items only (module docs): a trashed item's "open" would land on a view with no
     // edit/copy path of its own worth surfacing here, and `palette.ts`'s own trash filter would
@@ -117,12 +127,8 @@ function Dialog(props: {
         }
       },
     );
-    // The dialog has only just mounted this render; queue the focus for the frame after it
-    // lands, the same pattern `VaultView.tsx`'s own `focus-search` shortcut uses.
-    const frame = requestAnimationFrame(() => inputRef.current?.focus());
     return () => {
       live = false;
-      cancelAnimationFrame(frame);
       if (previouslyFocused.current instanceof HTMLElement) {
         previouslyFocused.current.focus();
       }
