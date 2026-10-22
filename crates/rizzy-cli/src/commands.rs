@@ -52,8 +52,11 @@ use std::path::Path;
 use std::time::Duration;
 
 use rizzy_client::ClientError;
+use rizzy_client::export::cxf::CXF_EXPORT_WARNING;
 use rizzy_client::export::detect::{DetectedFormat, detect_format};
-use rizzy_client::export::gate::{ExportGate, PLAINTEXT_EXPORT_HOLD_MS, check_export_password};
+use rizzy_client::export::gate::{
+    ExportGate, PLAINTEXT_EXPORT_HOLD_MS, PlaintextExportAuth, check_export_password,
+};
 use rizzy_client::export::plaintext::{
     PLAINTEXT_EXPORT_PHRASE, PLAINTEXT_EXPORT_WARNING, PlaintextExportAck, csv_export_warning,
 };
@@ -1069,7 +1072,10 @@ fn totp(device: &Device, ui: &mut dyn Ui, item: &str) -> Result<ItemId, CliError
 ///    checks; it is needed to import the file and is not the master password.
 /// 4. Plaintext: ADR 0027 §5's warning (with the CSV addition), then a hold of 10 seconds that
 ///    no flag or environment variable shortens ([`Ui::hold`]), then the typed `EXPORT
-///    PLAINTEXT` from the terminal.
+///    PLAINTEXT` from the terminal. CXF (ADR 0074 §2): the new file password of step 3, then
+///    this gate with the CXF export's own warning ([`CXF_EXPORT_WARNING`]) instead of ADR 0027
+///    §5's: the file is encrypted, but once decrypted it is a portable dump of every passkey's
+///    private key.
 /// 5. The export takes the gate's permission (`rizzy_client::export::gate`): one export per
 ///    re-authentication, within five minutes of it.
 async fn export(
@@ -1101,20 +1107,7 @@ async fn export(
     let vault = device.vault();
     match format {
         ExportFormat::Encrypted => {
-            env.ui.note(
-                "Choose a password for this export file. It is needed to import the file. It \
-                 is not your master password, and nobody can recover it if it is lost.",
-            );
-            let password = env.ui.secret("Password for this export file")?;
-            let again = env.ui.secret("Password for this export file, again")?;
-            if *password != *again {
-                return Err(CliError::BadInput("the two passwords differ"));
-            }
-            check_export_password(&password).map_err(|_| {
-                CliError::BadInput(
-                    "the export file's password must not be empty or hold unassigned characters",
-                )
-            })?;
+            let password = new_export_password(env.ui)?;
             let auth = gate.authorize_encrypted(now_ms())?;
             let mut rng = os_rng();
             let exported = vault.export_encrypted(&mut rng, auth, &password, now_ms())?;
@@ -1132,6 +1125,27 @@ async fn export(
             }
             Ok(())
         }
+        ExportFormat::Cxf => {
+            let passkeys = vault.cxf_export_passkeys()?;
+            let password = new_export_password(env.ui)?;
+            env.ui.note(CXF_EXPORT_WARNING);
+            let (auth, ack, now) = plaintext_gate(env.ui, &mut gate)?;
+            let mut rng = os_rng();
+            let exported = vault.export_cxf(&mut rng, auth, ack, &password, now)?;
+            write_new_file(out, &exported.file)?;
+            env.ui.note(&format!(
+                "Exported {} passkeys of {passkeys} as a CXF file, encrypted. Keep the file's \
+                 password: it is needed to import the file.",
+                exported.passkeys
+            ));
+            if exported.skipped > 0 {
+                env.ui.note(&format!(
+                    "{} passkeys could not be read and were left out.",
+                    exported.skipped
+                ));
+            }
+            Ok(())
+        }
         ExportFormat::Json | ExportFormat::Csv => {
             // ADR 0027 §5: the warning, then the phrase typed at a terminal; no flag skips it.
             env.ui.note(PLAINTEXT_EXPORT_WARNING);
@@ -1139,23 +1153,7 @@ async fn export(
                 let loss = vault.csv_export_loss()?;
                 env.ui.note(&csv_export_warning(loss.items_losing_data()));
             }
-            // The hold after the warning (owner decision 2026-10-05).
-            let shown = now_ms();
-            gate.plaintext_warning_shown(shown);
-            env.ui.note(&format!(
-                "Read the warning above. rv waits {} seconds before it asks for the phrase.",
-                PLAINTEXT_EXPORT_HOLD_MS / 1000
-            ));
-            let held = env.ui.hold(Duration::from_millis(PLAINTEXT_EXPORT_HOLD_MS));
-            let typed = env
-                .ui
-                .typed(&format!("Type {PLAINTEXT_EXPORT_PHRASE} to write the file"))?;
-            let ack = PlaintextExportAck::from_typed_phrase(&typed)?;
-            // The hold was measured on the monotonic clock; the wall clock may have moved
-            // less (or back) meanwhile.
-            let held_ms = u64::try_from(held.as_millis()).unwrap_or(u64::MAX);
-            let now = now_ms().max(shown.saturating_add(held_ms));
-            let auth = gate.authorize_plaintext(now)?;
+            let (auth, ack, _) = plaintext_gate(env.ui, &mut gate)?;
             let plaintext = if format == ExportFormat::Json {
                 vault.export_plaintext_json(auth, ack, now_ms())?
             } else {
@@ -1169,6 +1167,49 @@ async fn export(
     }
 }
 
+/// Asks for a new export-file password, twice, with CRYPTO.md §2's new-password checks.
+fn new_export_password(ui: &mut dyn Ui) -> Result<Zeroizing<String>, CliError> {
+    ui.note(
+        "Choose a password for this export file. It is needed to import the file. It is not \
+         your master password, and nobody can recover it if it is lost.",
+    );
+    let password = ui.secret("Password for this export file")?;
+    let again = ui.secret("Password for this export file, again")?;
+    if *password != *again {
+        return Err(CliError::BadInput("the two passwords differ"));
+    }
+    check_export_password(&password).map_err(|_| {
+        CliError::BadInput(
+            "the export file's password must not be empty or hold unassigned characters",
+        )
+    })?;
+    Ok(password)
+}
+
+/// The gate after a plaintext or CXF warning was printed (ADR 0027 §5, owner decision
+/// 2026-10-05, ADR 0074 §2): the hold of 10 seconds, then the typed phrase, then the gate's
+/// permission. Returns it, the acknowledgement and the time it was granted at.
+fn plaintext_gate(
+    ui: &mut dyn Ui,
+    gate: &mut ExportGate,
+) -> Result<(PlaintextExportAuth, PlaintextExportAck, u64), CliError> {
+    let shown = now_ms();
+    gate.plaintext_warning_shown(shown);
+    ui.note(&format!(
+        "Read the warning above. rv waits {} seconds before it asks for the phrase.",
+        PLAINTEXT_EXPORT_HOLD_MS / 1000
+    ));
+    let held = ui.hold(Duration::from_millis(PLAINTEXT_EXPORT_HOLD_MS));
+    let typed = ui.typed(&format!("Type {PLAINTEXT_EXPORT_PHRASE} to write the file"))?;
+    let ack = PlaintextExportAck::from_typed_phrase(&typed)?;
+    // The hold was measured on the monotonic clock; the wall clock may have moved less (or
+    // back) meanwhile.
+    let held_ms = u64::try_from(held.as_millis()).unwrap_or(u64::MAX);
+    let now = now_ms().max(shown.saturating_add(held_ms));
+    let auth = gate.authorize_plaintext(now)?;
+    Ok((auth, ack, now))
+}
+
 /// What `import` reads a file as.
 #[derive(Clone, Copy, Debug)]
 enum ImportAs {
@@ -1176,6 +1217,8 @@ enum ImportAs {
     Foreign(Format),
     /// Our own encrypted export.
     Encrypted,
+    /// Our own CXF passkey export (ADR 0074 §2).
+    CxfEncrypted,
 }
 
 /// The name of an import format as the user reads it.
@@ -1190,6 +1233,7 @@ const fn format_name(format: Format) -> &'static str {
         Format::RizzyPlaintextJson => "a rizzy-vault plaintext JSON export",
         Format::AliasVaultCsv => "an AliasVault CSV export",
         Format::AliasVaultAvux => "an AliasVault .avux export",
+        Format::CxfJson => "a CXF passkey file (FIDO Credential Exchange Format)",
         _ => "a file of a known format",
     }
 }
@@ -1207,6 +1251,10 @@ fn import_as(
             Some(DetectedFormat::RizzyEncrypted) => {
                 ui.note("Recognised: a rizzy-vault encrypted export.");
                 ImportAs::Encrypted
+            }
+            Some(DetectedFormat::RizzyCxfEncrypted) => {
+                ui.note("Recognised: a rizzy-vault CXF passkey export.");
+                ImportAs::CxfEncrypted
             }
             Some(DetectedFormat::Import(format)) => {
                 ui.note(&format!("Recognised: {}.", format_name(format)));
@@ -1237,6 +1285,8 @@ fn import_as(
         ImportFormat::RizzyEncrypted => ImportAs::Encrypted,
         ImportFormat::AliasVaultCsv => ImportAs::Foreign(Format::AliasVaultCsv),
         ImportFormat::AliasVaultAvux => ImportAs::Foreign(Format::AliasVaultAvux),
+        ImportFormat::CxfJson => ImportAs::Foreign(Format::CxfJson),
+        ImportFormat::RizzyCxfEncrypted => ImportAs::CxfEncrypted,
     })
 }
 
@@ -1266,13 +1316,24 @@ async fn import(
                 done.skipped.len() + parsed.counts.skipped_items,
                 parsed.warnings.len()
             ));
-            let counts = parsed.counts;
-            if counts.collapsed_conflicts + counts.dropped_history + counts.dropped_fields > 0 {
-                env.ui.note(&format!(
-                    "{} conflicts collapsed, {} history entries and {} fields not carried.",
-                    counts.collapsed_conflicts, counts.dropped_history, counts.dropped_fields
-                ));
-            }
+            note_counts(env.ui, &parsed.counts);
+        }
+        ImportAs::CxfEncrypted => {
+            let password = env
+                .ui
+                .secret("Password of this export file (the one chosen when it was exported)")?;
+            let done = device
+                .edit(|vault, rng, unlocked, now| {
+                    vault.import_cxf_encrypted(rng, unlocked, &file, &password, now)
+                })
+                .await?;
+            env.ui.note(&format!(
+                "Imported {} items; {} skipped; {} entries with warnings.",
+                done.imported.len(),
+                done.skipped.len() + done.counts.skipped_items,
+                done.warnings.len()
+            ));
+            note_counts(env.ui, &done.counts);
         }
         ImportAs::Encrypted => {
             let password = env
@@ -1295,6 +1356,23 @@ async fn import(
         }
     }
     sync_after_write(&mut device, env.ui).await
+}
+
+/// The losses of an import, counts only (INV-48): what ADR 0027 §6 and ADR 0074 §1, §3 count.
+fn note_counts(ui: &mut dyn Ui, counts: &rizzy_import::Counts) {
+    if counts.collapsed_conflicts + counts.dropped_history + counts.dropped_fields > 0 {
+        ui.note(&format!(
+            "{} conflicts collapsed, {} history entries and {} fields not carried.",
+            counts.collapsed_conflicts, counts.dropped_history, counts.dropped_fields
+        ));
+    }
+    if counts.skipped_credentials > 0 {
+        ui.note(&format!(
+            "{} CXF credentials not imported (only passkeys are imported, and only those that \
+             could be read).",
+            counts.skipped_credentials
+        ));
+    }
 }
 
 /// How `session list` names a session (ADR 0075 §9).

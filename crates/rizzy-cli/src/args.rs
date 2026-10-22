@@ -45,7 +45,7 @@ USAGE:
                 [--exclude <chars>] | --words <n> [--passphrase-number]
     rv totp <item>
     rv cache reindex
-    rv export --out <file> --name <login> [--format encrypted|json|csv]
+    rv export --out <file> --name <login> [--format encrypted|json|csv|cxf]
     rv import --in <file> [--format <format>]
     rv device list
     rv device revoke <device> --name <login> [--standard]
@@ -87,10 +87,13 @@ unencrypted; `cache reindex` rebuilds that index and forgets the use history.
 bank-account or passkey. Field keys are the item schema's (item.name, item.notes,
 login.username, login.password, login.totp, card.number, …).
 Every export first asks for the master password again and checks it with the server. An
-encrypted export then asks for a new password for that file, needed to import it.
+encrypted export then asks for a new password for that file, needed to import it. A cxf
+export holds only passkeys, as a FIDO Credential Exchange Format document inside a file
+encrypted like the encrypted export; it is gated like a plaintext export (the warning, a
+10-second wait and the typed phrase), since once decrypted it is a portable key dump.
 Import recognises the file's format; --format overrides it. Import formats: bitwarden-json,
 1pux, keepass-xml, csv, chrome-csv, firefox-csv, rizzy-json, rizzy-encrypted, aliasvault-csv,
-aliasvault-avux.
+aliasvault-avux, cxf-json (a CXF passkey file of another product), rizzy-cxf-encrypted.
 After the server was restored from a backup, `recovery repair` makes the recovery code work
 again: a new code and Emergency Kit by default, or with --retype the current code, which the
 server takes only when the code did not change since the backup.
@@ -118,6 +121,8 @@ pub enum ExportFormat {
     Json,
     /// Plaintext CSV (ADR 0027 §4).
     Csv,
+    /// The CXF passkey export, sealed under a password for the file (ADR 0074 §2).
+    Cxf,
 }
 
 /// What an import reads.
@@ -143,6 +148,10 @@ pub enum ImportFormat {
     AliasVaultCsv,
     /// `AliasVault`'s `.avux` (unencrypted) export archive.
     AliasVaultAvux,
+    /// A bare FIDO CXF document, passkeys only (ADR 0074 §3).
+    CxfJson,
+    /// Our own CXF passkey export (ADR 0074 §2).
+    RizzyCxfEncrypted,
 }
 
 /// The field changes of `item create` and `item edit`.
@@ -961,7 +970,8 @@ fn export(args: &mut Args) -> Result<Command, CliError> {
                     "encrypted" => ExportFormat::Encrypted,
                     "json" => ExportFormat::Json,
                     "csv" => ExportFormat::Csv,
-                    _ => return Err(usage("--format takes encrypted, json or csv")),
+                    "cxf" => ExportFormat::Cxf,
+                    _ => return Err(usage("--format takes encrypted, json, csv or cxf")),
                 }
             }
             other => return Err(unknown(other)),
@@ -992,6 +1002,8 @@ fn import(args: &mut Args) -> Result<Command, CliError> {
                     "rizzy-encrypted" => ImportFormat::RizzyEncrypted,
                     "aliasvault-csv" => ImportFormat::AliasVaultCsv,
                     "aliasvault-avux" => ImportFormat::AliasVaultAvux,
+                    "cxf-json" => ImportFormat::CxfJson,
+                    "rizzy-cxf-encrypted" => ImportFormat::RizzyCxfEncrypted,
                     _ => return Err(usage("unknown import format")),
                 });
             }
@@ -1258,6 +1270,29 @@ mod tests {
             Command::Import {
                 input: PathBuf::from("a.1pux"),
                 format: Some(ImportFormat::OnePux)
+            }
+        );
+        // ADR 0074: the CXF passkey export and both CXF import forms.
+        assert_eq!(
+            command("export --out p.rizzy --name alice --format cxf"),
+            Command::Export {
+                out: PathBuf::from("p.rizzy"),
+                name: "alice".to_owned(),
+                format: ExportFormat::Cxf
+            }
+        );
+        assert_eq!(
+            command("import --in a.json --format cxf-json"),
+            Command::Import {
+                input: PathBuf::from("a.json"),
+                format: Some(ImportFormat::CxfJson)
+            }
+        );
+        assert_eq!(
+            command("import --in p.rizzy --format rizzy-cxf-encrypted"),
+            Command::Import {
+                input: PathBuf::from("p.rizzy"),
+                format: Some(ImportFormat::RizzyCxfEncrypted)
             }
         );
         assert_eq!(
