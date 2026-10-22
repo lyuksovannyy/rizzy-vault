@@ -14,6 +14,7 @@ import { createHmac } from "node:crypto";
 
 import { expectAccessible, expectFocusTrapped } from "./a11y.ts";
 import { MARKDOWN_NOTE, PASSWORD, logIn, lockVault, newItem, signUp, signUpToGuide, watch } from "./helpers.ts";
+import { M3_TYPES, fieldLine, fillAndSave } from "./m3-types.ts";
 import { type RunningServer, startServer } from "./server.ts";
 
 let server: RunningServer;
@@ -206,6 +207,37 @@ test("a11y: two-factor setup and the login code prompt", async ({ page }) => {
   await expectFocusTrapped(page, prompt, "two-factor code prompt");
   await prompt.getByRole("button", { name: "Cancel" }).click();
   await expect(prompt).toHaveCount(0);
+  expect(problems).toEqual([]);
+});
+
+test("a11y: the editor and item view of each M3 item type (ADR 0055)", async ({ page }) => {
+  const { problems } = watch(page);
+  await signUp(page, server.origin, "a11ym3");
+  for (const t of M3_TYPES) {
+    await newItem(page, t.menu);
+    await expect(page.getByRole("heading", { name: t.heading })).toBeVisible();
+    await expectAccessible(page, `editor: ${t.menu}`);
+    // A multi-line secret (the SSH private key) revealed in the editor, too.
+    if (t.menu === "SSH key") {
+      await page.locator(".secret-field").filter({ has: page.getByLabel("Private key", { exact: true }) })
+        .getByRole("button", { name: "Show" }).click();
+      await expectAccessible(page, "editor: SSH key, private key shown");
+    }
+    await fillAndSave(page, t);
+    await expectAccessible(page, `item view: ${t.menu}`);
+    // With a concealed value revealed.
+    const secret = t.concealed[0];
+    if (secret !== undefined) {
+      await fieldLine(page, secret.key).getByRole("button", { name: "Reveal" }).click();
+      await expect(fieldLine(page, secret.key).locator("[data-secret-field]")).toBeVisible();
+      await expectAccessible(page, `item view: ${t.menu}, ${secret.label} revealed`);
+    }
+    // The sidebar's filter for the type.
+    await page.getByRole("button", { name: t.menu, exact: true }).click();
+    await expect(page.locator(".row-title")).toHaveText([t.title]);
+    await expectAccessible(page, `items: ${t.menu} filter`);
+    await page.getByRole("button", { name: "All items", exact: true }).click();
+  }
   expect(problems).toEqual([]);
 });
 

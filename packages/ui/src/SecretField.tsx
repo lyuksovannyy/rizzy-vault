@@ -15,6 +15,15 @@
 //
 // The input is uncontrolled by default: the secret is read from the element on submit (through
 // `inputRef`) and the caller clears the element afterwards, so it never sits in React state.
+//
+// `multiline` renders a `<textarea>` instead, for a secret that holds line breaks (an SSH
+// private key, ADR 0055 §1: Text "stored as entered"): an `<input>` strips line breaks from its
+// value (the HTML value sanitization of text and password inputs), which would corrupt the key.
+// It carries the same attributes before and after a reveal. A textarea has no `password` type,
+// so it is masked with CSS (`-webkit-text-security`, `.secret-masked` in the app's stylesheet)
+// and says which state it is in through `data-masked`; where a browser does not support that
+// property the typed text shows (unverified per browser), while spell-check and the autocomplete
+// hints stay off either way (INV-68).
 import { type KeyboardEvent, type Ref, useId, useState } from "react";
 
 /** The attributes every secret input carries, before and after a reveal (INV-68). */
@@ -33,6 +42,10 @@ export interface SecretFieldProps {
   readonly name: string;
   /** The element, for the caller to read and clear the value on submit. */
   readonly inputRef?: Ref<HTMLInputElement>;
+  /** A multi-line secret (module docs): rendered as a textarea, whose element is `textareaRef`. */
+  readonly multiline?: boolean;
+  /** The textarea of a `multiline` field, for the caller to read and clear on submit. */
+  readonly textareaRef?: Ref<HTMLTextAreaElement>;
   /** A read-only revealed value (item view); absent for an input. */
   readonly value?: string;
   /** Whether the field must be filled before the form submits. */
@@ -77,24 +90,44 @@ export function SecretField(props: SecretFieldProps) {
     <div className="secret-field">
       <label htmlFor={id}>{props.label}</label>
       <div className="secret-field-row">
-        <input
-          id={id}
-          name={props.name}
-          ref={props.inputRef}
-          type={revealed ? "text" : "password"}
-          {...SECRET_INPUT_ATTRIBUTES}
-          data-secret-field=""
-          readOnly={readOnly}
-          required={props.required === true}
-          autoFocus={props.autoFocus === true}
-          {...(readOnly
-            ? {}
-            : { onKeyDown: checkCapsLock, onKeyUp: checkCapsLock, onBlur: clearCapsLockHint })}
-          {...(readOnly ? { value: props.value } : {})}
-          {...(props.onInput !== undefined
-            ? { onInput: (e: { currentTarget: HTMLInputElement }) => props.onInput?.(e.currentTarget.value) }
-            : {})}
-        />
+        {props.multiline === true ? (
+          <textarea
+            id={id}
+            name={props.name}
+            ref={props.textareaRef}
+            rows={4}
+            className={revealed ? "secret-multiline" : "secret-multiline secret-masked"}
+            {...SECRET_INPUT_ATTRIBUTES}
+            data-secret-field=""
+            data-masked={revealed ? "false" : "true"}
+            readOnly={readOnly}
+            required={props.required === true}
+            autoFocus={props.autoFocus === true}
+            {...(readOnly ? { value: props.value } : {})}
+            {...(props.onInput !== undefined
+              ? { onInput: (e: { currentTarget: HTMLTextAreaElement }) => props.onInput?.(e.currentTarget.value) }
+              : {})}
+          />
+        ) : (
+          <input
+            id={id}
+            name={props.name}
+            ref={props.inputRef}
+            type={revealed ? "text" : "password"}
+            {...SECRET_INPUT_ATTRIBUTES}
+            data-secret-field=""
+            readOnly={readOnly}
+            required={props.required === true}
+            autoFocus={props.autoFocus === true}
+            {...(readOnly
+              ? {}
+              : { onKeyDown: checkCapsLock, onKeyUp: checkCapsLock, onBlur: clearCapsLockHint })}
+            {...(readOnly ? { value: props.value } : {})}
+            {...(props.onInput !== undefined
+              ? { onInput: (e: { currentTarget: HTMLInputElement }) => props.onInput?.(e.currentTarget.value) }
+              : {})}
+          />
+        )}
         <button
           type="button"
           className="secondary"

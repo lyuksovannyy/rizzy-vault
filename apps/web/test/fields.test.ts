@@ -6,16 +6,23 @@ import type { FieldView } from "@rizzy-vault/core";
 import { describe, expect, it } from "vitest";
 
 import {
+  CREATABLE_TYPES,
   FIXED_FIELDS,
+  SSH_DEFAULT_PORT,
+  UNSUPPORTED_ITEM,
+  canEditFields,
   compareFavoriteFirst,
   fixedChanges,
   group,
+  isMultiline,
   labelOf,
   MATCH_MODE_OPTIONS,
   MATCH_MODE_REGEX,
   matchModeLabel,
   matches,
+  orderFixed,
   tagCounts,
+  typeLabel,
 } from "../src/fields.ts";
 
 /** A field view with defaults. */
@@ -33,6 +40,112 @@ function f(key: string, more: Partial<FieldView> = {}): FieldView {
     ...more,
   };
 }
+
+// ADR 0055 §1: the fixed keys of each M3 type, and the eight the core conceals (§4). The web
+// vault's `secret` flag picks the input a new value is typed in; it must match the core's list.
+const M3_KEYS: Readonly<Record<string, readonly (readonly [string, boolean])[]>> = {
+  "ssh-key": [
+    ["ssh.host", false],
+    ["ssh.port", false],
+    ["ssh.username", false],
+    ["ssh.private_key", true],
+    ["ssh.public_key", false],
+    ["ssh.passphrase", true],
+  ],
+  "api-credential": [
+    ["api.name", false],
+    ["api.key", true],
+    ["api.secret", true],
+    ["api.endpoint", false],
+  ],
+  "software-license": [
+    ["license.name", false],
+    ["license.key", true],
+    ["license.seats", false],
+    ["license.expires", false],
+  ],
+  wifi: [
+    ["wifi.ssid", false],
+    ["wifi.password", true],
+    ["wifi.security_type", false],
+  ],
+  "bank-account": [
+    ["bank.bank_name", false],
+    ["bank.account_holder", false],
+    ["bank.account_number", true],
+    ["bank.routing_number", true],
+    ["bank.account_type", false],
+  ],
+};
+
+describe("the M3 item types (ADR 0055)", () => {
+  it("are creatable, each with its own keys and the eight concealed ones typed as secrets", () => {
+    expect(CREATABLE_TYPES.map((t) => t.type)).toEqual([
+      "login",
+      "note",
+      "card",
+      "identity",
+      "ssh-key",
+      "api-credential",
+      "software-license",
+      "wifi",
+      "bank-account",
+    ]);
+    let secrets = 0;
+    for (const [type, keys] of Object.entries(M3_KEYS)) {
+      const fields = FIXED_FIELDS[type as keyof typeof FIXED_FIELDS] ?? [];
+      expect(fields.map((x) => x.key)).toEqual(["item.name", ...keys.map(([k]) => k), "item.notes"]);
+      for (const [key, secret] of keys) {
+        expect(fields.find((x) => x.key === key)?.secret === true, key).toBe(secret);
+        secrets += secret ? 1 : 0;
+      }
+    }
+    expect(secrets).toBe(8);
+    // Labels are unique within a type, so each input has its own accessible name.
+    for (const fields of Object.values(FIXED_FIELDS)) {
+      const labels = (fields ?? []).map((x) => x.label);
+      expect(new Set(labels).size).toBe(labels.length);
+    }
+  });
+
+  it("type an SSH private key in a multi-line field, and show port 22 when none is set", () => {
+    expect(isMultiline("ssh.private_key")).toBe(true);
+    expect(isMultiline("item.notes")).toBe(true);
+    expect(isMultiline("ssh.public_key")).toBe(false);
+    expect(isMultiline("login.password")).toBe(false);
+    expect(SSH_DEFAULT_PORT).toBe("22");
+    expect(FIXED_FIELDS["ssh-key"]?.find((x) => x.key === "ssh.port")?.placeholder).toBe("22");
+  });
+
+  it("show a type this build does not know generically, with no field edits (ADR 0018 §8, §11)", () => {
+    expect(typeLabel("wifi")).toBe("Wi-Fi");
+    expect(typeLabel("bank-account")).toBe("Bank account");
+    expect(typeLabel("unknown")).toBe(UNSUPPORTED_ITEM);
+    // `passkey` is a name the core reserves but no type this build creates.
+    expect(typeLabel("passkey")).toBe(UNSUPPORTED_ITEM);
+    expect(canEditFields("ssh-key")).toBe(true);
+    expect(canEditFields("unknown")).toBe(false);
+    expect(canEditFields("passkey")).toBe(false);
+  });
+
+  it("order an item's fixed fields as the editor does, unknown keys last", () => {
+    const fixed = [
+      f("ssh.username"),
+      f("newer.key"),
+      f("ssh.private_key"),
+      f("item.name"),
+      f("ssh.host"),
+    ];
+    expect(orderFixed("ssh-key", fixed).map((x) => x.key)).toEqual([
+      "item.name",
+      "ssh.host",
+      "ssh.username",
+      "ssh.private_key",
+      "newer.key",
+    ]);
+    expect(orderFixed("unknown", fixed).map((x) => x.key)).toEqual(fixed.map((x) => x.key));
+  });
+});
 
 describe("fixedChanges", () => {
   it("writes only what changed", () => {
@@ -99,7 +212,7 @@ describe("layout", () => {
   it("names fields and marks the concealed ones the schema conceals", () => {
     expect(labelOf("login.password")).toBe("Password");
     expect(labelOf("x.unknown")).toBe("x.unknown");
-    // ADR 0018 §7's concealed list, for the types this vault creates.
+    // ADR 0018 §7's concealed list, extended by ADR 0055 §4, for the types this vault creates.
     const secret = Object.values(FIXED_FIELDS)
       .flatMap((fields) => fields ?? [])
       .filter((x) => x.secret === true)
@@ -114,6 +227,14 @@ describe("layout", () => {
         "identity.ssn",
         "login.password",
         "login.totp",
+        "ssh.private_key",
+        "ssh.passphrase",
+        "api.key",
+        "api.secret",
+        "license.key",
+        "wifi.password",
+        "bank.account_number",
+        "bank.routing_number",
       ].sort(),
     );
   });

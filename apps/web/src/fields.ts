@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// How the web vault lays out items: the fixed fields of each writable M1 item type (ADR 0018
-// §7), their labels, and the grouping of a field list into fixed fields, URIs, custom fields
-// and tags. Which fields are concealed is the core's answer (`FieldView.concealed`), never
+// How the web vault lays out items: the fixed fields of each writable item type (the M1 types of
+// ADR 0018 §7 and the M3 types of ADR 0055 §1), their labels, and the grouping of a field list
+// into fixed fields, URIs, custom fields and tags. Which fields are concealed is the core's answer (`FieldView.concealed`), never
 // this module's; `secret` below only picks the input used to *type* a new value.
 import type { FieldView, ItemChange, ItemType } from "@rizzy-vault/core";
 
@@ -12,17 +12,54 @@ export interface FixedField {
   readonly label: string;
   /** Typed in the secret-field component (INV-68). */
   readonly secret?: boolean;
-  /** A multi-line text. */
+  /** A multi-line text (a secret one is a multi-line secret field: an SSH private key). */
   readonly multiline?: boolean;
+  /** What an empty field means, shown as the input's placeholder (`ssh.port`: 22). */
+  readonly placeholder?: string;
 }
 
-/** The item types this web vault creates (the writable M1 types of ADR 0018 §7). */
-export const CREATABLE_TYPES: readonly { readonly type: ItemType; readonly label: string }[] = [
-  { type: "login", label: "Login" },
-  { type: "note", label: "Secure note" },
-  { type: "card", label: "Card" },
-  { type: "identity", label: "Identity" },
+/** A type this web vault creates: its menu and sidebar label, and the noun of "New …". */
+export interface CreatableType {
+  readonly type: ItemType;
+  readonly label: string;
+  readonly noun: string;
+}
+
+/** The item types this web vault creates: the writable M1 types of ADR 0018 §7 and the M3 types
+ * of ADR 0055 §2. */
+export const CREATABLE_TYPES: readonly CreatableType[] = [
+  { type: "login", label: "Login", noun: "login" },
+  { type: "note", label: "Secure note", noun: "note" },
+  { type: "card", label: "Card", noun: "card" },
+  { type: "identity", label: "Identity", noun: "identity" },
+  { type: "ssh-key", label: "SSH key", noun: "SSH key" },
+  { type: "api-credential", label: "API credential", noun: "API credential" },
+  { type: "software-license", label: "Software license", noun: "software license" },
+  { type: "wifi", label: "Wi-Fi", noun: "Wi-Fi network" },
+  { type: "bank-account", label: "Bank account", noun: "bank account" },
 ];
+
+/** What an item of a type this build does not support shows instead of its type (ADR 0018 §8:
+ * "Unsupported item, update rizzy-vault"). Trash, restore and purge still work; field edits are
+ * not offered ({@link canEditFields}). */
+export const UNSUPPORTED_ITEM = "Unsupported item, update rizzy-vault";
+
+/** The label of an item's type, for the item view; {@link UNSUPPORTED_ITEM} for one this build
+ * does not create (ADR 0018 §8, §11: a newer client's type, such as the M3 types were to a build
+ * before ADR 0055). */
+export function typeLabel(type: ItemType | "unknown"): string {
+  return CREATABLE_TYPES.find((t) => t.type === type)?.label ?? UNSUPPORTED_ITEM;
+}
+
+/** Whether the fields of an item of `type` may be edited: only for a type this build supports
+ * (ADR 0018 §8, "field edits are not offered"; the core refuses them too). */
+export function canEditFields(type: ItemType | "unknown"): boolean {
+  return CREATABLE_TYPES.some((t) => t.type === type);
+}
+
+/** What an SSH key without `ssh.port` uses: port 22, a display default that is never stored
+ * (ADR 0055 §1; `rizzy-core`'s `item::schema::SSH_DEFAULT_PORT`). */
+export const SSH_DEFAULT_PORT = "22";
 
 const NAME: FixedField = { key: "item.name", label: "Title" };
 const NOTES: FixedField = { key: "item.notes", label: "Notes", multiline: true };
@@ -70,7 +107,71 @@ export const FIXED_FIELDS: Readonly<Partial<Record<ItemType, readonly FixedField
     { key: "identity.drivers_license", label: "Driver's license" },
     NOTES,
   ],
+  // ADR 0055 §1. `secret` marks the eight keys the core conceals (§4); the core's
+  // `FieldView.concealed` still decides how a stored value is shown.
+  "ssh-key": [
+    NAME,
+    { key: "ssh.host", label: "Host" },
+    { key: "ssh.port", label: "Port", placeholder: SSH_DEFAULT_PORT },
+    { key: "ssh.username", label: "Username" },
+    { key: "ssh.private_key", label: "Private key", secret: true, multiline: true },
+    { key: "ssh.public_key", label: "Public key" },
+    { key: "ssh.passphrase", label: "Passphrase", secret: true },
+    NOTES,
+  ],
+  "api-credential": [
+    NAME,
+    { key: "api.name", label: "Service" },
+    { key: "api.key", label: "API key", secret: true },
+    { key: "api.secret", label: "API secret", secret: true },
+    { key: "api.endpoint", label: "Endpoint" },
+    NOTES,
+  ],
+  "software-license": [
+    NAME,
+    { key: "license.name", label: "Product" },
+    { key: "license.key", label: "License key", secret: true },
+    { key: "license.seats", label: "Seats" },
+    { key: "license.expires", label: "Expires" },
+    NOTES,
+  ],
+  wifi: [
+    NAME,
+    { key: "wifi.ssid", label: "Network name (SSID)" },
+    { key: "wifi.password", label: "Wi-Fi password", secret: true },
+    { key: "wifi.security_type", label: "Security type" },
+    NOTES,
+  ],
+  "bank-account": [
+    NAME,
+    { key: "bank.bank_name", label: "Bank" },
+    { key: "bank.account_holder", label: "Account holder" },
+    { key: "bank.account_number", label: "Account number", secret: true },
+    { key: "bank.routing_number", label: "Routing number", secret: true },
+    { key: "bank.account_type", label: "Account type" },
+    NOTES,
+  ],
 };
+
+/** `fixed` in the display order of `type`'s fixed fields (`FIXED_FIELDS`), the order the editor
+ * shows them in; a key the type does not list (a newer client's) keeps its place after them, in
+ * the order the core sent it. */
+export function orderFixed<T extends { readonly key: string }>(type: ItemType | "unknown", fixed: readonly T[]): T[] {
+  const order = (type === "unknown" ? undefined : FIXED_FIELDS[type]) ?? [];
+  const rank = (key: string): number => {
+    const i = order.findIndex((f) => f.key === key);
+    return i === -1 ? order.length : i;
+  };
+  return fixed
+    .map((f, i) => ({ f, i }))
+    .sort((a, b) => rank(a.f.key) - rank(b.f.key) || a.i - b.i)
+    .map(({ f }) => f);
+}
+
+/** Whether the fixed field `key` holds multi-line text (`item.notes`, `ssh.private_key`). */
+export function isMultiline(key: string): boolean {
+  return Object.values(FIXED_FIELDS).some((fields) => fields?.some((f) => f.key === key && f.multiline === true));
+}
 
 /** `uri/<id>/match`'s wire values (ADR 0037 §4, Accepted M2), for the editor's select and the
  * item detail view. `0x0000` ("absent") falls back to the account-level match default
