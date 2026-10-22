@@ -17,10 +17,14 @@
 //! never the raw path, a header or a body). No response is compressed ([ADR 0028] item 9), and
 //! none carries a CORS header (item 10).
 //!
+//! The admin listener has its own router, [`admin_panel::router`], which is never merged into
+//! this one (ADR 0060 §2): no path here reaches it, `/admin/...` included.
+//!
 //! [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
 //! [ADR 0002]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0002-own-protocol.md
 //! [ADR 0010]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0010-server-shape.md
 
+pub mod admin_panel;
 pub mod api;
 pub mod headers;
 pub mod security;
@@ -114,7 +118,8 @@ fn method_name(method: &Method) -> &'static str {
     }
 }
 
-/// Writes one access-log line per request (module docs).
+/// Writes one access-log line per request (module docs); the admin listener's router
+/// ([`admin_panel`]) logs through it too.
 async fn access_log(request: Request, next: Next) -> Response {
     let method = method_name(request.method());
     let start = Instant::now();

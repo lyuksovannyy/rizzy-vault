@@ -198,6 +198,8 @@ impl Server {
                     format!("http://127.0.0.1:{}", origin_port.unwrap_or(port)),
                 )
                 .env("RIZZY_LISTEN", format!("127.0.0.1:{port}"))
+                // An ephemeral admin port, so parallel servers never collide on 8081 (ADR 0060 §2).
+                .env("RIZZY_ADMIN_LISTEN", "127.0.0.1:0")
                 .env("RIZZY_SIGNUP", "open")
                 .env("RIZZY_DATA_DIR", dir.join("data"))
                 .env(

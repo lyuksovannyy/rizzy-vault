@@ -148,6 +148,8 @@ export async function startServer(): Promise<RunningServer> {
   const settings = (port: number): Record<string, string> => ({
     RIZZY_ORIGIN: `http://127.0.0.1:${port}`,
     RIZZY_LISTEN: `127.0.0.1:${port}`,
+    // An ephemeral admin port, so parallel servers never collide on 8081 (ADR 0060 §2).
+    RIZZY_ADMIN_LISTEN: "127.0.0.1:0",
     RIZZY_SIGNUP: "open",
     RIZZY_DATA_DIR: join(dir, "data"),
     RIZZY_SECRETS_FILE: join(dir, "secrets", "secrets.json"),
