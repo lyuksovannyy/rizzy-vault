@@ -270,3 +270,15 @@ Owner decision of 2026-10-08: [ADR 0041](0041-p256-crate-approval.md) accepted `
 **New cargo-deny duplicates.** As ADR 0041 predicted: `base16ct` (0.2.0 and 1.0.0), `const-oid` (0.9.6 and 0.10.2), `crypto-bigint` (0.5.5 and 0.7.5), `der` (0.7.10 and 0.8.2), `elliptic-curve` (0.13.8 and 0.14.1), `ff` (0.13.1 and 0.14.0), `group` (0.13.0 and 0.14.0), `sec1` (0.7.3 and 0.8.1) join the 2026-09-27 duplicate-debt list above, all `warn`, none a new ban or license exception. (`const-oid` was missed in the first pass of this entry; added 2026-10-09 after re-running `cargo deny check bans` and finding it in the output, per ADR 0041 §7's own instruction to record the real list the tool reports.) They stay until `opaque-ke`'s `voprf` stack catches up to the newer RustCrypto generation, the same condition already stated for the original twelve.
 
 **Where it is applied.** `p256` is declared in `[workspace.dependencies]` with the pin and feature set above and as a normal dependency of `rizzy-core` only ([ADR 0039](0039-passkeys-vault-and-extension.md) §5). `Cargo.lock` gains `p256` and the fourteen transitive crates named in the crate-table row above; its duplicate set grows by the eight names in the paragraph above. The ES256 key-generation, signing and COSE/CBOR encoding code this unblocks is `crates/rizzy-core/src/passkey.rs` and its known-answer-vector tests, tracked by [ADR 0039](0039-passkeys-vault-and-extension.md), not by this ADR.
+
+### 2026-10-21: security patch bumps of the `rv` TLS crates
+
+Owner decision of 2026-10-21: the exact-pin bumps of commit `d79085d` are approved ("Bump, no problem"). They are the human-reviewed patch releases this ADR's Consequences ask for ("a patch release needs a human PR"). The pins in the 2026-10-05 entry above change as follows. Nothing else in that entry, its feature sets or this ADR changes.
+
+| Crate | Was | Now | Why |
+|---|---|---|---|
+| `rustls` | `=0.23.45` | `=0.23.46` | RUSTSEC-2026-0346 (`Debug` of client session values exposed TLS secrets), RUSTSEC-2026-0347 (buffered data sent to the outer server after ECH rejection) |
+| `webpki-roots` | `=1.0.9` | `=1.0.10` | RUSTSEC-2026-0381 (bundled roots trusted distrusted emSign intermediates) |
+| `rustls-webpki` (lockfile-pinned) | 0.103.15 | 0.103.16 | RUSTSEC-2026-0382 (verification could accept distrusted intermediates) |
+
+Checks for this bump: patch releases from the same maintainers, with no new crate in `Cargo.lock` or `fuzz/Cargo.lock` and no feature change. `cargo deny check` and the fuzz `cargo deny` report `advisories ok` with no `ignore` (V, 2026-10-21). The `rizzy-cli` tests pass, 83 of them, including the TLS-1.3-only and CA-file tests (V). CRYPTO.md §3's transport row carries the new pins.
