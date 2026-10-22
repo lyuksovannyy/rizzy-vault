@@ -7,7 +7,8 @@
 // theme, forced colours (Windows High Contrast emulation) and at phone width. The conflict
 // chooser's state is audited in `conflict.spec.ts`; the Sessions section with two sessions, its
 // end dialog, its log-in-again form and the login after a session was ended in
-// `sessions.spec.ts`; keyboard-only use of these same screens is `keyboard-nav.spec.ts`. A
+// `sessions.spec.ts`; the breach check's results (item view, generator, Password health with a
+// found item) in `breach.spec.ts`; keyboard-only use of these same screens is `keyboard-nav.spec.ts`. A
 // Secure Note rendered from its Markdown (ADR 0062) is audited in every one of those modes too.
 import { expect, test } from "@playwright/test";
 import { createHmac } from "node:crypto";
@@ -140,6 +141,14 @@ test("a11y: signup, login, the guide, the vault, its dialogs and settings", asyn
   await page.getByRole("button", { name: "Generator", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Generator" })).toBeVisible();
   await expectAccessible(page, "generator");
+  // Password health (ADR 0053), before and after a check; with a mocked `icons` role and a
+  // breached item it is audited in `breach.spec.ts`.
+  await page.getByRole("button", { name: "Password health", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Password health" })).toBeVisible();
+  await expectAccessible(page, "password health");
+  await page.getByRole("button", { name: "Check all passwords" }).click();
+  await expect(page.getByTestId("health-status")).not.toBeEmpty();
+  await expectAccessible(page, "password health: after a check");
   await page.getByRole("button", { name: "Export and import", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Export and import" })).toBeVisible();
   await expectAccessible(page, "export and import");

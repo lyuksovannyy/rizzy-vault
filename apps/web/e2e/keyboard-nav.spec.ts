@@ -152,6 +152,14 @@ test("keyboard only: every audited screen is reachable and operable without a po
   await kb.press("Enter");
   await expect(page.getByLabel("Generated", { exact: true })).toBeVisible();
 
+  // Password health (ADR 0053): start the report. This server runs no `icons` role, so it ends
+  // on "not enabled"; the report with a mocked role is walked in `breach.spec.ts`.
+  await tabTo(page, button("Password health"));
+  await kb.press("Enter");
+  await tabTo(page, button("Check all passwords"));
+  await kb.press("Enter");
+  await expect(page.getByTestId("health-status")).toHaveText(/not enabled on this server|No Login item/);
+
   // Export and import: re-authenticate, open and cancel the plaintext dialog with Escape.
   await tabTo(page, button("Export and import"));
   await kb.press("Enter");
