@@ -1,0 +1,17 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- ADR 0076 §1.3–§1.4 fixture: SMS verification -->
+<html lang="en">
+  <head><meta charset="utf-8" /><title>SMS verification</title></head>
+  <body>
+    <form id="sms" action="/verify">
+      <label for="code">Enter the code we sent to your phone by SMS</label>
+      <input id="code" name="code" type="text" autocomplete="one-time-code" inputmode="numeric" maxlength="6" />
+      <button type="submit">Verify</button>
+    </form>
+    <form id="sms2" action="/verify2">
+      <input id="code2" name="sms_otp" type="tel" maxlength="6" placeholder="Verification code (text message)" />
+      <button type="submit">Verify</button>
+    </form>
+  </body>
+</html>

@@ -80,13 +80,14 @@ const EXPECTED_HOST_PERMISSIONS: &[&str] = &["http://*/*", "https://*/*"];
 /// a subset, [`check_web_accessible_resources`] below — a build exposing fewer, even zero, of
 /// these still passes): the extension-origin UI pages the content script injects into an
 /// untrusted page (ADR 0036 §4, §6: the inline-menu iframe app, the passkey-consent iframe app,
-/// and the passkey page-world shim it loads). Nothing else — in particular never the popup or options page,
+/// the save-dialog iframe app of ADR 0076 §5.2, and the passkey page-world shim it loads). Nothing else — in particular never the popup or options page,
 /// which carry no secrets of their own either but are the one place `packages/core`'s
 /// messaging-backed client talks to the long-lived context, and have no reason to be reachable
 /// from a page's own `<iframe src="...">` or navigation at all.
 const EXPECTED_WEB_ACCESSIBLE_RESOURCES: &[&str] = &[
     "src/inline-menu/index.html",
     "src/passkey-consent/index.html",
+    "src/save-dialog/index.html",
     "src/content/passkey-page-shim.js",
 ];
 

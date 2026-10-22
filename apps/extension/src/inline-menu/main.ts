@@ -6,7 +6,17 @@
 // page: see `protocol.ts` for exactly what that origin boundary does and does not guarantee.
 import { INLINE_MENU_PICK, isInlineMenuShowMessage, type InlineMenuCandidate } from "./protocol.ts";
 import { decideClick } from "./decide-click.ts";
-import type { FillScope, InlineMenuFillRequestMessage, InlineMenuGeneratePasswordRequestMessage } from "../messaging/contract.ts";
+import { disclosureText } from "./disclosure.ts";
+import {
+  isInlineMenuOfferMessage,
+  type FillOnly,
+  type FillScope,
+  type InlineMenuFillRequestMessage,
+  type InlineMenuGeneratePasswordRequestMessage,
+  type InlineMenuOfferMessage,
+  type InlineMenuOfferRequestMessage,
+  type OfferCandidate,
+} from "../messaging/contract.ts";
 
 // GATE C (A7/THREAT_MODEL gap, HANDOFF X6; defense-in-depth, Chromium only, never the sole
 // gate — Firefox has no IntersectionObserver v2, and the manual Gates A/B in
@@ -72,7 +82,15 @@ let pageHost = "";
 /** The one field this login step fills, from the latest show message (`protocol.ts`'s
  * `InlineMenuShowMessage.only`): passed on in {@link requestFill}, and `"username"` hides the
  * generator, which has no password field to fill on an identifier-first step. */
-let only: FillScope | undefined;
+let only: FillOnly | undefined;
+// ADR 0076 §4.1: the step's whole scope, and the offer the long-lived context answered for it.
+// The offer's disclosure is shown in each row before the click; a click names the offer, and the
+// long-lived context fills only what that offer disclosed.
+let scope: FillScope | undefined;
+let offer: InlineMenuOfferMessage | undefined;
+let shown: readonly InlineMenuCandidate[] = [];
+// Bumped per show message, so a slow offer answer for an older menu is ignored.
+let showSeq = 0;
 /** This instance's own token (ADR 0043 point 3), from the latest show message: sent back with
  * every privileged request, never shown, stored nowhere else. `undefined` until a show message
  * arrives, and then neither request is sent at all. */
@@ -98,9 +116,22 @@ window.addEventListener("message", (event) => {
   // untrusted content, not markup.
   pageHostHeader.textContent = pageHost;
   only = event.data.only;
-  stepNote.textContent = only === "username" ? "Fills the username only." : only === "password" ? "Fills the password only." : "";
-  generateContainer.hidden = only === "username";
-  render(event.data.candidates);
+  scope = event.data.scope ?? (only === undefined ? {} : { only });
+  offer = undefined;
+  shown = event.data.candidates;
+  stepNote.textContent =
+    only === "username"
+      ? "Fills the username only."
+      : only === "password"
+        ? "Fills the password only."
+        : only === "totp"
+          ? "Fills the one-time code only."
+          : "";
+  generateContainer.hidden = only === "username" || only === "totp";
+  // A TOTP-only step shows its rows only once the offer says which candidates fill a code.
+  render(only === "totp" ? [] : shown);
+  showSeq += 1;
+  void requestOffer(showSeq);
 });
 
 /** Candidates the user has already seen the equivalence warning for and confirmed once
@@ -112,14 +143,34 @@ function render(candidates: readonly InlineMenuCandidate[]): void {
   if (list === null) {
     return;
   }
-  confirmed.clear();
   list.replaceChildren();
   for (const candidate of candidates) {
-    list.appendChild(renderCandidate(candidate));
+    list.appendChild(renderCandidate(candidate, offer?.candidates.find((c) => c.itemId === candidate.itemId)));
   }
 }
 
-function renderCandidate(candidate: InlineMenuCandidate): HTMLElement {
+/** Asks the long-lived context for this menu's offer (ADR 0076 §4.1 step 2), with the ADR 0043
+ * instance token, and re-renders the rows with their disclosures once it answers. */
+async function requestOffer(seq: number): Promise<void> {
+  const ext = typeof chrome !== "undefined" ? chrome : browser;
+  const token = instanceToken;
+  if (ext === undefined || token === undefined || scope === undefined) {
+    return;
+  }
+  let answer: unknown;
+  try {
+    answer = await ext.runtime.sendMessage({ type: "inline_menu_offer_request", instanceToken: token, scope } satisfies InlineMenuOfferRequestMessage);
+  } catch {
+    return;
+  }
+  if (seq !== showSeq || !isInlineMenuOfferMessage(answer)) {
+    return;
+  }
+  offer = answer;
+  render(only === "totp" ? shown.filter((c) => answer.candidates.some((o) => o.itemId === c.itemId && o.fillsTotp)) : shown);
+}
+
+function renderCandidate(candidate: InlineMenuCandidate, offered: OfferCandidate | undefined): HTMLElement {
   const wrapper = document.createElement("div");
   const item = document.createElement("button");
   item.type = "button";
@@ -133,7 +184,19 @@ function renderCandidate(candidate: InlineMenuCandidate): HTMLElement {
     candidate.needsWarning && !confirmed.has(candidate.itemId)
       ? `${candidate.title} (${candidate.username}) — saved for ${candidate.savedHost}, this page is ${pageHost} (equivalent domain). Click again to fill.`
       : `${candidate.title} (${candidate.username})`;
-  item.textContent = label();
+  const disclosure = disclosureText(offered);
+  const paint = () => {
+    item.textContent = label();
+    if (disclosure !== "") {
+      const also = document.createElement("span");
+      also.className = "also-fills";
+      also.style.display = "block";
+      also.style.fontSize = "0.85em";
+      also.textContent = disclosure;
+      item.appendChild(also);
+    }
+  };
+  paint();
   iov2Observer?.observe(item);
   item.addEventListener("click", (event) => {
     // Defence in depth, not the primary guarantee (INV-36): the primary guarantee is that this
@@ -166,7 +229,7 @@ function renderCandidate(candidate: InlineMenuCandidate): HTMLElement {
     const decision = decideClick(candidate, confirmed);
     if (decision.action === "warn") {
       confirmed.add(candidate.itemId);
-      item.textContent = label();
+      paint();
       return;
     }
     // The actual fill request (ADR 0040): sent directly to the background from
@@ -190,7 +253,8 @@ function renderCandidate(candidate: InlineMenuCandidate): HTMLElement {
     // never shown again regardless, and this is a background `postMessage`, not a repaint), and
     // it is why `requestFill` itself must settle on every code path, including when `ext` is
     // `undefined` or the call throws.
-    void requestFill(candidate.itemId, decision.confirmedEquivalence).finally(() => {
+    const offerId = offered !== undefined ? offer?.offerId : undefined;
+    void requestFill(candidate.itemId, decision.confirmedEquivalence, offerId).finally(() => {
       // Unforgeable in the other direction (`protocol.ts`): `window.parent`'s listener checks
       // `event.source`/`event.origin` against this iframe's own, real identity, which no script
       // running in the page's window can fake.
@@ -209,7 +273,7 @@ function renderCandidate(candidate: InlineMenuCandidate): HTMLElement {
  * failure (device locked, candidate no longer valid) is not something this one-shot menu has any
  * UI left to show once it tears down right after — the content script's own next detection pass,
  * or the user trying again, is what recovers from it. */
-async function requestFill(itemId: string, confirmedEquivalence: boolean): Promise<void> {
+async function requestFill(itemId: string, confirmedEquivalence: boolean, offerId: string | undefined): Promise<void> {
   const ext = typeof chrome !== "undefined" ? chrome : browser;
   const token = instanceToken;
   if (ext === undefined || token === undefined) {
@@ -222,6 +286,7 @@ async function requestFill(itemId: string, confirmedEquivalence: boolean): Promi
       itemId,
       confirmedEquivalence,
       ...(only === undefined ? {} : { only }),
+      ...(offerId === undefined ? {} : { offerId }),
     } satisfies InlineMenuFillRequestMessage);
   } catch {
     // The background/offscreen document was unreachable (e.g. mid-restart): nothing to do.

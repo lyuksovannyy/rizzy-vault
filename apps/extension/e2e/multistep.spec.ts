@@ -101,7 +101,7 @@ test.setTimeout(150_000);
 
 /** The tags real detection must put on each fixture: element id → `data-rizzy-field` value.
  * Mirrors `test/login-step.test.ts`'s `EXPECTED` (an empty object: no step, nothing tagged). */
-const EXPECTED_TAGS: Readonly<Record<string, Readonly<Record<string, "username" | "password">>>> = {
+const EXPECTED_TAGS: Readonly<Record<string, Readonly<Record<string, "username" | "password" | "totp">>>> = {
   "one-page.html": { user: "username", pass: "password" },
   "identifier-first.html": { user: "username" },
   "identifier-weak.html": { user: "username" },
@@ -118,7 +118,7 @@ const EXPECTED_TAGS: Readonly<Record<string, Readonly<Record<string, "username" 
   "newsletter.html": {},
   "signup-email.html": {},
   "contact-form.html": {},
-  "one-time-code.html": {},
+  "one-time-code.html": { code: "totp" },
   "webauthn-identifier.html": { user: "username" },
   "disabled-password.html": { user: "username" },
 };

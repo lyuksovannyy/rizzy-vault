@@ -14,6 +14,7 @@ import { createSavePromptLocationIndex } from "./save-prompt-location.ts";
 import {
   type AddPasskeyInput,
   type DurableSession,
+  type ItemChange,
   type MatchCandidate,
   type MatchFrameInfo,
   addPasskeyChange,
@@ -35,6 +36,7 @@ import {
 import { ExtensionCache } from "../cache/idb.ts";
 import { AutoLockTimer, readAutoLockMs } from "./lifecycle.ts";
 import { createIframeInstanceStore } from "./iframe-instance.ts";
+import { type OfferRecord, type OfferRefusal, type OfferedItem, createOfferStore } from "./offer-store.ts";
 import {
   type PasskeyCeremonyRequest,
   createPasskeyCeremonyStore,
@@ -43,7 +45,12 @@ import {
 import { base64ToBytes, bytesToBase64 } from "../messaging/bytes.ts";
 import { clearUnlockedSnapshot, hasSessionStorage, restoreUnlockedSnapshot } from "./session-store.ts";
 import type {
+  CapturedCustomField,
+  FillOnly,
+  FillScope,
+  FillValues,
   ItemFieldSummary,
+  OfferCandidate,
   PasskeyCandidateSummary,
   PasskeyResultPayload,
   PopupRequest,
@@ -103,6 +110,7 @@ async function lock(ext: WebExtNamespace): Promise<void> {
   savePromptLocations.clear();
   passkeyCeremonies.clear();
   iframeInstances.clear();
+  offers.clear();
   if (hasSessionStorage(ext)) {
     await clearUnlockedSnapshot(ext);
   }
@@ -132,6 +140,9 @@ interface PendingSavePrompt {
    * whatever the vault's state happens to be by then. Set only when `action` is `"update"`,
    * same as the immediate response `offerSavePrompt` already returns. */
   readonly itemTitle?: string;
+  /** ADR 0076 §5.1: the submitted form's custom-token fields, for the extension-origin save
+   * dialog only (never the page-DOM banner, §5.2). Held in memory, dropped with the prompt. */
+  readonly customFields?: readonly CapturedCustomField[];
 }
 
 /** Submitted-credential reports awaiting a save/update decision (ADR 0036 §4: zeroized once the
@@ -197,7 +208,7 @@ function rememberPendingOfferByLocation(tabId: number | undefined, pageUrl: stri
 export function checkPendingSavePromptByLocation(
   tabId: number | undefined,
   pageUrl: string,
-): { readonly token: string; readonly suggestion: "save" | "update"; readonly itemTitle?: string } | undefined {
+): { readonly token: string; readonly suggestion: "save" | "update"; readonly itemTitle?: string; readonly dialog?: true } | undefined {
   const token = savePromptLocations.take(tabId, registrableDomainOrUndefined(pageUrl), Date.now());
   if (token === undefined) {
     return undefined;
@@ -216,7 +227,21 @@ export function checkPendingSavePromptByLocation(
     token,
     suggestion: pending.action,
     ...(pending.itemTitle !== undefined ? { itemTitle: pending.itemTitle } : {}),
+    // ADR 0076 §5.2: the same dialog/banner choice as the immediate answer made.
+    ...(hasDialogRows(pending) ? { dialog: true as const } : {}),
   };
+}
+
+/** Whether a pending prompt's captured custom fields give save-dialog rows (ADR 0076 §5.3). */
+function hasDialogRows(pending: PendingSavePrompt): boolean {
+  if (session === undefined || pending.customFields === undefined || pending.customFields.length === 0) {
+    return false;
+  }
+  try {
+    return session.customSavePlan(pending.action === "update" ? pending.updateItemId : undefined, pending.customFields).length > 0;
+  } catch {
+    return false;
+  }
 }
 
 /** Runs the save or update a resolved save-prompt token named (`content-handler.ts`'s
@@ -566,16 +591,30 @@ export function offerSavePrompt(
   usernameValue: string | undefined,
   passwordValue: string | undefined,
   tabId: number | undefined,
-): { readonly token: string; readonly suggestion: "save" | "update"; readonly itemTitle?: string } | undefined {
+  customFields?: readonly CapturedCustomField[],
+): { readonly token: string; readonly suggestion: "save" | "update"; readonly itemTitle?: string; readonly dialog?: true } | undefined {
   if (session === undefined || passwordValue === undefined || passwordValue === "") {
     return undefined;
   }
   const username = usernameValue ?? "";
   const existing = findItemForUpdate(session, pageUrl, username);
+  const custom = customFields !== undefined && customFields.length > 0 ? { customFields } : {};
+  // ADR 0076 §5.2–§5.3: when a captured custom field gives a dialog row, consent is asked in
+  // the extension-origin save dialog, never in the page-DOM banner.
+  const dialog = (itemId: string | undefined) => {
+    if (customFields === undefined || customFields.length === 0 || session === undefined) {
+      return {};
+    }
+    try {
+      return session.customSavePlan(itemId, customFields).length > 0 ? { dialog: true as const } : {};
+    } catch {
+      return {};
+    }
+  };
   if (existing === undefined) {
-    const token = addPendingSavePrompt({ action: "save", pageUrl, usernameValue: username, passwordValue });
+    const token = addPendingSavePrompt({ action: "save", pageUrl, usernameValue: username, passwordValue, ...custom });
     rememberPendingOfferByLocation(tabId, pageUrl, token);
-    return { token, suggestion: "save" };
+    return { token, suggestion: "save", ...dialog(undefined) };
   }
   const token = addPendingSavePrompt({
     action: "update",
@@ -584,9 +623,203 @@ export function offerSavePrompt(
     passwordValue,
     updateItemId: existing.id,
     itemTitle: existing.title,
+    ...custom,
   });
   rememberPendingOfferByLocation(tabId, pageUrl, token);
-  return { token, suggestion: "update", itemTitle: existing.title };
+  return { token, suggestion: "update", itemTitle: existing.title, ...dialog(existing.id) };
+}
+
+/** One row of the extension-origin save dialog (ADR 0076 §5.3). Never a value. */
+export interface SaveDialogRow {
+  readonly index: number;
+  readonly kind: "add" | "update";
+  readonly label: string;
+  readonly concealed: boolean;
+  readonly checked: boolean;
+}
+
+/** What the save dialog shows for the pending prompt `token` (ADR 0076 §5.2: it fetches its
+ * choices from here directly, by the save-prompt token). `undefined` when there is no such
+ * prompt or the device is locked. The prompt stays pending. */
+export function saveDialogChoices(
+  token: string,
+): { readonly suggestion: "save" | "update"; readonly itemTitle?: string; readonly pageHost: string; readonly rows: readonly SaveDialogRow[] } | undefined {
+  const pending = pendingSavePrompts.get(token);
+  if (pending === undefined || session === undefined) {
+    return undefined;
+  }
+  let pageHost = "";
+  try {
+    pageHost = new URL(pending.pageUrl).hostname;
+  } catch {
+    // An unparsable URL was refused before it was stored; an empty host is shown otherwise.
+  }
+  const rows = session
+    .customSavePlan(pending.action === "update" ? pending.updateItemId : undefined, pending.customFields ?? [])
+    .map((r) => ({ index: r.index, kind: r.kind, label: r.label, concealed: r.concealed, checked: r.checked }));
+  return {
+    suggestion: pending.action,
+    ...(pending.itemTitle !== undefined ? { itemTitle: pending.itemTitle } : {}),
+    pageHost,
+    rows,
+  };
+}
+
+/** The longest Display Name the save dialog may set, in UTF-16 code units. */
+export const MAX_SAVE_DIALOG_LABEL_LEN = 256;
+
+/**
+ * Resolves the pending prompt `token` from the save dialog (ADR 0076 §5.3–§5.4): the login's
+ * save or update as the banner would, plus the custom rows the user ticked (`chosen`, by row
+ * index, with the Display Name the user left in an "add" row). The rows are recomputed here
+ * from the prompt and the vault, never taken from the message: a save never sets or changes an
+ * existing field's id, adds a field only under its own token, and every write runs W1–W5 in
+ * `rizzy-client`. Returns `false` for no such prompt.
+ */
+export async function resolveSaveDialog(
+  token: string,
+  action: "save" | "update" | "dismiss",
+  chosen: readonly { readonly index: number; readonly label: string }[],
+): Promise<boolean> {
+  const pending = takePendingSavePrompt(token);
+  if (pending === undefined) {
+    return false;
+  }
+  if (action === "dismiss" || session === undefined || action !== pending.action) {
+    return true;
+  }
+  const captured = pending.customFields ?? [];
+  const rows = session.customSavePlan(pending.action === "update" ? pending.updateItemId : undefined, captured);
+  const extra: ItemChange[] = [];
+  for (const pick of chosen) {
+    const row = rows.find((r) => r.index === pick.index);
+    const field = captured[pick.index];
+    if (row === undefined || field === undefined) {
+      continue;
+    }
+    if (row.kind === "add") {
+      const label = pick.label.trim();
+      if (label === "" || label.length > MAX_SAVE_DIALOG_LABEL_LEN) {
+        continue; // W5: a new field needs a Display Name; the dialog never sends an empty one.
+      }
+      extra.push({
+        op: "addCustomField",
+        element: newElementId(),
+        label,
+        kind: field.masked ? "hidden" : "text",
+        value: field.value,
+        autocomplete: field.token,
+      });
+    } else if (row.element !== undefined) {
+      extra.push({ op: "set", key: `field/${row.element}/value`, value: field.value });
+    }
+  }
+  if (pending.action === "save") {
+    await session.createItem("login", [...newLoginChangeset(pending.pageUrl, pending.usernameValue, pending.passwordValue), ...extra]);
+  } else if (pending.updateItemId !== undefined) {
+    await session.editItem(pending.updateItemId, [...updateLoginChangeset(pending.usernameValue, pending.passwordValue), ...extra]);
+  }
+  return true;
+}
+
+/** The inline-menu offer records (ADR 0076 §4.1; `offer-store.ts`), cleared on lock. */
+const offers = createOfferStore(
+  (out) => crypto.getRandomValues(out),
+  () => Date.now(),
+);
+
+/** Truncates a Display Name to the offer's 256-character bound, by code point. */
+function offerLabel(label: string): string {
+  let out = "";
+  for (const ch of label) {
+    if (out.length + ch.length > 256) {
+      break;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/** Whether an item can produce a TOTP code (ADR 0076 §1.3 rule (g), `hasTotp`). */
+export function hasTotpFor(itemId: string): boolean {
+  if (session === undefined) {
+    return false;
+  }
+  try {
+    return session.autofillOffer(itemId, []).fillsTotp;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Builds and records the offer for one inline menu (ADR 0076 §4.1 step 3): per current candidate,
+ * whether a click fills a TOTP code (the step has a TOTP target and the item a time-based
+ * secret) and which custom fields it fills, by Display Name. `undefined` while locked.
+ */
+export function createOffer(
+  tabId: number,
+  pageUrl: string,
+  scope: FillScope,
+  candidateIds: readonly string[],
+): { readonly offerId: string; readonly candidates: readonly OfferCandidate[] } | undefined {
+  if (session === undefined) {
+    return undefined;
+  }
+  const stepHasTotp = scope.only === "totp" || scope.totp === true;
+  const items = new Map<string, OfferedItem>();
+  const candidates: OfferCandidate[] = [];
+  for (const itemId of candidateIds) {
+    let offer: ReturnType<DurableSession["autofillOffer"]>;
+    try {
+      offer = session.autofillOffer(itemId, scope.custom ?? []);
+    } catch {
+      continue;
+    }
+    const fillsTotp = stepHasTotp && offer.fillsTotp;
+    items.set(itemId, { fillsTotp, custom: offer.custom.map((c) => ({ token: c.token, element: c.element })) });
+    candidates.push({
+      itemId,
+      fillsTotp,
+      customFill: offer.custom.map((c) => ({ label: offerLabel(c.label), concealed: c.concealed })),
+    });
+  }
+  const offerId = offers.create({ tabId, pageUrl, scope, items });
+  return { offerId, candidates };
+}
+
+/** Takes an offer for a fill (ADR 0076 §4.2; `offer-store.ts`'s `take`). */
+export function takeOffer(offerId: string, tabId: number, pageUrl: string, itemId: string, only: FillOnly | undefined): OfferRecord | OfferRefusal {
+  return offers.take(offerId, tabId, pageUrl, itemId, only);
+}
+
+/**
+ * The values of one offered fill (ADR 0076 §4.2): one coarse call into `rizzy-client` with the
+ * offer record's own scope and the elements it recorded. `undefined` while locked or when
+ * nothing would be filled.
+ */
+export function fillValuesFor(itemId: string, record: OfferRecord): FillValues | undefined {
+  if (session === undefined) {
+    return undefined;
+  }
+  const item = record.items.get(itemId);
+  if (item === undefined) {
+    return undefined;
+  }
+  const plan = session.fillPlan(itemId, {
+    only: record.scope.only,
+    totp: item.fillsTotp && record.scope.only !== "totp",
+    custom: item.custom,
+    usernameToken: record.scope.usernameToken,
+    passwordToken: record.scope.passwordToken,
+  });
+  const values: FillValues = {
+    ...(plan.username !== undefined ? { username: plan.username } : {}),
+    ...(plan.password !== undefined ? { password: plan.password } : {}),
+    ...(plan.totp !== undefined && item.fillsTotp ? { totp: plan.totp } : {}),
+    ...(plan.custom.length > 0 ? { custom: plan.custom } : {}),
+  };
+  return Object.keys(values).length === 0 ? undefined : values;
 }
 
 function mapFields(fields: readonly { key: string; kind: ItemFieldSummary["kind"]; concealed: boolean; value: string | undefined }[]): readonly ItemFieldSummary[] {

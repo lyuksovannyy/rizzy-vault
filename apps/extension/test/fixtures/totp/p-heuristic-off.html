@@ -1,0 +1,12 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- ADR 0076 §1.3–§1.4 fixture: autocomplete=off counts as absent -->
+<html lang="en">
+  <head><meta charset="utf-8" /><title>autocomplete=off counts as absent</title></head>
+  <body>
+    <form id="verify" action="/verify">
+      <input id="totp" name="totp_code" type="tel" autocomplete="off" placeholder="Two-factor code" />
+      <button type="submit">Sign in</button>
+    </form>
+  </body>
+</html>
