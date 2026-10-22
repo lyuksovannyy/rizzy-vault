@@ -25,6 +25,8 @@ use chacha20::ChaCha20Rng;
 use chacha20::rand_core::SeedableRng as _;
 use rizzy_domain_auth::ServerSecrets;
 use rizzy_domain_auth::types::SessionToken;
+use rizzy_domain_vault::VaultDomain;
+use rizzy_server::bridge::AuthDirectory;
 use rizzy_server::config::{self, Config, Settings, Sources};
 use rizzy_server::http::api::Api;
 use rizzy_server::server::{Services, open_services};
@@ -193,9 +195,41 @@ impl Server {
     /// Starts the server of `config`, whose directories are in `dir` and whose secrets file
     /// exists; `adjust` edits its `api` role before the router is built.
     pub(crate) async fn open(dir: TempDir, config: &Config, adjust: impl FnOnce(&mut Api)) -> Self {
+        Self::open_services_with(dir, config, |services| {
+            // The api role is not shared yet: the router is built below.
+            adjust(Arc::get_mut(&mut services.api).unwrap());
+        })
+        .await
+    }
+
+    /// A server with open signup whose Fetch pages hold at most `page_bytes` bytes of ops and
+    /// covers (`VaultDomain::with_page_bytes`; ADR 0021 §4): a page always takes its first op.
+    pub(crate) async fn start_with_page_bytes(page_bytes: usize) -> Self {
+        let dir = TempDir::new();
+        let config = config_in(&dir, &[]);
+        let secrets = ServerSecrets::generate(&mut ChaCha20Rng::seed_from_u64(99));
+        std::fs::write(
+            &config.secrets_file,
+            secrets_file::serialize(&secrets).unwrap(),
+        )
+        .unwrap();
+        Self::open_services_with(dir, &config, |services| {
+            let vault = VaultDomain::new(services.db.clone(), AuthDirectory, services.bus.clone())
+                .with_page_bytes(page_bytes);
+            Arc::get_mut(&mut services.api).unwrap().vault = vault;
+        })
+        .await
+    }
+
+    /// Starts the server of `config` as [`Server::open`], with `adjust` editing its services
+    /// before the router is built.
+    async fn open_services_with(
+        dir: TempDir,
+        config: &Config,
+        adjust: impl FnOnce(&mut Services),
+    ) -> Self {
         let mut services = open_services(config).await.unwrap();
-        // The api role is not shared yet: the router is built below.
-        adjust(Arc::get_mut(&mut services.api).unwrap());
+        adjust(&mut services);
         let router = http::router(Some(services.api.clone()), config.roles.web);
         Self {
             dir,
