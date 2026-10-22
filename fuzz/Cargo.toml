@@ -103,6 +103,8 @@
 #   breach_range       the breach-check range response (CRYPTO.md §11.16, ADR 0053): rizzy-proto's
 #                      bounded `SUFFIX:COUNT` parser on arbitrary bytes and JSON, and
 #                      rizzy-client's constant-time verdict over what it accepts
+#   passkey_pkcs8      rizzy-core's hand-written PKCS#8 reader and writers for CXF passkey keys
+#                      (ADR 0074 §4): never panic; what parses writes back to a fixed point
 #
 # The `import_*` targets share `fuzz_targets/import_common/mod.rs` (the checks on an import
 # result and a counting RNG), included with `#[path]`; it is not a target.
@@ -502,6 +504,13 @@ bench = false
 [[bin]]
 name = "passkey_ceremony"
 path = "fuzz_targets/passkey_ceremony.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "passkey_pkcs8"
+path = "fuzz_targets/passkey_pkcs8.rs"
 test = false
 doc = false
 bench = false
