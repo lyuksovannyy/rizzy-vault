@@ -51,7 +51,7 @@ Volume=rizzy-vault-secrets.volume:/run/rizzy-secrets:ro
 # compose.yaml hardcodes this one rather than reading it from .env; do the same here.
 Environment=RIZZY_LISTEN=0.0.0.0:8080
 # The rest (RIZZY_ORIGIN, RIZZY_SIGNUP, RIZZY_LOG_LEVEL, RIZZY_RECOVERY_WAIT_HOURS,
-# RIZZY_TRUSTED_PROXIES) come from the env file, as compose.yaml's `environment:` block reads
+# RIZZY_ACCOUNT_QUOTA_BYTES, RIZZY_TRUSTED_PROXIES) come from the env file, as compose.yaml's `environment:` block reads
 # them from deploy/.env. Unverified: whether %h expands inside a Quadlet EnvironmentFile= path
 # in your Podman version (self-hosting.md §13) — replace %h with your home directory if not.
 EnvironmentFile=%h/.config/containers/systemd/rizzy-vault.env
