@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! `rizzy-icon-proxy` — the egress of the `icons` role ([ADR 0010] §1–§2, [ADR 0052],
+//! [ADR 0053]; [ADR 0016] §3 row `rizzy-icon-proxy`).
+//!
+//! The `icons` role is the one process that reaches the internet. It holds no database
+//! credentials and no server secrets ([ADR 0010] §2), and this crate depends on `rizzy-proto`
+//! only ([ADR 0016] R3: no storage, bus, domain, sqlx or `rizzy-core`; it handles no keys).
+//!
+//! # What this build has
+//!
+//! This crate is the minimal shared scaffolding [ADR 0053] needs, plus the breach check
+//! itself. The favicon fetch of [ADR 0052] (discovery, redirects, re-encoding) is a separate
+//! change and is not here; the pieces below are written so that it can reuse them.
+//!
+//! | Module | Spec | Purpose |
+//! |---|---|---|
+//! | [`allow`] | INV-51 | The address allow-list: globally routable unicast only, IPv4-mapped and NAT64 judged by the embedded IPv4 address |
+//! | [`connect`] | INV-51, INV-77; ADR 0052 point 2 | Resolve once, check every address, connect to exactly one checked address, TLS 1.3 with Mozilla's roots, verified against the hostname |
+//! | [`cache`] | ADR 0052 point 5; ADR 0053 item 4 | The shared on-disk cache: TTL, a total-size cap, oldest-first eviction |
+//! | [`limit`] | ADR 0052 point 6, owner answer 5; ADR 0053 item 8 | The per-source token bucket, with a global fallback bucket |
+//! | [`breach`] | ADR 0053; CRYPTO.md §11.16; INV-77 | The range query to the one fixed upstream host, cached by prefix |
+//!
+//! # Rules
+//!
+//! - **No identity, no log.** Nothing that reaches this crate names an account, a session or
+//!   an item; the crate logs nothing, and its errors carry no prefix, upstream answer or
+//!   address.
+//! - **The connector is injected.** [`breach::BreachService`] takes any
+//!   [`connect::Connector`]. Production passes [`connect::PinnedTls`]; tests pass a connector
+//!   to a local fake upstream, so no test touches the network. No setting selects a
+//!   connector: only code can.
+//! - **No `unsafe`, no panics** (workspace lints, and `forbid(unsafe_code)` below).
+//!
+//! [ADR 0010]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0010-server-shape.md
+//! [ADR 0016]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0016-workspace-layout.md
+//! [ADR 0052]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0052-icon-proxy-role.md
+//! [ADR 0053]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0053-hibp-breach-check-egress.md
+
+#![forbid(unsafe_code)]
+#![warn(clippy::indexing_slicing, clippy::unreachable)]
+#![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
+
+pub mod allow;
+pub mod breach;
+pub mod cache;
+pub mod connect;
+pub mod limit;

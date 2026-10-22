@@ -1,0 +1,36 @@
+[package]
+name = "rizzy-icon-proxy"
+description = "The rizzy-vault icons role's egress: the INV-51 address allow-list, the DNS-pinned TLS fetch, the shared cache, the per-source limit, and the HIBP breach-check range query (ADR 0052, ADR 0053)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Internal dependencies: exactly the ADR 0016 §3 row (`rizzy-proto` only), checked by
+# `cargo xtask check-deps`; R3 keeps storage, the bus, the domains, sqlx and `rizzy-core` out
+# ("it handles no keys"). Every external crate below is already in Cargo.lock through
+# `rizzy-server` and `rizzy-cli`: this crate adds no package to the graph.
+[dependencies]
+# The shared request and response types of the breach check and its range parser.
+rizzy-proto.workspace = true
+# The runtime: TCP, the OS resolver (`lookup_host`), timers, blocking file I/O for the cache,
+# the connection driver task, and the limiter's mutex.
+tokio = { workspace = true, features = ["rt", "net", "time", "sync"] }
+# The HTTP/1.1 client connection to the upstream, as `rv` uses it (ADR 0052 point 2).
+hyper = { workspace = true, features = ["client"] }
+hyper-util.workspace = true
+http-body-util.workspace = true
+# TLS 1.3 to the upstream with the `ring` provider and Mozilla's roots only, no private CA
+# (ADR 0052 point 2, extending ADR 0030 Decision 1; CRYPTO.md §3 "Transport
+# (`rizzy-icon-proxy`)"). Pins and features: the workspace entries.
+tokio-rustls.workspace = true
+rustls.workspace = true
+webpki-roots.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "net", "time", "sync", "io-util", "macros"] }
+
+[lints]
+workspace = true

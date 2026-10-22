@@ -1632,6 +1632,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rizzy-icon-proxy"
+version = "0.0.0"
+dependencies = [
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rizzy-proto",
+ "rustls",
+ "tokio",
+ "tokio-rustls",
+ "webpki-roots",
+]
+
+[[package]]
 name = "rizzy-import"
 version = "0.0.0"
 dependencies = [

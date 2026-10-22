@@ -24,6 +24,7 @@ rizzy-domain-auth = { path = "crates/rizzy-domain-auth" }
 rizzy-domain-vault = { path = "crates/rizzy-domain-vault" }
 rizzy-import = { path = "crates/rizzy-import" }
 rizzy-match = { path = "crates/rizzy-match" }
+rizzy-icon-proxy = { path = "crates/rizzy-icon-proxy" }
 
 # Cryptography. Exact pins and feature sets from ADR 0009 ("Allowed crate families" and
 # "Required feature sets"); docs/CRYPTO.md §3. Bumps are reviewed like crypto changes and are
