@@ -387,6 +387,22 @@ The PR that accepts this ADR makes these edits. None is made now.
    Add the §1.4 negatives and the §10 adversarial cases to the INV-36 and INV-37 test columns.
 3. **`rizzy-core`'s `schema.rs` key table comment** gains the new row when step 2 of §8 lands.
 
+### Owner answers at acceptance (2026-10-22)
+
+The owner accepted this ADR as drafted; the recommendations of "Open questions for the owner" stand:
+
+1. The ROADMAP row is already in place: the owner added it to ROADMAP §4.4 in commit 081d82c.
+2. ADR 0018 §7's row is superseded, as §9 does, because W5 changes the row's meaning for `label`.
+3. The reserved set is all of §3, `email` and `tel` included.
+4. Importers keep an empty label. The field shows as "Unnamed field" and fills nothing, and the next edit asks for a name.
+5. `new-password` is respected: the saved password never goes there, only the generator.
+6. In the save dialog, new text fields start checked. Masked fields and updates of existing values start unchecked.
+7. The TOTP heuristic for fields without `one-time-code` is on, with every rule of §1.3.
+8. After a merge that duplicates an id, the first field in list order fills, with a warning (§2.5).
+9. TOTP and custom fill from the popup are not in this ADR.
+
+Of the "On acceptance" edits, items 1 and 2 are made in the accepting change: the status lines of ADRs 0018, 0036 and 0040 with their index rows, and THREAT_MODEL.md A7 with the INV-36 and INV-37 test columns. Item 3, the `schema.rs` key-table comment, is code and lands with step 2 of §8.
+
 ## Consequences
 
 ### Positive

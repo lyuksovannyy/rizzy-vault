@@ -82,6 +82,18 @@ Mirrors [ADR 0026](0026-client-device-state-and-cache.md) §6 for the new surfac
 - `client_device_state` (ADR 0026 §6) extended to v2 inputs: `has_ks`, the forward list and its count byte, and the `has_ks = 1 ⇒ has_local = 1` constraint, under both `keystore_capable` values.
 - Crash injection (ADR 0026 §6 method): fail after the first write that upgrades a loaded v1 record to v2; reload and assert the record is still valid v1 or valid v2, never a torn mix.
 
+### Owner answers at acceptance (2026-10-22)
+
+The owner accepted this ADR as drafted; the recommendations of "Open questions for the owner" stand:
+
+1. `ACCOUNT_KEY_FORWARD` ships in the same record version as `E_ks`.
+2. At `forward_count = 8` the device still fetches and stores each new epoch's wrapped key. Only a further keystore-only unlock is refused, and that path goes read-only until a password unlock collapses the chain. There is no new UI state.
+3. The platform gate is a hard parse refusal.
+4. ADR 0051's placement in `cache_meta` was confirmed, not open, and needs no decision. Record version 3 stays free.
+5. The sibling unlock entry point's signature and the new `ClientError` variant's name are settled in the M3 `rizzy-ffi` API review.
+
+The accepting change sets ADR 0026's status line and index row from the "Proposed status-line text" of §1. ADR 0046 is still Proposed, so only this ADR's entry is added, after those of ADRs 0051 and 0056. It also adds INV-81 and INV-82 (THREAT_MODEL.md §8.9).
+
 ## Consequences
 
 ### Positive

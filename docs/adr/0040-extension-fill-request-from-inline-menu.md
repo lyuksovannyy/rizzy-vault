@@ -1,6 +1,6 @@
 # ADR 0040: The extension's fill request comes from the inline menu, not the content script
 
-- Status: Partially superseded by [ADR 0043](0043-inline-menu-instance-token.md) (point 1 in part, point 3 in part)
+- Status: Partially superseded by [ADR 0043](0043-inline-menu-instance-token.md) (point 1 in part, point 3 in part); [ADR 0076](0076-autocomplete-driven-autofill.md) (point 2; "What this ADR supersedes" in part)
 - Date: 2026-10-08
 - Deciders: project owner
 - Milestone: M2
