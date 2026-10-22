@@ -1410,7 +1410,8 @@ All of this lands with the code in M1. None of it is optional.
 2. **Upstream vectors.** Run against our pinned crates, not just trusted from their CI:
    - RFC 5869 (HKDF), RFC 9106 (Argon2id)
    - draft-irtf-cfrg-xchacha-03 (XChaCha20-Poly1305)
-   - RFC 7748 (X25519), RFC 8032 (Ed25519)
+   - RFC 7748 (X25519), RFC 8032 (Ed25519). RFC 8032 §7.1 TEST 1–3 also run through the `EdDSA` passkey keys of [ADR 0074](adr/0074-passkey-cxf-import-export.md) (`rizzy-core`'s `passkey` tests)
+   - PKCS#8 passkey keys ([ADR 0074](adr/0074-passkey-cxf-import-export.md) §4; `passkey::pkcs8` tests, provenance in the file): the CXF 1.0 Proposed Standard's Appendix A passkey key, OpenSSL 3.0.13 ES256 and Ed25519 keys, Chromium 148 `WebCrypto` ES256 and Ed25519 keys, and RFC 8410 §10.3's Ed25519 examples. Each parses, derives the published public key, and is written back byte for byte; the CXF importer's golden test runs the whole Appendix A document
    - RFC 9180 (HPKE, through hpke's `kat` test data for our suite, in Base and PSK mode)
    - RFC 9807 (OPAQUE, through opaque-ke's test vectors)
    - RFC 2202 (HMAC-SHA-1), RFC 4226 Appendix D and RFC 6238 Appendix B (HOTP and TOTP, all three algorithms). The RFC 6238 vectors also run through `rizzy-client`'s autofill fill plan ([ADR 0076](adr/0076-autocomplete-driven-autofill.md) §10)
@@ -1453,6 +1454,7 @@ All of this lands with the code in M1. None of it is optional.
    - Padmé frame parser
    - export-file parser ([§11.14](#1114-encrypted-export-m1)): the JSON document reader, the header and `data` field decoders it calls, and the server-secrets backup header, which shares the header decoder ([§5.11](#511-server-side-encryption-not-zero-knowledge))
    - otpauth URI parser ([§11.15](#1115-totp-m1))
+   - the PKCS#8 passkey-key reader (`passkey_pkcs8`) and the CXF importer (`import_cxf`), for bare CXF files and the decrypted payload of a CXF export alike ([ADR 0074](adr/0074-passkey-cxf-import-export.md) §3, §4)
    - item-record parsers ([ADR 0018](adr/0018-item-record-encoding.md) §12): op data, snapshot data, tombstone, the value decoder and the key grammar
    - op and snapshot header parsers ([ADR 0012](adr/0012-sync-engine.md) §3)
    - sync-engine decoders: the canonical version vector, dot and HLC ([ADR 0012](adr/0012-sync-engine.md) §2–§3)
