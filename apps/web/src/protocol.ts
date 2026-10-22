@@ -23,6 +23,7 @@ import type {
   HistoryEntry,
   ImportFormat,
   ImportReport,
+  CustomFieldAutofill,
   ItemChange,
   ItemSummary,
   ItemType,
@@ -86,6 +87,8 @@ export interface CoreApi {
   items(trash: boolean): ItemSummary[];
   item(id: string): ItemSummary;
   fields(id: string): FieldView[];
+  /** What each custom field's autocomplete id does (ADR 0076 §2.5): no value. */
+  customFieldAutofill(id: string): CustomFieldAutofill[];
   reveal(id: string, key: string): string;
   createItem(itemType: ItemType, changes: ItemChange[]): string;
   editItem(id: string, changes: ItemChange[]): void;
@@ -196,6 +199,7 @@ export const METHODS: readonly Method[] = [
   "items",
   "item",
   "fields",
+  "customFieldAutofill",
   "reveal",
   "createItem",
   "editItem",

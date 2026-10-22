@@ -77,6 +77,11 @@ export const en = {
   "errors.equivalence_domain_rejected":
     "Use each site's own domain, like example.com: not a public suffix such as co.uk or github.io, and not a subdomain such as www.example.com.",
   "errors.settings_limit_reached": "The account settings are full: at most 64 groups of your own and 1,024 turned-off groups.",
+  "errors.autocomplete_invalid": "An autocomplete id is 1–64 lowercase letters, digits, “-”, “_” or “.”, with no spaces.",
+  "errors.autocomplete_reserved": "That autocomplete id is reserved for the manager.",
+  "errors.autocomplete_duplicate": "Another custom field of this item already uses that autocomplete id.",
+  "errors.autocomplete_kind": "Only text and hidden custom fields can have an autocomplete id.",
+  "errors.label_required": "Every custom field needs a display name.",
 
   // ---- Shared ----
   // An error code without an `errors.*` entry: shown with the code itself, so that a report

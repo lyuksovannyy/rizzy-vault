@@ -403,7 +403,9 @@ export function ItemView(props: {
       })}
       {grouped.custom.map((c) => {
         const v = c.attributes.get("value");
-        const label = c.attributes.get("label")?.value ?? "Field";
+        // ADR 0076 §2.4: a field without a Display Name shows as "Unnamed field".
+        const savedLabel = c.attributes.get("label")?.value ?? "";
+        const label = savedLabel.trim() === "" ? "Unnamed field" : savedLabel;
         return v === undefined ? null : (
           <FieldValue key={v.key} ctx={ctx} id={id} field={v} label={label} onResolved={resolved} />
         );
