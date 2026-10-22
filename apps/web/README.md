@@ -122,10 +122,19 @@ and shows them.
   CSV addition), counts down 10 seconds with the confirm button disabled, and needs the typed
   `EXPORT PLAINTEXT`. Closing and opening the dialog starts the count over, in the view and in
   the core (`plaintext_export_hold` before it ends).
+- **Passkey export (CXF)** ([ADR 0074](../../docs/adr/0074-passkey-cxf-import-export.md) §2):
+  every passkey as a FIDO Credential Exchange Format document inside a file sealed like the
+  encrypted export. Its dialog shows the CXF export's own warning (`cxfExportWarning`), counts
+  down the same 10 seconds, and needs the file's password twice and the typed `EXPORT
+  PLAINTEXT` (`export-flow.ts`'s `cxfExport`). There is no unencrypted CXF export (the ADR's
+  open question 4 waits for a ROADMAP edit). Its words are in `@rizzy-vault/i18n`
+  (`transfer.*`).
 - **Import** recognises the file's format from its bytes (`detectImportFormat` of
-  `@rizzy-vault/core`): our encrypted export then asks for that file's password; our plaintext
-  JSON and other products' files need nothing more; our CSV export and unknown files are
-  refused with a message. The format can still be chosen by hand.
+  `@rizzy-vault/core`): our encrypted export and our CXF passkey export then ask for that
+  file's password; our plaintext JSON, a CXF passkey file of another product (one new Login per
+  passkey, other credential types counted and skipped) and other products' files need nothing
+  more; our CSV export and unknown files are refused with a message. The format can still be
+  chosen by hand.
 
 ## The shell and item views (redesign, in progress)
 
