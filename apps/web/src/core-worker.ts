@@ -45,6 +45,7 @@ import {
   type KitMessage,
   type SessionInfo,
   TOTP_CANCELLED,
+  isSettingsChange,
   isToWorker,
   transferables,
 } from "./protocol.ts";
@@ -298,6 +299,14 @@ async function run(m: CallMessage): Promise<unknown> {
     enableTwoFactor: () => current().enableTwoFactor(),
     confirmTwoFactor: () => current().confirmTwoFactor(str(a[0])),
     disableTwoFactor: () => current().disableTwoFactor(str(a[0])),
+    matchSettings: () => current().matchSettings(),
+    matchCandidates: () => current().matchCandidates(str(a[0])),
+    changeMatchSettings: async () => {
+      if (!isSettingsChange(a[0])) {
+        throw new CoreError("invalid_input");
+      }
+      await current().changeMatchSettings(a[0]);
+    },
     generatePasswordWithOptions: () => generatePasswordWithOptions(a[0] as never),
     generatePassphraseWithOptions: () => generatePassphraseWithOptions(a[0] as never),
     passwordEntropy: () => passwordEntropy(a[0] as never),

@@ -27,11 +27,13 @@ import {
   type Clock,
   CoreError,
   type HistoryEntry,
+  MatchMode,
   Signup,
   type Transport,
   type VaultSession,
   checkServer,
   createPasskey,
+  decideMatchCandidates,
   PASSKEY_ALG_ES256,
   fetchTransport,
   detectImportFormat,
@@ -586,6 +588,22 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     await signup.confirm(lastGroup);
     const owner = await signup.login();
     const ownerAccountId = owner.accountId;
+    // ADR 0042 §5: the web session writes the account's match settings, one `account/commit` of
+    // the whole record each; the durable device below (the extension's binding) reads them.
+    expect(owner.matchSettings()).toEqual({
+      matchDefault: MatchMode.BaseDomain,
+      userGroups: [],
+      globalGroups: [],
+      otherDisabled: [],
+    });
+    await expect(
+      owner.changeMatchSettings({ kind: "addUserGroup", domains: ["co.uk", "example.com"] }),
+    ).rejects.toMatchObject({ code: "equivalence_domain_rejected" });
+    await owner.changeMatchSettings({ kind: "addUserGroup", domains: ["example.com", "Example.NET"] });
+    await owner.changeMatchSettings({ kind: "matchDefault", mode: MatchMode.Host });
+    const written = owner.matchSettings();
+    expect(written.matchDefault).toBe(MatchMode.Host);
+    expect(written.userGroups.map((g) => g.domains)).toEqual([["example.com", "example.net"]]);
     owner.lock();
 
     const store = memoryCacheStore();
@@ -609,6 +627,25 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     // syncs an item of its own: persisted through `store` before each call resolves.
     await session.sync();
     expect(session.items()).toEqual([]);
+
+    // ADR 0042 §6: the device reads the same settings and applies them to its match decision.
+    expect(session.matchSettings()).toEqual(written);
+    const saved = (mode: (typeof MatchMode)[keyof typeof MatchMode]) => [
+      { itemId: "a".repeat(32), uriId: "b".repeat(32), value: "https://example.com/login", mode },
+    ];
+    const top = { isTopFrame: true, frameOrigin: "" };
+    // Base domain widens through the user group, with the equivalence warning...
+    expect(
+      session.decideMatchCandidates("https://example.net/", top, saved(MatchMode.BaseDomain)).candidates.map(
+        (c) => c.needsWarning,
+      ),
+    ).toEqual([true]);
+    // ...the free function, which holds no account settings, does not...
+    expect(decideMatchCandidates("https://example.net/", top, MatchMode.BaseDomain, saved(MatchMode.BaseDomain)).candidates).toEqual([]);
+    // ...and a URI with no override of its own takes the account default, Host: not offered on
+    // a subdomain that its Base domain own-mode twin is offered on.
+    expect(session.decideMatchCandidates("https://www.example.com/", top, saved(MatchMode.AccountDefault)).candidates).toEqual([]);
+    expect(session.decideMatchCandidates("https://www.example.com/", top, saved(MatchMode.BaseDomain)).candidates).toHaveLength(1);
     const id = await session.createItem("login", [
       { op: "set", key: "item.name", value: "Extension item" },
       { op: "set", key: "login.username", value: "extension-user" },

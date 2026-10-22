@@ -326,14 +326,9 @@ export function updateLoginChangeset(usernameValue: string, passwordValue: strin
  * - `undefined` (the register was never written), `"0"` (ADR 0037 §4 row `0x0000`, the explicit
  *   account-default sentinel), and text that does not parse as a number at all (corrupt or
  *   otherwise not a value any client meant to set, never a deliberate choice to distinguish from
- *   "no override") all resolve to {@link MatchMode.BaseDomain}: the account's own effective
- *   default today, since the extension has no read path yet for a real account-level override
- *   (ADR 0042 is `Status: Proposed`; gap 27(b) in the M2 gap audit), and `BaseDomain` is
- *   `rizzy-match`'s own documented default for an unset mode
- *   (`crates/rizzy-match/src/modes.rs`'s `account_default_resolves_to_base_domain_when_unset`
- *   test) — the same "corrupt data narrows back to the safe baseline, never breaks autofill
- *   outright" choice {@link global_equivalence_groups}'s own doc makes for a corrupt compiled-in
- *   equivalence list.
+ *   "no override") all resolve to {@link MatchMode.AccountDefault}: the core resolves it to the
+ *   account's own match default from its `ACCOUNT_SETTINGS` (ADR 0037 §6, ADR 0042 §6;
+ *   `DurableSession.decideMatchCandidates`), *Base domain* when the account never set one.
  * - One of the six assigned values (`0x0001`-`0x0006`) resolves to that exact mode, so a stored
  *   override — `0x0006` Never very much included — is honored rather than silently discarded.
  * - A well-formed but unassigned Enum value (ADR 0037 §4 row `0x0007`-`0xFFFF`: a real mode a
@@ -363,12 +358,12 @@ export function matchModeOf(raw: string | undefined): MatchModeValue {
         return MatchMode.Never;
       default:
         if (n === 0 || Number.isNaN(n)) {
-          return MatchMode.BaseDomain;
+          return MatchMode.AccountDefault;
         }
         return MatchMode.Never;
     }
   }
-  return MatchMode.BaseDomain;
+  return MatchMode.AccountDefault;
 }
 
 /** Every `uri/<id>/value` field of one item's `fields()` call, paired with its sibling
@@ -399,10 +394,9 @@ export function itemUriFields(fields: readonly FieldView[]): ReadonlyArray<{ uri
 }
 
 /** Every saved URI of every active item, as `decideMatchCandidates` needs them (ADR 0037 §4).
- * `mode` is each URI's own resolved match mode (`itemUriFields`'s doc): a stored override is
- * honored, not discarded, and only {@link MatchMode.BaseDomain} is used as a resolved stand-in
- * for "no override" (absent or the account-default sentinel), never a blanket default applied
- * regardless of what is actually stored. */
+ * `mode` is each URI's own match mode (`itemUriFields`'s doc): a stored override is honored, not
+ * discarded, and "no override" stays {@link MatchMode.AccountDefault} for the core to resolve
+ * against the account's own setting, never a blanket default applied here. */
 export function sessionItemUris(session: DurableSession): readonly MatchUriInput[] {
   const out: MatchUriInput[] = [];
   for (const item of session.items()) {
@@ -413,15 +407,18 @@ export function sessionItemUris(session: DurableSession): readonly MatchUriInput
   return out;
 }
 
-/** Decides autofill candidates for `pageUrl` against every saved item (ADR 0037 §4–§5): one
- * call wrapping `sessionItemUris` + `decideMatchCandidates` so `content-handler.ts` never
- * touches `@rizzy-vault/core` shapes directly either. */
+/** Decides autofill candidates for `pageUrl` against every saved item (ADR 0037 §4–§5), under
+ * the account's own match settings (ADR 0042 §6: the match default, the disabled global groups
+ * and the user-defined groups, read by the core from the account's `ACCOUNT_SETTINGS`): one call
+ * wrapping `sessionItemUris` + the session's `decideMatchCandidates` so `content-handler.ts` never
+ * touches `@rizzy-vault/core` shapes directly either. Settings the core cannot read (written by
+ * a newer rizzy-vault) throw, so no candidate is offered under settings it could not apply. */
 export function decideCandidates(
   session: DurableSession,
   pageUrl: string,
   frame: MatchFrameInfo,
 ): { pageHost: string; pagePort: number | undefined; candidates: readonly MatchCandidate[]; warnings: readonly string[] } {
-  return decideMatchCandidates(pageUrl, frame, MatchMode.BaseDomain, sessionItemUris(session));
+  return session.decideMatchCandidates(pageUrl, frame, sessionItemUris(session));
 }
 
 /** The active item to offer "update" for on a submitted form, or `undefined` to offer "save"
