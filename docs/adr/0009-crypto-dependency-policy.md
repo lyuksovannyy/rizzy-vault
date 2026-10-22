@@ -1,6 +1,6 @@
 # ADR 0009: Cryptographic dependency and memory-hygiene policy
 
-- Status: Partially superseded by [ADR 0019](0019-native-clients.md) ("RNG rules" in part)
+- Status: Partially superseded by [ADR 0019](0019-native-clients.md) ("RNG rules" in part); [ADR 0052](0052-icon-proxy-role.md) (Amendments, 2026-10-05 entry, "Where it is applied" in part)
 - Date: 2026-09-27
 - Deciders: project owner
 - Milestone: M1 (applies from the first crypto dependency in `rizzy-core`)
@@ -282,3 +282,19 @@ Owner decision of 2026-10-21: the exact-pin bumps of commit `d79085d` are approv
 | `rustls-webpki` (lockfile-pinned) | 0.103.15 | 0.103.16 | RUSTSEC-2026-0382 (verification could accept distrusted intermediates) |
 
 Checks for this bump: patch releases from the same maintainers, with no new crate in `Cargo.lock` or `fuzz/Cargo.lock` and no feature change. `cargo deny check` and the fuzz `cargo deny` report `advisories ok` with no `ignore` (V, 2026-10-21). The `rizzy-cli` tests pass, 83 of them, including the TLS-1.3-only and CA-file tests (V). CRYPTO.md §3's transport row carries the new pins.
+
+### 2026-10-22: `webauthn-rs` for WebAuthn 2FA ([ADR 0058](0058-webauthn-2fa-second-factor.md), [ADR 0059](0059-webauthn-rs-crate-approval.md))
+
+Owner decision of 2026-10-22: [ADR 0059](0059-webauthn-rs-crate-approval.md) accepted `webauthn-rs` `=0.5.5`, `default-features = false, features = ["attestation"]`, for `rizzy-domain-auth` only. It is the WebAuthn server library for which [owner decision 1](#owner-decisions-2026-09-25) already scoped the `openssl` exception. ADR 0059's "The ADR 0009 checklist" is the first-pass checklist record. This entry adds one row to [Allowed crate families for cryptography](#allowed-crate-families-for-cryptography) and one line to [Required feature sets](#required-feature-sets), as those sections provide for, and changes nothing else in this ADR.
+
+**Added to the crate table:**
+
+| Family / crate | Use | Pin (M3) |
+|---|---|---|
+| `webauthn-rs` (Kanidm) | WebAuthn/FIDO2 registration and assertion ceremonies for the server-side second factor ([ADR 0058](0058-webauthn-2fa-second-factor.md), [CRYPTO.md §11.17](../CRYPTO.md#1117-webauthn-2fa-m3)), in `rizzy-domain-auth` only. Transitively `webauthn-rs-core` and `webauthn-rs-proto` `=0.5.5`, version-locked to the facade, and `openssl`/`openssl-sys` under owner decision 1's exception ([THREAT_MODEL.md](../THREAT_MODEL.md#8-security-invariants) INV-85) | `=0.5.5` |
+
+**Added to the required feature sets:**
+
+- `webauthn-rs`: `default-features = false`, `["attestation"]`. Never `resident-key-support`, `conditional-ui`, `workaround-google-passkey-specific-issues` or any `danger-*` feature.
+
+**Not yet run.** The checklist re-run, with its mechanical checks and the remaining **U** items, belongs to the implementation PR that adds the dependency (ADR 0059 open question 5), not to this entry. Those are `cargo deny check`, `cargo xtask check-deps`, the resolved `rand` 0.9.x version against RUSTSEC-2026-0097, `rand_chacha` only ever seeded from the OS outside tests (ADR 0059 open question 6), the `attestation` feature's API surface, and the `verify_es256` seam of ADR 0058 point 7. That PR records its run under this entry, the way the 2026-10-09 `p256` entry did for ADR 0041. It also declares the crate in `[workspace.dependencies]`, adds the `deny.toml` wrapper lines of owner decision 1 and the CRYPTO.md §3 row. Until it lands, the crate is approved but not declared, and `Cargo.lock` does not change.

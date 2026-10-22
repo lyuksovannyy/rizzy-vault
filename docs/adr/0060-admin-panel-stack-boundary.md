@@ -126,6 +126,19 @@ set.
 **On acceptance:** [docs/adr/README.md](README.md) gains the 0060 index row; nothing else is
 superseded. If open question 2 is yes, CRYPTO.md §5.11 gains the new purpose.
 
+### Owner answers at acceptance (2026-10-22)
+
+The owner accepted this ADR as drafted; the recommendations of "Open questions for the owner" stand:
+
+1. Askama is the template crate, pending the implementing PR's `cargo deny check`.
+2. Yes, SMTP credentials reuse Algorithm 0x01 under the server-only purpose `0x0103` (INV-86).
+3. The settings-persistence schema is a short ADR 0011 follow-up, required before the schema is implemented, never the implementing PR's call.
+4. The M3 metrics endpoint shares `admin_listen`.
+5. Admin login, bootstrap-token redemption and the second factor get their own ADR. `admin_panel/auth.rs` stays empty, and no screen behind it merges, until that ADR is Accepted.
+6. Invite-only signup gets its own ADR. Until then the signup screen offers only Closed and Open.
+
+Of the "On acceptance" edits, the index row already exists. Because open question 2 is yes, CRYPTO.md §5.11 gains purpose `0x0103` and THREAT_MODEL.md §8.8 gains INV-86. This ADR fixes the value only. The purpose's name, its ctx and its CRYPTO.md §8.4 row are still undecided and must be fixed by an Accepted ADR before code lands. §5.11 says so.
+
 ## Consequences
 
 ### Positive

@@ -56,6 +56,15 @@ The change that accepts this ADR makes these edits. None is made now.
 
 **Proposed INV-77** (allocated across the 2026-10-11 batch in ADR-number order. Provisional: the allocation was made across the 2026-10-11 batch in ADR-number order; if ADRs are accepted out of order, the owner renumbers at acceptance.): *The `icons` role's breach-check traffic connects only to one pinned, config-named upstream host over HTTPS, under the same SSRF allow-list and DNS-pinning as INV-51; clients send only a 5-hex-char SHA-1 prefix in the request payload, with no account identity, session token or item id in that payload (IP- and timing-level correlation through the shared proxy is a separately accepted risk, not covered by this invariant); the endpoint is rate-limited per source alongside the existing favicon-fetch limit; responses are cached by prefix with no per-user log; and the role keeps the no-DB-credentials, no-server-secrets properties ADR 0010 §2 already requires of it.*
 
+### Owner answers at acceptance (2026-10-22)
+
+The owner accepted this ADR as drafted; the recommendations of "Open questions for the owner" stand:
+
+1. Yes, a password-hash prefix reaching the `icons` role is acceptable under CRYPTO.md Goal 1. This rests on the Decision's no-account-identity, rate-limit (item 8) and no-per-user-log rules, which are load-bearing. IP and timing correlation through the shared proxy is an accepted residual risk.
+2. There are two role flags: `icons` keeps its favicon switch, and breach-check gets its own. Both are off by default.
+
+Of the "On acceptance" edits, all are made in the accepting change: THREAT_MODEL.md §2 (AST-13), §3.1 (the `icons` and "External services" rows), §3.2/§3.3 (TB-8's label is extended, not split into a TB-8a), §3.4 (a new row), §7.11 (the I row) and INV-77 in §8.8. CRYPTO.md gains the breach-check section. It is numbered §11.16 as drafted. ADR 0058 also asked for a §11.16, so its section is numbered §11.17. ADR 0010's status line names this ADR for the `icons` row of its §1 role table, which "What this ADR supersedes" replaces in part. The known-answer vectors (CRYPTO.md §15) and the exact upstream host, path and headers (item 2, U) land with the implementation.
+
 ## Consequences
 
 ### Positive

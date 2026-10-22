@@ -1,6 +1,6 @@
 # ADR 0010: Server shape: modular monolith with roles
 
-- Status: Partially superseded by [ADR 0022](0022-server-mode-only.md) (§1 in part)
+- Status: Partially superseded by [ADR 0022](0022-server-mode-only.md) (§1 in part); [ADR 0053](0053-hibp-breach-check-egress.md) (§1 in part)
 - Date: 2026-09-27
 - Deciders: project owner
 - Milestone: M1 (`api`, `web`, `worker`) / M3 (`notify`, `icons`) / M6 (`smtp`)
