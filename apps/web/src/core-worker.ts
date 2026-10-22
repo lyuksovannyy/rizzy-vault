@@ -23,6 +23,7 @@ import {
   Signup,
   type Transport,
   type VaultSession,
+  checkPasswordBreach,
   checkServer,
   detectImportFormat,
   fetchTransport,
@@ -302,6 +303,11 @@ async function run(m: CallMessage): Promise<unknown> {
     takeNotices: () => current().takeNotices(),
     restoreLateAsNew: () => current().restoreLateAsNew(str(a[0]), str(a[1]) as never),
     totp: () => current().totp(str(a[0])),
+    breachCheckItem: async () => (await current().checkItemBreach(str(a[0]))) ?? null,
+    breachCheckPassword: () => {
+      current();
+      return checkPasswordBreach(transport, bytes(a[0]));
+    },
     exportEncrypted: () => current().exportEncrypted(bytes(a[0])),
     exportBlockers: () => current().exportBlockers(),
     csvExportWarning: () => current().csvExportWarning(),

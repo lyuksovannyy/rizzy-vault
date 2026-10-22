@@ -1295,3 +1295,41 @@ button.sidebar-item .sidebar-item-count {
   align-items: center;
   padding: var(--space-1) 0;
 }
+
+/* The breach check (PasswordHealth.tsx; ADR 0053): the result line under the check button, and
+   the report's list of breached items. A found result is marked by its words, not by colour
+   alone; the danger colour only reinforces them. */
+.breach-check {
+  margin: var(--space-1) 0 var(--space-2);
+}
+
+.breach-check [role="status"]:empty {
+  display: none;
+}
+
+.breach-found {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+.breach-found .hint {
+  font-weight: normal;
+}
+
+.health-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.health-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: baseline;
+  padding: var(--space-1) 0;
+}
+
+.password-health progress {
+  width: 100%;
+}

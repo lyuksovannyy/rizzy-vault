@@ -12,6 +12,7 @@
 // This module is types and pure checks only; it imports no wasm.
 import type {
   AttachmentInfo,
+  BreachResult,
   ConflictValue,
   DetectedImportFormat,
   DeviceView,
@@ -130,6 +131,12 @@ export interface CoreApi {
   /** Restores the late edits of an item deleted permanently as a new item; returns its id. */
   restoreLateAsNew(id: string, itemType: ItemType): string;
   totp(id: string): TotpCode;
+  /** A breach check of the item's password (ADR 0053), read inside the core; `null` when the
+   * item has no password. Only a 5-character hash prefix is sent. */
+  breachCheckItem(id: string): BreachResult | null;
+  /** A breach check of a password the UI already holds (a generated one), as bytes the Worker
+   * zeroes; only a 5-character hash prefix is sent. */
+  breachCheckPassword(password: Uint8Array): BreachResult;
   exportEncrypted(password: Uint8Array): EncryptedExport;
   exportBlockers(): string[];
   csvExportWarning(): string;
@@ -218,6 +225,8 @@ export const METHODS: readonly Method[] = [
   "takeNotices",
   "restoreLateAsNew",
   "totp",
+  "breachCheckItem",
+  "breachCheckPassword",
   "exportEncrypted",
   "exportBlockers",
   "csvExportWarning",
