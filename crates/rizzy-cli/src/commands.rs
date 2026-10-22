@@ -75,7 +75,7 @@ use rizzy_core::generator::{
 use rizzy_core::ids::DeviceId;
 use rizzy_core::item::schema::{
     Concealment, Expected, ITEM_NAME, KeyClass, LIST_FIELD, LIST_PWHIST, LIST_URI, LOGIN_TOTP,
-    classify,
+    SSH_PORT, classify, ssh_port,
 };
 use rizzy_core::item::tag::{tag_key, tag_name};
 use rizzy_core::item::value::ValueRef;
@@ -498,6 +498,16 @@ fn item_show(device: &Device, ui: &mut dyn Ui, item: &str, reveal: bool) -> Resu
         };
         let line = Zeroizing::new(format!("{}: {}{conflict}", label.as_str(), shown.as_str()));
         ui.print(&line)?;
+    }
+    // ADR 0055 §1: an SSH key without `ssh.port` (or with it cleared) uses port 22, a display
+    // default that is never stored, so it is marked as one.
+    if vault.item_type(item) == Some(ItemType::SSH_KEY) {
+        let port = vault.field_value(item, SSH_PORT);
+        if port.as_ref().is_none_or(Value::is_cleared)
+            && let Some(default) = ssh_port(None)
+        {
+            ui.print(&format!("{SSH_PORT}: {default} (default)"))?;
+        }
     }
     // The fields above are in key order; the lists a user reorders, in list order (ADR 0018
     // §6), by the element ids `--move-uri` and `--move-custom` take.
