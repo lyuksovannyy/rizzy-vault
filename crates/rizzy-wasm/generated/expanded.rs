@@ -31,8 +31,9 @@
 //! |---|---|
 //! | [`SignupFlow`], [`EmergencyKit`] | signup of a web-vault account (CRYPTO.md §11.1, kind 4) |
 //! | [`LoginFlow`] | an OPAQUE login with an optional second factor; also a session's re-authentication |
-//! | [`Session`] | the unlocked session: sync driver, items, TOTP, export, import, devices, 2FA, lock |
+//! | [`Session`], [`AttachmentView`] | the unlocked session: sync driver, items, attachments (ADR 0054), TOTP, export, import, devices, 2FA, lock |
 //! | [`ItemDraft`], [`ItemSummary`], [`FieldView`] | item edits and views |
+//! | [`autofill::CustomFieldAutofillView`], [`autofill::AutofillOffer`], [`autofill::FillValues`], [`autofill::SaveRowView`] | autocomplete-driven autofill (ADR 0076): the editor's id states, the offer's disclosure, one fill's values, the save dialog's rows |
 //! | [`HttpRequest`], [`meta_request`], [`check_meta`], [`expect_no_content`] | the requests JavaScript sends and the answers it hands back |
 //! | [`generate_password_with_options`] (`generatePasswordWithOptions`), [`generate_passphrase_with_options`] (`generatePassphraseWithOptions`), [`password_entropy`] (`passwordEntropy`), [`passphrase_entropy`] (`passphraseEntropy`), [`generator_limits`] (`generatorLimits`), [`GeneratorLimits`], [`Generated`] | the generator, every option ([`generator`]) |
 //! | [`TotpCode`], [`EncryptedExport`], [`ImportReport`], [`DeviceView`], [`TwoFactorEnrolment`] | results |
@@ -95,11 +96,3781 @@ extern crate std;
 #[prelude_import]
 use std::prelude::rust_2024::*;
 
+pub mod autofill {
+
+
+
+
+    //! Autocomplete-driven autofill bindings ([ADR 0076] §2.5, §4, §5; ADR 0013 §3 rules 3 and 6):
+    //! one coarse call per user action, over [`rizzy_client::autofill`].
+    //!
+    //! | Call | What crosses to JavaScript |
+    //! |---|---|
+    //! | `custom_field_autofill` (`Session.customFieldAutofill`, `DeviceSession.customFieldAutofill`) | per custom field: its element id, what its autocomplete id does, and for a shadowed one the winner's id and Display Name (the editor shows both anyway) |
+    //! | `autofill_offer` (`DeviceSession.autofillOffer`) | whether the item fills a TOTP code, and per page token the Display Name, the concealed flag and the element id the offer records. Never a value |
+    //! | `fill_plan` (`DeviceSession.fillPlan`) | the values of one fill click: username, password, the current TOTP code (never the secret), custom values by token |
+    //! | `save_plan` (`DeviceSession.customSavePlan`) | the save dialog's rows: kind, element id, Display Name, flags. Never a value |
+    //!
+    //! [ADR 0076]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0076-autocomplete-driven-autofill.md
+    use core::fmt;
+    use rizzy_client::ClientError;
+    use rizzy_client::autofill::{
+        AutofillState, CapturedField, CustomChoice, FillOnly, FillRequest,
+        SaveRowKind,
+    };
+    use rizzy_client::rizzy_core::item::schema::{ATTR_LABEL, LIST_FIELD};
+    use rizzy_client::rizzy_core::item::value::ValueRef;
+    use rizzy_client::sync::VaultSync;
+    use wasm_bindgen::prelude::wasm_bindgen;
+    use zeroize::Zeroizing;
+    use crate::error::{CoreError, CoreResult};
+    use crate::items::{item_id, visible_item};
+    #[wasm_bindgen()]
+    #[__wasm_bindgen_retried]
+    #[doc =
+    " What one custom field\'s autocomplete id does (ADR 0076 §2.4–§2.5, §3), for the editor."]
+    pub struct CustomFieldAutofillView {
+        #[doc = " The element id, hex."]
+        element: String,
+        #[doc =
+        " `none`, `fills`, `invalid`, `reserved`, `wrong_kind`, `unnamed` or `shadowed`."]
+        state: &'static str,
+        #[doc =
+        " For `shadowed`: the element id of the field that fills the id instead."]
+        winner: Option<String>,
+        #[doc = " For `shadowed`: that field\'s Display Name."]
+        winner_label: Option<Zeroizing<String>>,
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsConstructor for
+        CustomFieldAutofillView {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for
+        CustomFieldAutofillView {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsStaticProperty for
+        CustomFieldAutofillView {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribe for CustomFieldAutofillView {
+        fn describe() {
+            use wasm_bindgen::describe::*;
+            inform(RUST_STRUCT);
+            inform(23u32);
+            inform(67u32);
+            inform(117u32);
+            inform(115u32);
+            inform(116u32);
+            inform(111u32);
+            inform(109u32);
+            inform(70u32);
+            inform(105u32);
+            inform(101u32);
+            inform(108u32);
+            inform(100u32);
+            inform(65u32);
+            inform(117u32);
+            inform(116u32);
+            inform(111u32);
+            inform(102u32);
+            inform(105u32);
+            inform(108u32);
+            inform(108u32);
+            inform(86u32);
+            inform(105u32);
+            inform(101u32);
+            inform(119u32);
+            inform(27u32);
+            inform(114u32);
+            inform(105u32);
+            inform(122u32);
+            inform(122u32);
+            inform(121u32);
+            inform(45u32);
+            inform(119u32);
+            inform(97u32);
+            inform(115u32);
+            inform(109u32);
+            inform(45u32);
+            inform(101u32);
+            inform(48u32);
+            inform(57u32);
+            inform(99u32);
+            inform(99u32);
+            inform(48u32);
+            inform(101u32);
+            inform(98u32);
+            inform(51u32);
+            inform(53u32);
+            inform(102u32);
+            inform(56u32);
+            inform(98u32);
+            inform(53u32);
+            inform(56u32);
+            inform(51u32);
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::IntoWasmAbi for CustomFieldAutofillView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CustomFieldAutofillView>>;
+        fn into_abi(self) -> Self::Abi {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+            WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self))) as
+                    *mut WasmRefCell<CustomFieldAutofillView>)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::FromWasmAbi for CustomFieldAutofillView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CustomFieldAutofillView>>;
+        unsafe fn from_abi(js: Self::Abi) -> Self {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+            use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+            let ptr = js.into_ptr();
+            assert_not_null(ptr);
+            let rc = Rc::from_raw(ptr);
+            match Rc::try_unwrap(rc) {
+                Ok(cell) => cell.into_inner(),
+                Err(_) =>
+                    wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::core::convert::From<CustomFieldAutofillView> for
+        wasm_bindgen::JsValue {
+        fn from(value: CustomFieldAutofillView) -> Self {
+            let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name =
+                "__wbg_customfieldautofillview_new_e09cc0eb35f8b583"]
+                fn __wbg_customfieldautofillview_new(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CustomFieldAutofillView>>)
+                -> u32;
+            }
+            unsafe {
+                <wasm_bindgen::JsValue as
+                        wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_customfieldautofillview_new(ptr))
+            }
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[export_name =
+            "__wbg_customfieldautofillview_free_e09cc0eb35f8b583"]
+            #[doc(hidden)]
+            pub unsafe extern "C-unwind" fn __wbg_customfieldautofillview_free(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CustomFieldAutofillView>>,
+                allow_delayed: u32) {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                if allow_delayed != 0 {
+                    let ptr = ptr.into_ptr();
+                    wasm_bindgen::__rt::assert_not_null(ptr);
+                    drop(Rc::from_raw(ptr));
+                } else {
+                    let _ =
+                        <CustomFieldAutofillView as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                }
+            }
+        };
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefFromWasmAbi for CustomFieldAutofillView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CustomFieldAutofillView>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<CustomFieldAutofillView>;
+        unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRef::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefMutFromWasmAbi for CustomFieldAutofillView
+        {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CustomFieldAutofillView>>;
+        type Anchor = wasm_bindgen::__rt::RcRefMut<CustomFieldAutofillView>;
+        unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRefMut::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::LongRefFromWasmAbi for CustomFieldAutofillView
+        {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CustomFieldAutofillView>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<CustomFieldAutofillView>;
+        unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            <Self as wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionIntoWasmAbi for CustomFieldAutofillView
+        {
+        #[inline]
+        fn none() -> Self::Abi {
+            <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CustomFieldAutofillView>>>::null()
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionFromWasmAbi for CustomFieldAutofillView
+        {
+        #[inline]
+        fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::TryFromJsValue for CustomFieldAutofillView {
+        fn try_from_js_value(value: wasm_bindgen::JsValue)
+            ->
+                wasm_bindgen::__rt::core::result::Result<Self,
+                wasm_bindgen::JsValue> {
+            Self::try_from_js_value_ref(&value).ok_or(value)
+        }
+        fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+            -> wasm_bindgen::__rt::core::option::Option<Self> {
+            let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name =
+                "__wbg_customfieldautofillview_unwrap_e09cc0eb35f8b583"]
+                fn __wbg_customfieldautofillview_unwrap(ptr: u32)
+                ->
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CustomFieldAutofillView>>;
+            }
+            let ptr = unsafe { __wbg_customfieldautofillview_unwrap(idx) };
+            if ptr.is_null() {
+                wasm_bindgen::__rt::core::option::Option::None
+            } else {
+                unsafe {
+                    wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                }
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribeVector for
+        CustomFieldAutofillView {
+        fn describe_vector() {
+            use wasm_bindgen::describe::*;
+            inform(VECTOR);
+            <CustomFieldAutofillView as
+                    wasm_bindgen::describe::WasmDescribe>::describe();
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorIntoWasmAbi for CustomFieldAutofillView
+        {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::IntoWasmAbi>::Abi;
+        fn vector_into_abi(vector:
+                wasm_bindgen::__rt::alloc::boxed::Box<[CustomFieldAutofillView]>)
+            -> Self::Abi {
+            wasm_bindgen::convert::js_value_vector_into_abi(vector)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorFromWasmAbi for CustomFieldAutofillView
+        {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::FromWasmAbi>::Abi;
+        unsafe fn vector_from_abi(js: Self::Abi)
+            ->
+                wasm_bindgen::__rt::alloc::boxed::Box<[CustomFieldAutofillView]> {
+            wasm_bindgen::convert::js_value_vector_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\x01\x17CustomFieldAutofillView\0\x01\\ What one custom field's autocomplete id does (ADR 0076 \xc2\xa72.4\xe2\x80\x93\xc2\xa72.5, \xc2\xa73), for the editor.\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    impl fmt::Debug for CustomFieldAutofillView {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("CustomFieldAutofillView").field("state",
+                    &self.state).finish_non_exhaustive()
+        }
+    }
+    impl CustomFieldAutofillView {
+        #[doc = " The element id, hex."]
+        #[must_use]
+        pub fn element(&self) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The element id, hex."]
+                    #[must_use]
+                    #[export_name =
+                    "customfieldautofillview_element_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_CustomFieldAutofillView_element(me:
+                            <CustomFieldAutofillView as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<CustomFieldAutofillView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<CustomFieldAutofillView>();
+                                            let me =
+                                                unsafe {
+                                                    <CustomFieldAutofillView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.element();
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The element id, hex."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_customfieldautofillview_element_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x17CustomFieldAutofillView\x01\x15 The element id, hex.\0\0\0\0\x07element\x01\x01\0\0\0\0\x01\0\x02\x07element\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.element.clone()
+        }
+        #[doc =
+        " What the id does: `none`, `fills`, `invalid` (W1), `reserved` (W2), `wrong_kind` (W4),"]
+        #[doc = " `unnamed` (no Display Name) or `shadowed` (§2.5)."]
+        #[must_use]
+        pub fn state(&self) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " What the id does: `none`, `fills`, `invalid` (W1), `reserved` (W2), `wrong_kind` (W4),"]
+                    #[doc =
+                    " `unnamed` (no Display Name) or `shadowed` (§2.5)."]
+                    #[must_use]
+                    #[export_name =
+                    "customfieldautofillview_state_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_CustomFieldAutofillView_state(me:
+                            <CustomFieldAutofillView as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<CustomFieldAutofillView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<CustomFieldAutofillView>();
+                                            let me =
+                                                unsafe {
+                                                    <CustomFieldAutofillView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.state();
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " What the id does: `none`, `fills`, `invalid` (W1), `reserved` (W2), `wrong_kind` (W4),"]
+                    #[doc =
+                    " `unnamed` (no Display Name) or `shadowed` (§2.5)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_customfieldautofillview_state_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x17CustomFieldAutofillView\x02W What the id does: `none`, `fills`, `invalid` (W1), `reserved` (W2), `wrong_kind` (W4),3 `unnamed` (no Display Name) or `shadowed` (\xc2\xa72.5).\0\0\0\0\x05state\x01\x01\0\0\0\0\x01\0\x02\x05state\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.state.to_owned()
+        }
+        #[doc = " For `shadowed`: the winner\'s element id."]
+        #[must_use]
+        pub fn winner(&self) -> Option<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " For `shadowed`: the winner\'s element id."]
+                    #[must_use]
+                    #[export_name =
+                    "customfieldautofillview_winner_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_CustomFieldAutofillView_winner(me:
+                            <CustomFieldAutofillView as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<CustomFieldAutofillView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<CustomFieldAutofillView>();
+                                            let me =
+                                                unsafe {
+                                                    <CustomFieldAutofillView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.winner();
+                                            _ret
+                                        }
+                                    });
+                        <Option<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " For `shadowed`: the winner\'s element id."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_customfieldautofillview_winner_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<String> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x17CustomFieldAutofillView\x01) For `shadowed`: the winner's element id.\0\0\0\0\x06winner\x01\x01\0\0\0\0\x01\0\x02\x06winner\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.winner.clone()
+        }
+        #[doc = " For `shadowed`: the winner\'s Display Name."]
+        #[must_use]
+        pub fn winner_label(&self) -> Option<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " For `shadowed`: the winner\'s Display Name."]
+                    #[must_use]
+                    #[export_name =
+                    "customfieldautofillview_winnerLabel_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_CustomFieldAutofillView_winnerLabel(me:
+                            <CustomFieldAutofillView as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<CustomFieldAutofillView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<CustomFieldAutofillView>();
+                                            let me =
+                                                unsafe {
+                                                    <CustomFieldAutofillView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.winner_label();
+                                            _ret
+                                        }
+                                    });
+                        <Option<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " For `shadowed`: the winner\'s Display Name."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_customfieldautofillview_winnerLabel_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<String> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x17CustomFieldAutofillView\x01+ For `shadowed`: the winner's Display Name.\0\0\0\0\x0bwinnerLabel\x01\x01\0\0\0\0\x01\0\x02\x0bwinnerLabel\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.winner_label.as_ref().map(|l| l.as_str().to_owned())
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    /// The displayed Text of `field/<element>/label`, if any.
+    fn label_of(vault: &VaultSync, item: rizzy_client::items::ItemId,
+        element: &str) -> Option<Zeroizing<String>> {
+        let value =
+            vault.field_value(item,
+                    &::alloc::__export::must_use({
+                                ::alloc::fmt::format(format_args!("{0}/{1}/{2}", LIST_FIELD,
+                                        element, ATTR_LABEL))
+                            }))?;
+        match value.decode() {
+            Ok(ValueRef::Text(text)) => Some(Zeroizing::new(text.to_owned())),
+            _ => None,
+        }
+    }
+    /// [`VaultSync::custom_field_autofill`] for a visible item.
+    ///
+    /// # Errors
+    /// `invalid_input` for an id that is not 32 hex digits; `unknown_item`.
+    pub(crate) fn custom_field_autofill(vault: &VaultSync, id: &str)
+        -> CoreResult<Vec<CustomFieldAutofillView>> {
+        let item = visible_item(vault, id)?;
+        Ok(vault.custom_field_autofill(item).into_iter().map(|f|
+                        {
+                            let (state, winner) =
+                                match f.state {
+                                    AutofillState::None => ("none", None),
+                                    AutofillState::Fills => ("fills", None),
+                                    AutofillState::Invalid => ("invalid", None),
+                                    AutofillState::Reserved => ("reserved", None),
+                                    AutofillState::WrongKind => ("wrong_kind", None),
+                                    AutofillState::Unnamed => ("unnamed", None),
+                                    AutofillState::Shadowed(winner) =>
+                                        ("shadowed", Some(winner)),
+                                };
+                            let winner_label =
+                                winner.as_ref().and_then(|w| label_of(vault, item, w));
+                            CustomFieldAutofillView {
+                                element: f.element.as_str().to_owned(),
+                                state,
+                                winner: winner.map(|w| w.as_str().to_owned()),
+                                winner_label,
+                            }
+                        }).collect())
+    }
+    #[wasm_bindgen()]
+    #[__wasm_bindgen_retried]
+    #[doc = " One custom field an offer discloses (ADR 0076 §4.1)."]
+    pub struct CustomOfferView {
+        #[doc = " The page token."]
+        token: String,
+        #[doc = " The element id the offer records."]
+        element: String,
+        #[doc = " The Display Name."]
+        label: Zeroizing<String>,
+        #[doc = " A hidden field."]
+        concealed: bool,
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsConstructor for CustomOfferView {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for
+        CustomOfferView {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsStaticProperty for
+        CustomOfferView {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribe for CustomOfferView {
+        fn describe() {
+            use wasm_bindgen::describe::*;
+            inform(RUST_STRUCT);
+            inform(15u32);
+            inform(67u32);
+            inform(117u32);
+            inform(115u32);
+            inform(116u32);
+            inform(111u32);
+            inform(109u32);
+            inform(79u32);
+            inform(102u32);
+            inform(102u32);
+            inform(101u32);
+            inform(114u32);
+            inform(86u32);
+            inform(105u32);
+            inform(101u32);
+            inform(119u32);
+            inform(27u32);
+            inform(114u32);
+            inform(105u32);
+            inform(122u32);
+            inform(122u32);
+            inform(121u32);
+            inform(45u32);
+            inform(119u32);
+            inform(97u32);
+            inform(115u32);
+            inform(109u32);
+            inform(45u32);
+            inform(101u32);
+            inform(48u32);
+            inform(57u32);
+            inform(99u32);
+            inform(99u32);
+            inform(48u32);
+            inform(101u32);
+            inform(98u32);
+            inform(51u32);
+            inform(53u32);
+            inform(102u32);
+            inform(56u32);
+            inform(98u32);
+            inform(53u32);
+            inform(56u32);
+            inform(51u32);
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::IntoWasmAbi for CustomOfferView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CustomOfferView>>;
+        fn into_abi(self) -> Self::Abi {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+            WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self))) as
+                    *mut WasmRefCell<CustomOfferView>)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::FromWasmAbi for CustomOfferView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CustomOfferView>>;
+        unsafe fn from_abi(js: Self::Abi) -> Self {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+            use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+            let ptr = js.into_ptr();
+            assert_not_null(ptr);
+            let rc = Rc::from_raw(ptr);
+            match Rc::try_unwrap(rc) {
+                Ok(cell) => cell.into_inner(),
+                Err(_) =>
+                    wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::core::convert::From<CustomOfferView> for
+        wasm_bindgen::JsValue {
+        fn from(value: CustomOfferView) -> Self {
+            let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_customofferview_new_e09cc0eb35f8b583"]
+                fn __wbg_customofferview_new(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CustomOfferView>>)
+                -> u32;
+            }
+            unsafe {
+                <wasm_bindgen::JsValue as
+                        wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_customofferview_new(ptr))
+            }
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[export_name = "__wbg_customofferview_free_e09cc0eb35f8b583"]
+            #[doc(hidden)]
+            pub unsafe extern "C-unwind" fn __wbg_customofferview_free(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CustomOfferView>>,
+                allow_delayed: u32) {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                if allow_delayed != 0 {
+                    let ptr = ptr.into_ptr();
+                    wasm_bindgen::__rt::assert_not_null(ptr);
+                    drop(Rc::from_raw(ptr));
+                } else {
+                    let _ =
+                        <CustomOfferView as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                }
+            }
+        };
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefFromWasmAbi for CustomOfferView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CustomOfferView>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<CustomOfferView>;
+        unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRef::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefMutFromWasmAbi for CustomOfferView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CustomOfferView>>;
+        type Anchor = wasm_bindgen::__rt::RcRefMut<CustomOfferView>;
+        unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRefMut::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::LongRefFromWasmAbi for CustomOfferView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CustomOfferView>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<CustomOfferView>;
+        unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            <Self as wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionIntoWasmAbi for CustomOfferView {
+        #[inline]
+        fn none() -> Self::Abi {
+            <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CustomOfferView>>>::null()
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionFromWasmAbi for CustomOfferView {
+        #[inline]
+        fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::TryFromJsValue for CustomOfferView {
+        fn try_from_js_value(value: wasm_bindgen::JsValue)
+            ->
+                wasm_bindgen::__rt::core::result::Result<Self,
+                wasm_bindgen::JsValue> {
+            Self::try_from_js_value_ref(&value).ok_or(value)
+        }
+        fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+            -> wasm_bindgen::__rt::core::option::Option<Self> {
+            let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_customofferview_unwrap_e09cc0eb35f8b583"]
+                fn __wbg_customofferview_unwrap(ptr: u32)
+                ->
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<CustomOfferView>>;
+            }
+            let ptr = unsafe { __wbg_customofferview_unwrap(idx) };
+            if ptr.is_null() {
+                wasm_bindgen::__rt::core::option::Option::None
+            } else {
+                unsafe {
+                    wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                }
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribeVector for CustomOfferView {
+        fn describe_vector() {
+            use wasm_bindgen::describe::*;
+            inform(VECTOR);
+            <CustomOfferView as
+                    wasm_bindgen::describe::WasmDescribe>::describe();
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorIntoWasmAbi for CustomOfferView {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::IntoWasmAbi>::Abi;
+        fn vector_into_abi(vector:
+                wasm_bindgen::__rt::alloc::boxed::Box<[CustomOfferView]>)
+            -> Self::Abi {
+            wasm_bindgen::convert::js_value_vector_into_abi(vector)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorFromWasmAbi for CustomOfferView {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::FromWasmAbi>::Abi;
+        unsafe fn vector_from_abi(js: Self::Abi)
+            -> wasm_bindgen::__rt::alloc::boxed::Box<[CustomOfferView]> {
+            wasm_bindgen::convert::js_value_vector_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\x01\x0fCustomOfferView\0\x016 One custom field an offer discloses (ADR 0076 \xc2\xa74.1).\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    impl fmt::Debug for CustomOfferView {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("CustomOfferView").field("concealed",
+                    &self.concealed).finish_non_exhaustive()
+        }
+    }
+    impl CustomOfferView {
+        #[doc = " The page token it fills."]
+        #[must_use]
+        pub fn token(&self) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The page token it fills."]
+                    #[must_use]
+                    #[export_name = "customofferview_token_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_CustomOfferView_token(me:
+                            <CustomOfferView as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<CustomOfferView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<CustomOfferView>();
+                                            let me =
+                                                unsafe {
+                                                    <CustomOfferView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.token();
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The page token it fills."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_customofferview_token_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0fCustomOfferView\x01\x19 The page token it fills.\0\0\0\0\x05token\x01\x01\0\0\0\0\x01\0\x02\x05token\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.token.clone()
+        }
+        #[doc =
+        " The element id the offer records for the token (kept in the long-lived context)."]
+        #[must_use]
+        pub fn element(&self) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The element id the offer records for the token (kept in the long-lived context)."]
+                    #[must_use]
+                    #[export_name = "customofferview_element_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_CustomOfferView_element(me:
+                            <CustomOfferView as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<CustomOfferView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<CustomOfferView>();
+                                            let me =
+                                                unsafe {
+                                                    <CustomOfferView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.element();
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The element id the offer records for the token (kept in the long-lived context)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_customofferview_element_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0fCustomOfferView\x01Q The element id the offer records for the token (kept in the long-lived context).\0\0\0\0\x07element\x01\x01\0\0\0\0\x01\0\x02\x07element\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.element.clone()
+        }
+        #[doc = " The Display Name."]
+        #[must_use]
+        pub fn label(&self) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The Display Name."]
+                    #[must_use]
+                    #[export_name = "customofferview_label_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_CustomOfferView_label(me:
+                            <CustomOfferView as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<CustomOfferView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<CustomOfferView>();
+                                            let me =
+                                                unsafe {
+                                                    <CustomOfferView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.label();
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The Display Name."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_customofferview_label_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0fCustomOfferView\x01\x12 The Display Name.\0\0\0\0\x05label\x01\x01\0\0\0\0\x01\0\x02\x05label\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.label.as_str().to_owned()
+        }
+        #[doc = " A hidden field: the row says \"(hidden)\"."]
+        #[must_use]
+        pub fn concealed(&self) -> bool {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " A hidden field: the row says \"(hidden)\"."]
+                    #[must_use]
+                    #[export_name =
+                    "customofferview_concealed_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_CustomOfferView_concealed(me:
+                            <CustomOfferView as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<bool as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<CustomOfferView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<CustomOfferView>();
+                                            let me =
+                                                unsafe {
+                                                    <CustomOfferView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.concealed();
+                                            _ret
+                                        }
+                                    });
+                        <bool as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " A hidden field: the row says \"(hidden)\"."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_customofferview_concealed_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <bool as WasmDescribe>::describe();
+                        <bool as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0fCustomOfferView\x01) A hidden field: the row says \"(hidden)\".\0\0\0\0\tconcealed\x01\x01\0\0\0\0\x01\0\x02\tconcealed\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.concealed
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    #[wasm_bindgen()]
+    #[__wasm_bindgen_retried]
+    #[doc =
+    " What a fill of one item would include (ADR 0076 §4.1), values never included."]
+    pub struct AutofillOffer {
+        #[doc = " The item holds a valid time-based secret."]
+        fills_totp: bool,
+        #[doc = " The custom fields, in the order of the page tokens."]
+        custom: Vec<CustomOfferView>,
+    }
+    #[automatically_derived]
+    impl ::core::fmt::Debug for AutofillOffer {
+        #[inline]
+        fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+            ::core::fmt::Formatter::debug_struct_field2_finish(f,
+                "AutofillOffer", "fills_totp", &self.fills_totp, "custom",
+                &&self.custom)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsConstructor for AutofillOffer { }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for
+        AutofillOffer {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsStaticProperty for AutofillOffer
+        {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribe for AutofillOffer {
+        fn describe() {
+            use wasm_bindgen::describe::*;
+            inform(RUST_STRUCT);
+            inform(13u32);
+            inform(65u32);
+            inform(117u32);
+            inform(116u32);
+            inform(111u32);
+            inform(102u32);
+            inform(105u32);
+            inform(108u32);
+            inform(108u32);
+            inform(79u32);
+            inform(102u32);
+            inform(102u32);
+            inform(101u32);
+            inform(114u32);
+            inform(27u32);
+            inform(114u32);
+            inform(105u32);
+            inform(122u32);
+            inform(122u32);
+            inform(121u32);
+            inform(45u32);
+            inform(119u32);
+            inform(97u32);
+            inform(115u32);
+            inform(109u32);
+            inform(45u32);
+            inform(101u32);
+            inform(48u32);
+            inform(57u32);
+            inform(99u32);
+            inform(99u32);
+            inform(48u32);
+            inform(101u32);
+            inform(98u32);
+            inform(51u32);
+            inform(53u32);
+            inform(102u32);
+            inform(56u32);
+            inform(98u32);
+            inform(53u32);
+            inform(56u32);
+            inform(51u32);
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::IntoWasmAbi for AutofillOffer {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AutofillOffer>>;
+        fn into_abi(self) -> Self::Abi {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+            WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self))) as
+                    *mut WasmRefCell<AutofillOffer>)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::FromWasmAbi for AutofillOffer {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AutofillOffer>>;
+        unsafe fn from_abi(js: Self::Abi) -> Self {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+            use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+            let ptr = js.into_ptr();
+            assert_not_null(ptr);
+            let rc = Rc::from_raw(ptr);
+            match Rc::try_unwrap(rc) {
+                Ok(cell) => cell.into_inner(),
+                Err(_) =>
+                    wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::core::convert::From<AutofillOffer> for
+        wasm_bindgen::JsValue {
+        fn from(value: AutofillOffer) -> Self {
+            let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_autofilloffer_new_e09cc0eb35f8b583"]
+                fn __wbg_autofilloffer_new(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AutofillOffer>>)
+                -> u32;
+            }
+            unsafe {
+                <wasm_bindgen::JsValue as
+                        wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_autofilloffer_new(ptr))
+            }
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[export_name = "__wbg_autofilloffer_free_e09cc0eb35f8b583"]
+            #[doc(hidden)]
+            pub unsafe extern "C-unwind" fn __wbg_autofilloffer_free(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AutofillOffer>>,
+                allow_delayed: u32) {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                if allow_delayed != 0 {
+                    let ptr = ptr.into_ptr();
+                    wasm_bindgen::__rt::assert_not_null(ptr);
+                    drop(Rc::from_raw(ptr));
+                } else {
+                    let _ =
+                        <AutofillOffer as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                }
+            }
+        };
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefFromWasmAbi for AutofillOffer {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AutofillOffer>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<AutofillOffer>;
+        unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRef::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefMutFromWasmAbi for AutofillOffer {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AutofillOffer>>;
+        type Anchor = wasm_bindgen::__rt::RcRefMut<AutofillOffer>;
+        unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRefMut::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::LongRefFromWasmAbi for AutofillOffer {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AutofillOffer>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<AutofillOffer>;
+        unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            <Self as wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionIntoWasmAbi for AutofillOffer {
+        #[inline]
+        fn none() -> Self::Abi {
+            <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AutofillOffer>>>::null()
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionFromWasmAbi for AutofillOffer {
+        #[inline]
+        fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::TryFromJsValue for AutofillOffer {
+        fn try_from_js_value(value: wasm_bindgen::JsValue)
+            ->
+                wasm_bindgen::__rt::core::result::Result<Self,
+                wasm_bindgen::JsValue> {
+            Self::try_from_js_value_ref(&value).ok_or(value)
+        }
+        fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+            -> wasm_bindgen::__rt::core::option::Option<Self> {
+            let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_autofilloffer_unwrap_e09cc0eb35f8b583"]
+                fn __wbg_autofilloffer_unwrap(ptr: u32)
+                ->
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AutofillOffer>>;
+            }
+            let ptr = unsafe { __wbg_autofilloffer_unwrap(idx) };
+            if ptr.is_null() {
+                wasm_bindgen::__rt::core::option::Option::None
+            } else {
+                unsafe {
+                    wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                }
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribeVector for AutofillOffer {
+        fn describe_vector() {
+            use wasm_bindgen::describe::*;
+            inform(VECTOR);
+            <AutofillOffer as
+                    wasm_bindgen::describe::WasmDescribe>::describe();
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorIntoWasmAbi for AutofillOffer {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::IntoWasmAbi>::Abi;
+        fn vector_into_abi(vector:
+                wasm_bindgen::__rt::alloc::boxed::Box<[AutofillOffer]>)
+            -> Self::Abi {
+            wasm_bindgen::convert::js_value_vector_into_abi(vector)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorFromWasmAbi for AutofillOffer {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::FromWasmAbi>::Abi;
+        unsafe fn vector_from_abi(js: Self::Abi)
+            -> wasm_bindgen::__rt::alloc::boxed::Box<[AutofillOffer]> {
+            wasm_bindgen::convert::js_value_vector_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\x01\rAutofillOffer\0\x01O What a fill of one item would include (ADR 0076 \xc2\xa74.1), values never included.\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    impl AutofillOffer {
+        #[doc =
+        " The item can fill a TOTP code (`hasTotp`, ADR 0076 §1.3 rule (g))."]
+        #[must_use]
+        pub fn fills_totp(&self) -> bool {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The item can fill a TOTP code (`hasTotp`, ADR 0076 §1.3 rule (g))."]
+                    #[must_use]
+                    #[export_name = "autofilloffer_fillsTotp_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_AutofillOffer_fillsTotp(me:
+                            <AutofillOffer as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<bool as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<AutofillOffer>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<AutofillOffer>();
+                                            let me =
+                                                unsafe {
+                                                    <AutofillOffer as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.fills_totp();
+                                            _ret
+                                        }
+                                    });
+                        <bool as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The item can fill a TOTP code (`hasTotp`, ADR 0076 §1.3 rule (g))."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_autofilloffer_fillsTotp_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <bool as WasmDescribe>::describe();
+                        <bool as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rAutofillOffer\x01D The item can fill a TOTP code (`hasTotp`, ADR 0076 \xc2\xa71.3 rule (g)).\0\0\0\0\tfillsTotp\x01\x01\0\0\0\0\x01\0\x02\tfillsTotp\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.fills_totp
+        }
+        #[doc = " The custom fields it would fill."]
+        #[must_use]
+        pub fn custom(&self) -> Vec<CustomOfferView> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The custom fields it would fill."]
+                    #[must_use]
+                    #[export_name = "autofilloffer_custom_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_AutofillOffer_custom(me:
+                            <AutofillOffer as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Vec<CustomOfferView> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<AutofillOffer>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<AutofillOffer>();
+                                            let me =
+                                                unsafe {
+                                                    <AutofillOffer as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.custom();
+                                            _ret
+                                        }
+                                    });
+                        <Vec<CustomOfferView> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The custom fields it would fill."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_autofilloffer_custom_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Vec<CustomOfferView> as WasmDescribe>::describe();
+                        <Vec<CustomOfferView> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rAutofillOffer\x01! The custom fields it would fill.\0\0\0\0\x06custom\x01\x01\0\0\0\0\x01\0\x02\x06custom\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.custom.iter().map(|c|
+                        CustomOfferView {
+                            token: c.token.clone(),
+                            element: c.element.clone(),
+                            label: c.label.clone(),
+                            concealed: c.concealed,
+                        }).collect()
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    /// The offer for an Active item and the page's custom `tokens`.
+    ///
+    /// # Errors
+    /// `invalid_input` for an id that is not 32 hex digits.
+    pub(crate) fn autofill_offer(vault: &VaultSync, id: &str,
+        tokens: &[String]) -> CoreResult<AutofillOffer> {
+        let item = item_id(id)?;
+        let tokens: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        let custom =
+            vault.custom_fill_offer(item,
+                            &tokens).into_iter().map(|c|
+                        CustomOfferView {
+                            token: c.token.as_str().to_owned(),
+                            element: c.element.as_str().to_owned(),
+                            label: c.label,
+                            concealed: c.concealed,
+                        }).collect();
+        Ok(AutofillOffer {
+                fills_totp: vault.has_time_based_totp(item),
+                custom,
+            })
+    }
+    #[wasm_bindgen()]
+    #[__wasm_bindgen_retried]
+    #[doc =
+    " The values one fill click sends (ADR 0076 §4.4 `FillValues`). Wiped when freed."]
+    pub struct FillValues {
+        #[doc = " `login.username`."]
+        username: Option<Zeroizing<String>>,
+        #[doc = " `login.password`."]
+        password: Option<Zeroizing<String>>,
+        #[doc = " The current TOTP code."]
+        totp: Option<Zeroizing<String>>,
+        #[doc = " Custom tokens, parallel to [`FillValues::custom_values`]."]
+        custom_tokens: Vec<String>,
+        #[doc = " Custom values."]
+        custom_values: Vec<Zeroizing<String>>,
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsConstructor for FillValues { }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for FillValues {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsStaticProperty for FillValues { }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribe for FillValues {
+        fn describe() {
+            use wasm_bindgen::describe::*;
+            inform(RUST_STRUCT);
+            inform(10u32);
+            inform(70u32);
+            inform(105u32);
+            inform(108u32);
+            inform(108u32);
+            inform(86u32);
+            inform(97u32);
+            inform(108u32);
+            inform(117u32);
+            inform(101u32);
+            inform(115u32);
+            inform(27u32);
+            inform(114u32);
+            inform(105u32);
+            inform(122u32);
+            inform(122u32);
+            inform(121u32);
+            inform(45u32);
+            inform(119u32);
+            inform(97u32);
+            inform(115u32);
+            inform(109u32);
+            inform(45u32);
+            inform(101u32);
+            inform(48u32);
+            inform(57u32);
+            inform(99u32);
+            inform(99u32);
+            inform(48u32);
+            inform(101u32);
+            inform(98u32);
+            inform(51u32);
+            inform(53u32);
+            inform(102u32);
+            inform(56u32);
+            inform(98u32);
+            inform(53u32);
+            inform(56u32);
+            inform(51u32);
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::IntoWasmAbi for FillValues {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<FillValues>>;
+        fn into_abi(self) -> Self::Abi {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+            WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self))) as
+                    *mut WasmRefCell<FillValues>)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::FromWasmAbi for FillValues {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<FillValues>>;
+        unsafe fn from_abi(js: Self::Abi) -> Self {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+            use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+            let ptr = js.into_ptr();
+            assert_not_null(ptr);
+            let rc = Rc::from_raw(ptr);
+            match Rc::try_unwrap(rc) {
+                Ok(cell) => cell.into_inner(),
+                Err(_) =>
+                    wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::core::convert::From<FillValues> for
+        wasm_bindgen::JsValue {
+        fn from(value: FillValues) -> Self {
+            let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_fillvalues_new_e09cc0eb35f8b583"]
+                fn __wbg_fillvalues_new(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<FillValues>>)
+                -> u32;
+            }
+            unsafe {
+                <wasm_bindgen::JsValue as
+                        wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_fillvalues_new(ptr))
+            }
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[export_name = "__wbg_fillvalues_free_e09cc0eb35f8b583"]
+            #[doc(hidden)]
+            pub unsafe extern "C-unwind" fn __wbg_fillvalues_free(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<FillValues>>,
+                allow_delayed: u32) {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                if allow_delayed != 0 {
+                    let ptr = ptr.into_ptr();
+                    wasm_bindgen::__rt::assert_not_null(ptr);
+                    drop(Rc::from_raw(ptr));
+                } else {
+                    let _ =
+                        <FillValues as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                }
+            }
+        };
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefFromWasmAbi for FillValues {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<FillValues>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<FillValues>;
+        unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRef::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefMutFromWasmAbi for FillValues {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<FillValues>>;
+        type Anchor = wasm_bindgen::__rt::RcRefMut<FillValues>;
+        unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRefMut::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::LongRefFromWasmAbi for FillValues {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<FillValues>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<FillValues>;
+        unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            <Self as wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionIntoWasmAbi for FillValues {
+        #[inline]
+        fn none() -> Self::Abi {
+            <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<FillValues>>>::null()
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionFromWasmAbi for FillValues {
+        #[inline]
+        fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::TryFromJsValue for FillValues {
+        fn try_from_js_value(value: wasm_bindgen::JsValue)
+            ->
+                wasm_bindgen::__rt::core::result::Result<Self,
+                wasm_bindgen::JsValue> {
+            Self::try_from_js_value_ref(&value).ok_or(value)
+        }
+        fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+            -> wasm_bindgen::__rt::core::option::Option<Self> {
+            let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_fillvalues_unwrap_e09cc0eb35f8b583"]
+                fn __wbg_fillvalues_unwrap(ptr: u32)
+                ->
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<FillValues>>;
+            }
+            let ptr = unsafe { __wbg_fillvalues_unwrap(idx) };
+            if ptr.is_null() {
+                wasm_bindgen::__rt::core::option::Option::None
+            } else {
+                unsafe {
+                    wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                }
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribeVector for FillValues {
+        fn describe_vector() {
+            use wasm_bindgen::describe::*;
+            inform(VECTOR);
+            <FillValues as wasm_bindgen::describe::WasmDescribe>::describe();
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorIntoWasmAbi for FillValues {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::IntoWasmAbi>::Abi;
+        fn vector_into_abi(vector:
+                wasm_bindgen::__rt::alloc::boxed::Box<[FillValues]>)
+            -> Self::Abi {
+            wasm_bindgen::convert::js_value_vector_into_abi(vector)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorFromWasmAbi for FillValues {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::FromWasmAbi>::Abi;
+        unsafe fn vector_from_abi(js: Self::Abi)
+            -> wasm_bindgen::__rt::alloc::boxed::Box<[FillValues]> {
+            wasm_bindgen::convert::js_value_vector_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\x01\nFillValues\0\x01Q The values one fill click sends (ADR 0076 \xc2\xa74.4 `FillValues`). Wiped when freed.\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    impl fmt::Debug for FillValues {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("FillValues").field("custom",
+                    &self.custom_tokens.len()).finish_non_exhaustive()
+        }
+    }
+    impl FillValues {
+        #[doc = " `login.username`, if sent."]
+        #[must_use]
+        pub fn username(&self) -> Option<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " `login.username`, if sent."]
+                    #[must_use]
+                    #[export_name = "fillvalues_username_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_FillValues_username(me:
+                            <FillValues as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<FillValues>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<FillValues>();
+                                            let me =
+                                                unsafe {
+                                                    <FillValues as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.username();
+                                            _ret
+                                        }
+                                    });
+                        <Option<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " `login.username`, if sent."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_fillvalues_username_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<String> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\nFillValues\x01\x1b `login.username`, if sent.\0\0\0\0\x08username\x01\x01\0\0\0\0\x01\0\x02\x08username\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.username.as_ref().map(|v| v.as_str().to_owned())
+        }
+        #[doc = " `login.password`, if sent."]
+        #[must_use]
+        pub fn password(&self) -> Option<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " `login.password`, if sent."]
+                    #[must_use]
+                    #[export_name = "fillvalues_password_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_FillValues_password(me:
+                            <FillValues as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<FillValues>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<FillValues>();
+                                            let me =
+                                                unsafe {
+                                                    <FillValues as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.password();
+                                            _ret
+                                        }
+                                    });
+                        <Option<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " `login.password`, if sent."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_fillvalues_password_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<String> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\nFillValues\x01\x1b `login.password`, if sent.\0\0\0\0\x08password\x01\x01\0\0\0\0\x01\0\x02\x08password\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.password.as_ref().map(|v| v.as_str().to_owned())
+        }
+        #[doc = " The current TOTP code, if sent."]
+        #[must_use]
+        pub fn totp(&self) -> Option<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The current TOTP code, if sent."]
+                    #[must_use]
+                    #[export_name = "fillvalues_totp_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_FillValues_totp(me:
+                            <FillValues as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<FillValues>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<FillValues>();
+                                            let me =
+                                                unsafe {
+                                                    <FillValues as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.totp();
+                                            _ret
+                                        }
+                                    });
+                        <Option<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The current TOTP code, if sent."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_fillvalues_totp_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<String> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\nFillValues\x01  The current TOTP code, if sent.\0\0\0\0\x04totp\x01\x01\0\0\0\0\x01\0\x02\x04totp\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.totp.as_ref().map(|v| v.as_str().to_owned())
+        }
+        #[doc =
+        " The custom tokens, parallel to [`FillValues::custom_values`]."]
+        #[must_use]
+        pub fn custom_tokens(&self) -> Vec<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The custom tokens, parallel to [`FillValues::custom_values`]."]
+                    #[must_use]
+                    #[export_name = "fillvalues_customTokens_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_FillValues_customTokens(me:
+                            <FillValues as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Vec<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<FillValues>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<FillValues>();
+                                            let me =
+                                                unsafe {
+                                                    <FillValues as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.custom_tokens();
+                                            _ret
+                                        }
+                                    });
+                        <Vec<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The custom tokens, parallel to [`FillValues::custom_values`]."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_fillvalues_customTokens_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Vec<String> as WasmDescribe>::describe();
+                        <Vec<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\nFillValues\x01> The custom tokens, parallel to [`FillValues::custom_values`].\0\0\0\0\x0ccustomTokens\x01\x01\0\0\0\0\x01\0\x02\x0ccustomTokens\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.custom_tokens.clone()
+        }
+        #[doc = " The custom values."]
+        #[must_use]
+        pub fn custom_values(&self) -> Vec<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The custom values."]
+                    #[must_use]
+                    #[export_name = "fillvalues_customValues_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_FillValues_customValues(me:
+                            <FillValues as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Vec<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<FillValues>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<FillValues>();
+                                            let me =
+                                                unsafe {
+                                                    <FillValues as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.custom_values();
+                                            _ret
+                                        }
+                                    });
+                        <Vec<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The custom values."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_fillvalues_customValues_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Vec<String> as WasmDescribe>::describe();
+                        <Vec<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\nFillValues\x01\x13 The custom values.\0\0\0\0\x0ccustomValues\x01\x01\0\0\0\0\x01\0\x02\x0ccustomValues\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.custom_values.iter().map(|v| v.as_str().to_owned()).collect()
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    /// The `only` narrowing as JavaScript names it.
+    fn only_of(only: Option<&str>) -> CoreResult<Option<FillOnly>> {
+        match only {
+            None => Ok(None),
+            Some("username") => Ok(Some(FillOnly::Username)),
+            Some("password") => Ok(Some(FillOnly::Password)),
+            Some("totp") => Ok(Some(FillOnly::Totp)),
+            Some(_) => Err(ClientError::InvalidInput.into()),
+        }
+    }
+    /// One fill's request, as the long-lived context's offer record holds it.
+    pub(crate) struct FillArgs<'a> {
+        /// The narrowing.
+        pub(crate) only: Option<&'a str>,
+        /// The step also has a TOTP target.
+        pub(crate) totp: bool,
+        /// The recorded custom tokens.
+        pub(crate) tokens: &'a [String],
+        /// The element ids recorded for them, parallel.
+        pub(crate) elements: &'a [String],
+        /// The username target's custom token.
+        pub(crate) username_token: Option<&'a str>,
+        /// The password target's custom token.
+        pub(crate) password_token: Option<&'a str>,
+    }
+    impl fmt::Debug for FillArgs<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("FillArgs").field("only",
+                        &self.only).field("totp",
+                    &self.totp).finish_non_exhaustive()
+        }
+    }
+    /// [`VaultSync::fill_plan`] for one fill click.
+    ///
+    /// # Errors
+    /// `invalid_input` for a bad id, a bad `only` or token and element lists of different
+    /// lengths; `unknown_item` unless the item is an Active Login.
+    pub(crate) fn fill_plan(vault: &VaultSync, id: &str, args: &FillArgs<'_>,
+        now_ms: u64) -> CoreResult<FillValues> {
+        let item = item_id(id)?;
+        if args.tokens.len() != args.elements.len() {
+            return Err(ClientError::InvalidInput.into());
+        }
+        let custom: Vec<CustomChoice> =
+            args.tokens.iter().zip(args.elements).map(|(token, element)|
+                        CustomChoice {
+                            token: Zeroizing::new(token.clone()),
+                            element: Zeroizing::new(element.clone()),
+                        }).collect();
+        let request =
+            FillRequest {
+                only: only_of(args.only)?,
+                totp: args.totp,
+                custom: &custom,
+                username_token: args.username_token,
+                password_token: args.password_token,
+            };
+        let plan = vault.fill_plan(item, &request, now_ms)?;
+        let (custom_tokens, custom_values) =
+            plan.custom.into_iter().map(|(token, value)|
+                        (token.as_str().to_owned(), value)).unzip();
+        Ok(FillValues {
+                username: plan.username,
+                password: plan.password,
+                totp: plan.totp,
+                custom_tokens,
+                custom_values,
+            })
+    }
+    #[wasm_bindgen()]
+    #[__wasm_bindgen_retried]
+    #[doc = " One save-dialog row (ADR 0076 §5.3). No value."]
+    pub struct SaveRowView {
+        #[doc = " The index of the captured field."]
+        index: u32,
+        #[doc = " `add` or `update`."]
+        kind: &'static str,
+        #[doc = " For `update`: the field\'s element id."]
+        element: Option<String>,
+        #[doc = " The Display Name (the token for a new field, editable)."]
+        label: Zeroizing<String>,
+        #[doc = " \"(hidden)\"."]
+        concealed: bool,
+        #[doc = " The row\'s default."]
+        checked: bool,
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsConstructor for SaveRowView { }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for SaveRowView
+        {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsStaticProperty for SaveRowView {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribe for SaveRowView {
+        fn describe() {
+            use wasm_bindgen::describe::*;
+            inform(RUST_STRUCT);
+            inform(11u32);
+            inform(83u32);
+            inform(97u32);
+            inform(118u32);
+            inform(101u32);
+            inform(82u32);
+            inform(111u32);
+            inform(119u32);
+            inform(86u32);
+            inform(105u32);
+            inform(101u32);
+            inform(119u32);
+            inform(27u32);
+            inform(114u32);
+            inform(105u32);
+            inform(122u32);
+            inform(122u32);
+            inform(121u32);
+            inform(45u32);
+            inform(119u32);
+            inform(97u32);
+            inform(115u32);
+            inform(109u32);
+            inform(45u32);
+            inform(101u32);
+            inform(48u32);
+            inform(57u32);
+            inform(99u32);
+            inform(99u32);
+            inform(48u32);
+            inform(101u32);
+            inform(98u32);
+            inform(51u32);
+            inform(53u32);
+            inform(102u32);
+            inform(56u32);
+            inform(98u32);
+            inform(53u32);
+            inform(56u32);
+            inform(51u32);
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::IntoWasmAbi for SaveRowView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SaveRowView>>;
+        fn into_abi(self) -> Self::Abi {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+            WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self))) as
+                    *mut WasmRefCell<SaveRowView>)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::FromWasmAbi for SaveRowView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SaveRowView>>;
+        unsafe fn from_abi(js: Self::Abi) -> Self {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+            use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+            let ptr = js.into_ptr();
+            assert_not_null(ptr);
+            let rc = Rc::from_raw(ptr);
+            match Rc::try_unwrap(rc) {
+                Ok(cell) => cell.into_inner(),
+                Err(_) =>
+                    wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::core::convert::From<SaveRowView> for
+        wasm_bindgen::JsValue {
+        fn from(value: SaveRowView) -> Self {
+            let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_saverowview_new_e09cc0eb35f8b583"]
+                fn __wbg_saverowview_new(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SaveRowView>>)
+                -> u32;
+            }
+            unsafe {
+                <wasm_bindgen::JsValue as
+                        wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_saverowview_new(ptr))
+            }
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[export_name = "__wbg_saverowview_free_e09cc0eb35f8b583"]
+            #[doc(hidden)]
+            pub unsafe extern "C-unwind" fn __wbg_saverowview_free(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SaveRowView>>,
+                allow_delayed: u32) {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                if allow_delayed != 0 {
+                    let ptr = ptr.into_ptr();
+                    wasm_bindgen::__rt::assert_not_null(ptr);
+                    drop(Rc::from_raw(ptr));
+                } else {
+                    let _ =
+                        <SaveRowView as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                }
+            }
+        };
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefFromWasmAbi for SaveRowView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SaveRowView>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<SaveRowView>;
+        unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRef::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefMutFromWasmAbi for SaveRowView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SaveRowView>>;
+        type Anchor = wasm_bindgen::__rt::RcRefMut<SaveRowView>;
+        unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRefMut::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::LongRefFromWasmAbi for SaveRowView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SaveRowView>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<SaveRowView>;
+        unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            <Self as wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionIntoWasmAbi for SaveRowView {
+        #[inline]
+        fn none() -> Self::Abi {
+            <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SaveRowView>>>::null()
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionFromWasmAbi for SaveRowView {
+        #[inline]
+        fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::TryFromJsValue for SaveRowView {
+        fn try_from_js_value(value: wasm_bindgen::JsValue)
+            ->
+                wasm_bindgen::__rt::core::result::Result<Self,
+                wasm_bindgen::JsValue> {
+            Self::try_from_js_value_ref(&value).ok_or(value)
+        }
+        fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+            -> wasm_bindgen::__rt::core::option::Option<Self> {
+            let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_saverowview_unwrap_e09cc0eb35f8b583"]
+                fn __wbg_saverowview_unwrap(ptr: u32)
+                ->
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SaveRowView>>;
+            }
+            let ptr = unsafe { __wbg_saverowview_unwrap(idx) };
+            if ptr.is_null() {
+                wasm_bindgen::__rt::core::option::Option::None
+            } else {
+                unsafe {
+                    wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                }
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribeVector for SaveRowView {
+        fn describe_vector() {
+            use wasm_bindgen::describe::*;
+            inform(VECTOR);
+            <SaveRowView as wasm_bindgen::describe::WasmDescribe>::describe();
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorIntoWasmAbi for SaveRowView {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::IntoWasmAbi>::Abi;
+        fn vector_into_abi(vector:
+                wasm_bindgen::__rt::alloc::boxed::Box<[SaveRowView]>)
+            -> Self::Abi {
+            wasm_bindgen::convert::js_value_vector_into_abi(vector)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorFromWasmAbi for SaveRowView {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::FromWasmAbi>::Abi;
+        unsafe fn vector_from_abi(js: Self::Abi)
+            -> wasm_bindgen::__rt::alloc::boxed::Box<[SaveRowView]> {
+            wasm_bindgen::convert::js_value_vector_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\x01\x0bSaveRowView\0\x010 One save-dialog row (ADR 0076 \xc2\xa75.3). No value.\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    impl fmt::Debug for SaveRowView {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("SaveRowView").field("index",
+                        &self.index).field("kind",
+                    &self.kind).finish_non_exhaustive()
+        }
+    }
+    impl SaveRowView {
+        #[doc = " The index of the captured field the row is for."]
+        #[must_use]
+        pub fn index(&self) -> u32 {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The index of the captured field the row is for."]
+                    #[must_use]
+                    #[export_name = "saverowview_index_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_SaveRowView_index(me:
+                            <SaveRowView as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<u32 as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<SaveRowView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<SaveRowView>();
+                                            let me =
+                                                unsafe {
+                                                    <SaveRowView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.index();
+                                            _ret
+                                        }
+                                    });
+                        <u32 as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The index of the captured field the row is for."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_saverowview_index_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <u32 as WasmDescribe>::describe();
+                        <u32 as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0bSaveRowView\x010 The index of the captured field the row is for.\0\0\0\0\x05index\x01\x01\0\0\0\0\x01\0\x02\x05index\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.index
+        }
+        #[doc = " `add` or `update`."]
+        #[must_use]
+        pub fn kind(&self) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " `add` or `update`."]
+                    #[must_use]
+                    #[export_name = "saverowview_kind_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_SaveRowView_kind(me:
+                            <SaveRowView as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<SaveRowView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<SaveRowView>();
+                                            let me =
+                                                unsafe {
+                                                    <SaveRowView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.kind();
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " `add` or `update`."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_saverowview_kind_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0bSaveRowView\x01\x13 `add` or `update`.\0\0\0\0\x04kind\x01\x01\0\0\0\0\x01\0\x02\x04kind\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.kind.to_owned()
+        }
+        #[doc = " For `update`: the existing field\'s element id."]
+        #[must_use]
+        pub fn element(&self) -> Option<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " For `update`: the existing field\'s element id."]
+                    #[must_use]
+                    #[export_name = "saverowview_element_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_SaveRowView_element(me:
+                            <SaveRowView as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<SaveRowView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<SaveRowView>();
+                                            let me =
+                                                unsafe {
+                                                    <SaveRowView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.element();
+                                            _ret
+                                        }
+                                    });
+                        <Option<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " For `update`: the existing field\'s element id."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_saverowview_element_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<String> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0bSaveRowView\x01/ For `update`: the existing field's element id.\0\0\0\0\x07element\x01\x01\0\0\0\0\x01\0\x02\x07element\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.element.clone()
+        }
+        #[doc = " The Display Name."]
+        #[must_use]
+        pub fn label(&self) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The Display Name."]
+                    #[must_use]
+                    #[export_name = "saverowview_label_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_SaveRowView_label(me:
+                            <SaveRowView as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<SaveRowView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<SaveRowView>();
+                                            let me =
+                                                unsafe {
+                                                    <SaveRowView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.label();
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The Display Name."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_saverowview_label_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0bSaveRowView\x01\x12 The Display Name.\0\0\0\0\x05label\x01\x01\0\0\0\0\x01\0\x02\x05label\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.label.as_str().to_owned()
+        }
+        #[doc = " A hidden field."]
+        #[must_use]
+        pub fn concealed(&self) -> bool {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " A hidden field."]
+                    #[must_use]
+                    #[export_name = "saverowview_concealed_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_SaveRowView_concealed(me:
+                            <SaveRowView as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<bool as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<SaveRowView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<SaveRowView>();
+                                            let me =
+                                                unsafe {
+                                                    <SaveRowView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.concealed();
+                                            _ret
+                                        }
+                                    });
+                        <bool as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " A hidden field."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_saverowview_concealed_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <bool as WasmDescribe>::describe();
+                        <bool as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0bSaveRowView\x01\x10 A hidden field.\0\0\0\0\tconcealed\x01\x01\0\0\0\0\x01\0\x02\tconcealed\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.concealed
+        }
+        #[doc = " Checked by default."]
+        #[must_use]
+        pub fn checked(&self) -> bool {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Checked by default."]
+                    #[must_use]
+                    #[export_name = "saverowview_checked_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_SaveRowView_checked(me:
+                            <SaveRowView as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<bool as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<SaveRowView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<SaveRowView>();
+                                            let me =
+                                                unsafe {
+                                                    <SaveRowView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.checked();
+                                            _ret
+                                        }
+                                    });
+                        <bool as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Checked by default."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_saverowview_checked_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <bool as WasmDescribe>::describe();
+                        <bool as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0bSaveRowView\x01\x14 Checked by default.\0\0\0\0\x07checked\x01\x01\0\0\0\0\x01\0\x02\x07checked\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.checked
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    /// [`VaultSync::custom_save_plan`] for a new item (`id` `None`) or an update.
+    ///
+    /// # Errors
+    /// `invalid_input` for a bad id or lists of different lengths.
+    pub(crate) fn save_plan(vault: &VaultSync, id: Option<&str>,
+        tokens: &[String], values: &[Zeroizing<String>], masked: &[u8])
+        -> CoreResult<Vec<SaveRowView>> {
+        let item = id.map(item_id).transpose()?;
+        if tokens.len() != values.len() || tokens.len() != masked.len() {
+            return Err(ClientError::InvalidInput.into());
+        }
+        let captured: Vec<CapturedField<'_>> =
+            tokens.iter().zip(values).zip(masked).map(|((token, value),
+                            masked)|
+                        CapturedField {
+                            token,
+                            value: value.as_str(),
+                            masked: *masked != 0,
+                        }).collect();
+        vault.custom_save_plan(item,
+                        &captured).into_iter().map(|row|
+                    {
+                        let (kind, element) =
+                            match row.kind {
+                                SaveRowKind::Add => ("add", None),
+                                SaveRowKind::Update(element) =>
+                                    ("update", Some(element.as_str().to_owned())),
+                            };
+                        Ok(SaveRowView {
+                                index: u32::try_from(row.index).map_err(|_|
+                                            CoreError::from(ClientError::Internal))?,
+                                kind,
+                                element,
+                                label: row.label,
+                                concealed: row.concealed,
+                                checked: row.checked,
+                            })
+                    }).collect()
+    }
+}
 pub mod breach {
-
-
-
-
     //! The breach check across the boundary (CRYPTO.md §11.16; ADR 0053; `rizzy_client::breach`).
     //!
     //! ```text
@@ -6355,6 +10126,838 @@ pub mod device {
             let vault = self.vault_ref()?;
             let item = visible_item(vault, id)?;
             Ok(items::fields(vault, item))
+        }
+        #[doc =
+        " What each custom field\'s autocomplete id does, in list order (ADR 0076 §2.5)."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " As [`DeviceSession::item`]."]
+        pub fn custom_field_autofill(&self, id: &str)
+            ->
+                Result<Vec<crate::autofill::CustomFieldAutofillView>,
+                CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " What each custom field\'s autocomplete id does, in list order (ADR 0076 §2.5)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " As [`DeviceSession::item`]."]
+                    #[export_name =
+                    "devicesession_customFieldAutofill_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_customFieldAutofill(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<Vec<crate::autofill::CustomFieldAutofillView>,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            let _ret = me.custom_field_autofill(arg1);
+                                            _ret
+                                        }
+                                    });
+                        <Result<Vec<crate::autofill::CustomFieldAutofillView>,
+                                    CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " What each custom field\'s autocomplete id does, in list order (ADR 0076 §2.5)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " As [`DeviceSession::item`]."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_customFieldAutofill_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(1u32);
+                        <&str as WasmDescribe>::describe();
+                        <Result<Vec<crate::autofill::CustomFieldAutofillView>,
+                                CoreError> as WasmDescribe>::describe();
+                        <Result<Vec<crate::autofill::CustomFieldAutofillView>,
+                                CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x04O What each custom field's autocomplete id does, in list order (ADR 0076 \xc2\xa72.5).\0\t # Errors\x1c As [`DeviceSession::item`].\0\x01\x02id\0\0\0\0\0\x13customFieldAutofill\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            crate::autofill::custom_field_autofill(self.vault_ref()?, id)
+        }
+        #[doc =
+        " The offer of one inline-menu candidate (ADR 0076 §4.1): whether it fills a TOTP code,"]
+        #[doc =
+        " and which custom fields it fills for the page\'s custom `tokens` (Display Names and"]
+        #[doc = " flags only, never a value)."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " As `DeviceSession::vault_ref`; `invalid_input` for an id that is not 32 hex digits."]
+        #[expect(clippy::needless_pass_by_value, reason =
+        "wasm-bindgen hands this exported call ownership of the JS array as Vec<String>")]
+        pub fn autofill_offer(&self, id: &str, tokens: Vec<String>)
+            -> Result<crate::autofill::AutofillOffer, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The offer of one inline-menu candidate (ADR 0076 §4.1): whether it fills a TOTP code,"]
+                    #[doc =
+                    " and which custom fields it fills for the page\'s custom `tokens` (Display Names and"]
+                    #[doc = " flags only, never a value)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " As `DeviceSession::vault_ref`; `invalid_input` for an id that is not 32 hex digits."]
+                    #[allow(clippy::needless_pass_by_value, reason =
+                    "wasm-bindgen hands this exported call ownership of the JS array as Vec<String>")]
+                    #[export_name =
+                    "devicesession_autofillOffer_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_autofillOffer(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<Vec<String> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<Vec<String> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<Vec<String> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<Vec<String> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<crate::autofill::AutofillOffer,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<Vec<String>>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <Vec<String> as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Vec<String>
+                                                                as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let _ret = me.autofill_offer(arg1, arg2);
+                                            _ret
+                                        }
+                                    });
+                        <Result<crate::autofill::AutofillOffer, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The offer of one inline-menu candidate (ADR 0076 §4.1): whether it fills a TOTP code,"]
+                    #[doc =
+                    " and which custom fields it fills for the page\'s custom `tokens` (Display Names and"]
+                    #[doc = " flags only, never a value)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " As `DeviceSession::vault_ref`; `invalid_input` for an id that is not 32 hex digits."]
+                    #[allow(clippy::needless_pass_by_value, reason =
+                    "wasm-bindgen hands this exported call ownership of the JS array as Vec<String>")]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_autofillOffer_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(2u32);
+                        <&str as WasmDescribe>::describe();
+                        <Vec<String> as WasmDescribe>::describe();
+                        <Result<crate::autofill::AutofillOffer, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<crate::autofill::AutofillOffer, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x06W The offer of one inline-menu candidate (ADR 0076 \xc2\xa74.1): whether it fills a TOTP code,S and which custom fields it fills for the page's custom `tokens` (Display Names and\x1c flags only, never a value).\0\t # ErrorsT As `DeviceSession::vault_ref`; `invalid_input` for an id that is not 32 hex digits.\0\x02\x02id\0\0\0\x06tokens\0\0\0\0\0\rautofillOffer\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            crate::autofill::autofill_offer(self.vault_ref()?, id, &tokens)
+        }
+        #[doc =
+        " The values of one fill click (ADR 0076 §4.2): one coarse call. `only` is `username`,"]
+        #[doc =
+        " `password`, `totp` or none; `tokens` and `elements` are the offer record\'s custom"]
+        #[doc =
+        " tokens and the element ids it recorded for them. The TOTP code is computed here at"]
+        #[doc = " `now_ms`; the secret never crosses."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " As `DeviceSession::vault_ref`; `invalid_input` for a bad id, `only` or lists of"]
+        #[doc =
+        " different lengths; `unknown_item` unless the item is an Active Login."]
+        #[expect(clippy::too_many_arguments, reason =
+        "one coarse call: the offer record's scope, flat, as wasm-bindgen passes it")]
+        #[expect(clippy::needless_pass_by_value, reason =
+        "wasm-bindgen hands this exported call ownership of the JS arrays and strings")]
+        pub fn fill_plan(&self, id: &str, only: Option<String>, totp: bool,
+            tokens: Vec<String>, elements: Vec<String>,
+            username_token: Option<String>, password_token: Option<String>,
+            now_ms: u64) -> Result<crate::autofill::FillValues, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The values of one fill click (ADR 0076 §4.2): one coarse call. `only` is `username`,"]
+                    #[doc =
+                    " `password`, `totp` or none; `tokens` and `elements` are the offer record\'s custom"]
+                    #[doc =
+                    " tokens and the element ids it recorded for them. The TOTP code is computed here at"]
+                    #[doc = " `now_ms`; the secret never crosses."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " As `DeviceSession::vault_ref`; `invalid_input` for a bad id, `only` or lists of"]
+                    #[doc =
+                    " different lengths; `unknown_item` unless the item is an Active Login."]
+                    #[allow(clippy::too_many_arguments, reason =
+                    "one coarse call: the offer record's scope, flat, as wasm-bindgen passes it")]
+                    #[allow(clippy::needless_pass_by_value, reason =
+                    "wasm-bindgen hands this exported call ownership of the JS arrays and strings")]
+                    #[export_name = "devicesession_fillPlan_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_fillPlan(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg3_1:
+                            <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg3_2:
+                            <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg3_3:
+                            <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg3_4:
+                            <<bool as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg4_1:
+                            <<Vec<String> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg4_2:
+                            <<Vec<String> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg4_3:
+                            <<Vec<String> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg4_4:
+                            <<Vec<String> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg5_1:
+                            <<Vec<String> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg5_2:
+                            <<Vec<String> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg5_3:
+                            <<Vec<String> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg5_4:
+                            <<Vec<String> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg6_1:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg6_2:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg6_3:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg6_4:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg7_1:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg7_2:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg7_3:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg7_4:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg8_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg8_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg8_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg8_4:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<crate::autofill::FillValues,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<Option<String>>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <Option<String> as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Option<String>
+                                                                as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<bool>();
+                                            let arg3 =
+                                                unsafe {
+                                                    <bool as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<bool as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<Vec<String>>();
+                                            let arg4 =
+                                                unsafe {
+                                                    <Vec<String> as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Vec<String>
+                                                                as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                            arg4_3, arg4_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<Vec<String>>();
+                                            let arg5 =
+                                                unsafe {
+                                                    <Vec<String> as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Vec<String>
+                                                                as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg5_1, arg5_2,
+                                                            arg5_3, arg5_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<Option<String>>();
+                                            let arg6 =
+                                                unsafe {
+                                                    <Option<String> as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Option<String>
+                                                                as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg6_1, arg6_2,
+                                                            arg6_3, arg6_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<Option<String>>();
+                                            let arg7 =
+                                                unsafe {
+                                                    <Option<String> as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Option<String>
+                                                                as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg7_1, arg7_2,
+                                                            arg7_3, arg7_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg8 =
+                                                unsafe {
+                                                    <u64 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg8_1, arg8_2,
+                                                            arg8_3, arg8_4))
+                                                };
+                                            let _ret =
+                                                me.fill_plan(arg1, arg2, arg3, arg4, arg5, arg6, arg7,
+                                                    arg8);
+                                            _ret
+                                        }
+                                    });
+                        <Result<crate::autofill::FillValues, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The values of one fill click (ADR 0076 §4.2): one coarse call. `only` is `username`,"]
+                    #[doc =
+                    " `password`, `totp` or none; `tokens` and `elements` are the offer record\'s custom"]
+                    #[doc =
+                    " tokens and the element ids it recorded for them. The TOTP code is computed here at"]
+                    #[doc = " `now_ms`; the secret never crosses."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " As `DeviceSession::vault_ref`; `invalid_input` for a bad id, `only` or lists of"]
+                    #[doc =
+                    " different lengths; `unknown_item` unless the item is an Active Login."]
+                    #[allow(clippy::too_many_arguments, reason =
+                    "one coarse call: the offer record's scope, flat, as wasm-bindgen passes it")]
+                    #[allow(clippy::needless_pass_by_value, reason =
+                    "wasm-bindgen hands this exported call ownership of the JS arrays and strings")]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_fillPlan_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(8u32);
+                        <&str as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                        <bool as WasmDescribe>::describe();
+                        <Vec<String> as WasmDescribe>::describe();
+                        <Vec<String> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                        <u64 as WasmDescribe>::describe();
+                        <Result<crate::autofill::FillValues, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<crate::autofill::FillValues, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x08V The values of one fill click (ADR 0076 \xc2\xa74.2): one coarse call. `only` is `username`,R `password`, `totp` or none; `tokens` and `elements` are the offer record's customS tokens and the element ids it recorded for them. The TOTP code is computed here at$ `now_ms`; the secret never crosses.\0\t # ErrorsP As `DeviceSession::vault_ref`; `invalid_input` for a bad id, `only` or lists ofF different lengths; `unknown_item` unless the item is an Active Login.\0\x08\x02id\0\0\0\x04only\0\0\0\x04totp\0\0\0\x06tokens\0\0\0\x08elements\0\0\0\x0eusername_token\0\0\0\x0epassword_token\0\0\0\x06now_ms\0\0\0\0\0\x08fillPlan\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            crate::autofill::fill_plan(self.vault_ref()?, id,
+                &crate::autofill::FillArgs {
+                        only: only.as_deref(),
+                        totp,
+                        tokens: &tokens,
+                        elements: &elements,
+                        username_token: username_token.as_deref(),
+                        password_token: password_token.as_deref(),
+                    }, now_ms)
+        }
+        #[doc =
+        " The save dialog\'s custom-field rows (ADR 0076 §5.3) for a new item (`id` absent) or an"]
+        #[doc =
+        " update of `id`: `tokens`, `values` and `masked` (1 for a `type=password` input) are"]
+        #[doc = " the captured fields, parallel. No value crosses back."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " As `DeviceSession::vault_ref`; `invalid_input` for a bad id or lists of different"]
+        #[doc = " lengths."]
+        #[expect(clippy::needless_pass_by_value, reason =
+        "wasm-bindgen hands this exported call ownership of the JS arrays")]
+        pub fn custom_save_plan(&self, id: Option<String>,
+            tokens: Vec<String>, values: Vec<String>, masked: Vec<u8>)
+            -> Result<Vec<crate::autofill::SaveRowView>, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The save dialog\'s custom-field rows (ADR 0076 §5.3) for a new item (`id` absent) or an"]
+                    #[doc =
+                    " update of `id`: `tokens`, `values` and `masked` (1 for a `type=password` input) are"]
+                    #[doc =
+                    " the captured fields, parallel. No value crosses back."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " As `DeviceSession::vault_ref`; `invalid_input` for a bad id or lists of different"]
+                    #[doc = " lengths."]
+                    #[allow(clippy::needless_pass_by_value, reason =
+                    "wasm-bindgen hands this exported call ownership of the JS arrays")]
+                    #[export_name =
+                    "devicesession_customSavePlan_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_customSavePlan(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<Vec<String> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<Vec<String> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<Vec<String> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<Vec<String> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg3_1:
+                            <<Vec<String> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg3_2:
+                            <<Vec<String> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg3_3:
+                            <<Vec<String> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg3_4:
+                            <<Vec<String> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg4_1:
+                            <<Vec<u8> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg4_2:
+                            <<Vec<u8> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg4_3:
+                            <<Vec<u8> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg4_4:
+                            <<Vec<u8> as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<Vec<crate::autofill::SaveRowView>,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<Option<String>>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <Option<String> as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Option<String>
+                                                                as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<Vec<String>>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <Vec<String> as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Vec<String>
+                                                                as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<Vec<String>>();
+                                            let arg3 =
+                                                unsafe {
+                                                    <Vec<String> as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Vec<String>
+                                                                as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<Vec<u8>>();
+                                            let arg4 =
+                                                unsafe {
+                                                    <Vec<u8> as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Vec<u8> as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                            arg4_3, arg4_4))
+                                                };
+                                            let _ret = me.custom_save_plan(arg1, arg2, arg3, arg4);
+                                            _ret
+                                        }
+                                    });
+                        <Result<Vec<crate::autofill::SaveRowView>, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The save dialog\'s custom-field rows (ADR 0076 §5.3) for a new item (`id` absent) or an"]
+                    #[doc =
+                    " update of `id`: `tokens`, `values` and `masked` (1 for a `type=password` input) are"]
+                    #[doc =
+                    " the captured fields, parallel. No value crosses back."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " As `DeviceSession::vault_ref`; `invalid_input` for a bad id or lists of different"]
+                    #[doc = " lengths."]
+                    #[allow(clippy::needless_pass_by_value, reason =
+                    "wasm-bindgen hands this exported call ownership of the JS arrays")]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_customSavePlan_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(4u32);
+                        <Option<String> as WasmDescribe>::describe();
+                        <Vec<String> as WasmDescribe>::describe();
+                        <Vec<String> as WasmDescribe>::describe();
+                        <Vec<u8> as WasmDescribe>::describe();
+                        <Result<Vec<crate::autofill::SaveRowView>, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<Vec<crate::autofill::SaveRowView>, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x07X The save dialog's custom-field rows (ADR 0076 \xc2\xa75.3) for a new item (`id` absent) or anT update of `id`: `tokens`, `values` and `masked` (1 for a `type=password` input) are6 the captured fields, parallel. No value crosses back.\0\t # ErrorsR As `DeviceSession::vault_ref`; `invalid_input` for a bad id or lists of different\t lengths.\0\x04\x02id\0\0\0\x06tokens\0\0\0\x06values\0\0\0\x06masked\0\0\0\0\0\x0ecustomSavePlan\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let values: Vec<Zeroizing<String>> =
+                values.into_iter().map(Zeroizing::new).collect();
+            crate::autofill::save_plan(self.vault_ref()?, id.as_deref(),
+                &tokens, &values, &masked)
         }
         #[doc =
         " One field\'s value as text, concealed or not: call it only on the user\'s request."]
@@ -31172,9 +35775,10 @@ pub mod session {
     //!   refresh ([`crate::sync`]). The host syncs before it lists them, as `rv device list` reads
     //!   `account/state` first.
     use core::fmt;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use rizzy_client::ClientError;
     use rizzy_client::account::VerifiedAccount;
+    use rizzy_client::attachments::{AttachmentDownload, AttachmentUpload};
     use rizzy_client::device::UnlockedDevice;
     use rizzy_client::export::detect::{DetectedFormat, detect_format};
     use rizzy_client::export::gate::{self, ExportGate, check_export_password};
@@ -31189,7 +35793,7 @@ pub mod session {
         decide_with_settings, global_equivalence_groups, vault_item_uris,
     };
     use rizzy_client::passkey::get_assertion;
-    use rizzy_client::rizzy_core::ids::AccountId;
+    use rizzy_client::rizzy_core::ids::{AccountId, AttachmentId};
     use rizzy_client::rizzy_core::item::key::ElementId;
     use rizzy_client::rizzy_core::item::schema::{
         ATTR_ALG, ATTR_CREATED_MS, ATTR_CREDENTIAL_ID, ATTR_PRIVATE_KEY,
@@ -31233,6 +35837,3067 @@ pub mod session {
     use crate::rng::{Rng, os_rng};
     use crate::secret::take_secret;
     use crate::sync::{Ctx, Signer, SyncDriver};
+    mod attachments {
+        //! Encrypted attachments for the web vault ([ADR 0054]; `rizzy_client::attachments`).
+        //!
+        //! ```text
+        //! const id = session.addAttachment(itemId, name, mime, bytes, now)    // the item op is written
+        //! send(session.attachmentCreateRequest(id))                            // attachments/create
+        //! for i in 0..session.attachmentChunkCount(id): send(session.attachmentUploadChunkRequest(id, i))
+        //! session.attachmentUploadDone(id)
+        //!
+        //! const n = session.attachmentDownloadStart(itemId, id)                // n from the item's size
+        //! session.attachmentGetResponse(id, ...send(session.attachmentGetRequest(id)))
+        //! for i in 0..n: session.attachmentDownloadChunkResponse(id, i, ...send(…ChunkRequest(id, i)))
+        //! const file = session.attachmentDownloadFinish(id)                    // only if every chunk opened
+        //!
+        //! send(session.attachmentDeleteRequest(id)); session.removeAttachment(itemId, id, now)
+        //! ```
+        //!
+        //! Every request is built here and every answer verified here; JavaScript only carries bytes.
+        //! The finished file crosses to JavaScript as a byte array, the one copy a download needs; like
+        //! a plaintext export, it cannot be wiped once there (ADR 0013 §4 "Honest limit").
+        //!
+        //! [ADR 0054]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0054-attachments-envelope-and-api.md
+        use rizzy_client::ClientError;
+        use rizzy_client::attachments::{AttachmentInfo, delete_request};
+        use rizzy_client::rizzy_core::ids::AttachmentId;
+        use rizzy_client::rizzy_proto::attachments::{
+            DownloadChunkResponse, GetAttachmentResponse,
+        };
+        use rizzy_client::rizzy_proto::http::paths;
+        use wasm_bindgen::prelude::wasm_bindgen;
+        use super::Session;
+        use crate::error::{CoreError, CoreResult};
+        use crate::http::{self, HttpRequest};
+        use crate::items::{self, hex, parse_id};
+        /// An attachment id from its 32 hex digits.
+        fn attachment_id(text: &str) -> CoreResult<AttachmentId> {
+            Ok(AttachmentId::from_bytes(parse_id(text)?))
+        }
+        #[wasm_bindgen()]
+        #[__wasm_bindgen_retried]
+        #[doc =
+        " One attachment an item lists: id, name, media type and size. Item data, for display."]
+        pub struct AttachmentView {
+            #[doc = " The id, 32 hex digits."]
+            id: String,
+            #[doc = " The file name."]
+            name: String,
+            #[doc = " The declared media type."]
+            mime: String,
+            #[doc = " The size in bytes."]
+            size: u64,
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::__rt::marker::SupportsConstructor for
+            AttachmentView {
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for
+            AttachmentView {
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::__rt::marker::SupportsStaticProperty for
+            AttachmentView {
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::describe::WasmDescribe for AttachmentView {
+            fn describe() {
+                use wasm_bindgen::describe::*;
+                inform(RUST_STRUCT);
+                inform(14u32);
+                inform(65u32);
+                inform(116u32);
+                inform(116u32);
+                inform(97u32);
+                inform(99u32);
+                inform(104u32);
+                inform(109u32);
+                inform(101u32);
+                inform(110u32);
+                inform(116u32);
+                inform(86u32);
+                inform(105u32);
+                inform(101u32);
+                inform(119u32);
+                inform(27u32);
+                inform(114u32);
+                inform(105u32);
+                inform(122u32);
+                inform(122u32);
+                inform(121u32);
+                inform(45u32);
+                inform(119u32);
+                inform(97u32);
+                inform(115u32);
+                inform(109u32);
+                inform(45u32);
+                inform(101u32);
+                inform(48u32);
+                inform(57u32);
+                inform(99u32);
+                inform(99u32);
+                inform(48u32);
+                inform(101u32);
+                inform(98u32);
+                inform(51u32);
+                inform(53u32);
+                inform(102u32);
+                inform(56u32);
+                inform(98u32);
+                inform(53u32);
+                inform(56u32);
+                inform(51u32);
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::IntoWasmAbi for AttachmentView {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AttachmentView>>;
+            fn into_abi(self) -> Self::Abi {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+                WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self)))
+                        as *mut WasmRefCell<AttachmentView>)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::FromWasmAbi for AttachmentView {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AttachmentView>>;
+            unsafe fn from_abi(js: Self::Abi) -> Self {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+                use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+                let ptr = js.into_ptr();
+                assert_not_null(ptr);
+                let rc = Rc::from_raw(ptr);
+                match Rc::try_unwrap(rc) {
+                    Ok(cell) => cell.into_inner(),
+                    Err(_) =>
+                        wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+                }
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::__rt::core::convert::From<AttachmentView> for
+            wasm_bindgen::JsValue {
+            fn from(value: AttachmentView) -> Self {
+                let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+                #[link(wasm_import_module = "__wbindgen_placeholder__")]
+                extern "C" {
+                    #[link_name = "__wbg_attachmentview_new_e09cc0eb35f8b583"]
+                    fn __wbg_attachmentview_new(ptr:
+                        wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AttachmentView>>)
+                    -> u32;
+                }
+                unsafe {
+                    <wasm_bindgen::JsValue as
+                            wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_attachmentview_new(ptr))
+                }
+            }
+        }
+        #[automatically_derived]
+        const _: () =
+            {
+                #[export_name = "__wbg_attachmentview_free_e09cc0eb35f8b583"]
+                #[doc(hidden)]
+                pub unsafe extern "C-unwind" fn __wbg_attachmentview_free(ptr:
+                        wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AttachmentView>>,
+                    allow_delayed: u32) {
+                    use wasm_bindgen::__rt::alloc::rc::Rc;
+                    if allow_delayed != 0 {
+                        let ptr = ptr.into_ptr();
+                        wasm_bindgen::__rt::assert_not_null(ptr);
+                        drop(Rc::from_raw(ptr));
+                    } else {
+                        let _ =
+                            <AttachmentView as
+                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                    }
+                }
+            };
+        #[automatically_derived]
+        impl wasm_bindgen::convert::RefFromWasmAbi for AttachmentView {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AttachmentView>>;
+            type Anchor = wasm_bindgen::__rt::RcRef<AttachmentView>;
+            unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                let js = js.into_ptr();
+                wasm_bindgen::__rt::assert_not_null(js);
+                Rc::increment_strong_count(js);
+                let rc = Rc::from_raw(js);
+                wasm_bindgen::__rt::RcRef::new(rc)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::RefMutFromWasmAbi for AttachmentView {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AttachmentView>>;
+            type Anchor = wasm_bindgen::__rt::RcRefMut<AttachmentView>;
+            unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                let js = js.into_ptr();
+                wasm_bindgen::__rt::assert_not_null(js);
+                Rc::increment_strong_count(js);
+                let rc = Rc::from_raw(js);
+                wasm_bindgen::__rt::RcRefMut::new(rc)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::LongRefFromWasmAbi for AttachmentView {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AttachmentView>>;
+            type Anchor = wasm_bindgen::__rt::RcRef<AttachmentView>;
+            unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+                <Self as
+                        wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::OptionIntoWasmAbi for AttachmentView {
+            #[inline]
+            fn none() -> Self::Abi {
+                <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AttachmentView>>>::null()
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::OptionFromWasmAbi for AttachmentView {
+            #[inline]
+            fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::TryFromJsValue for AttachmentView {
+            fn try_from_js_value(value: wasm_bindgen::JsValue)
+                ->
+                    wasm_bindgen::__rt::core::result::Result<Self,
+                    wasm_bindgen::JsValue> {
+                Self::try_from_js_value_ref(&value).ok_or(value)
+            }
+            fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+                -> wasm_bindgen::__rt::core::option::Option<Self> {
+                let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+                #[link(wasm_import_module = "__wbindgen_placeholder__")]
+                extern "C" {
+                    #[link_name =
+                    "__wbg_attachmentview_unwrap_e09cc0eb35f8b583"]
+                    fn __wbg_attachmentview_unwrap(ptr: u32)
+                    ->
+                        wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<AttachmentView>>;
+                }
+                let ptr = unsafe { __wbg_attachmentview_unwrap(idx) };
+                if ptr.is_null() {
+                    wasm_bindgen::__rt::core::option::Option::None
+                } else {
+                    unsafe {
+                        wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                    }
+                }
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::describe::WasmDescribeVector for AttachmentView {
+            fn describe_vector() {
+                use wasm_bindgen::describe::*;
+                inform(VECTOR);
+                <AttachmentView as
+                        wasm_bindgen::describe::WasmDescribe>::describe();
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::VectorIntoWasmAbi for AttachmentView {
+            type Abi =
+                <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]>
+                as wasm_bindgen::convert::IntoWasmAbi>::Abi;
+            fn vector_into_abi(vector:
+                    wasm_bindgen::__rt::alloc::boxed::Box<[AttachmentView]>)
+                -> Self::Abi {
+                wasm_bindgen::convert::js_value_vector_into_abi(vector)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::VectorFromWasmAbi for AttachmentView {
+            type Abi =
+                <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]>
+                as wasm_bindgen::convert::FromWasmAbi>::Abi;
+            unsafe fn vector_from_abi(js: Self::Abi)
+                -> wasm_bindgen::__rt::alloc::boxed::Box<[AttachmentView]> {
+                wasm_bindgen::convert::js_value_vector_from_abi(js)
+            }
+        }
+        #[automatically_derived]
+        const _: () =
+            {
+                use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                static _INCLUDED_FILES: &[&str] = &[];
+                const _ENCODED_BYTES: &[u8] =
+                    {
+                        const _CHUNK_SLICES: [&[u8]; 1usize] =
+                            [b"\0\0\0\x01\x0eAttachmentView\0\x01U One attachment an item lists: id, name, media type and size. Item data, for display.\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        #[allow(long_running_const_eval)]
+                        const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                        #[allow(long_running_const_eval)]
+                        const _CHUNKS: [u8; _CHUNK_LEN] =
+                            flat_byte_slices(_CHUNK_SLICES);
+                        const _LEN_BYTES: [u8; 4] =
+                            (_CHUNK_LEN as u32).to_le_bytes();
+                        const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                        #[allow(long_running_const_eval)]
+                        const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                            flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                        &_ENCODED_BYTES
+                    };
+                const _PREFIX_JSON_BYTES: &[u8] =
+                    b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                const _PREFIX_JSON_BYTES_LEN: usize =
+                    _PREFIX_JSON_BYTES.len();
+                const _LEN: usize =
+                    _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                #[link_section = "__wasm_bindgen_unstable"]
+                #[allow(long_running_const_eval)]
+                static _GENERATED: [u8; _LEN] =
+                    flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+            };
+        impl core::fmt::Debug for AttachmentView {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>)
+                -> core::fmt::Result {
+                f.debug_struct("AttachmentView").field("size",
+                        &self.size).finish_non_exhaustive()
+            }
+        }
+        impl AttachmentView {
+            /// The view of a listed attachment.
+            fn of(info: &AttachmentInfo) -> Self {
+                Self {
+                    id: hex(&info.attachment_id.to_bytes()),
+                    name: info.name.as_str().to_owned(),
+                    mime: info.mime.as_str().to_owned(),
+                    size: info.size,
+                }
+            }
+        }
+        impl AttachmentView {
+            #[doc = " The attachment id, 32 hex digits."]
+            #[must_use]
+            pub fn id(&self) -> String {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The attachment id, 32 hex digits."]
+                        #[must_use]
+                        #[export_name = "attachmentview_id_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_AttachmentView_id(me:
+                                <AttachmentView as
+                                wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<String as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () =
+                                {
+                                    let _:
+                                            wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<AttachmentView>;
+                                };
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<AttachmentView>();
+                                                let me =
+                                                    unsafe {
+                                                        <AttachmentView as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.id();
+                                                _ret
+                                            }
+                                        });
+                            <String as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The attachment id, 32 hex digits."]
+                        #[must_use]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_attachmentview_id_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <String as WasmDescribe>::describe();
+                            <String as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x0eAttachmentView\x01\" The attachment id, 32 hex digits.\0\0\0\0\x02id\x01\x01\0\0\0\0\x01\0\x02\x02id\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                self.id.clone()
+            }
+            #[doc = " The file name, as entered."]
+            #[must_use]
+            pub fn name(&self) -> String {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The file name, as entered."]
+                        #[must_use]
+                        #[export_name = "attachmentview_name_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_AttachmentView_name(me:
+                                <AttachmentView as
+                                wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<String as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () =
+                                {
+                                    let _:
+                                            wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<AttachmentView>;
+                                };
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<AttachmentView>();
+                                                let me =
+                                                    unsafe {
+                                                        <AttachmentView as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.name();
+                                                _ret
+                                            }
+                                        });
+                            <String as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The file name, as entered."]
+                        #[must_use]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_attachmentview_name_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <String as WasmDescribe>::describe();
+                            <String as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x0eAttachmentView\x01\x1b The file name, as entered.\0\0\0\0\x04name\x01\x01\0\0\0\0\x01\0\x02\x04name\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                self.name.clone()
+            }
+            #[doc = " The declared media type."]
+            #[must_use]
+            pub fn mime(&self) -> String {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The declared media type."]
+                        #[must_use]
+                        #[export_name = "attachmentview_mime_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_AttachmentView_mime(me:
+                                <AttachmentView as
+                                wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<String as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () =
+                                {
+                                    let _:
+                                            wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<AttachmentView>;
+                                };
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<AttachmentView>();
+                                                let me =
+                                                    unsafe {
+                                                        <AttachmentView as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.mime();
+                                                _ret
+                                            }
+                                        });
+                            <String as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The declared media type."]
+                        #[must_use]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_attachmentview_mime_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <String as WasmDescribe>::describe();
+                            <String as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x0eAttachmentView\x01\x19 The declared media type.\0\0\0\0\x04mime\x01\x01\0\0\0\0\x01\0\x02\x04mime\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                self.mime.clone()
+            }
+            #[doc = " The plaintext size in bytes."]
+            #[must_use]
+            pub fn size(&self) -> u64 {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The plaintext size in bytes."]
+                        #[must_use]
+                        #[export_name = "attachmentview_size_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_AttachmentView_size(me:
+                                <AttachmentView as
+                                wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<u64 as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () =
+                                {
+                                    let _:
+                                            wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<AttachmentView>;
+                                };
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<AttachmentView>();
+                                                let me =
+                                                    unsafe {
+                                                        <AttachmentView as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.size();
+                                                _ret
+                                            }
+                                        });
+                            <u64 as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The plaintext size in bytes."]
+                        #[must_use]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_attachmentview_size_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <u64 as WasmDescribe>::describe();
+                            <u64 as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x0eAttachmentView\x01\x1d The plaintext size in bytes.\0\0\0\0\x04size\x01\x01\0\0\0\0\x01\0\x02\x04size\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                self.size
+            }
+        }
+        #[automatically_derived]
+        const _: () =
+            {
+                use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                static _INCLUDED_FILES: &[&str] = &[];
+                const _ENCODED_BYTES: &[u8] =
+                    {
+                        const _CHUNK_SLICES: [&[u8]; 1usize] =
+                            [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        #[allow(long_running_const_eval)]
+                        const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                        #[allow(long_running_const_eval)]
+                        const _CHUNKS: [u8; _CHUNK_LEN] =
+                            flat_byte_slices(_CHUNK_SLICES);
+                        const _LEN_BYTES: [u8; 4] =
+                            (_CHUNK_LEN as u32).to_le_bytes();
+                        const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                        #[allow(long_running_const_eval)]
+                        const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                            flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                        &_ENCODED_BYTES
+                    };
+                const _PREFIX_JSON_BYTES: &[u8] =
+                    b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                const _PREFIX_JSON_BYTES_LEN: usize =
+                    _PREFIX_JSON_BYTES.len();
+                const _LEN: usize =
+                    _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                #[link_section = "__wasm_bindgen_unstable"]
+                #[allow(long_running_const_eval)]
+                static _GENERATED: [u8; _LEN] =
+                    flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+            };
+        impl Session {
+            #[doc = " The attachments of an item, in list order."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " `locked`; `invalid_input` for a malformed id."]
+            pub fn attachments(&self, id: &str)
+                -> Result<Vec<AttachmentView>, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The attachments of an item, in list order."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`; `invalid_input` for a malformed id."]
+                        #[export_name = "session_attachments_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachments(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<Vec<AttachmentView>,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.attachments(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<Vec<AttachmentView>, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The attachments of an item, in list order."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`; `invalid_input` for a malformed id."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachments_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<Vec<AttachmentView>, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<Vec<AttachmentView>, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x04+ The attachments of an item, in list order.\0\t # Errors. `locked`; `invalid_input` for a malformed id.\0\x01\x02id\0\0\0\0\0\x0battachments\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let item = items::item_id(id)?;
+                Ok(self.inner()?.vault.attachments(item).iter().map(AttachmentView::of).collect())
+            }
+            #[doc =
+            " Adds a file to an item: writes the item op naming it (ADR 0054 §7), wraps a fresh"]
+            #[doc =
+            " attachment key and seals every chunk. Returns the new attachment\'s id; its requests follow."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `wrong_state` while a sync runs; `attachment_too_large` over 25 MiB;"]
+            #[doc =
+            " `invalid_input` for an empty or overlong name or media type; `read_only`;"]
+            #[doc = " `unknown_item`."]
+            pub fn add_attachment(&mut self, id: &str, name: &str, mime: &str,
+                data: &[u8], now_ms: u64) -> Result<String, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Adds a file to an item: writes the item op naming it (ADR 0054 §7), wraps a fresh"]
+                        #[doc =
+                        " attachment key and seals every chunk. Returns the new attachment\'s id; its requests follow."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` while a sync runs; `attachment_too_large` over 25 MiB;"]
+                        #[doc =
+                        " `invalid_input` for an empty or overlong name or media type; `read_only`;"]
+                        #[doc = " `unknown_item`."]
+                        #[export_name = "session_addAttachment_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_addAttachment(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg3_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg3_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg3_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg3_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg4_1:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg4_2:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg4_3:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg4_4:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg5_1:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg5_2:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg5_3:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg5_4:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<String, CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                let arg2 = &*arg2;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg3 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                                arg3_3, arg3_4))
+                                                    };
+                                                let arg3 = &*arg3;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                                let arg4 =
+                                                    unsafe {
+                                                        <[u8] as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                                arg4_3, arg4_4))
+                                                    };
+                                                let arg4 = &*arg4;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                                let arg5 =
+                                                    unsafe {
+                                                        <u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg5_1, arg5_2,
+                                                                arg5_3, arg5_4))
+                                                    };
+                                                let _ret = me.add_attachment(arg1, arg2, arg3, arg4, arg5);
+                                                _ret
+                                            }
+                                        });
+                            <Result<String, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Adds a file to an item: writes the item op naming it (ADR 0054 §7), wraps a fresh"]
+                        #[doc =
+                        " attachment key and seals every chunk. Returns the new attachment\'s id; its requests follow."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` while a sync runs; `attachment_too_large` over 25 MiB;"]
+                        #[doc =
+                        " `invalid_input` for an empty or overlong name or media type; `read_only`;"]
+                        #[doc = " `unknown_item`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_addAttachment_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(5u32);
+                            <&str as WasmDescribe>::describe();
+                            <&str as WasmDescribe>::describe();
+                            <&str as WasmDescribe>::describe();
+                            <&[u8] as WasmDescribe>::describe();
+                            <u64 as WasmDescribe>::describe();
+                            <Result<String, CoreError> as WasmDescribe>::describe();
+                            <Result<String, CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x07S Adds a file to an item: writes the item op naming it (ADR 0054 \xc2\xa77), wraps a fresh\\ attachment key and seals every chunk. Returns the new attachment's id; its requests follow.\0\t # ErrorsO `locked`; `wrong_state` while a sync runs; `attachment_too_large` over 25 MiB;J `invalid_input` for an empty or overlong name or media type; `read_only`;\x10 `unknown_item`.\0\x05\x02id\0\0\0\x04name\0\0\0\x04mime\0\0\0\x04data\0\0\0\x06now_ms\0\0\0\0\0\raddAttachment\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let item = items::item_id(id)?;
+                let inner = self.writable()?;
+                let upload =
+                    inner.vault.add_attachment(&mut inner.rng, &inner.unlocked,
+                            item, name, mime, data, now_ms)?;
+                let attachment = upload.attachment_id();
+                inner.uploads.insert(attachment, upload);
+                Ok(hex(&attachment.to_bytes()))
+            }
+            #[doc =
+            " The `attachments/create` request of an attachment being uploaded."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `invalid_input` for an id with no upload in progress."]
+            pub fn attachment_create_request(&self, attachment: &str)
+                -> Result<HttpRequest, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `attachments/create` request of an attachment being uploaded."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no upload in progress."]
+                        #[export_name =
+                        "session_attachmentCreateRequest_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentCreateRequest(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.attachment_create_request(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<HttpRequest, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `attachments/create` request of an attachment being uploaded."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no upload in progress."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentCreateRequest_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x04B The `attachments/create` request of an attachment being uploaded.\0\t # Errors@ `locked`; `invalid_input` for an id with no upload in progress.\0\x01\nattachment\0\0\0\0\0\x17attachmentCreateRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let inner = self.inner()?;
+                let upload =
+                    inner.uploads.get(&attachment_id(attachment)?).ok_or(ClientError::InvalidInput)?;
+                HttpRequest::post(paths::ATTACHMENTS_CREATE,
+                    &upload.create_request(), Some(&inner.token))
+            }
+            #[doc =
+            " How many chunks an attachment being uploaded or downloaded has."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `invalid_input` for an id with no transfer in progress."]
+            pub fn attachment_chunk_count(&self, attachment: &str)
+                -> Result<u32, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " How many chunks an attachment being uploaded or downloaded has."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no transfer in progress."]
+                        #[export_name =
+                        "session_attachmentChunkCount_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentChunkCount(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<u32, CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.attachment_chunk_count(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<u32, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " How many chunks an attachment being uploaded or downloaded has."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no transfer in progress."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentChunkCount_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<u32, CoreError> as WasmDescribe>::describe();
+                            <Result<u32, CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x04@ How many chunks an attachment being uploaded or downloaded has.\0\t # ErrorsB `locked`; `invalid_input` for an id with no transfer in progress.\0\x01\nattachment\0\0\0\0\0\x14attachmentChunkCount\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let inner = self.inner()?;
+                let id = attachment_id(attachment)?;
+                if let Some(upload) = inner.uploads.get(&id) {
+                    return Ok(upload.chunk_count());
+                }
+                Ok(inner.downloads.get(&id).ok_or(ClientError::InvalidInput)?.chunk_count())
+            }
+            #[doc =
+            " The `attachments/upload-chunk` request of chunk `index`."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `invalid_input` for an id with no upload in progress or an index past the"]
+            #[doc = " last chunk."]
+            pub fn attachment_upload_chunk_request(&self, attachment: &str,
+                index: u32) -> Result<HttpRequest, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `attachments/upload-chunk` request of chunk `index`."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no upload in progress or an index past the"]
+                        #[doc = " last chunk."]
+                        #[export_name =
+                        "session_attachmentUploadChunkRequest_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentUploadChunkRequest(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u32>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <u32 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u32 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                let _ret = me.attachment_upload_chunk_request(arg1, arg2);
+                                                _ret
+                                            }
+                                        });
+                            <Result<HttpRequest, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `attachments/upload-chunk` request of chunk `index`."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no upload in progress or an index past the"]
+                        #[doc = " last chunk."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentUploadChunkRequest_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(2u32);
+                            <&str as WasmDescribe>::describe();
+                            <u32 as WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x059 The `attachments/upload-chunk` request of chunk `index`.\0\t # ErrorsT `locked`; `invalid_input` for an id with no upload in progress or an index past the\x0c last chunk.\0\x02\nattachment\0\0\0\x05index\0\0\0\0\0\x1cattachmentUploadChunkRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let inner = self.inner()?;
+                let upload =
+                    inner.uploads.get(&attachment_id(attachment)?).ok_or(ClientError::InvalidInput)?;
+                HttpRequest::post(paths::ATTACHMENTS_UPLOAD_CHUNK,
+                    &upload.chunk_request(index)?, Some(&inner.token))
+            }
+            #[doc =
+            " Forgets an upload: its requests were sent, or the host gave up on them (the item then"]
+            #[doc =
+            " names an attachment the server lacks; its download answers `not_found`, ADR 0054 §7)."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " `locked`; `invalid_input` for a malformed id."]
+            pub fn attachment_upload_done(&mut self, attachment: &str)
+                -> Result<(), CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Forgets an upload: its requests were sent, or the host gave up on them (the item then"]
+                        #[doc =
+                        " names an attachment the server lacks; its download answers `not_found`, ADR 0054 §7)."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`; `invalid_input` for a malformed id."]
+                        #[export_name =
+                        "session_attachmentUploadDone_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentUploadDone(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.attachment_upload_done(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<(), CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Forgets an upload: its requests were sent, or the host gave up on them (the item then"]
+                        #[doc =
+                        " names an attachment the server lacks; its download answers `not_found`, ADR 0054 §7)."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`; `invalid_input` for a malformed id."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentUploadDone_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05V Forgets an upload: its requests were sent, or the host gave up on them (the item thenW names an attachment the server lacks; its download answers `not_found`, ADR 0054 \xc2\xa77).\0\t # Errors. `locked`; `invalid_input` for a malformed id.\0\x01\nattachment\0\0\0\0\0\x14attachmentUploadDone\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let id = attachment_id(attachment)?;
+                self.inner_mut()?.uploads.remove(&id);
+                Ok(())
+            }
+            #[doc =
+            " Starts downloading an attachment of an item; returns its chunk count, derived from the"]
+            #[doc = " size the item records (never from the server)."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `unknown_item` if the item does not list it; `invalid_input`."]
+            pub fn attachment_download_start(&mut self, id: &str,
+                attachment: &str) -> Result<u32, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Starts downloading an attachment of an item; returns its chunk count, derived from the"]
+                        #[doc = " size the item records (never from the server)."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `unknown_item` if the item does not list it; `invalid_input`."]
+                        #[export_name =
+                        "session_attachmentDownloadStart_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentDownloadStart(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<u32, CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                let arg2 = &*arg2;
+                                                let _ret = me.attachment_download_start(arg1, arg2);
+                                                _ret
+                                            }
+                                        });
+                            <Result<u32, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Starts downloading an attachment of an item; returns its chunk count, derived from the"]
+                        #[doc = " size the item records (never from the server)."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `unknown_item` if the item does not list it; `invalid_input`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentDownloadStart_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(2u32);
+                            <&str as WasmDescribe>::describe();
+                            <&str as WasmDescribe>::describe();
+                            <Result<u32, CoreError> as WasmDescribe>::describe();
+                            <Result<u32, CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05W Starts downloading an attachment of an item; returns its chunk count, derived from the/ size the item records (never from the server).\0\t # ErrorsH `locked`; `unknown_item` if the item does not list it; `invalid_input`.\0\x02\x02id\0\0\0\nattachment\0\0\0\0\0\x17attachmentDownloadStart\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let item = items::item_id(id)?;
+                let attachment = attachment_id(attachment)?;
+                let inner = self.inner_mut()?;
+                let download = inner.vault.begin_download(item, attachment)?;
+                let count = download.chunk_count();
+                inner.downloads.insert(attachment, download);
+                Ok(count)
+            }
+            #[doc = " The `attachments/get` request of a download."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `invalid_input` for an id with no download in progress."]
+            pub fn attachment_get_request(&self, attachment: &str)
+                -> Result<HttpRequest, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The `attachments/get` request of a download."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no download in progress."]
+                        #[export_name =
+                        "session_attachmentGetRequest_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentGetRequest(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.attachment_get_request(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<HttpRequest, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " The `attachments/get` request of a download."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no download in progress."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentGetRequest_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x04- The `attachments/get` request of a download.\0\t # ErrorsB `locked`; `invalid_input` for an id with no download in progress.\0\x01\nattachment\0\0\0\0\0\x14attachmentGetRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let inner = self.inner()?;
+                let download =
+                    inner.downloads.get(&attachment_id(attachment)?).ok_or(ClientError::InvalidInput)?;
+                HttpRequest::post(paths::ATTACHMENTS_GET,
+                    &download.get_request(), Some(&inner.token))
+            }
+            #[doc =
+            " Reads the `attachments/get` answer: the wrap, opened with the item key its header names."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `invalid_input`; the server\'s code (`server_not_found` for an attachment the"]
+            #[doc =
+            " server does not hold); `invalid_server_response` for a wrap no held key opens."]
+            pub fn attachment_get_response(&mut self, attachment: &str,
+                status: u16, body: &[u8]) -> Result<(), CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Reads the `attachments/get` answer: the wrap, opened with the item key its header names."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input`; the server\'s code (`server_not_found` for an attachment the"]
+                        #[doc =
+                        " server does not hold); `invalid_server_response` for a wrap no held key opens."]
+                        #[export_name =
+                        "session_attachmentGetResponse_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentGetResponse(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg3_1:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg3_2:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg3_3:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg3_4:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u16>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <u16 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u16 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                                let arg3 =
+                                                    unsafe {
+                                                        <[u8] as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                                arg3_3, arg3_4))
+                                                    };
+                                                let arg3 = &*arg3;
+                                                let _ret = me.attachment_get_response(arg1, arg2, arg3);
+                                                _ret
+                                            }
+                                        });
+                            <Result<(), CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Reads the `attachments/get` answer: the wrap, opened with the item key its header names."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input`; the server\'s code (`server_not_found` for an attachment the"]
+                        #[doc =
+                        " server does not hold); `invalid_server_response` for a wrap no held key opens."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentGetResponse_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(3u32);
+                            <&str as WasmDescribe>::describe();
+                            <u16 as WasmDescribe>::describe();
+                            <&[u8] as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05Y Reads the `attachments/get` answer: the wrap, opened with the item key its header names.\0\t # ErrorsW `locked`; `invalid_input`; the server's code (`server_not_found` for an attachment theO server does not hold); `invalid_server_response` for a wrap no held key opens.\0\x03\nattachment\0\0\0\x06status\0\0\0\x04body\0\0\0\0\0\x15attachmentGetResponse\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let id = attachment_id(attachment)?;
+                let answer: GetAttachmentResponse = http::json(status, body)?;
+                let inner = self.inner_mut()?;
+                let download =
+                    inner.downloads.get_mut(&id).ok_or(ClientError::InvalidInput)?;
+                inner.vault.accept_attachment_key(download, &answer)?;
+                Ok(())
+            }
+            #[doc =
+            " The `attachments/download-chunk` request of chunk `index`."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `invalid_input` for an id with no download or an index past the last chunk."]
+            pub fn attachment_download_chunk_request(&self, attachment: &str,
+                index: u32) -> Result<HttpRequest, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `attachments/download-chunk` request of chunk `index`."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no download or an index past the last chunk."]
+                        #[export_name =
+                        "session_attachmentDownloadChunkRequest_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentDownloadChunkRequest(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u32>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <u32 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u32 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                let _ret = me.attachment_download_chunk_request(arg1, arg2);
+                                                _ret
+                                            }
+                                        });
+                            <Result<HttpRequest, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `attachments/download-chunk` request of chunk `index`."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no download or an index past the last chunk."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentDownloadChunkRequest_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(2u32);
+                            <&str as WasmDescribe>::describe();
+                            <u32 as WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x04; The `attachments/download-chunk` request of chunk `index`.\0\t # ErrorsV `locked`; `invalid_input` for an id with no download or an index past the last chunk.\0\x02\nattachment\0\0\0\x05index\0\0\0\0\0\x1eattachmentDownloadChunkRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let inner = self.inner()?;
+                let download =
+                    inner.downloads.get(&attachment_id(attachment)?).ok_or(ClientError::InvalidInput)?;
+                HttpRequest::post(paths::ATTACHMENTS_DOWNLOAD_CHUNK,
+                    &download.chunk_request(index)?, Some(&inner.token))
+            }
+            #[doc =
+            " Reads the answer for chunk `index` and opens it against this client\'s own layout."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `invalid_input`; the server\'s code; `attachment_incomplete` for a chunk that"]
+            #[doc = " does not open where it was asked for."]
+            pub fn attachment_download_chunk_response(&mut self,
+                attachment: &str, index: u32, status: u16, body: &[u8])
+                -> Result<(), CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Reads the answer for chunk `index` and opens it against this client\'s own layout."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input`; the server\'s code; `attachment_incomplete` for a chunk that"]
+                        #[doc = " does not open where it was asked for."]
+                        #[export_name =
+                        "session_attachmentDownloadChunkResponse_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentDownloadChunkResponse(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<u32 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg3_1:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg3_2:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg3_3:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg3_4:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg4_1:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg4_2:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg4_3:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg4_4:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u32>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <u32 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u32 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u16>();
+                                                let arg3 =
+                                                    unsafe {
+                                                        <u16 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u16 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                                arg3_3, arg3_4))
+                                                    };
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                                let arg4 =
+                                                    unsafe {
+                                                        <[u8] as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                                arg4_3, arg4_4))
+                                                    };
+                                                let arg4 = &*arg4;
+                                                let _ret =
+                                                    me.attachment_download_chunk_response(arg1, arg2, arg3,
+                                                        arg4);
+                                                _ret
+                                            }
+                                        });
+                            <Result<(), CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Reads the answer for chunk `index` and opens it against this client\'s own layout."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input`; the server\'s code; `attachment_incomplete` for a chunk that"]
+                        #[doc = " does not open where it was asked for."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentDownloadChunkResponse_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(4u32);
+                            <&str as WasmDescribe>::describe();
+                            <u32 as WasmDescribe>::describe();
+                            <u16 as WasmDescribe>::describe();
+                            <&[u8] as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05R Reads the answer for chunk `index` and opens it against this client's own layout.\0\t # ErrorsW `locked`; `invalid_input`; the server's code; `attachment_incomplete` for a chunk that& does not open where it was asked for.\0\x04\nattachment\0\0\0\x05index\0\0\0\x06status\0\0\0\x04body\0\0\0\0\0\x1fattachmentDownloadChunkResponse\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let id = attachment_id(attachment)?;
+                let answer: DownloadChunkResponse = http::json(status, body)?;
+                let inner = self.inner_mut()?;
+                let download =
+                    inner.downloads.get_mut(&id).ok_or(ClientError::InvalidInput)?;
+                download.accept_response(index, &answer)?;
+                Ok(())
+            }
+            #[doc =
+            " The verified file, only when every chunk opened (INV-79). The download is forgotten"]
+            #[doc = " either way."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `invalid_input` for an id with no download; `attachment_incomplete`."]
+            pub fn attachment_download_finish(&mut self, attachment: &str)
+                -> Result<Vec<u8>, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The verified file, only when every chunk opened (INV-79). The download is forgotten"]
+                        #[doc = " either way."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no download; `attachment_incomplete`."]
+                        #[export_name =
+                        "session_attachmentDownloadFinish_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentDownloadFinish(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<Vec<u8>, CoreError>
+                                as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.attachment_download_finish(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<Vec<u8>, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The verified file, only when every chunk opened (INV-79). The download is forgotten"]
+                        #[doc = " either way."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for an id with no download; `attachment_incomplete`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentDownloadFinish_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<Vec<u8>, CoreError> as WasmDescribe>::describe();
+                            <Result<Vec<u8>, CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05T The verified file, only when every chunk opened (INV-79). The download is forgotten\x0c either way.\0\t # ErrorsO `locked`; `invalid_input` for an id with no download; `attachment_incomplete`.\0\x01\nattachment\0\0\0\0\0\x18attachmentDownloadFinish\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let id = attachment_id(attachment)?;
+                let download =
+                    self.inner_mut()?.downloads.remove(&id).ok_or(ClientError::InvalidInput)?;
+                let file = download.finish()?;
+                Ok(file.as_slice().to_vec())
+            }
+            #[doc = " Forgets a download without assembling it."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " `locked`; `invalid_input` for a malformed id."]
+            pub fn attachment_download_abort(&mut self, attachment: &str)
+                -> Result<(), CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " Forgets a download without assembling it."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`; `invalid_input` for a malformed id."]
+                        #[export_name =
+                        "session_attachmentDownloadAbort_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentDownloadAbort(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.attachment_download_abort(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<(), CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc = " Forgets a download without assembling it."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`; `invalid_input` for a malformed id."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentDownloadAbort_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x04* Forgets a download without assembling it.\0\t # Errors. `locked`; `invalid_input` for a malformed id.\0\x01\nattachment\0\0\0\0\0\x17attachmentDownloadAbort\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let id = attachment_id(attachment)?;
+                self.inner_mut()?.downloads.remove(&id);
+                Ok(())
+            }
+            #[doc =
+            " The `attachments/delete` request. Send it before [`Session::remove_attachment`]; a"]
+            #[doc = " `server_not_found` answer means it is gone already."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " `locked`; `invalid_input` for a malformed id."]
+            pub fn attachment_delete_request(&self, attachment: &str)
+                -> Result<HttpRequest, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `attachments/delete` request. Send it before [`Session::remove_attachment`]; a"]
+                        #[doc =
+                        " `server_not_found` answer means it is gone already."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`; `invalid_input` for a malformed id."]
+                        #[export_name =
+                        "session_attachmentDeleteRequest_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_attachmentDeleteRequest(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.attachment_delete_request(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<HttpRequest, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `attachments/delete` request. Send it before [`Session::remove_attachment`]; a"]
+                        #[doc =
+                        " `server_not_found` answer means it is gone already."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`; `invalid_input` for a malformed id."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_attachmentDeleteRequest_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05S The `attachments/delete` request. Send it before [`Session::remove_attachment`]; a4 `server_not_found` answer means it is gone already.\0\t # Errors. `locked`; `invalid_input` for a malformed id.\0\x01\nattachment\0\0\0\0\0\x17attachmentDeleteRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let inner = self.inner()?;
+                HttpRequest::post(paths::ATTACHMENTS_DELETE,
+                    &delete_request(attachment_id(attachment)?),
+                    Some(&inner.token))
+            }
+            #[doc =
+            " Removes an attachment from an item: clears its fields in one edit."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `wrong_state` while a sync runs; `unknown_item` if the item does not list"]
+            #[doc = " it; `read_only`."]
+            pub fn remove_attachment(&mut self, id: &str, attachment: &str,
+                now_ms: u64) -> Result<(), CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Removes an attachment from an item: clears its fields in one edit."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` while a sync runs; `unknown_item` if the item does not list"]
+                        #[doc = " it; `read_only`."]
+                        #[export_name = "session_removeAttachment_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_removeAttachment(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg3_1:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg3_2:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg3_3:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg3_4:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                let arg2 = &*arg2;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                                let arg3 =
+                                                    unsafe {
+                                                        <u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                                arg3_3, arg3_4))
+                                                    };
+                                                let _ret = me.remove_attachment(arg1, arg2, arg3);
+                                                _ret
+                                            }
+                                        });
+                            <Result<(), CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Removes an attachment from an item: clears its fields in one edit."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` while a sync runs; `unknown_item` if the item does not list"]
+                        #[doc = " it; `read_only`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_removeAttachment_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(3u32);
+                            <&str as WasmDescribe>::describe();
+                            <&str as WasmDescribe>::describe();
+                            <u64 as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05C Removes an attachment from an item: clears its fields in one edit.\0\t # ErrorsT `locked`; `wrong_state` while a sync runs; `unknown_item` if the item does not list\x11 it; `read_only`.\0\x03\x02id\0\0\0\nattachment\0\0\0\x06now_ms\0\0\0\0\0\x10removeAttachment\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let item = items::item_id(id)?;
+                let attachment = attachment_id(attachment)?;
+                let inner = self.writable()?;
+                inner.vault.remove_attachment(&mut inner.rng, &inner.unlocked,
+                        item, attachment, now_ms)?;
+                Ok(())
+            }
+        }
+        #[automatically_derived]
+        const _: () =
+            {
+                use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                static _INCLUDED_FILES: &[&str] = &[];
+                const _ENCODED_BYTES: &[u8] =
+                    {
+                        const _CHUNK_SLICES: [&[u8]; 1usize] =
+                            [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        #[allow(long_running_const_eval)]
+                        const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                        #[allow(long_running_const_eval)]
+                        const _CHUNKS: [u8; _CHUNK_LEN] =
+                            flat_byte_slices(_CHUNK_SLICES);
+                        const _LEN_BYTES: [u8; 4] =
+                            (_CHUNK_LEN as u32).to_le_bytes();
+                        const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                        #[allow(long_running_const_eval)]
+                        const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                            flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                        &_ENCODED_BYTES
+                    };
+                const _PREFIX_JSON_BYTES: &[u8] =
+                    b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                const _PREFIX_JSON_BYTES_LEN: usize =
+                    _PREFIX_JSON_BYTES.len();
+                const _LEN: usize =
+                    _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                #[link_section = "__wasm_bindgen_unstable"]
+                #[allow(long_running_const_eval)]
+                static _GENERATED: [u8; _LEN] =
+                    flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+            };
+    }
+    pub use attachments::AttachmentView;
     /// How long a re-authentication allows one export: 5 minutes (module docs;
     /// `rizzy_client::export::gate::REAUTH_WINDOW_MS`).
     pub const REAUTH_WINDOW_MS: u64 = gate::REAUTH_WINDOW_MS;
@@ -31289,6 +38954,10 @@ pub mod session {
         global_groups: Vec<EquivalenceGroup>,
         /// The last `sessions/list` answer (ADR 0075), so that an end names only a listed row.
         sessions: Option<SessionList>,
+        /// Attachments sealed and not yet fully sent, by id (ADR 0054; [`attachments`]).
+        uploads: BTreeMap<AttachmentId, AttachmentUpload>,
+        /// Attachments being downloaded and verified, by id.
+        downloads: BTreeMap<AttachmentId, AttachmentDownload>,
     }
     #[wasm_bindgen()]
     #[__wasm_bindgen_retried]
@@ -31592,6 +39261,8 @@ pub mod session {
                                 settings_pending: None,
                                 global_groups: global_equivalence_groups(0).0,
                                 sessions: None,
+                                uploads: BTreeMap::new(),
+                                downloads: BTreeMap::new(),
                             })),
                 })
         }
@@ -36787,6 +44458,138 @@ pub mod session {
                 inner.vault.restore_late_as_new_item(&mut inner.rng,
                         &inner.unlocked, item, item_type, now_ms)?;
             Ok(hex(restored.as_bytes()))
+        }
+        #[doc =
+        " What each custom field\'s autocomplete id does, in list order (ADR 0076 §2.4–§2.5, §3):"]
+        #[doc =
+        " the editor\'s inline errors and its \"also used by\" warning."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " As [`Session::item`]."]
+        pub fn custom_field_autofill(&self, id: &str)
+            ->
+                Result<Vec<crate::autofill::CustomFieldAutofillView>,
+                CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " What each custom field\'s autocomplete id does, in list order (ADR 0076 §2.4–§2.5, §3):"]
+                    #[doc =
+                    " the editor\'s inline errors and its \"also used by\" warning."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " As [`Session::item`]."]
+                    #[export_name =
+                    "session_customFieldAutofill_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_customFieldAutofill(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<Vec<crate::autofill::CustomFieldAutofillView>,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            let _ret = me.custom_field_autofill(arg1);
+                                            _ret
+                                        }
+                                    });
+                        <Result<Vec<crate::autofill::CustomFieldAutofillView>,
+                                    CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " What each custom field\'s autocomplete id does, in list order (ADR 0076 §2.4–§2.5, §3):"]
+                    #[doc =
+                    " the editor\'s inline errors and its \"also used by\" warning."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " As [`Session::item`]."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_customFieldAutofill_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(1u32);
+                        <&str as WasmDescribe>::describe();
+                        <Result<Vec<crate::autofill::CustomFieldAutofillView>,
+                                CoreError> as WasmDescribe>::describe();
+                        <Result<Vec<crate::autofill::CustomFieldAutofillView>,
+                                CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x05\\ What each custom field's autocomplete id does, in list order (ADR 0076 \xc2\xa72.4\xe2\x80\x93\xc2\xa72.5, \xc2\xa73):; the editor's inline errors and its \"also used by\" warning.\0\t # Errors\x16 As [`Session::item`].\0\x01\x02id\0\0\0\0\0\x13customFieldAutofill\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            crate::autofill::custom_field_autofill(&self.inner()?.vault, id)
         }
         #[doc =
         " A breach check of an item\'s `login.password` (CRYPTO.md §11.16; [`crate::breach`]): the"]
@@ -50537,9 +58340,14 @@ pub mod store {
     //!   `cache_meta` row `highest_equivalence_list_version`, an 8-byte big-endian value under that
     //!   UTF-8 key, the same key and encoding `rv`'s `SQLite` file uses (ADR 0051 open question 3).
     //!   This module's row codec is unchanged by it: a `cache_meta` row is already opaque bytes.
+    //!   Format 3 ([ADR 0056] §3) adds `SQLite`'s `item_index` table, which this host does not
+    //!   keep: the browser extension keeps its M2 item list (ADR 0056 owner answer 4), so its
+    //!   format-3 cache is its format-2 one with the format bumped, no store is added to
+    //!   [`STORE_NAMES`], and no index row is ever encoded or decoded here.
     //!
     //! [ADR 0026]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0026-client-device-state-and-cache.md
     //! [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
+    //! [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
     use rizzy_client::ClientError;
     use rizzy_client::rizzy_core::encoding::{
         Reader, put_bytes, put_u8, put_u64,
@@ -53437,8 +61245,8 @@ pub use matching::{
 };
 pub use passkey::{CreatedPasskey, PasskeyAssertion, create_passkey};
 pub use session::{
-    DeviceView, EncryptedExport, ImportReport, Notice, Session, SessionRow,
-    TotpCode, TwoFactorEnrolment, detect_import_format,
+    AttachmentView, DeviceView, EncryptedExport, ImportReport, Notice,
+    Session, SessionRow, TotpCode, TwoFactorEnrolment, detect_import_format,
     ends_session_on_unauthorized, others_ended_notice,
     plaintext_export_hold_ms, plaintext_export_phrase,
     plaintext_export_warning, session_ended_by_you_notice,
