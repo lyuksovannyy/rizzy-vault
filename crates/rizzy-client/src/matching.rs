@@ -34,8 +34,15 @@ pub use rizzy_match::{
 
 use rizzy_match::security::frame_may_request_candidates;
 
+use rizzy_core::item::schema::{ATTR_MATCH, ATTR_VALUE, LIST_URI};
+use rizzy_core::item::types::ItemType;
+use rizzy_core::item::value::ValueRef;
+use rizzy_sync::merge::ItemLifecycle;
+use zeroize::Zeroizing;
+
 use crate::error::ClientError;
 use crate::settings::AccountSettingsRecord;
+use crate::sync::VaultSync;
 
 /// The compiled-in global equivalence list's groups (ADR 0038 §1–§2, §7; gap 27(a) in the M2
 /// gap audit), or empty when none is compiled in yet, or when a compiled-in list fails to
@@ -245,6 +252,106 @@ pub fn decide_with_settings(
         item_uris,
         &matching.view(&global),
     )
+}
+
+/// One saved URI of a vault item, owned, as [`vault_item_uris`] collects them: what an
+/// [`ItemUri`] borrows ([`SavedUri::as_item_uri`]). The value is item data, so it wipes itself and
+/// `Debug` shows nothing.
+pub struct SavedUri {
+    /// The item.
+    pub item_id: [u8; 16],
+    /// The URI's element id.
+    pub uri_id: [u8; 16],
+    /// `uri/<id>/value`.
+    pub value: Zeroizing<String>,
+    /// `uri/<id>/match`: [`MatchMode::AccountDefault`] when absent or cleared, and
+    /// [`MatchMode::Never`] for a value this build does not know (`0x0007`+, written by a newer
+    /// client; narrowing only, INV-38).
+    pub mode: MatchMode,
+}
+
+impl core::fmt::Debug for SavedUri {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("SavedUri([REDACTED])")
+    }
+}
+
+impl SavedUri {
+    /// The borrowed form [`decide_candidates`] takes.
+    #[must_use]
+    pub fn as_item_uri(&self) -> ItemUri<'_> {
+        ItemUri {
+            item_id: self.item_id,
+            uri_id: self.uri_id,
+            value: self.value.as_str(),
+            mode: self.mode,
+        }
+    }
+}
+
+/// Every saved URI of every active item of `vault` (not trashed, not the vault-settings item),
+/// in item and list order: the input of one autofill decision over the whole vault (ADR 0037 §4).
+/// A URI without a text value is left out.
+#[must_use]
+pub fn vault_item_uris(vault: &VaultSync) -> Vec<SavedUri> {
+    let mut out = Vec::new();
+    for item in vault.item_ids() {
+        if vault.item_lifecycle(item) != ItemLifecycle::Active
+            || vault.item_type(item) == Some(ItemType::VAULT_SETTINGS)
+        {
+            continue;
+        }
+        for element in vault.list_elements(item, LIST_URI) {
+            let Some(uri_id) = element_id(element.element.as_str()) else {
+                continue;
+            };
+            let value_key = format!("{LIST_URI}/{}/{ATTR_VALUE}", element.element.as_str());
+            let Some(value) = vault.field_value(item, &value_key) else {
+                continue;
+            };
+            let Ok(ValueRef::Text(text)) = value.decode() else {
+                continue;
+            };
+            let match_key = format!("{LIST_URI}/{}/{ATTR_MATCH}", element.element.as_str());
+            let mode = match vault.field_value(item, &match_key).map(|v| {
+                v.decode().ok().and_then(|r| match r {
+                    ValueRef::Enum(n) => Some(n),
+                    _ => None,
+                })
+            }) {
+                None => MatchMode::AccountDefault,
+                Some(Some(n)) => MatchMode::from_wire(n).unwrap_or(MatchMode::Never),
+                Some(None) => MatchMode::Never,
+            };
+            out.push(SavedUri {
+                item_id: *item.as_bytes(),
+                uri_id,
+                value: Zeroizing::new(text.to_owned()),
+                mode,
+            });
+        }
+    }
+    out
+}
+
+/// A 16-byte element id from its 32 lowercase hex digits.
+fn element_id(hex: &str) -> Option<[u8; 16]> {
+    let digits = hex.as_bytes();
+    if digits.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for (byte, pair) in out.iter_mut().zip(digits.chunks_exact(2)) {
+        let nibble = |d: u8| match d {
+            b'0'..=b'9' => Some(d - b'0'),
+            b'a'..=b'f' => Some(d - b'a' + 10),
+            _ => None,
+        };
+        if let [high, low] = pair {
+            *byte = (nibble(*high)? << 4) | nibble(*low)?;
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]
