@@ -17,10 +17,18 @@
 //! parser, re-encodes them byte for byte, rebuilds each context from the parsed header and
 //! opens the envelope under it.
 //!
-//! The plaintexts of `ITEM_OP`, `ITEM_SNAPSHOT`, `ACCOUNT_SETTINGS`, `EXPORT_FILE` and the
-//! server purposes are opaque placeholder bytes. The item-record encoding (ADR 0018) is
-//! implemented in `rizzy-sync`; the other plaintext formats are not implemented yet. The
-//! envelope does not look inside any of them.
+//! The plaintexts of `ITEM_OP`, `ITEM_SNAPSHOT`, `EXPORT_FILE` and the server purposes are
+//! opaque placeholder bytes. The item-record encoding (ADR 0018) is implemented in
+//! `rizzy-sync`; the other plaintext formats are not implemented yet. The envelope does not look
+//! inside any of them.
+//!
+//! The `ACCOUNT_SETTINGS` plaintext is a real `account_settings_plaintext` ([ADR 0042] §2–§3, "On
+//! acceptance" item 3), written by hand by [`account_settings_plaintext`]: the codec is
+//! `rizzy-client`'s and `rizzy-match`'s, which this crate cannot depend on (ADR 0016), and a
+//! `rizzy-client` test (`settings::vectors`) parses this vector's plaintext with that codec and
+//! re-encodes it byte for byte.
+//!
+//! [ADR 0042]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0042-account-settings-matching-layout.md
 
 use chacha20::ChaCha20Rng;
 use chacha20poly1305::aead::{Aead as _, Payload};
@@ -76,6 +84,44 @@ fn symmetric(rng: &mut ChaCha20Rng, ctx: Obj, plaintext: &[u8]) -> Obj {
         .obj("ctx", ctx)
         .bytes("plaintext", plaintext)
         .bytes("nonce", &random::<24>(rng))
+}
+
+/// A real `account_settings_plaintext` (ADR 0042 §2–§3; module docs), its ids taken from `draw`
+/// (the 120 bytes the earlier opaque placeholder drew, so no later vector of the file moves):
+/// `format_version` 1, one entry, tag `0x0001`: `match_default` Host (`0x0002`), two disabled
+/// global ids (sorted), one user group of `example.com` and `example.net` with
+/// `flag_third_party_hostable = 0x00`. Written field by field, independent of `rizzy-client`'s
+/// and `rizzy-match`'s encoders, which a `rizzy-client` test checks it against.
+fn account_settings_plaintext(draw: &[u8]) -> Vec<u8> {
+    let id = |at: usize| -> [u8; 16] {
+        draw.get(at..at + 16)
+            .and_then(|s| s.try_into().ok())
+            .expect("120 drawn bytes")
+    };
+    let mut disabled = [id(0), id(16)];
+    disabled.sort_unstable();
+    assert_ne!(disabled[0], disabled[1], "two distinct disabled ids");
+    let mut matching = Vec::new();
+    matching.extend_from_slice(&0x0002u16.to_be_bytes());
+    matching.extend_from_slice(&2u16.to_be_bytes());
+    for d in disabled {
+        matching.extend_from_slice(&d);
+    }
+    matching.extend_from_slice(&1u16.to_be_bytes());
+    matching.extend_from_slice(&id(32));
+    matching.extend_from_slice(&2u16.to_be_bytes());
+    for domain in ["example.com", "example.net"] {
+        matching.extend_from_slice(&u32::try_from(domain.len()).expect("short").to_be_bytes());
+        matching.extend_from_slice(domain.as_bytes());
+    }
+    matching.push(0x00);
+    let mut pt = Vec::new();
+    pt.extend_from_slice(&1u16.to_be_bytes()); // format_version
+    pt.extend_from_slice(&1u16.to_be_bytes()); // n
+    pt.extend_from_slice(&0x0001u16.to_be_bytes()); // tag: matching settings
+    pt.extend_from_slice(&u32::try_from(matching.len()).expect("short").to_be_bytes());
+    pt.extend_from_slice(&matching);
+    pt
 }
 
 /// Draws the inputs of one envelope per M1 purpose (two per padded purpose), in §8.4 table
@@ -172,7 +218,7 @@ pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
     let ctx = Obj::new()
         .bytes("account_id", &id(rng))
         .u64("settings_seq", 1 + u64::from(small(rng, 100)));
-    let pt = random_vec(rng, 120);
+    let pt = account_settings_plaintext(&random_vec(rng, 120));
     out.push(vector("ACCOUNT_SETTINGS", 0, symmetric(rng, ctx, &pt)));
 
     let ctx = Obj::new()
