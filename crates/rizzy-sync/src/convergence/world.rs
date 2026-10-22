@@ -247,7 +247,9 @@ pub(super) struct Faults {
     pub(super) shuffle: bool,
     /// Duplicate records inside pages, and whole pages.
     pub(super) duplicate: bool,
-    /// Keep paging during [`World::drain`] too (only the finding test of `named` sets it).
+    /// Keep paging during [`World::drain`] too: the ADR 0050 tests set it, so that every
+    /// Fetch until quiescence may split a tombstone cover from its recorded purge. The
+    /// generated families page during the history only.
     pub(super) page_in_drain: bool,
 }
 
@@ -1059,16 +1061,13 @@ impl World {
     /// until nothing changes (the network is quiet). Returns whether the fixed point was
     /// reached within the round cap.
     ///
-    /// From here on Fetch responses come as one page. A paged response can put a tombstone
-    /// cover in the page of a bodiless header it covers and its recorded purge in a later page;
-    /// the merge then refuses the cover (`PurgeAboveCut`: the purge is above the page's cut),
-    /// the chain stops at a gap, and the next Fetch from the same cursor with the same paging
-    /// repeats it. That is reported as a finding, not hidden: during the history paging stays
-    /// on, and only the drain, which must reach quiescence, fetches whole responses. Exactly
-    /// that refusal (the kind `PurgeAboveCut`, on a page that is a strict prefix of its
-    /// response) is counted apart ([`super::device::DeviceStats::paged_refused`]) and excuses
-    /// the "no gap ever reported" half of property 7 for the run
-    /// ([`World::gap_check_skipped`]); any other refusal stays a violation.
+    /// From here on Fetch responses come as one page, unless [`Faults::page_in_drain`]. A paged
+    /// response can put a tombstone cover in the page of a bodiless header it covers and its
+    /// recorded purge in a later page (of the same chain or another device's); the merge
+    /// refuses the cover (`PurgeAboveCut`: the purge is above the page's cut), and the device
+    /// holds it until a later page of the same response delivers the purge (ADR 0050 §2). A
+    /// hold the response leaves unresolved, and every other refusal of an untainted cover, is a
+    /// violation.
     pub(super) fn drain(&mut self) -> bool {
         self.draining = true;
         for d in 0..self.devices.len() {
@@ -1095,12 +1094,6 @@ impl World {
             last = now;
         }
         false
-    }
-
-    /// Whether the run's "no device ever reported a gap against the honest server" check is
-    /// skipped: a device met the paging finding ([`World::drain`]).
-    pub(super) fn gap_check_skipped(&self) -> bool {
-        self.devices.iter().any(|dev| dev.stats.paged_refused > 0)
     }
 
     /// The ops of U on `item` (see the module docs).
@@ -1314,7 +1307,7 @@ impl World {
                 }
             }
         }
-        let skip_gaps = self.restored || self.gap_check_skipped();
+        let skip_gaps = self.restored;
         for &d in &active {
             let Some(dev) = self.devices.get(d) else {
                 continue;

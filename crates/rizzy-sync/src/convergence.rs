@@ -62,12 +62,13 @@
 //! and the wrap hash in a signed statement (a wrap travels beside its record). Every device
 //! holds the initial item keys from enrolment.
 //!
-//! # Findings
+//! # Paging
 //!
-//! A paged Fetch can split a tombstone cover from its recorded purge, and the device then
-//! stalls against an honest server: see [`named`]'s
-//! `finding_a_paged_tombstone_cover_split_from_its_purge_stalls`. The generated histories page
-//! during the history and fetch whole responses in the drain ([`world::World::drain`]).
+//! A paged Fetch can split a tombstone cover from its recorded purge; the device holds the
+//! cover until a later page of the same response brings the purge (ADR 0050 §2). [`named`]
+//! pins the boundary case and the cross-device one, and [`generate`]'s split histories
+//! (`run_split`) page every Fetch, the drain's included. The generated families page during
+//! the history and fetch whole responses in the drain ([`world::World::drain`]).
 //!
 //! # Readings
 //!

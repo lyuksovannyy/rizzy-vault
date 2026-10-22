@@ -15,6 +15,14 @@
 //!   the merge spike's `integrated` preset drops them (`keepown` = "since newest snapshot"), so
 //!   that a healing request has to send headers without their bodies behind snapshots.
 //!
+//! # Held covers
+//!
+//! A cover the merge refuses only as `PurgeAboveCut` is held for the rest of the response, as
+//! `rizzy-client` holds it (ADR 0050 §2): the log counts it for the chain check, the merge keeps
+//! its plaintext, and the absorption is retried after every page whose commit advanced a chain
+//! and once more after the last page; what is still held then is given up, and counts as a
+//! refusal of an untainted cover (a violation) unless it could lie.
+//!
 //! # Crypto
 //!
 //! The device signs and seals what it writes, and verifies and opens what it is served
@@ -100,7 +108,7 @@ use super::server::{
 };
 use super::{VAULT, crypto};
 use crate::causal::{
-    AuthorStatus, BodyStatus, Report, ServedOp, ServerView, VaultLog, check_op_author,
+    AuthorStatus, BodyStatus, CoverPlan, Report, ServedOp, ServerView, VaultLog, check_op_author,
     check_snapshot_author,
 };
 use crate::dot::Dot;
@@ -133,9 +141,15 @@ pub(super) struct DeviceStats {
     pub(super) absorbed: u64,
     /// Untainted covers the merge refused, other than the paging finding: a violation.
     pub(super) refused: u64,
-    /// Tombstone covers refused as `PurgeAboveCut` on a page that is a strict prefix of its
-    /// response: the paging finding of [`super::world::World::drain`], excused.
-    pub(super) paged_refused: u64,
+    /// Covers refused only as `PurgeAboveCut` and held across the pages of their response
+    /// sequence (ADR 0050 §2).
+    pub(super) held: u64,
+    /// Held covers that ended resolved: the merge took them on a retry, or a cover it took
+    /// since made them moot.
+    pub(super) holds_resolved: u64,
+    /// Held covers the merge took on a retry (the rest of [`DeviceStats::holds_resolved`] were
+    /// moot).
+    pub(super) holds_taken: u64,
     /// Covers refused that could lie (a tainted record, or a tainted device): the reports of
     /// "Snapshots are claims" at work.
     pub(super) lie_refused: u64,
@@ -193,6 +207,9 @@ pub(super) struct Device {
     rng: crypto::Nonces,
     /// Every snapshot record it wrote or absorbed.
     held_snaps: Vec<SnapRecord>,
+    /// Per item, the record of the cover the merge holds in the current response sequence
+    /// (ADR 0050 §2).
+    pending_covers: BTreeMap<ItemId, SnapRecord>,
     /// Snapshots written and not uploaded yet.
     outbox_snaps: Vec<SnapRecord>,
     /// Its HLC.
@@ -279,6 +296,7 @@ impl Device {
             signed: BTreeMap::new(),
             rng: crypto::Nonces::new(seed, id),
             held_snaps: Vec::new(),
+            pending_covers: BTreeMap::new(),
             outbox_snaps: Vec::new(),
             clock: Hlc::ZERO,
             now_ms,
@@ -1337,6 +1355,11 @@ impl Device {
         for page in pages {
             self.process_page(page, &mut touched);
         }
+        // The end of the response sequence (ADR 0050 §2): a last retry, then what is still held
+        // is given up and its links lapse.
+        self.retry_holds(&[], &BTreeMap::new(), &mut touched);
+        self.end_holds();
+        self.deliver(&mut touched);
         for item in touched {
             let due = self.items.get_mut(&item).and_then(ItemMerge::end_fetch);
             if due.is_some() {
@@ -1345,6 +1368,193 @@ impl Device {
         }
         self.last_complete = self.log.complete_fetch_reports();
         self.prune_bodies();
+    }
+
+    /// Absorbs one verified cover under `plan`, with the verified bodies of the page on its
+    /// item, and does what the client does with the outcome: records an absorption, holds a
+    /// cover refused only as `PurgeAboveCut` (ADR 0050 §2), counts any other refusal.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one cover with its record and plaintext, the plan, and the page it came in"
+    )]
+    fn absorb_cover(
+        &mut self,
+        plan: &CoverPlan,
+        header: &SnapshotHeader,
+        record: &SnapRecord,
+        opened: &SecretBytes,
+        served: &[ServedOp],
+        verified: &BTreeMap<Dot, Opened<'_>>,
+        touched: &mut BTreeSet<ItemId>,
+    ) {
+        let item = header.item_id;
+        let Ok(data) = parse_snapshot(&header.covered, opened.expose_secret()) else {
+            return;
+        };
+        let bodies: Vec<(&OpHeader, SymmetricKeyId, OpData<'_>)> = served
+            .iter()
+            .filter(|s| s.header.item_id == item)
+            .filter_map(|s| {
+                let body = verified.get(&s.header.dot)?;
+                Some((&s.header, body.key, parse_op(&body.data).ok()?))
+            })
+            .collect();
+        let with: Vec<OpInput<'_>> = bodies
+            .iter()
+            .map(|(h, key, d)| OpInput {
+                header: h,
+                key_id: *key,
+                data: d,
+            })
+            .collect();
+        let merge = Self::merge_mut(&mut self.items, &self.item_keys, item);
+        // Whether this absorption could involve a lie (ground truth, for the checks only).
+        let could_lie = record.tainted || self.tainted;
+        match merge.absorb_snapshot(
+            SnapshotInput {
+                header,
+                data: &data,
+            },
+            &with,
+            Some(&plan.cut),
+        ) {
+            Ok(absorption) => match absorption.outcome {
+                AbsorbOutcome::Absorbed(absorbed) => {
+                    let taken = merge.covered().clone();
+                    self.log.record_absorbed(plan, item, &taken);
+                    self.stats.claim_cuts += absorption.claim_cuts.len() as u64;
+                    if !absorbed.disagreements.is_empty() {
+                        self.disagreement_items.insert(item);
+                        if !could_lie {
+                            self.honest_disagreements
+                                .extend(absorbed.disagreements.iter().copied());
+                        }
+                    }
+                    self.disagreements.extend(absorbed.disagreements);
+                    if let Some(hlc) = absorbed.receive_hlc {
+                        self.receive(hlc);
+                    }
+                    if !self.held_snaps.contains(record) {
+                        self.held_snaps.push(record.clone());
+                    }
+                    if record.tainted {
+                        self.tainted = true;
+                        self.stats.lies_absorbed += 1;
+                    }
+                    touched.insert(item);
+                    self.stats.absorbed += 1;
+                    if self.end_retried_hold(item) {
+                        self.stats.holds_resolved += 1;
+                        self.stats.holds_taken += 1;
+                    }
+                }
+                AbsorbOutcome::Refused(r) => {
+                    self.stats.claim_cuts += absorption.claim_cuts.len() as u64;
+                    let kind = refusal_kind(&r);
+                    let copy = SecretBytes::copy_from_slice(opened.expose_secret());
+                    let held = r.holds_cover()
+                        && self.log.hold_cover(header)
+                        && merge.hold_claim(header.clone(), copy).is_ok();
+                    if held {
+                        if self.pending_covers.insert(item, record.clone()).is_none() {
+                            self.stats.held += 1;
+                        }
+                    } else {
+                        self.give_up(item, could_lie);
+                    }
+                    // Server-visible metadata only: the cover's VV and author, the refusal's
+                    // kind and the plan's cut (the purge dot of a tombstone is content, and is
+                    // left out).
+                    self.events.push(format!(
+                        "cover {:?} by {:?} refused: {kind} held {held} plan cut {:?}",
+                        header.covered, header.author, plan.cut
+                    ));
+                }
+            },
+            Err(e) => self.errors.push(format!("absorb_snapshot failed: {e:?}")),
+        }
+    }
+
+    /// A cover refused for good: an untainted one is a violation, a tainted one "Snapshots are
+    /// claims" at work. If it was the item's held cover, retried, the hold ends (its links
+    /// lapse, ADR 0050 §2).
+    fn give_up(&mut self, item: ItemId, could_lie: bool) {
+        if could_lie {
+            self.stats.lie_refused += 1;
+        } else {
+            self.stats.refused += 1;
+        }
+        self.end_retried_hold(item);
+    }
+
+    /// Ends the hold of `item` if its held cover is the one being retried: the log holds the
+    /// item and the merge no longer does, since [`Device::retry_holds`] took the claim out. A
+    /// cover of an item whose held cover is still in the merge changes no hold.
+    fn end_retried_hold(&mut self, item: ItemId) -> bool {
+        let taken = self
+            .items
+            .get(&item)
+            .is_none_or(|merge| merge.held_claim().is_none());
+        if taken && self.log.release_hold(item) {
+            self.pending_covers.remove(&item);
+            return true;
+        }
+        false
+    }
+
+    /// Retries every held cover, unchanged, under the log's held plan, as the client does when
+    /// a chain advanced and at the end of the response sequence (ADR 0050 §2). A moot one (a
+    /// cover absorbed since dominates it) is dropped.
+    fn retry_holds(
+        &mut self,
+        served: &[ServedOp],
+        verified: &BTreeMap<Dot, Opened<'_>>,
+        touched: &mut BTreeSet<ItemId>,
+    ) {
+        let items: Vec<ItemId> = self.log.held_items().collect();
+        if items.is_empty() {
+            return;
+        }
+        let plan = self.log.held_plan();
+        for item in items {
+            let mut moot = false;
+            let claim = self.items.get_mut(&item).and_then(|merge| {
+                moot = merge.held_claim_moot();
+                merge.take_held_claim().filter(|_| !moot)
+            });
+            let (Some((header, opened)), Some(record)) =
+                (claim, self.pending_covers.get(&item).cloned())
+            else {
+                self.log.release_hold(item);
+                self.pending_covers.remove(&item);
+                if moot {
+                    self.stats.holds_resolved += 1;
+                }
+                continue;
+            };
+            self.absorb_cover(&plan, &header, &record, &opened, served, verified, touched);
+        }
+    }
+
+    /// The end of a response sequence (ADR 0050 §2): every cover still held is given up, and
+    /// its links lapse into the gap `complete_fetch_reports` reports.
+    fn end_holds(&mut self) {
+        for (item, record) in core::mem::take(&mut self.pending_covers) {
+            if let Some(merge) = self.items.get_mut(&item) {
+                merge.take_held_claim();
+            }
+            let could_lie = record.tainted || self.tainted;
+            if could_lie {
+                self.stats.lie_refused += 1;
+            } else {
+                self.stats.refused += 1;
+                self.events.push(format!(
+                    "held cover {:?} by {:?} unresolved at the end of the response",
+                    record.header.covered, record.header.author
+                ));
+            }
+        }
+        self.log.end_holds();
     }
 
     /// One page through the cycle of the `causal` module docs: verify, plan, absorb, commit,
@@ -1474,93 +1684,18 @@ impl Device {
                     .push(format!("record_header failed at {dot:?}: {e:?}"));
             }
         }
-        // 3. Absorb each named cover, with the verified bodies of this page on its item.
+        // 3. Absorb each named cover, with the verified bodies of this page on its item. A cover
+        //    refused only as `PurgeAboveCut` is held for the response sequence (ADR 0050 §2).
         for &i in &plan.absorb {
             let Some((header, record, opened)) = covers.get(i) else {
                 continue;
             };
-            let item = header.item_id;
-            let Ok(data) = parse_snapshot(&header.covered, opened.expose_secret()) else {
-                continue;
-            };
-            let bodies: Vec<(&OpHeader, SymmetricKeyId, OpData<'_>)> = served
-                .iter()
-                .filter(|s| s.header.item_id == item)
-                .filter_map(|s| {
-                    let body = verified.get(&s.header.dot)?;
-                    Some((&s.header, body.key, parse_op(&body.data).ok()?))
-                })
-                .collect();
-            let with: Vec<OpInput<'_>> = bodies
-                .iter()
-                .map(|(h, key, d)| OpInput {
-                    header: h,
-                    key_id: *key,
-                    data: d,
-                })
-                .collect();
-            let merge = Self::merge_mut(&mut self.items, &self.item_keys, item);
-            // Whether this absorption could involve a lie (ground truth, for the checks only).
-            let could_lie = record.tainted || self.tainted;
-            match merge.absorb_snapshot(
-                SnapshotInput {
-                    header,
-                    data: &data,
-                },
-                &with,
-                Some(&plan.cut),
-            ) {
-                Ok(absorption) => match absorption.outcome {
-                    AbsorbOutcome::Absorbed(absorbed) => {
-                        let taken = merge.covered().clone();
-                        self.log.record_absorbed(&plan, item, &taken);
-                        self.stats.claim_cuts += absorption.claim_cuts.len() as u64;
-                        if !absorbed.disagreements.is_empty() {
-                            self.disagreement_items.insert(item);
-                            if !could_lie {
-                                self.honest_disagreements
-                                    .extend(absorbed.disagreements.iter().copied());
-                            }
-                        }
-                        self.disagreements.extend(absorbed.disagreements);
-                        if let Some(hlc) = absorbed.receive_hlc {
-                            self.receive(hlc);
-                        }
-                        if !self.held_snaps.contains(record) {
-                            self.held_snaps.push((*record).clone());
-                        }
-                        if record.tainted {
-                            self.tainted = true;
-                            self.stats.lies_absorbed += 1;
-                        }
-                        touched.insert(item);
-                        self.stats.absorbed += 1;
-                    }
-                    AbsorbOutcome::Refused(r) => {
-                        self.stats.claim_cuts += absorption.claim_cuts.len() as u64;
-                        let kind = refusal_kind(&r);
-                        if could_lie {
-                            self.stats.lie_refused += 1;
-                        } else if kind == "PurgeAboveCut" && page.partial {
-                            self.stats.paged_refused += 1;
-                        } else {
-                            self.stats.refused += 1;
-                        }
-                        // Server-visible metadata only: the cover's VV and author, the
-                        // refusal's kind and the plan's cut (the purge dot of a tombstone is
-                        // content, and is left out).
-                        self.events.push(format!(
-                            "cover {:?} by {:?} refused: {kind} partial page {} plan cut {:?}",
-                            header.covered, header.author, page.partial, plan.cut
-                        ));
-                    }
-                },
-                Err(e) => self.errors.push(format!("absorb_snapshot failed: {e:?}")),
-            }
+            self.absorb_cover(&plan, header, record, opened, &served, &verified, touched);
         }
-        // 4. Commit.
+        // 4. Commit; a chain that advanced may let a held cover be taken (ADR 0050 §2).
         let commit = self.log.commit(&served);
         self.reports.extend(commit.reports);
+        let advanced = !commit.accepted.is_empty();
         for dot in commit.accepted {
             let Some(header) = self.log.header(dot).cloned() else {
                 continue;
@@ -1584,6 +1719,9 @@ impl Device {
                     },
                 );
             }
+        }
+        if advanced {
+            self.retry_holds(&served, &verified, touched);
         }
         // 5. Deliver.
         self.deliver(touched);
