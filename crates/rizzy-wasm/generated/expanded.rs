@@ -165,9 +165,6 @@ pub mod device {
         Enrolled, LoggedIn, LoginAwaitingSession, LoginInput, LoginStarted,
         start_login,
     };
-    use rizzy_client::matching::{
-        EquivalenceGroup, startup_equivalence_groups,
-    };
     use rizzy_client::passkey::get_assertion;
     use rizzy_client::rizzy_core::item::key::ElementId;
     use rizzy_client::rizzy_core::item::schema::{
@@ -190,7 +187,7 @@ pub mod device {
     };
     use rizzy_client::settings::SettingsCache;
     use rizzy_client::store::floors::Floors;
-    use rizzy_client::store::rows::{CacheRows, Changeset};
+    use rizzy_client::store::rows::CacheRows;
     use rizzy_client::store::{self, record::Stage as RecordStage};
     use rizzy_client::sync::{Authors, VaultSync};
     use wasm_bindgen::prelude::wasm_bindgen;
@@ -1828,7 +1825,7 @@ pub mod device {
                     session: Some(DeviceSession::from_parts(enrolled.device,
                             enrolled.unlocked, account, authors,
                             <[_]>::into_vec(::alloc::boxed::box_new([vault])), rows,
-                            floors, Changeset::new())),
+                            floors)),
                 })
         }
     }
@@ -2135,24 +2132,6 @@ pub mod device {
         #[doc =
         " The account settings of `account`, read once per object (ADR 0042 §6)."]
         settings: SettingsCache,
-        #[doc =
-        " The compiled-in global equivalence list\'s groups, verified once when the session"]
-        #[doc =
-        " started against the cache\'s persisted floor (ADR 0051 §4), for every later decision."]
-        global_groups: Vec<EquivalenceGroup>,
-        #[doc =
-        " Writes of the session\'s start not yet in `cache`: a format migration of the rows it was"]
-        #[doc =
-        " unlocked from ([`store::load::migration_writes`]) and a raised"]
-        #[doc =
-        " `highest_equivalence_list_version` ([`startup_equivalence_groups`]). The first"]
-        #[doc =
-        " [`DeviceSession::drain_cache_writes`] puts them ahead of every other write, through"]
-        #[doc =
-        " [`Floors::admit`] like any other (ADR 0051 §3, INV-75: until the host commits them, a"]
-        #[doc =
-        " restart re-migrates and re-verifies, never accepts an older list)."]
-        start_writes: Changeset,
     }
     #[automatically_derived]
     impl wasm_bindgen::__rt::marker::SupportsConstructor for DeviceSession { }
@@ -2431,15 +2410,10 @@ pub mod device {
     impl DeviceSession {
         /// Wraps an already-unlocked device (used by [`EnrolResult::new`] and
         /// [`DeviceSession::unlock`]).
-        #[expect(clippy::too_many_arguments, reason =
-        "one private constructor over the session's parts; a parts struct would only rename them")]
         fn from_parts(device: DeviceState, unlocked: UnlockedDevice,
             account: VerifiedAccount, authors: Authors,
-            vaults: Vec<VaultSync>, cache: CacheRows, floors: Floors,
-            mut start_writes: Changeset) -> Self {
-            let (global_groups, floor_writes) =
-                startup_equivalence_groups(&floors);
-            start_writes.append(floor_writes);
+            vaults: Vec<VaultSync>, cache: CacheRows, floors: Floors)
+            -> Self {
             Self {
                 device,
                 unlocked,
@@ -2453,8 +2427,6 @@ pub mod device {
                 sync: SyncDriver::default(),
                 rng: os_rng(),
                 settings: SettingsCache::default(),
-                global_groups,
-                start_writes,
             }
         }
         /// The personal vault, read-only (struct docs). A write goes through a direct
@@ -2480,8 +2452,7 @@ pub mod device {
         /// [`ClientError::Internal`] if the changeset breaks a floor (never, for a changeset this
         /// device's own steps produced over its own `floors`) or a row does not encode.
         fn drain_cache_writes(&mut self) -> CoreResult<CacheDelta> {
-            let mut changeset = core::mem::take(&mut self.start_writes);
-            changeset.append(store::account_writes(&self.account));
+            let mut changeset = store::account_writes(&self.account);
             for vault in &mut self.vaults {
                 changeset.append(vault.take_writes());
             }
@@ -2695,11 +2666,7 @@ pub mod device {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             let password = take_secret(password)?;
-            let stored = decode_rows(&cache_rows).map_err(CoreError::from)?;
-            let migration =
-                store::load::migration_writes(&stored).map_err(CoreError::from)?;
-            let mut rows = decode_rows(&cache_rows).map_err(CoreError::from)?;
-            rows.apply(&migration);
+            let rows = decode_rows(&cache_rows).map_err(CoreError::from)?;
             let record = store::load::open(&rows).map_err(CoreError::from)?;
             let unlocked =
                 record.unlock(password.as_str()).map_err(CoreError::from)?;
@@ -2707,8 +2674,7 @@ pub mod device {
                 store::load::load(&rows, &record, &unlocked,
                             now_ms).map_err(CoreError::from)?;
             Ok(Self::from_parts(loaded.device, unlocked, loaded.account,
-                    loaded.authors, loaded.vaults, stored, loaded.floors,
-                    migration))
+                    loaded.authors, loaded.vaults, rows, loaded.floors))
         }
         #[doc = " The account, hex."]
         #[must_use]
@@ -7041,7 +7007,7 @@ pub mod device {
                 };
             let settings = self.settings.get(&self.account, &self.unlocked)?;
             matching::decide_with_account(page_url, is_top_frame,
-                frame_origin, &uris, settings, &self.global_groups)
+                frame_origin, &uris, settings)
         }
         #[doc =
         " The account\'s matching settings, against this build\'s global list."]
@@ -7143,8 +7109,7 @@ pub mod device {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             let settings = self.settings.get(&self.account, &self.unlocked)?;
-            Ok(matching::settings_view(settings.matching(),
-                    &self.global_groups))
+            Ok(matching::settings_view(settings.matching()))
         }
     }
     #[automatically_derived]
@@ -20624,6 +20589,8 @@ mod login {
     //!   §11.4): unlocking is a new login, and a lock drops the [`Session`].
     //! - **Re-authentication** for a plaintext export ([`Session::reauth`]) runs the same OPAQUE
     //!   steps, keeps none of the new login's keys and uploads no certificate.
+    //! - **A refresh** ([`Session::refresh`], ADR 0075 §9) runs them too and keeps only the new
+    //!   session's bearer token, which [`Session::adopt_refresh`] swaps in for the old one.
     //! - **Moving to the server's current OPAQUE setup** ([ADR 0031] point 2). When `login/finish`
     //!   answers `reregister`, the session login holds the typed password, so before the ephemeral
     //!   certificate it runs the same-password re-registration over its OPAQUE session
@@ -20649,6 +20616,7 @@ mod login {
     use rizzy_client::rizzy_proto::change::ReregisterStartResponse;
     use rizzy_client::rizzy_proto::error::ErrorCode;
     use rizzy_client::rizzy_proto::http::paths;
+    use rizzy_client::rizzy_proto::wire::SessionToken;
     use wasm_bindgen::prelude::wasm_bindgen;
     use zeroize::Zeroizing;
     use crate::error::{CoreError, CoreResult, WRONG_STATE};
@@ -20684,6 +20652,11 @@ mod login {
         /// A re-authentication of an open session (plaintext export): only the verified account
         /// id is kept.
         Reauth,
+
+        /// A fresh OPAQUE session for an open one (ADR 0075 §9: "Without freshness, the pane first
+        /// runs a login"): the verified account id and the new bearer token are kept, for
+        /// `Session::adopt_refresh`; no certificate is uploaded.
+        Refresh,
     }
     #[automatically_derived]
     #[doc(hidden)]
@@ -20703,6 +20676,7 @@ mod login {
                 match self {
                     Purpose::Session => "Session",
                     Purpose::Reauth => "Reauth",
+                    Purpose::Refresh => "Refresh",
                 })
         }
     }
@@ -20751,6 +20725,9 @@ mod login {
 
         /// A re-authentication verified this account.
         Reauthenticated(AccountId),
+
+        /// A refresh verified this account and holds its new session's token.
+        Refreshed(AccountId, SessionToken),
 
         /// Failed, or its result was taken.
         Spent,
@@ -21379,7 +21356,8 @@ mod login {
                         Stage::ReregisterCommit(..) | Stage::Certificate(_) =>
                         "request",
                     Stage::NeedsTotp => "needs_totp",
-                    Stage::Done(_) | Stage::Reauthenticated(_) => "done",
+                    Stage::Done(_) | Stage::Reauthenticated(_) |
+                        Stage::Refreshed(..) => "done",
                     Stage::Spent => "failed",
                 }.to_owned()
         }
@@ -22064,9 +22042,8 @@ mod login {
                     Ok(())
                 }
                 Stage::NeedsTotp | Stage::Done(_) | Stage::Reauthenticated(_)
-                    | Stage::Spent => {
-                    Err(CoreError::new(WRONG_STATE))
-                }
+                    | Stage::Refreshed(..) | Stage::Spent =>
+                    Err(CoreError::new(WRONG_STATE)),
             }
         }
         /// ADR 0031 point 2 (module docs): starts the same-password re-registration over the
@@ -22109,8 +22086,28 @@ mod login {
                     self.stage =
                         Stage::Reauthenticated(logged_in.account().account_id());
                 }
+                Purpose::Refresh => {
+                    let token =
+                        SessionToken::new(Zeroizing::new(*logged_in.bearer_token().expose_secret()));
+                    self.stage =
+                        Stage::Refreshed(logged_in.account().account_id(), token);
+                }
             }
             Ok(())
+        }
+        /// The account and new token of a finished refresh, taken once.
+        pub(crate) fn take_refreshed(&mut self)
+            -> Option<(AccountId, SessionToken)> {
+            if !#[allow(non_exhaustive_omitted_patterns)] match self.stage {
+                        Stage::Refreshed(..) => true,
+                        _ => false,
+                    } {
+                return None;
+            }
+            match core::mem::replace(&mut self.stage, Stage::Spent) {
+                Stage::Refreshed(account, token) => Some((account, token)),
+                _ => None,
+            }
         }
         /// The account a finished re-authentication verified.
         pub(crate) const fn reauthenticated(&self) -> Option<AccountId> {
@@ -22138,20 +22135,18 @@ pub mod matching {
     //!
     //! **Two entry points.** The free [`decide_match_candidates`] holds no session and so no account
     //! settings: it takes the account default as an argument and builds its [`EquivalenceView`]
-    //! from the compiled-in global list alone, as a [`GlobalEquivalence`] the host verified once
-    //! (ADR 0037 §7, ADR 0038 §5, [ADR 0051] §4). A host with a session calls the session's
-    //! `decideMatchCandidates` (`crate::Session`, `crate::DeviceSession`) instead: that reads the
-    //! account's `ACCOUNT_SETTINGS` once per object ([ADR 0042] §6,
-    //! `rizzy_client::settings::SettingsCache`) and applies its match default, disabled global groups
-    //! and user groups (`decide_with_account`), over the global groups the session verified when it
-    //! started: a `crate::DeviceSession` against its cache's persisted
-    //! `highest_equivalence_list_version` (INV-39; ADR 0051 §1–§4, raised in its first cache
-    //! write when a newer list verifies), a `crate::Session` (the web vault, no cache) from `0`
-    //! (ADR 0051 §5). While `rizzy_match::compiled::GLOBAL_LIST` is `None`, the only equivalence
-    //! groups are the account's own.
+    //! from the compiled-in global list alone ([`rizzy_client::matching::global_equivalence_groups`],
+    //! ADR 0037 §7, ADR 0038 §5). A host with a session calls the session's `decideMatchCandidates`
+    //! (`crate::Session`, `crate::DeviceSession`) instead: that reads the account's
+    //! `ACCOUNT_SETTINGS` once per object ([ADR 0042] §6, `rizzy_client::settings::SettingsCache`) and
+    //! applies its match default, disabled global groups and user groups
+    //! (`decide_with_account`). Persisting the highest accepted `list_version` across launches
+    //! (INV-39) is still deferred (gap 27(b)): it needs an ADR amending ADR 0026's `cache_meta`
+    //! format, so every call accepts version `0` (`global_equivalence_groups`'s own docs). While
+    //! `rizzy_match::compiled::GLOBAL_LIST` is `None`, the only equivalence groups are the account's
+    //! own.
     //!
     //! [ADR 0042]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0042-account-settings-matching-layout.md
-    //! [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
     use core::fmt;
     use std::collections::BTreeSet;
     use rizzy_client::ClientError;
@@ -24555,527 +24550,11 @@ pub mod matching {
             static _GENERATED: [u8; _LEN] =
                 flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
         };
-    #[wasm_bindgen()]
-    #[__wasm_bindgen_retried]
-    #[doc =
-    " The compiled-in global equivalence list\'s groups, verified once and passed to every"]
-    #[doc =
-    " [`decide_match_candidates`] call instead of being verified per decision (ADR 0051 §4)."]
-    pub struct GlobalEquivalence {
-        #[doc =
-        " The verified groups; empty while no list is compiled in or one fails to verify."]
-        groups: Vec<EquivalenceGroup>,
-    }
-    #[automatically_derived]
-    impl wasm_bindgen::__rt::marker::SupportsConstructor for GlobalEquivalence
-        {
-    }
-    #[automatically_derived]
-    impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for
-        GlobalEquivalence {
-    }
-    #[automatically_derived]
-    impl wasm_bindgen::__rt::marker::SupportsStaticProperty for
-        GlobalEquivalence {
-    }
-    #[automatically_derived]
-    impl wasm_bindgen::describe::WasmDescribe for GlobalEquivalence {
-        fn describe() {
-            use wasm_bindgen::describe::*;
-            inform(RUST_STRUCT);
-            inform(17u32);
-            inform(71u32);
-            inform(108u32);
-            inform(111u32);
-            inform(98u32);
-            inform(97u32);
-            inform(108u32);
-            inform(69u32);
-            inform(113u32);
-            inform(117u32);
-            inform(105u32);
-            inform(118u32);
-            inform(97u32);
-            inform(108u32);
-            inform(101u32);
-            inform(110u32);
-            inform(99u32);
-            inform(101u32);
-            inform(27u32);
-            inform(114u32);
-            inform(105u32);
-            inform(122u32);
-            inform(122u32);
-            inform(121u32);
-            inform(45u32);
-            inform(119u32);
-            inform(97u32);
-            inform(115u32);
-            inform(109u32);
-            inform(45u32);
-            inform(101u32);
-            inform(48u32);
-            inform(57u32);
-            inform(99u32);
-            inform(99u32);
-            inform(48u32);
-            inform(101u32);
-            inform(98u32);
-            inform(51u32);
-            inform(53u32);
-            inform(102u32);
-            inform(56u32);
-            inform(98u32);
-            inform(53u32);
-            inform(56u32);
-            inform(51u32);
-        }
-    }
-    #[automatically_derived]
-    impl wasm_bindgen::convert::IntoWasmAbi for GlobalEquivalence {
-        type Abi =
-            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GlobalEquivalence>>;
-        fn into_abi(self) -> Self::Abi {
-            use wasm_bindgen::__rt::alloc::rc::Rc;
-            use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
-            WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self))) as
-                    *mut WasmRefCell<GlobalEquivalence>)
-        }
-    }
-    #[automatically_derived]
-    impl wasm_bindgen::convert::FromWasmAbi for GlobalEquivalence {
-        type Abi =
-            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GlobalEquivalence>>;
-        unsafe fn from_abi(js: Self::Abi) -> Self {
-            use wasm_bindgen::__rt::alloc::rc::Rc;
-            use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
-            use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
-            let ptr = js.into_ptr();
-            assert_not_null(ptr);
-            let rc = Rc::from_raw(ptr);
-            match Rc::try_unwrap(rc) {
-                Ok(cell) => cell.into_inner(),
-                Err(_) =>
-                    wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
-            }
-        }
-    }
-    #[automatically_derived]
-    impl wasm_bindgen::__rt::core::convert::From<GlobalEquivalence> for
-        wasm_bindgen::JsValue {
-        fn from(value: GlobalEquivalence) -> Self {
-            let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
-            #[link(wasm_import_module = "__wbindgen_placeholder__")]
-            extern "C" {
-                #[link_name = "__wbg_globalequivalence_new_e09cc0eb35f8b583"]
-                fn __wbg_globalequivalence_new(ptr:
-                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GlobalEquivalence>>)
-                -> u32;
-            }
-            unsafe {
-                <wasm_bindgen::JsValue as
-                        wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_globalequivalence_new(ptr))
-            }
-        }
-    }
-    #[automatically_derived]
-    const _: () =
-        {
-            #[export_name = "__wbg_globalequivalence_free_e09cc0eb35f8b583"]
-            #[doc(hidden)]
-            pub unsafe extern "C-unwind" fn __wbg_globalequivalence_free(ptr:
-                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GlobalEquivalence>>,
-                allow_delayed: u32) {
-                use wasm_bindgen::__rt::alloc::rc::Rc;
-                if allow_delayed != 0 {
-                    let ptr = ptr.into_ptr();
-                    wasm_bindgen::__rt::assert_not_null(ptr);
-                    drop(Rc::from_raw(ptr));
-                } else {
-                    let _ =
-                        <GlobalEquivalence as
-                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
-                }
-            }
-        };
-    #[automatically_derived]
-    impl wasm_bindgen::convert::RefFromWasmAbi for GlobalEquivalence {
-        type Abi =
-            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GlobalEquivalence>>;
-        type Anchor = wasm_bindgen::__rt::RcRef<GlobalEquivalence>;
-        unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
-            use wasm_bindgen::__rt::alloc::rc::Rc;
-            let js = js.into_ptr();
-            wasm_bindgen::__rt::assert_not_null(js);
-            Rc::increment_strong_count(js);
-            let rc = Rc::from_raw(js);
-            wasm_bindgen::__rt::RcRef::new(rc)
-        }
-    }
-    #[automatically_derived]
-    impl wasm_bindgen::convert::RefMutFromWasmAbi for GlobalEquivalence {
-        type Abi =
-            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GlobalEquivalence>>;
-        type Anchor = wasm_bindgen::__rt::RcRefMut<GlobalEquivalence>;
-        unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
-            use wasm_bindgen::__rt::alloc::rc::Rc;
-            let js = js.into_ptr();
-            wasm_bindgen::__rt::assert_not_null(js);
-            Rc::increment_strong_count(js);
-            let rc = Rc::from_raw(js);
-            wasm_bindgen::__rt::RcRefMut::new(rc)
-        }
-    }
-    #[automatically_derived]
-    impl wasm_bindgen::convert::LongRefFromWasmAbi for GlobalEquivalence {
-        type Abi =
-            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GlobalEquivalence>>;
-        type Anchor = wasm_bindgen::__rt::RcRef<GlobalEquivalence>;
-        unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
-            <Self as wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
-        }
-    }
-    #[automatically_derived]
-    impl wasm_bindgen::convert::OptionIntoWasmAbi for GlobalEquivalence {
-        #[inline]
-        fn none() -> Self::Abi {
-            <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GlobalEquivalence>>>::null()
-        }
-    }
-    #[automatically_derived]
-    impl wasm_bindgen::convert::OptionFromWasmAbi for GlobalEquivalence {
-        #[inline]
-        fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
-    }
-    #[automatically_derived]
-    impl wasm_bindgen::convert::TryFromJsValue for GlobalEquivalence {
-        fn try_from_js_value(value: wasm_bindgen::JsValue)
-            ->
-                wasm_bindgen::__rt::core::result::Result<Self,
-                wasm_bindgen::JsValue> {
-            Self::try_from_js_value_ref(&value).ok_or(value)
-        }
-        fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
-            -> wasm_bindgen::__rt::core::option::Option<Self> {
-            let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
-            #[link(wasm_import_module = "__wbindgen_placeholder__")]
-            extern "C" {
-                #[link_name =
-                "__wbg_globalequivalence_unwrap_e09cc0eb35f8b583"]
-                fn __wbg_globalequivalence_unwrap(ptr: u32)
-                ->
-                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<GlobalEquivalence>>;
-            }
-            let ptr = unsafe { __wbg_globalequivalence_unwrap(idx) };
-            if ptr.is_null() {
-                wasm_bindgen::__rt::core::option::Option::None
-            } else {
-                unsafe {
-                    wasm_bindgen::__rt::core::option::Option::Some(<Self as
-                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
-                }
-            }
-        }
-    }
-    #[automatically_derived]
-    impl wasm_bindgen::describe::WasmDescribeVector for GlobalEquivalence {
-        fn describe_vector() {
-            use wasm_bindgen::describe::*;
-            inform(VECTOR);
-            <GlobalEquivalence as
-                    wasm_bindgen::describe::WasmDescribe>::describe();
-        }
-    }
-    #[automatically_derived]
-    impl wasm_bindgen::convert::VectorIntoWasmAbi for GlobalEquivalence {
-        type Abi =
-            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
-            wasm_bindgen::convert::IntoWasmAbi>::Abi;
-        fn vector_into_abi(vector:
-                wasm_bindgen::__rt::alloc::boxed::Box<[GlobalEquivalence]>)
-            -> Self::Abi {
-            wasm_bindgen::convert::js_value_vector_into_abi(vector)
-        }
-    }
-    #[automatically_derived]
-    impl wasm_bindgen::convert::VectorFromWasmAbi for GlobalEquivalence {
-        type Abi =
-            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
-            wasm_bindgen::convert::FromWasmAbi>::Abi;
-        unsafe fn vector_from_abi(js: Self::Abi)
-            -> wasm_bindgen::__rt::alloc::boxed::Box<[GlobalEquivalence]> {
-            wasm_bindgen::convert::js_value_vector_from_abi(js)
-        }
-    }
-    #[automatically_derived]
-    const _: () =
-        {
-            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
-            static _INCLUDED_FILES: &[&str] = &[];
-            const _ENCODED_BYTES: &[u8] =
-                {
-                    const _CHUNK_SLICES: [&[u8]; 1usize] =
-                        [b"\0\0\0\x01\x11GlobalEquivalence\0\x02T The compiled-in global equivalence list's groups, verified once and passed to everyX [`decide_match_candidates`] call instead of being verified per decision (ADR 0051 \xc2\xa74).\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
-                    #[allow(long_running_const_eval)]
-                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
-                    #[allow(long_running_const_eval)]
-                    const _CHUNKS: [u8; _CHUNK_LEN] =
-                        flat_byte_slices(_CHUNK_SLICES);
-                    const _LEN_BYTES: [u8; 4] =
-                        (_CHUNK_LEN as u32).to_le_bytes();
-                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
-                    #[allow(long_running_const_eval)]
-                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
-                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
-                    &_ENCODED_BYTES
-                };
-            const _PREFIX_JSON_BYTES: &[u8] =
-                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
-            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
-            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
-            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
-            #[link_section = "__wasm_bindgen_unstable"]
-            #[allow(long_running_const_eval)]
-            static _GENERATED: [u8; _LEN] =
-                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
-        };
-    impl fmt::Debug for GlobalEquivalence {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_struct("GlobalEquivalence").field("groups",
-                    &self.groups.len()).finish()
-        }
-    }
-    impl GlobalEquivalence {
-        #[doc =
-        " Verifies the compiled-in list for a host that keeps no cache, and so no persisted floor:"]
-        #[doc =
-        " from `highest_accepted_version = 0`, as the web vault does every session (ADR 0051 §5)."]
-        #[doc =
-        " A host with a cache uses its `DeviceSession` instead, which verifies against the"]
-        #[doc = " cache\'s persisted floor and raises it."]
-        #[must_use]
-        pub fn without_cache() -> Self {
-            #[automatically_derived]
-            const _: () =
-                {
-                    #[doc =
-                    " Verifies the compiled-in list for a host that keeps no cache, and so no persisted floor:"]
-                    #[doc =
-                    " from `highest_accepted_version = 0`, as the web vault does every session (ADR 0051 §5)."]
-                    #[doc =
-                    " A host with a cache uses its `DeviceSession` instead, which verifies against the"]
-                    #[doc = " cache\'s persisted floor and raises it."]
-                    #[must_use]
-                    #[export_name =
-                    "globalequivalence_withoutCache_e09cc0eb35f8b583"]
-                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_GlobalEquivalence_withoutCache()
-                        ->
-                            wasm_bindgen::convert::WasmRet<<GlobalEquivalence as
-                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
-                        const _: () = {};
-                        let _ret =
-                            wasm_bindgen::__rt::maybe_catch_unwind(||
-                                    {
-                                        { let _ret = GlobalEquivalence::without_cache(); _ret }
-                                    });
-                        <GlobalEquivalence as
-                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
-                    }
-                };
-            #[automatically_derived]
-            const _: () =
-                {
-                    #[doc =
-                    " Verifies the compiled-in list for a host that keeps no cache, and so no persisted floor:"]
-                    #[doc =
-                    " from `highest_accepted_version = 0`, as the web vault does every session (ADR 0051 §5)."]
-                    #[doc =
-                    " A host with a cache uses its `DeviceSession` instead, which verifies against the"]
-                    #[doc = " cache\'s persisted floor and raises it."]
-                    #[must_use]
-                    #[no_mangle]
-                    #[doc(hidden)]
-                    pub extern "C-unwind" fn __wbindgen_describe_globalequivalence_withoutCache_e09cc0eb35f8b583() {
-                        use wasm_bindgen::describe::*;
-                        wasm_bindgen::__rt::link_mem_intrinsics();
-                        inform(FUNCTION);
-                        inform(0);
-                        inform(0u32);
-                        <GlobalEquivalence as WasmDescribe>::describe();
-                        <GlobalEquivalence as WasmDescribe>::describe();
-                    }
-                };
-            #[automatically_derived]
-            const _: () =
-                {
-                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
-                    static _INCLUDED_FILES: &[&str] = &[];
-                    const _ENCODED_BYTES: &[u8] =
-                        {
-                            const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x11GlobalEquivalence\x04Y Verifies the compiled-in list for a host that keeps no cache, and so no persisted floor:Y from `highest_accepted_version = 0`, as the web vault does every session (ADR 0051 \xc2\xa75).Q A host with a cache uses its `DeviceSession` instead, which verifies against the' cache's persisted floor and raises it.\0\0\0\0\x0cwithoutCache\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
-                            #[allow(long_running_const_eval)]
-                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
-                            #[allow(long_running_const_eval)]
-                            const _CHUNKS: [u8; _CHUNK_LEN] =
-                                flat_byte_slices(_CHUNK_SLICES);
-                            const _LEN_BYTES: [u8; 4] =
-                                (_CHUNK_LEN as u32).to_le_bytes();
-                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
-                            #[allow(long_running_const_eval)]
-                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
-                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
-                            &_ENCODED_BYTES
-                        };
-                    const _PREFIX_JSON_BYTES: &[u8] =
-                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
-                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
-                    const _PREFIX_JSON_BYTES_LEN: usize =
-                        _PREFIX_JSON_BYTES.len();
-                    const _LEN: usize =
-                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
-                    #[link_section = "__wasm_bindgen_unstable"]
-                    #[allow(long_running_const_eval)]
-                    static _GENERATED: [u8; _LEN] =
-                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
-                };
-            Self { groups: global_equivalence_groups(0).0 }
-        }
-        #[doc =
-        " How many global groups verified (`0` while no list is compiled in)."]
-        #[must_use]
-        pub fn group_count(&self) -> usize {
-            #[automatically_derived]
-            const _: () =
-                {
-                    #[doc =
-                    " How many global groups verified (`0` while no list is compiled in)."]
-                    #[must_use]
-                    #[export_name =
-                    "globalequivalence_groupCount_e09cc0eb35f8b583"]
-                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_GlobalEquivalence_groupCount(me:
-                            <GlobalEquivalence as
-                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
-                        ->
-                            wasm_bindgen::convert::WasmRet<<usize as
-                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
-                        const _: () =
-                            {
-                                let _:
-                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<GlobalEquivalence>;
-                            };
-                        let _ret =
-                            wasm_bindgen::__rt::maybe_catch_unwind(||
-                                    {
-                                        {
-                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<GlobalEquivalence>();
-                                            let me =
-                                                unsafe {
-                                                    <GlobalEquivalence as
-                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
-                                                };
-                                            let me = &*me;
-                                            let _ret = me.group_count();
-                                            _ret
-                                        }
-                                    });
-                        <usize as
-                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
-                    }
-                };
-            #[automatically_derived]
-            const _: () =
-                {
-                    #[doc =
-                    " How many global groups verified (`0` while no list is compiled in)."]
-                    #[must_use]
-                    #[no_mangle]
-                    #[doc(hidden)]
-                    pub extern "C-unwind" fn __wbindgen_describe_globalequivalence_groupCount_e09cc0eb35f8b583() {
-                        use wasm_bindgen::describe::*;
-                        wasm_bindgen::__rt::link_mem_intrinsics();
-                        inform(FUNCTION);
-                        inform(0);
-                        inform(0u32);
-                        <usize as WasmDescribe>::describe();
-                        <usize as WasmDescribe>::describe();
-                    }
-                };
-            #[automatically_derived]
-            const _: () =
-                {
-                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
-                    static _INCLUDED_FILES: &[&str] = &[];
-                    const _ENCODED_BYTES: &[u8] =
-                        {
-                            const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x11GlobalEquivalence\x01D How many global groups verified (`0` while no list is compiled in).\0\0\0\0\ngroupCount\x01\x01\0\0\0\0\x01\0\x02\ngroupCount\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
-                            #[allow(long_running_const_eval)]
-                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
-                            #[allow(long_running_const_eval)]
-                            const _CHUNKS: [u8; _CHUNK_LEN] =
-                                flat_byte_slices(_CHUNK_SLICES);
-                            const _LEN_BYTES: [u8; 4] =
-                                (_CHUNK_LEN as u32).to_le_bytes();
-                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
-                            #[allow(long_running_const_eval)]
-                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
-                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
-                            &_ENCODED_BYTES
-                        };
-                    const _PREFIX_JSON_BYTES: &[u8] =
-                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
-                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
-                    const _PREFIX_JSON_BYTES_LEN: usize =
-                        _PREFIX_JSON_BYTES.len();
-                    const _LEN: usize =
-                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
-                    #[link_section = "__wasm_bindgen_unstable"]
-                    #[allow(long_running_const_eval)]
-                    static _GENERATED: [u8; _LEN] =
-                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
-                };
-            self.groups.len()
-        }
-    }
-    #[automatically_derived]
-    const _: () =
-        {
-            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
-            static _INCLUDED_FILES: &[&str] = &[];
-            const _ENCODED_BYTES: &[u8] =
-                {
-                    const _CHUNK_SLICES: [&[u8]; 1usize] =
-                        [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
-                    #[allow(long_running_const_eval)]
-                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
-                    #[allow(long_running_const_eval)]
-                    const _CHUNKS: [u8; _CHUNK_LEN] =
-                        flat_byte_slices(_CHUNK_SLICES);
-                    const _LEN_BYTES: [u8; 4] =
-                        (_CHUNK_LEN as u32).to_le_bytes();
-                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
-                    #[allow(long_running_const_eval)]
-                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
-                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
-                    &_ENCODED_BYTES
-                };
-            const _PREFIX_JSON_BYTES: &[u8] =
-                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
-            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
-            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
-            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
-            #[link_section = "__wasm_bindgen_unstable"]
-            #[allow(long_running_const_eval)]
-            static _GENERATED: [u8; _LEN] =
-                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
-        };
     #[allow(dead_code)]
     #[doc =
     " Decides which of `uris` are autofill candidates for `page_url`, requested by the frame at"]
     #[doc =
-    " `frame_origin` (module docs; `rizzy_client::matching::decide_candidates`), over the global"]
-    #[doc = " groups `global` the host verified once (ADR 0051 §4)."]
+    " `frame_origin` (module docs; `rizzy_client::matching::decide_candidates`)."]
     #[doc = ""]
     #[doc =
     " `is_top_frame` and `frame_origin` are the content script\'s own report (ADR 0037 §5);"]
@@ -25092,8 +24571,8 @@ pub mod matching {
     #[expect(clippy::needless_pass_by_value, reason =
     "wasm-bindgen hands this exported call ownership of the JS array as Vec<UriInput>, never a slice")]
     pub fn decide_match_candidates(page_url: &str, is_top_frame: bool,
-        frame_origin: &str, account_default_mode: u16, uris: Vec<UriInput>,
-        global: &GlobalEquivalence) -> Result<MatchDecision, CoreError> {
+        frame_origin: &str, account_default_mode: u16, uris: Vec<UriInput>)
+        -> Result<MatchDecision, CoreError> {
         let account_default = mode_of(account_default_mode)?;
         let mut owned_ids = Vec::with_capacity(uris.len());
         for input in &uris {
@@ -25111,10 +24590,11 @@ pub mod matching {
                             mode: *mode,
                         }).collect();
         let frame = FrameContext { is_top_frame, frame_origin };
+        let global: Vec<EquivalenceGroup> = global_equivalence_groups();
         let no_disabled_groups: BTreeSet<GroupId> = BTreeSet::new();
         let no_user_defined_groups: Vec<EquivalenceGroup> = Vec::new();
         let equivalence =
-            EquivalenceView::new(&global.groups, &no_disabled_groups,
+            EquivalenceView::new(&global, &no_disabled_groups,
                 &no_user_defined_groups);
         let decision =
             matching::decide_candidates(page_url, &frame, account_default,
@@ -25127,8 +24607,7 @@ pub mod matching {
             #[doc =
             " Decides which of `uris` are autofill candidates for `page_url`, requested by the frame at"]
             #[doc =
-            " `frame_origin` (module docs; `rizzy_client::matching::decide_candidates`), over the global"]
-            #[doc = " groups `global` the host verified once (ADR 0051 §4)."]
+            " `frame_origin` (module docs; `rizzy_client::matching::decide_candidates`)."]
             #[doc = ""]
             #[doc =
             " `is_top_frame` and `frame_origin` are the content script\'s own report (ADR 0037 §5);"]
@@ -25204,23 +24683,7 @@ pub mod matching {
                     as wasm_bindgen::convert::WasmAbi>::Prim3,
                 arg4_4:
                     <<Vec<UriInput> as wasm_bindgen::convert::FromWasmAbi>::Abi
-                    as wasm_bindgen::convert::WasmAbi>::Prim4,
-                arg5_1:
-                    <<GlobalEquivalence as
-                    wasm_bindgen::convert::RefFromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim1,
-                arg5_2:
-                    <<GlobalEquivalence as
-                    wasm_bindgen::convert::RefFromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim2,
-                arg5_3:
-                    <<GlobalEquivalence as
-                    wasm_bindgen::convert::RefFromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim3,
-                arg5_4:
-                    <<GlobalEquivalence as
-                    wasm_bindgen::convert::RefFromWasmAbi>::Abi as
-                    wasm_bindgen::convert::WasmAbi>::Prim4)
+                    as wasm_bindgen::convert::WasmAbi>::Prim4)
                 ->
                     wasm_bindgen::convert::WasmRet<<Result<MatchDecision,
                     CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
@@ -25276,18 +24739,8 @@ pub mod matching {
                                                         wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
                                                     arg4_3, arg4_4))
                                         };
-                                    wasm_bindgen::__rt::ensure_ref_unwind_safe::<GlobalEquivalence>();
-                                    let arg5 =
-                                        unsafe {
-                                            <GlobalEquivalence as
-                                                    wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<GlobalEquivalence
-                                                        as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
-                                                        wasm_bindgen::convert::WasmAbi>::join(arg5_1, arg5_2,
-                                                    arg5_3, arg5_4))
-                                        };
-                                    let arg5 = &*arg5;
                                     let _ret =
-                                        decide_match_candidates(arg0, arg1, arg2, arg3, arg4, arg5);
+                                        decide_match_candidates(arg0, arg1, arg2, arg3, arg4);
                                     _ret
                                 }
                             });
@@ -25301,8 +24754,7 @@ pub mod matching {
             #[doc =
             " Decides which of `uris` are autofill candidates for `page_url`, requested by the frame at"]
             #[doc =
-            " `frame_origin` (module docs; `rizzy_client::matching::decide_candidates`), over the global"]
-            #[doc = " groups `global` the host verified once (ADR 0051 §4)."]
+            " `frame_origin` (module docs; `rizzy_client::matching::decide_candidates`)."]
             #[doc = ""]
             #[doc =
             " `is_top_frame` and `frame_origin` are the content script\'s own report (ADR 0037 §5);"]
@@ -25325,13 +24777,12 @@ pub mod matching {
                 wasm_bindgen::__rt::link_mem_intrinsics();
                 inform(FUNCTION);
                 inform(0);
-                inform(6u32);
+                inform(5u32);
                 <&str as WasmDescribe>::describe();
                 <bool as WasmDescribe>::describe();
                 <&str as WasmDescribe>::describe();
                 <u16 as WasmDescribe>::describe();
                 <Vec<UriInput> as WasmDescribe>::describe();
-                <&GlobalEquivalence as WasmDescribe>::describe();
                 <Result<MatchDecision, CoreError> as
                         WasmDescribe>::describe();
                 <Result<MatchDecision, CoreError> as
@@ -25346,7 +24797,7 @@ pub mod matching {
             const _ENCODED_BYTES: &[u8] =
                 {
                     const _CHUNK_SLICES: [&[u8]; 1usize] =
-                        [b"\x01\0\x0bZ Decides which of `uris` are autofill candidates for `page_url`, requested by the frame at[ `frame_origin` (module docs; `rizzy_client::matching::decide_candidates`), over the global7 groups `global` the host verified once (ADR 0051 \xc2\xa74).\0V `is_top_frame` and `frame_origin` are the content script's own report (ADR 0037 \xc2\xa75);D `account_default_mode` resolves any URI whose own mode is `0x0000`.\0\t # Errors\\ `invalid_input` if `page_url` or `account_default_mode` does not parse; a malformed item or] URI id in `uris` is `invalid_input` too (unlike a saved URI that fails to *normalise*, whichR this call reports as a warning instead, per `rizzy_client::matching`'s own docs).\0\x06\x08page_url\0\0\0\x0cis_top_frame\0\0\0\x0cframe_origin\0\0\0\x14account_default_mode\0\0\0\x04uris\0\0\0\x06global\0\0\0\0\0\x15decideMatchCandidates\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        [b"\x01\0\nZ Decides which of `uris` are autofill candidates for `page_url`, requested by the frame atK `frame_origin` (module docs; `rizzy_client::matching::decide_candidates`).\0V `is_top_frame` and `frame_origin` are the content script's own report (ADR 0037 \xc2\xa75);D `account_default_mode` resolves any URI whose own mode is `0x0000`.\0\t # Errors\\ `invalid_input` if `page_url` or `account_default_mode` does not parse; a malformed item or] URI id in `uris` is `invalid_input` too (unlike a saved URI that fails to *normalise*, whichR this call reports as a warning instead, per `rizzy_client::matching`'s own docs).\0\x05\x08page_url\0\0\0\x0cis_top_frame\0\0\0\x0cframe_origin\0\0\0\x14account_default_mode\0\0\0\x04uris\0\0\0\0\0\x15decideMatchCandidates\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                     #[allow(long_running_const_eval)]
                     const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                     #[allow(long_running_const_eval)]
@@ -25399,7 +24850,7 @@ pub mod matching {
     /// As [`decide_match_candidates`].
     pub(crate) fn decide_with_account(page_url: &str, is_top_frame: bool,
         frame_origin: &str, uris: &[UriInput],
-        settings: &AccountSettingsRecord, global: &[EquivalenceGroup])
+        settings: &AccountSettingsRecord)
         -> Result<MatchDecision, CoreError> {
         let mut owned_ids = Vec::with_capacity(uris.len());
         for input in uris {
@@ -25417,7 +24868,7 @@ pub mod matching {
         let frame = FrameContext { is_top_frame, frame_origin };
         let decision =
             matching::decide_with_settings(page_url, &frame, &item_uris,
-                    settings, global)?;
+                    settings)?;
         Ok(decision_view(decision))
     }
     #[wasm_bindgen()]
@@ -26772,10 +26223,10 @@ pub mod matching {
             static _GENERATED: [u8; _LEN] =
                 flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
         };
-    /// The settings screen's view of `settings` against the compiled-in global list's groups
-    /// `global`, as the session verified them at its start (ADR 0051 §4).
-    pub(crate) fn settings_view(settings: &MatchingSettings,
-        global: &[EquivalenceGroup]) -> MatchSettingsView {
+    /// The settings screen's view of `settings` against the compiled-in global list.
+    pub(crate) fn settings_view(settings: &MatchingSettings)
+        -> MatchSettingsView {
+        let global = global_equivalence_groups();
         let disabled = settings.disabled_global();
         let group_view =
             |g: &EquivalenceGroup, disabled: bool|
@@ -29747,6 +29198,7 @@ pub mod session {
     //! | Export | [`Session::reauth`] + [`Session::confirm_reauth`], then [`Session::export_encrypted`], or [`Session::plaintext_warning_shown`] + [`Session::export_plaintext`] after the hold |
     //! | Import | [`detect_import_format`], then [`Session::import_file`] or [`Session::import_encrypted`] |
     //! | Devices | [`Session::devices`] |
+    //! | Sessions (ADR 0075) | [`Session::sessions_list_request`] / [`Session::sessions_list_response`], [`Session::end_session_request`], [`Session::end_other_sessions_request`], [`Session::sign_out_request`] (on lock), [`Session::refresh`] + [`Session::adopt_refresh`] when an end needs a fresh session |
     //! | 2FA | [`Session::two_factor_enrol_request`], [`Session::two_factor_enrol_response`], [`Session::two_factor_confirm_request`], [`Session::two_factor_disable_request`] |
     //!
     //! Every write goes into the vault's memory first; the next sync uploads it. A write is refused
@@ -29785,8 +29237,7 @@ pub mod session {
     use rizzy_client::items::{Dot, FieldEdit, ItemId, TRASH_RETENTION_MS};
     use rizzy_client::login::WebSession;
     use rizzy_client::matching::{
-        EquivalenceGroup, FrameContext, ItemUri, SavedUri,
-        decide_with_settings, global_equivalence_groups, vault_item_uris,
+        FrameContext, ItemUri, SavedUri, decide_with_settings, vault_item_uris,
     };
     use rizzy_client::passkey::get_assertion;
     use rizzy_client::rizzy_core::ids::AccountId;
@@ -29802,8 +29253,13 @@ pub mod session {
     use rizzy_client::rizzy_import::{self, Format};
     use rizzy_client::rizzy_proto::error::ErrorCode;
     use rizzy_client::rizzy_proto::http::paths;
+    use rizzy_client::rizzy_proto::session::SessionListResponse;
     use rizzy_client::rizzy_proto::totp::TotpEnrolStartResponse;
     use rizzy_client::rizzy_proto::wire::SessionToken;
+    use rizzy_client::sessions::{
+        self, ListedSession, OTHERS_ENDED_NOTICE, SESSION_ENDED_BY_YOU_NOTICE,
+        SESSION_ENDED_NOTICE, SessionList,
+    };
     use rizzy_client::settings::{
         PendingSettingsChange, SettingsCache, SettingsEdit, change_settings,
     };
@@ -29818,8 +29274,8 @@ pub mod session {
     use crate::http::{self, HttpRequest};
     use crate::items::{
         self, ConflictValueView, FieldHistoryView, FieldView,
-        HistoryEntryView, ItemDraft, ItemSummary, hex, type_from_name,
-        visible_item,
+        HistoryEntryView, ItemDraft, ItemSummary, hex, parse_id,
+        type_from_name, visible_item,
     };
     use crate::login::{Credentials, LoginFlow, Purpose};
     use crate::matching::{self, MatchDecision, MatchSettingsView};
@@ -29877,10 +29333,8 @@ pub mod session {
         /// A settings change sent to `account/commit` and not yet answered, or kept after a
         /// `state_conflict` for a retry.
         settings_pending: Option<PendingSettingsChange>,
-        /// The compiled-in global equivalence list's groups, verified once when the session starts
-        /// and kept for every decision (ADR 0051 §4). The web vault keeps no cache, so no floor:
-        /// it verifies from `highest_accepted_version = 0` every session (ADR 0051 §5).
-        global_groups: Vec<EquivalenceGroup>,
+        /// The last `sessions/list` answer (ADR 0075), so that an end names only a listed row.
+        sessions: Option<SessionList>,
     }
     #[wasm_bindgen()]
     #[__wasm_bindgen_retried]
@@ -30182,7 +29636,7 @@ pub mod session {
                                 shown_trash_notices: BTreeSet::new(),
                                 settings: SettingsCache::default(),
                                 settings_pending: None,
-                                global_groups: global_equivalence_groups(0).0,
+                                sessions: None,
                             })),
                 })
         }
@@ -37980,6 +37434,1089 @@ pub mod session {
                             }).collect())
         }
         #[doc =
+        " `sessions/list` ([ADR 0075] R1): the account\'s live sessions."]
+        #[doc = ""]
+        #[doc =
+        " [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md"]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `locked`."]
+        pub fn sessions_list_request(&self)
+            -> Result<HttpRequest, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " `sessions/list` ([ADR 0075] R1): the account\'s live sessions."]
+                    #[doc = ""]
+                    #[doc =
+                    " [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md"]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[export_name =
+                    "session_sessionsListRequest_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_sessionsListRequest(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.sessions_list_request();
+                                            _ret
+                                        }
+                                    });
+                        <Result<HttpRequest, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " `sessions/list` ([ADR 0075] R1): the account\'s live sessions."]
+                    #[doc = ""]
+                    #[doc =
+                    " [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md"]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_sessionsListRequest_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Result<HttpRequest, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<HttpRequest, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x06> `sessions/list` ([ADR 0075] R1): the account's live sessions.\0n [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md\0\t # Errors\n `locked`.\0\0\0\0\x13sessionsListRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            Ok(HttpRequest::post_empty(paths::SESSIONS_LIST,
+                    Some(&self.inner()?.token)))
+        }
+        #[doc =
+        " Reads the answer to [`Session::sessions_list_request`]: the rows, newest first. The list"]
+        #[doc =
+        " is kept, so that [`Session::end_session_request`] names only a row it holds. The list is"]
+        #[doc =
+        " the server\'s word (AR-9), for display: never proof that nothing else is open."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `locked`; the server\'s code; `invalid_server_response`."]
+        pub fn sessions_list_response(&mut self, status: u16, body: &[u8])
+            -> Result<Vec<SessionRow>, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Reads the answer to [`Session::sessions_list_request`]: the rows, newest first. The list"]
+                    #[doc =
+                    " is kept, so that [`Session::end_session_request`] names only a row it holds. The list is"]
+                    #[doc =
+                    " the server\'s word (AR-9), for display: never proof that nothing else is open."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `locked`; the server\'s code; `invalid_server_response`."]
+                    #[export_name =
+                    "session_sessionsListResponse_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_sessionsListResponse(me:
+                            <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<Vec<SessionRow>,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let mut me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u16>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <u16 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u16 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let arg2 = &*arg2;
+                                            let _ret = me.sessions_list_response(arg1, arg2);
+                                            _ret
+                                        }
+                                    });
+                        <Result<Vec<SessionRow>, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Reads the answer to [`Session::sessions_list_request`]: the rows, newest first. The list"]
+                    #[doc =
+                    " is kept, so that [`Session::end_session_request`] names only a row it holds. The list is"]
+                    #[doc =
+                    " the server\'s word (AR-9), for display: never proof that nothing else is open."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `locked`; the server\'s code; `invalid_server_response`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_sessionsListResponse_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(2u32);
+                        <u16 as WasmDescribe>::describe();
+                        <&[u8] as WasmDescribe>::describe();
+                        <Result<Vec<SessionRow>, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<Vec<SessionRow>, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x06Y Reads the answer to [`Session::sessions_list_request`]: the rows, newest first. The listY is kept, so that [`Session::end_session_request`] names only a row it holds. The list isN the server's word (AR-9), for display: never proof that nothing else is open.\0\t # Errors8 `locked`; the server's code; `invalid_server_response`.\0\x02\x06status\0\0\0\x04body\0\0\0\0\0\x14sessionsListResponse\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let inner = self.inner_mut()?;
+            let answer: SessionListResponse = http::json(status, body)?;
+            let list = SessionList::from_response(answer)?;
+            let rows = list.sessions().iter().map(SessionRow::of).collect();
+            inner.sessions = Some(list);
+            Ok(rows)
+        }
+        #[doc =
+        " Whether the last list stopped short of the account\'s live sessions (`truncated`)."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `locked`."]
+        pub fn sessions_truncated(&self) -> Result<bool, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Whether the last list stopped short of the account\'s live sessions (`truncated`)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[export_name =
+                    "session_sessionsTruncated_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_sessionsTruncated(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<bool, CoreError> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.sessions_truncated();
+                                            _ret
+                                        }
+                                    });
+                        <Result<bool, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Whether the last list stopped short of the account\'s live sessions (`truncated`)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_sessionsTruncated_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Result<bool, CoreError> as WasmDescribe>::describe();
+                        <Result<bool, CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x04R Whether the last list stopped short of the account's live sessions (`truncated`).\0\t # Errors\n `locked`.\0\0\0\0\x11sessionsTruncated\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            Ok(self.inner()?.sessions.as_ref().is_some_and(SessionList::truncated))
+        }
+        #[doc =
+        " `sessions/end` (R3) for the row `id` (32 hex digits) of the last list; its answer is"]
+        #[doc =
+        " an empty success. Needs a fresh session: on `server_fresh_session_required` the host"]
+        #[doc = " runs [`Session::refresh`] and asks again."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " `locked`; `invalid_input` for an id that is not a row of the last list, or a row that may"]
+        #[doc =
+        " not be ended (a device row, ADR 0075 §5; the current session, which signs out instead)."]
+        pub fn end_session_request(&self, id: &str)
+            -> Result<HttpRequest, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " `sessions/end` (R3) for the row `id` (32 hex digits) of the last list; its answer is"]
+                    #[doc =
+                    " an empty success. Needs a fresh session: on `server_fresh_session_required` the host"]
+                    #[doc = " runs [`Session::refresh`] and asks again."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `locked`; `invalid_input` for an id that is not a row of the last list, or a row that may"]
+                    #[doc =
+                    " not be ended (a device row, ADR 0075 §5; the current session, which signs out instead)."]
+                    #[export_name =
+                    "session_endSessionRequest_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_endSessionRequest(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            let _ret = me.end_session_request(arg1);
+                                            _ret
+                                        }
+                                    });
+                        <Result<HttpRequest, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " `sessions/end` (R3) for the row `id` (32 hex digits) of the last list; its answer is"]
+                    #[doc =
+                    " an empty success. Needs a fresh session: on `server_fresh_session_required` the host"]
+                    #[doc = " runs [`Session::refresh`] and asks again."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `locked`; `invalid_input` for an id that is not a row of the last list, or a row that may"]
+                    #[doc =
+                    " not be ended (a device row, ADR 0075 §5; the current session, which signs out instead)."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_endSessionRequest_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(1u32);
+                        <&str as WasmDescribe>::describe();
+                        <Result<HttpRequest, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<HttpRequest, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x07U `sessions/end` (R3) for the row `id` (32 hex digits) of the last list; its answer isU an empty success. Needs a fresh session: on `server_fresh_session_required` the host* runs [`Session::refresh`] and asks again.\0\t # ErrorsZ `locked`; `invalid_input` for an id that is not a row of the last list, or a row that mayY not be ended (a device row, ADR 0075 \xc2\xa75; the current session, which signs out instead).\0\x01\x02id\0\0\0\0\0\x11endSessionRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let inner = self.inner()?;
+            let wanted = parse_id(id)?;
+            let row =
+                inner.sessions.as_ref().and_then(|l|
+                                l.sessions().iter().find(|s|
+                                        s.session_id() ==
+                                            wanted)).ok_or(CoreError::from(ClientError::InvalidInput))?;
+            HttpRequest::post(paths::SESSIONS_END, &row.end_request()?,
+                Some(&inner.token))
+        }
+        #[doc =
+        " `sessions/others/end` (R4): every other password and recovery session; device sessions"]
+        #[doc =
+        " stay (ADR 0075 §5). Its answer is an empty success. Needs a fresh session, as"]
+        #[doc = " [`Session::end_session_request`]."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `locked`."]
+        pub fn end_other_sessions_request(&self)
+            -> Result<HttpRequest, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " `sessions/others/end` (R4): every other password and recovery session; device sessions"]
+                    #[doc =
+                    " stay (ADR 0075 §5). Its answer is an empty success. Needs a fresh session, as"]
+                    #[doc = " [`Session::end_session_request`]."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[export_name =
+                    "session_endOtherSessionsRequest_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_endOtherSessionsRequest(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.end_other_sessions_request();
+                                            _ret
+                                        }
+                                    });
+                        <Result<HttpRequest, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " `sessions/others/end` (R4): every other password and recovery session; device sessions"]
+                    #[doc =
+                    " stay (ADR 0075 §5). Its answer is an empty success. Needs a fresh session, as"]
+                    #[doc = " [`Session::end_session_request`]."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_endOtherSessionsRequest_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Result<HttpRequest, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<HttpRequest, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x06W `sessions/others/end` (R4): every other password and recovery session; device sessionsO stay (ADR 0075 \xc2\xa75). Its answer is an empty success. Needs a fresh session, as\" [`Session::end_session_request`].\0\t # Errors\n `locked`.\0\0\0\0\x17endOtherSessionsRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            Ok(HttpRequest::post_empty(paths::SESSIONS_OTHERS_END,
+                    Some(&self.inner()?.token)))
+        }
+        #[doc =
+        " `sessions/current/end` (R2), sign-out: the request a host sends, best effort and never"]
+        #[doc =
+        " retried, when it locks (ADR 0075 §6). Build it before [`Session::lock`], which drops the"]
+        #[doc = " token."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `locked`."]
+        pub fn sign_out_request(&self) -> Result<HttpRequest, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " `sessions/current/end` (R2), sign-out: the request a host sends, best effort and never"]
+                    #[doc =
+                    " retried, when it locks (ADR 0075 §6). Build it before [`Session::lock`], which drops the"]
+                    #[doc = " token."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[export_name = "session_signOutRequest_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_signOutRequest(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.sign_out_request();
+                                            _ret
+                                        }
+                                    });
+                        <Result<HttpRequest, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " `sessions/current/end` (R2), sign-out: the request a host sends, best effort and never"]
+                    #[doc =
+                    " retried, when it locks (ADR 0075 §6). Build it before [`Session::lock`], which drops the"]
+                    #[doc = " token."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_signOutRequest_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Result<HttpRequest, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<HttpRequest, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x06W `sessions/current/end` (R2), sign-out: the request a host sends, best effort and neverZ retried, when it locks (ADR 0075 \xc2\xa76). Build it before [`Session::lock`], which drops the\x07 token.\0\t # Errors\n `locked`.\0\0\0\0\x0esignOutRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            Ok(HttpRequest::post_empty(paths::SESSIONS_CURRENT_END,
+                    Some(&self.inner()?.token)))
+        }
+        #[doc =
+        " Starts a fresh OPAQUE login of this session\'s account (ADR 0075 §9: \"Without freshness,"]
+        #[doc =
+        " the pane first runs a login\"), with the Secret Key and master password typed again. The"]
+        #[doc =
+        " host runs the returned flow to `\"done\"` and passes it to [`Session::adopt_refresh`]."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " `locked`; as [`LoginFlow::start`], whose byte-array rules `secret_key` and `password`"]
+        #[doc = " follow (both zeroed on return, [`crate::secret`])."]
+        pub fn refresh(&self, secret_key: &mut [u8], password: &mut [u8],
+            totp: Option<String>) -> Result<LoginFlow, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Starts a fresh OPAQUE login of this session\'s account (ADR 0075 §9: \"Without freshness,"]
+                    #[doc =
+                    " the pane first runs a login\"), with the Secret Key and master password typed again. The"]
+                    #[doc =
+                    " host runs the returned flow to `\"done\"` and passes it to [`Session::adopt_refresh`]."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `locked`; as [`LoginFlow::start`], whose byte-array rules `secret_key` and `password`"]
+                    #[doc =
+                    " follow (both zeroed on return, [`crate::secret`])."]
+                    #[export_name = "session_refresh_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_refresh(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg3_1:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg3_2:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg3_3:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg3_4:
+                            <<Option<String> as wasm_bindgen::convert::FromWasmAbi>::Abi
+                            as wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<LoginFlow, CoreError>
+                            as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            let mut arg1 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &mut *arg1;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            let mut arg2 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let arg2 = &mut *arg2;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<Option<String>>();
+                                            let arg3 =
+                                                unsafe {
+                                                    <Option<String> as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<Option<String>
+                                                                as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
+                                                };
+                                            let _ret = me.refresh(arg1, arg2, arg3);
+                                            _ret
+                                        }
+                                    });
+                        <Result<LoginFlow, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Starts a fresh OPAQUE login of this session\'s account (ADR 0075 §9: \"Without freshness,"]
+                    #[doc =
+                    " the pane first runs a login\"), with the Secret Key and master password typed again. The"]
+                    #[doc =
+                    " host runs the returned flow to `\"done\"` and passes it to [`Session::adopt_refresh`]."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `locked`; as [`LoginFlow::start`], whose byte-array rules `secret_key` and `password`"]
+                    #[doc =
+                    " follow (both zeroed on return, [`crate::secret`])."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_refresh_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(3u32);
+                        <&mut [u8] as WasmDescribe>::describe();
+                        <&mut [u8] as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                        <Result<LoginFlow, CoreError> as WasmDescribe>::describe();
+                        <Result<LoginFlow, CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x07Y Starts a fresh OPAQUE login of this session's account (ADR 0075 \xc2\xa79: \"Without freshness,X the pane first runs a login\"), with the Secret Key and master password typed again. TheU host runs the returned flow to `\"done\"` and passes it to [`Session::adopt_refresh`].\0\t # ErrorsV `locked`; as [`LoginFlow::start`], whose byte-array rules `secret_key` and `password`3 follow (both zeroed on return, [`crate::secret`]).\0\x03\nsecret_key\0\0\0\x08password\0\0\0\x04totp\0\0\0\0\0\x07refresh\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let secret_key = take_secret(secret_key);
+            let password = take_secret(password);
+            let inner = self.inner()?;
+            LoginFlow::begin(Credentials {
+                    origin: inner.origin.clone(),
+                    login_name: inner.login_name.clone(),
+                    secret_key: secret_key?,
+                    password: password?,
+                }, totp.map(Zeroizing::new), Purpose::Refresh)
+        }
+        #[doc =
+        " Switches to the fresh session of a finished [`Session::refresh`] and returns the"]
+        #[doc =
+        " sign-out (R2) of the old one, for the host to send best effort."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " `locked`; `wrong_state` unless the flow is a refresh in state `\"done\"` (taken once);"]
+        #[doc =
+        " `wrong_password_or_secret_key` if it verified another account."]
+        pub fn adopt_refresh(&mut self, flow: &mut LoginFlow)
+            -> Result<HttpRequest, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Switches to the fresh session of a finished [`Session::refresh`] and returns the"]
+                    #[doc =
+                    " sign-out (R2) of the old one, for the host to send best effort."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `locked`; `wrong_state` unless the flow is a refresh in state `\"done\"` (taken once);"]
+                    #[doc =
+                    " `wrong_password_or_secret_key` if it verified another account."]
+                    #[export_name = "session_adoptRefresh_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_adoptRefresh(me:
+                            <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<LoginFlow as
+                            wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<LoginFlow as
+                            wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<LoginFlow as
+                            wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<LoginFlow as
+                            wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let mut me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<LoginFlow>();
+                                            let mut arg1 =
+                                                unsafe {
+                                                    <LoginFlow as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(<<LoginFlow
+                                                                as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &mut *arg1;
+                                            let _ret = me.adopt_refresh(arg1);
+                                            _ret
+                                        }
+                                    });
+                        <Result<HttpRequest, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Switches to the fresh session of a finished [`Session::refresh`] and returns the"]
+                    #[doc =
+                    " sign-out (R2) of the old one, for the host to send best effort."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `locked`; `wrong_state` unless the flow is a refresh in state `\"done\"` (taken once);"]
+                    #[doc =
+                    " `wrong_password_or_secret_key` if it verified another account."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_adoptRefresh_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(1u32);
+                        <&mut LoginFlow as WasmDescribe>::describe();
+                        <Result<HttpRequest, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<HttpRequest, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x06Q Switches to the fresh session of a finished [`Session::refresh`] and returns the@ sign-out (R2) of the old one, for the host to send best effort.\0\t # ErrorsU `locked`; `wrong_state` unless the flow is a refresh in state `\"done\"` (taken once);? `wrong_password_or_secret_key` if it verified another account.\0\x01\x04flow\0\0\0\0\0\x0cadoptRefresh\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let inner = self.inner_mut()?;
+            if flow.purpose() != Purpose::Refresh {
+                return Err(CoreError::new(WRONG_STATE));
+            }
+            let (account, token) =
+                flow.take_refreshed().ok_or(CoreError::new(WRONG_STATE))?;
+            if account != inner.account_id {
+                return Err(ClientError::WrongPasswordOrSecretKey.into());
+            }
+            let old = core::mem::replace(&mut inner.token, token);
+            Ok(HttpRequest::post_empty(paths::SESSIONS_CURRENT_END,
+                    Some(&old)))
+        }
+        #[doc =
         " `totp/enrol/start` (CRYPTO.md §11.15): the server generates the 2FA secret."]
         #[doc = ""]
         #[doc = " # Errors"]
@@ -38684,8 +39221,7 @@ pub mod session {
                 };
             let inner = self.inner_mut()?;
             let record = inner.settings.get(&inner.account, &inner.unlocked)?;
-            Ok(matching::settings_view(record.matching(),
-                    &inner.global_groups))
+            Ok(matching::settings_view(record.matching()))
         }
         #[doc =
         " The autofill candidates among this vault\'s items for `page_url` as a top frame, under the"]
@@ -38829,8 +39365,7 @@ pub mod session {
             let frame =
                 FrameContext { is_top_frame: true, frame_origin: page_url };
             let decision =
-                decide_with_settings(page_url, &frame, &uris, record,
-                        &inner.global_groups)?;
+                decide_with_settings(page_url, &frame, &uris, record)?;
             Ok(matching::decision_view(decision))
         }
         #[doc =
@@ -43098,6 +43633,1372 @@ pub mod session {
         };
     #[wasm_bindgen()]
     #[__wasm_bindgen_retried]
+    #[doc = " One row of the account\'s session list ([ADR 0075] §9)."]
+    #[doc = ""]
+    #[doc =
+    " [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md"]
+    pub struct SessionRow {
+        #[doc = " The `session_id`, hex."]
+        id: String,
+        #[doc =
+        " `password-login`, `password-recheck`, `device`, `recovery` or `unknown`."]
+        kind: &'static str,
+        #[doc =
+        " The device of a device session or a password re-check, hex."]
+        device_id: Option<String>,
+        #[doc = " Creation time."]
+        created_at_ms: u64,
+        #[doc = " Expiry."]
+        expires_at_ms: u64,
+        #[doc = " Whether this is this browser\'s session."]
+        current: bool,
+        #[doc = " Whether \"End\" is offered."]
+        endable: bool,
+    }
+    #[automatically_derived]
+    impl ::core::clone::Clone for SessionRow {
+        #[inline]
+        fn clone(&self) -> SessionRow {
+            SessionRow {
+                id: ::core::clone::Clone::clone(&self.id),
+                kind: ::core::clone::Clone::clone(&self.kind),
+                device_id: ::core::clone::Clone::clone(&self.device_id),
+                created_at_ms: ::core::clone::Clone::clone(&self.created_at_ms),
+                expires_at_ms: ::core::clone::Clone::clone(&self.expires_at_ms),
+                current: ::core::clone::Clone::clone(&self.current),
+                endable: ::core::clone::Clone::clone(&self.endable),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl ::core::fmt::Debug for SessionRow {
+        #[inline]
+        fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+            let names: &'static _ =
+                &["id", "kind", "device_id", "created_at_ms", "expires_at_ms",
+                            "current", "endable"];
+            let values: &[&dyn ::core::fmt::Debug] =
+                &[&self.id, &self.kind, &self.device_id, &self.created_at_ms,
+                            &self.expires_at_ms, &self.current, &&self.endable];
+            ::core::fmt::Formatter::debug_struct_fields_finish(f,
+                "SessionRow", names, values)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsConstructor for SessionRow { }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for SessionRow {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsStaticProperty for SessionRow { }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribe for SessionRow {
+        fn describe() {
+            use wasm_bindgen::describe::*;
+            inform(RUST_STRUCT);
+            inform(10u32);
+            inform(83u32);
+            inform(101u32);
+            inform(115u32);
+            inform(115u32);
+            inform(105u32);
+            inform(111u32);
+            inform(110u32);
+            inform(82u32);
+            inform(111u32);
+            inform(119u32);
+            inform(27u32);
+            inform(114u32);
+            inform(105u32);
+            inform(122u32);
+            inform(122u32);
+            inform(121u32);
+            inform(45u32);
+            inform(119u32);
+            inform(97u32);
+            inform(115u32);
+            inform(109u32);
+            inform(45u32);
+            inform(101u32);
+            inform(48u32);
+            inform(57u32);
+            inform(99u32);
+            inform(99u32);
+            inform(48u32);
+            inform(101u32);
+            inform(98u32);
+            inform(51u32);
+            inform(53u32);
+            inform(102u32);
+            inform(56u32);
+            inform(98u32);
+            inform(53u32);
+            inform(56u32);
+            inform(51u32);
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::IntoWasmAbi for SessionRow {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SessionRow>>;
+        fn into_abi(self) -> Self::Abi {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+            WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self))) as
+                    *mut WasmRefCell<SessionRow>)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::FromWasmAbi for SessionRow {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SessionRow>>;
+        unsafe fn from_abi(js: Self::Abi) -> Self {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+            use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+            let ptr = js.into_ptr();
+            assert_not_null(ptr);
+            let rc = Rc::from_raw(ptr);
+            match Rc::try_unwrap(rc) {
+                Ok(cell) => cell.into_inner(),
+                Err(_) =>
+                    wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::core::convert::From<SessionRow> for
+        wasm_bindgen::JsValue {
+        fn from(value: SessionRow) -> Self {
+            let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_sessionrow_new_e09cc0eb35f8b583"]
+                fn __wbg_sessionrow_new(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SessionRow>>)
+                -> u32;
+            }
+            unsafe {
+                <wasm_bindgen::JsValue as
+                        wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_sessionrow_new(ptr))
+            }
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[export_name = "__wbg_sessionrow_free_e09cc0eb35f8b583"]
+            #[doc(hidden)]
+            pub unsafe extern "C-unwind" fn __wbg_sessionrow_free(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SessionRow>>,
+                allow_delayed: u32) {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                if allow_delayed != 0 {
+                    let ptr = ptr.into_ptr();
+                    wasm_bindgen::__rt::assert_not_null(ptr);
+                    drop(Rc::from_raw(ptr));
+                } else {
+                    let _ =
+                        <SessionRow as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                }
+            }
+        };
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefFromWasmAbi for SessionRow {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SessionRow>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<SessionRow>;
+        unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRef::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefMutFromWasmAbi for SessionRow {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SessionRow>>;
+        type Anchor = wasm_bindgen::__rt::RcRefMut<SessionRow>;
+        unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRefMut::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::LongRefFromWasmAbi for SessionRow {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SessionRow>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<SessionRow>;
+        unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            <Self as wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionIntoWasmAbi for SessionRow {
+        #[inline]
+        fn none() -> Self::Abi {
+            <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SessionRow>>>::null()
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionFromWasmAbi for SessionRow {
+        #[inline]
+        fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::TryFromJsValue for SessionRow {
+        fn try_from_js_value(value: wasm_bindgen::JsValue)
+            ->
+                wasm_bindgen::__rt::core::result::Result<Self,
+                wasm_bindgen::JsValue> {
+            Self::try_from_js_value_ref(&value).ok_or(value)
+        }
+        fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+            -> wasm_bindgen::__rt::core::option::Option<Self> {
+            let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_sessionrow_unwrap_e09cc0eb35f8b583"]
+                fn __wbg_sessionrow_unwrap(ptr: u32)
+                ->
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<SessionRow>>;
+            }
+            let ptr = unsafe { __wbg_sessionrow_unwrap(idx) };
+            if ptr.is_null() {
+                wasm_bindgen::__rt::core::option::Option::None
+            } else {
+                unsafe {
+                    wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                }
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribeVector for SessionRow {
+        fn describe_vector() {
+            use wasm_bindgen::describe::*;
+            inform(VECTOR);
+            <SessionRow as wasm_bindgen::describe::WasmDescribe>::describe();
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorIntoWasmAbi for SessionRow {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::IntoWasmAbi>::Abi;
+        fn vector_into_abi(vector:
+                wasm_bindgen::__rt::alloc::boxed::Box<[SessionRow]>)
+            -> Self::Abi {
+            wasm_bindgen::convert::js_value_vector_into_abi(vector)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorFromWasmAbi for SessionRow {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::FromWasmAbi>::Abi;
+        unsafe fn vector_from_abi(js: Self::Abi)
+            -> wasm_bindgen::__rt::alloc::boxed::Box<[SessionRow]> {
+            wasm_bindgen::convert::js_value_vector_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\x01\nSessionRow\0\x038 One row of the account's session list ([ADR 0075] \xc2\xa79).\0n [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    impl SessionRow {
+        /// The row of a listed session.
+        fn of(session: &ListedSession) -> Self {
+            Self {
+                id: hex(&session.session_id()),
+                kind: session.kind().name(),
+                device_id: session.device_id().map(|d| hex(d.as_bytes())),
+                created_at_ms: session.created_at_ms(),
+                expires_at_ms: session.expires_at_ms(),
+                current: session.current(),
+                endable: session.endable(),
+            }
+        }
+    }
+    impl SessionRow {
+        #[doc =
+        " The `session_id`, 32 hex digits: the handle of [`Session::end_session_request`]."]
+        #[must_use]
+        pub fn id(&self) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The `session_id`, 32 hex digits: the handle of [`Session::end_session_request`]."]
+                    #[must_use]
+                    #[export_name = "sessionrow_id_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_SessionRow_id(me:
+                            <SessionRow as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<SessionRow>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<SessionRow>();
+                                            let me =
+                                                unsafe {
+                                                    <SessionRow as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.id();
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The `session_id`, 32 hex digits: the handle of [`Session::end_session_request`]."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_sessionrow_id_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\nSessionRow\x01Q The `session_id`, 32 hex digits: the handle of [`Session::end_session_request`].\0\0\0\0\x02id\x01\x01\0\0\0\0\x01\0\x02\x02id\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.id.clone()
+        }
+        #[doc =
+        " `password-login` (a web or password login), `password-recheck` (a password re-check"]
+        #[doc =
+        " on a device), `device`, `recovery` (an account recovery in progress) or `unknown`."]
+        #[must_use]
+        pub fn kind(&self) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " `password-login` (a web or password login), `password-recheck` (a password re-check"]
+                    #[doc =
+                    " on a device), `device`, `recovery` (an account recovery in progress) or `unknown`."]
+                    #[must_use]
+                    #[export_name = "sessionrow_kind_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_SessionRow_kind(me:
+                            <SessionRow as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<SessionRow>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<SessionRow>();
+                                            let me =
+                                                unsafe {
+                                                    <SessionRow as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.kind();
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " `password-login` (a web or password login), `password-recheck` (a password re-check"]
+                    #[doc =
+                    " on a device), `device`, `recovery` (an account recovery in progress) or `unknown`."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_sessionrow_kind_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\nSessionRow\x02T `password-login` (a web or password login), `password-recheck` (a password re-checkS on a device), `device`, `recovery` (an account recovery in progress) or `unknown`.\0\0\0\0\x04kind\x01\x01\0\0\0\0\x01\0\x02\x04kind\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.kind.to_owned()
+        }
+        #[doc =
+        " The device of a device session or a password re-check, 32 hex digits."]
+        #[must_use]
+        pub fn device_id(&self) -> Option<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The device of a device session or a password re-check, 32 hex digits."]
+                    #[must_use]
+                    #[export_name = "sessionrow_deviceId_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_SessionRow_deviceId(me:
+                            <SessionRow as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<SessionRow>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<SessionRow>();
+                                            let me =
+                                                unsafe {
+                                                    <SessionRow as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.device_id();
+                                            _ret
+                                        }
+                                    });
+                        <Option<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The device of a device session or a password re-check, 32 hex digits."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_sessionrow_deviceId_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<String> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\nSessionRow\x01F The device of a device session or a password re-check, 32 hex digits.\0\0\0\0\x08deviceId\x01\x01\0\0\0\0\x01\0\x02\x08deviceId\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.device_id.clone()
+        }
+        #[doc =
+        " When the session was opened, milliseconds since the Unix epoch (the server\'s word)."]
+        #[must_use]
+        pub fn created_at_ms(&self) -> u64 {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When the session was opened, milliseconds since the Unix epoch (the server\'s word)."]
+                    #[must_use]
+                    #[export_name = "sessionrow_createdAtMs_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_SessionRow_createdAtMs(me:
+                            <SessionRow as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<u64 as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<SessionRow>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<SessionRow>();
+                                            let me =
+                                                unsafe {
+                                                    <SessionRow as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.created_at_ms();
+                                            _ret
+                                        }
+                                    });
+                        <u64 as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When the session was opened, milliseconds since the Unix epoch (the server\'s word)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_sessionrow_createdAtMs_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <u64 as WasmDescribe>::describe();
+                        <u64 as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\nSessionRow\x01T When the session was opened, milliseconds since the Unix epoch (the server's word).\0\0\0\0\x0bcreatedAtMs\x01\x01\0\0\0\0\x01\0\x02\x0bcreatedAtMs\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.created_at_ms
+        }
+        #[doc =
+        " When the session expires, milliseconds since the Unix epoch (the server\'s word)."]
+        #[must_use]
+        pub fn expires_at_ms(&self) -> u64 {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When the session expires, milliseconds since the Unix epoch (the server\'s word)."]
+                    #[must_use]
+                    #[export_name = "sessionrow_expiresAtMs_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_SessionRow_expiresAtMs(me:
+                            <SessionRow as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<u64 as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<SessionRow>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<SessionRow>();
+                                            let me =
+                                                unsafe {
+                                                    <SessionRow as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.expires_at_ms();
+                                            _ret
+                                        }
+                                    });
+                        <u64 as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When the session expires, milliseconds since the Unix epoch (the server\'s word)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_sessionrow_expiresAtMs_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <u64 as WasmDescribe>::describe();
+                        <u64 as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\nSessionRow\x01Q When the session expires, milliseconds since the Unix epoch (the server's word).\0\0\0\0\x0bexpiresAtMs\x01\x01\0\0\0\0\x01\0\x02\x0bexpiresAtMs\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.expires_at_ms
+        }
+        #[doc = " Whether this is this browser\'s own session."]
+        #[must_use]
+        pub fn current(&self) -> bool {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Whether this is this browser\'s own session."]
+                    #[must_use]
+                    #[export_name = "sessionrow_current_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_SessionRow_current(me:
+                            <SessionRow as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<bool as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<SessionRow>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<SessionRow>();
+                                            let me =
+                                                unsafe {
+                                                    <SessionRow as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.current();
+                                            _ret
+                                        }
+                                    });
+                        <bool as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Whether this is this browser\'s own session."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_sessionrow_current_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <bool as WasmDescribe>::describe();
+                        <bool as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\nSessionRow\x01, Whether this is this browser's own session.\0\0\0\0\x07current\x01\x01\0\0\0\0\x01\0\x02\x07current\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.current
+        }
+        #[doc =
+        " Whether \"End\" is offered: another session\'s password login, re-check or recovery row,"]
+        #[doc = " never a device row (ADR 0075 §5)."]
+        #[must_use]
+        pub fn endable(&self) -> bool {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Whether \"End\" is offered: another session\'s password login, re-check or recovery row,"]
+                    #[doc = " never a device row (ADR 0075 §5)."]
+                    #[must_use]
+                    #[export_name = "sessionrow_endable_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_SessionRow_endable(me:
+                            <SessionRow as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<bool as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<SessionRow>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<SessionRow>();
+                                            let me =
+                                                unsafe {
+                                                    <SessionRow as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.endable();
+                                            _ret
+                                        }
+                                    });
+                        <bool as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Whether \"End\" is offered: another session\'s password login, re-check or recovery row,"]
+                    #[doc = " never a device row (ADR 0075 §5)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_sessionrow_endable_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <bool as WasmDescribe>::describe();
+                        <bool as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\nSessionRow\x02V Whether \"End\" is offered: another session's password login, re-check or recovery row,# never a device row (ADR 0075 \xc2\xa75).\0\0\0\0\x07endable\x01\x01\0\0\0\0\x01\0\x02\x07endable\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.endable
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    #[allow(dead_code)]
+    #[doc =
+    " Whether a `401` answer to a request on `path` means the session has ended ([ADR 0075] §6):"]
+    #[doc =
+    " every `/api/v1` request but `login/*`, `recovery/*` and the sign-out itself. The host then"]
+    #[doc = " locks and shows [`session_ended_notice`]."]
+    #[doc = ""]
+    #[doc =
+    " [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md"]
+    #[must_use]
+    pub fn ends_session_on_unauthorized(path: &str) -> bool {
+        sessions::ends_session_on_unauthorized(path)
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " Whether a `401` answer to a request on `path` means the session has ended ([ADR 0075] §6):"]
+            #[doc =
+            " every `/api/v1` request but `login/*`, `recovery/*` and the sign-out itself. The host then"]
+            #[doc = " locks and shows [`session_ended_notice`]."]
+            #[doc = ""]
+            #[doc =
+            " [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md"]
+            #[must_use]
+            #[export_name = "endsSessionOnUnauthorized_e09cc0eb35f8b583"]
+            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_endsSessionOnUnauthorized(arg0_1:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim1,
+                arg0_2:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim2,
+                arg0_3:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim3,
+                arg0_4:
+                    <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                    wasm_bindgen::convert::WasmAbi>::Prim4)
+                ->
+                    wasm_bindgen::convert::WasmRet<<bool as
+                    wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                const _: () = {};
+                let _ret =
+                    wasm_bindgen::__rt::maybe_catch_unwind(||
+                            {
+                                {
+                                    wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                    let arg0 =
+                                        unsafe {
+                                            <str as
+                                                    wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                        as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                        wasm_bindgen::convert::WasmAbi>::join(arg0_1, arg0_2,
+                                                    arg0_3, arg0_4))
+                                        };
+                                    let arg0 = &*arg0;
+                                    let _ret = ends_session_on_unauthorized(arg0);
+                                    _ret
+                                }
+                            });
+                <bool as
+                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " Whether a `401` answer to a request on `path` means the session has ended ([ADR 0075] §6):"]
+            #[doc =
+            " every `/api/v1` request but `login/*`, `recovery/*` and the sign-out itself. The host then"]
+            #[doc = " locks and shows [`session_ended_notice`]."]
+            #[doc = ""]
+            #[doc =
+            " [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md"]
+            #[must_use]
+            #[no_mangle]
+            #[doc(hidden)]
+            pub extern "C-unwind" fn __wbindgen_describe_endsSessionOnUnauthorized_e09cc0eb35f8b583() {
+                use wasm_bindgen::describe::*;
+                wasm_bindgen::__rt::link_mem_intrinsics();
+                inform(FUNCTION);
+                inform(0);
+                inform(1u32);
+                <&str as WasmDescribe>::describe();
+                <bool as WasmDescribe>::describe();
+                <bool as WasmDescribe>::describe();
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\x01\0\x05\\ Whether a `401` answer to a request on `path` means the session has ended ([ADR 0075] \xc2\xa76):[ every `/api/v1` request but `login/*`, `recovery/*` and the sign-out itself. The host then* locks and shows [`session_ended_notice`].\0n [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md\0\x01\x04path\0\0\0\0\0\x19endsSessionOnUnauthorized\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    #[allow(dead_code)]
+    #[doc = " What the ended web vault shows (ADR 0075 §6)."]
+    #[must_use]
+    pub fn session_ended_notice() -> String {
+        SESSION_ENDED_NOTICE.to_owned()
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc = " What the ended web vault shows (ADR 0075 §6)."]
+            #[must_use]
+            #[export_name = "sessionEndedNotice_e09cc0eb35f8b583"]
+            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_sessionEndedNotice()
+                ->
+                    wasm_bindgen::convert::WasmRet<<String as
+                    wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                const _: () = {};
+                let _ret =
+                    wasm_bindgen::__rt::maybe_catch_unwind(||
+                            { { let _ret = session_ended_notice(); _ret } });
+                <String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc = " What the ended web vault shows (ADR 0075 §6)."]
+            #[must_use]
+            #[no_mangle]
+            #[doc(hidden)]
+            pub extern "C-unwind" fn __wbindgen_describe_sessionEndedNotice_e09cc0eb35f8b583() {
+                use wasm_bindgen::describe::*;
+                wasm_bindgen::__rt::link_mem_intrinsics();
+                inform(FUNCTION);
+                inform(0);
+                inform(0u32);
+                <String as WasmDescribe>::describe();
+                <String as WasmDescribe>::describe();
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\x01\0\x01/ What the ended web vault shows (ADR 0075 \xc2\xa76).\0\0\0\0\x12sessionEndedNotice\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    #[allow(dead_code)]
+    #[doc = " The confirmation after ending other sessions (ADR 0075 §8)."]
+    #[must_use]
+    pub fn others_ended_notice() -> String { OTHERS_ENDED_NOTICE.to_owned() }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " The confirmation after ending other sessions (ADR 0075 §8)."]
+            #[must_use]
+            #[export_name = "othersEndedNotice_e09cc0eb35f8b583"]
+            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_othersEndedNotice()
+                ->
+                    wasm_bindgen::convert::WasmRet<<String as
+                    wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                const _: () = {};
+                let _ret =
+                    wasm_bindgen::__rt::maybe_catch_unwind(||
+                            { { let _ret = others_ended_notice(); _ret } });
+                <String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " The confirmation after ending other sessions (ADR 0075 §8)."]
+            #[must_use]
+            #[no_mangle]
+            #[doc(hidden)]
+            pub extern "C-unwind" fn __wbindgen_describe_othersEndedNotice_e09cc0eb35f8b583() {
+                use wasm_bindgen::describe::*;
+                wasm_bindgen::__rt::link_mem_intrinsics();
+                inform(FUNCTION);
+                inform(0);
+                inform(0u32);
+                <String as WasmDescribe>::describe();
+                <String as WasmDescribe>::describe();
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\x01\0\x01= The confirmation after ending other sessions (ADR 0075 \xc2\xa78).\0\0\0\0\x11othersEndedNotice\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    #[allow(dead_code)]
+    #[doc = " The confirmation after ending one session (ADR 0075 §8)."]
+    #[must_use]
+    pub fn session_ended_by_you_notice() -> String {
+        SESSION_ENDED_BY_YOU_NOTICE.to_owned()
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " The confirmation after ending one session (ADR 0075 §8)."]
+            #[must_use]
+            #[export_name = "sessionEndedByYouNotice_e09cc0eb35f8b583"]
+            pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_sessionEndedByYouNotice()
+                ->
+                    wasm_bindgen::convert::WasmRet<<String as
+                    wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                const _: () = {};
+                let _ret =
+                    wasm_bindgen::__rt::maybe_catch_unwind(||
+                            { { let _ret = session_ended_by_you_notice(); _ret } });
+                <String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            #[doc =
+            " The confirmation after ending one session (ADR 0075 §8)."]
+            #[must_use]
+            #[no_mangle]
+            #[doc(hidden)]
+            pub extern "C-unwind" fn __wbindgen_describe_sessionEndedByYouNotice_e09cc0eb35f8b583() {
+                use wasm_bindgen::describe::*;
+                wasm_bindgen::__rt::link_mem_intrinsics();
+                inform(FUNCTION);
+                inform(0);
+                inform(0u32);
+                <String as WasmDescribe>::describe();
+                <String as WasmDescribe>::describe();
+            }
+        };
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\x01\0\x01: The confirmation after ending one session (ADR 0075 \xc2\xa78).\0\0\0\0\x17sessionEndedByYouNotice\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    #[wasm_bindgen()]
+    #[__wasm_bindgen_retried]
     #[doc = " One durable device of the account."]
     pub struct DeviceView {
         #[doc = " The device id, hex."]
@@ -46537,15 +48438,10 @@ pub mod store {
     //!   → `KvRow` diff (write only the rows a step actually touched) is a documented follow-up,
     //!   not a correctness requirement ([`CacheRows::apply`] is still the only place a write's
     //!   meaning is decided; this module never reimplements it).
-    //! - **Migration.** `rizzy-client` decides it (`rizzy_client::store::load::migration_writes`,
-    //!   ADR 0026 §5): `DeviceSession::unlock` applies it to the rows it loads and hands the same
-    //!   writes to the host in its first drained delta. Format 2 ([ADR 0051] §2) adds the one
-    //!   `cache_meta` row `highest_equivalence_list_version`, an 8-byte big-endian value under that
-    //!   UTF-8 key, the same key and encoding `rv`'s `SQLite` file uses (ADR 0051 open question 3).
-    //!   This module's row codec is unchanged by it: a `cache_meta` row is already opaque bytes.
+    //! - **Migration.** Cache format 1 is the only format `rizzy-client` itself knows yet (its own
+    //!   module docs, "Not in this build"); this module inherits that.
     //!
     //! [ADR 0026]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0026-client-device-state-and-cache.md
-    //! [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
     use rizzy_client::ClientError;
     use rizzy_client::rizzy_core::encoding::{
         Reader, put_bytes, put_u8, put_u64,
@@ -49437,14 +51333,16 @@ pub use items::{
 };
 pub use login::LoginFlow;
 pub use matching::{
-    GlobalEquivalence, MatchDecision, decide_match_candidates,
-    normalize_page_url,
+    MatchDecision, decide_match_candidates, normalize_page_url,
 };
 pub use passkey::{CreatedPasskey, PasskeyAssertion, create_passkey};
 pub use session::{
-    DeviceView, EncryptedExport, ImportReport, Notice, Session, TotpCode,
-    TwoFactorEnrolment, detect_import_format, plaintext_export_hold_ms,
-    plaintext_export_phrase, plaintext_export_warning,
+    DeviceView, EncryptedExport, ImportReport, Notice, Session, SessionRow,
+    TotpCode, TwoFactorEnrolment, detect_import_format,
+    ends_session_on_unauthorized, others_ended_notice,
+    plaintext_export_hold_ms, plaintext_export_phrase,
+    plaintext_export_warning, session_ended_by_you_notice,
+    session_ended_notice,
 };
 pub use signup::{EmergencyKit, SignupFlow};
 pub use store::{KvRow, cache_store_names};

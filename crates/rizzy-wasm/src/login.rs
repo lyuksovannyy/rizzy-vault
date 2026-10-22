@@ -26,6 +26,8 @@
 //!   §11.4): unlocking is a new login, and a lock drops the [`Session`].
 //! - **Re-authentication** for a plaintext export ([`Session::reauth`]) runs the same OPAQUE
 //!   steps, keeps none of the new login's keys and uploads no certificate.
+//! - **A refresh** ([`Session::refresh`], ADR 0075 §9) runs them too and keeps only the new
+//!   session's bearer token, which [`Session::adopt_refresh`] swaps in for the old one.
 //! - **Moving to the server's current OPAQUE setup** ([ADR 0031] point 2). When `login/finish`
 //!   answers `reregister`, the session login holds the typed password, so before the ephemeral
 //!   certificate it runs the same-password re-registration over its OPAQUE session
@@ -48,6 +50,7 @@ use rizzy_client::rizzy_proto::auth::{LoginFinishResponse, LoginStartResponse};
 use rizzy_client::rizzy_proto::change::ReregisterStartResponse;
 use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::rizzy_proto::http::paths;
+use rizzy_client::rizzy_proto::wire::SessionToken;
 use wasm_bindgen::prelude::wasm_bindgen;
 use zeroize::Zeroizing;
 
@@ -87,6 +90,10 @@ pub(crate) enum Purpose {
     /// A re-authentication of an open session (plaintext export): only the verified account
     /// id is kept.
     Reauth,
+    /// A fresh OPAQUE session for an open one (ADR 0075 §9: "Without freshness, the pane first
+    /// runs a login"): the verified account id and the new bearer token are kept, for
+    /// `Session::adopt_refresh`; no certificate is uploaded.
+    Refresh,
 }
 
 /// Where the flow is.
@@ -108,6 +115,8 @@ enum Stage {
     Done(Box<WebSession>),
     /// A re-authentication verified this account.
     Reauthenticated(AccountId),
+    /// A refresh verified this account and holds its new session's token.
+    Refreshed(AccountId, SessionToken),
     /// Failed, or its result was taken.
     Spent,
 }
@@ -186,7 +195,7 @@ impl LoginFlow {
             | Stage::ReregisterCommit(..)
             | Stage::Certificate(_) => "request",
             Stage::NeedsTotp => "needs_totp",
-            Stage::Done(_) | Stage::Reauthenticated(_) => "done",
+            Stage::Done(_) | Stage::Reauthenticated(_) | Stage::Refreshed(..) => "done",
             Stage::Spent => "failed",
         }
         .to_owned()
@@ -358,9 +367,11 @@ impl LoginFlow {
                 self.stage = Stage::Done(web);
                 Ok(())
             }
-            Stage::NeedsTotp | Stage::Done(_) | Stage::Reauthenticated(_) | Stage::Spent => {
-                Err(CoreError::new(WRONG_STATE))
-            }
+            Stage::NeedsTotp
+            | Stage::Done(_)
+            | Stage::Reauthenticated(_)
+            | Stage::Refreshed(..)
+            | Stage::Spent => Err(CoreError::new(WRONG_STATE)),
         }
     }
 
@@ -404,8 +415,25 @@ impl LoginFlow {
             Purpose::Reauth => {
                 self.stage = Stage::Reauthenticated(logged_in.account().account_id());
             }
+            Purpose::Refresh => {
+                // A copy into a new wiped buffer; `logged_in` wipes its own on drop.
+                let token =
+                    SessionToken::new(Zeroizing::new(*logged_in.bearer_token().expose_secret()));
+                self.stage = Stage::Refreshed(logged_in.account().account_id(), token);
+            }
         }
         Ok(())
+    }
+
+    /// The account and new token of a finished refresh, taken once.
+    pub(crate) fn take_refreshed(&mut self) -> Option<(AccountId, SessionToken)> {
+        if !matches!(self.stage, Stage::Refreshed(..)) {
+            return None;
+        }
+        match core::mem::replace(&mut self.stage, Stage::Spent) {
+            Stage::Refreshed(account, token) => Some((account, token)),
+            _ => None,
+        }
     }
 
     /// The account a finished re-authentication verified.
