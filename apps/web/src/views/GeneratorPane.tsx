@@ -123,7 +123,7 @@ export function GeneratorPane(props: { readonly ctx: VaultContext }) {
 
   return (
     <div className="panel narrow generator-pane">
-      <h2>Generator</h2>
+      <h1>Generator</h1>
       <fieldset>
         <legend>Kind</legend>
         <label className="check">

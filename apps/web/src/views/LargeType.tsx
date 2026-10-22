@@ -19,7 +19,7 @@
 // Close button, since a `<button>` is not a typing target (`shortcuts.ts`'s `isTypingTarget`) —
 // `N` silently swapped the item detail pane to a blank draft mid-read, and `?`/Ctrl+K opened
 // another dialog stacked on top.
-import { setModalOpen } from "@rizzy-vault/ui";
+import { setModalOpen, trapTab } from "@rizzy-vault/ui";
 import { useEffect, useId, useRef } from "react";
 
 import { charCells } from "../largeType.ts";
@@ -31,6 +31,7 @@ export function LargeType(props: { readonly label: string; readonly value: strin
   const { value, onClose } = props;
   const titleId = useId();
   const closeRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const previouslyFocused = useRef<Element | null>(null);
 
   useEffect(() => {
@@ -66,11 +67,14 @@ export function LargeType(props: { readonly label: string; readonly value: strin
         aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={`${titleId}-value`}
+        ref={dialogRef}
         onKeyDown={(e) => {
           if (e.key === "Escape") {
             e.preventDefault();
             onClose();
+            return;
           }
+          trapTab(e, dialogRef.current);
         }}
       >
         <h2 id={titleId}>{props.label}</h2>

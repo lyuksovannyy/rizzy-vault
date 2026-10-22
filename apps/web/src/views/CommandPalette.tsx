@@ -225,7 +225,6 @@ function Dialog(props: {
               id={`${listboxId}-${index}`}
               role="option"
               aria-selected={index === safeActiveIndex}
-              aria-label={row.sub === undefined ? row.label : `${row.label} — ${row.sub}`}
               className={index === safeActiveIndex ? "row selected" : "row"}
               onMouseEnter={() => setActiveIndex(index)}
               onClick={() => runRow(row)}
@@ -233,6 +232,8 @@ function Dialog(props: {
               <span className="row-icon" aria-hidden="true">
                 {row.icon}
               </span>
+              {/* The option's accessible name is its visible text (WCAG 2.5.3 "label in
+                  name"): the title, then the sub line, which the column layout separates. */}
               <span className="row-text">
                 <span className="row-title">{row.label}</span>
                 {row.sub !== undefined && <span className="row-sub">{row.sub}</span>}
