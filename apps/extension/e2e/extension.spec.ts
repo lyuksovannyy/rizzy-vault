@@ -200,6 +200,10 @@ async function openInlineMenuWithOneCandidate(context: BrowserContext, extension
           // `render()` and `#list` never gets a button, which is exactly the hang this fixture
           // used to produce before these two fields were added here.
           pageHost: location.hostname,
+          // ADR 0043: a show message without a canonical instance token is refused like any
+          // other malformed one. Nothing registers this one with the background, so the fill
+          // request it leads to is refused there; this test only checks the pick teardown.
+          instanceToken: crypto.randomUUID(),
           candidates: [{ itemId, title: "Example", username: "alice", needsWarning: false, savedHost: location.hostname }],
         },
         location.origin,
