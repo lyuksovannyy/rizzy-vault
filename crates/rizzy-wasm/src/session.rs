@@ -27,6 +27,7 @@
 //! | Export | [`Session::reauth`] + [`Session::confirm_reauth`], then [`Session::export_encrypted`], or [`Session::plaintext_warning_shown`] + [`Session::export_plaintext`] after the hold |
 //! | Import | [`detect_import_format`], then [`Session::import_file`] or [`Session::import_encrypted`] |
 //! | Devices | [`Session::devices`] |
+//! | Sessions (ADR 0075) | [`Session::sessions_list_request`] / [`Session::sessions_list_response`], [`Session::end_session_request`], [`Session::end_other_sessions_request`], [`Session::sign_out_request`] (on lock), [`Session::refresh`] + [`Session::adopt_refresh`] when an end needs a fresh session |
 //! | 2FA | [`Session::two_factor_enrol_request`], [`Session::two_factor_enrol_response`], [`Session::two_factor_confirm_request`], [`Session::two_factor_disable_request`] |
 //!
 //! Every write goes into the vault's memory first; the next sync uploads it. A write is refused
@@ -83,8 +84,13 @@ use rizzy_client::rizzy_core::totp::{OtpAuthUri, TotpParams, TotpSecret};
 use rizzy_client::rizzy_import::{self, Format};
 use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::rizzy_proto::http::paths;
+use rizzy_client::rizzy_proto::session::SessionListResponse;
 use rizzy_client::rizzy_proto::totp::TotpEnrolStartResponse;
 use rizzy_client::rizzy_proto::wire::SessionToken;
+use rizzy_client::sessions::{
+    self, ListedSession, OTHERS_ENDED_NOTICE, SESSION_ENDED_BY_YOU_NOTICE, SESSION_ENDED_NOTICE,
+    SessionList,
+};
 use rizzy_client::settings::{PendingSettingsChange, SettingsCache, SettingsEdit, change_settings};
 use rizzy_client::sync::{Authors, VaultSync};
 use rizzy_client::two_factor::{TotpEnrolment, disable_request};
@@ -95,7 +101,7 @@ use crate::error::{CoreError, CoreResult, IMPORT_FAILED, LOCKED, UNKNOWN_FORMAT,
 use crate::http::{self, HttpRequest};
 use crate::items::{
     self, ConflictValueView, FieldHistoryView, FieldView, HistoryEntryView, ItemDraft, ItemSummary,
-    hex, type_from_name, visible_item,
+    hex, parse_id, type_from_name, visible_item,
 };
 use crate::login::{Credentials, LoginFlow, Purpose};
 use crate::matching::{self, MatchDecision, MatchSettingsView};
@@ -159,6 +165,8 @@ struct Inner {
     /// and kept for every decision (ADR 0051 §4). The web vault keeps no cache, so no floor:
     /// it verifies from `highest_accepted_version = 0` every session (ADR 0051 §5).
     global_groups: Vec<EquivalenceGroup>,
+    /// The last `sessions/list` answer (ADR 0075), so that an end names only a listed row.
+    sessions: Option<SessionList>,
 }
 
 /// An unlocked web-vault session (module docs). `Debug` shows nothing secret.
@@ -219,6 +227,7 @@ impl Session {
                 settings: SettingsCache::default(),
                 settings_pending: None,
                 global_groups: global_equivalence_groups(0).0,
+                sessions: None,
             })),
         })
     }
@@ -1293,6 +1302,152 @@ impl Session {
             .collect())
     }
 
+    /// `sessions/list` ([ADR 0075] R1): the account's live sessions.
+    ///
+    /// [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(js_name = sessionsListRequest)]
+    pub fn sessions_list_request(&self) -> Result<HttpRequest, CoreError> {
+        Ok(HttpRequest::post_empty(
+            paths::SESSIONS_LIST,
+            Some(&self.inner()?.token),
+        ))
+    }
+
+    /// Reads the answer to [`Session::sessions_list_request`]: the rows, newest first. The list
+    /// is kept, so that [`Session::end_session_request`] names only a row it holds. The list is
+    /// the server's word (AR-9), for display: never proof that nothing else is open.
+    ///
+    /// # Errors
+    /// `locked`; the server's code; `invalid_server_response`.
+    #[wasm_bindgen(js_name = sessionsListResponse)]
+    pub fn sessions_list_response(
+        &mut self,
+        status: u16,
+        body: &[u8],
+    ) -> Result<Vec<SessionRow>, CoreError> {
+        let inner = self.inner_mut()?;
+        let answer: SessionListResponse = http::json(status, body)?;
+        let list = SessionList::from_response(answer)?;
+        let rows = list.sessions().iter().map(SessionRow::of).collect();
+        inner.sessions = Some(list);
+        Ok(rows)
+    }
+
+    /// Whether the last list stopped short of the account's live sessions (`truncated`).
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(js_name = sessionsTruncated)]
+    pub fn sessions_truncated(&self) -> Result<bool, CoreError> {
+        Ok(self
+            .inner()?
+            .sessions
+            .as_ref()
+            .is_some_and(SessionList::truncated))
+    }
+
+    /// `sessions/end` (R3) for the row `id` (32 hex digits) of the last list; its answer is
+    /// an empty success. Needs a fresh session: on `server_fresh_session_required` the host
+    /// runs [`Session::refresh`] and asks again.
+    ///
+    /// # Errors
+    /// `locked`; `invalid_input` for an id that is not a row of the last list, or a row that may
+    /// not be ended (a device row, ADR 0075 §5; the current session, which signs out instead).
+    #[wasm_bindgen(js_name = endSessionRequest)]
+    pub fn end_session_request(&self, id: &str) -> Result<HttpRequest, CoreError> {
+        let inner = self.inner()?;
+        let wanted = parse_id(id)?;
+        let row = inner
+            .sessions
+            .as_ref()
+            .and_then(|l| l.sessions().iter().find(|s| s.session_id() == wanted))
+            .ok_or(CoreError::from(ClientError::InvalidInput))?;
+        HttpRequest::post(paths::SESSIONS_END, &row.end_request()?, Some(&inner.token))
+    }
+
+    /// `sessions/others/end` (R4): every other password and recovery session; device sessions
+    /// stay (ADR 0075 §5). Its answer is an empty success. Needs a fresh session, as
+    /// [`Session::end_session_request`].
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(js_name = endOtherSessionsRequest)]
+    pub fn end_other_sessions_request(&self) -> Result<HttpRequest, CoreError> {
+        Ok(HttpRequest::post_empty(
+            paths::SESSIONS_OTHERS_END,
+            Some(&self.inner()?.token),
+        ))
+    }
+
+    /// `sessions/current/end` (R2), sign-out: the request a host sends, best effort and never
+    /// retried, when it locks (ADR 0075 §6). Build it before [`Session::lock`], which drops the
+    /// token.
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(js_name = signOutRequest)]
+    pub fn sign_out_request(&self) -> Result<HttpRequest, CoreError> {
+        Ok(HttpRequest::post_empty(
+            paths::SESSIONS_CURRENT_END,
+            Some(&self.inner()?.token),
+        ))
+    }
+
+    /// Starts a fresh OPAQUE login of this session's account (ADR 0075 §9: "Without freshness,
+    /// the pane first runs a login"), with the Secret Key and master password typed again. The
+    /// host runs the returned flow to `"done"` and passes it to [`Session::adopt_refresh`].
+    ///
+    /// # Errors
+    /// `locked`; as [`LoginFlow::start`], whose byte-array rules `secret_key` and `password`
+    /// follow (both zeroed on return, [`crate::secret`]).
+    pub fn refresh(
+        &self,
+        secret_key: &mut [u8],
+        password: &mut [u8],
+        totp: Option<String>,
+    ) -> Result<LoginFlow, CoreError> {
+        // Both are taken, and so wiped, before any error returns.
+        let secret_key = take_secret(secret_key);
+        let password = take_secret(password);
+        let inner = self.inner()?;
+        LoginFlow::begin(
+            Credentials {
+                origin: inner.origin.clone(),
+                login_name: inner.login_name.clone(),
+                secret_key: secret_key?,
+                password: password?,
+            },
+            totp.map(Zeroizing::new),
+            Purpose::Refresh,
+        )
+    }
+
+    /// Switches to the fresh session of a finished [`Session::refresh`] and returns the
+    /// sign-out (R2) of the old one, for the host to send best effort.
+    ///
+    /// # Errors
+    /// `locked`; `wrong_state` unless the flow is a refresh in state `"done"` (taken once);
+    /// `wrong_password_or_secret_key` if it verified another account.
+    #[wasm_bindgen(js_name = adoptRefresh)]
+    pub fn adopt_refresh(&mut self, flow: &mut LoginFlow) -> Result<HttpRequest, CoreError> {
+        let inner = self.inner_mut()?;
+        if flow.purpose() != Purpose::Refresh {
+            return Err(CoreError::new(WRONG_STATE));
+        }
+        let (account, token) = flow.take_refreshed().ok_or(CoreError::new(WRONG_STATE))?;
+        if account != inner.account_id {
+            return Err(ClientError::WrongPasswordOrSecretKey.into());
+        }
+        let old = core::mem::replace(&mut inner.token, token);
+        Ok(HttpRequest::post_empty(
+            paths::SESSIONS_CURRENT_END,
+            Some(&old),
+        ))
+    }
+
     /// `totp/enrol/start` (CRYPTO.md §11.15): the server generates the 2FA secret.
     ///
     /// # Errors
@@ -1812,6 +1967,129 @@ impl Notice {
     pub fn conflict_id(&self) -> Option<String> {
         self.conflict_id.clone()
     }
+}
+
+/// One row of the account's session list ([ADR 0075] §9).
+///
+/// [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md
+#[wasm_bindgen]
+#[derive(Clone, Debug)]
+pub struct SessionRow {
+    /// The `session_id`, hex.
+    id: String,
+    /// `password-login`, `password-recheck`, `device`, `recovery` or `unknown`.
+    kind: &'static str,
+    /// The device of a device session or a password re-check, hex.
+    device_id: Option<String>,
+    /// Creation time.
+    created_at_ms: u64,
+    /// Expiry.
+    expires_at_ms: u64,
+    /// Whether this is this browser's session.
+    current: bool,
+    /// Whether "End" is offered.
+    endable: bool,
+}
+
+impl SessionRow {
+    /// The row of a listed session.
+    fn of(session: &ListedSession) -> Self {
+        Self {
+            id: hex(&session.session_id()),
+            kind: session.kind().name(),
+            device_id: session.device_id().map(|d| hex(d.as_bytes())),
+            created_at_ms: session.created_at_ms(),
+            expires_at_ms: session.expires_at_ms(),
+            current: session.current(),
+            endable: session.endable(),
+        }
+    }
+}
+
+#[wasm_bindgen]
+impl SessionRow {
+    /// The `session_id`, 32 hex digits: the handle of [`Session::end_session_request`].
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    /// `password-login` (a web or password login), `password-recheck` (a password re-check
+    /// on a device), `device`, `recovery` (an account recovery in progress) or `unknown`.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn kind(&self) -> String {
+        self.kind.to_owned()
+    }
+
+    /// The device of a device session or a password re-check, 32 hex digits.
+    #[wasm_bindgen(getter, js_name = deviceId)]
+    #[must_use]
+    pub fn device_id(&self) -> Option<String> {
+        self.device_id.clone()
+    }
+
+    /// When the session was opened, milliseconds since the Unix epoch (the server's word).
+    #[wasm_bindgen(getter, js_name = createdAtMs)]
+    #[must_use]
+    pub fn created_at_ms(&self) -> u64 {
+        self.created_at_ms
+    }
+
+    /// When the session expires, milliseconds since the Unix epoch (the server's word).
+    #[wasm_bindgen(getter, js_name = expiresAtMs)]
+    #[must_use]
+    pub fn expires_at_ms(&self) -> u64 {
+        self.expires_at_ms
+    }
+
+    /// Whether this is this browser's own session.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn current(&self) -> bool {
+        self.current
+    }
+
+    /// Whether "End" is offered: another session's password login, re-check or recovery row,
+    /// never a device row (ADR 0075 §5).
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn endable(&self) -> bool {
+        self.endable
+    }
+}
+
+/// Whether a `401` answer to a request on `path` means the session has ended ([ADR 0075] §6):
+/// every `/api/v1` request but `login/*`, `recovery/*` and the sign-out itself. The host then
+/// locks and shows [`session_ended_notice`].
+///
+/// [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md
+#[wasm_bindgen(js_name = endsSessionOnUnauthorized)]
+#[must_use]
+pub fn ends_session_on_unauthorized(path: &str) -> bool {
+    sessions::ends_session_on_unauthorized(path)
+}
+
+/// What the ended web vault shows (ADR 0075 §6).
+#[wasm_bindgen(js_name = sessionEndedNotice)]
+#[must_use]
+pub fn session_ended_notice() -> String {
+    SESSION_ENDED_NOTICE.to_owned()
+}
+
+/// The confirmation after ending other sessions (ADR 0075 §8).
+#[wasm_bindgen(js_name = othersEndedNotice)]
+#[must_use]
+pub fn others_ended_notice() -> String {
+    OTHERS_ENDED_NOTICE.to_owned()
+}
+
+/// The confirmation after ending one session (ADR 0075 §8).
+#[wasm_bindgen(js_name = sessionEndedByYouNotice)]
+#[must_use]
+pub fn session_ended_by_you_notice() -> String {
+    SESSION_ENDED_BY_YOU_NOTICE.to_owned()
 }
 
 /// One durable device of the account.

@@ -49,6 +49,7 @@ import initWasm, {
   createPasskey as wasmCreatePasskey,
   decideMatchCandidates as wasmDecideMatchCandidates,
   detectImportFormat as wasmDetectImportFormat,
+  endsSessionOnUnauthorized,
   expectNoContent,
   generateElementId,
   generatePassphraseWithOptions as wasmGeneratePassphraseWithOptions,
@@ -62,6 +63,9 @@ import initWasm, {
   plaintextExportHoldMs as wasmPlaintextExportHoldMs,
   plaintextExportPhrase as wasmPlaintextExportPhrase,
   plaintextExportWarning as wasmPlaintextExportWarning,
+  othersEndedNotice as wasmOthersEndedNotice,
+  sessionEndedByYouNotice as wasmSessionEndedByYouNotice,
+  sessionEndedNotice as wasmSessionEndedNotice,
   registrableDomainOf as wasmRegistrableDomainOf,
 } from "../generated/rizzy_core.js";
 
@@ -214,6 +218,12 @@ export const MAX_RESPONSE_BYTES = 256 * 1024 * 1024;
  * builder names them identically on every platform (`rizzy_proto::http`'s own constants). */
 const REQUEST_COUNTER_HEADER = "Rizzy-Request-Counter";
 const REQUEST_SIGNATURE_HEADER = "Rizzy-Request-Signature";
+
+/** The two requests whose `401` may be a wrong TOTP code rather than an ended session. */
+const TOTP_CODE_PATHS: ReadonlySet<string> = new Set([
+  "/api/v1/totp/enrol/confirm",
+  "/api/v1/totp/disable",
+]);
 
 /** Copies a generated request into a plain object and frees it. */
 function takeRequest(request: HttpRequest): CoreRequest {
@@ -776,6 +786,49 @@ export interface DeviceView {
   readonly revoked: boolean;
 }
 
+/**
+ * One session of the account, as `sessions/list` reports it (ADR 0075 §9). The server's word,
+ * for display only (AR-9): never proof that nothing else is open.
+ */
+export interface SessionRowView {
+  /** The `session_id`, 32 hex digits: what {@link VaultSession.endSession} takes. */
+  readonly id: string;
+  /**
+   * `password-login` (a web or password login), `password-recheck` (a password re-check on a
+   * device), `device`, `recovery` (an account recovery in progress) or `unknown`.
+   */
+  readonly kind: string;
+  /** The device of a device session or a password re-check, 32 hex digits. */
+  readonly deviceId: string | undefined;
+  readonly createdAtMs: number;
+  readonly expiresAtMs: number;
+  /** This browser's own session. */
+  readonly current: boolean;
+  /** Whether "End" is offered: never on a device row (ADR 0075 §5) or the current one. */
+  readonly endable: boolean;
+}
+
+/** The account's sessions: the rows, newest first, and whether the server cut the list. */
+export interface SessionListView {
+  readonly sessions: readonly SessionRowView[];
+  readonly truncated: boolean;
+}
+
+/** What the web vault shows when its session was ended elsewhere (ADR 0075 §6). */
+export function sessionEndedNotice(): string {
+  return wasmSessionEndedNotice();
+}
+
+/** The confirmation after ending other sessions (ADR 0075 §8). */
+export function othersEndedNotice(): string {
+  return wasmOthersEndedNotice();
+}
+
+/** The confirmation after ending one session (ADR 0075 §8). */
+export function sessionEndedByYouNotice(): string {
+  return wasmSessionEndedByYouNotice();
+}
+
 /** A started 2FA enrolment, to show once. */
 export interface TwoFactorSetup {
   readonly otpauthUri: string;
@@ -994,14 +1047,47 @@ export interface StorageUsage {
 export class VaultSession {
   #session: Session | undefined;
   readonly #transport: Transport;
+  /** The transport as given, without the ended-session watch (for the sign-out). */
+  readonly #plainTransport: Transport;
   readonly #clock: Clock;
   #enrolment: TwoFactorEnrolment | undefined;
+  /** Set once a request answered `401` that means the session ended (ADR 0075 §6). */
+  #ended = false;
 
   /** @internal Use {@link login} or {@link Signup.login}. */
   constructor(session: Session, transport: Transport, clock: Clock) {
     this.#session = session;
-    this.#transport = transport;
+    this.#plainTransport = transport;
+    // ADR 0075 §6: a `401` on any request but `login/*`, `recovery/*` and the sign-out means
+    // the session has ended. TOTP confirmation and removal also answer `401` for a wrong code,
+    // so for those two the session is asked once more (`#confirmEnded`).
+    this.#transport = async (request) => {
+      const answer = await transport(request);
+      if (
+        answer.status === 401 &&
+        !TOTP_CODE_PATHS.has(request.path) &&
+        endsSessionOnUnauthorized(request.path)
+      ) {
+        this.#ended = true;
+      }
+      return answer;
+    };
     this.#clock = clock;
+  }
+
+  /**
+   * Whether the server ended this session (ADR 0075 §6): a request answered `401` that only an
+   * ended or unknown session gets. The host locks and shows {@link sessionEndedNotice}.
+   */
+  get ended(): boolean {
+    return this.#ended;
+  }
+
+  /** After a `401` on a TOTP code check: whether the session itself ended (a list answers `401`
+   * too) or only the code was wrong. */
+  async #confirmEnded(): Promise<void> {
+    const s = this.#s();
+    await this.#transport(takeRequest(call(() => s.sessionsListRequest())));
   }
 
   /** The session, or `locked`. */
@@ -1058,10 +1144,24 @@ export class VaultSession {
     });
   }
 
-  /** Locks: wipes every key and decrypted item; unsent changes are lost. */
+  /**
+   * Locks: wipes every key and decrypted item; unsent changes are lost. The session is also
+   * ended on the server (`sessions/current/end`, ADR 0075 §6), best effort: the request is
+   * sent and not awaited, a failure is ignored and not retried, and the token then lapses at
+   * its TTL. Not sent for a session the server already ended.
+   */
   lock(): void {
     this.#enrolment?.free();
     this.#enrolment = undefined;
+    const s = this.#session;
+    if (s !== undefined && !s.locked && !this.#ended) {
+      try {
+        const signOut = takeRequest(s.signOutRequest());
+        this.#plainTransport(signOut).catch(() => undefined);
+      } catch {
+        // Best effort (module docs of lock).
+      }
+    }
     this.#session?.lock();
     this.#session?.free();
     this.#session = undefined;
@@ -1466,6 +1566,69 @@ export class VaultSession {
     );
   }
 
+  /** The account's live sessions (`sessions/list`, ADR 0075 R1), newest first. */
+  async sessions(): Promise<SessionListView> {
+    const s = this.#s();
+    const answer = await this.#transport(takeRequest(call(() => s.sessionsListRequest())));
+    const rows = mapFree(
+      call(() => s.sessionsListResponse(answer.status, answer.body)),
+      (r) => ({
+        id: r.id,
+        kind: r.kind,
+        deviceId: r.deviceId,
+        createdAtMs: Number(r.createdAtMs),
+        expiresAtMs: Number(r.expiresAtMs),
+        current: r.current,
+        endable: r.endable,
+      }),
+    );
+    return { sessions: rows, truncated: call(() => s.sessionsTruncated()) };
+  }
+
+  /**
+   * Ends one other session of the last {@link sessions} list (`sessions/end`, R3). Needs a
+   * fresh login (`server_fresh_session_required` otherwise: call {@link refreshSession} and try
+   * again).
+   */
+  async endSession(id: string): Promise<void> {
+    const s = this.#s();
+    const answer = await this.#transport(takeRequest(call(() => s.endSessionRequest(id))));
+    call(() => expectNoContent(answer.status, answer.body));
+  }
+
+  /**
+   * Ends every other password and recovery session (`sessions/others/end`, R4); device sessions
+   * stay. Needs a fresh login, as {@link endSession}.
+   */
+  async endOtherSessions(): Promise<void> {
+    const s = this.#s();
+    const answer = await this.#transport(takeRequest(call(() => s.endOtherSessionsRequest())));
+    call(() => expectNoContent(answer.status, answer.body));
+  }
+
+  /**
+   * Logs in again (Secret Key and master password typed again) and switches this vault to the
+   * new, fresh session; the old one is ended on the server, best effort (ADR 0075 §9: "It
+   * switches to the new session and ends the old one").
+   */
+  async refreshSession(
+    secretKey: SecretInput,
+    password: SecretInput,
+    askTotp?: AskTotp,
+  ): Promise<void> {
+    const s = this.#s();
+    const flow = withSecrets([secretKey, password], (b) =>
+      call(() => s.refresh(at(b, 0), at(b, 1), undefined)),
+    );
+    try {
+      await drive(flow, this.#transport, this.#clock, askTotp);
+      const signOut = takeRequest(call(() => s.adoptRefresh(flow)));
+      this.#plainTransport(signOut).catch(() => undefined);
+    } finally {
+      flow.free();
+    }
+  }
+
   /** Starts a 2FA enrolment: the server's secret, to show once (QR or Base32). */
   async enableTwoFactor(): Promise<TwoFactorSetup> {
     const s = this.#s();
@@ -1486,6 +1649,9 @@ export class VaultSession {
     const answer = await this.#transport(
       takeRequest(call(() => s.twoFactorConfirmRequest(enrolment, code))),
     );
+    if (answer.status === 401) {
+      await this.#confirmEnded();
+    }
     call(() => expectNoContent(answer.status, answer.body));
     enrolment.free();
     this.#enrolment = undefined;
@@ -1495,6 +1661,9 @@ export class VaultSession {
   async disableTwoFactor(code: string): Promise<void> {
     const s = this.#s();
     const answer = await this.#transport(takeRequest(call(() => s.twoFactorDisableRequest(code))));
+    if (answer.status === 401) {
+      await this.#confirmEnded();
+    }
     call(() => expectNoContent(answer.status, answer.body));
   }
 

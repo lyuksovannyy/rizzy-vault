@@ -26,6 +26,7 @@ import {
   type CacheStore,
   type Clock,
   CoreError,
+  type SessionListView,
   type HistoryEntry,
   MatchMode,
   Signup,
@@ -1042,9 +1043,14 @@ describe.skipIf(binary === undefined)("against a real server", () => {
 
   // Gap 02 (ADR 0018 §3 "Surfacing", ADR 0012 §5 "Active wins"): each notice is handed over
   // once per session, kept in session memory only, and a late edit restores as a new item.
+  /** Erin's Secret Key, for the sessions test below (a new signup there would hit the per-source
+   * signup limit of this one server). */
+  let erinSecretKey = "";
+
   it("hands over late-edit and concurrent-trash notices once per session", async () => {
     const transport = fetchTransport(origin);
     const { session: first, secretKey } = await freshAccount("Erin");
+    erinSecretKey = secretKey;
     const kept = first.createItem("note", [{ op: "set", key: "item.name", value: "Kept" }]);
     const gone = first.createItem("note", [{ op: "set", key: "item.name", value: "Gone" }]);
     await first.sync();
@@ -1256,6 +1262,74 @@ describe.skipIf(binary === undefined)("against a real server", () => {
       expect(fields.some((f) => f.conflict)).toBe(false);
     }
     lockAll(first, second, unlocked);
+  });
+
+  // ADR 0075: two web sessions of one account; one lists both, ends the other, and the other
+  // learns it on its next request; a lock ends a session on the server too; a stale session
+  // needs a fresh login first and switches to it.
+  it("lists sessions, ends another one, and ends its own on lock", async () => {
+    const secretKey = erinSecretKey;
+    expect(secretKey).not.toBe("");
+    const transport = fetchTransport(origin);
+    const web = () => login(transport, { origin, loginName: "erin", secretKey, password: PASSWORD });
+    // Erin's earlier web sessions were locked, which ended them; her durable device's session
+    // may still be listed (a device row, never endable).
+    const a = await web();
+    const b = await web();
+    const passwordRows = (l: SessionListView) => l.sessions.filter((s) => s.kind === "password-login");
+
+    const listed = await a.sessions();
+    expect(listed.truncated).toBe(false);
+    expect(passwordRows(listed)).toHaveLength(2);
+    expect(listed.sessions.filter((s) => s.kind === "device").every((s) => !s.endable)).toBe(true);
+    const mine = listed.sessions.filter((s) => s.current);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]?.kind).toBe("password-login");
+    expect(mine[0]?.endable).toBe(false);
+    const theirs = listed.sessions.find((s) => !s.current);
+    expect(theirs).toMatchObject({ kind: "password-login", endable: true, deviceId: undefined });
+    // An id that is not a row of the last list is refused before anything is sent.
+    await expect(a.endSession("00".repeat(16))).rejects.toMatchObject({ code: "invalid_input" });
+
+    await a.endSession(theirs?.id ?? "");
+    expect(b.ended).toBe(false);
+    await expect(b.sync()).rejects.toMatchObject({ code: "server_unauthorized" });
+    expect(b.ended).toBe(true);
+    expect(a.ended).toBe(false);
+    b.lock();
+
+    // A lock signs out: the third session sees only itself after a's lock.
+    const c = await web();
+    a.lock();
+    let rows = passwordRows(await c.sessions());
+    for (let i = 0; i < 50 && rows.length > 1; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      rows = passwordRows(await c.sessions());
+    }
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.current).toBe(true);
+
+    // R4 from a fresh session; nothing left to end still succeeds.
+    const d = await web();
+    await c.endOtherSessions();
+    await expect(d.sessions()).rejects.toMatchObject({ code: "server_unauthorized" });
+    expect(d.ended).toBe(true);
+    await c.endOtherSessions();
+
+    // A stale session (the server's clock is not moved here, so the refresh is exercised
+    // directly): it switches to a new session and ends the old one.
+    const before = (await c.sessions()).sessions.find((s) => s.current)?.id;
+    await c.refreshSession(secretKey, PASSWORD);
+    const after = await c.sessions();
+    const current = after.sessions.find((s) => s.current)?.id;
+    expect(current).toBeDefined();
+    expect(current).not.toBe(before);
+    for (let i = 0; i < 50 && (await c.sessions()).sessions.some((s) => s.id === before); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect((await c.sessions()).sessions.some((s) => s.id === before)).toBe(false);
+    lockAll(c);
+    d.lock();
   });
 });
 
