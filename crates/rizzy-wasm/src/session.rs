@@ -54,10 +54,11 @@
 //!   `account/state` first.
 
 use core::fmt;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rizzy_client::ClientError;
 use rizzy_client::account::VerifiedAccount;
+use rizzy_client::attachments::{AttachmentDownload, AttachmentUpload};
 use rizzy_client::device::UnlockedDevice;
 use rizzy_client::export::detect::{DetectedFormat, detect_format};
 use rizzy_client::export::gate::{self, ExportGate, check_export_password};
@@ -71,7 +72,7 @@ use rizzy_client::matching::{
     global_equivalence_groups, vault_item_uris,
 };
 use rizzy_client::passkey::get_assertion;
-use rizzy_client::rizzy_core::ids::AccountId;
+use rizzy_client::rizzy_core::ids::{AccountId, AttachmentId};
 use rizzy_client::rizzy_core::item::key::ElementId;
 use rizzy_client::rizzy_core::item::schema::{
     ATTR_ALG, ATTR_CREATED_MS, ATTR_CREDENTIAL_ID, ATTR_PRIVATE_KEY, ATTR_RP_ID, ATTR_USER_HANDLE,
@@ -109,6 +110,10 @@ use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
 use crate::rng::{Rng, os_rng};
 use crate::secret::take_secret;
 use crate::sync::{Ctx, Signer, SyncDriver};
+
+mod attachments;
+
+pub use attachments::AttachmentView;
 
 /// How long a re-authentication allows one export: 5 minutes (module docs;
 /// `rizzy_client::export::gate::REAUTH_WINDOW_MS`).
@@ -167,6 +172,10 @@ struct Inner {
     global_groups: Vec<EquivalenceGroup>,
     /// The last `sessions/list` answer (ADR 0075), so that an end names only a listed row.
     sessions: Option<SessionList>,
+    /// Attachments sealed and not yet fully sent, by id (ADR 0054; [`attachments`]).
+    uploads: BTreeMap<AttachmentId, AttachmentUpload>,
+    /// Attachments being downloaded and verified, by id.
+    downloads: BTreeMap<AttachmentId, AttachmentDownload>,
 }
 
 /// An unlocked web-vault session (module docs). `Debug` shows nothing secret.
@@ -228,6 +237,8 @@ impl Session {
                 settings_pending: None,
                 global_groups: global_equivalence_groups(0).0,
                 sessions: None,
+                uploads: BTreeMap::new(),
+                downloads: BTreeMap::new(),
             })),
         })
     }
