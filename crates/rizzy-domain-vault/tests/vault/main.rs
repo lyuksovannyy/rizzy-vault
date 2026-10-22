@@ -4,6 +4,9 @@
 //! database when `RIZZY_TEST_POSTGRES_URL` names one the tests may wipe (`common::Slot`), with
 //! real `op` and `snapshot` statements signed by `rizzy-core` device keys.
 //!
+//! - [`attachments`]: encrypted attachments (ADR 0054 §5–§7): the lifecycle, exact chunk
+//!   lengths, retries and conflicts, the cap and the quota charged at create, another account's
+//!   id answered `not_found`, and the 24 h sweep.
 //! - [`common`]: the harness: a migrated database with one account, created through
 //!   `rizzy-storage`'s restore (so the `auth_accounts` row is written by `rizzy-storage`, never
 //!   by this domain's SQL); an in-memory [`DeviceDirectory`](rizzy_domain_vault::DeviceDirectory);
@@ -26,6 +29,7 @@
 //!   wrap set, one test per refusal of the lag rule, the repeat rules, and a vault epoch ahead
 //!   of the account epoch.
 
+mod attachments;
 mod common;
 mod compaction;
 mod healing;

@@ -103,6 +103,7 @@
 #![cfg_attr(not(test), warn(clippy::missing_docs_in_private_items))]
 
 pub mod account;
+pub mod attachments;
 pub mod conflicts;
 pub mod credentials;
 pub mod device;
