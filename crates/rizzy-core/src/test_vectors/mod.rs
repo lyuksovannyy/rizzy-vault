@@ -40,6 +40,11 @@
     reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
 )]
 mod attachments;
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code slices fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
+mod breach;
 mod derivations;
 #[expect(
     clippy::indexing_slicing,
@@ -97,7 +102,7 @@ struct VectorFile {
     contents: &'static [(&'static str, &'static str, usize)],
 }
 
-const FILES: [VectorFile; 7] = [
+const FILES: [VectorFile; 8] = [
     VectorFile {
         name: "derivations",
         tier: "A",
@@ -253,6 +258,17 @@ const FILES: [VectorFile; 7] = [
         check_file: |_| {},
         contents: &[("transcript", "signup-login-unlock", 1)],
     },
+    VectorFile {
+        name: "breach",
+        tier: "A",
+        spec: "CRYPTO.md §11.16 (ADR 0053 item 1: digest, prefix, suffix match)",
+        seed: 0x1116,
+        committed: include_str!("../../tests/vectors/breach.json"),
+        generate: breach::generate,
+        compute: breach::compute,
+        check_file: |_| {},
+        contents: &[("breach", "digest", 10), ("breach", "match", 6)],
+    },
 ];
 
 /// One vector: `{id, kind, name, inputs, outputs}`.
@@ -260,8 +276,8 @@ const FILES: [VectorFile; 7] = [
 struct Vector {
     /// `<kind>/<name>/<index>`, unique within its file.
     id: String,
-    /// The group: `derivation`, `envelope`, `statement`, `encoding`, `padding`, `item` or
-    /// `transcript`.
+    /// The group: `derivation`, `envelope`, `statement`, `encoding`, `padding`, `item`,
+    /// `breach` or `transcript`.
     kind: String,
     /// The §4.3 label, §8.4 purpose, §10.2 statement type or encoding the vector exercises;
     /// `compute` dispatches on it.
@@ -591,6 +607,11 @@ fn replay_attachments() {
 #[test]
 fn replay_transcript() {
     replay(file("transcript"));
+}
+
+#[test]
+fn replay_breach() {
+    replay(file("breach"));
 }
 
 /// Rewrites every committed vector file from its seed. Run only in a change that is meant to

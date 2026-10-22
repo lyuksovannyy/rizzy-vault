@@ -8,7 +8,7 @@
   "additionalProperties": false,
   "properties": {
     "schema": { "const": "rizzy-vault/test-vectors/v1" },
-    "file": { "enum": ["derivations", "envelopes", "statements", "encodings", "items", "attachments", "transcript"] },
+    "file": { "enum": ["derivations", "envelopes", "statements", "encodings", "items", "attachments", "transcript", "breach"] },
     "tier": {
       "description": "A: normative format vectors. B: transcript regression vectors.",
       "enum": ["A", "B"]
