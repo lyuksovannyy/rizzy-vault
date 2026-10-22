@@ -84,6 +84,7 @@ use rizzy_client::rizzy_proto::wire::SessionToken;
 use rizzy_client::session::{
     DeviceSession as ClientDeviceSession, device_auth_finish, device_auth_start,
 };
+use rizzy_client::settings::SettingsCache;
 use rizzy_client::store::floors::Floors;
 use rizzy_client::store::rows::CacheRows;
 use rizzy_client::store::{self, record::Stage as RecordStage};
@@ -94,6 +95,7 @@ use zeroize::Zeroizing;
 use crate::error::{CoreError, CoreResult, WRONG_STATE};
 use crate::http::{self, HttpRequest};
 use crate::items::{self, FieldView, ItemDraft, ItemSummary, hex, type_from_name, visible_item};
+use crate::matching::{self, MatchDecision, MatchSettingsView, UriInput};
 use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
 use crate::rng::{Rng, os_rng};
 use crate::secret::take_secret;
@@ -499,6 +501,8 @@ pub struct DeviceSession {
     sync: SyncDriver,
     /// The RNG for item writes and sync.
     rng: Rng,
+    /// The account settings of `account`, read once per object (ADR 0042 §6).
+    settings: SettingsCache,
 }
 
 impl fmt::Debug for DeviceSession {
@@ -535,6 +539,7 @@ impl DeviceSession {
             pending: None,
             sync: SyncDriver::default(),
             rng: os_rng(),
+            settings: SettingsCache::default(),
         }
     }
 
@@ -1149,6 +1154,46 @@ impl DeviceSession {
     /// Zeroizes every handle this session holds (ADR 0013 §3 rule 1). Consumes the session;
     /// dropping it does the same.
     pub fn lock(self) {}
+}
+
+/// URL matching under the account's own settings (ADR 0037 §6–§7; ADR 0042 §6).
+#[wasm_bindgen]
+impl DeviceSession {
+    /// Decides which of `uris` are autofill candidates for `page_url`, requested by the frame at
+    /// `frame_origin`, under this account's settings: a URI mode `0x0000` resolves to the
+    /// account's match default, and the merged equivalence view is the compiled-in global list
+    /// minus the account's disabled groups, plus its user-defined groups. The settings are read
+    /// once per `ACCOUNT_SETTINGS` object (`rizzy_client::settings::SettingsCache`).
+    ///
+    /// # Errors
+    /// `settings_update_required` or `invalid_server_response` for settings this build cannot
+    /// read: no candidate is offered under settings it could not apply; `account_key_rotated`;
+    /// `invalid_input` as the free `decideMatchCandidates`.
+    #[wasm_bindgen(js_name = decideMatchCandidates)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen hands this exported call ownership of the JS array as Vec<UriInput>, never a slice"
+    )]
+    pub fn decide_match_candidates(
+        &mut self,
+        page_url: &str,
+        is_top_frame: bool,
+        frame_origin: &str,
+        uris: Vec<UriInput>,
+    ) -> Result<MatchDecision, CoreError> {
+        let settings = self.settings.get(&self.account, &self.unlocked)?;
+        matching::decide_with_account(page_url, is_top_frame, frame_origin, &uris, settings)
+    }
+
+    /// The account's matching settings, against this build's global list.
+    ///
+    /// # Errors
+    /// As [`DeviceSession::decide_match_candidates`].
+    #[wasm_bindgen(js_name = matchSettings)]
+    pub fn match_settings(&mut self) -> Result<MatchSettingsView, CoreError> {
+        let settings = self.settings.get(&self.account, &self.unlocked)?;
+        Ok(matching::settings_view(settings.matching()))
+    }
 }
 
 impl DeviceSession {
