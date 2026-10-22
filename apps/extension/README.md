@@ -56,9 +56,11 @@ crypto and store decision still happens inside `DurableSession`/`rizzy-wasm`).
   `background-page.ts` actually takes, has no e2e coverage of its own; only the Chromium relay
   branch is exercised, by the autofill-and-save spec); a longer-running soak test of whether the
   offscreen document/Firefox background page survive a real session (see "The ADR 0036 §2
-  survival spike" below); regex, per-URI match
-  mode and user-defined equivalence-group settings UI (the matcher and core support them; no
-  options-page surface edits them yet; every item matches via the account default, Base domain).
+  survival spike" below); regex, and a per-URI match mode or account match settings surface in
+  the extension itself (the web vault's item editor and Settings → Website matching edit them;
+  the extension applies them: a URI with no override of its own takes the account's match
+  default, and the account's user-defined and disabled global equivalence groups shape matching,
+  through `DurableSession.decideMatchCandidates`, ADR 0042 §6).
 
 ### Bugs found only by the end-to-end Playwright spec (`e2e/autofill-and-save.spec.ts`)
 
