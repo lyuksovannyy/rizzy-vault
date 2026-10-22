@@ -1075,8 +1075,9 @@ impl VaultSync {
             &mut outcome,
         )?;
         // The rows of what was accepted (ADR 0026 §4 step 2): every accepted op statement with
-        // the body and wrap that matched its signed hashes, every absorbed snapshot record.
-        // The same records are held in memory for a healing request (ADR 0021 §9).
+        // the body and wrap that matched its signed hashes, every absorbed snapshot record
+        // (`keep_covers`). The same records are held in memory for a healing request (ADR 0021
+        // §9).
         for (op, (record, wrap)) in served.iter().zip(&op_records) {
             if settled.accepted.contains(&op.header.dot) {
                 let body = matches!(op.body, BodyStatus::Verified | BodyStatus::Waiting);
@@ -1087,18 +1088,7 @@ impl VaultSync {
                 }
             }
         }
-        for index in &settled.absorbed {
-            if let (Some((header, _)), Some((record, wrap))) =
-                (covers.get(*index), cover_records.get(*index))
-            {
-                self.hold_cover(header, record, *wrap);
-                if self.journal.is_some() {
-                    let row = self.snapshot_row(header, record, *wrap, own::SERVED);
-                    self.record(|| Write::PutSnapshot(row));
-                }
-            }
-        }
-        self.keep_pending_covers(&settled, &covers, &cover_records);
+        self.keep_covers(&settled, &covers, &cover_records);
         if response.complete {
             outcome.reports.extend(self.log.complete_fetch_reports());
         }
@@ -1371,15 +1361,28 @@ impl VaultSync {
         }
     }
 
-    /// Keeps the record of each cover the merge holds with it, and journals and holds, as any
-    /// absorbed cover, each one the merge took on a retry (ADR 0050 §2). `covers` and
-    /// `cover_records` are the page's verified covers, by the indexes `settled` names.
-    fn keep_pending_covers(
+    /// Journals and holds every absorbed snapshot record (ADR 0026 §4 step 2; held in memory
+    /// for a healing request, ADR 0021 §9), keeps the record of each cover the merge holds with
+    /// it, and journals and holds each one the merge took on a retry like any absorbed one (ADR
+    /// 0050 §2). `covers` and `cover_records` are the page's verified covers, by the indexes
+    /// `settled` names.
+    fn keep_covers(
         &mut self,
         settled: &Settled,
         covers: &[(SnapshotHeader, SecretBytes)],
         cover_records: &[(&SnapshotRecord, bool)],
     ) {
+        for index in &settled.absorbed {
+            if let (Some((header, _)), Some((record, wrap))) =
+                (covers.get(*index), cover_records.get(*index))
+            {
+                self.hold_cover(header, record, *wrap);
+                if self.journal.is_some() {
+                    let row = self.snapshot_row(header, record, *wrap, own::SERVED);
+                    self.record(|| Write::PutSnapshot(row));
+                }
+            }
+        }
         for index in &settled.held {
             if let (Some((header, _)), Some((record, wrap))) =
                 (covers.get(*index), cover_records.get(*index))
@@ -2232,6 +2235,20 @@ impl VaultSync {
     /// The highest `device_seq` this device holds from `device` in this vault.
     pub(crate) fn cursor_of(&self, device: DeviceId) -> u64 {
         self.log.cursor().get(device)
+    }
+
+    /// Test access to the ADR 0050 bookkeeping: the items whose cover the log holds, the
+    /// records kept with them, and the covers of `item` held for a healing request.
+    #[cfg(test)]
+    pub(crate) fn holds_for_tests(&self, item: ItemId) -> (Vec<ItemId>, usize, usize) {
+        (
+            self.log.held_items().collect(),
+            self.pending_covers.len(),
+            self.held_covers
+                .iter()
+                .filter(|(h, _)| h.item_id == item)
+                .count(),
+        )
     }
 
     /// The vault half of a rotation for this vault (ADR 0025 §2 steps 1–3; CRYPTO.md §11.6
