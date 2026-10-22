@@ -28,6 +28,7 @@ use rizzy_sync::record::{
 use rizzy_sync::vv::VersionVector;
 
 use super::*;
+use crate::export::detect::{DetectedFormat, detect_format};
 use crate::export::gate::test_auth;
 use crate::export::payload::{
     MAX_PAYLOAD_ENTRIES, MAX_PAYLOAD_LEN, PayloadImport, PayloadItem, PayloadPreview,
@@ -40,6 +41,7 @@ use crate::export::plaintext::{
 };
 use crate::export::{read_export, write_export};
 use crate::items::ImportWrite;
+use proptest::prelude::*;
 
 /// A signed-up device and the driver of its personal vault.
 struct Fixture {
@@ -1033,13 +1035,15 @@ fn payload_refusal_vectors() {
         parse_payload(&vec![0u8; MAX_PAYLOAD_LEN + 1]).unwrap_err(),
         BAD
     );
-    // `payload_version` = 1; any other is "update required".
-    for version in [[0, 0], [0, 2], [1, 1], [0xff, 0xff]] {
+    // `payload_version` = 1; 2 is a CXF payload under the wrong tag, refused at dispatch
+    // (ADR 0074 §2); any other is "update required".
+    for version in [[0, 0], [1, 1], [0xff, 0xff]] {
         assert_eq!(
             parse_payload(&with(0, &version)).unwrap_err(),
             ClientError::ExportUpdateRequired
         );
     }
+    assert_eq!(parse_payload(&with(0, &[0, 2])).unwrap_err(), BAD);
     // Too short for the version or the count.
     for len in 0..6 {
         assert_eq!(parse_payload(&ok[..len]).unwrap_err(), BAD, "{len}");
@@ -1504,4 +1508,474 @@ fn gated_exports_are_recognised_on_import() {
         detect_format(csv.expose_secret()),
         Some(DetectedFormat::RizzyPlaintextCsv)
     );
+}
+
+// CXF passkey export and import (ADR 0074).
+
+/// One passkey as the tests write it: the element's fields (ADR 0039 §1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TestPasskey {
+    /// `rp_id`.
+    rp_id: String,
+    /// `credential_id`.
+    credential_id: Vec<u8>,
+    /// `user_handle`.
+    user_handle: Vec<u8>,
+    /// `private_key`.
+    private_key: Vec<u8>,
+    /// `public_key_cose`.
+    public_key_cose: Vec<u8>,
+    /// `alg`.
+    alg: u16,
+}
+
+impl TestPasskey {
+    /// An ES256 passkey created the way the extension creates one (ADR 0039 §2).
+    fn es256(rng: &mut ChaCha20Rng, rp_id: &str, user_handle: &[u8]) -> Self {
+        let created = crate::passkey::create_credential(
+            rng,
+            &format!("https://{rp_id}"),
+            rp_id,
+            b"challenge",
+        )
+        .unwrap();
+        Self {
+            rp_id: rp_id.to_owned(),
+            credential_id: created.credential_id,
+            user_handle: user_handle.to_vec(),
+            private_key: created.signing_key.to_bytes().expose_secret().to_vec(),
+            public_key_cose: created.public_key_cose,
+            alg: 1,
+        }
+    }
+
+    /// An `EdDSA` passkey from a seed (as a CXF import would bring one in).
+    fn eddsa(seed: [u8; 32], rp_id: &str, credential_id: &[u8], user_handle: &[u8]) -> Self {
+        let public = rizzy_core::passkey::EdDsaSigningKey::from_seed(&seed)
+            .unwrap()
+            .verifying_key()
+            .to_bytes();
+        Self {
+            rp_id: rp_id.to_owned(),
+            credential_id: credential_id.to_vec(),
+            user_handle: user_handle.to_vec(),
+            private_key: seed.to_vec(),
+            public_key_cose: rizzy_import::cxf::cose_key_ed25519(&public),
+            alg: 2,
+        }
+    }
+
+    /// The element's writes under a fresh element id.
+    fn writes(&self, rng: &mut ChaCha20Rng) -> Vec<(SchemaKey, Value)> {
+        let id = ElementId::generate(rng);
+        let key = |attribute: &str| id.key("passkey", attribute).unwrap();
+        vec![
+            (key("rp_id"), text(&self.rp_id)),
+            (key("user_handle"), Value::bytes(&self.user_handle).unwrap()),
+            (
+                key("credential_id"),
+                Value::bytes(&self.credential_id).unwrap(),
+            ),
+            (key("private_key"), Value::bytes(&self.private_key).unwrap()),
+            (
+                key("public_key_cose"),
+                Value::bytes(&self.public_key_cose).unwrap(),
+            ),
+            (key("alg"), Value::enumeration(self.alg)),
+            (key("discoverable"), Value::bool(true)),
+            (key("created_ms"), Value::u64(T0)),
+        ]
+    }
+
+    /// The passkeys of an item's displayed fields, in element-id order.
+    fn of(fields: &BTreeMap<String, Vec<u8>>) -> Vec<Self> {
+        let mut by_element: BTreeMap<&str, BTreeMap<&str, ValueRef<'_>>> = BTreeMap::new();
+        for (key, value) in fields {
+            let mut parts = key.split('/');
+            if let (Some("passkey"), Some(element), Some(attribute)) =
+                (parts.next(), parts.next(), parts.next())
+            {
+                by_element
+                    .entry(element)
+                    .or_default()
+                    .insert(attribute, ValueRef::decode(value).unwrap());
+            }
+        }
+        by_element
+            .values()
+            .map(|a| {
+                let bytes = |name: &str| match a[name] {
+                    ValueRef::Bytes(b) => b.to_vec(),
+                    _ => panic!("{name} is not bytes"),
+                };
+                let ValueRef::Text(rp_id) = a["rp_id"] else {
+                    panic!("rp_id is not text");
+                };
+                let ValueRef::Enum(alg) = a["alg"] else {
+                    panic!("alg is not an enum");
+                };
+                assert!(matches!(a["discoverable"], ValueRef::Bool(true)));
+                Self {
+                    rp_id: rp_id.to_owned(),
+                    credential_id: bytes("credential_id"),
+                    user_handle: bytes("user_handle"),
+                    private_key: bytes("private_key"),
+                    public_key_cose: bytes("public_key_cose"),
+                    alg,
+                }
+            })
+            .collect()
+    }
+}
+
+impl Fixture {
+    /// Creates a Login item named `name` with `username` and `passkeys`.
+    fn login_with_passkeys(
+        &mut self,
+        name: &str,
+        username: &str,
+        passkeys: &[TestPasskey],
+    ) -> ItemId {
+        let mut writes = vec![(k(ITEM_NAME), text(name))];
+        if !username.is_empty() {
+            writes.push((k("login.username"), text(username)));
+        }
+        for passkey in passkeys {
+            writes.extend(passkey.writes(&mut self.rng));
+        }
+        let fields: Vec<(&SchemaKey, &Value)> = writes.iter().map(|(k, v)| (k, v)).collect();
+        self.create(ItemType::LOGIN, &fields, T0 + 1)
+    }
+}
+
+/// The typed acknowledgement.
+fn cxf_ack() -> PlaintextExportAck {
+    PlaintextExportAck::from_typed_phrase(PLAINTEXT_EXPORT_PHRASE).unwrap()
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one vault of every kind of item the CXF export reads or leaves out, then the round trip"
+)]
+fn cxf_export_round_trips_every_active_passkey_into_a_new_vault() {
+    let mut a = fixture(740);
+    let es256 = TestPasskey::es256(&mut a.rng, "example.com", b"user-1");
+    let eddsa = TestPasskey::eddsa([0x42; 32], "login.example.org", b"cred-2", b"user-2");
+    let second_es256 = TestPasskey::es256(&mut a.rng, "example.net", &[0xFF; 64]);
+    a.login_with_passkeys(
+        "Site",
+        "alice \"quoted\" \\ é",
+        std::slice::from_ref(&es256),
+    );
+    a.login_with_passkeys("Two keys", "bob", &[eddsa.clone(), second_es256.clone()]);
+    let gone = TestPasskey::es256(&mut a.rng, "gone.example", b"user-3");
+    let trashed = a.login_with_passkeys("Trashed", "carol", &[gone]);
+    a.vault
+        .trash_item(&mut a.rng, &a.unlocked, trashed, T0 + 2)
+        .unwrap();
+    a.login_with_passkeys("No passkey", "dave", &[]);
+    a.create(
+        ItemType::SECURE_NOTE,
+        &[(&k(ITEM_NAME), &text("A note"))],
+        T0 + 3,
+    );
+
+    assert_eq!(a.vault.cxf_export_passkeys().unwrap(), 3);
+    let export = a
+        .vault
+        .export_cxf(&mut a.rng, test_auth().1, cxf_ack(), "export pw", T0 + 100)
+        .unwrap();
+    assert_eq!((export.passkeys, export.items, export.skipped), (3, 2, 0));
+    assert!(
+        export
+            .file
+            .starts_with(br#"{"format":"rizzy-vault-cxf-export","version":1,"#)
+    );
+    assert_eq!(
+        detect_format(&export.file),
+        Some(DetectedFormat::RizzyCxfEncrypted)
+    );
+
+    // The decrypted document is CXF 1.0 as ADR 0074 §2 writes it.
+    let payload = read_export(&export.file, "export pw").unwrap();
+    let document = crate::export::cxf::parse_cxf_payload(payload.expose_secret()).unwrap();
+    let root = rizzy_import::json::parse(document, rizzy_import::limits::MAX_JSON_LEN).unwrap();
+    assert_eq!(
+        root.get("exporterDisplayName")
+            .and_then(rizzy_import::json::Json::as_str),
+        Some("rizzy-vault")
+    );
+    assert_eq!(
+        root.get("exporterRpId")
+            .and_then(rizzy_import::json::Json::as_str),
+        Some("")
+    );
+    assert_eq!(
+        root.get("timestamp")
+            .and_then(rizzy_import::json::Json::as_u64),
+        Some((T0 + 100) / 1000)
+    );
+    assert_eq!(
+        root.get("version")
+            .and_then(|v| v.get("major"))
+            .and_then(rizzy_import::json::Json::as_u64),
+        Some(1)
+    );
+
+    let mut b = fixture(741);
+    assert_eq!(
+        b.vault
+            .import_cxf_encrypted(&mut b.rng, &b.unlocked, &export.file, "wrong", T0 + 200)
+            .unwrap_err(),
+        ClientError::ExportDecryptionFailed
+    );
+    let done = b
+        .vault
+        .import_cxf_encrypted(&mut b.rng, &b.unlocked, &export.file, "export pw", T0 + 200)
+        .unwrap();
+    assert_eq!(done.imported.len(), 3);
+    assert!(done.skipped.is_empty());
+    assert_eq!(done.counts, rizzy_import::Counts::default());
+    assert!(done.warnings.is_empty());
+
+    // One Login per passkey; the item is named after the user (ADR 0074 §3: item.name from
+    // userDisplayName, which the export writes from login.username, §2), the key material is
+    // the same bytes, the public key the same COSE map.
+    let mut got: Vec<(String, TestPasskey)> = b
+        .vault
+        .item_ids()
+        .into_iter()
+        .map(|item| {
+            assert_eq!(b.vault.item_lifecycle(item), ItemLifecycle::Active);
+            let fields: BTreeMap<String, Vec<u8>> = b
+                .vault
+                .field_keys(item)
+                .into_iter()
+                .map(|key| {
+                    let value = b.vault.field_value(item, &key).unwrap();
+                    (key.to_string(), value.expose_secret().to_vec())
+                })
+                .collect();
+            let ValueRef::Text(name) = ValueRef::decode(&fields[ITEM_NAME]).unwrap() else {
+                panic!("no name");
+            };
+            let mut passkeys = TestPasskey::of(&fields);
+            assert_eq!(passkeys.len(), 1);
+            (name.to_owned(), passkeys.remove(0))
+        })
+        .collect();
+    let mut want = vec![
+        ("alice \"quoted\" \\ é".to_owned(), es256),
+        ("bob".to_owned(), eddsa),
+        ("bob".to_owned(), second_es256),
+    ];
+    got.sort_by(|x, y| x.1.rp_id.cmp(&y.1.rp_id));
+    want.sort_by(|x, y| x.1.rp_id.cmp(&y.1.rp_id));
+    assert_eq!(got, want);
+}
+
+#[test]
+fn a_swapped_export_tag_fails_at_dispatch_never_silently() {
+    let mut a = fixture(742);
+    let passkey = TestPasskey::es256(&mut a.rng, "example.com", b"u");
+    a.login_with_passkeys("Site", "alice", &[passkey]);
+    let cxf = a
+        .vault
+        .export_cxf(&mut a.rng, test_auth().1, cxf_ack(), "pw", T0 + 100)
+        .unwrap();
+    let plain = a
+        .vault
+        .export_encrypted(&mut a.rng, test_auth().0, "pw", T0 + 100)
+        .unwrap();
+    let swap = |file: &[u8], from: &str, to: &str| {
+        String::from_utf8(file.to_vec())
+            .unwrap()
+            .replacen(from, to, 1)
+            .into_bytes()
+    };
+    let mut b = fixture(743);
+    // A CXF payload under the item-list tag: the payload version refuses it.
+    let cxf_as_plain = swap(&cxf.file, "rizzy-vault-cxf-export", "rizzy-vault-export");
+    assert_eq!(
+        detect_format(&cxf_as_plain),
+        Some(DetectedFormat::RizzyEncrypted)
+    );
+    assert_eq!(
+        b.vault
+            .import_encrypted(&mut b.rng, &b.unlocked, &cxf_as_plain, "pw", T0 + 200)
+            .unwrap_err(),
+        ClientError::InvalidExportFile
+    );
+    // An item-list payload under the CXF tag: likewise.
+    let plain_as_cxf = swap(&plain.file, "rizzy-vault-export", "rizzy-vault-cxf-export");
+    assert_eq!(
+        b.vault
+            .import_cxf_encrypted(&mut b.rng, &b.unlocked, &plain_as_cxf, "pw", T0 + 200)
+            .unwrap_err(),
+        ClientError::InvalidExportFile
+    );
+    // Each reader refuses the other's tag before any key derivation.
+    assert_eq!(
+        b.vault
+            .import_encrypted(&mut b.rng, &b.unlocked, &cxf.file, "pw", T0 + 200)
+            .unwrap_err(),
+        ClientError::InvalidExportFile
+    );
+    assert_eq!(
+        b.vault
+            .import_cxf_encrypted(&mut b.rng, &b.unlocked, &plain.file, "pw", T0 + 200)
+            .unwrap_err(),
+        ClientError::InvalidExportFile
+    );
+    assert!(b.vault.item_ids().is_empty());
+}
+
+#[test]
+fn a_bare_cxf_file_imports_through_the_same_reader() {
+    // CXF 1.0 PS errata Appendix A's passkey credential, as another product would write it.
+    let doc = r#"{"version":{"major":1,"minor":0},"exporterRpId":"exporter.example.com","exporterDisplayName":"Exporter app","timestamp":1705228800,"accounts":[{"id":"DZSXp7iBQY-Fg-OofakQtQ","username":"jane_smith","email":"jane.smith@example.com","collections":[],"items":[{"id":"akKA3Y0jQRuK7sKplB0Y9w","title":"WebAuthn.io","credentials":[{"type":"passkey","credentialId":"Y3JlZGVudGlhbElkRXhhbXBsZQ","rpId":"webauthn.io","username":"johndoe","userDisplayName":"John Doe","userHandle":"cnEzaNHWcYK3coWZjvoaV1Hj9gnI12mKe2dL2HZVFlY","key":"MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgARu_0sCt20EpgVxb4Puq3Ga5VVLpuTY75ngvZlyq3X6hRANCAASmdk1xLsK0oOlhxIPp0d1ZuS0sT9nf6BZtSelhqvLBW0fOL33l_bXgsr_STUHjCLn8l6gcRJwe7OQvbQubZ1dY"}]}]}]}"#;
+    assert_eq!(
+        detect_format(doc.as_bytes()),
+        Some(DetectedFormat::Import(Format::CxfJson))
+    );
+    let mut f = fixture(744);
+    let parsed = import(Format::CxfJson, doc.as_bytes(), &mut f.rng).unwrap();
+    let done = f
+        .vault
+        .import_items(&mut f.rng, &f.unlocked, &parsed.items, T0 + 5)
+        .unwrap();
+    assert_eq!(done.imported.len(), 1);
+    let shown = displayed(&f.vault);
+    let (_, fields) = &shown["John Doe"];
+    let passkeys = TestPasskey::of(fields);
+    assert_eq!(passkeys.len(), 1);
+    assert_eq!(passkeys[0].rp_id, "webauthn.io");
+    assert_eq!(passkeys[0].credential_id, b"credentialIdExample");
+    assert_eq!(passkeys[0].alg, 1);
+    // The imported key signs an assertion that verifies under the COSE key derived from it.
+    let key = crate::passkey::PasskeySigningKey::from_stored(1, &passkeys[0].private_key).unwrap();
+    let assertion = crate::passkey::get_assertion_with(
+        &key,
+        &passkeys[0].credential_id,
+        &passkeys[0].user_handle,
+        "https://webauthn.io",
+        "webauthn.io",
+        b"challenge",
+    )
+    .unwrap();
+    let mut message = assertion.authenticator_data.clone();
+    message.extend_from_slice(&rizzy_core::passkey::client_data_hash(
+        &assertion.client_data_json,
+    ));
+    let cose = &passkeys[0].public_key_cose;
+    let mut sec1 = vec![0x04];
+    sec1.extend_from_slice(&cose[10..42]);
+    sec1.extend_from_slice(&cose[45..77]);
+    rizzy_core::passkey::Es256VerifyingKey::from_uncompressed_sec1(&sec1)
+        .unwrap()
+        .verify_der(&message, &assertion.signature_der)
+        .unwrap();
+}
+
+/// A passkey with arbitrary fields, for the round-trip property.
+fn any_passkey() -> impl Strategy<Value = (String, Vec<u8>, Vec<u8>, [u8; 32], bool, String)> {
+    (
+        "[a-z]{1,12}\\.[a-z]{2,6}",
+        proptest::collection::vec(any::<u8>(), 1..=64),
+        proptest::collection::vec(any::<u8>(), 1..=64),
+        any::<[u8; 32]>(),
+        any::<bool>(),
+        // Not blank: a blank display name falls back to the rpId (rizzy_import::cxf "Mapping").
+        "[a-zA-Z0-9\"\\\\é😀][a-zA-Z0-9 \"\\\\é😀]{0,15}",
+    )
+}
+
+/// Export → import: every passkey of the vault comes back, field for field, with the user's
+/// name, whatever its bytes (CXF document level, without the Argon2id of the sealed file,
+/// which the round-trip test above covers).
+#[test]
+fn cxf_document_round_trips_arbitrary_passkeys() {
+    let state = std::cell::RefCell::new((fixture(745), Vec::<(String, TestPasskey)>::new()));
+    let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig {
+        cases: 24,
+        ..ProptestConfig::default()
+    });
+    runner
+        .run(
+            &proptest::collection::vec(any_passkey(), 1..4),
+            |passkeys| {
+                let mut state = state.borrow_mut();
+                let (f, want) = &mut *state;
+                let mut made = Vec::new();
+                for (rp_id, credential_id, user_handle, seed, eddsa, username) in passkeys {
+                    let passkey = if eddsa {
+                        TestPasskey::eddsa(seed, &rp_id, &credential_id, &user_handle)
+                    } else {
+                        // Not through create_credential: an arbitrary rpId may be a public suffix,
+                        // which INV-64 refuses at creation, and is not what this property tests.
+                        let key = rizzy_core::passkey::Es256SigningKey::generate(&mut f.rng);
+                        let public = key.verifying_key();
+                        TestPasskey {
+                            rp_id: rp_id.clone(),
+                            credential_id,
+                            user_handle,
+                            private_key: key.to_bytes().expose_secret().to_vec(),
+                            public_key_cose: rizzy_import::cxf::cose_key_es256(
+                                &public.x(),
+                                &public.y(),
+                            ),
+                            alg: 1,
+                        }
+                    };
+                    made.push((username, passkey));
+                }
+                for (username, passkey) in &made {
+                    f.login_with_passkeys("item", username, std::slice::from_ref(passkey));
+                }
+                want.extend(made);
+                let (document, counts) = f.vault.cxf_document(&mut f.rng, T0 + 9_999).unwrap();
+                prop_assert_eq!(counts.passkeys, want.len());
+                let parsed = import(Format::CxfJson, document.expose_secret(), &mut f.rng).unwrap();
+                prop_assert_eq!(parsed.counts, rizzy_import::Counts::default());
+                let mut got: Vec<(String, TestPasskey)> = parsed
+                    .items
+                    .iter()
+                    .map(|item| {
+                        let fields: BTreeMap<String, Vec<u8>> = item
+                            .writes()
+                            .iter()
+                            .map(|w| {
+                                (
+                                    w.key().as_str().to_owned(),
+                                    w.value().expose_secret().to_vec(),
+                                )
+                            })
+                            .collect();
+                        let ValueRef::Text(name) = ValueRef::decode(&fields[ITEM_NAME]).unwrap()
+                        else {
+                            panic!("no name");
+                        };
+                        let ValueRef::U64(ms) = ValueRef::decode(
+                            &fields[fields.keys().find(|k| k.ends_with("/created_ms")).unwrap()],
+                        )
+                        .unwrap() else {
+                            panic!("no created_ms");
+                        };
+                        assert_eq!(ms, (T0 + 9_999) / 1000 * 1000);
+                        let mut passkeys = TestPasskey::of(&fields);
+                        (name.to_owned(), passkeys.remove(0))
+                    })
+                    .collect();
+                let key = |e: &(String, TestPasskey)| {
+                    (e.1.credential_id.clone(), e.1.rp_id.clone(), e.0.clone())
+                };
+                got.sort_by_key(key);
+                let mut sorted = want.clone();
+                sorted.sort_by_key(key);
+                prop_assert_eq!(got, sorted);
+                Ok(())
+            },
+        )
+        .unwrap();
 }

@@ -29,11 +29,13 @@
 //!
 //! **JSON.** The strict, allocation-free reader of our encrypted export
 //! ([`parse_export_json`]) first: if it reads the file and `format` is
-//! `rizzy-vault-export`, that is the answer. Otherwise `rizzy-import`'s bounded JSON reader
-//! reads the root object: `format` = `rizzy-vault-export` is a damaged encrypted export
-//! (its reader then says so), `rizzy-vault-plaintext-export` our plaintext JSON, and a root
-//! with an `items` array Bitwarden's JSON export (whose reader refuses an encrypted one with
-//! its own message). Anything else is nothing. (`AliasVault`'s `.avex` encrypted export also
+//! `rizzy-vault-export`, that is the answer, and `rizzy-vault-cxf-export` is our CXF passkey
+//! export (ADR 0074 §2: "The tag lets `detect_format` name it before any password is asked").
+//! Otherwise `rizzy-import`'s bounded JSON reader reads the root object: either `format` is a
+//! damaged file of that format (its reader then says so), `rizzy-vault-plaintext-export` our
+//! plaintext JSON, a root with an `accounts` array and an integer `version.major` a bare CXF
+//! document (ADR 0074 §3, "Bare file"), and a root with an `items` array Bitwarden's JSON
+//! export (whose reader refuses an encrypted one with its own message). Anything else is nothing. (`AliasVault`'s `.avex` encrypted export also
 //! starts with `{`, a JSON header; it is not recognised here — no `Format` exists for it yet,
 //! see `rizzy_import::aliasvault` — and its binary payload after the header's delimiter makes
 //! every rule above answer nothing, same as any other unknown JSON-like file.)
@@ -58,10 +60,10 @@
 //! [`detect_format`] on arbitrary bytes. The cost is at most one extra parse of the file,
 //! within the caps the importer applies anyway.
 
-use rizzy_core::export::FORMAT;
+use rizzy_core::export::{CXF_FORMAT, FORMAT};
 use rizzy_import::Format;
 use rizzy_import::limits::{MAX_ARCHIVE_LEN, MAX_CSV_LEN, MAX_JSON_LEN};
-use rizzy_import::{csv, json, zip};
+use rizzy_import::{csv, cxf, json, zip};
 
 use super::parse_export_json;
 use super::plaintext::csv_columns;
@@ -110,6 +112,9 @@ pub enum DetectedFormat {
     /// Our encrypted export (CRYPTO.md §11.14): open it with the file's own password
     /// ([`VaultSync::import_encrypted`](crate::sync::VaultSync::import_encrypted)).
     RizzyEncrypted,
+    /// Our CXF passkey export (`rizzy-vault-cxf-export`, ADR 0074 §2): open it with the file's
+    /// own password ([`VaultSync::import_cxf_encrypted`](crate::sync::VaultSync::import_cxf_encrypted)).
+    RizzyCxfEncrypted,
     /// A format `rizzy-import` reads, our plaintext JSON export included.
     Import(Format),
     /// Our plaintext CSV export, which has no reader (ADR 0027 §6); the JSON and encrypted
@@ -148,8 +153,12 @@ pub fn detect_format(file: &[u8]) -> Option<DetectedFormat> {
 
 /// The JSON rules (module docs).
 fn detect_json(file: &[u8]) -> Option<DetectedFormat> {
-    if parse_export_json(file).is_ok_and(|fields| fields.format == FORMAT) {
-        return Some(DetectedFormat::RizzyEncrypted);
+    if let Ok(fields) = parse_export_json(file) {
+        match fields.format {
+            FORMAT => return Some(DetectedFormat::RizzyEncrypted),
+            CXF_FORMAT => return Some(DetectedFormat::RizzyCxfEncrypted),
+            _ => {}
+        }
     }
     if file.len() > MAX_JSON_LEN {
         return None;
@@ -157,10 +166,14 @@ fn detect_json(file: &[u8]) -> Option<DetectedFormat> {
     let root = json::parse(file, MAX_JSON_LEN).ok()?;
     match root.get("format").and_then(json::Json::as_str) {
         Some(FORMAT) => return Some(DetectedFormat::RizzyEncrypted),
+        Some(CXF_FORMAT) => return Some(DetectedFormat::RizzyCxfEncrypted),
         Some(PLAINTEXT_FORMAT) => {
             return Some(DetectedFormat::Import(Format::RizzyPlaintextJson));
         }
         _ => {}
+    }
+    if cxf::looks_like_cxf(&root) {
+        return Some(DetectedFormat::Import(Format::CxfJson));
     }
     root.get("items")
         .and_then(json::Json::as_array)
@@ -282,6 +295,20 @@ mod tests {
             detect(r#" {"format":"rizzy-vault-export","extra":true}"#),
             Some(DetectedFormat::RizzyEncrypted)
         );
+        // Our CXF passkey export (ADR 0074 §2), whole or damaged.
+        let cxf = br#"{"format":"rizzy-vault-cxf-export","version":1,"kdf_id":1,"export_salt":"AAAAAAAAAAAAAAAAAAAAAA","export_id":"AAAAAAAAAAAAAAAAAAAAAA","created_at":1,"data":"AA"}"#;
+        assert_eq!(detect_format(cxf), Some(DetectedFormat::RizzyCxfEncrypted));
+        assert_eq!(
+            detect(r#"{"format":"rizzy-vault-cxf-export","data":7}"#),
+            Some(DetectedFormat::RizzyCxfEncrypted)
+        );
+        // A bare CXF document (ADR 0074 §3): an accounts array and an integer version.major.
+        assert_eq!(
+            detect(r#"{"version":{"major":1,"minor":0},"timestamp":1,"accounts":[]}"#),
+            Some(DetectedFormat::Import(Format::CxfJson))
+        );
+        assert_eq!(detect(r#"{"version":{"major":"1"},"accounts":[]}"#), None);
+        assert_eq!(detect(r#"{"version":{"major":1},"accounts":{}}"#), None);
         assert_eq!(
             detect(
                 "\u{feff}{\"format\":\"rizzy-vault-plaintext-export\",\"version\":1,\"items\":[]}"
