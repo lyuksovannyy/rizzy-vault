@@ -24,6 +24,7 @@
 // garbage-collected, as do revealed values and plaintext exports.
 
 import initWasm, {
+  BreachCheck,
   CacheDelta,
   CacheKey,
   CoreError as WasmCoreError,
@@ -1119,6 +1120,77 @@ function mapOne<T extends { free(): void }, U>(item: T, f: (item: T) => U): U {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The breach check (ADR 0053; CRYPTO.md §11.16)
+//
+// The core computes SHA-1 over UTF-8(NFC(password)) and builds a request that carries the first
+// five hex characters only: `POST /api/v1/icons/breach-range`, no Authorization header. The
+// `icons` role relays the upstream's range, and the core compares every suffix in constant time.
+// The password never reaches this module as a string from an item (`checkItemBreach`); a typed or
+// generated one crosses as bytes that are zeroed (`checkPasswordBreach`).
+
+/** The outcome of a breach check: advice from the upstream, relayed by a server the threat model
+ * does not trust, so never a security decision. */
+export interface BreachResult {
+  /** Whether the password appeared in the breach corpus. */
+  readonly found: boolean;
+  /** How often it appeared; 0 when not found. */
+  readonly count: number;
+}
+
+/** Whether a breach-check failure means "not available here" (switched off on this server, the
+ * upstream down, a bad answer) rather than "too many checks, wait a moment". */
+export function breachCheckUnavailable(code: string): boolean {
+  return code !== "server_rate_limited";
+}
+
+/** The most range answers a session keeps in memory, by prefix (one per distinct prefix). */
+const MAX_CACHED_RANGES = 512;
+
+/** Runs one check: the cached answer for its prefix, or one request; frees the check. Only a
+ * `200` answer is kept, in memory only, so items that share a prefix send one request. */
+async function runBreachCheck(
+  check: BreachCheck,
+  transport: Transport,
+  ranges: Map<string, CoreResponse> | undefined,
+): Promise<BreachResult> {
+  try {
+    const prefix = check.prefix;
+    let answer = ranges?.get(prefix);
+    if (answer === undefined) {
+      answer = await transport(takeRequest(call(() => check.request())));
+      if (answer.status === 200 && ranges !== undefined) {
+        if (ranges.size >= MAX_CACHED_RANGES) {
+          ranges.clear();
+        }
+        ranges.set(prefix, answer);
+      }
+    }
+    const reply = answer;
+    return mapOne(
+      call(() => check.finish(reply.status, reply.body)),
+      (v) => ({ found: v.found, count: v.count }),
+    );
+  } finally {
+    check.free();
+  }
+}
+
+/**
+ * Checks a password the user typed or generated against the breach corpus (ADR 0053). The
+ * password crosses as bytes, zeroed afterwards (`SecretInput`); only its 5-character hash prefix
+ * is sent. Throws a {@link CoreError}: `server_not_found` when this server has no breach check,
+ * `server_rate_limited`, `server_internal`, `transport_failed`, `invalid_input` (empty).
+ */
+export async function checkPasswordBreach(
+  transport: Transport,
+  password: SecretInput,
+): Promise<BreachResult> {
+  ensureReady();
+  const check = withSecrets([password], (bytes) => call(() => BreachCheck.forPassword(at(bytes, 0))));
+  return runBreachCheck(check, transport, undefined);
+}
+
+// ---------------------------------------------------------------------------------------------
 // The session
 
 /**
@@ -1144,6 +1216,8 @@ export class VaultSession {
   readonly #plainTransport: Transport;
   readonly #clock: Clock;
   #enrolment: TwoFactorEnrolment | undefined;
+  /** Breach-check range answers by prefix, memory only, dropped on lock (`checkItemBreach`). */
+  #breachRanges = new Map<string, CoreResponse>();
   /** Set once a request answered `401` that means the session ended (ADR 0075 §6). */
   #ended = false;
 
@@ -1246,6 +1320,7 @@ export class VaultSession {
   lock(): void {
     this.#enrolment?.free();
     this.#enrolment = undefined;
+    this.#breachRanges.clear();
     const s = this.#session;
     if (s !== undefined && !s.locked && !this.#ended) {
       try {
@@ -1542,6 +1617,21 @@ export class VaultSession {
    * inline errors and its "also used by" warning. */
   customFieldAutofill(id: string): CustomFieldAutofill[] {
     return mapCustomFieldAutofill(call(() => this.#s().customFieldAutofill(id)));
+  }
+
+  /**
+   * Checks the item's `login.password` against the breach corpus (ADR 0053): the core reads the
+   * password, so it never crosses; only its 5-character hash prefix is sent, without the session
+   * token. `undefined` when the item has no password. Errors as {@link checkPasswordBreach}.
+   * Answers are kept by prefix in memory until lock, so a vault-wide check sends one request per
+   * distinct prefix.
+   */
+  async checkItemBreach(id: string): Promise<BreachResult | undefined> {
+    const check = call(() => this.#s().breachCheckItem(id));
+    if (check === undefined) {
+      return undefined;
+    }
+    return runBreachCheck(check, this.#plainTransport, this.#breachRanges);
   }
 
   /** The item's current TOTP code. */
