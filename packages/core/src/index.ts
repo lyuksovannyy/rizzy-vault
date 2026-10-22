@@ -49,6 +49,7 @@ import initWasm, {
   cacheStoreNames as wasmCacheStoreNames,
   createPasskey as wasmCreatePasskey,
   decideMatchCandidates as wasmDecideMatchCandidates,
+  cxfExportWarning as wasmCxfExportWarning,
   detectImportFormat as wasmDetectImportFormat,
   endsSessionOnUnauthorized,
   expectNoContent,
@@ -815,6 +816,12 @@ export interface EncryptedExport {
   readonly unresolved: number;
 }
 
+/** A CXF passkey export (ADR 0074 §2): the sealed file and how many passkeys it holds. */
+export interface CxfExport {
+  readonly file: Uint8Array;
+  readonly passkeys: number;
+}
+
 /** What an import did, as counts. */
 export interface ImportReport {
   readonly imported: number;
@@ -823,6 +830,8 @@ export interface ImportReport {
   readonly collapsedConflicts: number;
   readonly historyNotCarried: number;
   readonly fieldsNotCarried: number;
+  /** CXF credentials not imported: another type than a passkey, or an unreadable passkey. */
+  readonly credentialsSkipped: number;
 }
 
 /** The import formats of other products, and our own plaintext JSON. */
@@ -835,14 +844,21 @@ export type ImportFormat =
   | "firefox-csv"
   | "rizzy-json"
   | "aliasvault-csv"
-  | "aliasvault-avux";
+  | "aliasvault-avux"
+  | "cxf-json";
 
 /**
  * What {@link detectImportFormat} recognised: an {@link ImportFormat}, our encrypted export
- * (`rizzy-encrypted`, opened with the file's own password), our plaintext CSV export
- * (`rizzy-csv`, which cannot be imported), or `unknown` (ask the user to name the format).
+ * (`rizzy-encrypted`, opened with the file's own password), our CXF passkey export
+ * (`rizzy-cxf-encrypted`, likewise; ADR 0074), our plaintext CSV export (`rizzy-csv`, which
+ * cannot be imported), or `unknown` (ask the user to name the format).
  */
-export type DetectedImportFormat = ImportFormat | "rizzy-encrypted" | "rizzy-csv" | "unknown";
+export type DetectedImportFormat =
+  | ImportFormat
+  | "rizzy-encrypted"
+  | "rizzy-cxf-encrypted"
+  | "rizzy-csv"
+  | "unknown";
 
 /** One durable device of the account. */
 export interface DeviceView {
@@ -1672,6 +1688,27 @@ export class VaultSession {
     );
   }
 
+  /** How many passkeys a CXF export would hold now (ADR 0074 §2). */
+  cxfExportPasskeys(): number {
+    return call(() => this.#s().cxfExportPasskeys());
+  }
+
+  /**
+   * The vault's passkeys as a CXF export file under a new password for that file (ADR 0074
+   * §2), gated like {@link exportPlaintext}: {@link cxfExportWarning} shown
+   * ({@link plaintextWarningShown}), its hold ended, {@link plaintextExportPhrase} typed, within
+   * five minutes of {@link reauthenticate}.
+   */
+  exportCxf(typedPhrase: string, exportPassword: SecretInput): CxfExport {
+    const s = this.#s();
+    return mapOne(
+      withSecrets([exportPassword], (b) =>
+        call(() => s.exportCxf(typedPhrase, at(b, 0), this.#now())),
+      ),
+      (e) => ({ file: e.file, passkeys: e.passkeys }),
+    );
+  }
+
   /** The ids of the items too large to export. */
   exportBlockers(): string[] {
     return call(() => this.#s().exportBlockers());
@@ -1742,6 +1779,17 @@ export class VaultSession {
     return mapOne(
       withSecrets([exportPassword], (b) =>
         call(() => s.importEncrypted(file, at(b, 0), this.#now())),
+      ),
+      report,
+    );
+  }
+
+  /** Imports our own CXF passkey export (ADR 0074) as new Login items, one per passkey. */
+  importCxfEncrypted(file: Uint8Array, exportPassword: SecretInput): ImportReport {
+    const s = this.#s();
+    return mapOne(
+      withSecrets([exportPassword], (b) =>
+        call(() => s.importCxfEncrypted(file, at(b, 0), this.#now())),
       ),
       report,
     );
@@ -2007,6 +2055,7 @@ function report(r: {
   collapsedConflicts: number;
   historyNotCarried: number;
   fieldsNotCarried: number;
+  credentialsSkipped: number;
 }): ImportReport {
   return {
     imported: r.imported,
@@ -2015,6 +2064,7 @@ function report(r: {
     collapsedConflicts: r.collapsedConflicts,
     historyNotCarried: r.historyNotCarried,
     fieldsNotCarried: r.fieldsNotCarried,
+    credentialsSkipped: r.credentialsSkipped,
   };
 }
 
@@ -2309,6 +2359,15 @@ export function plaintextExportWarning(): string {
   return wasmPlaintextExportWarning();
 }
 
+/**
+ * The warning before a CXF passkey export (ADR 0074 §2): its own text, under the same gate as
+ * a plaintext export (the hold and {@link plaintextExportPhrase}).
+ */
+export function cxfExportWarning(): string {
+  ensureReady();
+  return wasmCxfExportWarning();
+}
+
 /** The phrase the user types to allow a plaintext export (ADR 0027 §5). */
 export function plaintextExportPhrase(): string {
   ensureReady();
@@ -2338,7 +2397,9 @@ export function detectImportFormat(file: Uint8Array): DetectedImportFormat {
     case "rizzy-json":
     case "aliasvault-csv":
     case "aliasvault-avux":
+    case "cxf-json":
     case "rizzy-encrypted":
+    case "rizzy-cxf-encrypted":
     case "rizzy-csv":
       return found;
     default:

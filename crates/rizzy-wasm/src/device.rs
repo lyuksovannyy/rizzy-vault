@@ -67,14 +67,13 @@ use rizzy_client::login::{
     Enrolled, LoggedIn, LoginAwaitingSession, LoginInput, LoginStarted, start_login,
 };
 use rizzy_client::matching::{EquivalenceGroup, startup_equivalence_groups};
-use rizzy_client::passkey::get_assertion;
+use rizzy_client::passkey::{PasskeySigningKey, get_assertion_with};
 use rizzy_client::rizzy_core::item::key::ElementId;
 use rizzy_client::rizzy_core::item::schema::{
     ATTR_ALG, ATTR_CREATED_MS, ATTR_CREDENTIAL_ID, ATTR_PRIVATE_KEY, ATTR_RP_ID, ATTR_USER_HANDLE,
     LIST_PASSKEY,
 };
 use rizzy_client::rizzy_core::item::value::ValueRef;
-use rizzy_client::rizzy_core::passkey::Es256SigningKey;
 use rizzy_client::rizzy_core::sign::DeviceKind;
 use rizzy_client::rizzy_proto::auth::{
     DeviceAuthFinishResponse, DeviceAuthStartResponse, LoginFinishResponse, LoginStartResponse,
@@ -1057,7 +1056,7 @@ impl DeviceSession {
     ///
     /// # Errors
     /// As [`DeviceSession::item`]; `invalid_input` when `passkey_id` is not a valid element
-    /// id, the item has no such passkey, or its stored key is not a valid 32-byte scalar;
+    /// id, the item has no such passkey, or its stored `alg` and key are not a valid ES256 scalar or `EdDSA` seed;
     /// otherwise whatever `get_assertion` returns (`rp_id_rejected` for INV-64).
     ///
     /// This call does **not** check `passkey_id` against the page's `allowCredentials` — the
@@ -1094,6 +1093,17 @@ impl DeviceSession {
         let credential_id = bytes_field(ATTR_CREDENTIAL_ID)?;
         let user_handle = bytes_field(ATTR_USER_HANDLE)?;
 
+        // `alg` picks the algorithm (ADR 0039 §1): 1 is ES256, which this project creates; 2 is
+        // an `EdDSA` passkey a CXF import brought in (ADR 0074 §3), whose seed must never be
+        // read as a P-256 scalar.
+        let alg_key = element.key(LIST_PASSKEY, ATTR_ALG).map_err(|_| bad())?;
+        let Ok(ValueRef::Enum(alg)) = vault
+            .field_value(item, alg_key.as_str())
+            .ok_or_else(bad)?
+            .decode()
+        else {
+            return Err(bad());
+        };
         let private_key_key = element
             .key(LIST_PASSKEY, ATTR_PRIVATE_KEY)
             .map_err(|_| bad())?;
@@ -1102,11 +1112,13 @@ impl DeviceSession {
             .ok_or_else(bad)?
             .decode()
         {
-            Ok(ValueRef::Bytes(bytes)) => Es256SigningKey::from_bytes(bytes).map_err(|_| bad())?,
+            Ok(ValueRef::Bytes(bytes)) => {
+                PasskeySigningKey::from_stored(alg, bytes).map_err(|_| bad())?
+            }
             _ => return Err(bad()),
         };
 
-        let assertion = get_assertion(
+        let assertion = get_assertion_with(
             &signing_key,
             &credential_id,
             &user_handle,

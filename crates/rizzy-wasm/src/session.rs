@@ -61,6 +61,7 @@ use rizzy_client::ClientError;
 use rizzy_client::account::VerifiedAccount;
 use rizzy_client::attachments::{AttachmentDownload, AttachmentUpload};
 use rizzy_client::device::UnlockedDevice;
+use rizzy_client::export::cxf::CXF_EXPORT_WARNING;
 use rizzy_client::export::detect::{DetectedFormat, detect_format};
 use rizzy_client::export::gate::{self, ExportGate, check_export_password};
 use rizzy_client::export::plaintext::{
@@ -72,7 +73,7 @@ use rizzy_client::matching::{
     EquivalenceGroup, FrameContext, ItemUri, SavedUri, decide_with_settings,
     global_equivalence_groups, vault_item_uris,
 };
-use rizzy_client::passkey::get_assertion;
+use rizzy_client::passkey::{PasskeySigningKey, get_assertion_with};
 use rizzy_client::rizzy_core::ids::{AccountId, AttachmentId};
 use rizzy_client::rizzy_core::item::key::ElementId;
 use rizzy_client::rizzy_core::item::schema::{
@@ -80,7 +81,6 @@ use rizzy_client::rizzy_core::item::schema::{
     LIST_PASSKEY, LOGIN_PASSWORD, LOGIN_TOTP,
 };
 use rizzy_client::rizzy_core::item::value::ValueRef;
-use rizzy_client::rizzy_core::passkey::Es256SigningKey;
 use rizzy_client::rizzy_core::sign::DeviceKind;
 use rizzy_client::rizzy_core::totp::{OtpAuthUri, TotpParams, TotpSecret};
 use rizzy_client::rizzy_import::{self, Format};
@@ -953,7 +953,7 @@ impl Session {
     ///
     /// # Errors
     /// As [`Session::item`]; `invalid_input` when `passkey_id` is not a valid element id, the
-    /// item has no such passkey, or its stored key is not a valid 32-byte scalar; otherwise
+    /// item has no such passkey, or its stored `alg` and key are not a valid ES256 scalar or `EdDSA` seed; otherwise
     /// whatever `get_assertion` returns (`rp_id_rejected` for INV-64).
     #[wasm_bindgen(js_name = passkeyAssertion)]
     pub fn passkey_assertion(
@@ -984,6 +984,17 @@ impl Session {
         let credential_id = bytes_field(ATTR_CREDENTIAL_ID)?;
         let user_handle = bytes_field(ATTR_USER_HANDLE)?;
 
+        // `alg` picks the algorithm (ADR 0039 §1): 1 is ES256, which this project creates; 2 is
+        // an `EdDSA` passkey a CXF import brought in (ADR 0074 §3), whose seed must never be
+        // read as a P-256 scalar.
+        let alg_key = element.key(LIST_PASSKEY, ATTR_ALG).map_err(|_| bad())?;
+        let Ok(ValueRef::Enum(alg)) = vault
+            .field_value(item, alg_key.as_str())
+            .ok_or_else(bad)?
+            .decode()
+        else {
+            return Err(bad());
+        };
         let private_key_key = element
             .key(LIST_PASSKEY, ATTR_PRIVATE_KEY)
             .map_err(|_| bad())?;
@@ -992,11 +1003,13 @@ impl Session {
             .ok_or_else(bad)?
             .decode()
         {
-            Ok(ValueRef::Bytes(bytes)) => Es256SigningKey::from_bytes(bytes).map_err(|_| bad())?,
+            Ok(ValueRef::Bytes(bytes)) => {
+                PasskeySigningKey::from_stored(alg, bytes).map_err(|_| bad())?
+            }
             _ => return Err(bad()),
         };
 
-        let assertion = get_assertion(
+        let assertion = get_assertion_with(
             &signing_key,
             &credential_id,
             &user_handle,
@@ -1092,6 +1105,53 @@ impl Session {
             file: exported.file,
             items: exported.items,
             unresolved: exported.unresolved.len(),
+        })
+    }
+
+    /// The number of passkeys a CXF export would hold now (ADR 0074 §2), for the dialog.
+    ///
+    /// # Errors
+    /// `locked`; `export_oversize_items`.
+    #[wasm_bindgen(js_name = cxfExportPasskeys)]
+    pub fn cxf_export_passkeys(&self) -> Result<usize, CoreError> {
+        Ok(self.inner()?.vault.cxf_export_passkeys()?)
+    }
+
+    /// The vault's passkeys as a CXF export file (ADR 0074 §2): a CXF document sealed under a
+    /// new password for that file (`rizzy-vault-cxf-export`). Gated like a plaintext export:
+    /// a re-authentication confirmed within [`REAUTH_WINDOW_MS`], [`cxf_export_warning`] shown
+    /// ([`Session::plaintext_warning_shown`]) and its hold over, and `typed_phrase` exactly
+    /// [`plaintext_export_phrase`]; spends them. Ciphertext: the host saves the bytes as a
+    /// download. No bare, unencrypted CXF export exists (ADR 0074 owner answer 4).
+    ///
+    /// # Errors
+    /// `locked`; `invalid_input` for an empty export password or one with an unassigned code
+    /// point (checked first, so it spends nothing); `reauth_required`;
+    /// `plaintext_export_not_acknowledged`; `plaintext_export_hold`; `export_oversize_items`;
+    /// `export_too_large`. `export_password` is UTF-8 bytes, zeroed on return
+    /// ([`crate::secret`]).
+    #[wasm_bindgen(js_name = exportCxf)]
+    pub fn export_cxf(
+        &mut self,
+        typed_phrase: &str,
+        export_password: &mut [u8],
+        now_ms: u64,
+    ) -> Result<CxfExport, CoreError> {
+        let export_password = take_secret(export_password)?;
+        let inner = self.inner_mut()?;
+        check_export_password(&export_password)?;
+        if !inner.gate.reauth_fresh(now_ms) {
+            return Err(ClientError::ReauthRequired.into());
+        }
+        let ack = PlaintextExportAck::from_typed_phrase(typed_phrase)?;
+        let auth = inner.gate.authorize_plaintext(now_ms)?;
+        let exported =
+            inner
+                .vault
+                .export_cxf(&mut inner.rng, auth, ack, &export_password, now_ms)?;
+        Ok(CxfExport {
+            file: exported.file,
+            passkeys: exported.passkeys,
         })
     }
 
@@ -1241,8 +1301,8 @@ impl Session {
 
     /// Imports a file of another product, or our own plaintext JSON export, as new items.
     /// `format` is one of `bitwarden-json`, `1pux`, `keepass-xml`, `csv`, `chrome-csv`,
-    /// `firefox-csv`, `rizzy-json`, `aliasvault-csv`, `aliasvault-avux`. The report has counts
-    /// only (INV-48).
+    /// `firefox-csv`, `rizzy-json`, `aliasvault-csv`, `aliasvault-avux`, `cxf-json` (a bare
+    /// CXF passkey file, ADR 0074 §3). The report has counts only (INV-48).
     ///
     /// # Errors
     /// `locked`; `wrong_state` while a sync runs; `unknown_format`; `invalid_input` for a file
@@ -1265,6 +1325,7 @@ impl Session {
             "rizzy-json" => Format::RizzyPlaintextJson,
             "aliasvault-csv" => Format::AliasVaultCsv,
             "aliasvault-avux" => Format::AliasVaultAvux,
+            "cxf-json" => Format::CxfJson,
             _ => return Err(CoreError::new(UNKNOWN_FORMAT)),
         };
         if file.len() > MAX_IMPORT_FILE_LEN {
@@ -1285,6 +1346,46 @@ impl Session {
             collapsed_conflicts: counts.collapsed_conflicts,
             history_not_carried: counts.dropped_history,
             fields_not_carried: counts.dropped_fields,
+            credentials_skipped: counts.skipped_credentials,
+        })
+    }
+
+    /// Imports our own CXF passkey export (`rizzy-vault-cxf-export`, ADR 0074 §2–§3) with its
+    /// export password, one new Login item per passkey. The report has counts only (INV-48).
+    ///
+    /// # Errors
+    /// `locked`; `wrong_state` while a sync runs; `invalid_input` for a file over
+    /// [`MAX_IMPORT_FILE_LEN`]; `invalid_export_file` (another tag or payload version
+    /// included); `export_decryption_failed`; `export_update_required`; `read_only`.
+    /// `export_password` is UTF-8 bytes, zeroed on return whatever the outcome
+    /// ([`crate::secret`]).
+    #[wasm_bindgen(js_name = importCxfEncrypted)]
+    pub fn import_cxf_encrypted(
+        &mut self,
+        file: &[u8],
+        export_password: &mut [u8],
+        now_ms: u64,
+    ) -> Result<ImportReport, CoreError> {
+        let export_password = take_secret(export_password)?;
+        if file.len() > MAX_IMPORT_FILE_LEN {
+            return Err(ClientError::InvalidInput.into());
+        }
+        let inner = self.writable()?;
+        let done = inner.vault.import_cxf_encrypted(
+            &mut inner.rng,
+            &inner.unlocked,
+            file,
+            &export_password,
+            now_ms,
+        )?;
+        Ok(ImportReport {
+            imported: done.imported.len(),
+            skipped: done.skipped.len().saturating_add(done.counts.skipped_items),
+            warnings: done.warnings.len(),
+            collapsed_conflicts: done.counts.collapsed_conflicts,
+            history_not_carried: done.counts.dropped_history,
+            fields_not_carried: done.counts.dropped_fields,
+            credentials_skipped: done.counts.skipped_credentials,
         })
     }
 
@@ -1321,6 +1422,7 @@ impl Session {
             collapsed_conflicts: done.collapsed_fields,
             history_not_carried: done.history_not_carried,
             fields_not_carried: done.fields_not_carried,
+            credentials_skipped: 0,
         })
     }
 
@@ -1747,6 +1849,15 @@ const fn kind_name(kind: DeviceKind) -> &'static str {
     }
 }
 
+/// The warning shown before a CXF passkey export (ADR 0074 §2 "Warning": its own text, not
+/// [`plaintext_export_warning`]'s), under the same gate: re-authentication, the hold, and the
+/// typed [`plaintext_export_phrase`] (owner answer 3).
+#[wasm_bindgen(js_name = cxfExportWarning)]
+#[must_use]
+pub fn cxf_export_warning() -> String {
+    CXF_EXPORT_WARNING.to_owned()
+}
+
 /// The frozen warning shown before a plaintext export (ADR 0027 §5).
 #[wasm_bindgen(js_name = plaintextExportWarning)]
 #[must_use]
@@ -1771,8 +1882,9 @@ pub fn plaintext_export_hold_ms() -> u32 {
 
 /// The format of an import file, recognised from its bytes (owner decision 2026-10-05;
 /// `rizzy_client::export::detect`): `rizzy-encrypted` (open it with
-/// [`Session::import_encrypted`] and the file's password), an [`Session::import_file`] format
-/// name, `rizzy-csv` (our plaintext CSV export, which cannot be imported), or `unknown` (the
+/// [`Session::import_encrypted`] and the file's password), `rizzy-cxf-encrypted` (our CXF
+/// passkey export, ADR 0074 §2: open it with [`Session::import_cxf_encrypted`] and the file's
+/// password), an [`Session::import_file`] format name (`cxf-json` for a bare CXF file), `rizzy-csv` (our plaintext CSV export, which cannot be imported), or `unknown` (the
 /// host asks the user to name the format). A file over [`MAX_IMPORT_FILE_LEN`] is `unknown`.
 /// The answer names a kind only, never a byte of the file.
 #[wasm_bindgen(js_name = detectImportFormat)]
@@ -1783,6 +1895,7 @@ pub fn detect_import_format(file: &[u8]) -> String {
     } else {
         match detect_format(file) {
             Some(DetectedFormat::RizzyEncrypted) => "rizzy-encrypted",
+            Some(DetectedFormat::RizzyCxfEncrypted) => "rizzy-cxf-encrypted",
             Some(DetectedFormat::RizzyPlaintextCsv) => "rizzy-csv",
             Some(DetectedFormat::Import(format)) => match format {
                 Format::BitwardenJson => "bitwarden-json",
@@ -1794,6 +1907,7 @@ pub fn detect_import_format(file: &[u8]) -> String {
                 Format::RizzyPlaintextJson => "rizzy-json",
                 Format::AliasVaultCsv => "aliasvault-csv",
                 Format::AliasVaultAvux => "aliasvault-avux",
+                Format::CxfJson => "cxf-json",
                 _ => "unknown",
             },
             _ => "unknown",
@@ -1842,6 +1956,33 @@ impl TotpCode {
     #[must_use]
     pub fn period_s(&self) -> u32 {
         u32::try_from(self.period_s).unwrap_or(u32::MAX)
+    }
+}
+
+/// A CXF passkey export (ADR 0074 §2): the file's bytes and how many passkeys it holds.
+#[wasm_bindgen]
+#[derive(Debug)]
+pub struct CxfExport {
+    /// The file (ciphertext).
+    file: Vec<u8>,
+    /// Passkeys exported.
+    passkeys: usize,
+}
+
+#[wasm_bindgen]
+impl CxfExport {
+    /// The file's bytes.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn file(&self) -> Vec<u8> {
+        self.file.clone()
+    }
+
+    /// Passkeys exported.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn passkeys(&self) -> usize {
+        self.passkeys
     }
 }
 
@@ -1897,10 +2038,20 @@ pub struct ImportReport {
     history_not_carried: usize,
     /// Fields not carried.
     fields_not_carried: usize,
+    /// CXF credentials not imported: of another type than a passkey, or a passkey that could
+    /// not be read (ADR 0074 §1, §3). Zero for the other formats.
+    credentials_skipped: usize,
 }
 
 #[wasm_bindgen]
 impl ImportReport {
+    /// CXF credentials not imported (ADR 0074 §1, §3).
+    #[wasm_bindgen(getter, js_name = credentialsSkipped)]
+    #[must_use]
+    pub fn credentials_skipped(&self) -> usize {
+        self.credentials_skipped
+    }
+
     /// Items imported.
     #[wasm_bindgen(getter)]
     #[must_use]

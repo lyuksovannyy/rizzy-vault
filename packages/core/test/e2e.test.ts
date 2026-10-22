@@ -38,6 +38,7 @@ import {
   decideMatchCandidates,
   PASSKEY_ALG_ES256,
   fetchTransport,
+  cxfExportWarning,
   detectImportFormat,
   enrolDevice,
   login,
@@ -555,6 +556,39 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     expect(() => first.exportPlaintext("csv", plaintextExportPhrase())).toThrowError(
       expect.objectContaining({ code: "reauth_required" }),
     );
+
+    // CXF passkey export (ADR 0074 §2): the plaintext gate, its own warning, a sealed file;
+    // imported back through the CXF reader, one Login per passkey (§3). The passkey item was
+    // duplicated by the encrypted round trip above, so there are two.
+    expect(cxfExportWarning()).toMatch(/^Once decrypted with its export password/);
+    expect(first.cxfExportPasskeys()).toBe(2);
+    expect(() => first.exportCxf(plaintextExportPhrase(), "cxf password")).toThrowError(
+      expect.objectContaining({ code: "reauth_required" }),
+    );
+    await first.reauthenticate(secretKey, PASSWORD);
+    expect(() => first.exportCxf(plaintextExportPhrase(), "cxf password")).toThrowError(
+      expect.objectContaining({ code: "plaintext_export_hold" }),
+    );
+    expect(first.plaintextWarningShown()).toBe(10_000);
+    skew += 10_000;
+    expect(() => first.exportCxf("EXPORT PASSKEYS", "cxf password")).toThrowError(
+      expect.objectContaining({ code: "plaintext_export_not_acknowledged" }),
+    );
+    const cxf = first.exportCxf(plaintextExportPhrase(), "cxf password");
+    expect(cxf.passkeys).toBe(2);
+    expect(detectImportFormat(cxf.file)).toBe("rizzy-cxf-encrypted");
+    expect(new TextDecoder().decode(cxf.file)).toMatch(/^\{"format":"rizzy-vault-cxf-export"/);
+    await expect(
+      Promise.resolve().then(() => first.importCxfEncrypted(cxf.file, "wrong")),
+    ).rejects.toMatchObject({ code: "export_decryption_failed" });
+    await expect(
+      Promise.resolve().then(() => first.importEncrypted(cxf.file, "cxf password")),
+    ).rejects.toMatchObject({ code: "invalid_export_file" });
+    const before = first.items().length;
+    const cxfImported = first.importCxfEncrypted(cxf.file, "cxf password");
+    expect(cxfImported).toMatchObject({ imported: 2, skipped: 0, credentialsSkipped: 0 });
+    expect(first.items()).toHaveLength(before + 2);
+    await first.sync();
 
     // A transport failure mid-sync aborts the sync in the core: writes are accepted again at
     // once, and the next sync sends the unsent change. Once before the upload reached the
