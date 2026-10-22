@@ -61,6 +61,17 @@ No CRYPTO.md change: this reuses the `equivalence-list` signed statement and the
 
 > **Proposed INV-75** (allocated across the 2026-10-11 batch in ADR-number order. Provisional: the allocation was made across the 2026-10-11 batch in ADR-number order; if ADRs are accepted out of order, the owner renumbers at acceptance.). A client's persisted `highest_equivalence_list_version` never decreases, and changes only immediately after that same client verifies, under INV-39, a global equivalence list whose `list_version` exceeds the stored value. A crash between verifying a list and persisting the new value causes at most a harmless re-verification of the same list on the next load, never acceptance of an older one.
 
+### Owner answers at acceptance (2026-10-22)
+
+The owner accepted this ADR as drafted; the recommendations of "Open questions for the owner" stand:
+
+1. INV-75 keeps its number.
+2. Cache format 2 is a mandatory migration (point 2), not an optional key that is zero when absent.
+3. The extension's IndexedDB store and any native leaf use the same key name and encoding (ADR 0026 §3). No separate decision is needed.
+4. The implementer names each leaf's host entry point in the PR that wires point 4. It needs no ADR.
+
+Of the "On acceptance" edits, ADR 0026's status line, its index row and INV-75 (THREAT_MODEL.md §8.6) are made in the accepting change. CLAUDE.md's status sentence was already brought up to date by the owner's status change (24812c8).
+
 ## Consequences
 
 ### Positive

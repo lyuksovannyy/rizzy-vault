@@ -1,6 +1,6 @@
 # ADR 0038: Equivalent-domain list: format, signing and governance
 
-- Status: Accepted
+- Status: Partially superseded by [ADR 0044](0044-equivalence-group-member-rules.md) (§1 in part)
 - Date: 2026-10-07
 - Deciders: project owner
 - Milestone: M2
