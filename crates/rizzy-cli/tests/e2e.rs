@@ -2086,6 +2086,78 @@ fn sessions_are_listed_and_ended() {
 
 /// ADR 0048 §5: `rv unlock` prints the storage use the server reports with the account answer,
 /// in whole bytes, against the instance's quota (the default 5 GiB here).
+/// ADR 0074 through `rv`: a bare CXF file of another product is recognised and imported (one
+/// Login per passkey); `export --format cxf` asks for a file password, prints the CXF export's
+/// own warning, holds 10 seconds, takes the typed phrase and writes a sealed
+/// `rizzy-vault-cxf-export` file; importing that file on another device asks for its password
+/// and brings the passkey back as a new item.
+#[test]
+fn cxf_passkey_files_are_imported_and_exported() {
+    let server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("cxa");
+    let (secret_key, _) = sign_up(&a, &origin, "cxfuser");
+    let out = temp_dir("cxf-files");
+    // CXF 1.0 PS errata, Appendix A: its passkey item and its GitHub item (no passkey).
+    let bare = out.join("other.cxf.json");
+    std::fs::write(
+        &bare,
+        br#"{"version":{"major":1,"minor":0},"exporterRpId":"exporter.example.com","exporterDisplayName":"Exporter app","timestamp":1705228800,"accounts":[{"id":"DZSXp7iBQY-Fg-OofakQtQ","username":"jane_smith","email":"jane.smith@example.com","collections":[],"items":[{"id":"9OF-QjVDQo2Wp2xWPw6ZhA","title":"GitHub Login","credentials":[{"type":"basic-auth","username":{"id":"-eZX0Gw-TzOsBFwt67N7ZA","fieldType":"string","value":"johndoe"}}]},{"id":"akKA3Y0jQRuK7sKplB0Y9w","title":"WebAuthn.io","credentials":[{"type":"passkey","credentialId":"Y3JlZGVudGlhbElkRXhhbXBsZQ","rpId":"webauthn.io","username":"johndoe","userDisplayName":"John Doe","userHandle":"cnEzaNHWcYK3coWZjvoaV1Hj9gnI12mKe2dL2HZVFlY","key":"MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgARu_0sCt20EpgVxb4Puq3Ga5VVLpuTY75ngvZlyq3X6hRANCAASmdk1xLsK0oOlhxIPp0d1ZuS0sT9nf6BZtSelhqvLBW0fOL33l_bXgsr_STUHjCLn8l6gcRJwe7OQvbQubZ1dY"}]}]}]}"#,
+    )
+    .unwrap();
+    let imported = a.ok(&["import", "--in", bare.to_str().unwrap()], &[]);
+    assert!(imported.noted("Recognised: a CXF passkey file"));
+    assert!(imported.noted("Imported 1 items"));
+    assert!(imported.noted("1 CXF credentials not imported"));
+    let items = a.items();
+    assert_eq!(items.len(), 1);
+    assert_eq!(a.field(&items[0].0, "login.username"), "johndoe");
+    a.ok(&["sync"], &[]);
+
+    let sealed = out.join("passkeys.rizzy");
+    let sealed_path = sealed.to_str().unwrap();
+    let (outcome, written) = a.try_run(
+        &[
+            "export",
+            "--out",
+            sealed_path,
+            "--name",
+            "cxfuser",
+            "--format",
+            "cxf",
+        ],
+        &[PASSWORD, PASSWORD, "cxf file password", "cxf file password"],
+        &[],
+        &["EXPORT PLAINTEXT"],
+    );
+    outcome.unwrap_or_else(|e| panic!("cxf export failed: {e:?}; {:?}", written.notes));
+    assert!(written.noted("standard CXF credential-exchange document"));
+    assert_eq!(written.holds, [Duration::from_secs(10)]);
+    assert!(written.noted("Exported 1 passkeys of 1 as a CXF file"));
+    let file = std::fs::read(&sealed).unwrap();
+    assert!(file.starts_with(br#"{"format":"rizzy-vault-cxf-export","version":1,"#));
+    // Sealed: no member of the CXF document is readable in the file.
+    assert!(!file.windows(11).any(|w| w == b"webauthn.io"));
+
+    let b = Rv::new("cxb");
+    log_in(&b, &origin, "cxfuser", &secret_key);
+    let before = b.items().len();
+    let (outcome, refused) = b.try_run(
+        &["import", "--in", sealed_path],
+        &[PASSWORD, "not the password"],
+        &[],
+        &[],
+    );
+    assert!(matches!(
+        outcome,
+        Err(CliError::Client(ClientError::ExportDecryptionFailed))
+    ));
+    assert!(refused.noted("Recognised: a rizzy-vault CXF passkey export"));
+    let again = b.ok(&["import", "--in", sealed_path], &["cxf file password"]);
+    assert!(again.noted("Imported 1 items"));
+    assert_eq!(b.items().len(), before + 1);
+}
+
 #[test]
 fn unlock_prints_the_storage_use_the_server_reports() {
     let server = Server::start();
