@@ -595,6 +595,10 @@ export type ItemChange =
       readonly label: string;
       readonly kind: "text" | "hidden" | "boolean";
       readonly value: string;
+      /** The field's autocomplete id (ADR 0076 §2): written as `field/<element>/autocomplete`
+       * in the same op. Lowercase it before passing it; `rizzy-client` refuses, never
+       * normalises, an id that breaks the grammar or is reserved. */
+      readonly autocomplete?: string;
     }
   | { readonly op: "removeElement"; readonly list: string; readonly element: string }
   | {
@@ -649,6 +653,67 @@ export interface ItemSummary {
   readonly tags: readonly string[];
   /** The host of the item's first website, or `undefined`. Never the full URI. */
   readonly websiteHost: string | undefined;
+}
+
+/** What one custom field's autocomplete id does (ADR 0076 §2.4–§2.5, §3). */
+export interface CustomFieldAutofill {
+  /** The field's element id. */
+  readonly element: string;
+  /** `none`; `fills`; `invalid` (W1), `reserved` (W2), `wrong_kind` (W4): stored ids that never
+   * fill; `unnamed`: no Display Name; `shadowed`: another field earlier in list order fills it. */
+  readonly state: "none" | "fills" | "invalid" | "reserved" | "wrong_kind" | "unnamed" | "shadowed";
+  /** For `shadowed`: the winner's element id and Display Name. */
+  readonly winner: string | undefined;
+  readonly winnerLabel: string | undefined;
+}
+
+/** One custom field an inline-menu offer discloses (ADR 0076 §4.1). Never a value. */
+export interface CustomOffer {
+  readonly token: string;
+  readonly element: string;
+  readonly label: string;
+  readonly concealed: boolean;
+}
+
+/** One candidate's offer (ADR 0076 §4.1). */
+export interface AutofillOffer {
+  readonly fillsTotp: boolean;
+  readonly custom: readonly CustomOffer[];
+}
+
+/** One fill click's scope, taken from the long-lived context's own offer record (ADR 0076
+ * §4.2). */
+export interface FillPlanRequest {
+  readonly only: "username" | "password" | "totp" | undefined;
+  readonly totp: boolean;
+  readonly custom: readonly { readonly token: string; readonly element: string }[];
+  readonly usernameToken: string | undefined;
+  readonly passwordToken: string | undefined;
+}
+
+/** The values of one fill (ADR 0076 §4.4). */
+export interface FillPlanValues {
+  readonly username?: string;
+  readonly password?: string;
+  readonly totp?: string;
+  readonly custom: readonly { readonly token: string; readonly value: string }[];
+}
+
+/** One custom field a submitted form captured (ADR 0076 §5.1). */
+export interface CapturedCustomField {
+  readonly token: string;
+  readonly value: string;
+  readonly masked: boolean;
+}
+
+/** One save-dialog row (ADR 0076 §5.3). */
+export interface SaveRow {
+  readonly index: number;
+  readonly kind: "add" | "update";
+  readonly element: string | undefined;
+  readonly label: string;
+  readonly concealed: boolean;
+  readonly checked: boolean;
 }
 
 /** One displayed field. `value` is absent while `concealed`; reveal it with `reveal`. */
@@ -983,6 +1048,9 @@ function draftOf(changes: readonly ItemChange[]): ItemDraft {
             break;
           case "addCustomField":
             draft.addCustomField(change.element, change.label, change.kind, change.value);
+            if (change.autocomplete !== undefined) {
+              draft.set(`field/${change.element}/autocomplete`, change.autocomplete);
+            }
             break;
           case "addPasskey":
             draft.addPasskey(
@@ -1031,6 +1099,17 @@ function mapFree<T extends { free(): void }, U>(items: T[], f: (item: T) => U): 
 }
 
 /** Maps one generated value and frees it. */
+function mapCustomFieldAutofill(
+  views: { element: string; state: string; winner: string | undefined; winnerLabel: string | undefined; free(): void }[],
+): CustomFieldAutofill[] {
+  return mapFree(views, (v) => ({
+    element: v.element,
+    state: v.state as CustomFieldAutofill["state"],
+    winner: v.winner,
+    winnerLabel: v.winnerLabel,
+  }));
+}
+
 function mapOne<T extends { free(): void }, U>(item: T, f: (item: T) => U): U {
   try {
     return f(item);
@@ -1457,6 +1536,12 @@ export class VaultSession {
    */
   restoreLateAsNew(id: string, itemType: ItemType): string {
     return call(() => this.#s().restoreLateAsNew(id, itemType, this.#now()));
+  }
+
+  /** What each custom field's autocomplete id does, list order (ADR 0076 §2.5): the editor's
+   * inline errors and its "also used by" warning. */
+  customFieldAutofill(id: string): CustomFieldAutofill[] {
+    return mapCustomFieldAutofill(call(() => this.#s().customFieldAutofill(id)));
   }
 
   /** The item's current TOTP code. */
@@ -2634,6 +2719,77 @@ export class DurableSession {
    */
   passkeyCandidates(id: string): PasskeyCandidateResult[] {
     return mapPasskeyCandidates(call(() => this.#inner.passkeyCandidates(id)));
+  }
+
+  /** What each custom field's autocomplete id does, list order (ADR 0076 §2.5). */
+  customFieldAutofill(id: string): CustomFieldAutofill[] {
+    return mapCustomFieldAutofill(call(() => this.#inner.customFieldAutofill(id)));
+  }
+
+  /**
+   * One inline-menu candidate's offer (ADR 0076 §4.1): whether it fills a TOTP code, and the
+   * custom fields it fills for the page's custom `tokens` — Display Names, the concealed flag
+   * and the element id the long-lived context records. Never a value.
+   */
+  autofillOffer(id: string, tokens: readonly string[]): AutofillOffer {
+    return mapOne(call(() => this.#inner.autofillOffer(id, [...tokens])), (o) => ({
+      fillsTotp: o.fillsTotp,
+      custom: mapFree(o.custom, (c) => ({ token: c.token, element: c.element, label: c.label, concealed: c.concealed })),
+    }));
+  }
+
+  /**
+   * The values of one fill click (ADR 0076 §4.2): one coarse call into `rizzy-client`, the TOTP
+   * code computed there at this session's clock — the secret never crosses.
+   */
+  fillPlan(id: string, request: FillPlanRequest): FillPlanValues {
+    return mapOne(
+      call(() =>
+        this.#inner.fillPlan(
+          id,
+          request.only,
+          request.totp,
+          request.custom.map((c) => c.token),
+          request.custom.map((c) => c.element),
+          request.usernameToken,
+          request.passwordToken,
+          this.#now(),
+        ),
+      ),
+      (v) => {
+        const tokens = v.customTokens;
+        const values = v.customValues;
+        return {
+          ...(v.username !== undefined ? { username: v.username } : {}),
+          ...(v.password !== undefined ? { password: v.password } : {}),
+          ...(v.totp !== undefined ? { totp: v.totp } : {}),
+          custom: tokens.map((token, i) => ({ token, value: values[i] ?? "" })),
+        };
+      },
+    );
+  }
+
+  /** The save dialog's custom-field rows (ADR 0076 §5.3) for a new item (`id` undefined) or an
+   * update; no value crosses back. */
+  customSavePlan(id: string | undefined, captured: readonly CapturedCustomField[]): SaveRow[] {
+    return mapFree(
+      call(() =>
+        this.#inner.customSavePlan(
+          id,
+          captured.map((c) => c.token),
+          captured.map((c) => c.value),
+          Uint8Array.from(captured.map((c) => (c.masked ? 1 : 0))),
+        ),
+      ),
+      (r) => ({
+        index: r.index,
+        kind: r.kind as SaveRow["kind"],
+        element: r.element,
+        label: r.label,
+        concealed: r.concealed,
+        checked: r.checked,
+      }),
+    );
   }
 
   /** Creates an item; returns its id. Persisted before this resolves (class docs). */

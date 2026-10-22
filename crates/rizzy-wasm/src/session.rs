@@ -860,6 +860,19 @@ impl Session {
         Ok(hex(restored.as_bytes()))
     }
 
+    /// What each custom field's autocomplete id does, in list order (ADR 0076 §2.4–§2.5, §3):
+    /// the editor's inline errors and its "also used by" warning.
+    ///
+    /// # Errors
+    /// As [`Session::item`].
+    #[wasm_bindgen(js_name = customFieldAutofill)]
+    pub fn custom_field_autofill(
+        &self,
+        id: &str,
+    ) -> Result<Vec<crate::autofill::CustomFieldAutofillView>, CoreError> {
+        crate::autofill::custom_field_autofill(&self.inner()?.vault, id)
+    }
+
     /// The current TOTP code of an item's `login.totp`, which holds an `otpauth://` URI or a
     /// bare Base32 secret (then SHA-1, 6 digits, 30 s; CRYPTO.md §11.15), at `now_ms`.
     ///
