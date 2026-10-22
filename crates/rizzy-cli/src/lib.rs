@@ -123,6 +123,7 @@ fn run(arguments: Vec<OsString>) -> Result<(), CliError> {
         account: None,
         trust: tls::Trust::from_settings(None, &|name| std::env::var_os(name)),
         ui: &mut terminal,
+        sign_outs: device::SignOuts::default(),
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()

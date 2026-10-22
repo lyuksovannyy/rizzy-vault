@@ -111,6 +111,7 @@ mod heal;
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use rizzy_client::ClientError;
 use rizzy_client::account::{CertifiedDevice, RevokedDevice, StorageUsage, VerifiedAccount};
@@ -126,7 +127,9 @@ use rizzy_client::rizzy_proto::auth::{
     DeviceAuthFinishResponse, DeviceAuthStartResponse, LoginFinishResponse, LoginStartResponse,
     Reconciliation,
 };
-use rizzy_client::rizzy_proto::auth::{RegisterFinishRequest, RegisterStartResponse};
+use rizzy_client::rizzy_proto::auth::{
+    RegisterFinishRequest, RegisterStartResponse, RequestSignature,
+};
 use rizzy_client::rizzy_proto::change::{
     CommitChangeRequest, DeviceSuspensionRequest, ReregisterStartRequest, ReregisterStartResponse,
     SuspendDeviceResponse,
@@ -134,6 +137,7 @@ use rizzy_client::rizzy_proto::change::{
 use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::rizzy_proto::http::paths;
 use rizzy_client::rizzy_proto::recovery::RecoveryCancelResponse;
+use rizzy_client::rizzy_proto::session::{EndSessionRequest, SessionListResponse};
 use rizzy_client::rizzy_proto::vault::{FetchResponse, UploadResponse};
 use rizzy_client::rizzy_proto::wire::{Id, SessionToken};
 use rizzy_client::rotation::{
@@ -144,6 +148,7 @@ use rizzy_client::session::{
     DeviceSession, device_auth_finish, device_auth_finish_reconciling, device_auth_start,
     device_auth_start_reconciling,
 };
+use rizzy_client::sessions::SessionList;
 use rizzy_client::store::floors::Floors;
 use rizzy_client::store::load::{self, Loaded};
 use rizzy_client::store::record::{DeviceRecord, Stage};
@@ -180,6 +185,71 @@ pub struct Env<'a> {
     pub trust: crate::tls::Trust,
     /// The user.
     pub ui: &'a mut dyn Ui,
+    /// The sign-outs of this run's device sessions, sent when the command is over
+    /// ([`SignOuts`]).
+    pub sign_outs: SignOuts,
+}
+
+/// How long the sign-out of one session may take at exit (best effort, ADR 0075 owner answer
+/// 3).
+const SIGN_OUT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A sign-out (`sessions/current/end`, ADR 0075 R2) signed when a [`Device`] was dropped,
+/// for [`SignOuts::send_all`].
+struct PendingSignOut {
+    /// The device's server.
+    http: Http,
+    /// The session's bearer token (a secret, wiped on drop).
+    token: SessionToken,
+    /// The `device-request` signature over the sign-out.
+    signature: RequestSignature,
+}
+
+/// The sign-outs of one `rv` run. ADR 0075 owner answer 3: "`rv` ends its own session with
+/// `sessions/current/end` when a command exits: best effort, no retry." Each [`Device`] that
+/// authenticated leaves one here when it is dropped, signed with its device key then;
+/// [`crate::commands::run`] sends them once the command is over, each bounded by
+/// [`SIGN_OUT_TIMEOUT`], and ignores every failure (the session then lapses at its TTL).
+#[derive(Clone, Default)]
+pub struct SignOuts(Arc<Mutex<Vec<PendingSignOut>>>);
+
+impl std::fmt::Debug for SignOuts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignOuts").finish_non_exhaustive()
+    }
+}
+
+impl SignOuts {
+    /// Keeps `sign_out` for [`SignOuts::send_all`].
+    fn push(&self, sign_out: PendingSignOut) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(sign_out);
+    }
+
+    /// How many sign-outs wait.
+    #[must_use]
+    pub fn pending(&self) -> usize {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).len()
+    }
+
+    /// Sends every waiting sign-out once, best effort: a failure, a timeout or a `401` (the
+    /// session had already ended) is ignored and not retried.
+    pub async fn send_all(&self) {
+        let pending = std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner));
+        for sign_out in pending {
+            let _ended = tokio::time::timeout(
+                SIGN_OUT_TIMEOUT,
+                sign_out.http.post_bytes_empty(
+                    paths::SESSIONS_CURRENT_END,
+                    Vec::new(),
+                    Auth::Presigned(&sign_out.token, &sign_out.signature),
+                ),
+            )
+            .await;
+        }
+    }
 }
 
 impl std::fmt::Debug for Env<'_> {
@@ -327,10 +397,13 @@ pub(crate) async fn opaque_login(
 
 /// An enrolled device, unlocked and loaded (module docs).
 pub struct Device {
-    /// The account's lock, held for the life of the process.
-    lock: AccountLock,
-    /// The cache file.
-    db: Db,
+    /// The account's lock, held for the life of the process (`None` once [`Device::close`]
+    /// gave it back).
+    lock: Option<AccountLock>,
+    /// The cache file (`None` once closed).
+    db: Option<Db>,
+    /// Where this device's sign-out goes when it is dropped ([`SignOuts`]).
+    sign_outs: SignOuts,
     /// The floors of what the file holds.
     floors: Floors,
     /// The transport to the device's server.
@@ -476,8 +549,9 @@ impl Device {
             return Err(CliError::Client(ClientError::CacheCorrupt));
         };
         Ok(Self {
-            lock,
-            db,
+            lock: Some(lock),
+            db: Some(db),
+            sign_outs: env.sign_outs.clone(),
             floors,
             http,
             record,
@@ -516,12 +590,14 @@ impl Device {
         (certificates, revocations, authors): (Vec<CertifiedDevice>, Vec<RevokedDevice>, Authors),
         mut vault: VaultSync,
         password: Zeroizing<String>,
+        sign_outs: SignOuts,
     ) -> Result<Self, CliError> {
         let record = state.record(Stage::Committed)?;
         vault.persist();
         Ok(Self {
-            lock,
-            db,
+            lock: Some(lock),
+            db: Some(db),
+            sign_outs,
             floors,
             http,
             record,
@@ -609,7 +685,11 @@ impl Device {
             return Ok(());
         }
         self.floors.admit(&changeset)?;
-        self.db.write(&changeset).await
+        self.db
+            .as_mut()
+            .ok_or(CliError::Client(ClientError::Internal))?
+            .write(&changeset)
+            .await
     }
 
     /// Commits what the vault driver journaled.
@@ -712,6 +792,62 @@ impl Device {
             )
             .await?;
         Ok(answer.cancelled)
+    }
+
+    /// The account's live sessions (`sessions/list`, ADR 0075 R1) over this run's device
+    /// session.
+    ///
+    /// # Errors
+    /// The transport's errors; [`ClientError::InvalidServerResponse`] for a list that does not
+    /// hold; [`ClientError::Internal`] before [`Device::online`].
+    pub async fn sessions(&mut self) -> Result<SessionList, CliError> {
+        let session = self
+            .session
+            .as_mut()
+            .ok_or(CliError::Client(ClientError::Internal))?;
+        let answer: SessionListResponse = self
+            .http
+            .post_no_body(paths::SESSIONS_LIST, Auth::Device(session, &self.unlocked))
+            .await?;
+        Ok(SessionList::from_response(answer)?)
+    }
+
+    /// Ends one session of the account (`sessions/end`, R3). A device session needs no
+    /// password for it: every request it sends is signed (ADR 0075 §9).
+    ///
+    /// # Errors
+    /// The transport's errors; [`ClientError::Internal`] before [`Device::online`].
+    pub async fn end_session(&mut self, request: &EndSessionRequest) -> Result<(), CliError> {
+        let session = self
+            .session
+            .as_mut()
+            .ok_or(CliError::Client(ClientError::Internal))?;
+        self.http
+            .post_empty(
+                paths::SESSIONS_END,
+                request,
+                Auth::Device(session, &self.unlocked),
+            )
+            .await
+    }
+
+    /// Ends every other OPAQUE and recovery-only session of the account
+    /// (`sessions/others/end`, R4); device sessions stay (ADR 0075 §5).
+    ///
+    /// # Errors
+    /// The transport's errors; [`ClientError::Internal`] before [`Device::online`].
+    pub async fn end_other_sessions(&mut self) -> Result<(), CliError> {
+        let session = self
+            .session
+            .as_mut()
+            .ok_or(CliError::Client(ClientError::Internal))?;
+        self.http
+            .post_bytes_empty(
+                paths::SESSIONS_OTHERS_END,
+                Vec::new(),
+                Auth::Device(session, &self.unlocked),
+            )
+            .await
     }
 
     /// `POST path` over the device session, with a JSON answer. A session the server ended (a
@@ -1971,16 +2107,38 @@ impl Device {
 
     /// Closes the cache and gives back the account id and the lock, for the removal of the
     /// device's files.
-    pub(crate) async fn close(self) -> ([u8; 16], AccountLock) {
+    pub(crate) async fn close(mut self) -> ([u8; 16], Option<AccountLock>) {
         let account = self.state.account_id().to_bytes();
-        self.db.close().await;
-        (account, self.lock)
+        if let Some(db) = self.db.take() {
+            db.close().await;
+        }
+        (account, self.lock.take())
     }
 
     /// The account id as the files are named.
     #[must_use]
     pub fn account_hex(&self) -> String {
         hex(self.state.account_id().as_bytes())
+    }
+}
+
+impl Drop for Device {
+    /// Leaves the sign-out of this run's device session in [`SignOuts`], signed now with the
+    /// device key (ADR 0075 owner answer 3). Nothing when the run never authenticated.
+    fn drop(&mut self) {
+        let Some(mut session) = self.session.take() else {
+            return;
+        };
+        let Ok(signature) =
+            session.sign_request(&self.unlocked, "POST", paths::SESSIONS_CURRENT_END, b"")
+        else {
+            return;
+        };
+        self.sign_outs.push(PendingSignOut {
+            http: self.http.clone(),
+            token: copy_token(session.bearer_token()),
+            signature,
+        });
     }
 }
 

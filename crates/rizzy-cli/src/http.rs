@@ -70,6 +70,7 @@ use hyper::header::{
 use hyper::{Method, Request, StatusCode};
 use hyper_util::rt::TokioIo;
 use rizzy_client::device::UnlockedDevice;
+use rizzy_client::rizzy_proto::auth::RequestSignature;
 use rizzy_client::rizzy_proto::error::{ErrorCode, ErrorResponse};
 use rizzy_client::rizzy_proto::http::{
     BEARER_SCHEME, REQUEST_COUNTER_HEADER, REQUEST_SIGNATURE_HEADER,
@@ -117,6 +118,10 @@ pub enum Auth<'a> {
     Bearer(&'a SessionToken),
     /// A device session: the bearer token and the `device-request` signature.
     Device(&'a mut DeviceSession, &'a UnlockedDevice),
+    /// A device session's bearer token and a signature made earlier over this very request
+    /// (method, path, empty body): the sign-out a dropped [`crate::device::Device`] leaves
+    /// behind (ADR 0075 owner answer 3).
+    Presigned(&'a SessionToken, &'a RequestSignature),
 }
 
 /// A response: the status and the collected body.
@@ -131,6 +136,7 @@ struct Reply {
 }
 
 /// The transport to one server origin.
+#[derive(Clone)]
 pub struct Http {
     /// The canonical origin (CRYPTO.md §2): what device requests are signed for.
     origin: ServerOrigin,
@@ -335,6 +341,12 @@ impl Http {
                 let signature = session.sign_request(unlocked, method.as_str(), path, &body)?;
                 request = request
                     .header(AUTHORIZATION, bearer(session.bearer_token())?)
+                    .header(REQUEST_COUNTER_HEADER, signature.request_counter)
+                    .header(REQUEST_SIGNATURE_HEADER, signature.signature.to_b64url());
+            }
+            Auth::Presigned(token, signature) => {
+                request = request
+                    .header(AUTHORIZATION, bearer(token)?)
                     .header(REQUEST_COUNTER_HEADER, signature.request_counter)
                     .header(REQUEST_SIGNATURE_HEADER, signature.signature.to_b64url());
             }

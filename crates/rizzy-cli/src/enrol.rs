@@ -295,6 +295,7 @@ impl PreparedSignup {
             ),
             vault,
             password,
+            env.sign_outs.clone(),
         )?;
         device.sync(env.ui).await?;
         Ok(device)
@@ -376,6 +377,7 @@ pub async fn login(env: &mut Env<'_>, server: &str, login_name: &str) -> Result<
             ),
             vault,
             password,
+            env.sign_outs.clone(),
         )?;
         device.sync(env.ui).await?;
         return Ok(device);
