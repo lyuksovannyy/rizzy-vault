@@ -119,6 +119,9 @@ window.addEventListener("message", (event) => {
   scope = event.data.scope ?? (only === undefined ? {} : { only });
   offer = undefined;
   shown = event.data.candidates;
+  // A new menu starts with no equivalence confirmed (ADR 0037 §5); a re-render when its offer
+  // arrives keeps what the user confirmed in it.
+  confirmed.clear();
   stepNote.textContent =
     only === "username"
       ? "Fills the username only."
