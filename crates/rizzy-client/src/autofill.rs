@@ -309,11 +309,14 @@ struct Touched {
     newly_set: Option<Zeroizing<String>>,
 }
 
-/// [`check_fields`] for a new item (create or import): no current fields. Pure, so the import
-/// preview and its fuzz target run it too.
+/// Runs the ADR 0076 §2.3 writer checks W1–W5 on a new item's writes (create or import): no
+/// current fields. Pure, so the import preview and its fuzz target run it too.
 ///
 /// # Errors
-/// As [`check_fields`].
+/// [`ClientError::AutocompleteInvalid`] (W1), [`ClientError::AutocompleteReserved`] (W2),
+/// [`ClientError::AutocompleteDuplicate`] (W3), [`ClientError::AutocompleteKind`] (W4),
+/// [`ClientError::LabelRequired`] (W5); [`ClientError::InvalidEdit`] for an autocomplete id
+/// that is not Text.
 pub fn check_custom_fields(writes: &[(&str, &[u8])], mode: CheckMode) -> Result<(), ClientError> {
     check_fields(Vec::new(), writes, mode)
 }
@@ -508,9 +511,9 @@ impl fmt::Debug for CapturedField<'_> {
 /// What a save-dialog row does (ADR 0076 §5.3).
 #[derive(Clone, PartialEq, Eq)]
 pub enum SaveRowKind {
-    /// "Add custom field <Display Name>": a new field, its id the token.
+    /// "Add custom field `<Display Name>`": a new field, its id the token.
     Add,
-    /// "Update <Display Name>": a new value for this existing field (element id).
+    /// "Update `<Display Name>`": a new value for this existing field (element id).
     Update(Zeroizing<String>),
 }
 
