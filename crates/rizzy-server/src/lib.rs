@@ -82,7 +82,7 @@
 //! `rizzy-proto`'s. **This crate's readings where the ADR is silent**, each documented where it
 //! is applied and reported to the owner: a `429` that comes from no bucket carries a fixed
 //! `Retry-After` ([`http::api::RETRY_AFTER_FALLBACK_SECS`]); the `Rizzy-Client` and
-//! `X-Forwarded-For` checks run on the 27 `/api/v1` endpoints, before the session check, and
+//! `X-Forwarded-For` checks run on the 31 `/api/v1` endpoints, before the session check, and
 //! not on `GET /api/meta`; a repeated `Authorization`, signing or `Content-Length` field line
 //! is refused; a
 //! `request_counter` above `i64::MAX` is refused (`rizzy-domain-auth`); the setting
