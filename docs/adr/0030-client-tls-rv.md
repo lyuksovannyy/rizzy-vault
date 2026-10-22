@@ -1,6 +1,6 @@
 # ADR 0030: Client-side TLS for `rv`
 
-- Status: Partially superseded by [ADR 0035](0035-ca-file-ca-certificates-only.md) (Decision 5 in part)
+- Status: Partially superseded by [ADR 0035](0035-ca-file-ca-certificates-only.md) (Decision 5 in part); [ADR 0052](0052-icon-proxy-role.md) (Decision 1 in part)
 - Date: 2026-10-01
 - Deciders: project owner
 - Milestone: M1
