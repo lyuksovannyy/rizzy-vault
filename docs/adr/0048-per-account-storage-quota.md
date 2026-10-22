@@ -61,6 +61,18 @@ The counter lives in `rizzy-storage`, not in any `rizzy-domain-*` crate, so it i
 
 ADR 0028's status line gains "; [ADR 0048](0048-per-account-storage-quota.md) (item 3 in part, item 12 in part)", appended after any earlier entry; [README](README.md) row 0028 repeats it and row 0048 becomes Accepted. [THREAT_MODEL.md](../THREAT_MODEL.md) §8 gains INV-72's text (§3 above), checked against this batch's other proposed invariants first. Nothing in [ADR 0021](0021-server-compaction.md) is edited: this ADR only fulfils its owner decision 2, by citation.
 
+### Owner answers at acceptance (2026-10-22)
+
+The owner accepted this ADR as drafted; the recommendations of "Open questions for the owner" stand:
+
+1. `RIZZY_ACCOUNT_QUOTA_BYTES` defaults to 5 GiB, with a minimum of 256 MiB and no maximum.
+2. `quota_exceeded` is a `409`, not a `413`.
+3. The enforcement headroom is the instance's own `RIZZY_MAX_UPLOAD_BYTES`, not a separate constant.
+4. `storage_account_usage` is backed up, so a restored counter matches the restored rows.
+5. There is no per-account override before the M3 admin panel: one instance-wide value in M1.
+
+Of the "On acceptance" edits, ADR 0028's status line, its index row and INV-72 (THREAT_MODEL.md §8.8) are made in the accepting change.
+
 ## Consequences
 
 ### Positive
