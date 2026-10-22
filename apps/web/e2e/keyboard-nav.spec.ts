@@ -7,13 +7,14 @@
 //
 // "Keyboard only" walks every screen the accessibility audit covers (`a11y.spec.ts`) without
 // the pointer: each control is reached with Tab alone (`tabTo`, which fails when it is not
-// reached within its bound) and operated with Enter, Space, Escape or typing. The Sessions
-// section's "End all other sessions", its dialog and its log-in-again form are walked the same
-// way in `sessions.spec.ts`, which needs a second session.
+// reached within its bound) and operated with Enter, Space, Escape or typing. That includes a
+// Secure Note rendered from its Markdown (ADR 0062), whose rendered body holds nothing focusable.
+// The Sessions section's "End all other sessions", its dialog and its log-in-again form are
+// walked the same way in `sessions.spec.ts`, which needs a second session.
 import { expect, test } from "@playwright/test";
 
 import { tabTo } from "./a11y.ts";
-import { PASSWORD, newItem, signUp, watch } from "./helpers.ts";
+import { MARKDOWN_NOTE, PASSWORD, newItem, signUp, watch } from "./helpers.ts";
 import { type RunningServer, startServer } from "./server.ts";
 
 let server: RunningServer;
@@ -214,3 +215,50 @@ test("keyboard only: every audited screen is reachable and operable without a po
   expect(problems).toEqual([]);
 });
 
+test("keyboard: a Secure Note rendered from Markdown", async ({ page, context }) => {
+  const { problems } = watch(page);
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: server.origin });
+  await signUp(page, server.origin, "keyboardnote");
+  const kb = page.keyboard;
+  const button = (name: string | RegExp) => page.getByRole("button", { name });
+
+  // New Secure Note through the menu, typed and saved from the keyboard.
+  await tabTo(page, button(/New item/));
+  await kb.press("Enter");
+  await tabTo(page, page.getByRole("menuitem", { name: "Secure note" }));
+  await kb.press("Enter");
+  await tabTo(page, page.getByLabel("Title"));
+  await kb.type("Keys note");
+  await tabTo(page, page.getByLabel("Notes"));
+  await kb.insertText(MARKDOWN_NOTE);
+  await tabTo(page, button("Save"));
+  await kb.press("Enter");
+  await expect(page.getByRole("heading", { name: "Keys note" })).toBeVisible();
+
+  // The rendered note holds nothing focusable (it has no links: ADR 0062 §6), so Tab walks
+  // from the favourite toggle to the notes' Copy without ever stopping inside it.
+  const notes = page.locator('[data-field="item.notes"]');
+  const rendered = notes.locator(".md-note");
+  await expect(rendered.getByRole("heading", { name: "Wi-Fi and alarm" })).toBeVisible();
+  const copy = notes.getByRole("button", { name: "Copy" });
+  await tabTo(page, button("Add to favorites"));
+  let reached = false;
+  for (let i = 0; i < 20 && !reached; i++) {
+    await kb.press("Tab");
+    expect(await rendered.evaluate((root) => root.contains(document.activeElement))).toBe(false);
+    reached = await copy.evaluate((el) => el === document.activeElement);
+  }
+  expect(reached).toBe(true);
+
+  // Copy returns the Markdown source (§12); Edit shows it in the plain textarea (§2).
+  await kb.press("Enter");
+  await expect(notes.getByRole("button", { name: "Copied" })).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(MARKDOWN_NOTE);
+  await tabTo(page, button("Edit"));
+  await kb.press("Enter");
+  await expect(page.getByLabel("Notes")).toHaveValue(MARKDOWN_NOTE);
+  await tabTo(page, button("Cancel"));
+  await kb.press("Enter");
+  await expect(page.getByRole("heading", { name: "Keys note" })).toBeVisible();
+  expect(problems).toEqual([]);
+});

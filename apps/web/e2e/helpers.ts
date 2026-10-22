@@ -92,3 +92,38 @@ export async function lockVault(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Account menu" }).click();
   await page.getByRole("menuitem", { name: "Lock" }).click();
 }
+
+/** A Secure Note using every construct ADR 0062 §5 renders, with its headings in order (so the
+ * note's own outline is valid), for the accessibility audit and the keyboard walk of the
+ * rendered note (`a11y.spec.ts`, `keyboard-nav.spec.ts`). */
+export const MARKDOWN_NOTE = [
+  "# Wi-Fi and alarm",
+  "",
+  "Network **home-5g**, *guest* network ~~off~~ on, code `0000`.",
+  "Second line of the paragraph.",
+  "",
+  "## Steps",
+  "",
+  "- Hold the button",
+  "- Wait for the light",
+  "",
+  "1. Enter the code",
+  "2. Press arm",
+  "",
+  "> Do not share this note.",
+  "",
+  "---",
+  "",
+  "### Router config",
+  "",
+  "```",
+  "ssid=home-5g",
+  "a long configuration line that wraps rather than scrolls: " + "x".repeat(160),
+  "```",
+  "",
+  "#### Four",
+  "##### Five",
+  "###### Six",
+  "",
+  "Literal: <b>html</b> [link](https://example.com/) https://example.com/",
+].join("\n");

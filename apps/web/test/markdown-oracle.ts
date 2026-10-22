@@ -4,63 +4,19 @@
 // by `note-markdown.test.ts` and `markdown-fuzz.test.ts`. It judges the static markup React renders
 // for a note (`renderToStaticMarkup`, test-only): React escapes every text child, so each `<`
 // in that markup starts a real element, and the oracle checks every element against the fixed
-// allow-list: the §5 element set, no attribute but `class`, and only this module's own classes.
-// The list is written out here independently of `NoteMarkdown.tsx`, so a renderer change that
-// adds an element or attribute fails these tests rather than quietly widening the allow-list.
+// allow-list (`e2e/attack/markdown-allow-list.ts`, shared with the Playwright check): the §5
+// element set, no attribute but `class`, and only the renderer's own fixed classes.
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { MARKDOWN_CLASSES, MARKDOWN_TAGS } from "../e2e/attack/markdown-allow-list.ts";
 import { NoteMarkdown } from "../src/views/NoteMarkdown.tsx";
 
-/** Every element a rendered note may contain (ADR 0062 §5, plus the root and the plain
- * fallback's container). */
-export const ALLOWED_TAGS: ReadonlySet<string> = new Set([
-  "div",
-  "span",
-  "h1",
-  "h2",
-  "h3",
-  "h4",
-  "h5",
-  "h6",
-  "p",
-  "br",
-  "strong",
-  "em",
-  "del",
-  "code",
-  "pre",
-  "blockquote",
-  "ul",
-  "ol",
-  "li",
-  "hr",
-]);
+/** Every element a rendered note may contain (`markdown-allow-list.ts`). */
+export const ALLOWED_TAGS: ReadonlySet<string> = new Set(MARKDOWN_TAGS);
 
-/** Every class a rendered note's elements may carry: fixed, never from the note (§8). */
-export const ALLOWED_CLASSES: ReadonlySet<string> = new Set([
-  "field-value",
-  "md-note",
-  "md-h1",
-  "md-h2",
-  "md-h3",
-  "md-h4",
-  "md-h5",
-  "md-h6",
-  "md-p",
-  "md-br",
-  "md-strong",
-  "md-em",
-  "md-del",
-  "md-code",
-  "md-pre",
-  "md-pre-code",
-  "md-blockquote",
-  "md-ul",
-  "md-ol",
-  "md-li",
-  "md-hr",
-]);
+/** Every class a rendered note's elements may carry (`markdown-allow-list.ts`). */
+export const ALLOWED_CLASSES: ReadonlySet<string> = new Set(MARKDOWN_CLASSES);
 
 /** The static markup of `source` rendered as a Secure Note's notes. */
 export function renderMarkup(source: string): string {
