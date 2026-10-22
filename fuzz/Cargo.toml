@@ -431,6 +431,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "client_item_index"
+path = "fuzz_targets/client_item_index.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "client_cache_load"
 path = "fuzz_targets/client_cache_load.rs"
 test = false

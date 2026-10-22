@@ -41,6 +41,11 @@
 //! - change `format`, `server_origin`, `account_id` or `device_id` once set, or write a
 //!   device-state record that does not parse or names another account or device.
 //!
+//! The `item_index` writes ([ADR 0056] §1, §4) carry no floor: the table is disposable, a
+//! rebuild from the merge is always correct, and nothing a load verifies depends on it. They are
+//! admitted as they are.
+//!
+//! [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
 //! [ADR 0026]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0026-client-device-state-and-cache.md
 
 use std::collections::BTreeMap;
@@ -630,6 +635,10 @@ impl Pending<'_> {
                     None => Ok(()),
                 }
             }
+            Write::IndexPut(_)
+            | Write::IndexDelete { .. }
+            | Write::IndexUse { .. }
+            | Write::IndexReset => Ok(()),
         }
     }
 

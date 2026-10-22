@@ -15,6 +15,7 @@
 //! | [`rows`] | §3 | Schema text, row model, writes, the reference executor |
 //! | [`floors`] | §4 "What never goes backwards" | The check every changeset passes |
 //! | [`load`] | §4 steps 5 and 7, §5 | Opening and loading a cache as untrusted input |
+//! | [`index`] | ADR 0056 | The cleartext `item_index`: recently used and client-side search |
 //!
 //! # What is persisted, and what never is (§1)
 //!
@@ -24,7 +25,9 @@
 //! statement with the body and carried wrap that matched its signed hashes; the absorbed
 //! snapshot records; own records with the restore generation of their first send; the next
 //! `device_seq`, the HLC and the highest global equivalence-list version this device accepted
-//! ([ADR 0051] §1, never synced). **Never:** a decrypted value, the merge state, an unwrapped key,
+//! ([ADR 0051] §1, never synced); the cleartext `item_index` of [ADR 0056] ([`index`]), whose
+//! display-safe decrypted fields are the one exception to the next sentence. **Never:** any other
+//! decrypted value, the merge state, an unwrapped key,
 //! the password, `pw_in`, an unlock key, the recovery code, a bearer token, a session id or a
 //! request counter. No function of this module takes one of those, and the merge state is
 //! rebuilt at each unlock.
@@ -57,14 +60,20 @@
 //! # Not in this build (reported)
 //!
 //! - **`wraps_after_epoch`** is always `NULL`: the driver asks for the whole wrap set.
-//! - **Migrations.** Format 2 is current ([ADR 0051] §2 added `highest_equivalence_list_version`).
-//!   A host upgrades an older cache before [`load::open`]: `SQLite` runs [`rows::MIGRATIONS`],
-//!   a raw-row host commits [`load::migration_writes`]; both add only that row, at `0`.
+//! - **Migrations.** Format 3 is current ([ADR 0051] §2 added `highest_equivalence_list_version`
+//!   in format 2, [ADR 0056] §3 the `item_index` table in format 3). A host upgrades an older
+//!   cache before [`load::open`]: `SQLite` runs [`rows::MIGRATIONS`], a raw-row host commits
+//!   [`load::migration_writes`]; both add only that row, at `0`, and that table, empty.
+//! - **`item_index` in `IndexedDB`.** The browser extension keeps its M2 item list (ADR 0056
+//!   owner answer 4): `rizzy-wasm` neither stores nor reads `item_index` rows, and never turns
+//!   tracking on ([`index::reconcile`]), so its changesets carry no index writes.
 //!
 //! [ADR 0026]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0026-client-device-state-and-cache.md
 //! [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
+//! [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
 
 pub mod floors;
+pub mod index;
 pub mod load;
 pub mod record;
 pub mod rows;

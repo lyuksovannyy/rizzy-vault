@@ -122,6 +122,8 @@ fn copy(rows: &CacheRows) -> CacheRows {
         wraps: rows.wraps.clone(),
         ops: rows.ops.clone(),
         snapshots: rows.snapshots.clone(),
+        item_index: rows.item_index.clone(),
+        item_index_unreadable: rows.item_index_unreadable,
     }
 }
 
