@@ -13,7 +13,7 @@
 //! | `item.name`, `item.notes` | Text | all | any | no |
 //! | `item.favorite` | Bool (absent means false) | all | any | no |
 //! | `import.created_ms` | U64 | all | importers only | no |
-//! | `field/<id>/label` · `/kind` · `/value` · `/order` | Text · Enum · Text or Bool · `SortKey` | all | any | `value` of a hidden custom field |
+//! | `field/<id>/label` · `/kind` · `/value` · `/order` · `/autocomplete` | Text · Enum · Text or Bool · `SortKey` · Text | all | any | `value` of a hidden custom field |
 //! | `tag/<hex>` | Bool `0x01` | all | any | no |
 //! | `share/<share_id>/secret` | Bytes, 32 | all | not in M1 (M5) | yes |
 //! | `login.username`, `login.password`, `login.totp` | Text | Login | any | password, TOTP |
@@ -293,6 +293,11 @@ pub const LIST_ATTACHMENT: &str = "attachment";
 pub const ATTR_LABEL: &str = "label";
 /// Attribute `kind` of a custom field: Enum, see [`CustomFieldKind`]. A layout attribute.
 pub const ATTR_KIND: &str = "kind";
+/// The `autocomplete` attribute of a custom field: its autocomplete id, Text, a content
+/// attribute, shown ([ADR 0076] §2.1). Its value meaning is [`super::autocomplete`].
+///
+/// [ADR 0076]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0076-autocomplete-driven-autofill.md
+pub const ATTR_AUTOCOMPLETE: &str = "autocomplete";
 /// Attribute `value` of a custom field, a URI or a password-history entry.
 pub const ATTR_VALUE: &str = "value";
 /// Attribute `order` of a custom field or a URI: `SortKey`. A layout attribute.
@@ -705,8 +710,12 @@ fn classify_element(key: FieldKeyRef<'_>) -> KeyClass {
     };
     let list = key.namespace();
     match (list, key.attribute()) {
-        // ADR 0054 §4: an attachment's `name` and `mime` are plain Text on every type.
-        (LIST_FIELD, Some(ATTR_LABEL)) | (LIST_ATTACHMENT, Some(ATTR_NAME | ATTR_MIME)) => known(
+        // ADR 0054 §4: an attachment's `name` and `mime` are plain Text on every type. ADR 0076
+        // §2.1: a custom field's autocomplete id is Text, any writer, shown, like the label. Its
+        // grammar and reserved set are `super::autocomplete`; the item-state checks are
+        // `rizzy-client`'s.
+        (LIST_FIELD, Some(ATTR_LABEL | ATTR_AUTOCOMPLETE))
+        | (LIST_ATTACHMENT, Some(ATTR_NAME | ATTR_MIME)) => known(
             Expected::Text,
             Applies::All,
             Writers::Any,

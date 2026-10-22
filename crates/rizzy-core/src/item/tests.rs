@@ -998,6 +998,8 @@ fn list_keys_are_classified() {
     // Every column of the ADR 0018 §7 table, for every known list key.
     for (list, attribute, expected, applies, writers, concealment) in [
         ("field", "label", Expected::Text, all, Any, Shown),
+        // ADR 0076 §2.1.
+        ("field", "autocomplete", Expected::Text, all, Any, Shown),
         ("field", "kind", Expected::Enum, all, Any, Shown),
         (
             "field",
