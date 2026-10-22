@@ -1,6 +1,6 @@
 # ADR 0026: Client device state and encrypted local cache
 
-- Status: Accepted
+- Status: Partially superseded by [ADR 0051](0051-equivalence-list-version-persistence.md) (§3 in part)
 - Date: 2026-09-29
 - Deciders: project owner
 - Milestone: M1 (`rv`) / M2 (extension, IndexedDB) / M3 (`rizzy-ffi`, `E_ks`)

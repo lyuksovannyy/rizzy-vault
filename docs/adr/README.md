@@ -82,7 +82,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0023 | [Logical database backup file format](0023-logical-backup-format.md) | Accepted | M1 |
 | 0024 | [Disabling core dumps through rustix](0024-core-dump-disabling-rustix.md) | Accepted | M1 (server, `rv`) / M3 (bindings) |
 | 0025 | [Key rotation upload: the vault half and the rotation cut-off](0025-rotation-vault-half.md) | Accepted | M1 |
-| 0026 | [Client device state and encrypted local cache](0026-client-device-state-and-cache.md) | Accepted | M1 (`rv`) / M2 (extension) / M3 (`rizzy-ffi`) |
+| 0026 | [Client device state and encrypted local cache](0026-client-device-state-and-cache.md) | Partially superseded by [0051](0051-equivalence-list-version-persistence.md) (§3 in part) | M1 (`rv`) / M2 (extension) / M3 (`rizzy-ffi`) |
 | 0027 | [Export payload encoding and plaintext export](0027-export-payload.md) | Partially superseded by [0034](0034-export-reauth-and-plaintext-hold.md) (§5 in part) | M1 |
 | 0028 | [`/api/v1` HTTP conventions](0028-api-v1-http-conventions.md) | Partially superseded by [0031](0031-retiring-old-opaque-setups.md) (item 3 in part); [0032](0032-healing-rotation-after-backup.md) (item 3 in part); [0048](0048-per-account-storage-quota.md) (item 3 in part, item 12 in part); [0049](0049-web-role-route-table.md) (item 10 in part, item 15) | M1 |
 | 0029 | [KeePass KDBX import: legacy primitives in `rizzy-import`](0029-kdbx-import.md) | Accepted | M3 |
@@ -92,11 +92,11 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0033 | [Protocol Buffers encoding for client–server messages](0033-protobuf-api-encoding.md) | Proposed | M1 (JSON only) / M3 (trigger re-checked) |
 | 0034 | [Re-authentication before every export and a hold before plaintext export](0034-export-reauth-and-plaintext-hold.md) | Accepted | M1 |
 | 0035 | [A private CA file holds CA certificates only](0035-ca-file-ca-certificates-only.md) | Accepted | M1 |
-| 0036 | [Browser extension: architecture and key custody](0036-browser-extension-architecture-and-key-custody.md) | Partially superseded by [0040](0040-extension-fill-request-from-inline-menu.md) (§4, first bullet, in part) | M2 |
+| 0036 | [Browser extension: architecture and key custody](0036-browser-extension-architecture-and-key-custody.md) | Partially superseded by [0040](0040-extension-fill-request-from-inline-menu.md) (§4, first bullet, in part); [0043](0043-inline-menu-instance-token.md) (§4, first bullet, in part) | M2 |
 | 0037 | [URL matching and autofill rules](0037-url-matching-and-autofill-rules.md) | Accepted | M2 |
-| 0038 | [Equivalent-domain list: format, signing and governance](0038-equivalent-domain-list.md) | Accepted | M2 |
+| 0038 | [Equivalent-domain list: format, signing and governance](0038-equivalent-domain-list.md) | Partially superseded by [0044](0044-equivalence-group-member-rules.md) (§1 in part) | M2 |
 | 0039 | [Passkeys in the vault and in the browser extension](0039-passkeys-vault-and-extension.md) | Accepted | M2 |
-| 0040 | [The extension's fill request comes from the inline menu, not the content script](0040-extension-fill-request-from-inline-menu.md) | Accepted | M2 |
+| 0040 | [The extension's fill request comes from the inline menu, not the content script](0040-extension-fill-request-from-inline-menu.md) | Partially superseded by [0043](0043-inline-menu-instance-token.md) (point 1 in part, point 3 in part) | M2 |
 | 0041 | [Approving the `p256` crate for ES256 (ECDSA P-256) in passkeys](0041-p256-crate-approval.md) | Accepted | M2 |
 | 0042 | [ACCOUNT_SETTINGS plaintext: canonical layout and the M2 matching section](0042-account-settings-matching-layout.md) | Accepted | M2 |
 | 0043 | [A per-instance token for the inline-menu and passkey-consent iframes](0043-inline-menu-instance-token.md) | Accepted | M2 |

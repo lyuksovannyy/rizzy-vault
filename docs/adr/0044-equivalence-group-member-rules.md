@@ -53,6 +53,15 @@ No mechanism changes. The new checks run inside `decode_ctx`'s structural pass, 
 
 None: no signed list has shipped, so no existing data this rule could invalidate.
 
+### Owner answers at acceptance (2026-10-22)
+
+The owner accepted this ADR as drafted; the recommendations of "Open questions for the owner" stand:
+
+1. ADR 0042's own §4 public-suffix check becomes redundant. But ADR 0042 was accepted on 2026-10-21, before this ADR, with that check in its §4, and an Accepted ADR is not edited (ADR 0020 point 4). The check therefore stays binding, alongside the `EquivalenceGroup::new` rule that now covers the same inputs. Dropping it would take a later ADR that partially supersedes ADR 0042 §4. No recommendation is recorded on whether to write one, so this stays open.
+2. A PSL bump is folded into the existing `cargo xtask check-deps` PSL review: an implementation detail, not a security gate.
+
+Of the "On acceptance" edits, ADR 0038's status line and its index row are set in the accepting change. CLAUDE.md's status sentence was already brought up to date by the owner's status change (24812c8).
+
 ## Consequences
 
 ### Positive
