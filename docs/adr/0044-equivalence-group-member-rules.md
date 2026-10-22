@@ -1,6 +1,6 @@
 # ADR 0044: Equivalence-group member rules: no IP literals, registrable domains only
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M2

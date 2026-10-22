@@ -1,6 +1,6 @@
 # ADR 0075: Session management: listing and ending sessions under `/api/v1/sessions`
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-21
 - Deciders: project owner
 - Milestone: M3

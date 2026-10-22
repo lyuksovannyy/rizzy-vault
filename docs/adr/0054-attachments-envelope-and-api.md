@@ -1,6 +1,6 @@
 # ADR 0054: Encrypted attachments: chunk layout, storage shape and upload/download API
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M3

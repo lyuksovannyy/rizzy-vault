@@ -99,26 +99,26 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0040 | [The extension's fill request comes from the inline menu, not the content script](0040-extension-fill-request-from-inline-menu.md) | Accepted | M2 |
 | 0041 | [Approving the `p256` crate for ES256 (ECDSA P-256) in passkeys](0041-p256-crate-approval.md) | Accepted | M2 |
 | 0042 | [ACCOUNT_SETTINGS plaintext: canonical layout and the M2 matching section](0042-account-settings-matching-layout.md) | Accepted | M2 |
-| 0043 | [A per-instance token for the inline-menu and passkey-consent iframes](0043-inline-menu-instance-token.md) | Proposed | M2 |
-| 0044 | [Equivalence-group member rules: no IP literals, registrable domains only](0044-equivalence-group-member-rules.md) | Proposed | M2 |
+| 0043 | [A per-instance token for the inline-menu and passkey-consent iframes](0043-inline-menu-instance-token.md) | Accepted | M2 |
+| 0044 | [Equivalence-group member rules: no IP literals, registrable domains only](0044-equivalence-group-member-rules.md) | Accepted | M2 |
 | 0045 | [Server-side notification of pending and completed account recovery](0045-recovery-pending-notification.md) | Proposed | M1 |
 | 0046 | [A recovery-pending device-state stage for `rv recovery complete`](0046-recovery-pending-device-stage.md) | Proposed | M1 |
 | 0047 | [Operator commands for OPAQUE secrets: restore and invalidate](0047-opaque-secrets-operator-commands.md) | Proposed | M1 |
-| 0048 | [Per-account storage quota and its wire error code](0048-per-account-storage-quota.md) | Proposed | M1 |
-| 0049 | [Web role: a fixed, enumerable route table (compiled-in assets + share links)](0049-web-role-route-table.md) | Proposed | M1 |
-| 0050 | [Paged Fetch: tombstone covers that can span a page boundary](0050-paged-fetch-tombstone-boundary.md) | Proposed | M1 |
-| 0051 | [Persisting the highest accepted equivalence-list version](0051-equivalence-list-version-persistence.md) | Proposed | M2 |
-| 0052 | [Icon-proxy (favicon) role: fetch, cache and re-encode mechanism](0052-icon-proxy-role.md) | Proposed | M3 |
-| 0053 | [Watchtower/HIBP breach-check egress route](0053-hibp-breach-check-egress.md) | Proposed | M3 |
-| 0054 | [Encrypted attachments: chunk layout, storage shape and upload/download API](0054-attachments-envelope-and-api.md) | Proposed | M3 |
-| 0055 | [M3 item types: field keys for SSH key, API credential, software license, Wi-Fi and bank account](0055-m3-item-type-field-keys.md) | Proposed | M3 |
-| 0056 | [M3 local index: recently-used tracking and client-side search](0056-local-index-recently-used-search.md) | Proposed | M3 |
-| 0057 | [Device-state record version 2: OS-keystore-backed local unlock (`E_ks`)](0057-device-state-v2-keystore.md) | Proposed | M3 |
-| 0058 | [WebAuthn/FIDO2 security keys as a server-side second factor](0058-webauthn-2fa-second-factor.md) | Proposed | M3 |
-| 0059 | [Crypto-crate approval: webauthn-rs for the FIDO2 2FA ceremony](0059-webauthn-rs-crate-approval.md) | Proposed | M3 |
-| 0060 | [Admin panel: web stack, directory and security boundary](0060-admin-panel-stack-boundary.md) | Proposed | M3 |
+| 0048 | [Per-account storage quota and its wire error code](0048-per-account-storage-quota.md) | Accepted | M1 |
+| 0049 | [Web role: a fixed, enumerable route table (compiled-in assets + share links)](0049-web-role-route-table.md) | Accepted | M1 |
+| 0050 | [Paged Fetch: tombstone covers that can span a page boundary](0050-paged-fetch-tombstone-boundary.md) | Accepted | M1 |
+| 0051 | [Persisting the highest accepted equivalence-list version](0051-equivalence-list-version-persistence.md) | Accepted | M2 |
+| 0052 | [Icon-proxy (favicon) role: fetch, cache and re-encode mechanism](0052-icon-proxy-role.md) | Accepted | M3 |
+| 0053 | [Watchtower/HIBP breach-check egress route](0053-hibp-breach-check-egress.md) | Accepted | M3 |
+| 0054 | [Encrypted attachments: chunk layout, storage shape and upload/download API](0054-attachments-envelope-and-api.md) | Accepted | M3 |
+| 0055 | [M3 item types: field keys for SSH key, API credential, software license, Wi-Fi and bank account](0055-m3-item-type-field-keys.md) | Accepted | M3 |
+| 0056 | [M3 local index: recently-used tracking and client-side search](0056-local-index-recently-used-search.md) | Accepted | M3 |
+| 0057 | [Device-state record version 2: OS-keystore-backed local unlock (`E_ks`)](0057-device-state-v2-keystore.md) | Accepted | M3 |
+| 0058 | [WebAuthn/FIDO2 security keys as a server-side second factor](0058-webauthn-2fa-second-factor.md) | Accepted | M3 |
+| 0059 | [Crypto-crate approval: webauthn-rs for the FIDO2 2FA ceremony](0059-webauthn-rs-crate-approval.md) | Accepted | M3 |
+| 0060 | [Admin panel: web stack, directory and security boundary](0060-admin-panel-stack-boundary.md) | Accepted | M3 |
 | 0061 | [notify role: WebSocket connect authentication and message envelope](0061-notify-websocket-protocol.md) | Proposed | M3 |
-| 0062 | [Markdown-in-notes rendering: sanitization and rendering rules](0062-markdown-notes-sanitization.md) | Proposed | M3 |
+| 0062 | [Markdown-in-notes rendering: sanitization and rendering rules](0062-markdown-notes-sanitization.md) | Accepted | M3 |
 | 0063 | [Share snapshot plaintext layout and link/fragment grammar](0063-share-snapshot-format.md) | Proposed | M5 |
 | 0064 | [Share API, storage and lifecycle](0064-share-api-storage-lifecycle.md) | Proposed | M5 |
 | 0065 | [Share recipient page origin and CSP](0065-share-page-origin-csp.md) | Proposed | M5 |
@@ -127,12 +127,12 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0068 | [Alias identity model, storage, and no-enumeration lookup](0068-alias-identity-model.md) | Proposed | M6 |
 | 0069 | [SMTP ingress architecture: own listener vs MTA handoff, and the smtp↔api protocol](0069-smtp-ingress-architecture.md) | Proposed | M6 |
 | 0070 | [Crypto-crate approval: mail-auth for SPF/DKIM/DMARC verification](0070-mail-auth-crate-approval.md) | Proposed | M6 |
-| 0071 | [Encrypted scheduled database backup format (SERVER_DB_BACKUP envelope)](0071-encrypted-db-backup-format.md) | Proposed | M8 |
+| 0071 | [Encrypted scheduled database backup format (SERVER_DB_BACKUP envelope)](0071-encrypted-db-backup-format.md) | Accepted | M8 |
 | 0072 | [Remote backup destinations (WebDAV, S3) and destination-credential storage](0072-remote-backup-destinations.md) | Proposed | M8 |
-| 0073 | [Signed release images, SBOM and supply-chain provenance](0073-signed-images-sbom-provenance.md) | Proposed | M8 |
-| 0074 | [Passkey import/export via the FIDO Credential Exchange Format (CXF)](0074-passkey-cxf-import-export.md) | Proposed | M8 |
-| 0075 | [Session management: listing and ending sessions under `/api/v1/sessions`](0075-session-listing-and-ending.md) | Proposed | M3 |
-| 0076 | [Autocomplete-driven autofill: field detection, TOTP-code fill and custom-field autocomplete ids](0076-autocomplete-driven-autofill.md) | Proposed | M3 |
+| 0073 | [Signed release images, SBOM and supply-chain provenance](0073-signed-images-sbom-provenance.md) | Accepted | M8 |
+| 0074 | [Passkey import/export via the FIDO Credential Exchange Format (CXF)](0074-passkey-cxf-import-export.md) | Accepted | M8 |
+| 0075 | [Session management: listing and ending sessions under `/api/v1/sessions`](0075-session-listing-and-ending.md) | Accepted | M3 |
+| 0076 | [Autocomplete-driven autofill: field detection, TOTP-code fill and custom-field autocomplete ids](0076-autocomplete-driven-autofill.md) | Accepted | M3 |
 
 ## Gates
 

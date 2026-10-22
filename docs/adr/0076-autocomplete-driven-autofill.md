@@ -1,6 +1,6 @@
 # ADR 0076: Autocomplete-driven autofill: field detection, TOTP-code fill and custom-field autocomplete ids
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-22
 - Deciders: project owner
 - Milestone: M3 (`rizzy-core`, `rizzy-client`, `rizzy-wasm`, web vault editor, browser extension)
