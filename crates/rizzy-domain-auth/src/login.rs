@@ -324,16 +324,15 @@ impl<V: VaultPort> AuthService<V> {
             ratelimit::clear(tx.conn(), &key).await?;
         }
         let devices = trust.devices(tx.conn()).await?;
-        let account =
-            view::build(
-                &self.vault,
-                tx.conn(),
-                &trust,
-                &devices,
-                ViewScope::Current,
-                self.config.account_quota_bytes,
-            )
-            .await?;
+        let account = view::build(
+            &self.vault,
+            tx.conn(),
+            &trust,
+            &devices,
+            ViewScope::Current,
+            self.config.account_quota_bytes,
+        )
+        .await?;
         let wrap = server_wrap(&credential, trust.state.account_key_epoch)?;
         // ADR 0031 point 2: KE3 verified, so the flag tells nothing an unauthenticated prober
         // could not learn.

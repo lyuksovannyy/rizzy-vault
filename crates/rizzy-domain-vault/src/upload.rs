@@ -262,8 +262,15 @@ impl<D: DeviceDirectory> VaultDomain<D> {
     ) -> Result<HealingResponse, HealingError> {
         let vault_id = VaultId::from_bytes(request.vault_id.to_bytes());
         let mut tx = self.database().begin_write().await?;
-        let mut session =
-            open_session(&mut tx, self.directory(), account_id, vault_id, now_ms, None).await?;
+        let mut session = open_session(
+            &mut tx,
+            self.directory(),
+            account_id,
+            vault_id,
+            now_ms,
+            None,
+        )
+        .await?;
         let generation = restore_generation(tx.conn()).await?;
         let outcome = match &request.self_grant {
             Some(grant) => {

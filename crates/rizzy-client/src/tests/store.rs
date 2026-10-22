@@ -1189,9 +1189,18 @@ fn a_quota_refusal_keeps_the_op_and_resends_it() {
     };
     let outcome = a.vault.apply_upload_response(&refused).unwrap();
     a.flush();
-    assert_eq!(outcome.rejected, vec![ErrorCode::QuotaExceeded; up.records.len()]);
+    assert_eq!(
+        outcome.rejected,
+        vec![ErrorCode::QuotaExceeded; up.records.len()]
+    );
     assert!(!outcome.own_conflict);
-    let after = a.cache.rows.ops.iter().find(|o| o.own == own::SENT).unwrap();
+    let after = a
+        .cache
+        .rows
+        .ops
+        .iter()
+        .find(|o| o.own == own::SENT)
+        .unwrap();
     assert_eq!(*after, sent_row, "a quota refusal changes no row");
     assert_eq!(a.vault.unacknowledged().0, 1);
     let again = a
