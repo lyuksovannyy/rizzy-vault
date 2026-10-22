@@ -11,7 +11,9 @@
 //! - `Referrer-Policy: no-referrer` (§7.7 "I").
 //! - `X-Frame-Options: DENY`, for browsers that predate `frame-ancestors`.
 //! - `Content-Security-Policy`: [`API_CSP`], which allows nothing to load, unless the handler
-//!   set the web vault's [`WEB_CSP`].
+//!   set the web vault's [`WEB_CSP`]: every answer of the web role's route table sets it, the
+//!   page, an embedded asset and the table's own `404` and `405` (ADR 0049, which replaces ADR
+//!   0028 item 10's page-only exception).
 //!
 //! **API responses** also get `Cache-Control: no-store`: they carry session tokens and
 //! ciphertext, which no cache between the client and the server should keep.
