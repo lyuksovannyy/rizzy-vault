@@ -967,6 +967,28 @@ fn concealed_by_default_is_the_adr_list() {
     assert!(!spec.concealed(CustomFieldKind::Hidden));
 }
 
+/// ADR 0054 §4: the four `attachment/<id>/…` attributes, on every item type.
+#[test]
+fn attachment_keys_are_classified() {
+    for (attribute, expected) in [
+        ("name", Expected::Text),
+        ("mime", Expected::Text),
+        ("size", Expected::U64),
+        ("order", Expected::SortKey),
+    ] {
+        assert_eq!(
+            classify(key(&element_key("attachment", attribute))),
+            KeyClass::Known(KeySpec {
+                expected,
+                applies: Applies::All,
+                writers: Writers::Any,
+                concealment: Concealment::Shown,
+            }),
+            "attachment/{attribute}"
+        );
+    }
+}
+
 #[test]
 fn list_keys_are_classified() {
     use Concealment::{Concealed, IfHiddenField, Shown};
@@ -1096,8 +1118,10 @@ fn keys_outside_the_m1_schema_are_classified() {
             "passkey.rp_id".to_owned(),
             KeyClass::Reserved(ReservedFor::PasskeyDotKeys),
         ),
+        // ADR 0054 §4 assigns `name`, `mime`, `size` and `order`; any other attribute stays
+        // reserved.
         (
-            element_key("attachment", "name"),
+            element_key("attachment", "wrap"),
             KeyClass::Reserved(ReservedFor::M3Attachments),
         ),
         // ADR 0055 §2: a key under the five M3 prefixes that §1 does not assign stays reserved

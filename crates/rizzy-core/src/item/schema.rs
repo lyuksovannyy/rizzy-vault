@@ -19,6 +19,7 @@
 //! | `login.username`, `login.password`, `login.totp` | Text | Login | any | password, TOTP |
 //! | `uri/<id>/value` · `/match` · `/order` | Text · Enum · `SortKey` | Login | any; `match`'s values are [ADR 0037] §4 (Accepted, M2) | no |
 //! | `pwhist/<id>/value` · `/ms` | Text · U64 | Login | any | no (see below) |
+//! | `attachment/<id>/name` · `/mime` · `/size` · `/order` | Text · Text · U64 · `SortKey` | all | any | no |
 //! | `card.holder`, `.number`, `.brand`, `.exp_month`, `.exp_year`, `.code`, `.pin` | Text | Card | any | number, code, PIN |
 //! | `identity.` + 18 names | Text | Identity | any | `ssn`, `passport_number` |
 //! | `ssh.host`, `.port`, `.username`, `.private_key`, `.public_key`, `.passphrase` | Text | SSH key | any | `private_key`, `passphrase` |
@@ -34,7 +35,12 @@
 //! `license.expires` follow `card.exp_month`'s precedent, not U64. `ssh.port` absent means
 //! [`SSH_DEFAULT_PORT`] (`22`), a display default and not a stored value.
 //!
-//! Keys under the reserved prefixes (`passkey.`, `attachment/`, `share/` attributes other than
+//! The `attachment/<id>/…` rows are [ADR 0054] §4's (Accepted 2026-10-22): `<id>` is the
+//! attachment's own 16-byte id, which also names its storage row. No `/wrap` attribute exists:
+//! the attachment key's wrap travels only through `attachments/get` (ADR 0054 §6).
+//!
+//! Keys under the reserved prefixes (`passkey.`, `attachment/` attributes ADR 0054 does not
+//! assign, `share/` attributes other than
 //! `secret`, and every key under `ssh.`, `api.`, `license.`, `wifi.` or `bank.` that ADR 0055
 //! does not assign) are [`KeyClass::Reserved`]; every other grammar key is [`KeyClass::Unknown`], and so is a
 //! `tag/<hex>` key whose hex is not a name [`super::tag::tag_key`] could have produced
@@ -103,6 +109,7 @@
 //!
 //! [ADR 0027]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0027-export-payload.md
 //! [ADR 0037]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0037-url-matching-and-autofill-rules.md
+//! [ADR 0054]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0054-attachments-envelope-and-api.md
 //! [ADR 0055]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0055-m3-item-type-field-keys.md
 //!
 //! **`uri/<id>/match` is writable from M2** (ADR 0037, Accepted, assigns its enum values
@@ -278,6 +285,9 @@ pub const LIST_PWHIST: &str = "pwhist";
 /// which uses this list on the existing Login type rather than the standalone item type
 /// `0x000A`, released to unassigned).
 pub const LIST_PASSKEY: &str = "passkey";
+/// List `attachment` (all types): one element per encrypted attachment, keyed by the
+/// attachment's 16-byte id (ADR 0054 §4).
+pub const LIST_ATTACHMENT: &str = "attachment";
 
 /// Attribute `label` of a custom field: Text.
 pub const ATTR_LABEL: &str = "label";
@@ -294,6 +304,14 @@ pub const ATTR_MATCH: &str = "match";
 pub const ATTR_SECRET: &str = "secret";
 /// Attribute `ms` of a password-history entry: U64, Unix milliseconds.
 pub const ATTR_MS: &str = "ms";
+/// Attribute `name` of an attachment: Text, the filename as entered (ADR 0054 §4).
+pub const ATTR_NAME: &str = "name";
+/// Attribute `mime` of an attachment: Text, the declared media type, never content-sniffed
+/// (ADR 0054 §4).
+pub const ATTR_MIME: &str = "mime";
+/// Attribute `size` of an attachment: U64, the plaintext byte length. The reader derives the
+/// chunk count from it (ADR 0054 §1, §4); the server never sees or trusts it.
+pub const ATTR_SIZE: &str = "size";
 /// Attribute `rp_id` of a passkey: Text, the registrable-domain-or-suffix the credential was
 /// created for. Never written from page-supplied data at use time; only at creation, after the
 /// `rizzy-client`/extension INV-64 check (ADR 0039 §1, §2).
@@ -627,7 +645,8 @@ pub enum ReservedFor {
     /// `ssh.`, `api.`, `license.`, `wifi.`, `bank.`: the M3 item types, for every key under
     /// them that ADR 0055 §1 does not assign.
     M3Types,
-    /// `attachment/`: the M3 attachments ADR.
+    /// `attachment/` attributes other than the four ADR 0054 §4 assigns (`name`, `mime`,
+    /// `size`, `order`), and `attachment/<id>` itself.
     M3Attachments,
     /// `share/` attributes other than `secret`, and `share/<id>` itself: the M5 ADR.
     M5Share,
@@ -686,7 +705,8 @@ fn classify_element(key: FieldKeyRef<'_>) -> KeyClass {
     };
     let list = key.namespace();
     match (list, key.attribute()) {
-        (LIST_FIELD, Some(ATTR_LABEL)) => known(
+        // ADR 0054 §4: an attachment's `name` and `mime` are plain Text on every type.
+        (LIST_FIELD, Some(ATTR_LABEL)) | (LIST_ATTACHMENT, Some(ATTR_NAME | ATTR_MIME)) => known(
             Expected::Text,
             Applies::All,
             Writers::Any,
@@ -704,7 +724,7 @@ fn classify_element(key: FieldKeyRef<'_>) -> KeyClass {
             Writers::Any,
             Concealment::IfHiddenField,
         ),
-        (LIST_FIELD | LIST_URI, Some(ATTR_ORDER)) => known(
+        (LIST_FIELD | LIST_URI | LIST_ATTACHMENT, Some(ATTR_ORDER)) => known(
             Expected::SortKey,
             if list == LIST_URI {
                 LOGIN
@@ -740,7 +760,14 @@ fn classify_element(key: FieldKeyRef<'_>) -> KeyClass {
             known(Expected::U64, LOGIN, Writers::Any, Concealment::Shown)
         }
         (LIST_PASSKEY, attribute) => classify_passkey(attribute),
-        ("attachment", _) => KeyClass::Reserved(ReservedFor::M3Attachments),
+        (LIST_ATTACHMENT, Some(ATTR_SIZE)) => known(
+            Expected::U64,
+            Applies::All,
+            Writers::Any,
+            Concealment::Shown,
+        ),
+        // ADR 0054 §4 assigns four attributes; any other stays reserved until an ADR ships it.
+        (LIST_ATTACHMENT, _) => KeyClass::Reserved(ReservedFor::M3Attachments),
         _ => KeyClass::Unknown,
     }
 }
