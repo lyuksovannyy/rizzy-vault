@@ -65,6 +65,9 @@ use rizzy_client::export::plaintext::{
 };
 use rizzy_client::items::{Dot, FieldEdit, ItemId, TRASH_RETENTION_MS};
 use rizzy_client::login::WebSession;
+use rizzy_client::matching::{
+    FrameContext, ItemUri, SavedUri, decide_with_settings, vault_item_uris,
+};
 use rizzy_client::passkey::get_assertion;
 use rizzy_client::rizzy_core::ids::AccountId;
 use rizzy_client::rizzy_core::item::key::ElementId;
@@ -77,9 +80,11 @@ use rizzy_client::rizzy_core::passkey::Es256SigningKey;
 use rizzy_client::rizzy_core::sign::DeviceKind;
 use rizzy_client::rizzy_core::totp::{OtpAuthUri, TotpParams, TotpSecret};
 use rizzy_client::rizzy_import::{self, Format};
+use rizzy_client::rizzy_proto::error::ErrorCode;
 use rizzy_client::rizzy_proto::http::paths;
 use rizzy_client::rizzy_proto::totp::TotpEnrolStartResponse;
 use rizzy_client::rizzy_proto::wire::SessionToken;
+use rizzy_client::settings::{PendingSettingsChange, SettingsCache, SettingsEdit, change_settings};
 use rizzy_client::sync::{Authors, VaultSync};
 use rizzy_client::two_factor::{TotpEnrolment, disable_request};
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -92,6 +97,7 @@ use crate::items::{
     hex, type_from_name, visible_item,
 };
 use crate::login::{Credentials, LoginFlow, Purpose};
+use crate::matching::{self, MatchDecision, MatchSettingsView};
 use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
 use crate::rng::{Rng, os_rng};
 use crate::secret::take_secret;
@@ -143,6 +149,11 @@ struct Inner {
     /// late-edit notices' marks live in the same place for the same reason (`rizzy-client`'s
     /// `VaultSync::mark_late_edits_surfaced`).
     shown_trash_notices: BTreeSet<(ItemId, Dot, Dot)>,
+    /// The account settings of the verified account, read once per object (ADR 0042 §6).
+    settings: SettingsCache,
+    /// A settings change sent to `account/commit` and not yet answered, or kept after a
+    /// `state_conflict` for a retry.
+    settings_pending: Option<PendingSettingsChange>,
 }
 
 /// An unlocked web-vault session (module docs). `Debug` shows nothing secret.
@@ -200,6 +211,8 @@ impl Session {
                 gate: ExportGate::new(),
                 rng: os_rng(),
                 shown_trash_notices: BTreeSet::new(),
+                settings: SettingsCache::default(),
+                settings_pending: None,
             })),
         })
     }
@@ -1311,6 +1324,183 @@ impl Session {
     pub fn two_factor_disable_request(&self, code: &str) -> Result<HttpRequest, CoreError> {
         let request = disable_request(code)?;
         HttpRequest::post(paths::TOTP_DISABLE, &request, Some(&self.inner()?.token))
+    }
+}
+
+/// Account settings: the match default and the equivalence groups (ADR 0037 §6–§7; ADR 0042).
+///
+/// Reading goes through `rizzy_client::settings::SettingsCache`, so the `ACCOUNT_SETTINGS` of the
+/// session's verified account is decrypted and parsed once per object (ADR 0042 §6). A change is
+/// one `account/commit` (ADR 0042 §5): one of the `…Request` calls below builds it and returns the
+/// request; the host sends it and passes the answer to [`Session::settings_respond`]. On
+/// `server_state_conflict` the host syncs (the sync's `account/state` step refreshes the account)
+/// and calls [`Session::settings_retry_request`], which lets `CasRetry` decide and redoes the same
+/// edit on the current record. The server takes a settings commit only over a fresh OPAQUE
+/// session (CRYPTO.md §11 "Replacing credentials"): a web session older than five minutes gets
+/// `server_fresh_session_required`, and the host asks the user to log in again.
+#[wasm_bindgen]
+impl Session {
+    /// The account's matching settings, against this build's global list.
+    ///
+    /// # Errors
+    /// `locked`; `settings_update_required` for settings a newer rizzy-vault wrote;
+    /// `invalid_server_response` for settings that do not open or parse; `account_key_rotated`.
+    #[wasm_bindgen(js_name = matchSettings)]
+    pub fn match_settings(&mut self) -> Result<MatchSettingsView, CoreError> {
+        let inner = self.inner_mut()?;
+        let record = inner.settings.get(&inner.account, &inner.unlocked)?;
+        Ok(matching::settings_view(record.matching()))
+    }
+
+    /// The autofill candidates among this vault's items for `page_url` as a top frame, under the
+    /// account's settings (ADR 0037 §4; ADR 0042 §6): what the extension would offer there. The
+    /// settings screen uses it to show what a change does.
+    ///
+    /// # Errors
+    /// `locked`; as [`Session::match_settings`]; `invalid_input` if `page_url` does not parse.
+    #[wasm_bindgen(js_name = matchCandidates)]
+    pub fn match_candidates(&mut self, page_url: &str) -> Result<MatchDecision, CoreError> {
+        let inner = self.inner_mut()?;
+        let record = inner.settings.get(&inner.account, &inner.unlocked)?;
+        let saved = vault_item_uris(&inner.vault);
+        let uris: Vec<ItemUri<'_>> = saved.iter().map(SavedUri::as_item_uri).collect();
+        let frame = FrameContext {
+            is_top_frame: true,
+            frame_origin: page_url,
+        };
+        let decision = decide_with_settings(page_url, &frame, &uris, record)?;
+        Ok(matching::decision_view(decision))
+    }
+
+    /// Sets the account-level match default (`0x0001`–`0x0006`): the commit request.
+    ///
+    /// # Errors
+    /// `invalid_input` for `0x0000` or an unassigned value; as [`Session::settings_change`].
+    #[wasm_bindgen(js_name = setMatchDefaultRequest)]
+    pub fn set_match_default_request(&mut self, mode: u16) -> Result<HttpRequest, CoreError> {
+        let mode = matching::default_mode_of(mode)?;
+        self.settings_change(SettingsEdit::SetMatchDefault(mode))
+    }
+
+    /// Adds a user-defined equivalence group of `domains` (2 to 64, each a registrable domain):
+    /// the commit request.
+    ///
+    /// # Errors
+    /// `equivalence_domain_rejected` for a public suffix or a subdomain; `invalid_input` for a
+    /// domain that does not normalise or a bad count; `settings_limit_reached` past 64 groups;
+    /// as [`Session::settings_change`].
+    #[wasm_bindgen(js_name = addUserGroupRequest)]
+    pub fn add_user_group_request(
+        &mut self,
+        domains: Vec<String>,
+    ) -> Result<HttpRequest, CoreError> {
+        self.settings_change(SettingsEdit::AddUserGroup(domains))
+    }
+
+    /// Removes the user-defined group `id` (hex): the commit request.
+    ///
+    /// # Errors
+    /// `invalid_input` for a malformed id or one no user group has; as
+    /// [`Session::settings_change`].
+    #[wasm_bindgen(js_name = removeUserGroupRequest)]
+    pub fn remove_user_group_request(&mut self, id: &str) -> Result<HttpRequest, CoreError> {
+        let id = matching::group_id_of(id)?;
+        self.settings_change(SettingsEdit::RemoveUserGroup(id))
+    }
+
+    /// Disables the global group `id` (hex): the commit request.
+    ///
+    /// # Errors
+    /// `invalid_input` for a malformed id or one already disabled; `settings_limit_reached`
+    /// past 1,024; as [`Session::settings_change`].
+    #[wasm_bindgen(js_name = disableGlobalGroupRequest)]
+    pub fn disable_global_group_request(&mut self, id: &str) -> Result<HttpRequest, CoreError> {
+        let id = matching::group_id_of(id)?;
+        self.settings_change(SettingsEdit::DisableGlobalGroup(id))
+    }
+
+    /// Enables the global group `id` (hex) again: the commit request.
+    ///
+    /// # Errors
+    /// `invalid_input` for a malformed id or one not disabled; as [`Session::settings_change`].
+    #[wasm_bindgen(js_name = enableGlobalGroupRequest)]
+    pub fn enable_global_group_request(&mut self, id: &str) -> Result<HttpRequest, CoreError> {
+        let id = matching::group_id_of(id)?;
+        self.settings_change(SettingsEdit::EnableGlobalGroup(id))
+    }
+
+    /// The answer to the settings commit: on success the session takes the new settings.
+    ///
+    /// # Errors
+    /// `locked`; `wrong_state` with no change outstanding; the server's code otherwise. On
+    /// `server_state_conflict` the change is kept for [`Session::settings_retry_request`];
+    /// after any other error it is dropped.
+    #[wasm_bindgen(js_name = settingsRespond)]
+    pub fn settings_respond(&mut self, status: u16, body: &[u8]) -> Result<(), CoreError> {
+        let inner = self.inner_mut()?;
+        let pending = inner
+            .settings_pending
+            .take()
+            .ok_or(CoreError::new(WRONG_STATE))?;
+        match http::empty(status, body) {
+            Ok(()) => {
+                inner.settings.clear();
+                Ok(pending.finalize(&mut inner.account)?)
+            }
+            Err(e) => {
+                if http::server_code(status, body) == Some(ErrorCode::StateConflict) {
+                    inner.settings_pending = Some(pending);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// After `server_state_conflict` and a sync: the change rebuilt on the account the sync
+    /// verified (`CasRetry`: a rollback or fork stops it; otherwise the same edit is redone on the
+    /// current record).
+    ///
+    /// # Errors
+    /// `locked`; `wrong_state` with no change kept or while a sync runs; `rollback`, `fork`;
+    /// as [`Session::settings_change`].
+    #[wasm_bindgen(js_name = settingsRetryRequest)]
+    pub fn settings_retry_request(&mut self) -> Result<HttpRequest, CoreError> {
+        let inner = self.writable()?;
+        let pending = inner
+            .settings_pending
+            .take()
+            .ok_or(CoreError::new(WRONG_STATE))?;
+        let retried = pending.on_state_conflict(&mut inner.rng, &inner.account, &inner.unlocked)?;
+        let request = HttpRequest::post(
+            paths::ACCOUNT_COMMIT,
+            retried.commit_request(),
+            Some(&inner.token),
+        )?;
+        inner.settings_pending = Some(retried);
+        Ok(request)
+    }
+}
+
+impl Session {
+    /// Builds one settings change and keeps it until [`Session::settings_respond`] (impl docs).
+    ///
+    /// # Errors
+    /// `locked`; `wrong_state` while a sync runs; `read_only` after a rollback or fork;
+    /// `settings_update_required` and `invalid_server_response` for settings this build cannot read
+    /// (no write is built over them, ADR 0042 §2); `account_key_rotated`.
+    fn settings_change(&mut self, edit: SettingsEdit) -> CoreResult<HttpRequest> {
+        let inner = self.writable()?;
+        if inner.vault.is_read_only() {
+            return Err(ClientError::ReadOnly.into());
+        }
+        let pending = change_settings(&mut inner.rng, &inner.account, &inner.unlocked, edit)?;
+        let request = HttpRequest::post(
+            paths::ACCOUNT_COMMIT,
+            pending.commit_request(),
+            Some(&inner.token),
+        )?;
+        inner.settings_pending = Some(pending);
+        Ok(request)
     }
 }
 

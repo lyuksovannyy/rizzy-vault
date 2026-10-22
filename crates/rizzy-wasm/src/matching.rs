@@ -12,29 +12,34 @@
 //! strings and small integers `wasm-bindgen` can hand to JavaScript (ADR 0013 §3 rule 6, "the
 //! API is coarse": one call, [`decide_match_candidates`], per autofill request).
 //!
-//! **The global equivalence list is wired in; the account's own settings are not (gap
-//! 27(a)/(b) in the M2 gap audit).** [`rizzy_client::matching::global_equivalence_groups`]
-//! (ADR 0037 §7, ADR 0038 §5) supplies the `global` half of the merged
-//! [`EquivalenceView`] every call below builds; the account's disabled-global-group set and its
-//! own user-defined groups are still empty, because reading them needs `ACCOUNT_SETTINGS`'s
-//! plaintext layout, which ADR 0042 (`Status: Proposed`) has not fixed yet. Persisting the
-//! highest accepted `list_version` across launches (INV-39) is also deferred: it needs a new
-//! ADR amending ADR 0026's `cache_meta` format, so every call accepts version `0`
-//! (`global_equivalence_groups`'s own docs). None of this changes this binding's signature
-//! (`uris` and the two mode values); only the `equivalence` argument gains real groups once a
-//! signed list ships and once ADR 0042 lands. Until then, `rizzy_match::compiled::GLOBAL_LIST`
-//! being `None` means this call behaves exactly as before: matching narrows to plain
-//! registrable-domain equality and never offers an equivalence-only candidate.
+//! **Two entry points.** The free [`decide_match_candidates`] holds no session and so no account
+//! settings: it takes the account default as an argument and builds its [`EquivalenceView`]
+//! from the compiled-in global list alone ([`rizzy_client::matching::global_equivalence_groups`],
+//! ADR 0037 §7, ADR 0038 §5). A host with a session calls the session's `decideMatchCandidates`
+//! (`crate::Session`, `crate::DeviceSession`) instead: that reads the account's
+//! `ACCOUNT_SETTINGS` once per object ([ADR 0042] §6, `rizzy_client::settings::SettingsCache`) and
+//! applies its match default, disabled global groups and user groups
+//! ([`decide_with_account`]). Persisting the highest accepted `list_version` across launches
+//! (INV-39) is still deferred (gap 27(b)): it needs an ADR amending ADR 0026's `cache_meta`
+//! format, so every call accepts version `0` (`global_equivalence_groups`'s own docs). While
+//! `rizzy_match::compiled::GLOBAL_LIST` is `None`, the only equivalence groups are the account's
+//! own.
+//!
+//! [ADR 0042]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0042-account-settings-matching-layout.md
+
+use core::fmt;
+use std::collections::BTreeSet;
 
 use rizzy_client::ClientError;
 use rizzy_client::matching::{
     self, EquivalenceGroup, EquivalenceView, FrameContext, GroupId, ItemUri, MatchMode, MatchedVia,
     global_equivalence_groups,
 };
-use std::collections::BTreeSet;
+use rizzy_client::rizzy_match::MatchingSettings;
+use rizzy_client::settings::AccountSettingsRecord;
 use wasm_bindgen::prelude::wasm_bindgen;
 
-use crate::error::CoreError;
+use crate::error::{CoreError, CoreResult};
 use crate::items::{hex, parse_id};
 
 /// Decodes a wire `MatchMode` value (ADR 0037 §4), refusing `0x0007`–`0xFFFF`.
@@ -263,11 +268,9 @@ pub fn decide_match_candidates(
         is_top_frame,
         frame_origin,
     };
-    // Wired (module docs, gap 27(a)): the compiled-in global list's groups, with no disabled
-    // groups and no user-defined groups yet (ADR 0042 is Proposed, not Accepted). `global` is
-    // `global_equivalence_groups()`'s owned `Vec`, borrowed for the lifetime of this one
-    // decision, exactly as `EquivalenceView` requires (`rizzy-match` is R1, no I/O, and never
-    // owns this data itself).
+    // The compiled-in global list's groups, with no disabled groups and no user-defined groups:
+    // this free function holds no session, so no account settings. A host with a session calls
+    // the session's own `decideMatchCandidates` instead, which applies them (ADR 0042 §6).
     let global: Vec<EquivalenceGroup> = global_equivalence_groups();
     let no_disabled_groups: BTreeSet<GroupId> = BTreeSet::new();
     let no_user_defined_groups: Vec<EquivalenceGroup> = Vec::new();
@@ -275,7 +278,12 @@ pub fn decide_match_candidates(
     let decision =
         matching::decide_candidates(page_url, &frame, account_default, &item_uris, &equivalence)
             .map_err(CoreError::from)?;
-    Ok(MatchDecision {
+    Ok(decision_view(decision))
+}
+
+/// The JavaScript form of a decision.
+pub(crate) fn decision_view(decision: matching::Decision) -> MatchDecision {
+    MatchDecision {
         page_host: decision.page_host,
         page_port: decision.page_port,
         candidates: decision
@@ -290,7 +298,197 @@ pub fn decide_match_candidates(
             })
             .collect(),
         warnings: decision.warnings.into_iter().map(str::to_owned).collect(),
-    })
+    }
+}
+
+/// [`decide_match_candidates`] under an account's own settings (ADR 0042 §6;
+/// `rizzy_client::matching::decide_with_settings`): every URI mode `0x0000` resolves to the
+/// account's match default, and the merged view takes its disabled and user groups.
+///
+/// # Errors
+/// As [`decide_match_candidates`].
+pub(crate) fn decide_with_account(
+    page_url: &str,
+    is_top_frame: bool,
+    frame_origin: &str,
+    uris: &[UriInput],
+    settings: &AccountSettingsRecord,
+) -> Result<MatchDecision, CoreError> {
+    let mut owned_ids = Vec::with_capacity(uris.len());
+    for input in uris {
+        owned_ids.push((
+            parse_id(&input.item_id)?,
+            parse_id(&input.uri_id)?,
+            mode_of(input.mode)?,
+        ));
+    }
+    let item_uris: Vec<ItemUri<'_>> = uris
+        .iter()
+        .zip(&owned_ids)
+        .map(|(input, (item_id, uri_id, mode))| ItemUri {
+            item_id: *item_id,
+            uri_id: *uri_id,
+            value: input.value.as_str(),
+            mode: *mode,
+        })
+        .collect();
+    let frame = FrameContext {
+        is_top_frame,
+        frame_origin,
+    };
+    let decision = matching::decide_with_settings(page_url, &frame, &item_uris, settings)?;
+    Ok(decision_view(decision))
+}
+
+/// One equivalence group, as the settings screen shows it: public global-list data, or the
+/// account's own group (its domains are the user's data, shown only to the user).
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct EquivalenceGroupView {
+    /// The group id, 32 lowercase hex digits.
+    id: String,
+    /// The member domains, A-label form, sorted.
+    domains: Vec<String>,
+    /// For a global group: whether the account disabled it. Always `false` for a user group.
+    disabled: bool,
+}
+
+impl fmt::Debug for EquivalenceGroupView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EquivalenceGroupView")
+            .field("domains", &self.domains.len())
+            .field("disabled", &self.disabled)
+            .finish_non_exhaustive()
+    }
+}
+
+#[wasm_bindgen]
+impl EquivalenceGroupView {
+    /// The group id, hex.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    /// The member domains (A-label form; never decode them to Unicode for display, ADR 0037 §2
+    /// point 4).
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn domains(&self) -> Vec<String> {
+        self.domains.clone()
+    }
+
+    /// Whether the account disabled this global group.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn disabled(&self) -> bool {
+        self.disabled
+    }
+}
+
+/// The account's matching settings (ADR 0037 §6–§7; ADR 0042 §3), for the settings screen.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct MatchSettingsView {
+    /// The account-level match default, a wire value `0x0001`–`0x0006`.
+    match_default: u16,
+    /// The account's own groups.
+    user_groups: Vec<EquivalenceGroupView>,
+    /// Every group of the compiled-in global list, each with its disabled flag; empty while no
+    /// signed list is compiled in.
+    global_groups: Vec<EquivalenceGroupView>,
+    /// Disabled ids that name no group of this build's global list (a list that dropped them,
+    /// or a newer one), hex: still disabled, and can be enabled again.
+    other_disabled: Vec<String>,
+}
+
+impl fmt::Debug for MatchSettingsView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MatchSettingsView")
+            .field("match_default", &self.match_default)
+            .field("user_groups", &self.user_groups.len())
+            .field("global_groups", &self.global_groups.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[wasm_bindgen]
+impl MatchSettingsView {
+    /// The account-level match default (`MatchMode` wire value).
+    #[wasm_bindgen(getter, js_name = matchDefault)]
+    #[must_use]
+    pub fn match_default(&self) -> u16 {
+        self.match_default
+    }
+
+    /// The account's own groups, sorted by id.
+    #[wasm_bindgen(getter, js_name = userGroups)]
+    #[must_use]
+    pub fn user_groups(&self) -> Vec<EquivalenceGroupView> {
+        self.user_groups.clone()
+    }
+
+    /// The compiled-in global list's groups.
+    #[wasm_bindgen(getter, js_name = globalGroups)]
+    #[must_use]
+    pub fn global_groups(&self) -> Vec<EquivalenceGroupView> {
+        self.global_groups.clone()
+    }
+
+    /// Disabled ids outside this build's global list, hex.
+    #[wasm_bindgen(getter, js_name = otherDisabled)]
+    #[must_use]
+    pub fn other_disabled(&self) -> Vec<String> {
+        self.other_disabled.clone()
+    }
+}
+
+/// The settings screen's view of `settings` against the compiled-in global list.
+pub(crate) fn settings_view(settings: &MatchingSettings) -> MatchSettingsView {
+    let global = global_equivalence_groups();
+    let disabled = settings.disabled_global();
+    let group_view = |g: &EquivalenceGroup, disabled: bool| EquivalenceGroupView {
+        id: hex(g.id().as_bytes()),
+        domains: g.domains().to_vec(),
+        disabled,
+    };
+    MatchSettingsView {
+        match_default: settings.match_default().to_wire(),
+        user_groups: settings
+            .user_groups()
+            .iter()
+            .map(|g| group_view(g, false))
+            .collect(),
+        global_groups: global
+            .iter()
+            .map(|g| group_view(g, disabled.contains(&g.id())))
+            .collect(),
+        other_disabled: disabled
+            .iter()
+            .filter(|id| !global.iter().any(|g| g.id() == **id))
+            .map(|id| hex(id.as_bytes()))
+            .collect(),
+    }
+}
+
+/// Parses a group id the host passes back (32 hex digits).
+///
+/// # Errors
+/// `invalid_input`.
+pub(crate) fn group_id_of(text: &str) -> CoreResult<GroupId> {
+    Ok(GroupId::from_bytes(parse_id(text)?))
+}
+
+/// A URI mode the host passes as the account default (`0x0001`–`0x0006`).
+///
+/// # Errors
+/// `invalid_input` for `0x0000` or an unassigned value.
+pub(crate) fn default_mode_of(value: u16) -> CoreResult<MatchMode> {
+    match mode_of(value)? {
+        MatchMode::AccountDefault => Err(ClientError::InvalidInput.into()),
+        mode => Ok(mode),
+    }
 }
 
 #[cfg(test)]
@@ -411,5 +609,95 @@ mod tests {
         let error =
             decide_match_candidates("https://example.com/", true, "", 0x0001, uris).unwrap_err();
         assert_eq!(error.as_str(), "invalid_input");
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(s.get(i..i + 2).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    /// A record (ADR 0042 §2–§3) with Base domain, two disabled ids and one user group of
+    /// `example.com` and `example.net` (`rizzy-client`'s `matching-groups` vector).
+    const WITH_GROUP: &str = "000100010001000000570001000211111111111111111111111111111111\
+        222222222222222222222222222222220001a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a000020000000b6578616d\
+        706c652e636f6d0000000b6578616d706c652e6e657400";
+
+    #[test]
+    fn the_account_settings_widen_through_a_user_group_and_resolve_the_default() {
+        let saved = |value: &str, mode: u16| {
+            vec![UriInput::new(
+                hex(&[1; 16]),
+                hex(&[2; 16]),
+                value.to_owned(),
+                mode,
+            )]
+        };
+        let with_group =
+            AccountSettingsRecord::decode(&unhex(&WITH_GROUP.replace(' ', ""))).unwrap();
+        let decision = decide_with_account(
+            "https://example.net/",
+            true,
+            "",
+            &saved("https://example.com/", 0x0000),
+            &with_group,
+        )
+        .unwrap();
+        assert_eq!(decision.candidates().len(), 1);
+        assert!(decision.candidates()[0].needs_warning(), "equivalence only");
+        // The free function, with no settings, never widens.
+        let free = decide_match_candidates(
+            "https://example.net/",
+            true,
+            "",
+            0x0001,
+            saved("https://example.com/", 0x0000),
+        )
+        .unwrap();
+        assert!(free.candidates().is_empty());
+
+        // An account default of Host narrows a 0x0000 URI to its exact host.
+        let host =
+            AccountSettingsRecord::decode(&unhex("00010001000100000006000200000000")).unwrap();
+        let narrowed = decide_with_account(
+            "https://www.example.com/",
+            true,
+            "",
+            &saved("https://example.com/", 0x0000),
+            &host,
+        )
+        .unwrap();
+        assert!(narrowed.candidates().is_empty());
+        // A URI's own mode still wins over the account default.
+        let own = decide_with_account(
+            "https://www.example.com/",
+            true,
+            "",
+            &saved("https://example.com/", 0x0001),
+            &host,
+        )
+        .unwrap();
+        assert_eq!(own.candidates().len(), 1);
+    }
+
+    #[test]
+    fn the_settings_view_lists_groups_and_disabled_ids() {
+        let record = AccountSettingsRecord::decode(&unhex(&WITH_GROUP.replace(' ', ""))).unwrap();
+        let view = settings_view(record.matching());
+        assert_eq!(view.match_default(), 0x0001);
+        assert_eq!(view.user_groups().len(), 1);
+        assert_eq!(view.user_groups()[0].id(), "a0".repeat(16));
+        assert_eq!(
+            view.user_groups()[0].domains(),
+            ["example.com", "example.net"]
+        );
+        // No global list is compiled in: both disabled ids are "other".
+        assert!(view.global_groups().is_empty());
+        assert_eq!(view.other_disabled(), ["11".repeat(16), "22".repeat(16)]);
+        assert_eq!(default_mode_of(0).unwrap_err().as_str(), "invalid_input");
+        assert_eq!(default_mode_of(7).unwrap_err().as_str(), "invalid_input");
+        assert_eq!(default_mode_of(2).unwrap(), MatchMode::Host);
+        assert_eq!(group_id_of("zz").unwrap_err().as_str(), "invalid_input");
     }
 }
