@@ -204,6 +204,17 @@ Freshness is obtained through the existing buckets: a web login uses `LoginNameS
 
 **`notify`:** if ADR 0061 is accepted, the socket of an ended session closes within one check interval.
 
+### Owner answers at acceptance (2026-10-22)
+
+The owner accepted this ADR as drafted; the recommendations of "Open questions for the owner" stand:
+
+1. The revoked-device rotation race is settled by a separate ADR, not this one.
+2. Sessions record no display metadata (source address, user agent, last-used time) in M3.
+3. `rv` ends its own session with `sessions/current/end` when a command exits: best effort, no retry.
+4. The 5-minute OPAQUE freshness of R3 and R4 stays the existing `FRESH_SESSION_MS`.
+
+The accepting change sets ADR 0028's status line (item 1 in part) and its index row. ADR 0052 names the same sentence. The `docs/rv.md` text for the three commands (§9) lands with the implementation.
+
 ## Consequences
 
 ### Positive

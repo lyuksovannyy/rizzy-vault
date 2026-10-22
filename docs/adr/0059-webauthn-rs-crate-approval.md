@@ -44,6 +44,20 @@ Whether attestation-chain validation needs live network access is checked direct
 
 This restates, as a numbered THREAT_MODEL invariant, what ADR 0009 owner decision 1 and THREAT_MODEL Q-14 already decided in prose and `rules.rs` already enforces in code; it adds no new rule of its own. INV-85 is allocated across the 2026-10-11 batch in ADR-number order. Provisional: the allocation was made across the 2026-10-11 batch in ADR-number order; if ADRs are accepted out of order, the owner renumbers at acceptance.
 
+### Owner answers at acceptance (2026-10-22)
+
+The owner accepted this ADR as drafted; the recommendations of "Open questions for the owner" stand:
+
+1. `webauthn-rs` `=0.5.5` is approved, with `default-features = false, features = ["attestation"]`, confined to `rizzy-domain-auth`.
+2. The `attestation` feature stays on. ADR 0058 makes the verify-or-store choice: its point 2 verifies no attestation statement, and its point 1 stores none. The CRYPTO.md §14 line was added with ADR 0058's §11.17.
+3. The `deny.toml` wrapper lines land together with the implementation PR that adds the crate, not standalone.
+4. Yes, INV-85 is added to THREAT_MODEL.md §8.8 at acceptance.
+5. The mechanical checks are re-run in the PR that implements ADR 0058.
+6. ADR 0009's "fails CI" sentence binds only the R1 no-I/O crates. `webauthn-rs-core`'s direct `rand` and `rand_chacha` dependencies therefore need no ADR 0009 change, provided the implementation PR confirms that `rand_chacha` is only ever an OS-seeded CSPRNG outside tests. If it does not, a partial supersession of that sentence is needed first.
+7. ADR 0058 writes the CRYPTO.md section, "WebAuthn 2FA (M3)", before any WebAuthn code lands. It is §11.17, because ADR 0053 took §11.16. The §14 metadata line is added in the same change.
+
+The accepting change adds a dated entry to ADR 0009's Amendments (2026-10-22): one crate-table row and one required-feature-set line, as that ADR's crate table provides for, plus INV-85 (THREAT_MODEL.md §8.8). The checklist re-run belongs to the implementation PR, which records its results under that entry the way the 2026-10-09 `p256` entry did for ADR 0041. That covers `cargo deny check`, `cargo xtask check-deps`, the resolved `rand` version and the other **U** items. The same PR makes the `deny.toml` wrapper lines, the `[workspace.dependencies]` declaration and the CRYPTO.md §3 row.
+
 ## Consequences
 
 ### Positive

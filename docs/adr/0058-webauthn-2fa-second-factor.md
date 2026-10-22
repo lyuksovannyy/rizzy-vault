@@ -35,6 +35,18 @@ Scope: user-account login only. The admin panel's own second factor, listener an
 
 9. **A new CRYPTO.md section is required before code lands.** [§5.10](../CRYPTO.md#510-sessions-after-authentication) only names "WebAuthn in M3" in passing, and there is no §11.16. A §11.16 "WebAuthn 2FA (M3)" must fix: challenge length and TTL, the allowed COSE algs, the `rpId`/origin rule, the counter rule of point 5, the stored credential shape of point 1, and the second-factor-pending row's shape and TTL. This is the standardized W3C WebAuthn Level 3 ceremony, not a new composition under [CRYPTO.md §1](../CRYPTO.md#1-goals-non-goals-and-rules) Rule 2 (the same reasoning ADR 0039 §4 gives for hand-written CBOR), so it does not join that rule's audit-target list.
 
+### Owner answers at acceptance (2026-10-22)
+
+The owner accepted this ADR as drafted; the recommendations of "Open questions for the owner" stand:
+
+1. `webauthn-rs` is approved under the `openssl` exception that ADR 0009 and Q-14 already approved. Its checklist is run in ADR 0059.
+2. The `verify_es256` seam is checked during the crate review. If it exists, `rizzy-core` gains that entry point and `rizzy-domain-auth` calls it. If not, the crate's own verification is accepted within the scoped exception. Either way, `p256` never becomes a direct dependency of `rizzy-domain-auth` or `rizzy-server`. ADR 0059, as accepted, records no finding on the seam, so the check falls to the implementation PR (U).
+3. Any attestation statement format is accepted on receipt, without verifying it.
+4. A clone signal flags the account's security event log and notifies the user. It does not disable the credential automatically.
+5. The change that accepts this ADR writes the CRYPTO.md section. It is numbered §11.17, not §11.16: ADR 0053, also accepted on 2026-10-22, took §11.16, and the two are numbered in ADR order.
+
+Of the "On acceptance" edits, items 1–3 are made in the accepting change: INV-83 and INV-84 (THREAT_MODEL.md §8.1), a note on INV-69 under §8.8, and CRYPTO.md §11.17. Item 4, the index row, already exists. The same change adds the CRYPTO.md §14 metadata line for whatever attestation statement arrives at enrolment, which ADR 0059 open questions 2 and 7 assign to this ADR's change. Per point 2, nothing is verified or stored from it.
+
 ## Consequences
 
 ### Positive

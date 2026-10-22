@@ -93,7 +93,7 @@ Versions are the latest stable releases as of 2026-09-25 (fact sheet). Audit sta
 | Symmetric AEAD | XChaCha20-Poly1305 | `chacha20poly1305` (`default-features = false`, `alloc`, `zeroize`), plus its `poly1305` (`default-features = false`, `zeroize`), declared only to switch on wiping ([§12.2](#122-memory-hygiene)) | 0.11.0 / `poly1305` =0.9.1 | NCC Group, 2020: "no significant findings", but on a much older version (V) |
 | KDF, MAC, commitment | HKDF-SHA-256, HMAC-SHA-256 | `hkdf` (the crate has no features), `hmac` (`zeroize`), `sha2` (`zeroize`) | 0.13.0 / 0.13.0 / 0.11.0 | No audit found (U) |
 | Hash (key ids, fingerprints, token hashes) | SHA-256 | `sha2` (`zeroize`) | 0.11.0 | No audit found (U). RUSTSEC-2021-0100 was fixed long ago (V) |
-| HOTP/TOTP only ([§11.15](#1115-totp-m1)); HIBP range queries from M3 | HMAC-SHA-1 (RFC 4226, RFC 6238). The SHA-256 and SHA-512 variants use `sha2` | `sha1` (`zeroize`) | 0.11.0, the digest 0.11 release that matches `hmac` 0.13 (V, crate manifest). Checklist in [ADR 0009](adr/0009-crypto-dependency-policy.md) | No audit found (U). SHA-1 appears only where an external standard fixes it, never in a construction of ours |
+| HOTP/TOTP only ([§11.15](#1115-totp-m1)); HIBP range queries from M3 ([§11.16](#1116-breach-check-hibp-k-anonymity-m3)) | HMAC-SHA-1 (RFC 4226, RFC 6238). The SHA-256 and SHA-512 variants use `sha2` | `sha1` (`zeroize`) | 0.11.0, the digest 0.11 release that matches `hmac` 0.13 (V, crate manifest). Checklist in [ADR 0009](adr/0009-crypto-dependency-policy.md) | No audit found (U). SHA-1 appears only where an external standard fixes it, never in a construction of ours |
 | Public-key wrapping | HPKE, RFC 9180, Base and PSK modes: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20Poly1305 | `hpke` (`default-features = false`, `alloc`, `x25519`, `chacha`) | 0.14.1 | "Nobody has performed a paid audit". Cloudflare reviewed v0.8 internally (V) |
 | X25519 (inside HPKE) | X25519, RFC 7748 | `x25519-dalek` (transitive via `hpke`) | 3.0.0 | Quarkslab 2019, light review of a much older major (L). 3.0.0 was released 2026-07-06 |
 | Signatures | Ed25519, RFC 8032, verified with `verify_strict` | `ed25519-dalek` (`default-features = false`, `fast`, `zeroize`) | 3.0.0 | Quarkslab 2019 on an older major (L). 3.0.0 is a new major, released 2026-07-06 |
@@ -105,6 +105,7 @@ Versions are the latest stable releases as of 2026-09-25 (fact sheet). Audit sta
 | Text normalisation | Unicode NFC | `unicode-normalization` | 0.1.25 (resolved in the M0 scratch build; not in the fact sheet) | U. It sits on the password path: a Unicode-table update can change `NFC(password)` for code points that were unassigned before, so it is exact-pinned and bumps are reviewed like crypto ([ADR 0009](adr/0009-crypto-dependency-policy.md)) |
 | Constant-time base64 (share fragment) | RFC 4648 §5 base64url | `base64ct` | 1.8.3 (resolved in the M0 scratch build; not in the fact sheet) | U |
 | Transport (`rv`) | TLS 1.3, ring provider, Mozilla roots or a private CA | `tokio-rustls`, `rustls` (`std`, `ring`), `webpki-roots` | =0.26.6 / =0.23.46 / =1.0.10 | rustls: Cure53 2020 on an older version (U) |
+| Transport (`rizzy-icon-proxy`) | TLS 1.3, ring provider, Mozilla roots only, no private CA ([ADR 0052](adr/0052-icon-proxy-role.md) point 2) | `tokio-rustls`, `rustls` (`std`, `ring`), `webpki-roots` | =0.26.6 / =0.23.46 / =1.0.10 | rustls: Cure53 2020 on an older version (U) |
 | *Reserved, not shipped* | ML-KEM-768 (FIPS 203), X-Wing | `ml-kem`, `x-wing` | 0.3.2 / 0.1.0 | Never audited (V). X-Wing is still an Internet-Draft (draft-10) |
 
 **The honest summary.** The *algorithms* are standard and heavily analysed. The *implementations* come from the two dominant Rust families, RustCrypto and dalek, plus the reference Rust OPAQUE and HPKE crates. The specific versions we will ship have **not** been audited. This is why [ADR 0009](adr/0009-crypto-dependency-policy.md) pins exact versions, and why the M8 external audit must cover these crates' use in our code, not only our code.
@@ -437,7 +438,7 @@ Parked post-1.0 by [ADR 0022](adr/0022-server-mode-only.md): Server mode is the 
   - A stolen bearer token alone is then useless. A MITM that relayed the device-auth challenge can forward the client's own requests but cannot make its own.
   - The web vault (kind 4) keeps short-lived bearer tokens. The OPAQUE `session_key` is not used for this.
   - Without it, a stolen bearer token, or a device-auth session relayed through intercepted TLS, would give ciphertext access and destructive calls until the session ends. That is the residual risk the owner declined to accept on 2026-09-25.
-- **Server-side 2FA** (TOTP in M1, [§11.15](#1115-totp-m1); WebAuthn in M3) gates *server access only*. It never enters key derivation. An attacker who defeats 2FA still needs the password and the SK to decrypt anything.
+- **Server-side 2FA** (TOTP in M1, [§11.15](#1115-totp-m1); WebAuthn in M3, [§11.17](#1117-webauthn-2fa-m3)) gates *server access only*. It never enters key derivation. An attacker who defeats 2FA still needs the password and the SK to decrypt anything.
 
 ### 5.11 Server-side encryption (not zero knowledge)
 
@@ -455,6 +456,7 @@ These objects are sealed by the server for the server. That protects them from a
   - `SERVER_TOTP_SECRET` 0x0100, ctx `account_id ‖ u32 totp_credential_seq`. `totp_credential_seq` counts the account's TOTP enrolments from 1, so a DB writer cannot move one account's sealed secret into another account's row. The plaintext is the TOTP secret ([§11.15](#1115-totp-m1)).
   - `SERVER_LOGIN_STATE` 0x0101, ctx `login_id ‖ credential_identifier (16) ‖ u64 expires_at_ms`. The plaintext is `ServerLogin::serialize()`, which opaque-ke 4.0.1 provides without its `serde` feature. The row is read and deleted in one transaction, and the fake-record path ([§5.9](#59-account-enumeration)) stores its state the same way.
   - `SERVER_SECRETS_BACKUP` 0x0102, ctx `backup_id ‖ u64 created_at_ms ‖ u16 kdf_id ‖ backup_salt`. Its key is derived like the export file key ([§4.3](#43-derivations)) from the operator passphrase, with `LABEL("server/secrets-backup")` and `backup_id`. The file has the shape of [§11.14](#1114-encrypted-export-m1): JSON, the header fields in clear, the envelope in `data`. `rizzy-core` defines only the header fields, the ctx and the key. The file's `format` string and its JSON writer and reader are defined in `rizzy-server`, with the `rizzy-vault backup-secrets` command ([ADR 0011](adr/0011-storage.md), M1 step 3); no `format` string exists yet.
+  - `0x0103`: SMTP credentials ([ADR 0060](adr/0060-admin-panel-stack-boundary.md), open question 2; THREAT_MODEL.md INV-86). It is the same construction as `SERVER_TOTP_SECRET`, with the SMTP password as the plaintext. ADR 0060 fixes only the value. The purpose's name and ctx, and its §8.4 row, are still undecided and must be fixed by an Accepted ADR, the settings-persistence follow-up of ADR 0060 open question 3, before code lands.
 - **Session tokens** are stored as `SHA-256(token)` ([§5.10](#510-sessions-after-authentication)). There is no token key.
 - **Rotation.** `rizzy-vault secrets rotate --data-key` adds a new current key; `worker` re-seals TOTP rows under the account lock, and the old key is dropped once no row names it. If the data key is lost, TOTP cannot be verified, OPAQUE logins for 2FA accounts fail closed, and only a logged admin 2FA reset (threat model INV-69) restores access.
 
@@ -1224,6 +1226,31 @@ One implementation in `rizzy-core` serves two uses: codes for items that hold a 
 - **Server 2FA.** The secret is sealed as `SERVER_TOTP_SECRET` ([§5.11](#511-server-side-encryption-not-zero-knowledge)). The server computes the codes of the current time step and of one step either side (±1) and compares each with the submitted code using `ct_eq`. It accepts a matching step only if that step is above the last step it accepted for that credential, and stores the accepted step in the same transaction as the login. So every step at or below the last accepted one is rejected, including an older step whose code was never used. If several steps match, the highest is accepted.
 - **Neither kind of TOTP feeds key derivation** ([§5.10](#510-sessions-after-authentication)).
 
+### 11.16 Breach check (HIBP k-anonymity, M3)
+
+Fixed by [ADR 0053](adr/0053-hibp-breach-check-egress.md) item 1. It is a lookup against an externally specified range API, not a construction of ours, so it is not on [§1](#1-goals-non-goals-and-rules) rule 2's list. SHA-1 appears here only because that API fixes it ([§3](#3-primitives)).
+
+- **Digest.** The client (web vault, extension, desktop or CLI) computes SHA-1 over `UTF-8(NFC(password))` of the candidate item password and renders it as uppercase hex, 40 characters.
+- **Request.** The client sends only the first 5 hex characters (20 bits) to the breach-check endpoint of the `icons` role, through the reverse proxy. The request payload carries no account identity, session token or item id.
+- **Response.** The `icons` role relays the upstream's suffix:count list unmodified. It caches responses by prefix, shared across users, with no per-user log.
+- **Comparison.** The client compares each returned suffix with the remaining 35 hex characters of its digest using `ct_eq` ([§2](#2-conventions)). It holds the password string and the digest in zeroizing buffers for the duration of the check.
+- **Upstream.** One hardcoded HIBP range hostname, over HTTPS (port 443) only, resolved and SSRF-checked as [INV-51](THREAT_MODEL.md#8-security-invariants) requires. The exact host, path and headers are U and are confirmed in the implementing PR.
+- **What the `icons` role learns.** A 20-bit prefix of an unsalted SHA-1 digest of a password. Against a high-entropy password that is a filter into one of 2^20 buckets, not a disclosure. Against a dictionary-guessable password it is a small but real narrowing that the server did not have before. IP and timing correlation through the shared proxy is an accepted residual risk ([ADR 0053](adr/0053-hibp-breach-check-egress.md) open question 1, INV-77).
+- **Switch.** Breach-check has its own flag inside the `icons` role, off by default and independent of the favicon switch.
+- **Tests.** Known-answer vectors for the digest, prefix and suffix match land with the implementation ([§15](#15-testing)).
+
+### 11.17 WebAuthn 2FA (M3)
+
+Fixed by [ADR 0058](adr/0058-webauthn-2fa-second-factor.md). The ceremony runs through `webauthn-rs` inside `rizzy-domain-auth` ([ADR 0059](adr/0059-webauthn-rs-crate-approval.md)), never in `rizzy-core` or a client. It is the standard W3C WebAuthn Level 3 ceremony, not a composition of ours, so it is not on [§1](#1-goals-non-goals-and-rules) rule 2's list. Like TOTP, it gates server access only and never feeds key derivation ([§5.10](#510-sessions-after-authentication)).
+
+- **Stored credential.** One `webauthn_credential` row per security key, keyed by `account_id`: `credential_id` (bytes), `alg` (`1` = ES256, `2` = EdDSA, the values of ADR 0039 §1's `passkey/<id>/alg`), the COSE-encoded public key, `sign_count` (u32), `label` and `created_ms`. None of it is a secret, so nothing is sealed and no `SERVER_*` purpose is added ([§5.11](#511-server-side-encryption-not-zero-knowledge)).
+- **Algorithms.** `pubKeyCredParams` offers ES256 and EdDSA, nothing else.
+- **Challenges.** 32 random bytes, a 60 s TTL, single use (read and deleted once), stored unsealed: the shape of the device-auth challenge ([§5.10](#510-sessions-after-authentication) step 1).
+- **RP ID and origin (INV-84).** `rpId` is always the host of the server's canonical origin ([§5.3](#53-context-identifiers-and-credential-identifier)), and `clientDataJSON.origin` must equal the canonical origin. A server reachable under several hostnames configures one canonical origin, as OPAQUE already requires.
+- **Enrolment.** It needs a fresh OPAQUE session, as TOTP enrolment does. The creation options carry `rp_id`, `user.id` = `account_id`, `excludeCredentials` = the account's credential ids, and attestation conveyance `"none"`. Confirmation checks `type == "webauthn.create"`, the challenge, `clientDataJSON.origin`, and `rpIdHash` against `SHA-256(rp_id)`. It does not verify the returned attestation statement, whatever its format.
+- **Login.** After KE3 verifies, if the account has a WebAuthn credential, the server demotes the verified login state to a second-factor-pending row (`pending_id`, `account_id`): unsealed, single use, 60 s TTL. `webauthn_login_challenge(pending_id)` returns `allowCredentials` and a fresh challenge, and `webauthn_login_finish(pending_id, assertion)` verifies the assertion and issues the session. No credential id is served before the password and SK are proven ([§5.9](#59-account-enumeration)). User presence is required and user verification is not. Credentials are non-discoverable.
+- **Sign counter (INV-83).** For a stored counter of 0 and a received counter of 0, the server accepts, since no clone detection is possible for that authenticator. For a stored 0 and a received value above 0, it accepts and starts tracking. For a stored value above 0 and a higher received value, it accepts and stores the new value. For a stored value above 0 and a received value at or below it, it refuses (fail closed, [§1](#1-goals-non-goals-and-rules) rule 6) and writes a possible-clone event to the account's security event log. The credential is not disabled automatically.
+
 ---
 
 ## 12. Randomness, memory hygiene and side channels
@@ -1323,7 +1350,7 @@ The OPAQUE question stays open. There is no standard PQ OPAQUE. opaque-ke 4.1.0-
 
 ## 14. What a malicious server can still do
 
-The threat model's §5 and §8 ([THREAT_MODEL.md](THREAT_MODEL.md)) state the matching invariants (INV-1 to INV-69). This section maps the five attack classes from Scarlata, Torrisi, Backendal and Paterson, "Zero Knowledge (About) Encryption", ePrint 2026/058 (L; we read secondary coverage only, the paper itself was not reachable), to this design.
+The threat model's §5 and §8 ([THREAT_MODEL.md](THREAT_MODEL.md)) state the matching invariants (INV-1 to INV-100). This section maps the five attack classes from Scarlata, Torrisi, Backendal and Paterson, "Zero Knowledge (About) Encryption", ePrint 2026/058 (L; we read secondary coverage only, the paper itself was not reachable), to this design.
 
 | Attack class | What we do | What remains |
 |---|---|---|
@@ -1342,6 +1369,7 @@ The threat model's §5 and §8 ([THREAT_MODEL.md](THREAT_MODEL.md)) state the ma
   - Padmé-padded sizes and timing of edits
   - share metadata (expiry, views, recipient emails)
   - alias ids and mail receive times and size buckets
+  - at WebAuthn 2FA enrolment (M3), whatever attestation statement a security key returns despite the `"none"` conveyance, which can name its AAGUID and, for batch attestation, its make and model. The server verifies none of it, and the stored credential row holds none of it ([§11.17](#1117-webauthn-2fa-m3))
 - **Availability.** The server can refuse service or delete everything. Backups (M8) are the answer; cryptography is not.
 
 ---
