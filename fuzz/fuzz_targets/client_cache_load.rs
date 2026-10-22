@@ -275,6 +275,8 @@ fn build() -> Fixture {
         identity_secret_keys: commit_request.identity_secret_keys.clone(),
         vault_self_grants: List::new(vec![commit_request.vault_self_grant.clone()])
             .expect("one grant"),
+        bytes_used: 0,
+        quota_bytes: 0,
     };
     let e_srv = commit_request.account_key_server_wrap.clone();
     let signed_up = pending.finalize().expect("finalised");

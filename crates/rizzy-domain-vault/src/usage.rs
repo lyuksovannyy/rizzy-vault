@@ -3,7 +3,8 @@
 //! The vault domain's part of the per-account storage quota ([ADR 0048]).
 //!
 //! **The unit** (§2) is the portable wire size a Fetch page already counts: for an op,
-//! [`STATEMENT_FRAME`] plus its header, signature container, body and carried wrap; for a
+//! the statement framing (74 bytes: three length prefixes and the two signed hashes, CRYPTO.md
+//! §9.6) plus its header, signature container, body and carried wrap; for a
 //! snapshot, the same framing plus its header, container, envelope and carried wrap. It is the
 //! same on both engines, unlike an engine's row encoding, and it is only what THREAT_MODEL §3.4
 //! already marks Visible: lengths, never contents. The counted rows are every row of every
