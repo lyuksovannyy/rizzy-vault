@@ -37,10 +37,12 @@
 //!   takes the typed acknowledgement of ADR 0027 §5 ("no flag, setting or environment
 //!   variable skips this"). [`encode_payload`] is public for the fuzz target: it encodes
 //!   bytes its caller already holds.
-//! - **Versions.** The file's `version` stays 1; the reader requires `payload_version` 1 and
-//!   refuses any other as "update required" ([`ClientError::ExportUpdateRequired`]). The
-//!   payload version is inside the envelope because the file's `version` is not in the
-//!   `EXPORT_FILE` context.
+//! - **Versions.** The file's `version` stays 1; the reader requires `payload_version` 1. A
+//!   payload of version 2 is a CXF document (ADR 0074 §2, §5 point 1, which replaces ADR 0027
+//!   §1's bullet), read only under the `rizzy-vault-cxf-export` tag ([`super::cxf`]): here it
+//!   is a swapped tag and refused as [`ClientError::InvalidExportFile`]. Any other version is
+//!   "update required" ([`ClientError::ExportUpdateRequired`]). The payload version is inside
+//!   the envelope because the file's `version` is not in the `EXPORT_FILE` context.
 //!
 //! # Reading (ADR 0027 §2 step 2)
 //!
@@ -117,9 +119,12 @@ use rizzy_sync::record::{
 use rizzy_sync::vv::VersionVector;
 use zeroize::Zeroizing;
 
+use rizzy_core::export::FORMAT;
+
+use super::cxf::CXF_PAYLOAD_VERSION;
 use super::gate::EncryptedExportAuth;
 use super::state;
-use super::{read_export, write_export};
+use super::{parse_export_json, read_export, write_export};
 use crate::device::UnlockedDevice;
 use crate::error::ClientError;
 use crate::items::{ImportWrite, check_import};
@@ -255,16 +260,20 @@ pub fn encode_payload(items: &[PayloadItem<'_>]) -> Result<SecretBytes, ClientEr
 /// bounds; any failure refuses the whole payload. Never panics.
 ///
 /// # Errors
-/// [`ClientError::ExportUpdateRequired`] for a payload of another version;
-/// [`ClientError::InvalidExportFile`] for every other failure.
+/// [`ClientError::ExportUpdateRequired`] for a payload of an unknown version;
+/// [`ClientError::InvalidExportFile`] for a CXF payload (version 2, ADR 0074 §2: it belongs
+/// under the `rizzy-vault-cxf-export` tag, so this is a swapped tag, refused at dispatch) and
+/// for every other failure.
 pub fn parse_payload(payload: &[u8]) -> Result<Vec<PayloadEntry<'_>>, ClientError> {
     const BAD: ClientError = ClientError::InvalidExportFile;
     if payload.len() > MAX_PAYLOAD_LEN {
         return Err(BAD);
     }
     let mut reader = Reader::new(payload);
-    if reader.u16().map_err(|_| BAD)? != PAYLOAD_VERSION {
-        return Err(ClientError::ExportUpdateRequired);
+    match reader.u16().map_err(|_| BAD)? {
+        PAYLOAD_VERSION => {}
+        CXF_PAYLOAD_VERSION => return Err(BAD),
+        _ => return Err(ClientError::ExportUpdateRequired),
     }
     let count = usize::try_from(reader.u32().map_err(|_| BAD)?).map_err(|_| BAD)?;
     if count > MAX_PAYLOAD_ENTRIES
@@ -668,10 +677,13 @@ impl VaultSync {
     /// strict JSON, the header checks, one Argon2id run, the envelope), then
     /// [`VaultSync::import_payload`] on the plaintext, which stays in its zeroizing buffer.
     ///
+    /// The file's tag must be `rizzy-vault-export`: a CXF export (`rizzy-vault-cxf-export`,
+    /// ADR 0074 §2) is opened with [`VaultSync::import_cxf_encrypted`] instead.
+    ///
     /// # Errors
-    /// As [`read_export`] and [`VaultSync::import_payload`]. The vault's own refusals
-    /// ([`ClientError::ReadOnly`], [`ClientError::InvalidInput`]) come before the key
-    /// derivation.
+    /// As [`read_export`] and [`VaultSync::import_payload`]; [`ClientError::InvalidExportFile`]
+    /// for another tag. The vault's own refusals ([`ClientError::ReadOnly`],
+    /// [`ClientError::InvalidInput`]) come before the key derivation.
     pub fn import_encrypted<R: CryptoRng + ?Sized>(
         &mut self,
         rng: &mut R,
@@ -681,6 +693,9 @@ impl VaultSync {
         now_ms: u64,
     ) -> Result<PayloadImport, ClientError> {
         self.check_writable(unlocked)?;
+        if parse_export_json(file)?.format != FORMAT {
+            return Err(ClientError::InvalidExportFile);
+        }
         let payload = read_export(file, export_password)?;
         self.import_payload(rng, unlocked, payload.expose_secret(), now_ms)
     }

@@ -11,6 +11,7 @@
 //! | Plaintext JSON and CSV, the warning and the typed acknowledgement | ADR 0027 §3–§5 | [`plaintext`] |
 //! | The re-authentication before any export and the hold after the plaintext warning | owner decision 2026-10-05 | [`gate`] |
 //! | Recognising an import file's format | owner decision 2026-10-05 | [`detect`] |
+//! | The CXF passkey export (`rizzy-vault-cxf-export`, payload version 2) and its import | ADR 0074 §2–§3 | [`cxf`] |
 //!
 //! **An export is not a backup** (ADR 0027 Context): it is a user-level portability file, the
 //! items of a vault as one client sees them. It holds no account, device, key, grant or op
@@ -59,10 +60,14 @@
 //! and [`VaultSync::import_encrypted`](crate::sync::VaultSync::import_encrypted) put the two
 //! halves together. A vault's payload is built and sealed inside `export_encrypted`: no
 //! public call returns it in plaintext (ADR 0027 §5). The file's `version` stays 1; the payload carries its own version inside
-//! the envelope, because the file's `version` is not in the `EXPORT_FILE` context.
+//! the envelope, because the file's `version` is not in the `EXPORT_FILE` context:
+//! `payload_version` 1 is ADR 0027's item-list payload, 2 a CXF document under the sibling tag
+//! `rizzy-vault-cxf-export` ([`cxf`]; ADR 0074 §2, §5 point 1). Each reader requires its own tag
+//! and its own payload version, so a swapped tag fails at dispatch.
 //!
 //! [ADR 0027]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0027-export-payload.md
 
+pub mod cxf;
 pub mod detect;
 pub mod gate;
 pub mod payload;
@@ -118,6 +123,19 @@ pub fn write_export<R: CryptoRng + ?Sized>(
     payload: &[u8],
     now_ms: u64,
 ) -> Result<Vec<u8>, ClientError> {
+    write_export_as(FORMAT, rng, export_password, payload, now_ms)
+}
+
+/// [`write_export`] with the `format` tag `format`: [`FORMAT`] or, for the CXF export,
+/// [`CXF_FORMAT`](rizzy_core::export::CXF_FORMAT) (ADR 0074 §2: the same fields and key
+/// derivation).
+pub(crate) fn write_export_as<R: CryptoRng + ?Sized>(
+    format: &str,
+    rng: &mut R,
+    export_password: &str,
+    payload: &[u8],
+    now_ms: u64,
+) -> Result<Vec<u8>, ClientError> {
     let key = ExportFileKey::derive_new(rng, export_password, now_ms, KdfId::DEFAULT)
         .map_err(|_| ClientError::InvalidInput)?;
     let data = key
@@ -125,7 +143,7 @@ pub fn write_export<R: CryptoRng + ?Sized>(
         .map_err(|_| ClientError::InvalidInput)?;
     let header = key.header();
     let text = format!(
-        "{{\"format\":\"{FORMAT}\",\"version\":{VERSION},\"kdf_id\":{},\"export_salt\":\"{}\",\
+        "{{\"format\":\"{format}\",\"version\":{VERSION},\"kdf_id\":{},\"export_salt\":\"{}\",\
          \"export_id\":\"{}\",\"created_at\":{},\"data\":\"{data}\"}}",
         header.kdf_id.get(),
         header.export_salt_b64(),
