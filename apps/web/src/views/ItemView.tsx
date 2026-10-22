@@ -10,6 +10,10 @@
 // §3 rule 3), and a revealed value is shown in the secret-field component (INV-68). The
 // large-type password display (`LargeType.tsx`) reveals nothing beyond that same path: its
 // "Large type" trigger below only renders a value `FieldValue` already fetched for Reveal/Copy.
+//
+// A Secure Note's notes, and only those, render from their Markdown (`NoteMarkdown.tsx`; ADR
+// 0062 §2, INV-88). Every other item type's notes stay plain text, and Copy always copies the
+// stored source (§12).
 import type { FieldView, HistoryEntry, ItemSummary, TotpCode } from "@rizzy-vault/core";
 import { ConfirmDialog, IconStarFilled, IconStarOutline, SecretField, TypeIcon, useToast } from "@rizzy-vault/ui";
 import { useEffect, useId, useState } from "react";
@@ -20,6 +24,7 @@ import { SafeLink, SafeOpenButton } from "../SafeLink.tsx";
 import { ConflictChooser } from "./ConflictChooser.tsx";
 import { ItemHistory } from "./ItemHistory.tsx";
 import { LargeType } from "./LargeType.tsx";
+import { NoteMarkdown } from "./NoteMarkdown.tsx";
 import { PasswordHistory } from "./PasswordHistory.tsx";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText, useAction } from "./common.tsx";
@@ -33,6 +38,8 @@ function FieldValue(props: {
   readonly field: FieldView;
   readonly label: string;
   readonly link?: boolean;
+  /** Render the value from its Markdown (a Secure Note's `item.notes` only: ADR 0062 §2). */
+  readonly markdown?: boolean;
   readonly onLargeType?: ((value: string) => void) | undefined;
   /** The refresh after a conflict resolution (`ConflictChooser.tsx`); `undefined` when the
    * item cannot be written (read-only vault, trashed item), so the chooser only shows. */
@@ -68,9 +75,13 @@ function FieldValue(props: {
       ) : (
         <>
           <span className="field-label">{label}</span>
-          <span className="field-value">
-            {props.link === true ? <SafeLink url={field.value ?? ""} /> : (field.value ?? "")}
-          </span>
+          {props.markdown === true ? (
+            <NoteMarkdown source={field.value ?? ""} />
+          ) : (
+            <span className="field-value">
+              {props.link === true ? <SafeLink url={field.value ?? ""} /> : (field.value ?? "")}
+            </span>
+          )}
         </>
       )}
       {field.conflict && <span className="badge" title="Edited on two devices at once">conflict</span>}
@@ -344,6 +355,7 @@ export function ItemView(props: {
             id={id}
             field={f}
             label={labelOf(f.key)}
+            markdown={summary.itemType === "note" && f.key === "item.notes"}
             onLargeType={f.key === "login.password" ? setLargeType : undefined}
             onResolved={resolved}
           />
