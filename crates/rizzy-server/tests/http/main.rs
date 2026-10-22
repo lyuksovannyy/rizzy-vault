@@ -14,6 +14,9 @@
 //! end with `rizzy-client` (`paged_fetch`, ADR 0050).
 //! Listing and ending sessions (`sessions`, ADR 0075): the gating and strict body of each route,
 //! the ended token's `401` byte for byte, a device ending web sessions, another account's id.
+//! Encrypted attachments (`attachments`, ADR 0054): upload, a second device's byte-identical
+//! download, retries and conflicts, exact chunk lengths and indices, another account's id, the
+//! 25 MiB cap and the quota answered `quota_exceeded`, and the counter released at delete.
 //!
 //! ADR 0028's HTTP conventions are pinned by `conventions` (the error table and `Retry-After`,
 //! the one `401`, `Content-Length`, no CORS and no compression, the trusted-proxy rule,
@@ -28,6 +31,7 @@
 )]
 
 mod account;
+mod attachments;
 mod attack;
 mod common;
 mod conventions;

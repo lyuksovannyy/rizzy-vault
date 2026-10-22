@@ -606,6 +606,10 @@ fn opaque(len: usize) -> String {
 /// A schema-shaped seed body for `endpoint`, using `me`'s own real ids where the field names
 /// are resource ids (module docs "Not covered" for the endpoints with no real seed, module docs
 /// above for the field-name sources).
+#[expect(
+    clippy::too_many_lines,
+    reason = "one flat table of seed bodies, one arm per endpoint, reads best as one match"
+)]
 fn seed_value(endpoint: Endpoint, me: &Account) -> Value {
     match endpoint {
         Endpoint::RegisterStart => json!({
@@ -702,6 +706,28 @@ fn seed_value(endpoint: Endpoint, me: &Account) -> Value {
             "vault_id": b64(&me.vault_id.to_bytes()),
             "item_key_wraps": [],
             "records": [],
+        }),
+        // ADR 0054 §6. The wrap and the chunk are opaque to the server, so zero bytes of the
+        // right lengths reach the domain: a create in the account's own vault, and the other
+        // four on an id nobody declared (`not_found`) unless a create case declared it first.
+        Endpoint::AttachmentCreate => json!({
+            "attachment_id": b64(&[0xa7; 16]),
+            "vault_id": b64(&me.vault_id.to_bytes()),
+            "item_id": b64(&[0u8; 16]),
+            "attachment_key_wrap": opaque(122),
+            "total_plaintext_len": 10,
+        }),
+        Endpoint::AttachmentGet | Endpoint::AttachmentDelete => json!({
+            "attachment_id": b64(&[0xa7; 16]),
+        }),
+        Endpoint::AttachmentUploadChunk => json!({
+            "attachment_id": b64(&[0xa7; 16]),
+            "chunk_index": 0,
+            "envelope": opaque(100),
+        }),
+        Endpoint::AttachmentDownloadChunk => json!({
+            "attachment_id": b64(&[0xa7; 16]),
+            "chunk_index": 0,
         }),
     }
 }

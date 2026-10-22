@@ -2163,6 +2163,7 @@ fn fake_server_refuses_forged_snapshots_and_serves_covers() {
     ));
 }
 
+mod attachments;
 mod canary;
 mod conflicts;
 mod credentials;

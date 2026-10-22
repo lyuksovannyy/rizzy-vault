@@ -5,8 +5,9 @@
 //!
 //! # Endpoints
 //!
-//! [ADR 0028] item 1 freezes this table for `v1`: the 27 endpoints under `/api/v1/`, and the four
-//! of the tenth resource, `sessions`, that [ADR 0075] §2 adds (31 in all), grouped by
+//! [ADR 0028] item 1 freezes this table for `v1`: the 27 endpoints under `/api/v1/`, the four
+//! of the `sessions` resource that [ADR 0075] §2 adds, and the five of the `attachments`
+//! resource that [ADR 0054] §6 adds (36 in all), grouped by
 //! resource, verb last; `POST` for everything, including reads that carry a body, and `GET`
 //! (and `HEAD`) only for `GET /api/v1/devices/grants`. The path strings are `rizzy-proto`'s
 //! (`http::paths`), shared with every client. The router matches them byte for byte: a path
@@ -47,6 +48,11 @@
 //! | `POST /api/v1/vault/upload` | `UploadRequest` → `UploadResponse` | OPAQUE or device |
 //! | `POST /api/v1/vault/fetch` | `FetchRequest` → `FetchResponse` | OPAQUE or device |
 //! | `POST /api/v1/vault/heal` | `HealingRequest` → `HealingResponse` | OPAQUE or device |
+//! | `POST /api/v1/attachments/create` | `CreateAttachmentRequest` → 204 | OPAQUE or device |
+//! | `POST /api/v1/attachments/get` | `AttachmentRequest` → `GetAttachmentResponse` | OPAQUE or device |
+//! | `POST /api/v1/attachments/upload-chunk` | `UploadChunkRequest` → 204 | OPAQUE or device |
+//! | `POST /api/v1/attachments/download-chunk` | `DownloadChunkRequest` → `DownloadChunkResponse` | OPAQUE or device |
+//! | `POST /api/v1/attachments/delete` | `AttachmentRequest` → 204 | OPAQUE or device |
 //!
 //! "Empty success" (`rizzy-proto`'s tables) is `204 No Content`; "no body" endpoints take an
 //! empty body (limit 0) and are `POST` because they change state. The recovery-only session
@@ -135,6 +141,7 @@
 //! [ADR 0002]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0002-own-protocol.md
 //! [ADR 0010]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0010-server-shape.md
 //! [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
+//! [ADR 0054]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0054-attachments-envelope-and-api.md
 //! [`rizzy-proto`]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/crates/rizzy-proto/src/lib.rs
 
 use std::net::{IpAddr, SocketAddr};
@@ -386,6 +393,16 @@ pub enum Endpoint {
     Fetch,
     /// Vault restore healing.
     Heal,
+    /// Declare an attachment (ADR 0054 §6).
+    AttachmentCreate,
+    /// An attachment's key wrap (ADR 0054 §6).
+    AttachmentGet,
+    /// Store one attachment chunk (ADR 0054 §6).
+    AttachmentUploadChunk,
+    /// Fetch one attachment chunk (ADR 0054 §6).
+    AttachmentDownloadChunk,
+    /// Delete an attachment (ADR 0054 §7).
+    AttachmentDelete,
 }
 
 impl Endpoint {
@@ -422,6 +439,11 @@ impl Endpoint {
         Self::Upload,
         Self::Fetch,
         Self::Heal,
+        Self::AttachmentCreate,
+        Self::AttachmentGet,
+        Self::AttachmentUploadChunk,
+        Self::AttachmentDownloadChunk,
+        Self::AttachmentDelete,
     ];
 
     /// The path.
@@ -459,6 +481,11 @@ impl Endpoint {
             Self::Upload => paths::VAULT_UPLOAD,
             Self::Fetch => paths::VAULT_FETCH,
             Self::Heal => paths::VAULT_HEAL,
+            Self::AttachmentCreate => paths::ATTACHMENTS_CREATE,
+            Self::AttachmentGet => paths::ATTACHMENTS_GET,
+            Self::AttachmentUploadChunk => paths::ATTACHMENTS_UPLOAD_CHUNK,
+            Self::AttachmentDownloadChunk => paths::ATTACHMENTS_DOWNLOAD_CHUNK,
+            Self::AttachmentDelete => paths::ATTACHMENTS_DELETE,
         }
     }
 
@@ -503,7 +530,12 @@ impl Endpoint {
             | Self::SessionsOthersEnd
             | Self::Upload
             | Self::Fetch
-            | Self::Heal => SessionNeed::NotRecovery,
+            | Self::Heal
+            | Self::AttachmentCreate
+            | Self::AttachmentGet
+            | Self::AttachmentUploadChunk
+            | Self::AttachmentDownloadChunk
+            | Self::AttachmentDelete => SessionNeed::NotRecovery,
         }
     }
 
@@ -1178,6 +1210,40 @@ async fn handle(api: &Api, endpoint: Endpoint, request: Request) -> Result<Reply
             Err(HealingError::Failed(e)) => Err(ve(e)),
             Err(e) => Err(e.code().into()),
         },
+        // ADR 0054 §6: every request fits the 1 MiB default body (`BODY_LIMIT`).
+        Endpoint::AttachmentCreate => {
+            api.vault
+                .attachments_create(need()?.account_id, &parse(&body)?, now)
+                .await
+                .map_err(ve)?;
+            Ok(Reply::Empty)
+        }
+        Endpoint::AttachmentGet => json(
+            &api.vault
+                .attachments_get(need()?.account_id, &parse(&body)?)
+                .await
+                .map_err(ve)?,
+        ),
+        Endpoint::AttachmentUploadChunk => {
+            api.vault
+                .attachments_upload_chunk(need()?.account_id, &parse(&body)?)
+                .await
+                .map_err(ve)?;
+            Ok(Reply::Empty)
+        }
+        Endpoint::AttachmentDownloadChunk => json(
+            &api.vault
+                .attachments_download_chunk(need()?.account_id, &parse(&body)?)
+                .await
+                .map_err(ve)?,
+        ),
+        Endpoint::AttachmentDelete => {
+            api.vault
+                .attachments_delete(need()?.account_id, &parse(&body)?, now)
+                .await
+                .map_err(ve)?;
+            Ok(Reply::Empty)
+        }
     }
 }
 
@@ -1227,13 +1293,18 @@ mod tests {
             | Endpoint::SessionsOthersEnd
             | Endpoint::Upload
             | Endpoint::Fetch
-            | Endpoint::Heal => true,
+            | Endpoint::Heal
+            | Endpoint::AttachmentCreate
+            | Endpoint::AttachmentGet
+            | Endpoint::AttachmentUploadChunk
+            | Endpoint::AttachmentDownloadChunk
+            | Endpoint::AttachmentDelete => true,
         }
     }
 
     #[test]
     fn all_is_complete_and_paths_unique() {
-        assert_eq!(Endpoint::ALL.len(), 31);
+        assert_eq!(Endpoint::ALL.len(), 36);
         assert!(Endpoint::ALL.iter().all(|e| listed(*e)));
         let unique: HashSet<_> = Endpoint::ALL.iter().copied().map(Endpoint::path).collect();
         assert_eq!(unique.len(), Endpoint::ALL.len());
