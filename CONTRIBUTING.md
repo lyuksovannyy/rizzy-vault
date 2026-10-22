@@ -46,6 +46,7 @@ cargo check-wasm                    # alias: check -p rizzy-core -p rizzy-sync -
 cargo deny check                    # advisories, licenses, bans, sources (deny.toml)
 cargo xtask check-deps              # crate-boundary and dependency rules (ADR 0016 §5, R1–R8; ADR 0009 feature sets, crypto crates with default-features = false); no unsafe keyword in first-party .rs files (ADR 0019 §4.1)
 cargo xtask check-clippy            # clippy.toml entries clippy ignores ("found a module", ADR 0016 §5)
+cargo xtask generate-tokens --check # every declared design-token pair meets WCAG AA contrast in both themes (no pair may ask for less than 3:1); the generated CSS and native-toolkit token files (Swift, Kotlin, XAML, QML) match packages/ui/tokens/tokens.json (ADR 0014 §5, ADR 0019 §13)
 cargo xtask check-tables            # not in CI yet: every table name after FROM/JOIN/INTO/UPDATE/TABLE/REFERENCES in the domain crates' queries/ and the migrations carries its owner's prefix (auth_, vault_), apart from the one foreign key to auth_accounts (id) ON DELETE CASCADE (ADR 0011 points 5–7, ADR 0016 R4); storage_ tables and backup queries are not checked yet
 cargo xtask check-spdx              # every first-party .rs/.ts/.tsx/.js/.mjs/.sh/.css/.html file starts with the SPDX header (ADR 0017 Decision 6); `--fix` inserts or corrects it
 cargo check --manifest-path fuzz/Cargo.toml --locked --bins               # fuzz targets still build
@@ -65,11 +66,40 @@ pnpm run build
 cargo xtask check-manifest                                  # not in CI yet: built extension manifests (Chromium, Firefox) against INV-40, ADR 0036 §4/§5, ADR 0040: no externally_connectable, allow-listed permissions/host_permissions/web_accessible_resources, all_frames: false, extension-pages CSP
 cargo build --locked -p rizzy-server --bin rizzy-vault     # so the end-to-end test below has a server binary
 pnpm run test
-pnpm run e2e                                                 # Playwright against rizzy-vault built with embed-web
+pnpm run e2e                                                 # Playwright against rizzy-vault built with embed-web, including the accessibility audit (e2e/a11y.spec.ts) and the keyboard-only walk (e2e/keyboard-nav.spec.ts)
+pnpm --filter @rizzy-vault/extension exec playwright test e2e/a11y.spec.ts   # the extension's accessibility audit only (popup, options page, inline menu); the rest of its Playwright suite is not in CI yet
 cargo xtask expand-bindings                                 # regenerates crates/rizzy-wasm/generated/; CI fails on any diff from the committed baseline (ADR 0019 §4.1)
 ```
 
 `cargo xtask check-manifest` is not yet a CI job: [`docs/HANDOFF.md`](docs/HANDOFF.md) lists wiring it (and `check-tables`) into `.github/workflows/` as blocked on the owner. Run it locally, right after `pnpm run build`, until that's wired.
+
+### What the accessibility checks cover
+
+ROADMAP §4.5 asks for keyboard-only use, screen-reader labels and WCAG AA contrast; ADR 0014 §5
+sets the checks. The automated ones:
+
+- **Token contrast** (`cargo xtask generate-tokens --check`, `crates/xtask/src/tokens.rs`): the
+  WCAG contrast ratio of every token pair `tokens.json` declares for text and controls, in both
+  themes, at 4.5:1 for text or 3:1 for large text and UI components; below AA fails. It covers the
+  declared pairs only.
+- **Rendered pages** (`apps/web/e2e/a11y.ts`, `apps/extension/e2e/a11y.ts`): axe-core's WCAG
+  2.0/2.1/2.2 A and AA rules and its best-practice rules on every screen and dialog of the web
+  vault and on the extension's popup, options page and inline menu, plus Chromium's own
+  accessibility tree (every focusable element exposed and named) and a Tab/Shift+Tab focus trap
+  check on every modal dialog. The web vault is also audited in the dark theme, under forced
+  colours (Windows High Contrast emulation) and at phone width.
+- **Keyboard only** (`apps/web/e2e/keyboard-nav.spec.ts`): every audited web vault screen reached
+  with Tab and operated with Enter, Space, Escape, the arrow keys or typing.
+
+What they do not cover: real screen readers (NVDA, JAWS, VoiceOver, TalkBack, Orca) — automated
+rules catch missing names, labels and structure, not whether the result is pleasant to use, so a
+UI change still needs a manual pass with one; Firefox (the Playwright suites run Chromium only);
+keyboard use of the extension (the popup and inline menu are audited, not walked by keyboard);
+undeclared token pairs; and the native clients. This repository's share of "native
+toolkits" is the generated token files under `packages/ui/tokens/generated/` staying in sync
+with the checked source; each native app's own contrast, high-contrast/increased-contrast mode and
+screen-reader checks live in that app's repository (ADR 0019 §6), set by its own ADR (ADR 0014
+§5).
 
 CI also builds the server image, [`deploy/Containerfile`](deploy/Containerfile), for `linux/amd64` and `linux/arm64` on every PR, each natively on its own runner. It pushes nothing. Locally: `docker build -f deploy/Containerfile .` (or `podman build`).
 

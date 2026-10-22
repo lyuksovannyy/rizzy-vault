@@ -169,10 +169,13 @@ still remains.
   the *safe* action (never the destructive one), Escape and a labelled backdrop button both
   cancel. Replaces `window.confirm` for: moving an item to trash, deleting it for good
   (`ItemView.tsx`), locking with unsaved changes (`VaultView.tsx`), and turning two-factor
-  authentication off (`TwoFactorPane.tsx`). The trap's cyclic arithmetic, `nextFocusIndex`, is
+  authentication off (`TwoFactorPane.tsx`). The trap is `packages/ui/src/focusTrap.ts`'s
+  `trapTab`, shared with every other modal dialog (shortcuts help, large type, the second-factor
+  prompt, the plaintext-export dialog). Its cyclic arithmetic, `nextFocusIndex`, is
   unit-tested directly (`packages/ui/test/confirm-dialog.test.ts`); there is no jsdom dependency
   in this workspace, so the trap/Escape/backdrop behaviour itself is covered by Playwright
-  instead (`e2e/vault.spec.ts`'s trash confirmation).
+  instead (`e2e/vault.spec.ts`'s trash confirmation, `e2e/a11y.spec.ts`'s trap check on every
+  dialog).
 
 ### Keyboard shortcuts (`src/shortcuts.ts`)
 
@@ -315,6 +318,44 @@ every pair here clears with margin to spare):
 | `--color-on-danger` on `--color-danger` | 6.54:1 | 10.09:1 |
 | `--color-warning-text` on `--color-warning-bg` | 10.64:1 | 10.57:1 |
 
+The same pairs, declared in `packages/ui/tokens/tokens.json`, are checked by `cargo xtask
+generate-tokens --check` in CI, which fails below AA. The rendered pages are checked too (next
+section).
+
+### Accessibility checks (ROADMAP §4.5, ADR 0014 §5)
+
+`e2e/a11y.ts` holds the checks; [CONTRIBUTING.md](../../CONTRIBUTING.md#what-the-accessibility-checks-cover)
+says how they fit with the token check and the extension's audit.
+
+- **What is audited.** `e2e/a11y.spec.ts`: login, signup, the getting-started guide's steps,
+  the vault list, the new-item menu, the editor (new and edit) and its generator popover, the
+  item view (and a revealed password), large type, the trash confirmation, the command palette
+  with results, the shortcuts help, the account menu, the generator, export and import with the
+  plaintext-export dialog, Settings (two-factor, devices, appearance, "What the server stores",
+  getting started), the trash, unlock, two-factor setup and the login's code prompt; then the
+  dark theme, forced colours (light and dark) and phone width. `e2e/conflict.spec.ts` audits a
+  conflicted item and the open conflict chooser.
+- **What each audit checks.** axe-core (`@axe-core/playwright`, a dev dependency) runs every
+  WCAG 2.0/2.1/2.2 A and AA rule and its best-practice rules: every control named, form fields
+  labelled, text alternatives, one main landmark, an h1 and no skipped heading levels, document
+  language and title, no duplicate ids that ARIA references, nothing focusable hidden from the
+  accessibility tree, named dialogs, valid ARIA, target size, colour contrast of the rendered
+  text. Any violation fails; `REQUIRED_RULES` fails a run in which axe did not evaluate one of
+  the rules this list relies on. Then Chromium's own accessibility tree (CDP): every visible,
+  focusable element is exposed and has a name. Every modal dialog must keep Tab and Shift+Tab
+  inside it. Under forced colours, axe's contrast rule is replaced by "nothing opts out with
+  `forced-color-adjust: none`" (Chromium reports the author's text colour there, not the
+  painted system colour; see `a11y.ts`).
+- **Keyboard only.** `e2e/keyboard-nav.spec.ts` walks the same screens with Tab, Enter, Space,
+  Escape, the arrow keys and typing; `tabTo` fails when a control is not reached within its
+  bound.
+- **What is not covered.** Real screen readers (NVDA, JAWS, VoiceOver, Orca): the rules catch
+  missing names, labels and structure, not whether the result reads well, so a UI change still
+  needs a manual pass with one. Firefox and Safari (Chromium only). Contrast of colours the token
+  file does not declare as a pair, outside what axe measures on the audited screens. The native
+  clients' toolkits: their checks live in their own repositories (ADR 0019 §6); this repository
+  only keeps their generated token files in sync (`cargo xtask generate-tokens --check`).
+
 ### Not yet done
 
 Slice 1 covered items 1–3 of the redesign brief and the contrast table of item 7; the centered
@@ -339,6 +380,7 @@ pnpm run build          # packages/core, then apps/web → apps/web/dist
 pnpm run lint           # the ADR 0014 §2 rules (eslint.config.mjs)
 pnpm run test           # Vitest, every package
 pnpm run e2e            # builds rizzy-vault with embed-web, then Playwright (Chromium) against it
+pnpm --filter @rizzy-vault/web run e2e e2e/a11y.spec.ts   # only the accessibility audit
 ```
 
 Playwright needs its Chromium build: `pnpm --filter @rizzy-vault/web exec playwright install chromium`.
