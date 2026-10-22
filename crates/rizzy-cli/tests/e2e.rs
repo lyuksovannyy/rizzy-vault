@@ -4636,9 +4636,13 @@ fn item_search_recent_and_reindex() {
         "работа",
         "РАБОТА",
     ] {
-        assert_eq!(ids(&["item", "search", query]), [mail.clone()], "{query}");
+        assert_eq!(
+            ids(&["item", "search", query]),
+            vec![mail.clone()],
+            "{query}"
+        );
     }
-    assert_eq!(ids(&["item", "search", "plan"]), [note.clone()]);
+    assert_eq!(ids(&["item", "search", "plan"]), vec![note.clone()]);
     for never in ["hunter2", "canary", "body"] {
         assert!(ids(&["item", "search", never]).is_empty(), "{never}");
     }
@@ -4649,7 +4653,7 @@ fn item_search_recent_and_reindex() {
     a.ok(&["item", "show", &note], &[]);
     a.ok(&["item", "show", &mail], &[]);
     assert_eq!(ids(&["item", "recent"]), [mail.clone(), note.clone()]);
-    assert_eq!(ids(&["item", "recent", "--limit", "1"]), [mail.clone()]);
+    assert_eq!(ids(&["item", "recent", "--limit", "1"]), vec![mail.clone()]);
     assert_eq!(ids(&["item", "search"]), [mail.clone(), note.clone()]);
 
     // The cache file holds the index in cleartext (ADR 0056 §3), lower-cased, and never a
@@ -4663,7 +4667,10 @@ fn item_search_recent_and_reindex() {
     // A trashed item leaves the default search, is found with --trash, stays recently used.
     a.ok(&["item", "trash", &mail], &[]);
     assert!(ids(&["item", "search", "ивана"]).is_empty());
-    assert_eq!(ids(&["item", "search", "ивана", "--trash"]), [mail.clone()]);
+    assert_eq!(
+        ids(&["item", "search", "ивана", "--trash"]),
+        vec![mail.clone()]
+    );
     let recent = a.ok(&["item", "recent"], &[]);
     assert!(
         recent.out[0].ends_with("(in the trash)"),
