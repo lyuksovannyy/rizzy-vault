@@ -46,3 +46,10 @@ pub mod breach;
 pub mod cache;
 pub mod connect;
 pub mod limit;
+
+/// The wire types and path of the breach check, for the role's router in `rizzy-server`
+/// (which reaches `rizzy-proto` only through the crates ADR 0016 §3 lets it depend on).
+pub mod wire {
+    pub use rizzy_proto::breach::{BreachRangeRequest, BreachRangeResponse, HashPrefix, RangeBody};
+    pub use rizzy_proto::http::paths::{ICONS_BREACH_RANGE, ICONS_PREFIX};
+}

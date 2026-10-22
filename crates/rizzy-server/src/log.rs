@@ -139,6 +139,8 @@ pub fn render(ts_ms: u64, level: Level, event: &'static str, fields: &[Field<'_>
 
 /// Writes one line at `level`, if enabled.
 pub fn log(level: Level, event: &'static str, fields: &[Field<'_>]) {
+    #[cfg(test)]
+    capture::record(level, event, fields);
     if !enabled(level) {
         return;
     }
@@ -166,6 +168,39 @@ pub fn info(event: &'static str, fields: &[Field<'_>]) {
 /// [`log`] at [`Level::Debug`].
 pub fn debug(event: &'static str, fields: &[Field<'_>]) {
     log(Level::Debug, event, fields);
+}
+
+/// Test builds only: collects the lines this thread logs, at every level, so a test can
+/// assert what a request wrote (INV-77: no breach-check prefix in any log line).
+#[cfg(test)]
+pub(crate) mod capture {
+    use std::cell::RefCell;
+
+    use super::{Field, Level, render};
+
+    thread_local! {
+        /// The lines of the running [`lines_of`] call, if any.
+        static LINES: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+    }
+
+    /// Records one line while a capture runs on this thread.
+    pub(super) fn record(level: Level, event: &'static str, fields: &[Field<'_>]) {
+        LINES.with(|lines| {
+            if let Some(lines) = lines.borrow_mut().as_mut() {
+                lines.push(render(0, level, event, fields));
+            }
+        });
+    }
+
+    /// Runs `f` and returns its result with every line logged on this thread meanwhile.
+    pub(crate) fn lines_of<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
+        LINES.with(|lines| *lines.borrow_mut() = Some(Vec::new()));
+        let result = f();
+        let lines = LINES
+            .with(|lines| lines.borrow_mut().take())
+            .unwrap_or_default();
+        (result, lines)
+    }
 }
 
 #[cfg(test)]
