@@ -6,9 +6,11 @@
 // offline, then sync. Both values stay and the field conflicts. The first round is resolved by
 // "pick one" on one session, the second by "keep both" on the other, and each resolution
 // reaches the other session through an ordinary sync. Concealed values stay masked in the
-// chooser until the user reveals one (ADR 0013 §3 rule 3).
+// chooser until the user reveals one (ADR 0013 §3 rule 3). The conflicted item, and the open
+// chooser with one value revealed, also pass the accessibility audit (`a11y.ts`).
 import { type BrowserContext, type Page, expect, test } from "@playwright/test";
 
+import { expectAccessible } from "./a11y.ts";
 import { logIn, newItem, signUp, watch } from "./helpers.ts";
 import { type RunningServer, startServer } from "./server.ts";
 
@@ -112,6 +114,7 @@ test("an offline conflict between two sessions: pick one, then keep both", async
   const rowB = b.locator('[data-field="login.password"]');
   await expect(rowA.locator(".badge", { hasText: "conflict" })).toBeVisible();
   await expect(rowB.locator(".badge", { hasText: "conflict" })).toBeVisible();
+  await expectAccessible(a, "item view: a conflicted field");
 
   // Pick one, on A. The chooser names the devices and masks both passwords.
   await rowA.getByRole("button", { name: "Resolve conflict" }).click();
@@ -128,6 +131,7 @@ test("an offline conflict between two sessions: pick one, then keep both", async
   await fromB.getByRole("button", { name: "Reveal" }).click();
   await expect(fromB.locator("input[data-secret-field]")).toHaveValue("from-b");
   await expect(chooserA.locator("input[data-secret-field]")).toHaveCount(1);
+  await expectAccessible(a, "conflict chooser: one value revealed");
   await fromB.getByRole("button", { name: "Use this value" }).click();
   await expect(a.locator(".sync-state")).toHaveText("Synced");
   await expect(rowA.locator(".badge", { hasText: "conflict" })).toHaveCount(0);
