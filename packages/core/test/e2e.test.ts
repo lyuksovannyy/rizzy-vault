@@ -697,14 +697,25 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     const FLOOR = enc.encode("highest_equivalence_list_version");
     const be64 = (n: number) => new Uint8Array([0, 0, 0, 0, n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255]);
     expect(await store.get("cache_meta", FLOOR)).toEqual(be64(0));
-    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 2]));
+    // Cache format 3 (ADR 0056 §3): the extension keeps no `item_index` (owner answer 4), so its
+    // format-3 store is its format-2 one with the format bumped.
+    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 3]));
+
+    // A format-2 store (as a pre-ADR-0056 build wrote it): unlocking bumps the format and
+    // changes nothing else.
+    await store.put("cache_meta", FORMAT, new Uint8Array([0, 2]));
+    const bumped = await unlockDurableDevice(transport, store, PASSWORD);
+    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 3]));
+    expect(await store.get("cache_meta", FLOOR)).toEqual(be64(0));
+    expect(bumped.items()).toEqual([]);
+    bumped.lock();
 
     // A format-1 store (as a pre-ADR-0051 build wrote it): unlocking migrates it, and the
     // migration is persisted by the time the unlock resolves (part of the load, ADR 0051 §2).
     await store.delete("cache_meta", FLOOR);
     await store.put("cache_meta", FORMAT, new Uint8Array([0, 1]));
     const migrated = await unlockDurableDevice(transport, store, PASSWORD);
-    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 2]));
+    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 3]));
     expect(await store.get("cache_meta", FLOOR)).toEqual(be64(0));
     expect(migrated.items()).toEqual([]);
     migrated.lock();
