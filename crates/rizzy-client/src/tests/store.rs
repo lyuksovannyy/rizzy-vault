@@ -747,6 +747,58 @@ fn assert_crash_safe(history: &[CacheRows], unlocked: &[&UnlockedDevice]) {
     }
 }
 
+/// ADR 0050 §2 and open question 1 with the cache: a held cover is not persisted (no new ADR
+/// 0026 row), so a restart in the middle of the response sequence drops it and the loaded
+/// device starts the next sequence from before the held headers; once the retry takes the
+/// cover it is journaled as any absorbed one, and the cache loads to the live state.
+#[test]
+fn a_held_cover_is_not_persisted_and_a_taken_one_is() {
+    let mut rng = ChaCha20Rng::seed_from_u64(72);
+    let mut server = Server::new(73);
+    let (mut a, sk, _code) = Dev::signed_up(&mut server, &mut rng);
+    a.fetch(&server);
+    let item = a.create(&mut rng, "doomed");
+    a.vault
+        .trash_item(&mut rng, &a.unlocked, item, T0 + 10)
+        .unwrap();
+    a.vault
+        .purge_item(&mut rng, &a.unlocked, item, T0 + 11)
+        .unwrap();
+    a.flush();
+    a.upload(&mut server, &mut rng);
+    let writer = a.unlocked.device_id;
+    // The writer's chain is create, trash, purge; a compacted server pages two ops at a time.
+    server.compact = true;
+    server.page_len = 2;
+    let mut c = Dev::enrolled(&mut server, &mut rng, &sk);
+    let outcome = c.fetch(&server);
+    assert_eq!(outcome.held_covers, 1, "{outcome:?}");
+    assert_eq!(c.vault.cursor_of(writer), 2);
+    // A restart now loses the hold: the loaded device's cursor is before the held headers.
+    let restarted = c.reload();
+    assert_eq!(restarted.vaults[0].cursor_of(writer), 0);
+    assert_eq!(
+        restarted.vaults[0].item_lifecycle(item),
+        ItemLifecycle::Absent
+    );
+    // The live device goes on: the purge with its body, and the retry takes the cover.
+    server.compact = false;
+    let outcome = c.fetch(&server);
+    assert_eq!(
+        (outcome.absorbed, outcome.refused_covers),
+        (1, 0),
+        "{outcome:?}"
+    );
+    assert!(outcome.reports.is_empty(), "{outcome:?}");
+    assert_eq!(c.vault.item_lifecycle(item), ItemLifecycle::Purged);
+    assert!(c.cache.rows.snapshots.iter().any(|s| s.own == own::SERVED));
+    c.assert_loads();
+    assert_eq!(
+        c.reload().vaults[0].item_lifecycle(item),
+        ItemLifecycle::Purged
+    );
+}
+
 /// ADR 0026 §4 and §6 end to end: a device that persists every step, a second device, a
 /// concurrent edit, and a compacted server. After every step the cache loads to the live
 /// state, and the file after each step passes the crash assertions.
