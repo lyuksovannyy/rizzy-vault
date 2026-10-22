@@ -37,6 +37,8 @@ services:
     environment:
       RIZZY_ORIGIN: ${RIZZY_ORIGIN:?set RIZZY_ORIGIN in deploy/.env}
       RIZZY_LISTEN: 0.0.0.0:8080
+      # RIZZY_ADMIN_LISTEN stays at its default, 127.0.0.1:8081: the container's own loopback,
+      # never exposed or published (ADR 0060 §2; self-hosting.md §6 "The admin listener").
       RIZZY_SIGNUP: ${RIZZY_SIGNUP:-closed}
       RIZZY_LOG_LEVEL: ${RIZZY_LOG_LEVEL:-info}
       # The recovery waiting period in hours, 0 to 720 (ADR 0008 decision 5; the guide's
@@ -55,7 +57,7 @@ services:
       - /tmp:size=64m,mode=1777
     networks:
       edge:
-    # Not published: only the proxy reaches it.
+    # Not published: only the proxy reaches it. The admin listener (8081) is not exposed.
     expose: ["8080"]
     stop_grace_period: 40s
     logging:
