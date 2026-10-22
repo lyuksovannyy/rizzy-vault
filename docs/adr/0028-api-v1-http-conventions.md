@@ -1,6 +1,6 @@
 # ADR 0028: `/api/v1` HTTP conventions
 
-- Status: Partially superseded by [ADR 0031](0031-retiring-old-opaque-setups.md) (item 3 in part); [ADR 0032](0032-healing-rotation-after-backup.md) (item 3 in part)
+- Status: Partially superseded by [ADR 0031](0031-retiring-old-opaque-setups.md) (item 3 in part); [ADR 0032](0032-healing-rotation-after-backup.md) (item 3 in part); [ADR 0048](0048-per-account-storage-quota.md) (item 3 in part, item 12 in part); [ADR 0049](0049-web-role-route-table.md) (item 10 in part, item 15)
 - Date: 2026-09-29
 - Deciders: project owner
 - Milestone: M1

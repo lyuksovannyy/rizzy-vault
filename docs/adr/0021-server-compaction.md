@@ -1,6 +1,6 @@
 # ADR 0021: Server-side compaction with concurrent snapshots
 
-- Status: Partially superseded by [ADR 0032](0032-healing-rotation-after-backup.md) (§9 "Healing request" in part)
+- Status: Partially superseded by [ADR 0032](0032-healing-rotation-after-backup.md) (§9 "Healing request" in part); [ADR 0050](0050-paged-fetch-tombstone-boundary.md) (§4 "Covers" in part)
 - Date: 2026-09-27
 - Deciders: project owner
 - Milestone: M1 (server; Accepted before M1 step 3)
