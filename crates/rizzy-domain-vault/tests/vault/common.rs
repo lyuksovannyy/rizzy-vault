@@ -518,7 +518,10 @@ impl Env {
     }
 
     /// A second domain over the same database and certificates, with `quota`.
-    pub(crate) fn domain_with_quota(&self, quota: rizzy_domain_vault::Quota) -> VaultDomain<Directory> {
+    pub(crate) fn domain_with_quota(
+        &self,
+        quota: rizzy_domain_vault::Quota,
+    ) -> VaultDomain<Directory> {
         VaultDomain::new(self.db.clone(), self.directory.clone(), Bus::default()).with_quota(quota)
     }
 

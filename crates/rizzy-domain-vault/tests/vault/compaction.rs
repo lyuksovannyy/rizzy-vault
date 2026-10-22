@@ -9,8 +9,8 @@ use rizzy_proto::vault::{Record, SeqVector};
 use rizzy_storage::on_engine;
 
 use crate::common::{
-    Device, Env, NOW, OpSpec, VAULT, block_on, chain, covers_of, fetch_all_with, item, op_dot, ops_of,
-    sign_op, sign_snapshot, sign_snapshot_id, snapshot_header,
+    Device, Env, NOW, OpSpec, VAULT, block_on, chain, covers_of, fetch_all_with, item, op_dot,
+    ops_of, sign_op, sign_snapshot, sign_snapshot_id, snapshot_header,
 };
 
 /// The dots of a complete Fetch's bodiless headers, as (device byte, seq).
@@ -82,7 +82,10 @@ fn two_author_covers_delete_bodies_drop_snapshots_and_are_served() {
             }
         );
         // The job is idempotent and the queue is empty.
-        assert_eq!(env.domain.run_compaction(16, NOW).await.unwrap().processed, 0);
+        assert_eq!(
+            env.domain.run_compaction(16, NOW).await.unwrap().processed,
+            0
+        );
         assert_eq!(
             env.domain.compact_item(VAULT, item(1), NOW).await.unwrap(),
             CompactionReport::default()

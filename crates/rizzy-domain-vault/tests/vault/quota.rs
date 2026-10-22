@@ -51,7 +51,13 @@ fn the_counter_is_the_portable_wire_size() {
         let mut spec = OpSpec::new(item(2), 3, 2);
         spec.wrap = Some(vec![0x77; 98]);
         records.push(Record::Op(sign_op(&a, VAULT, &spec)));
-        records.push(Record::Snapshot(sign_snapshot(&a, item(1), 1, &[(&a, 2)], 0)));
+        records.push(Record::Snapshot(sign_snapshot(
+            &a,
+            item(1),
+            1,
+            &[(&a, 2)],
+            0,
+        )));
         let expected: u64 = records.iter().map(wire_bytes).sum();
         env.store(records.clone()).await;
         assert_eq!(env.counted().await, expected);
@@ -188,7 +194,13 @@ fn a_healing_request_is_never_refused_for_quota_and_is_charged() {
         // A quota of zero: the healing request still goes through, and its bytes are charged.
         let none = env.domain_with_quota(exactly(0));
         let mut records = later.clone();
-        records.push(Record::Snapshot(sign_snapshot(&a, item(1), 7, &[(&a, 4)], 0)));
+        records.push(Record::Snapshot(sign_snapshot(
+            &a,
+            item(1),
+            7,
+            &[(&a, 4)],
+            0,
+        )));
         let added: u64 = records.iter().map(wire_bytes).sum();
         let heal = HealingRequest {
             vault_id: Id::from_bytes(VAULT.to_bytes()),
