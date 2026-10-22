@@ -13,7 +13,8 @@ use super::purpose::{
     AccountKeyDeviceGrantCtx, AccountKeyLocalWrapCtx, AccountKeyRecoveryWrapCtx,
     AccountKeyServerWrapCtx, AccountSettingsCtx, DeviceSecretKeysCtx, ExportFileCtx,
     IdentitySecretKeysCtx, ItemKeyWrapCtx, ItemOpCtx, ItemSnapshotCtx, RetiredSecretKeyCtx,
-    ServerLoginStateCtx, ServerSecretsBackupCtx, ServerTotpSecretCtx, Side, VaultKeySelfGrantCtx,
+    ServerDbBackupCtx, ServerLoginStateCtx, ServerSecretsBackupCtx, ServerTotpSecretCtx, Side,
+    VaultKeySelfGrantCtx,
 };
 use super::symmetric::{self, MAX_PLAINTEXT_LEN, OVERHEAD, server_open, server_seal, test_hooks};
 use super::*;
@@ -76,7 +77,7 @@ fn aead_opens_during<T>(f: impl FnOnce() -> T) -> (T, usize) {
 // ---------------------------------------------------------------------------------------------
 
 /// The §8.4 table: every purpose with its id.
-const CRYPTO_MD_PURPOSES: [(&str, u16); 31] = [
+const CRYPTO_MD_PURPOSES: [(&str, u16); 32] = [
     ("ACCOUNT_KEY_SERVER_WRAP", 0x0001),
     ("ACCOUNT_KEY_LOCAL_WRAP", 0x0002),
     ("ACCOUNT_KEY_RECOVERY_WRAP", 0x0003),
@@ -108,6 +109,7 @@ const CRYPTO_MD_PURPOSES: [(&str, u16); 31] = [
     ("SERVER_TOTP_SECRET", 0x0100),
     ("SERVER_LOGIN_STATE", 0x0101),
     ("SERVER_SECRETS_BACKUP", 0x0102),
+    ("SERVER_DB_BACKUP", 0x0105),
 ];
 
 #[test]
@@ -120,6 +122,7 @@ fn purpose_registry_matches_crypto_md_8_4() {
     }
     assert_eq!(Purpose::from_id(0x0000), None);
     assert_eq!(Purpose::from_id(0x0103), None);
+    assert_eq!(Purpose::from_id(0x0106), None);
 }
 
 #[test]
@@ -176,7 +179,8 @@ fn server_only_purposes_are_in_no_client_allow_list() {
         [
             Purpose::ServerTotpSecret,
             Purpose::ServerLoginState,
-            Purpose::ServerSecretsBackup
+            Purpose::ServerSecretsBackup,
+            Purpose::ServerDbBackup
         ]
     );
     for p in Purpose::ALL {
@@ -482,6 +486,24 @@ fn m1_context_layouts_files_and_server_objects() {
     check(
         &c,
         &cat(&[&[0xbb; 16], &7u64.to_be_bytes(), &[0, 1], &[0x55; 16]]),
+    );
+
+    let c = ServerDbBackupCtx {
+        backup_id: BackupId::from_bytes([0xcc; 16]),
+        created_at_ms: 9,
+        backup_key_id: 3,
+        chunk_index: 1,
+        chunk_count: 2,
+    };
+    check(
+        &c,
+        &cat(&[
+            &[0xcc; 16],
+            &9u64.to_be_bytes(),
+            &3u32.to_be_bytes(),
+            &1u32.to_be_bytes(),
+            &2u32.to_be_bytes(),
+        ]),
     );
 
     assert_eq!(ItemOpCtx::header_hash(b"abc").len(), 32);
@@ -798,6 +820,19 @@ fn server_purposes_round_trip_through_the_server_table_only() {
     assert_eq!(
         server_open(&k, &backup, &env).unwrap().expose_secret(),
         b"secrets"
+    );
+
+    let chunk = ServerDbBackupCtx {
+        backup_id: BackupId::generate(&mut rng),
+        created_at_ms: 1,
+        backup_key_id: 1,
+        chunk_index: 0,
+        chunk_count: 1,
+    };
+    let env = server_seal(&mut rng, &k, &chunk, b"db chunk").unwrap();
+    assert_eq!(
+        server_open(&k, &chunk, &env).unwrap().expose_secret(),
+        b"db chunk"
     );
 
     // The same ctx bytes under a client purpose (IDENTITY_SECRET_KEYS: account_id ‖ u32) do not

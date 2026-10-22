@@ -30,7 +30,8 @@ use super::purpose::{
     AccountKeyDeviceGrantCtx, AccountKeyLocalWrapCtx, AccountKeyRecoveryWrapCtx,
     AccountKeyServerWrapCtx, AccountSettingsCtx, DeviceSecretKeysCtx, ExportFileCtx,
     IdentitySecretKeysCtx, ItemKeyWrapCtx, ItemOpCtx, ItemSnapshotCtx, RetiredSecretKeyCtx,
-    ServerLoginStateCtx, ServerSecretsBackupCtx, ServerTotpSecretCtx, VaultKeySelfGrantCtx,
+    ServerDbBackupCtx, ServerLoginStateCtx, ServerSecretsBackupCtx, ServerTotpSecretCtx,
+    VaultKeySelfGrantCtx,
 };
 use super::symmetric::{self, server_open, server_seal, test_hooks};
 use super::{AlgId, Context, PlaintextRule, Purpose, open, seal};
@@ -291,6 +292,9 @@ case!(Client ExportFileCtx { export_id, created_at_ms, kdf_id, export_salt });
 case!(Server ServerTotpSecretCtx { account_id, totp_credential_seq });
 case!(Server ServerLoginStateCtx { login_id, credential_identifier, expires_at_ms });
 case!(Server ServerSecretsBackupCtx { backup_id, created_at_ms, kdf_id, backup_salt });
+case!(Server ServerDbBackupCtx {
+    backup_id, created_at_ms, backup_key_id, chunk_index, chunk_count
+});
 
 /// Opens `env` as purpose `C`, with `ctx_bytes` read as `C`'s context where the layouts have
 /// the same length, and a random `C` context otherwise. Returns the result and how many `okm`
@@ -310,7 +314,7 @@ type OpenAs =
     fn(&mut ChaCha20Rng, &Key32, &[u8], &[u8]) -> (Purpose, Result<(), DecryptError>, usize, usize);
 
 /// Every implemented symmetric purpose, as an opener.
-const ALL_SYMMETRIC: [OpenAs; 15] = [
+const ALL_SYMMETRIC: [OpenAs; 16] = [
     open_as::<AccountKeyServerWrapCtx>,
     open_as::<AccountKeyLocalWrapCtx>,
     open_as::<AccountKeyRecoveryWrapCtx>,
@@ -326,6 +330,7 @@ const ALL_SYMMETRIC: [OpenAs; 15] = [
     open_as::<ServerTotpSecretCtx>,
     open_as::<ServerLoginStateCtx>,
     open_as::<ServerSecretsBackupCtx>,
+    open_as::<ServerDbBackupCtx>,
 ];
 
 /// Runs `f`, counting `okm` derivations and AEAD openings on this thread.
@@ -540,7 +545,9 @@ macro_rules! symmetric_tests {
         fn the_harness_covers_every_implemented_symmetric_purpose() {
             let covered = [$(<$ty as Context>::PURPOSE),+];
             for p in Purpose::ALL {
-                let implemented = p.spec().first_used == super::purpose::Milestone::M1
+                // M1's symmetric purposes, and M8's SERVER_DB_BACKUP (ADR 0071).
+                let implemented = (p.spec().first_used == super::purpose::Milestone::M1
+                    || p == Purpose::ServerDbBackup)
                     && p.encrypt_alg() == AlgId::XChaCha20Poly1305Committed;
                 assert_eq!(covered.contains(&p), implemented, "{}", p.name());
             }
@@ -564,6 +571,7 @@ symmetric_tests!(
     server_totp_secret: ServerTotpSecretCtx,
     server_login_state: ServerLoginStateCtx,
     server_secrets_backup: ServerSecretsBackupCtx,
+    server_db_backup: ServerDbBackupCtx,
 );
 
 // ---------------------------------------------------------------------------------------------
