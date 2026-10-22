@@ -147,7 +147,7 @@ impl EquivalenceGroup {
     /// bytes; unreachable in practice, since every domain here already passed
     /// [`EquivalenceGroup::new`] or [`EquivalenceGroup::decode`], both bounded by
     /// [`MAX_HOST_LEN`], but still propagated rather than assumed.
-    fn encode(&self, out: &mut Vec<u8>) -> Result<(), rizzy_core::error::EncodeError> {
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) -> Result<(), rizzy_core::error::EncodeError> {
         out.extend_from_slice(self.id.as_bytes());
         rizzy_core::encoding::put_u16(out, u16::try_from(self.domains.len()).unwrap_or(0));
         for domain in &self.domains {
@@ -158,7 +158,7 @@ impl EquivalenceGroup {
     }
 
     /// Decodes one `group` record; `r` must be positioned at its first byte.
-    fn decode(r: &mut Reader<'_>) -> Result<Self, EquivalenceListError> {
+    pub(crate) fn decode(r: &mut Reader<'_>) -> Result<Self, EquivalenceListError> {
         let id = GroupId(
             *r.array::<16>()
                 .map_err(|_| EquivalenceListError::Malformed)?,
