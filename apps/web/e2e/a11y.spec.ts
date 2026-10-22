@@ -5,8 +5,9 @@
 // 2.x A/AA and best-practice rules, and Chromium's own accessibility tree), every modal dialog
 // keeps the focus inside it (`expectFocusTrapped`), and the vault also passes under the dark
 // theme, forced colours (Windows High Contrast emulation) and at phone width. The conflict
-// chooser's state is audited in `conflict.spec.ts`; keyboard-only use of these same screens is
-// `keyboard-nav.spec.ts`.
+// chooser's state is audited in `conflict.spec.ts`; the Sessions section with two sessions, its
+// end dialog, its log-in-again form and the login after a session was ended in
+// `sessions.spec.ts`; keyboard-only use of these same screens is `keyboard-nav.spec.ts`.
 import { expect, test } from "@playwright/test";
 import { createHmac } from "node:crypto";
 

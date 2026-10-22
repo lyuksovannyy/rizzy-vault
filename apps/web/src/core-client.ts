@@ -13,6 +13,7 @@ import {
   type Method,
   type ToWorker,
   BAD_MESSAGE,
+  SESSION_ENDED,
   isFromWorker,
   transferables,
 } from "./protocol.ts";
@@ -51,6 +52,7 @@ export class CoreClient {
   #next = 1;
   #dead: string | undefined;
   #prompt: TotpPrompt = () => Promise.resolve(null);
+  #onSessionEnded: (() => void) | undefined;
 
   constructor(port: WorkerPort) {
     this.#port = port;
@@ -60,6 +62,14 @@ export class CoreClient {
   /** Sets who answers the Worker's second-factor prompts. */
   setTotpPrompt(prompt: TotpPrompt): void {
     this.#prompt = prompt;
+  }
+
+  /**
+   * Sets who hears that the server ended the session (ADR 0075 §6): the Worker has locked it
+   * and answered a call `session_ended`. `undefined` clears it.
+   */
+  setSessionEndedHandler(handler: (() => void) | undefined): void {
+    this.#onSessionEnded = handler;
   }
 
   /**
@@ -109,6 +119,9 @@ export class CoreClient {
       waiter.resolve(m.value);
     } else {
       waiter.reject(new CallError(m.code === "" ? BAD_MESSAGE : m.code));
+      if (m.code === SESSION_ENDED) {
+        this.#onSessionEnded?.();
+      }
     }
   }
 }
