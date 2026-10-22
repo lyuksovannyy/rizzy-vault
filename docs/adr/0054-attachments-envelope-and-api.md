@@ -90,6 +90,18 @@ Added in this milestone, as §15 item 1 already provides for M3 constructions: n
 
 **On-acceptance edits.** CRYPTO.md: §8.4's `ATTACHMENT_CHUNK` row — algorithm "0x03 (reserved)" → "0x01"; ctx → as in Decision 1. §8.4's "Attachment keys (M3)" sentence "The chunked envelope (algorithm 0x03) is the M3 attachments ADR's to define" → chunks are `ATTACHMENT_CHUNK`/0x01 envelopes; 0x03 stays reserved, undefined. §9.4's `0x03` row — Construction: "chunked/streaming variant of 0x01 for attachments" → "undefined"; Status: "reserved for the M3 ADR" → "reserved; undefined; a real streaming/incremental AEAD needs its own ADR and CRYPTO.md section" (consistent with What this ADR supersedes, above). §4.2's `ATTACHMENT_KEY_WRAP` storage-location cell → "Server, `vault` domain: the `vault_attachments` row for that `attachment_id`; read back only via `attachments/get` (§6)." THREAT_MODEL.md §3.4 gains the row given in Consequences, Negative, below, and the M3 transparency page follows it. Separately, as the owner's act on acceptance ([ADR 0020](0020-partial-supersession.md) point 9): ADR 0007's status line gains "Partially superseded by ADR 0054 (§3 in part)"; its text is otherwise unedited.
 
+### Owner answers at acceptance (2026-10-22)
+
+The owner accepted this ADR as drafted; the recommendations of "Open questions for the owner" stand:
+
+1. Chunks are 512 KiB and an attachment is capped at 25 MiB, as Decision 2 sets.
+2. The endpoint-table growth is additive: ADR 0028 item 1 is not superseded.
+3. A fully uploaded attachment that is dereferenced without `delete` is accepted as a known M3 gap. A client-side reconcile sweep comes in a later milestone.
+4. Algorithm `0x03` is left fully open, not reserved for a streaming construction.
+5. ADR 0048 was accepted together with this ADR on 2026-10-22. Decision 6's over-cap or over-quota `create` rejection therefore uses ADR 0048's `quota_exceeded` code (ADR 0048 §5).
+
+Of the "On-acceptance edits", all the documentation ones are made in the accepting change: CRYPTO.md §8.4 (the `ATTACHMENT_CHUNK` row and the "Attachment keys (M3)" sentence), §9.4 (the `0x03` row) and §4.2 (the `ATTACHMENT_KEY_WRAP` storage cell); THREAT_MODEL.md §3.4 (the row from Consequences, Negative); INV-78 and INV-79 (§8.2); and INV-15's canary scope (c). The same change corrects CRYPTO.md §9.1's M1-limit sentence, which still sent attachments to `0x03`. ADR 0007's status line names this ADR (§3 in part). The vectors, the reassembly fuzz target (§8) and the M3 transparency page land with the implementation.
+
 ## Consequences
 
 ### Positive

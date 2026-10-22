@@ -60,6 +60,20 @@ This ADR makes none of these edits. The owner makes them in the change that acce
 1. **THREAT_MODEL.md §8** gains the INV-88 row (Decision §14) in the security-invariants table, after INV-69.
 2. **THREAT_MODEL.md, "A16. Malicious import files and shared content," mitigations:** "Field values are always rendered as text ([INV-35](#8-security-invariants))." becomes "Field values are always rendered as text ([INV-35](#8-security-invariants)), except a Secure Note's `item.notes`, which the web vault renders through the closed parser-to-AST pipeline of ADR 0062 (INV-88); that pipeline has no raw-HTML, script or link-element production rule, so an imported field value still cannot reach an HTML sink through it." A16's "XSS if a field value reaches an HTML sink" risk line is otherwise unchanged: it still applies to every other field and item type.
 
+### Owner answers at acceptance (2026-10-22)
+
+The owner accepted this ADR as drafted; the recommendations of "Open questions for the owner" stand:
+
+1. No third-party JS runtime dependency is taken on. The hand-written route of §3–§4 stands.
+2. No nested list or blockquote in v1.
+3. INV-88 keeps its number.
+4. Same-origin images are never allowed in notes.
+5. The 64 KiB `item.notes` limit is not raised here.
+6. Rendering is not widened beyond Secure Notes without a ROADMAP edit first.
+7. No bracketed-link (`[text]`) support in v1.
+
+Of the "On acceptance" edits, both are made in the accepting change: INV-88 in THREAT_MODEL.md §8.8, and the A16 mitigation sentence.
+
 ## Consequences
 
 ### Positive

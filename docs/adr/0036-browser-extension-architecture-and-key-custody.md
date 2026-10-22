@@ -1,6 +1,6 @@
 # ADR 0036: Browser extension: architecture and key custody
 
-- Status: Partially superseded by [ADR 0040](0040-extension-fill-request-from-inline-menu.md) (§4, first bullet, in part); [ADR 0043](0043-inline-menu-instance-token.md) (§4, first bullet, in part)
+- Status: Partially superseded by [ADR 0040](0040-extension-fill-request-from-inline-menu.md) (§4, first bullet, in part); [ADR 0043](0043-inline-menu-instance-token.md) (§4, first bullet, in part); [ADR 0076](0076-autocomplete-driven-autofill.md) (§4 in part)
 - Date: 2026-10-07
 - Deciders: project owner
 - Milestone: M2

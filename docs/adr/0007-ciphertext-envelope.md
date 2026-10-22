@@ -1,6 +1,6 @@
 # ADR 0007: Versioned ciphertext envelope and crypto agility
 
-- Status: Accepted
+- Status: Partially superseded by [ADR 0054](0054-attachments-envelope-and-api.md) (§3 in part)
 - Date: 2026-09-25
 - Deciders: project owner
 - Milestone: M1
