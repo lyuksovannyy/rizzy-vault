@@ -19,7 +19,7 @@
 //! (`crate::Session`, `crate::DeviceSession`) instead: that reads the account's
 //! `ACCOUNT_SETTINGS` once per object ([ADR 0042] §6, `rizzy_client::settings::SettingsCache`) and
 //! applies its match default, disabled global groups and user groups
-//! ([`decide_with_account`]). Persisting the highest accepted `list_version` across launches
+//! (`decide_with_account`). Persisting the highest accepted `list_version` across launches
 //! (INV-39) is still deferred (gap 27(b)): it needs an ADR amending ADR 0026's `cache_meta`
 //! format, so every call accepts version `0` (`global_equivalence_groups`'s own docs). While
 //! `rizzy_match::compiled::GLOBAL_LIST` is `None`, the only equivalence groups are the account's
