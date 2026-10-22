@@ -49033,9 +49033,14 @@ pub mod store {
     //!   `cache_meta` row `highest_equivalence_list_version`, an 8-byte big-endian value under that
     //!   UTF-8 key, the same key and encoding `rv`'s `SQLite` file uses (ADR 0051 open question 3).
     //!   This module's row codec is unchanged by it: a `cache_meta` row is already opaque bytes.
+    //!   Format 3 ([ADR 0056] §3) adds `SQLite`'s `item_index` table, which this host does not
+    //!   keep: the browser extension keeps its M2 item list (ADR 0056 owner answer 4), so its
+    //!   format-3 cache is its format-2 one with the format bumped, no store is added to
+    //!   [`STORE_NAMES`], and no index row is ever encoded or decoded here.
     //!
     //! [ADR 0026]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0026-client-device-state-and-cache.md
     //! [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
+    //! [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
     use rizzy_client::ClientError;
     use rizzy_client::rizzy_core::encoding::{
         Reader, put_bytes, put_u8, put_u64,
