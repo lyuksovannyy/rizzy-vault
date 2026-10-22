@@ -104,6 +104,7 @@ use rizzy_sync::record::{
 };
 use zeroize::Zeroizing;
 
+use crate::autofill::{CheckMode, check_custom_fields};
 use crate::device::UnlockedDevice;
 use crate::error::ClientError;
 use crate::sync::{OwnChange, VaultSync};
@@ -304,6 +305,10 @@ pub(crate) fn check_import(
         writes.iter().map(|(s, k, v)| (*s, k.as_bytes(), *v)),
     )
     .map_err(|_| ClientError::InvalidEdit)?;
+    // ADR 0076 §2.3: W1–W5 apply to an import too (an empty label is kept, §2.4). A refusal
+    // skips the item like any other invalid one.
+    let pairs: Vec<(&str, &[u8])> = writes.iter().map(|(_, k, v)| (*k, *v)).collect();
+    check_custom_fields(&pairs, CheckMode::Import).map_err(|_| ClientError::InvalidEdit)?;
     // The item must fit one item's snapshot, `@lifecycle` being one of its registers.
     let snapshot_len = writes.iter().fold(SNAPSHOT_MARGIN, |sum, (_, k, v)| {
         sum.saturating_add(REGISTER_OVERHEAD)
@@ -345,6 +350,8 @@ impl VaultSync {
                 .map(|(k, v)| (WriteSource::Entered, k.as_bytes(), *v)),
         )
         .map_err(|_| ClientError::InvalidEdit)?;
+        // ADR 0076 §2.3: W1–W5 on the new item's custom fields.
+        check_custom_fields(&writes, CheckMode::Write)?;
         let item = ItemId::generate(rng);
         self.write_op(
             rng,
@@ -523,6 +530,9 @@ impl VaultSync {
             .map_err(|_| ClientError::InvalidEdit)?;
             writes.push((f.key.as_str(), f.value.expose_secret()));
         }
+        // ADR 0076 §2.3: W1–W5 against the item's custom fields as they display now. Conflict
+        // resolution and history restore edit through here, so they run them too.
+        self.check_custom_field_edit(item, &writes)?;
         self.write_op(
             rng,
             unlocked,

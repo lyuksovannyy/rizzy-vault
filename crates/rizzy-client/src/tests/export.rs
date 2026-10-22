@@ -1387,16 +1387,15 @@ fn exports_refuse_oversize_vaults_and_oversize_items() {
     let grown = f.create(ItemType::LOGIN, &[(&k(ITEM_NAME), &text("grown"))], T0 + 2);
     assert!(f.vault.export_blockers().is_empty());
     assert_eq!(f.vault.export_payload().unwrap().items, 2);
-    // 4,096 custom-field values, in four ops of 1,024 writes: over the register cap.
+    // 4,096 website values, in four ops of 1,024 writes: over the register cap. (Websites,
+    // not custom fields: a custom field needs a Display Name too, ADR 0076 §2.3 W5.)
     let value = text("v");
     for op in 0..4u32 {
         let field_keys: Vec<SchemaKey> = (0..1_024u32)
             .map(|i| {
                 let mut id = [0u8; 16];
                 id[..4].copy_from_slice(&(op * 1_024 + i).to_be_bytes());
-                ElementId::from_bytes(id)
-                    .key(LIST_FIELD, ATTR_VALUE)
-                    .unwrap()
+                ElementId::from_bytes(id).key(LIST_URI, ATTR_VALUE).unwrap()
             })
             .collect();
         let edits: Vec<FieldEdit<'_>> = field_keys

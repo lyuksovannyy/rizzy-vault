@@ -341,7 +341,7 @@ fn restore_on_a_trashed_item_is_refused() {
 #[test]
 fn a_custom_fields_old_value_is_restored_only_into_a_kind_it_fits() {
     use rizzy_core::item::schema::{
-        ATTR_KIND, ATTR_VALUE, CUSTOM_KIND_BOOLEAN, CUSTOM_KIND_HIDDEN, LIST_FIELD,
+        ATTR_KIND, ATTR_LABEL, ATTR_VALUE, CUSTOM_KIND_BOOLEAN, CUSTOM_KIND_HIDDEN, LIST_FIELD,
     };
 
     let (_server, mut rng, mut vault, unlocked, item) = one_item(409);
@@ -360,6 +360,8 @@ fn a_custom_fields_old_value_is_restored_only_into_a_kind_it_fits() {
         &mut rng,
         LIST_FIELD,
         vec![
+            // ADR 0076 §2.3 W5: a new custom field has a Display Name.
+            (ATTR_LABEL, Value::text("PIN").unwrap()),
             (ATTR_KIND, Value::enumeration(CUSTOM_KIND_HIDDEN)),
             (ATTR_VALUE, Value::text("old-pin").unwrap()),
         ],

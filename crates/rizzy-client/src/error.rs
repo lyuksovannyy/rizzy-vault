@@ -176,6 +176,21 @@ pub enum ClientError {
     /// A downloaded attachment did not verify: a chunk missing, extra, out of place or failing
     /// to decrypt (INV-78, INV-79). Nothing was assembled; the partial data is wiped.
     AttachmentIncomplete,
+    /// ADR 0076 §2.3 W1: a custom field's autocomplete id breaks the `ac_id` grammar (1–64
+    /// bytes of `a-z`, `0-9`, `-`, `_`, `.`). Nothing was written. Never normalised.
+    AutocompleteInvalid,
+    /// ADR 0076 §2.3 W2: a custom field's autocomplete id is in the reserved set (§3) or begins
+    /// with `section-`. Nothing was written.
+    AutocompleteReserved,
+    /// ADR 0076 §2.3 W3: after the write another custom field of the item would display the
+    /// same autocomplete id. Nothing was written.
+    AutocompleteDuplicate,
+    /// ADR 0076 §2.3 W4: an autocomplete id on a boolean or unknown-kind custom field. Nothing
+    /// was written.
+    AutocompleteKind,
+    /// ADR 0076 §2.3 W5: a custom field created or edited without a Display Name (its `label`
+    /// would hold no non-whitespace character). Nothing was written.
+    LabelRequired,
     /// An internal step failed that the inputs cannot cause: a sealing, signing, encoding or
     /// derivation call that is unreachable for valid state. No detail is kept on purpose.
     Internal,
@@ -231,6 +246,11 @@ impl ClientError {
             Self::SettingsLimitReached => "settings_limit_reached",
             Self::AttachmentTooLarge => "attachment_too_large",
             Self::AttachmentIncomplete => "attachment_incomplete",
+            Self::AutocompleteInvalid => "autocomplete_invalid",
+            Self::AutocompleteReserved => "autocomplete_reserved",
+            Self::AutocompleteDuplicate => "autocomplete_duplicate",
+            Self::AutocompleteKind => "autocomplete_kind",
+            Self::LabelRequired => "label_required",
             Self::Internal => "internal",
         }
     }
@@ -312,6 +332,15 @@ impl fmt::Display for ClientError {
             Self::SettingsLimitReached => "the account settings are at a size limit",
             Self::AttachmentTooLarge => "the file is larger than the 25 MiB attachment limit",
             Self::AttachmentIncomplete => "the attachment did not download completely",
+            Self::AutocompleteInvalid => {
+                "an autocomplete id is 1-64 lowercase letters, digits, '-', '_' or '.'"
+            }
+            Self::AutocompleteReserved => "that autocomplete id is reserved for the manager",
+            Self::AutocompleteDuplicate => {
+                "another custom field of this item already uses that autocomplete id"
+            }
+            Self::AutocompleteKind => "only text and hidden custom fields take an autocomplete id",
+            Self::LabelRequired => "a custom field needs a display name",
             Self::Internal => "internal error",
         })
     }
@@ -376,6 +405,11 @@ mod tests {
             ClientError::SettingsLimitReached,
             ClientError::AttachmentTooLarge,
             ClientError::AttachmentIncomplete,
+            ClientError::AutocompleteInvalid,
+            ClientError::AutocompleteReserved,
+            ClientError::AutocompleteDuplicate,
+            ClientError::AutocompleteKind,
+            ClientError::LabelRequired,
             ClientError::Internal,
         ];
         let mut codes: Vec<&str> = all.iter().map(|e| e.code()).collect();
