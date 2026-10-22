@@ -105,6 +105,7 @@
 
 pub mod account;
 pub mod attachments;
+pub mod autofill;
 pub mod conflicts;
 pub mod credentials;
 pub mod device;
