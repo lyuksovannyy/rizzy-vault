@@ -107,6 +107,65 @@ fn server_binary() -> PathBuf {
 /// The log file of a server started with a debug log ([`Server::start_with`]), in its directory.
 const DEBUG_LOG: &str = "server.log";
 
+/// Where every `rizzy-vault` process of a server without a [`DEBUG_LOG`] writes its standard
+/// error, in the server's directory: its log lines at the default level and its error messages,
+/// kept for the failure report ([`log_tail`]).
+const STDERR_LOG: &str = "stderr.log";
+
+/// How long a `rizzy-vault` process may take to start listening. Generous: on a loaded host
+/// (parallel builds and browser tests) a debug build can take long to start.
+const START_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How many free ports a new server tries before the test gives up ([`Server::start_with`]).
+const START_ATTEMPTS: usize = 10;
+
+/// A loopback port that was free a moment ago. Another process may bind it before the server
+/// does, which [`Server::spawn`] detects.
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// The log file the processes of the server in `dir` write their standard error to.
+fn log_file(dir: &Path) -> PathBuf {
+    let debug = dir.join(DEBUG_LOG);
+    if debug.is_file() {
+        debug
+    } else {
+        dir.join(STDERR_LOG)
+    }
+}
+
+/// The text of `log` from byte `from` on (empty if there is none yet).
+fn log_text(log: &Path, from: u64) -> String {
+    let bytes = std::fs::read(log).unwrap_or_default();
+    let from = usize::try_from(from).unwrap().min(bytes.len());
+    String::from_utf8_lossy(&bytes[from..]).into_owned()
+}
+
+/// The last lines of the log of the server in `dir`, for a failure report.
+fn log_tail(dir: &Path) -> String {
+    const LINES: usize = 40;
+    let log = log_file(dir);
+    let text = log_text(&log, 0);
+    let lines: Vec<&str> = text.lines().collect();
+    format!(
+        "last {} lines of {}:\n{}",
+        LINES.min(lines.len()),
+        log.display(),
+        lines[lines.len().saturating_sub(LINES)..].join("\n")
+    )
+}
+
+/// Whether `line` is the log line a serving process writes once it listens on `port`.
+fn says_listening(line: &str, port: u16) -> bool {
+    serde_json::from_str::<serde_json::Value>(line)
+        .is_ok_and(|event| event["event"] == "listening" && event["port"] == u64::from(port))
+}
+
 /// A running `rizzy-vault` on a loopback port. Killed on drop.
 struct Server {
     /// The process.
@@ -148,27 +207,30 @@ impl Server {
         if debug_log {
             std::fs::write(dir.join(DEBUG_LOG), b"").unwrap();
         }
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let origin = origin.unwrap_or_else(|| format!("http://127.0.0.1:{port}"));
-        let init = Self::command(&dir, port, &origin)
+        // The secrets file does not depend on the port or the origin.
+        let init = Self::command(&dir, free_port(), "http://127.0.0.1:1")
             .args(["secrets", "init"])
-            .output()
+            .status()
             .unwrap();
-        assert!(
-            init.status.success(),
-            "{}",
-            String::from_utf8_lossy(&init.stderr)
-        );
-        let child = Self::spawn(&dir, port, &origin);
+        assert!(init.success(), "secrets init failed; {}", log_tail(&dir));
+        let own = |port: u16| format!("http://127.0.0.1:{port}");
+        let (child, port) = (0..START_ATTEMPTS)
+            .find_map(|_| {
+                let port = free_port();
+                let public = origin.clone().unwrap_or_else(|| own(port));
+                Self::spawn(&dir, port, &public).map(|child| (child, port))
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "rizzy-vault found every port it tried taken; {}",
+                    log_tail(&dir)
+                )
+            });
         Self {
             child,
             dir,
             port,
-            origin,
+            origin: origin.unwrap_or_else(|| own(port)),
         }
     }
 
@@ -186,29 +248,76 @@ impl Server {
                 dir.join("secrets").join("secrets.json"),
             )
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let log = dir.join(DEBUG_LOG);
-        if log.is_file() {
-            let file = std::fs::OpenOptions::new().append(true).open(log).unwrap();
-            command.env("RIZZY_LOG_LEVEL", "debug").stderr(file);
+            .stdout(Stdio::null());
+        let log = log_file(dir);
+        if log == dir.join(DEBUG_LOG) {
+            command.env("RIZZY_LOG_LEVEL", "debug");
         }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+            .unwrap();
+        command.stderr(file);
         command
     }
 
-    /// Spawns the serving process and waits until it accepts connections.
-    fn spawn(dir: &Path, port: u16, origin: &str) -> Child {
+    /// Spawns the serving process on `port` and waits until it logs that it listens there;
+    /// `None` if the port is taken.
+    ///
+    /// Ready means this process's own `listening` line, never a connection to the port: the
+    /// port was free when [`free_port`] probed it, but another process may have bound it since
+    /// (the server or proxy of a test running in parallel, in this binary or another). This
+    /// process then exits with `listener: address in use` while a connection reaches the
+    /// other one, and `rv` would sign up on a stranger's server, whose answer for a name
+    /// already taken there is `invalid_request`.
+    fn spawn(dir: &Path, port: u16, origin: &str) -> Option<Child> {
+        let log = log_file(dir);
+        let from = std::fs::metadata(&log).map_or(0, |m| m.len());
         let mut child = Self::command(dir, port, origin).spawn().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + START_TIMEOUT;
         loop {
-            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                return child;
+            if log_text(&log, from)
+                .lines()
+                .any(|line| says_listening(line, port))
+            {
+                return Some(child);
             }
             if let Some(status) = child.try_wait().unwrap() {
-                panic!("rizzy-vault exited at start: {status}");
+                if log_text(&log, from).contains("listener: address in use") {
+                    return None;
+                }
+                panic!("rizzy-vault exited at start: {status}; {}", log_tail(dir));
             }
-            assert!(Instant::now() < deadline, "rizzy-vault did not start");
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "rizzy-vault did not listen within {START_TIMEOUT:?}; {}",
+                    log_tail(dir)
+                );
+            }
             std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Starts the serving process again on its port, which `rv`'s caches name. The port was
+    /// free for a moment; if another process took it, the test fails with the log, rather than
+    /// going on against that process.
+    fn respawn(&mut self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(child) = Self::spawn(&self.dir, self.port, &self.origin) {
+                self.child = child;
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "port {} was taken by another process while rizzy-vault was stopped; {}",
+                self.port,
+                log_tail(&self.dir)
+            );
+            std::thread::sleep(Duration::from_millis(500));
         }
     }
 
@@ -226,7 +335,7 @@ impl Server {
     /// Starts it again on the same data and port.
     fn restart(&mut self) {
         self.stop();
-        self.child = Self::spawn(&self.dir, self.port, &self.origin);
+        self.respawn();
     }
 
     /// Stops the server, runs the operator's command `args` on its data, and starts it again.
@@ -234,10 +343,14 @@ impl Server {
         self.stop();
         let out = Self::command(&self.dir, self.port, &self.origin)
             .args(args)
-            .output()
+            .status()
             .unwrap();
-        assert!(out.status.success(), "rizzy-vault {args:?} failed");
-        self.child = Self::spawn(&self.dir, self.port, &self.origin);
+        assert!(
+            out.success(),
+            "rizzy-vault {args:?} failed; {}",
+            log_tail(&self.dir)
+        );
+        self.respawn();
     }
 
     /// ADR 0031 as an operator runs it after a leak: `secrets rotate`, a start (which records
@@ -250,10 +363,44 @@ impl Server {
 }
 
 impl Drop for Server {
+    #[expect(
+        clippy::print_stderr,
+        reason = "the server's log in a failed test's output, which the test harness captures"
+    )]
     fn drop(&mut self) {
         self.stop();
+        if std::thread::panicking() {
+            eprintln!("rizzy-vault on port {}: {}", self.port, log_tail(&self.dir));
+        }
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// The harness itself: a serving process whose port another process bound after it was probed
+/// is not taken for ready, so `rv` never goes on against that other process (on a loaded host,
+/// signups failed now and then with `invalid_request` from another test's server, where the
+/// name was taken): [`Server::start_with`] then tries another port.
+#[test]
+fn a_server_is_ready_only_once_it_listens_itself() {
+    let taken = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = taken.local_addr().unwrap().port();
+    let dir = temp_dir("server");
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    std::fs::create_dir_all(dir.join("secrets")).unwrap();
+    let origin = format!("http://127.0.0.1:{port}");
+    let init = Server::command(&dir, port, &origin)
+        .args(["secrets", "init"])
+        .status()
+        .unwrap();
+    assert!(init.success(), "{}", log_tail(&dir));
+    assert!(
+        Server::spawn(&dir, port, &origin).is_none(),
+        "{}",
+        log_tail(&dir)
+    );
+    assert!(log_text(&log_file(&dir), 0).contains("listener: address in use"));
+    drop(taken);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// What the [`Proxy`] does to the next request for a path, once.
@@ -2383,13 +2530,9 @@ impl Server {
         let backup = Self::command(&self.dir, self.port, &self.origin)
             .args(["backup", "--out"])
             .arg(&file)
-            .output()
+            .status()
             .unwrap();
-        assert!(
-            backup.status.success(),
-            "{}",
-            String::from_utf8_lossy(&backup.stderr)
-        );
+        assert!(backup.success(), "backup failed; {}", log_tail(&self.dir));
         file
     }
 
@@ -2404,14 +2547,10 @@ impl Server {
         let restore = Self::command(&self.dir, self.port, &self.origin)
             .args(["restore", "--in"])
             .arg(backup)
-            .output()
+            .status()
             .unwrap();
-        assert!(
-            restore.status.success(),
-            "{}",
-            String::from_utf8_lossy(&restore.stderr)
-        );
-        self.child = Self::spawn(&self.dir, self.port, &self.origin);
+        assert!(restore.success(), "restore failed; {}", log_tail(&self.dir));
+        self.respawn();
     }
 }
 
@@ -2470,7 +2609,7 @@ impl Server {
         self.stop();
         let copy = self.dir.join(name);
         copy_tree(&self.dir.join("data"), &copy);
-        self.child = Self::spawn(&self.dir, self.port, &self.origin);
+        self.respawn();
         copy
     }
 
@@ -2481,7 +2620,7 @@ impl Server {
         let data = self.dir.join("data");
         std::fs::remove_dir_all(&data).unwrap();
         copy_tree(copy, &data);
-        self.child = Self::spawn(&self.dir, self.port, &self.origin);
+        self.respawn();
     }
 }
 
