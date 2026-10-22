@@ -43,6 +43,10 @@ export const STORED: readonly StoredRow[] = [
     how: "Encrypted snapshots and an encrypted change log. The server cannot read titles, fields, tags or whether an item is in the Trash.",
   },
   {
+    data: "Your attachments, encrypted",
+    how: "Each file in encrypted chunks, with its key encrypted under the item's key. The server cannot read a file's name, type or contents.",
+  },
+  {
     data: "Item key wraps",
     how: "Encrypted, but they reveal your vault's and items' ids.",
   },
@@ -52,7 +56,7 @@ export const STORED: readonly StoredRow[] = [
   },
   {
     data: "Metadata it can see",
-    how: "Item ids, the number of changes, padded ciphertext sizes and upload times.",
+    how: "Item ids, the number of changes, padded ciphertext sizes and upload times. For attachments, more: each file's exact size, which item it belongs to, and how many files an item has.",
   },
   {
     data: "Your two-factor secret",
@@ -64,6 +68,7 @@ export const STORED: readonly StoredRow[] = [
 /** How long the server keeps what (ADR 0012 §5 and §7, ADR 0021 §6, AR-11). */
 export const RETENTION: readonly string[] = [
   "An item in the Trash is deleted for good 30 days after it was trashed, by the first of your devices that is unlocked after that. The server cannot see the Trash, so it never deletes an item itself.",
+  "Deleting an attachment removes it from the server at once. An attachment whose upload never finished is deleted after 24 hours. This web vault deletes an item's attachments when you delete the item for good; an attachment no item names any more, left behind by another app, stays on the server and counts against your storage.",
   "A deleted item leaves a tombstone of a few tens of bytes, kept for the life of the vault, so that an old copy cannot come back.",
   "The signed header of every change, about 225 bytes, is kept for the life of the vault. Older encrypted item versions are dropped once newer snapshots cover them.",
   "The server's own logs never hold IP addresses, login names or request contents. Your server operator's reverse proxy may log IP addresses, and the operator's backups keep deleted data until they expire.",

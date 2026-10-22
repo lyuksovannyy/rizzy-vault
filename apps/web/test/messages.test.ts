@@ -15,6 +15,8 @@ describe("messages", () => {
     expect(messageFor("server_credentials_stale")).toContain("restored from a backup");
     // ADR 0048 §5: an upload past the account's storage quota.
     expect(messageFor("server_quota_exceeded")).toContain("storage limit");
+    expect(messageFor("attachment_too_large")).toContain("25 MiB");
+    expect(messageFor("attachment_incomplete")).toContain("not saved");
     expect(messageFor("something_new")).toBe("Something went wrong (something_new).");
   });
 

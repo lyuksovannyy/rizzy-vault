@@ -258,7 +258,8 @@ export function group(fields: readonly FieldView[]): Grouped {
           elements.set(id, e);
         }
         e.attributes.set(f.attribute, f);
-      } else {
+      } else if (f.list !== "attachment") {
+        // Attachments (ADR 0054 §4) have their own section (`AttachmentsSection.tsx`).
         other.push(f);
       }
     } else if (f.key === "item.favorite") {
