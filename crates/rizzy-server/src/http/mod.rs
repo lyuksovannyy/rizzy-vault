@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The public listener's router: the `api` role under `/api/`, the `web` role everywhere else
-//! ([ADR 0010] §1, §4; [ADR 0002] point 3; [ADR 0028] items 1, 3, 10 and 15).
+//! ([ADR 0010] §1, §4; [ADR 0002] point 3; [ADR 0028] items 1, 3 and 10; ADR 0049's route
+//! table for the web role, which supersedes item 15 and item 10's first sentence).
 //!
 //! One listener serves both roles when both run; each is present only when its role is. A
 //! request under `/api/` with no `api` role, or to an unknown `/api/` path, answers
@@ -133,4 +134,47 @@ async fn access_log(request: Request, next: Next) -> Response {
         ],
     );
     response
+}
+
+#[cfg(test)]
+mod tests {
+    //! ADR 0049, INV-73: the access log names a web-role answer by a fixed route template, never
+    //! by the request's path, for every row of the route table and every path it refuses.
+
+    use super::*;
+
+    /// The route name `fallback` records for `method path`.
+    fn logged_route(method: Method, path: &str) -> &'static str {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .body(axum::body::Body::empty())
+            .unwrap_or_default();
+        let response = fallback(true, &request);
+        response
+            .extensions()
+            .get::<RouteName>()
+            .map_or("none", |r| r.0)
+    }
+
+    #[test]
+    fn the_logged_route_is_a_template_never_the_path() {
+        let mut paths: Vec<&str> = web::ROUTES
+            .iter()
+            .map(|r| match r {
+                web::Route::Literal(p) | web::Route::Segment(p) => *p,
+            })
+            .collect();
+        paths.extend([
+            "/nothing",
+            "/s/some-share-id",
+            "/assets/../index.html",
+            "/%2e%2e/",
+        ]);
+        for path in paths {
+            for method in [Method::GET, Method::HEAD, Method::POST] {
+                assert_eq!(logged_route(method, path), "web", "{path}");
+            }
+        }
+    }
 }
