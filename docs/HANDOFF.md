@@ -57,7 +57,23 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
   - no "keep both" at all.
   
   Each choice has trade-offs: duplicates if two devices both pick "keep both"; booleans and choice fields cannot be kept twice; extra fields clutter the item. The owner chooses whether the current shape stays.
-- **What is left for agents:** every §6 row is done or blocked. The rest of M3 waits on the §3 Proposed ADRs (0043–0076, minus the Accepted 0042), and the owner's review of them is the bottleneck.
+- **Owner decisions of 2026-10-22:**
+  - ADRs 0043, 0044, 0048–0060, 0062, 0071 and 0073–0076 are Accepted. Their acceptance changes are completed in `310711d`…`ab16a67`: "Owner answers at acceptance" with the recommendations, the "On acceptance" doc edits, and the superseded status lines.
+  - M5 (sharing) and M6 (aliases/email) are scheduled after v1.0, and ROADMAP §4.4 gains the ADR 0076 row.
+  - Implementation runs in waves, one worktree per ADR or per tight group.
+- **Open acceptance questions for the owner:**
+  1. ADRs 0043 and 0076 each rewrite ADR 0036 §4's first bullet, and 0076's text drops 0043's per-instance register/revoke message. Until a small reconciling ADR settles it, implementations treat **both** as binding: 0043's register/revoke message plus 0076's offer messages.
+  2. 0053 and 0058 both claimed CRYPTO §11.16. They are numbered in ADR order: §11.16 is the breach check, §11.17 is WebAuthn 2FA.
+  3. ADR 0073's "On acceptance" makes three supply-chain approval records (cosign, the CycloneDX generators, the merge tool) a condition of it binding, and they don't exist yet. 0073's CI signing work waits for them.
+  4. ADR 0044 question 1 recommends dropping ADR 0042 §4's public-suffix check. 0042 was accepted first, so the check stays unless a later ADR removes it.
+  5. ADR 0071 question 1 had no recommendation. The draft's placement as a new CRYPTO §9.8 was followed.
+  6. ADR 0074 question 4 (a bare unencrypted CXF export) needs a ROADMAP §4.10 edit, which is not made.
+  7. ADR 0060's purpose 0x0103 (SMTP credentials) has no name or ctx in any ADR. It belongs to the mail work, which is now after v1.0.
+  8. ADR 0056 question 5: the allow-list amendment for ADR 0055's item types is still to be written.
+  9. ADR 0052 question 7: whether `blob:` goes into `img-src` depends on the implementation's browser test.
+  10. Possible gap, unverified: in ADR 0071, `plaintext_len` is in no chunk's AAD, and the ADR's claim that the commitment catches an edit is unchecked.
+  11. 0059 keeps webauthn-rs' `attestation` feature on for provenance, while 0058 verifies no attestation. That looks consistent but should be checked.
+- **What is left for agents:** implementing the ADRs accepted on 2026-10-22, in waves (see the goal).
 - The gap-numbered audit (`docs/handoff/gap-audit.json`), which older gap ids below trace back to, still lives only on branch `wip/client-m1`. Keep that branch; its code is superseded by the commits in §2. `wip/match-core` (one unfinished commit off `main`) is likewise superseded and kept only for reference.
 
 ## 2. Done since the last rewrite
