@@ -9,8 +9,9 @@
 //! server's allow-list table, never in a client's.
 //!
 //! A context (`ctx`) is the ordered list of fields that says where a ciphertext belongs. Each
-//! M1 purpose has a context type implementing [`Context`]; the type fixes the purpose, so a
-//! caller cannot pair a context with the wrong purpose id. Purposes of later milestones, and
+//! M1 purpose, and each M3 attachment purpose (ADR 0054), has a context type implementing
+//! [`Context`]; the type fixes the purpose, so a caller cannot pair a context with the wrong
+//! purpose id. Purposes of later milestones, and
 //! the parked ones, are registered (their ids are reserved) but have no context type yet, so
 //! nothing can seal or open them until their milestone, or the ADR that revives On-device
 //! mode, defines and reviews the layout.
@@ -47,8 +48,8 @@ use sha2::{Digest as _, Sha256};
 
 use super::AlgId;
 use crate::ids::{
-    AccountId, BackupId, DeviceId, ExportId, ItemId, KeyType, LoginId, OpId, PublicKeyId,
-    SnapshotId, VaultId,
+    AccountId, AttachmentId, BackupId, DeviceId, ExportId, ItemId, KeyType, LoginId, OpId,
+    PublicKeyId, SnapshotId, VaultId,
 };
 use crate::kdf::KdfId;
 
@@ -133,9 +134,6 @@ pub struct PurposeSpec {
 
 /// Decrypt allow-list of every symmetric purpose: `{0x01}` (§9.5 rule 2).
 const SYMMETRIC: &[AlgId] = &[AlgId::XChaCha20Poly1305Committed];
-/// Decrypt allow-list of `ATTACHMENT_CHUNK`: `{0x03}`, reserved for M3. No layout exists yet,
-/// so the parser rejects every envelope against it.
-const CHUNKED: &[AlgId] = &[AlgId::ChunkedXChaCha20Poly1305];
 /// Decrypt allow-list of the HPKE Base-mode purposes: `{0x10}`.
 const HPKE_BASE: &[AlgId] = &[AlgId::HpkeBaseX25519];
 /// Decrypt allow-list of the HPKE PSK-mode purposes: `{0x12}`.
@@ -294,7 +292,9 @@ impl Purpose {
             Self::ItemKeyWrap => ("ITEM_KEY_WRAP", SYM, SYMMETRIC, Fixed(37), M::M1),
             Self::ItemOp => ("ITEM_OP", SYM, SYMMETRIC, Padded, M::M1),
             Self::ItemSnapshot => ("ITEM_SNAPSHOT", SYM, SYMMETRIC, Padded, M::M1),
-            Self::AttachmentChunk => ("ATTACHMENT_CHUNK", CHUNK, CHUNKED, Unspecified, M::M3),
+            // An ordinary `0x01` envelope per chunk, unpadded (ADR 0054 §1; §8.5's framed list
+            // omits it).
+            Self::AttachmentChunk => ("ATTACHMENT_CHUNK", SYM, SYMMETRIC, Unpadded, M::M3),
             Self::AttachmentKeyWrap => ("ATTACHMENT_KEY_WRAP", SYM, SYMMETRIC, Fixed(32), M::M3),
             Self::RelayBatch => ("RELAY_BATCH", SYM, SYMMETRIC, Padded, M::Parked),
             Self::PairingTransfer => ("PAIRING_TRANSFER", SYM, SYMMETRIC, Unpadded, M::Parked),
@@ -412,8 +412,6 @@ impl Purpose {
 // Short names for the registry rows above.
 /// Encrypt algorithm `0x01`, for the registry rows.
 const SYM: AlgId = AlgId::XChaCha20Poly1305Committed;
-/// Encrypt algorithm `0x03` (reserved, M3), for the registry rows.
-const CHUNK: AlgId = AlgId::ChunkedXChaCha20Poly1305;
 /// Encrypt algorithm `0x10`, for the registry rows.
 const BASE: AlgId = AlgId::HpkeBaseX25519;
 /// Encrypt algorithm `0x12`, for the registry rows.
@@ -559,7 +557,16 @@ macro_rules! id_ctx_fields {
 }
 
 id_ctx_fields!(
-    AccountId, DeviceId, VaultId, ItemId, OpId, SnapshotId, ExportId, BackupId, LoginId
+    AccountId,
+    DeviceId,
+    VaultId,
+    ItemId,
+    OpId,
+    SnapshotId,
+    ExportId,
+    BackupId,
+    LoginId,
+    AttachmentId
 );
 
 /// Defines one context type: its fields in §8.4 order, its purpose and its marker traits.
@@ -815,6 +822,41 @@ context! {
         snapshot_id: SnapshotId,
         /// `SHA-256(canonical snapshot header)`.
         snapshot_header_hash: [u8; 32],
+    }
+}
+
+context! {
+    /// `ATTACHMENT_CHUNK` (M3, ADR 0054 §1):
+    /// `vault_id ‖ item_id ‖ attachment_id ‖ u32 chunk_index ‖ u32 chunk_count`.
+    ///
+    /// `chunk_count` is never read from the server: the reader derives it from the item's
+    /// `attachment/<id>/size` field ([`crate::attachment::AttachmentLayout`]), so a chunk
+    /// opened at another index, for another attachment or against another declared size fails
+    /// the commitment (INV-78).
+    AttachmentChunkCtx: AttachmentChunk, SymmetricContext {
+        /// The vault holding the item.
+        vault_id: VaultId,
+        /// The item the attachment belongs to.
+        item_id: ItemId,
+        /// The attachment.
+        attachment_id: AttachmentId,
+        /// Zero-based position of this chunk.
+        chunk_index: u32,
+        /// Number of chunks, `ceil(size / CHUNK_SIZE)`.
+        chunk_count: u32,
+    }
+}
+
+context! {
+    /// `ATTACHMENT_KEY_WRAP` (M3): `vault_id ‖ item_id ‖ attachment_id`. Never re-wrapped
+    /// when the item key rotates (ADR 0054 §3).
+    AttachmentKeyWrapCtx: AttachmentKeyWrap, SymmetricContext {
+        /// The vault holding the item.
+        vault_id: VaultId,
+        /// The item the attachment belongs to.
+        item_id: ItemId,
+        /// The attachment.
+        attachment_id: AttachmentId,
     }
 }
 

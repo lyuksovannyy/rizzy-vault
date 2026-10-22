@@ -35,6 +35,11 @@
 //! specification checks inside `compute`. The vectors hold only test values drawn from the
 //! documented seeds or written as fixtures; none is a real credential.
 
+#[expect(
+    clippy::indexing_slicing,
+    reason = "test code indexes fixtures at known offsets; a panic there fails the test, which CLAUDE.md allows"
+)]
+mod attachments;
 mod derivations;
 #[expect(
     clippy::indexing_slicing,
@@ -92,7 +97,7 @@ struct VectorFile {
     contents: &'static [(&'static str, &'static str, usize)],
 }
 
-const FILES: [VectorFile; 6] = [
+const FILES: [VectorFile; 7] = [
     VectorFile {
         name: "derivations",
         tier: "A",
@@ -217,6 +222,24 @@ const FILES: [VectorFile; 6] = [
             ("item", "field-key/reject", 16),
             ("item", "tag-key", 8),
             ("item", "tag-key/reject", 5),
+        ],
+    },
+    VectorFile {
+        name: "attachments",
+        tier: "A",
+        spec: "ADR 0054 §1, §3, §8; CRYPTO.md §8.3, §8.4, §9.1",
+        seed: 0x0054,
+        committed: include_str!("../../tests/vectors/attachments.json"),
+        generate: attachments::generate,
+        compute: attachments::compute,
+        check_file: |_| {},
+        // ADR 0054 §8: the key wrap, a single-chunk and a three-chunk attachment (short final
+        // chunk), and the three negative cases (index, attachment id, chunk count).
+        contents: &[
+            ("attachment", "ATTACHMENT_KEY_WRAP", 1),
+            ("attachment", "single-chunk", 1),
+            ("attachment", "three-chunk", 1),
+            ("attachment", "reject", 3),
         ],
     },
     VectorFile {
@@ -558,6 +581,11 @@ fn replay_encodings() {
 #[test]
 fn replay_items() {
     replay(file("items"));
+}
+
+#[test]
+fn replay_attachments() {
+    replay(file("attachments"));
 }
 
 #[test]
