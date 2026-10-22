@@ -42,7 +42,8 @@ pub enum ImportError {
     /// defined or expanded (threat model A16).
     Doctype,
     /// A rizzy-vault plaintext JSON export of a `version` this reader does not know
-    /// (ADR 0027 §6: "update required, never guessed or migrated").
+    /// (ADR 0027 §6: "update required, never guessed or migrated"), or a CXF document of
+    /// another major version (ADR 0074 §3).
     UpdateRequired,
 }
 
@@ -63,7 +64,7 @@ impl fmt::Display for ImportError {
             Self::Checksum => "the archive's checksum does not match",
             Self::Doctype => "XML document type declarations are not accepted",
             Self::UpdateRequired => {
-                "the export was written by a newer rizzy-vault; update to import it"
+                "the export uses a newer format version; update rizzy-vault to import it"
             }
         })
     }
@@ -139,6 +140,12 @@ pub enum WarningKind {
     /// A member the rizzy-vault plaintext format does not define was ignored (ADR 0027 §6
     /// "Unknown members"). At most once per entry, and once for the file as a whole.
     UnknownMembersIgnored,
+    /// A CXF credential of a type other than a passkey (a password, note, one-time code, …);
+    /// only passkeys are imported from CXF (ADR 0074 §1).
+    CredentialTypeSkipped,
+    /// A CXF passkey whose private key is for an algorithm other than ES256 and Ed25519; it was
+    /// skipped (ADR 0074 §3).
+    UnsupportedKeyAlgorithm,
 }
 
 impl fmt::Display for WarningKind {
@@ -167,6 +174,10 @@ impl fmt::Display for WarningKind {
             Self::ConflictsCollapsed => "conflicting values were reduced to the displayed one",
             Self::HistoryDropped => "some password history was not imported",
             Self::UnknownMembersIgnored => "unknown members of the file were ignored",
+            Self::CredentialTypeSkipped => "a credential other than a passkey was not imported",
+            Self::UnsupportedKeyAlgorithm => {
+                "a passkey with an unsupported key algorithm was skipped"
+            }
         })
     }
 }
