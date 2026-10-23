@@ -88,15 +88,22 @@ impl fmt::Display for CacheError {
 
 impl std::error::Error for CacheError {}
 
-/// Whether `name` is a file name this module builds: 1 to 64 bytes of `[A-Za-z0-9-]` with
-/// exactly one `.`, neither first nor last.
-fn valid_name(name: &str) -> bool {
-    let dots = name.bytes().filter(|b| *b == b'.').count();
+/// The longest entry name, in bytes: the common file-name limit (`NAME_MAX` on Linux).
+pub const MAX_NAME_LEN: usize = 255;
+
+/// Whether `name` is a file name this module builds: 1 to [`MAX_NAME_LEN`] bytes of
+/// `[A-Za-z0-9-.]` with at least one `.` (before the extension), none first or last and
+/// never two in a row. A favicon entry is `<host>-<scheme>-<port>.png` (ADR 0052 point 5),
+/// its host already RFC 1123 syntax; a breach entry is `breach-<PREFIX>.txt`. No name can be
+/// `..`, contain a separator, or start like a temporary file.
+#[must_use]
+pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
-        && name.len() <= 64
-        && dots == 1
+        && name.len() <= MAX_NAME_LEN
+        && name.contains('.')
         && !name.starts_with('.')
         && !name.ends_with('.')
+        && !name.contains("..")
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
@@ -273,13 +280,27 @@ mod tests {
     fn names() {
         for good in [
             "breach-5BAA6.txt",
-            "example.com-https-443.png".replace(".com", "-com").as_str(),
+            "example.com-https-443.png",
+            "a.b.c",
+            &format!("{}.png", "a".repeat(MAX_NAME_LEN - 4)),
         ] {
             assert!(valid_name(good), "{good}");
         }
+        let too_long = format!("{}.png", "a".repeat(MAX_NAME_LEN - 3));
         for bad in [
-            "", ".txt", "a.", "a", "a.b.c", "../x.txt", "a/b.txt", "a\\b.txt", ".tmp-1-2",
+            "",
+            ".txt",
+            "a.",
+            "a",
+            "../x.txt",
+            "..",
+            "a..png",
+            "a/b.txt",
+            "a\\b.txt",
+            ".tmp-1-2",
             "a b.txt",
+            "a_b.png",
+            too_long.as_str(),
         ] {
             assert!(!valid_name(bad), "{bad}");
         }

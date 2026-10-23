@@ -187,6 +187,16 @@ webpki-roots = { version = "=1.0.10", default-features = false }
 # feature"; ADR 0019 §5; ADR 0026 §3). The same exact pin as `sqlx` above, without `postgres`,
 # TLS and `migrate`: the cache schema is `rizzy-client`'s SQL text, run by the leaf.
 sqlx-client = { package = "sqlx", version = "=0.9.0", default-features = false, features = ["runtime-tokio", "sqlite-bundled"] }
+# The image codec of the `icons` role (ADR 0052 point 4, owner answer 4). Not cryptography:
+# CLAUDE.md's ordinary review and `cargo deny check`, not ADR 0009's checklist. Pinned exactly;
+# default features off (no `rayon`, no AVIF/EXR/TIFF/QOI/HDR/PNM/TGA/DDS/farbfeld), and only the
+# six input codecs ADR 0052 names. `image` has no decode-only switch: `png` also brings the
+# PNG encoder the re-encoding needs, and `gif` brings `color_quant` for the unused GIF
+# encoder. Used by `rizzy-icon-proxy` alone. All pure Rust, MIT/Apache-2.0 or compatible
+# (crates added to Cargo.lock: image, png, fdeflate, flate2, miniz_oxide 0.8 and 0.9, zlib-rs,
+# crc32fast, adler2, simd-adler32, zune-core, zune-jpeg, gif, weezl, color_quant, image-webp,
+# quick-error 2, byteorder-lite, bytemuck, moxcms, pxfm, num-traits).
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "bmp", "ico", "webp"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -106,6 +106,7 @@ pub mod breach;
 pub mod change;
 pub mod error;
 pub mod http;
+pub mod icons;
 pub mod limits;
 pub mod meta;
 pub mod objects;

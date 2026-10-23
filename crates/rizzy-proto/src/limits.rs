@@ -143,6 +143,14 @@ pub const MAX_ITEM_KEY_WRAPS: usize = 65_536;
 /// [ADR 0075]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0075-session-listing-and-ending.md
 pub const MAX_SESSIONS_LISTED: usize = 256;
 
+/// Byte limit (this crate's choice): the PNG of one re-encoded icon in an `icons/fetch` answer
+/// ([ADR 0052] point 4). An icon is at most 128×128 RGBA pixels, 64 KiB raw; a PNG of it is at
+/// most that plus its filter bytes, zlib's stored-block overhead and the chunk headers, well
+/// under 96 KiB. As base64url it is at most 128 KiB, inside ADR 0028 item 7's 1 MiB.
+///
+/// [ADR 0052]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0052-icon-proxy-role.md
+pub const MAX_ICON_PNG_LEN: usize = 96 * 1024;
+
 /// Byte limit (this crate's choice): one upstream breach-check range response ([ADR 0053];
 /// CRYPTO.md §11.16), relayed as one JSON string. A range line is at most 58 bytes (35 suffix
 /// characters, a colon, a count of at most 20 digits, CRLF), and the upstream's padded answers
