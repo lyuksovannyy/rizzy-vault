@@ -137,6 +137,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0078 | [Retire the Bank account item type (`0x0009`) and its `bank.` field keys](0078-retire-bank-account-item-type.md) | Accepted | M3 |
 | 0079 | [Identity generator: pre-filled new identities, the `identity.sex` and `identity.birthday` keys, bundled name and address data, and the masked-email seam](0079-identity-generator.md) | Accepted | M3 / M6 |
 | 0080 | [Default site groups: seeding the signed global equivalence list from Vaultwarden's `global_domains.json`](0080-default-site-groups-vaultwarden-seed.md) | Accepted | M2 |
+| 0081 | [Multiple vaults per account: the Personal vault, user-created vaults, and sharing a vault with other users](0081-multiple-vaults-personal-and-shared.md) | Proposed | M3 (Part A) / M9 (Part B) |
 
 ## Gates
 
