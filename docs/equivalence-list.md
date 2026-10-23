@@ -15,13 +15,10 @@ the steps below, every client's merged equivalence view has no global groups, an
 matching runs from each account's own user-defined groups only (ADR 0038 §1: "clients reject an
 unsigned list").
 
-A starter, human-editable source file already exists at
-[`data/equivalence/groups.txt`](../data/equivalence/groups.txt), with the three groups named in
-[ROADMAP §4.4](ROADMAP.md#44-url-matching--autofill-m2) (`youtube.com`/`youtu.be`/
-`youtube-nocookie.com`, `google.com` + two ccTLD variants, `apple.com`/`icloud.com`). Its own
-header documents the line format and the review rules. **It has not been through the ADR 0038
-§4 two-maintainer review and ownership-proof process**, and must not be signed into a real,
-shipped list until it has.
+The seed dataset for the signed global list is approved under [ADR 0080](adr/0080-default-site-groups-vaultwarden-seed.md),
+seeding 22 maintained site groups from Vaultwarden's `global_domains.json`.
+The human-editable source file lives at [`data/equivalence/groups.txt`](../data/equivalence/groups.txt),
+accompanied by audit evidence for every group in [`data/equivalence/EVIDENCE.md`](../data/equivalence/EVIDENCE.md).
 
 ## 1. Generating the offline signing key
 
@@ -67,6 +64,7 @@ the format reference. Each change needs, in the pull request that makes it (ADR 
    by registrant — flag it `third_party_hostable = 1` and say why in the PR.
 4. **Per-ccTLD-variant proof.** `brand.com` and `brand.co.uk` each need their own evidence.
 5. **A note of the next scheduled re-check** (at minimum every release cycle).
+6. **Evidence recorded in `data/equivalence/EVIDENCE.md`** and upstream re-check diff against pinned Vaultwarden `global_domains.json` ([ADR 0080](adr/0080-default-site-groups-vaultwarden-seed.md)).
 
 **Start here, before editing the file.** File the proposal as a GitHub issue using the
 [`equivalence-group`](../.github/ISSUE_TEMPLATE/equivalence-group.yml) template — it asks for

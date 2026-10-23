@@ -1,6 +1,6 @@
 # ADR 0059: Crypto-crate approval: webauthn-rs for the FIDO2 2FA ceremony
 
-- Status: Accepted
+- Status: Partially superseded by [ADR 0077](0077-webauthn-rs-integration-fixes.md) (Decision "Recommendation" in part, checklist item 7 in part, owner answers 1 and 6)
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M3

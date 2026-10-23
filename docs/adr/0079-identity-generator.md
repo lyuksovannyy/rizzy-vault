@@ -1,7 +1,7 @@
 # ADR 0079: Identity generator: pre-filled new identities, the `identity.sex` and `identity.birthday` keys, bundled name and address data, and the masked-email seam
 
-- Status: Proposed
-- Date: 2026-10-23
+- Status: Accepted
+- Date: 2026-10-23 (accepted 2026-10-23)
 - Deciders: project owner
 - Milestone: M3 (generator, two new keys, bundled data, web vault and `rv`; needs the ROADMAP row in "On acceptance" item 1) / M6, after v1.0 (the masked-email seam in §9, designed here and built by nothing in this ADR)
 - Supersedes: none, in full or in part ([ADR 0020](0020-partial-supersession.md) point 9). It extends without superseding: [ADR 0018](0018-item-record-encoding.md) §7, under that section's own rule that "a new key needs a line in the ADR that ships it, never a version bump" (the route [ADR 0055](0055-m3-item-type-field-keys.md) and [ADR 0039](0039-passkeys-vault-and-extension.md) used); and, only if Open question 7 is answered as recommended, [ADR 0042](0042-account-settings-matching-layout.md) §2's tag registry, under its own rule that "a new setting gets a line here by ADR amendment, no version bump". No Accepted text is contradicted; §11 lists what was checked.
@@ -73,6 +73,10 @@ No row covers a pre-v1.0 identity generator, so the task is out of scope until a
 - **No new crate.** The data conversion uses only crates already in the workspace, as `cargo xtask equivalence-list` does (`crates/xtask/src/equivalence_list.rs`).
 
 ## Decision
+
+### Owner answers at acceptance (2026-10-23)
+
+The owner accepted this ADR as drafted, with the age-preset and masked-email answers previously recorded.
 
 ### 1. Two new item keys
 

@@ -1,6 +1,6 @@
 # ADR 0055: M3 item types: field keys for SSH key, API credential, software license, Wi-Fi and bank account
 
-- Status: Accepted
+- Status: Partially superseded by [ADR 0078](0078-retire-bank-account-item-type.md) (§1 in part, §2, §3, §4 in part)
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M3

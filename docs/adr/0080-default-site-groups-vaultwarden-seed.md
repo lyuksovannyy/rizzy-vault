@@ -1,7 +1,7 @@
 # ADR 0080: Default site groups: seeding the signed global equivalence list from Vaultwarden's `global_domains.json`
 
-- Status: Proposed
-- Date: 2026-10-23
+- Status: Accepted
+- Date: 2026-10-23 (accepted 2026-10-23)
 - Deciders: project owner
 - Milestone: M2
 
@@ -127,6 +127,10 @@
 - The downgrade INV-39 guards against is an *older* list. A compiled-in list re-verified at startup always arrives at the version it was accepted at.
 
 ## Decision
+
+### Owner answers at acceptance (2026-10-23)
+
+The owner accepted this ADR as drafted.
 
 ### 1. "Default site groups" are the signed global list, on by default and individually switchable
 
