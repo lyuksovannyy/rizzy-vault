@@ -60,7 +60,7 @@
 //! # Secrets
 //!
 //! The document is measured, then written into one zeroizing buffer of its final size (the
-//! plaintext writer's [`Sink`]); the payload is copied once into another, also exact. Every
+//! plaintext writer's `Sink`); the payload is copied once into another, also exact. Every
 //! PKCS#8 key is a [`SecretBytes`]. Only the sealed file leaves this module.
 
 use rizzy_core::encoding::{Reader, put_bytes, put_u16};
