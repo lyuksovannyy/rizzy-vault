@@ -78,8 +78,10 @@ describe("the import step's formats", () => {
     expect(sources).toContain(FORMAT_LABELS["1pux"]);
     expect(sources).toContain(FORMAT_LABELS["keepass-xml"]);
     expect(sources).toContain(FORMAT_LABELS["chrome-csv"]);
+    // Another manager's CXF passkey file (ADR 0074 §3) is one; our own CXF export is not.
+    expect(sources).toContain(FORMAT_LABELS["cxf-json"]);
     expect(sources.some((s) => s.startsWith("rizzy-vault"))).toBe(false);
-    expect(sources).toHaveLength(Object.keys(FORMAT_LABELS).length - 3);
+    expect(sources).toHaveLength(Object.keys(FORMAT_LABELS).length - 4);
   });
 });
 
