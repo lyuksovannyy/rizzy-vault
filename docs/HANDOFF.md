@@ -137,7 +137,21 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
   - **Still flaky under load:** `adversarial-fill-requests.spec.ts:187` once failed its setup step ("did not capture a real itemId"); it passed 3/3 alone.
   - **`gate.sh`** now runs `cargo test --no-fail-fast`.
 - **Found while implementing ADR 0071:** its "Ordering and completeness" sentence claims a `plaintext_len` edit fails the commitment. That is false as written: `plaintext_len` is in no chunk's AAD. A strict canonical reader catches the edit through exact framing plus the last chunk's AEAD, and that is what is implemented. Correcting the ADR text, or binding `plaintext_len` into the ctx, needs a new ADR from the owner.
-- **What is left for agents:** 0074 (CXF), 0071 (DB backup) and 0052 (icon proxy) are running. Not started: 0057 (keystore), and 0073 (signed images; CI signing waits on its approval records). Blocked on the owner: 0058/0059 (ADR 0077).
+- **Wave 4:**
+  - **ADR 0074, CXF passkeys:** import of bare CXF JSON and of our own encrypted CXF export (`payload_version` 2, tag `rizzy-vault-cxf-export`); the hand-written PKCS#8 of §4, with EdDSA keys; `rv export --format cxf`; the web transfer pane. Not built: the **bare unencrypted CXF export** (owner question 4 needs a ROADMAP §4.10 edit). Agent's readings:
+    - COSE maps are built in `rizzy-import::cxf`;
+    - item naming: display name, then username, then rpId;
+    - trashed items are not exported;
+    - assertion signing now reads `alg`, so EdDSA passkeys sign with Ed25519.
+  - **ADR 0071, encrypted DB backup:** `backup --encrypt`, `secrets rotate --backup-key`, `restore` of format v2, KAT container vectors, drills on SQLite and PG.
+    - The reader is strict (exact framing) because the ADR's `plaintext_len` claim is false (see above).
+    - Without ADR 0047 (Proposed) there is no secrets-restore command: **a lost secrets file means encrypted backups can't be restored.**
+    - `Purpose::ALL` is 32, not 34: 0x0103 and 0x0104 are absent.
+  - **ADR 0052, icon proxy:** favicon fetch, discovery and re-encode using `image =0.25.10` (default features off; png, jpeg, gif, bmp, ico, webp); `POST /api/v1/icons/fetch`; icons in the web vault and the extension popup; compose `--profile icons`, Caddy route and Quadlet icons unit.
+    - **Owner answer 7 was settled by test:** Chromium refuses a same-origin `blob:` image under `img-src 'self'`. `WEB_CSP` is now `img-src 'self' blob:`, and ADR 0028's status line names item 10 for that token. Firefox untested.
+    - Agent's readings: discovery runs on any non-200 response; no negative cache; running the icons role turns icons on (no separate switch); clients send the full hostname in IDNA form; no per-user opt-out.
+    - The deploy files were not run under Docker, Podman or Caddy.
+- **What is left for agents:** ADR 0057 (keystore) is running. ADR 0073 is not started: its own "On acceptance" makes three supply-chain approval records (cosign, CycloneDX generators, merge tool) a condition of it binding. Blocked on the owner: 0058/0059 (ADR 0077), the admin screens of 0060 (new ADRs), and the 0076/0043 bullet reconciliation.
 - The gap-numbered audit (`docs/handoff/gap-audit.json`), which older gap ids below trace back to, still lives only on branch `wip/client-m1`. Keep that branch; its code is superseded by the commits in §2. `wip/match-core` (one unfinished commit off `main`) is likewise superseded and kept only for reference.
 
 ## 2. Done since the last rewrite
