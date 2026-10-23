@@ -204,9 +204,14 @@ pub mod types {
     pub use rizzy_core::normalize::ServerOrigin;
     /// The `server_setup` and `enum_key` of [`crate::ServerSecrets`] (CRYPTO.md §5.8).
     pub use rizzy_core::opaque::{EnumKey, SERVER_SETUP_LEN, ServerSetup};
+    pub use rizzy_core::server_seal::{BackupHeader, ServerDataKey, ServerSecretsBackupKey};
     /// The data keys of [`crate::ServerSecrets`] and the sealed backup of the secrets file
     /// (CRYPTO.md §5.11).
-    pub use rizzy_core::server_seal::{BackupHeader, ServerDataKey, ServerSecretsBackupKey};
+    /// The backup keys of [`crate::ServerSecrets`], which seal a format version 2 database
+    /// backup (ADR 0071, CRYPTO.md §9.8), and the chunk context they seal under.
+    pub use rizzy_core::{
+        envelope::purpose::ServerDbBackupCtx, ids::BackupId, server_seal::ServerDbBackupKey,
+    };
     /// The backup key's KDF, its passphrase and plaintext type, the RNG trait every flow
     /// takes, and the bound on a sealed field (CRYPTO.md §5.11 "Backup").
     pub use rizzy_core::{
