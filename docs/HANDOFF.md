@@ -151,7 +151,23 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
     - **Owner answer 7 was settled by test:** Chromium refuses a same-origin `blob:` image under `img-src 'self'`. `WEB_CSP` is now `img-src 'self' blob:`, and ADR 0028's status line names item 10 for that token. Firefox untested.
     - Agent's readings: discovery runs on any non-200 response; no negative cache; running the icons role turns icons on (no separate switch); clients send the full hostname in IDNA form; no per-user opt-out.
     - The deploy files were not run under Docker, Podman or Caddy.
-- **What is left for agents:** ADR 0057 (keystore) is running. ADR 0073 is not started: its own "On acceptance" makes three supply-chain approval records (cosign, CycloneDX generators, merge tool) a condition of it binding. Blocked on the owner: 0058/0059 (ADR 0077), the admin screens of 0060 (new ADRs), and the 0076/0043 bullet reconciliation.
+- **ADR 0057, keystore unlock (integrated, full-gated):**
+  - Device-state record v2 with `E_ks` and the forward chain (≤8). The `keystore_capable` gate is a hard refusal (INV-81); `rv` and wasm always pass false.
+  - `unlock_keystore(&[u8])`, plus `enable_keystore` / `disable_keystore` / `attach_keystore_secret` / `collapse_forward`; vectors for 0x0006/0x0007 and record v2. No keyring crate: OS keystore access belongs to `rizzy-ffi`, which doesn't exist yet.
+  - **For the `rizzy-ffi` API review (owner answer 5):**
+    - all names are provisional;
+    - a password unlock that crosses a rotation deletes `E_ks` unless the host attached the secret (re-wrapping needs a second presence prompt);
+    - at 8 forward envelopes the keystore path refuses before acking;
+    - chain contiguity is checked at unlock, not at parse;
+    - stage 2 is not constrained;
+    - a bad `E_ks` returns `KeystoreUnlockUnavailable`.
+- **State of the 2026-10-22 batch:**
+  - **Implemented:** 0043, 0044, 0048–0057, 0062, 0071, 0074–0076, and 0060's listener only.
+  - **Not implemented:**
+    - 0058/0059: blocked; ADR 0077, Proposed, would unblock them.
+    - 0060's screens: they need new ADRs.
+    - 0073: blocked on its supply-chain approval records.
+- **What is left for agents:** nothing in the accepted batch is unblocked. Next owner actions: accept or answer ADR 0077; write or accept the admin-login ADR family; the approval records for 0073; the 0043/0076 bullet reconciliation; the ADR 0071 `plaintext_len` sentence; ADR 0074 question 4 (the ROADMAP §4.10 edit); and the open owner items above.
 - The gap-numbered audit (`docs/handoff/gap-audit.json`), which older gap ids below trace back to, still lives only on branch `wip/client-m1`. Keep that branch; its code is superseded by the commits in §2. `wip/match-core` (one unfinished commit off `main`) is likewise superseded and kept only for reference.
 
 ## 2. Done since the last rewrite
