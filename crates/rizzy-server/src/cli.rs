@@ -6,10 +6,10 @@
 //! rizzy-vault [serve] [--roles <list>] [--config <file>]
 //! rizzy-vault migrate [--config <file>]
 //! rizzy-vault secrets init [--config <file>]
-//! rizzy-vault secrets rotate [--data-key] [--config <file>]
+//! rizzy-vault secrets rotate [--data-key | --backup-key] [--config <file>]
 //! rizzy-vault secrets retire-setups [--grace-days <n>] [--config <file>]
 //! rizzy-vault backup-secrets --out <file> --passphrase-file <file|-> [--config <file>]
-//! rizzy-vault backup --out <file|-> [--config <file>]
+//! rizzy-vault backup --out <file|-> [--encrypt] [--config <file>]
 //! rizzy-vault restore --in <file|-> [--config <file>]
 //! rizzy-vault -h | --help
 //! rizzy-vault -V | --version
@@ -47,10 +47,10 @@ USAGE:
     rizzy-vault [serve] [--roles <list>] [--config <file>]
     rizzy-vault migrate [--config <file>]
     rizzy-vault secrets init [--config <file>]
-    rizzy-vault secrets rotate [--data-key] [--config <file>]
+    rizzy-vault secrets rotate [--data-key | --backup-key] [--config <file>]
     rizzy-vault secrets retire-setups [--grace-days <n>] [--config <file>]
     rizzy-vault backup-secrets --out <file> --passphrase-file <file|-> [--config <file>]
-    rizzy-vault backup --out <file|-> [--config <file>]
+    rizzy-vault backup --out <file|-> [--encrypt] [--config <file>]
     rizzy-vault restore --in <file|-> [--config <file>]
 
 OPTIONS:
@@ -58,6 +58,10 @@ OPTIONS:
     --config <file>   Configuration file of NAME=value lines (or RIZZY_CONFIG)
     --grace-days <n>  retire-setups: days since a setup's successor was recorded (default 90,
                       0 to 3650; 0 retires at once)
+    --data-key        secrets rotate: a new current data key instead of a new OPAQUE setup
+    --backup-key      secrets rotate: a new current backup key, for backup --encrypt
+    --encrypt         backup: seal the file under the secrets file's current backup key
+                      (format version 2); restore opens it with the same secrets file
     -h, --help        Print this help
     -V, --version     Print version
 
@@ -91,10 +95,12 @@ pub enum Command {
         /// `--config`.
         config: Option<PathBuf>,
     },
-    /// `secrets rotate [--data-key]`.
+    /// `secrets rotate [--data-key | --backup-key]`.
     SecretsRotate {
         /// `--data-key`.
         data_key: bool,
+        /// `--backup-key` (ADR 0071). Never together with `--data-key`.
+        backup_key: bool,
         /// `--config`.
         config: Option<PathBuf>,
     },
@@ -114,10 +120,12 @@ pub enum Command {
         /// `--config`.
         config: Option<PathBuf>,
     },
-    /// `backup` (ADR 0023 §6).
+    /// `backup` (ADR 0023 §6; `--encrypt`, ADR 0071).
     Backup {
         /// `--out`: a file, or `-` for stdout.
         out: PathBuf,
+        /// `--encrypt`: format version 2 under the current backup key.
+        encrypt: bool,
         /// `--config`.
         config: Option<PathBuf>,
     },
@@ -143,6 +151,10 @@ struct Flags {
     config: Option<PathBuf>,
     /// `--data-key`.
     data_key: bool,
+    /// `--backup-key`.
+    backup_key: bool,
+    /// `--encrypt`.
+    encrypt: bool,
     /// `--out`.
     out: Option<PathBuf>,
     /// `--passphrase-file`.
@@ -164,6 +176,10 @@ struct Allowed {
     roles: bool,
     /// `--data-key`.
     data_key: bool,
+    /// `--backup-key`.
+    backup_key: bool,
+    /// `--encrypt`.
+    encrypt: bool,
     /// `--out`.
     out: bool,
     /// `--passphrase-file`.
@@ -188,6 +204,8 @@ fn flags(args: &[OsString], allowed: Allowed) -> Result<Flags, UsageError> {
                 out.roles = Some(value.to_owned());
             }
             "--data-key" if allowed.data_key && !out.data_key => out.data_key = true,
+            "--backup-key" if allowed.backup_key && !out.backup_key => out.backup_key = true,
+            "--encrypt" if allowed.encrypt && !out.encrypt => out.encrypt = true,
             "--out" if allowed.out && out.out.is_none() => {
                 out.out = Some(PathBuf::from(it.next().ok_or(UsageError)?));
             }
@@ -211,6 +229,8 @@ fn flags(args: &[OsString], allowed: Allowed) -> Result<Flags, UsageError> {
 const NONE: Allowed = Allowed {
     roles: false,
     data_key: false,
+    backup_key: false,
+    encrypt: false,
     out: false,
     passphrase_file: false,
     input: false,
@@ -228,11 +248,17 @@ fn parse_secrets(sub: &str, rest: &[OsString]) -> Result<Command, UsageError> {
                 rest,
                 Allowed {
                     data_key: true,
+                    backup_key: true,
                     ..NONE
                 },
             )?;
+            // One secret per rotation.
+            if f.data_key && f.backup_key {
+                return Err(UsageError);
+            }
             Ok(Command::SecretsRotate {
                 data_key: f.data_key,
+                backup_key: f.backup_key,
                 config: f.config,
             })
         }
@@ -309,9 +335,17 @@ pub fn parse(args: &[OsString]) -> Result<Command, UsageError> {
             })
         }
         (Some("backup"), _) => {
-            let f = flags(rest(1), Allowed { out: true, ..NONE })?;
+            let f = flags(
+                rest(1),
+                Allowed {
+                    out: true,
+                    encrypt: true,
+                    ..NONE
+                },
+            )?;
             Ok(Command::Backup {
                 out: f.out.ok_or(UsageError)?,
+                encrypt: f.encrypt,
                 config: f.config,
             })
         }
@@ -449,7 +483,11 @@ pub fn main() -> ExitCode {
         Command::SecretsInit { .. } => admin::secrets_init(&config)
             .map(|()| "secrets file written".to_owned())
             .map_err(|e| e.to_string()),
-        Command::SecretsRotate { data_key, .. } => run_secrets_rotate(&config, data_key),
+        Command::SecretsRotate {
+            data_key,
+            backup_key,
+            ..
+        } => run_secrets_rotate(&config, data_key, backup_key),
         Command::SecretsRetireSetups { grace_days, .. } => {
             return run_retire_setups(&config, grace_days);
         }
@@ -460,7 +498,7 @@ pub fn main() -> ExitCode {
         } => admin::backup_secrets(&config, &out, &passphrase_file)
             .map(|()| "secrets backup written; store it apart from the database backups".to_owned())
             .map_err(|e| e.to_string()),
-        Command::Backup { out, .. } => return run_backup(&config, &out),
+        Command::Backup { out, encrypt, .. } => return run_backup(&config, &out, encrypt),
         Command::Restore { input, .. } => return run_restore(&config, &input),
     };
     match outcome {
@@ -479,11 +517,13 @@ pub fn main() -> ExitCode {
     }
 }
 
-/// `secrets rotate [--data-key]`: adds a new OPAQUE setup, or a new current data key, and
-/// returns the line to print.
-fn run_secrets_rotate(config: &Config, data_key: bool) -> Result<String, String> {
+/// `secrets rotate [--data-key | --backup-key]`: adds a new OPAQUE setup, a new current data
+/// key or a new current backup key, and returns the line to print.
+fn run_secrets_rotate(config: &Config, data_key: bool, backup_key: bool) -> Result<String, String> {
     let what = if data_key {
         Rotate::DataKey
+    } else if backup_key {
+        Rotate::BackupKey
     } else {
         Rotate::Setup
     };
@@ -518,6 +558,11 @@ fn rotation_message(what: Rotate, rotated: &admin::Rotated) -> String {
                  secrets under it when the server runs{dropped}. Make a new secrets backup"
             )
         }
+        Rotate::BackupKey => format!(
+            "new backup key {id} added and marked current; `backup --encrypt` seals under it, \
+             and the older backup keys stay so their backups remain restorable. Make a new \
+             secrets backup: without the secrets file no encrypted backup can be restored"
+        ),
     }
 }
 
@@ -613,7 +658,7 @@ fn admin_failure(e: &admin::AdminError) -> ExitCode {
 
 /// `backup`. Every message goes to stderr, since stdout may carry the file (`--out -`); the
 /// SHA-256 is printed for the operator to record (ADR 0023 §2).
-fn run_backup(config: &Config, out: &std::path::Path) -> ExitCode {
+fn run_backup(config: &Config, out: &std::path::Path, encrypt: bool) -> ExitCode {
     let rt = match runtime() {
         Ok(rt) => rt,
         Err(e) => {
@@ -621,17 +666,32 @@ fn run_backup(config: &Config, out: &std::path::Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match rt.block_on(admin::backup(config, out)) {
+    match rt.block_on(admin::backup(config, out, encrypt)) {
         Ok(summary) => {
-            eprint_line(&format!(
-                "database backup written: {} bytes, SHA-256 {}. Record the digest; encrypt the \
-                 file at rest and store it apart from the secrets backup",
-                summary.len,
-                summary.digest_hex()
-            ));
+            eprint_line(&backup_message(&summary));
             ExitCode::SUCCESS
         }
         Err(e) => admin_failure(&e),
+    }
+}
+
+/// The line `backup` prints on stderr: for a plain backup its length and SHA-256 (ADR 0023
+/// §2); for an encrypted one its length, chunk count and backup key id, which are in its clear
+/// header (ADR 0071; it has no outer digest).
+fn backup_message(summary: &admin::BackupSummary) -> String {
+    match summary.encrypted {
+        None => format!(
+            "database backup written: {} bytes, SHA-256 {}. Record the digest; encrypt the \
+             file at rest and store it apart from the secrets backup",
+            summary.len,
+            summary.digest_hex()
+        ),
+        Some(e) => format!(
+            "encrypted database backup written (format version 2): {} bytes in {} chunk(s), \
+             sealed under backup key {}. Restoring it needs the secrets file that holds this \
+             key: store the file apart from the secrets file and its backup",
+            summary.len, e.chunk_count, e.backup_key_id
+        ),
     }
 }
 
@@ -700,6 +760,15 @@ mod tests {
             parse(&args(&["secrets", "rotate", "--data-key"])),
             Ok(Command::SecretsRotate {
                 data_key: true,
+                backup_key: false,
+                config: None
+            })
+        );
+        assert_eq!(
+            parse(&args(&["secrets", "rotate", "--backup-key"])),
+            Ok(Command::SecretsRotate {
+                data_key: false,
+                backup_key: true,
                 config: None
             })
         );
@@ -738,6 +807,15 @@ mod tests {
             parse(&args(&["backup", "--out", "-"])),
             Ok(Command::Backup {
                 out: PathBuf::from("-"),
+                encrypt: false,
+                config: None
+            })
+        );
+        assert_eq!(
+            parse(&args(&["backup", "--encrypt", "--out", "db.rvbackup"])),
+            Ok(Command::Backup {
+                out: PathBuf::from("db.rvbackup"),
+                encrypt: true,
                 config: None
             })
         );
@@ -790,6 +868,20 @@ mod tests {
             ],
             &["secrets", "retire-setups", "--data-key"],
             &["secrets", "rotate", "--grace-days", "1"],
+            &["secrets", "rotate", "--data-key", "--backup-key"],
+            &["secrets", "rotate", "--backup-key", "--backup-key"],
+            &["secrets", "init", "--backup-key"],
+            &["backup", "--out", "f", "--encrypt", "--encrypt"],
+            &["backup", "--out", "f", "--backup-key"],
+            &["restore", "--in", "f", "--encrypt"],
+            &[
+                "backup-secrets",
+                "--out",
+                "b",
+                "--passphrase-file",
+                "p",
+                "--encrypt",
+            ],
             &["--database-url", "postgres://u:p@h/d"],
         ] {
             assert_eq!(parse(&args(bad)), Err(UsageError), "{bad:?}");

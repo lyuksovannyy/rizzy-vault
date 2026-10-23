@@ -1946,7 +1946,7 @@ fn canary_scan_finds_no_secrets_after_a_bulk_run() {
             .with_file_name("attack-canary.backup");
 
         let dir = scenario.server.stop().await;
-        rizzy_server::admin::backup(&scenario.config, &backup_path)
+        rizzy_server::admin::backup(&scenario.config, &backup_path, false)
             .await
             .expect(
                 "the canary fixture's own backup must succeed, or the backup-file check below \
