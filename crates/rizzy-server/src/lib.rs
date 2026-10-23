@@ -34,6 +34,7 @@
 //! | [`bridge`] | ADR 0016 R4 | The two cross-domain traits, wired |
 //! | [`secrets_file`] | CRYPTO.md §5.11; ADR 0010 §4 | The secrets file's reader and writer |
 //! | [`secrets_backup`] | ADR 0011 owner decision 3; CRYPTO.md §5.11 | The encrypted secrets backup file |
+//! | [`db_backup`] | ADR 0071; CRYPTO.md §9.8 | The encrypted database backup, format version 2 |
 //! | [`admin`] | ADR 0010 §2, §4; ADR 0011; CRYPTO.md §5.8, §5.11 | The admin subcommands |
 //! | [`log`] | INV-48 | Allow-listed structured log lines |
 //! | [`fsutil`] | ADR 0010 §4 | Bounded reads, 0600 files, atomic replace, the inside-the-data-directory check |
@@ -51,7 +52,8 @@
 //!   `rizzy-proto`'s bounded types), request headers ([`http::headers`]), the configuration
 //!   file, the secrets file and the database backup file. Fuzz targets: `server_headers`,
 //!   `server_config`, `server_secrets_file`; the request bodies are `rizzy-proto`'s
-//!   `proto_json`; the backup file is `rizzy-storage`'s `db_backup_parse`.
+//!   `proto_json`; the backup file is `rizzy-storage`'s `db_backup_parse`, and its encrypted
+//!   container `db_backup_container`.
 //! - **Crate wiring** (ADR 0016 §3 notes, R2, R5): internal dependencies are the domain crates,
 //!   `rizzy-storage` and `rizzy-bus`; the `rizzy-core` and `rizzy-proto` items the auth
 //!   domain's API is written in come through its `types` module, which names them one by one
