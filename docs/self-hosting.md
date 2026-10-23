@@ -18,7 +18,7 @@ Contents:
 11. [Logs](#11-logs)
 12. [Checklist](#12-checklist)
 13. [Podman Quadlet (systemd-managed, rootless)](#13-podman-quadlet-systemd-managed-rootless)
-14. [The breach check (`icons` role)](#14-the-breach-check-icons-role)
+14. [The `icons` role: item icons and the breach check](#14-the-icons-role-item-icons-and-the-breach-check)
 
 ## 1. What you run
 
@@ -52,7 +52,7 @@ Never put both into one backup, one archive or one volume.
 **Not in this build** (M1 is in progress):
 - A verified image build with the web vault. [`deploy/Containerfile`](../deploy/Containerfile) now builds the web vault (`apps/web`, M1 step 5) and embeds it with the `embed-web` feature ([ADR 0010](adr/0010-server-shape.md) §4): a `wasm` stage (wasm-bindgen-cli at the locked version, `cargo xtask build-wasm`), a `web` stage (Node.js 24, pnpm, `pnpm install --frozen-lockfile`, `pnpm run build`), then the server. That image build has not been run end to end yet; until it has, check that `/` of a new image serves the web vault, not the fixed "no web vault in this build" page. To build a binary with it from source instead: `pnpm install --frozen-lockfile`, `pnpm run build:wasm` (needs `wasm-bindgen-cli` at the locked version), `pnpm run build`, then `cargo build --locked --release -p rizzy-server --bin rizzy-vault --features embed-web`. The API is complete for the M1 clients.
 - PostgreSQL as a supported setup (M3). This build runs every M1 role on it, the `worker` included (one active worker per database, the others wait as standbys), but its PostgreSQL tests are not run in CI yet, and the PostgreSQL side of the instance lock, of `restore`, `migrate` and `secrets rotate` ([§9](#9-restore)) has not been run against a real PostgreSQL server at all. Do not rely on it before M3.
-- The admin panel (M3; only its separate listener is in this build, serving nothing yet, [§6](#the-admin-listener)), metrics, `notify`, `icons` (M3), `smtp` (M6), signed images (M8). Quadlet units are covered by this build ([§13](#13-podman-quadlet-systemd-managed-rootless)), written without a Podman install to test them against — see that section's "Unverified" list.
+- The admin panel (M3; only its separate listener is in this build, serving nothing yet, [§6](#the-admin-listener)), metrics, `notify`, `smtp` (M6), signed images (M8). Quadlet units are covered by this build ([§13](#13-podman-quadlet-systemd-managed-rootless)), written without a Podman install to test them against — see that section's "Unverified" list.
 
 **Core dumps are off.** A crash must never write the server's memory (keys, the OPAQUE secrets, session state) to disk ([INV-60](THREAT_MODEL.md#8-security-invariants), [ADR 0024](adr/0024-core-dump-disabling-rustix.md)). Before it reads its configuration, `rizzy-vault` sets its core-file limit (`RLIMIT_CORE`) to 0 and, on Linux, marks itself non-dumpable (`PR_SET_DUMPABLE` 0); it reads both back and refuses to start (exit 1, `cannot disable core dumps: ...` on stderr) if either did not take. There is no setting to turn this off. As defence in depth, [`compose.yaml`](../deploy/compose.yaml) also sets `ulimits: core: 0` on every container; under systemd, set `LimitCORE=0` in the unit. On the host, the kernel's `core_pattern` is global to all containers: if it pipes to a crash collector (`systemd-coredump`, `apport`, `abrt`) and `fs.suid_dumpable` is 2, check that the collector stores nothing for this container ([AR-10](THREAT_MODEL.md#9-accepted-risks-and-out-of-scope); whether such a collector can still capture a non-dumpable process is unverified).
 
@@ -108,7 +108,7 @@ Settings are `RIZZY_*` names. Each comes from the environment, or from a configu
 | Setting | Default | Meaning |
 |---|---|---|
 | `RIZZY_ORIGIN` | – (required by `api` and `worker`) | The canonical origin clients use, for example `https://vault.example.com` or `https://vault.example.com:8443`. It is bound into OPAQUE and every device signature: **changing it later locks every account out**. It must be an `https://` origin: the server refuses to start with an `http://` one, unless the host is `localhost` or a loopback address (`127.0.0.1`, `[::1]`), which is for local testing only. |
-| `RIZZY_ROLES` | `api,web,worker` | Comma-separated roles. `icons` runs alone, in its own process ([§14](#14-the-breach-check-icons-role)). `notify` and `smtp` are refused in this build. |
+| `RIZZY_ROLES` | `api,web,worker` | Comma-separated roles. `icons` runs alone, in its own process ([§14](#14-the-icons-role-item-icons-and-the-breach-check)). `notify` and `smtp` are refused in this build. |
 | `RIZZY_LISTEN` | `127.0.0.1:8080` (the image sets `0.0.0.0:8080`) | The HTTP listener of `api` and `web`. Plain HTTP: always behind the TLS proxy. |
 | `RIZZY_ADMIN_LISTEN` | `127.0.0.1:8081` | The admin listener ([§6](#the-admin-listener)), bound whenever the `api` role runs; a start whose address is taken fails. Never publish it or route the proxy to it. |
 | `RIZZY_DATA_DIR` | `/data` | The data volume: `rizzy-vault.sqlite3`, its WAL, its lock file, and the pre-migration copy. |
@@ -120,8 +120,8 @@ Settings are `RIZZY_*` names. Each comes from the environment, or from a configu
 | `RIZZY_WORKER_INTERVAL_SECS` | `60` | Seconds between two worker runs, 1 to 86400. |
 | `RIZZY_MAX_UPLOAD_BYTES` | `33554432` (32 MiB) | Body limit of vault uploads, restore healing and the account commit that carries a key rotation, 32 MiB to 256 MiB. The proxy must allow at least this much (Caddy has no limit by default). |
 | `RIZZY_RECOVERY_WAIT_HOURS` | `72` | The recovery waiting period in whole hours, 0 to 720 (30 days); anything else refuses the start. See "The recovery waiting period" below. |
-| `RIZZY_BREACH_CHECK` | `off` | `icons` role only: `off` or `on`, the breach check of the web vault's Password health ([§14](#14-the-breach-check-icons-role)). Anything else refuses the start. |
-| `RIZZY_ICON_CACHE_DIR` | `/cache` | `icons` role only: the cache volume, created if missing. |
+| `RIZZY_BREACH_CHECK` | `off` | `icons` role only: `off` or `on`, the breach check of the web vault's Password health ([§14](#14-the-icons-role-item-icons-and-the-breach-check)). Anything else refuses the start. |
+| `RIZZY_ICON_CACHE_DIR` | `/cache` | `icons` role only: the cache volume (re-encoded item icons and breach-check ranges, shared by all users), created if missing. |
 | `RIZZY_ICON_CACHE_TTL_SECS` | `1209600` (14 days) | `icons` role only: how long a cached answer is used before it is fetched again, 60 s to 365 days. |
 | `RIZZY_ICON_CACHE_MAX_BYTES` | `268435456` (256 MiB) | `icons` role only: the cache's total size, at least 1048576 (1 MiB); the oldest entries are removed first. |
 | `RIZZY_ACCOUNT_QUOTA_BYTES` | `5368709120` (5 GiB) | The storage quota of every account, in bytes: at least 268435456 (256 MiB), no maximum; anything else refuses the start. One number for all accounts. See "The storage quota" below. |
@@ -668,42 +668,51 @@ podman run --rm -i --network=none -v rizzy-vault-data:/data -v rizzy-vault-secre
 - The exact generated systemd unit names Quadlet derives from these file names (assumed here: `<name>.container` → `<name>.service`, `<name>.volume` → `<name>-volume.service`, `<name>.network` → `<name>-network.service`), and that Quadlet adds `Requires=`/`After=` for the `Volume=`/`Network=` references on its own, without this guide spelling them out.
 - The entire auto-update path once enabled: that `AutoUpdate=registry` plus `podman-auto-update.timer` actually re-pulls and restarts the service, and what it does on a failed pull or a failed new-image start (rollback behaviour).
 
-## 14. The breach check (`icons` role)
+## 14. The `icons` role: item icons and the breach check
+
+The `icons` role is the one part of rizzy-vault that reaches the internet. It does two things, for every client of this server: it fetches **item icons** (the small site icons next to items with a website, in the web vault and the browser extension; [ADR 0052](adr/0052-icon-proxy-role.md)) and, if you also switch it on, the **breach check** of Password health ([ADR 0053](adr/0053-hibp-breach-check-egress.md)). It is **off unless you run it** ([ADR 0010](adr/0010-server-shape.md) owner decision 5): without it, items show their type icon, the vault says "Breach checking is not enabled on this server", and nothing leaves the server.
+
+### Item icons
+
+**What leaves the browser, and what your server sees.** For an item that has a website, the client sends that website's **hostname** (for example `accounts.example.com`, lowercased, in its IDNA `xn--` form) to `POST /api/v1/icons/fetch`, and nothing else: no path, no full address, no session token, account or item id. The `icons` process therefore learns which sites your users have items for, but not who asked: the cache is shared by everyone and keyed by the site, and the role logs no hostname (its log lines are the route, the status and, at `debug` level, a fixed cause such as `no_icon` or `refused_address`). Your reverse proxy sees the request bodies too; keep its access log off (§6). The sites themselves see your **server's** address, never your users': the browser never loads an image from anywhere but your server. A request moments after a vault request from the same address can be linked to that account by timing; ADR 0052 accepts that.
+
+**What the role does with a hostname** ([ADR 0052](adr/0052-icon-proxy-role.md) points 2–5, [INV-51](THREAT_MODEL.md#8-security-invariants), [INV-76](THREAT_MODEL.md#8-security-invariants)):
+- It resolves the name once and connects only to an address on the allow-list (globally routable unicast; private, loopback, link-local, carrier-grade NAT, documentation and other special ranges refused, including IPv4 hidden in IPv4-mapped or NAT64 form), on ports 443 and 80 only, to exactly the address it checked. Redirects (at most 3) and icon links are checked the same way, again; a redirect from `https` to `http` on the same host is refused.
+- It asks `https://<host>/favicon.ico` (TLS 1.3, Mozilla's roots, verified against the name). Only when the TCP connection to port 443 fails does it try plain HTTP on port 80, on the same address. If there is no usable `/favicon.ico`, it reads at most the first 64 KiB of the site's home page for a `<link rel="icon">` and fetches that (which may be on another host, such as a CDN). SVG is never fetched or served.
+- It decodes the image (PNG, JPEG, GIF, BMP, ICO or WebP, at most 2 MiB, at most 2048×2048 pixels; a header claiming more is refused before any pixel is decoded) and **re-encodes** it as a fresh PNG of at most 128×128 pixels. The whole fetch has 10 seconds.
+- It caches the PNG in its cache volume as `<host>-<scheme>-<port>.png` for `RIZZY_ICON_CACHE_TTL_SECS` (14 days by default); when the cache passes `RIZZY_ICON_CACHE_MAX_BYTES` (256 MiB), the oldest entries go first. Breach-check answers share the volume and the cap.
+
+A site with no icon, an unreachable one, or one that answers anything unusable gets `404`, and the client shows the type icon. The web vault fetches each hostname at most once per unlocked session, two at a time.
+
+### The breach check
 
 The web vault's **Password health** and its "Check for breaches" buttons ask whether a password appears in [Have I Been Pwned](https://haveibeenpwned.com/Passwords)'s corpus of breached passwords ([ADR 0053](adr/0053-hibp-breach-check-egress.md), [CRYPTO.md §11.16](CRYPTO.md#1116-breach-check-hibp-k-anonymity-m3)). It is **off unless you run it**: without it, the vault says "Breach checking is not enabled on this server" and nothing leaves the server.
 
 **What leaves the browser, and what your server sees.** The browser hashes the password (SHA-1) and sends only the first 5 hex characters of the hash, with no session token, account or item id ([INV-77](THREAT_MODEL.md#8-security-invariants)). The `icons` role asks `https://api.pwnedpasswords.com/range/<those 5 characters>` for every hash that starts with them and relays the answer; the browser compares the rest itself. So the `icons` process sees 20-bit hash prefixes of the passwords users check, never a password or a full hash, and Have I Been Pwned sees your server's address, not your users'. The answers are cached by prefix, shared by all users, and the role logs no prefix: its log lines are the route, the status and, on a failure, a fixed cause. Your reverse proxy sees the request bodies too; keep its access log off (§6). A request moments after a vault request from the same address can be linked to that account by timing; ADR 0053 accepts that.
 
-**How to run it.** The role is the same binary with `--roles icons`, in **its own container** ([ADR 0010](adr/0010-server-shape.md) §2): it refuses to start combined with another role, with `RIZZY_DATABASE_URL` set, or when it can see the secrets file or the SQLite database, so do not mount the data or secrets volumes into it. It needs outbound HTTPS to `api.pwnedpasswords.com` (port 443 only; the address is checked against the allow-list of [INV-51](THREAT_MODEL.md#8-security-invariants) after DNS resolution, and the connection is TLS 1.3 to Mozilla's roots, verified against that name) and a writable cache volume. For example, next to profile A's service in `compose.yaml`:
+### How to run it
 
-```yaml
-  icons:
-    image: rizzy-vault:latest
-    command: ["serve", "--roles", "icons"]
-    environment:
-      RIZZY_BREACH_CHECK: "on"
-      RIZZY_LISTEN: "0.0.0.0:8081"
-      RIZZY_ICON_CACHE_DIR: /cache
-      RIZZY_TRUSTED_PROXIES: "<the proxy's address on this network>"
-      # The image sets RIZZY_SECRETS_FILE and RIZZY_DATA_DIR; with no volume mounted there, the
-      # role finds nothing and starts.
-    volumes:
-      - rizzy-vault-icons-cache:/cache
-    read_only: true
-    networks: [edge]
-```
+The role is the same binary with `--roles icons`, in **its own container** ([ADR 0010](adr/0010-server-shape.md) §2): it refuses to start combined with another role, with `RIZZY_DATABASE_URL` set, or when it can see the secrets file or the SQLite database, so never mount the data or secrets volumes into it. It needs outbound HTTP and HTTPS (ports 80 and 443) and a writable cache volume. The breach check has its own switch, `RIZZY_BREACH_CHECK` (default `off`); item icons are on whenever the role runs.
 
-and route its path in the proxy, before the catch-all (Caddy):
+With [`deploy/compose.yaml`](../deploy/compose.yaml), the `icons` service is ready behind a compose profile:
+
+1. In `deploy/.env`, set `RIZZY_ICONS_UPSTREAM=icons:8080` (and `RIZZY_BREACH_CHECK=on` if you want the breach check).
+2. `docker compose --profile icons up -d` (the proxy is recreated with the new route).
+
+The shipped [`Caddyfile`](../deploy/Caddyfile) routes `/api/v1/icons/*` to `{$RIZZY_ICONS_UPSTREAM}` before its catch-all; by default that is `rizzy-vault:8080`, which answers `404` for those paths, the "not enabled" answer the clients expect. With your own proxy, add the same path rule:
 
 ```text
 {$RIZZY_DOMAIN} {
-	reverse_proxy /api/v1/icons/* icons:8081
+	reverse_proxy /api/v1/icons/* icons:8080
 	reverse_proxy rizzy-vault:8080
 }
 ```
 
-The role serves one endpoint, `POST /api/v1/icons/breach-range`, with no login: anyone who reaches your proxy can use it, as for favicon fetches. It is rate-limited per client address (30 requests a minute, bursts of 10; the /64 of an IPv6 address counts as one), behind a trusted proxy by `X-Forwarded-For` as for `api`; with several `icons` replicas, each has its own limit. A request whose upstream fetch fails (unreachable, slow past 10 s, or an answer that is not a range) answers `500` and the vault shows "unavailable".
+With Quadlet (§13), copy [`rizzy-vault-icons.container`](../deploy/quadlet/rizzy-vault-icons.container), [`rizzy-vault-icon-cache.volume`](../deploy/quadlet/rizzy-vault-icon-cache.volume) and `rizzy-vault-icons.env` (from [`rizzy-vault-icons.env.example`](../deploy/quadlet/rizzy-vault-icons.env.example)) next to the other units, set `RIZZY_ICONS_UPSTREAM=rizzy-vault-icons:8080` in `rizzy-vault-proxy.env`, reload, start `rizzy-vault-icons.service` and restart the proxy. The unit has no `[Install]` section, so it does not start at login until you add one.
 
-**To turn it off**, set `RIZZY_BREACH_CHECK=off` (or remove the `icons` container and its proxy route). This build's `icons` role has no favicon fetch yet ([ADR 0052](adr/0052-icon-proxy-role.md)); with the breach check off it serves only `404`s and logs `icons_nothing_enabled` at startup.
+**Limits.** Both endpoints, `POST /api/v1/icons/fetch` and `POST /api/v1/icons/breach-range`, need no login: anyone who reaches your proxy can use them. Each has its own per-address rate limit (30 requests a minute, bursts of 10; the /64 of an IPv6 address counts as one), behind a trusted proxy by `X-Forwarded-For` as for `api` (`RIZZY_TRUSTED_PROXIES`); with several `icons` replicas, each has its own limit, so the effective limit multiplies (ADR 0052 point 6). A breach-check request whose upstream fetch fails (unreachable, slow past 10 s, or an answer that is not a range) answers `500` and the vault shows "unavailable".
 
-**Unverified here:** the compose and Caddy snippets above were not run in this change (the end-to-end tests mock the role's endpoint in the browser), and `deploy/compose.yaml` and the Quadlet units do not include the role.
+**To turn it off**, stop the `icons` container and point the proxy's icons route back at `rizzy-vault:8080` (unset `RIZZY_ICONS_UPSTREAM`). To keep item icons but not the breach check, set `RIZZY_BREACH_CHECK=off`; there is no switch for item icons other than the role itself. Clearing the cache volume is safe at any time.
+
+**Unverified here:** the compose service, the Caddy route and the Quadlet units were not run under Docker, Podman or Caddy in this change (the end-to-end tests mock the role's endpoints in the browser; the role itself is tested against fake sites on local sockets, never the internet). Caddy's `{$VAR:default}` with a `host:port` default is read from Caddy's documentation, not tested.
+
