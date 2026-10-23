@@ -27,11 +27,11 @@ use rand_core::Rng as _;
 
 use super::parse;
 use super::purpose::{
-    AccountKeyDeviceGrantCtx, AccountKeyLocalWrapCtx, AccountKeyRecoveryWrapCtx,
-    AccountKeyServerWrapCtx, AccountSettingsCtx, DeviceSecretKeysCtx, ExportFileCtx,
-    IdentitySecretKeysCtx, ItemKeyWrapCtx, ItemOpCtx, ItemSnapshotCtx, RetiredSecretKeyCtx,
-    ServerDbBackupCtx, ServerLoginStateCtx, ServerSecretsBackupCtx, ServerTotpSecretCtx,
-    VaultKeySelfGrantCtx,
+    AccountKeyDeviceGrantCtx, AccountKeyForwardCtx, AccountKeyKeystoreWrapCtx,
+    AccountKeyLocalWrapCtx, AccountKeyRecoveryWrapCtx, AccountKeyServerWrapCtx, AccountSettingsCtx,
+    DeviceSecretKeysCtx, ExportFileCtx, IdentitySecretKeysCtx, ItemKeyWrapCtx, ItemOpCtx,
+    ItemSnapshotCtx, RetiredSecretKeyCtx, ServerDbBackupCtx, ServerLoginStateCtx,
+    ServerSecretsBackupCtx, ServerTotpSecretCtx, VaultKeySelfGrantCtx,
 };
 use super::symmetric::{self, server_open, server_seal, test_hooks};
 use super::{AlgId, Context, PlaintextRule, Purpose, open, seal};
@@ -276,6 +276,10 @@ case!(Client AccountKeyLocalWrapCtx {
     account_id, device_id, account_key_epoch, password_epoch, kdf_id
 });
 case!(Client AccountKeyRecoveryWrapCtx { account_id, account_key_epoch, recovery_epoch });
+case!(Client AccountKeyKeystoreWrapCtx { account_id, device_id, account_key_epoch });
+case!(Client AccountKeyForwardCtx {
+    account_id, device_id, from_account_key_epoch, to_account_key_epoch
+});
 case!(Client IdentitySecretKeysCtx { account_id, identity_epoch });
 case!(Client DeviceSecretKeysCtx { account_id, device_id });
 case!(Client RetiredSecretKeyCtx { account_id, retired_key_id });
@@ -545,9 +549,15 @@ macro_rules! symmetric_tests {
         fn the_harness_covers_every_implemented_symmetric_purpose() {
             let covered = [$(<$ty as Context>::PURPOSE),+];
             for p in Purpose::ALL {
-                // M1's symmetric purposes, and M8's SERVER_DB_BACKUP (ADR 0071).
+                // M1's symmetric purposes, M8's SERVER_DB_BACKUP (ADR 0071) and the M3/M7
+                // E_ks and forward envelopes (ADR 0057).
                 let implemented = (p.spec().first_used == super::purpose::Milestone::M1
-                    || p == Purpose::ServerDbBackup)
+                    || matches!(
+                        p,
+                        Purpose::ServerDbBackup
+                            | Purpose::AccountKeyKeystoreWrap
+                            | Purpose::AccountKeyForward
+                    ))
                     && p.encrypt_alg() == AlgId::XChaCha20Poly1305Committed;
                 assert_eq!(covered.contains(&p), implemented, "{}", p.name());
             }
@@ -559,6 +569,8 @@ symmetric_tests!(
     account_key_server_wrap: AccountKeyServerWrapCtx,
     account_key_local_wrap: AccountKeyLocalWrapCtx,
     account_key_recovery_wrap: AccountKeyRecoveryWrapCtx,
+    account_key_keystore_wrap: AccountKeyKeystoreWrapCtx,
+    account_key_forward: AccountKeyForwardCtx,
     identity_secret_keys: IdentitySecretKeysCtx,
     device_secret_keys: DeviceSecretKeysCtx,
     retired_secret_key: RetiredSecretKeyCtx,

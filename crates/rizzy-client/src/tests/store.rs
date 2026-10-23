@@ -783,6 +783,52 @@ fn assert_crash_safe(history: &[CacheRows], unlocked: &[&UnlockedDevice]) {
 /// 0026 row), so a restart in the middle of the response sequence drops it and the loaded
 /// device starts the next sequence from before the held headers; once the retry takes the
 /// cover it is journaled as any absorbed one, and the cache loads to the live state.
+/// ADR 0057 §3, §5: a cache whose record is version 1 (as a pre-M3 build wrote it) loads and
+/// unlocks unchanged, and the next write of the record stores it as version 2 with
+/// `has_ks = 0` and no forward envelopes, in one transaction. Crash injection: the file before
+/// that write and the file after it each open, unlock and load, as valid v1 or valid v2; there
+/// is no file in between.
+#[test]
+fn a_v1_record_is_upgraded_on_its_next_write() {
+    let mut rng = ChaCha20Rng::seed_from_u64(57);
+    let mut server = Server::new(58);
+    let (mut a, _sk, _code) = Dev::signed_up(&mut server, &mut rng);
+    let v2 = a.cache.rows.device_state.clone().unwrap();
+    assert_eq!(v2[..2], [0, 2]);
+    // The v1 form of the same state: version 1, and no `has_ks` or `forward_count` byte in front
+    // of the final `pending = 0`.
+    let tail = v2.len() - 3;
+    assert_eq!(v2[tail..], [0, 0, 0]);
+    let mut v1 = v2.to_vec();
+    v1[1] = 1;
+    v1.drain(tail..tail + 2);
+    a.cache.rows.device_state = Some(zeroize::Zeroizing::new(v1.clone()));
+    let before = copy_rows(&a.cache.rows);
+    let history_len = a.cache.history.len();
+
+    // The host's next write of the record: here the unchanged state, through the floors.
+    let record = load::open(&before, false).unwrap();
+    assert!(!record.has_keystore());
+    let unlocked = record.unlock(PASSWORD).unwrap();
+    let mut changeset = Changeset::new();
+    changeset.push(store::record_write(&a.state.record(Stage::Committed).unwrap()).unwrap());
+    a.cache.commit(changeset);
+    assert_eq!(a.cache.history.len(), history_len + 1);
+    let after = copy_rows(&a.cache.rows);
+    let stored = after.device_state.as_ref().unwrap();
+    assert_eq!(stored.as_slice(), v2.as_slice());
+
+    for (rows, version) in [(&before, 1u8), (&after, 2)] {
+        assert_eq!(rows.device_state.as_ref().unwrap()[..2], [0, version]);
+        let record = load::open(rows, false).unwrap();
+        assert!(!record.has_keystore());
+        assert_eq!(record.forward_count(), 0);
+        let keys = record.unlock(PASSWORD).unwrap();
+        load::load(rows, &record, &keys, T0 + 100).unwrap();
+        load::load(rows, &record, &unlocked, T0 + 100).unwrap();
+    }
+}
+
 #[test]
 fn a_held_cover_is_not_persisted_and_a_taken_one_is() {
     let mut rng = ChaCha20Rng::seed_from_u64(72);

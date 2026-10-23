@@ -164,6 +164,8 @@ const FILES: [VectorFile; 8] = [
             ("envelope", "SERVER_LOGIN_STATE", 1),
             ("envelope", "SERVER_SECRETS_BACKUP", 1),
             ("envelope", "SERVER_DB_BACKUP", 1),
+            ("envelope", "ACCOUNT_KEY_KEYSTORE_WRAP", 1),
+            ("envelope", "ACCOUNT_KEY_FORWARD", 1),
         ],
     },
     VectorFile {

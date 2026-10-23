@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! `envelopes.json`: one envelope per M1 purpose of CRYPTO.md §8.4 (two for the padded ones),
-//! with its context bytes, AAD, subkey and commitment.
+//! plus the implemented later ones (`SERVER_DB_BACKUP`, M8; `ACCOUNT_KEY_KEYSTORE_WRAP` and
+//! `ACCOUNT_KEY_FORWARD`, M3/M7, ADR 0057), with its context bytes, AAD, subkey and commitment.
 //!
 //! Each vector gives the raw wrapping key (or, for the HPKE device grant, the recipient's
 //! X25519 secret key and the previous account key the PSK comes from), the context fields, the
@@ -38,11 +39,11 @@ use serde_json::{Map, Value};
 use super::headers::{OpHeaderFields, SnapshotHeaderFields};
 use super::{ExactRng, Obj, Vector, arr, bytes, num, object, random, random_vec, small, u64_of};
 use crate::envelope::purpose::{
-    AccountKeyDeviceGrantCtx, AccountKeyLocalWrapCtx, AccountKeyRecoveryWrapCtx,
-    AccountKeyServerWrapCtx, AccountSettingsCtx, DeviceSecretKeysCtx, ExportFileCtx,
-    IdentitySecretKeysCtx, ItemKeyWrapCtx, ItemOpCtx, ItemSnapshotCtx, Milestone,
-    RetiredSecretKeyCtx, ServerDbBackupCtx, ServerLoginStateCtx, ServerSecretsBackupCtx,
-    ServerTotpSecretCtx, VaultKeySelfGrantCtx,
+    AccountKeyDeviceGrantCtx, AccountKeyForwardCtx, AccountKeyKeystoreWrapCtx,
+    AccountKeyLocalWrapCtx, AccountKeyRecoveryWrapCtx, AccountKeyServerWrapCtx, AccountSettingsCtx,
+    DeviceSecretKeysCtx, ExportFileCtx, IdentitySecretKeysCtx, ItemKeyWrapCtx, ItemOpCtx,
+    ItemSnapshotCtx, Milestone, RetiredSecretKeyCtx, ServerDbBackupCtx, ServerLoginStateCtx,
+    ServerSecretsBackupCtx, ServerTotpSecretCtx, VaultKeySelfGrantCtx,
 };
 use crate::envelope::symmetric::{server_open, server_seal};
 use crate::envelope::{
@@ -54,7 +55,7 @@ use crate::ids::{
     SnapshotId, VaultId,
 };
 use crate::kdf::{self, KdfId};
-use crate::keys::{AccountKey, ItemKey, RetiredSecretKey, VaultKey};
+use crate::keys::{AccountKey, ItemKey, KeystoreUnlockSecret, RetiredSecretKey, VaultKey};
 use crate::labels;
 use crate::padding;
 use crate::secret::Key32;
@@ -378,6 +379,29 @@ pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
         .num("chunk_count", 3);
     let pt = random_vec(rng, 500);
     out.push(vector("SERVER_DB_BACKUP", 0, symmetric(rng, ctx, &pt)));
+
+    // M3 (ADR 0057), drawn after every earlier vector so those keep their inputs. `E_ks`: the
+    // key is the keystore unlock secret. The forward envelope: the key is the account key of
+    // `from_account_key_epoch`, the plaintext the newer one.
+    let ctx = Obj::new()
+        .bytes("account_id", &id(rng))
+        .bytes("device_id", &id(rng))
+        .num("account_key_epoch", small(rng, 4));
+    let pt = random::<32>(rng);
+    out.push(vector(
+        "ACCOUNT_KEY_KEYSTORE_WRAP",
+        0,
+        symmetric(rng, ctx, &pt),
+    ));
+
+    let from = small(rng, 4);
+    let ctx = Obj::new()
+        .bytes("account_id", &id(rng))
+        .bytes("device_id", &id(rng))
+        .num("from_account_key_epoch", from)
+        .num("to_account_key_epoch", from + 1 + small(rng, 3));
+    let pt = random::<32>(rng);
+    out.push(vector("ACCOUNT_KEY_FORWARD", 0, symmetric(rng, ctx, &pt)));
     out
 }
 
@@ -387,8 +411,16 @@ pub(super) fn generate(rng: &mut ChaCha20Rng) -> Vec<Vector> {
 pub(super) fn check_file(vectors: &[Vector]) {
     for p in Purpose::ALL {
         // VAULT_KEY_MEMBER_GRANT is M9; its context exists only in tests. SERVER_DB_BACKUP is
-        // M8 and implemented (ADR 0071).
-        if p.spec().first_used != Milestone::M1 && p != Purpose::ServerDbBackup {
+        // M8 and implemented (ADR 0071); ACCOUNT_KEY_KEYSTORE_WRAP and ACCOUNT_KEY_FORWARD are
+        // M3/M7 and implemented (ADR 0057).
+        if p.spec().first_used != Milestone::M1
+            && !matches!(
+                p,
+                Purpose::ServerDbBackup
+                    | Purpose::AccountKeyKeystoreWrap
+                    | Purpose::AccountKeyForward
+            )
+        {
             continue;
         }
         let of_purpose: Vec<&Vector> = vectors.iter().filter(|v| v.name == p.name()).collect();
@@ -527,6 +559,43 @@ pub(super) fn compute(name: &str, m: &Map<String, Value>) -> Map<String, Value> 
             },
         ),
         "ACCOUNT_KEY_DEVICE_GRANT" => device_grant(m),
+        "ACCOUNT_KEY_KEYSTORE_WRAP" => {
+            let ctx = AccountKeyKeystoreWrapCtx {
+                account_id: account(c),
+                device_id: device(c, "device_id"),
+                account_key_epoch: num(c, "account_key_epoch"),
+            };
+            let out = symmetric_outputs(m, &ctx);
+            // Typed: the secret opens `E_ks` to the plaintext key, and wraps it back to the
+            // same bytes with the vector's nonce.
+            let secret = typed(m, |r| {
+                KeystoreUnlockSecret::generate(r, ctx.account_id, ctx.device_id)
+            });
+            let env = bytes(&out, "envelope");
+            let ak = secret.unwrap_account_key(&ctx, &env).expect("E_ks opens");
+            assert_eq!(ak.key().expose_secret().as_slice(), pt.as_slice());
+            assert_eq!(ak.epoch(), ctx.account_key_epoch);
+            let again = with_nonce(m, |r| secret.wrap_account_key(r, &ctx, &ak).expect("wrap"));
+            assert_eq!(again, env, "KeystoreUnlockSecret::wrap_account_key");
+            out
+        }
+        "ACCOUNT_KEY_FORWARD" => {
+            let ctx = AccountKeyForwardCtx {
+                account_id: account(c),
+                device_id: device(c, "device_id"),
+                from_account_key_epoch: num(c, "from_account_key_epoch"),
+                to_account_key_epoch: num(c, "to_account_key_epoch"),
+            };
+            let out = symmetric_outputs(m, &ctx);
+            let previous = typed(m, |r| AccountKey::generate(r, ctx.from_account_key_epoch));
+            let env = bytes(&out, "envelope");
+            let newer = previous.unwrap_forward(&ctx, &env).expect("forward opens");
+            assert_eq!(newer.key().expose_secret().as_slice(), pt.as_slice());
+            assert_eq!(newer.epoch(), ctx.to_account_key_epoch);
+            let again = with_nonce(m, |r| previous.wrap_forward(r, &ctx, &newer).expect("wrap"));
+            assert_eq!(again, env, "AccountKey::wrap_forward");
+            out
+        }
         "IDENTITY_SECRET_KEYS" => {
             let ctx = IdentitySecretKeysCtx {
                 account_id: account(c),

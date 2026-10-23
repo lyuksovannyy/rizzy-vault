@@ -11,9 +11,10 @@
 
 use super::*;
 use crate::envelope::purpose::{
-    AccountKeyDeviceGrantCtx, AccountKeyLocalWrapCtx, AccountKeyRecoveryWrapCtx,
-    AccountKeyServerWrapCtx, AccountSettingsCtx, DeviceSecretKeysCtx, IdentitySecretKeysCtx,
-    ItemKeyWrapCtx, RetiredSecretKeyCtx, VaultKeySelfGrantCtx,
+    AccountKeyDeviceGrantCtx, AccountKeyForwardCtx, AccountKeyKeystoreWrapCtx,
+    AccountKeyLocalWrapCtx, AccountKeyRecoveryWrapCtx, AccountKeyServerWrapCtx, AccountSettingsCtx,
+    DeviceSecretKeysCtx, IdentitySecretKeysCtx, ItemKeyWrapCtx, RetiredSecretKeyCtx,
+    VaultKeySelfGrantCtx,
 };
 use crate::envelope::{Purpose, open, seal};
 use crate::error::{DecryptError, EncryptError, ParseError, VerifyError};
@@ -1363,4 +1364,185 @@ fn a_device_several_rotations_behind_opens_its_grants_in_order() {
             .expose_secret(),
         b"s"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// E_ks and ACCOUNT_KEY_FORWARD (M3/M7, ADR 0057; CRYPTO.md §8.4, §11.3 step 4.3)
+// ---------------------------------------------------------------------------------------------
+
+fn keystore_secret(byte: u8) -> KeystoreUnlockSecret {
+    KeystoreUnlockSecret::from_slice(&[byte; 32], account(), recipient_device()).unwrap()
+}
+
+fn keystore_ctx(epoch: u32) -> AccountKeyKeystoreWrapCtx {
+    AccountKeyKeystoreWrapCtx {
+        account_id: account(),
+        device_id: recipient_device(),
+        account_key_epoch: epoch,
+    }
+}
+
+fn forward_ctx(from: u32, to: u32) -> AccountKeyForwardCtx {
+    AccountKeyForwardCtx {
+        account_id: account(),
+        device_id: recipient_device(),
+        from_account_key_epoch: from,
+        to_account_key_epoch: to,
+    }
+}
+
+#[test]
+fn e_ks_round_trips_and_is_bound_to_its_context() {
+    let secret = keystore_secret(0x41);
+    let ak = account_key(0x11, 3);
+    let ctx = keystore_ctx(3);
+    let e_ks = secret
+        .wrap_account_key(&mut seeded_rng(1), &ctx, &ak)
+        .unwrap();
+    let opened = secret.unwrap_account_key(&ctx, &e_ks).unwrap();
+    assert_eq!(opened.epoch(), 3);
+    assert_eq!(opened.key().expose_secret(), ak.key().expose_secret());
+    // The plaintext is the bare key, sealed under the purpose of §8.4.
+    assert_eq!(
+        open(&key32(0x41), &ctx, &e_ks).unwrap().expose_secret(),
+        &[0x11; 32]
+    );
+    // Another epoch, device or account in the ctx does not open.
+    assert!(secret.unwrap_account_key(&keystore_ctx(4), &e_ks).is_err());
+    for other in [
+        AccountKeyKeystoreWrapCtx {
+            device_id: sender_device(),
+            ..ctx
+        },
+        AccountKeyKeystoreWrapCtx {
+            account_id: AccountId::from_bytes([0x0b; 16]),
+            ..ctx
+        },
+    ] {
+        assert_eq!(
+            secret.unwrap_account_key(&other, &e_ks).unwrap_err(),
+            DecryptError
+        );
+        assert_eq!(
+            secret
+                .wrap_account_key(&mut seeded_rng(1), &other, &ak)
+                .map(|_| ()),
+            Err(EncryptError::ContextMismatch)
+        );
+    }
+    // A secret made for another device (same bytes) still fails: the device id is in the AAD.
+    let impostor =
+        KeystoreUnlockSecret::from_slice(&[0x41; 32], account(), sender_device()).unwrap();
+    let moved = AccountKeyKeystoreWrapCtx {
+        device_id: sender_device(),
+        ..ctx
+    };
+    assert!(impostor.unwrap_account_key(&moved, &e_ks).is_err());
+    // A wrong secret, a flipped byte anywhere, and E_local's purpose under the same key fail.
+    assert!(
+        keystore_secret(0x42)
+            .unwrap_account_key(&ctx, &e_ks)
+            .is_err()
+    );
+    for i in 0..e_ks.len() {
+        let mut bad = e_ks.clone();
+        bad[i] ^= 0x01;
+        assert!(secret.unwrap_account_key(&ctx, &bad).is_err(), "byte {i}");
+    }
+    let local_ctx = AccountKeyLocalWrapCtx {
+        account_id: account(),
+        device_id: recipient_device(),
+        account_key_epoch: 3,
+        password_epoch: 0,
+        kdf_id: KdfId::DEFAULT,
+    };
+    let e_local_shaped = seal(&mut seeded_rng(2), &key32(0x41), &local_ctx, &[0x11; 32]).unwrap();
+    assert!(secret.unwrap_account_key(&ctx, &e_local_shaped).is_err());
+    // A wrap must name the key's own epoch.
+    assert_eq!(
+        secret
+            .wrap_account_key(&mut seeded_rng(1), &keystore_ctx(2), &ak)
+            .map(|_| ()),
+        Err(EncryptError::ContextMismatch)
+    );
+    assert_eq!(Purpose::AccountKeyKeystoreWrap as u16, 0x0006);
+}
+
+#[test]
+fn keystore_secret_is_32_bytes_and_redacted() {
+    for len in [0, 16, 31, 33, 64] {
+        assert_eq!(
+            KeystoreUnlockSecret::from_slice(&vec![7; len], account(), recipient_device())
+                .unwrap_err(),
+            ParseError::InvalidLength
+        );
+    }
+    let generated =
+        KeystoreUnlockSecret::generate(&mut seeded_rng(9), account(), recipient_device());
+    let again = KeystoreUnlockSecret::generate(&mut seeded_rng(9), account(), recipient_device());
+    assert_eq!(generated.expose_secret(), again.expose_secret());
+    assert_ne!(
+        generated.expose_secret(),
+        KeystoreUnlockSecret::generate(&mut seeded_rng(10), account(), recipient_device())
+            .expose_secret()
+    );
+    let shown = format!("{generated:?}");
+    assert!(!shown.contains(&format!("{:?}", generated.expose_secret())));
+    assert!(shown.starts_with("KeystoreUnlockSecret"));
+    assert_eq!(generated.account_id(), account());
+    assert_eq!(generated.device_id(), recipient_device());
+}
+
+#[test]
+fn forward_chain_opens_in_epoch_order_only() {
+    let k3 = account_key(0x13, 3);
+    let k4 = account_key(0x14, 4);
+    let k6 = account_key(0x16, 6);
+    let f34 = k3
+        .wrap_forward(&mut seeded_rng(1), &forward_ctx(3, 4), &k4)
+        .unwrap();
+    let f46 = k4
+        .wrap_forward(&mut seeded_rng(2), &forward_ctx(4, 6), &k6)
+        .unwrap();
+    let got4 = k3.unwrap_forward(&forward_ctx(3, 4), &f34).unwrap();
+    assert_eq!(got4.epoch(), 4);
+    let got6 = got4.unwrap_forward(&forward_ctx(4, 6), &f46).unwrap();
+    assert_eq!(got6.epoch(), 6);
+    assert_eq!(got6.key().expose_secret(), k6.key().expose_secret());
+    // Out of order, with the wrong epochs, or for another device: refused.
+    assert!(k3.unwrap_forward(&forward_ctx(4, 6), &f46).is_err());
+    assert!(k4.unwrap_forward(&forward_ctx(4, 5), &f46).is_err());
+    assert!(k4.unwrap_forward(&forward_ctx(4, 4), &f46).is_err());
+    assert!(
+        k3.unwrap_forward(
+            &AccountKeyForwardCtx {
+                device_id: sender_device(),
+                ..forward_ctx(3, 4)
+            },
+            &f34
+        )
+        .is_err()
+    );
+    let mut bad = f34.clone();
+    let last = bad.len() - 1;
+    bad[last] ^= 0x80;
+    assert!(k3.unwrap_forward(&forward_ctx(3, 4), &bad).is_err());
+    // A forward never points back or sideways, and must name both keys' epochs.
+    for (ctx, new) in [
+        (forward_ctx(4, 3), &k3),
+        (forward_ctx(4, 4), &k4),
+        (forward_ctx(3, 5), &k4),
+        (forward_ctx(2, 4), &k4),
+    ] {
+        let from = if ctx.from_account_key_epoch == 4 {
+            &k4
+        } else {
+            &k3
+        };
+        assert_eq!(
+            from.wrap_forward(&mut seeded_rng(3), &ctx, new).map(|_| ()),
+            Err(EncryptError::ContextMismatch)
+        );
+    }
+    assert_eq!(Purpose::AccountKeyForward as u16, 0x0007);
 }
