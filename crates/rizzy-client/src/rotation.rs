@@ -1217,8 +1217,13 @@ impl PendingRotation {
         if let Some((local_wrap, device_keys_wrap)) = self.prepared.take() {
             // The envelopes the pending record holds on disk: the finalised state is those
             // bytes, not a second wrap of the same key.
-            device.local_wrap = local_wrap;
+            device.set_local_wrap(local_wrap);
             device.device_keys_wrap = device_keys_wrap;
+            device.rewrap_keystore(
+                rng,
+                unlocked.keystore_secret.as_ref(),
+                &self.new_account_key,
+            )?;
         } else {
             let derived;
             let local = if let Some(local) = unlocked.local_unlock_key.as_ref() {
@@ -1235,7 +1240,13 @@ impl PendingRotation {
                     .map_err(internal)?;
                 &derived
             };
-            device.rewrap(rng, local, &self.new_account_key, &unlocked.device_keys)?;
+            device.rewrap(
+                rng,
+                local,
+                unlocked.keystore_secret.as_ref(),
+                &self.new_account_key,
+                &unlocked.device_keys,
+            )?;
         }
         if let Some(credential) = self.credential.take() {
             credential.apply(device, unlocked);

@@ -21,6 +21,13 @@
 //! 4. On [`ClientError::PasswordChangedElsewhere`]: the host prompts for the new password (and
 //!    Secret Key) and runs an OPAQUE login (§11.3 step 5), then
 //!    [`crate::credentials::follow_credential_change`] re-creates `E_local` with a new salt.
+//! 5. After a password unlock whose answer verified without a rotation, a state holding
+//!    `ACCOUNT_KEY_FORWARD` envelopes (left by keystore unlocks that crossed rotations, ADR
+//!    0057) is collapsed with [`DeviceState::collapse_forward`] and persisted (§11.3 step 4.3).
+//!
+//! The offline part may instead be a keystore unlock ([`DeviceState::unlock_keystore`],
+//! §5.6 step 3); [`apply_device_grants`] then re-wraps `E_ks` and `E_dev` and appends a
+//! forward envelope instead of re-wrapping `E_local`.
 //!
 //! # Readings
 //!
@@ -130,9 +137,17 @@ pub fn verify_unlock(
 /// [`ClientError::NoDeviceGrant`] when no grant for an epoch of the chain is served (ADR 0032
 /// §4: the host catches up with [`catch_up_account_key`]);
 /// [`ClientError::InvalidServerResponse`] for a misaddressed, duplicate or failing grant, or a
-/// delivered key that is not the state's; [`ClientError::InvalidInput`] if the unlock key was
-/// already dropped (a keystore unlock, which this build does not support); the errors of the
-/// public verification.
+/// delivered key that is not the state's; [`ClientError::InvalidInput`] if neither the local
+/// unlock key nor a keystore unlock secret is kept (both were dropped);
+/// [`ClientError::KeystoreUnlockUnavailable`] after a keystore unlock whose forward chain is
+/// full (ADR 0057 owner answer 2: nothing is acknowledged, the device stays read-only until a
+/// password unlock); the errors of the public verification.
+///
+/// After a password unlock, `E_local`, `E_ks` (if present; deleted unless the keystore secret
+/// was attached, [`UnlockedDevice::attach_keystore_secret`]) and `E_dev` are re-wrapped and the
+/// forward chain is deleted. After a keystore unlock, `E_ks` and `E_dev` are re-wrapped,
+/// `E_local` is left as it is, and a forward envelope from the old account key to the new one
+/// is appended (CRYPTO.md §11.3 step 4.3, ADR 0057 §2).
 pub fn apply_device_grants<R: CryptoRng + ?Sized>(
     rng: &mut R,
     state: &mut DeviceState,
@@ -203,11 +218,25 @@ pub fn apply_device_grants<R: CryptoRng + ?Sized>(
     if !public.state.matches_account_key(&new_key) {
         return Err(bad);
     }
-    let local = unlocked
-        .local_unlock_key
-        .as_ref()
-        .ok_or(ClientError::InvalidInput)?;
-    state.rewrap(rng, local, &new_key, &unlocked.device_keys)?;
+    match (
+        unlocked.local_unlock_key.as_ref(),
+        unlocked.keystore_secret.as_ref(),
+    ) {
+        // A password unlock: `E_local`, `E_ks` (if present) and `E_dev`; the forward chain is
+        // collapsed.
+        (Some(local), keystore) => {
+            state.rewrap(rng, local, keystore, &new_key, &unlocked.device_keys)?;
+        }
+        // A keystore unlock: `E_ks` and `E_dev`, and a forward envelope from the old key.
+        (None, Some(secret)) => state.rewrap_after_keystore_unlock(
+            rng,
+            secret,
+            &unlocked.account_key,
+            &new_key,
+            &unlocked.device_keys,
+        )?,
+        (None, None) => return Err(ClientError::InvalidInput),
+    }
     unlocked.account_key = new_key;
     Ok(AckDeviceGrantsRequest {
         account_key_epoch: target,
@@ -302,7 +331,13 @@ pub fn catch_up_account_key<R: CryptoRng + ?Sized>(
         .local_unlock_key
         .as_ref()
         .ok_or(ClientError::InvalidInput)?;
-    state.rewrap(rng, local, &account_key, &unlocked.device_keys)?;
+    state.rewrap(
+        rng,
+        local,
+        unlocked.keystore_secret.as_ref(),
+        &account_key,
+        &unlocked.device_keys,
+    )?;
     unlocked.account_key = account_key;
     Ok(())
 }
