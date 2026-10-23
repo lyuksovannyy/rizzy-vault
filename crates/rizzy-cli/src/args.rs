@@ -1207,6 +1207,33 @@ mod tests {
     }
 
     #[test]
+    fn cxf_commands_parse() {
+        // ADR 0074: the CXF passkey export and both CXF import forms.
+        assert_eq!(
+            command("export --out p.rizzy --name alice --format cxf"),
+            Command::Export {
+                out: PathBuf::from("p.rizzy"),
+                name: "alice".to_owned(),
+                format: ExportFormat::Cxf
+            }
+        );
+        assert_eq!(
+            command("import --in a.json --format cxf-json"),
+            Command::Import {
+                input: PathBuf::from("a.json"),
+                format: Some(ImportFormat::CxfJson)
+            }
+        );
+        assert_eq!(
+            command("import --in p.rizzy --format rizzy-cxf-encrypted"),
+            Command::Import {
+                input: PathBuf::from("p.rizzy"),
+                format: Some(ImportFormat::RizzyCxfEncrypted)
+            }
+        );
+    }
+
+    #[test]
     fn commands_parse() {
         assert_eq!(command("--help"), Command::Help);
         assert_eq!(command("-V"), Command::Version);
@@ -1270,29 +1297,6 @@ mod tests {
             Command::Import {
                 input: PathBuf::from("a.1pux"),
                 format: Some(ImportFormat::OnePux)
-            }
-        );
-        // ADR 0074: the CXF passkey export and both CXF import forms.
-        assert_eq!(
-            command("export --out p.rizzy --name alice --format cxf"),
-            Command::Export {
-                out: PathBuf::from("p.rizzy"),
-                name: "alice".to_owned(),
-                format: ExportFormat::Cxf
-            }
-        );
-        assert_eq!(
-            command("import --in a.json --format cxf-json"),
-            Command::Import {
-                input: PathBuf::from("a.json"),
-                format: Some(ImportFormat::CxfJson)
-            }
-        );
-        assert_eq!(
-            command("import --in p.rizzy --format rizzy-cxf-encrypted"),
-            Command::Import {
-                input: PathBuf::from("p.rizzy"),
-                format: Some(ImportFormat::RizzyCxfEncrypted)
             }
         );
         assert_eq!(
