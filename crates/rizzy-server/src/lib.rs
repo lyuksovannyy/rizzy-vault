@@ -146,6 +146,7 @@ pub mod bridge;
 pub mod cli;
 pub mod config;
 pub mod coredump;
+pub mod db_backup;
 pub mod fsutil;
 pub mod http;
 pub mod log;
