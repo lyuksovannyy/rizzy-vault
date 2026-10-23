@@ -25,6 +25,7 @@
 
 import initWasm, {
   BreachCheck,
+  IconFetch,
   CacheDelta,
   CacheKey,
   CoreError as WasmCoreError,
@@ -1204,6 +1205,63 @@ export async function checkPasswordBreach(
   ensureReady();
   const check = withSecrets([password], (bytes) => call(() => BreachCheck.forPassword(at(bytes, 0))));
   return runBreachCheck(check, transport, undefined);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Item icons (ADR 0052 point 6)
+//
+// The core normalises the host of an item's website (IDNA A-labels, lowercase, no trailing dot)
+// and builds `POST /api/v1/icons/fetch` with `{"host": …}` as its only field and no
+// Authorization header: the `icons` role learns a hostname, never who asks. The answer is
+// checked (`image/png`, the PNG signature, a bounded length) and returned as bytes for the
+// caller to show as an image: a `blob:` URL, never markup, never a `data:` URL.
+
+/** The hostname an icon request for `websiteHost` would carry (lowercase A-labels), or
+ * `undefined` when nothing would be sent for it (an IP literal in brackets, empty, too long).
+ * Hosts that normalise to the same name share one request and one cache entry. */
+export function iconHost(websiteHost: string): string | undefined {
+  ensureReady();
+  const fetch = startIconFetch(websiteHost);
+  return fetch === undefined ? undefined : mapOne(fetch, (f) => f.host);
+}
+
+/** The icon fetch for `websiteHost`, or `undefined` when the core refuses the host. */
+function startIconFetch(websiteHost: string): IconFetch | undefined {
+  try {
+    return call(() => IconFetch.forHost(websiteHost));
+  } catch (e) {
+    if (e instanceof CoreError && e.code === "invalid_input") {
+      return undefined;
+    }
+    throw e;
+  }
+}
+
+/**
+ * Fetches the icon of `websiteHost` from this server's `icons` role (ADR 0052): the PNG bytes,
+ * re-encoded by the role and checked here, or `undefined` when there is no icon to show (no
+ * usable host, no icon for the site, or no `icons` role on this server). Throws a
+ * {@link CoreError} only for `server_rate_limited` (wait and retry) and `transport_failed`.
+ */
+export async function fetchItemIcon(transport: Transport, websiteHost: string): Promise<Uint8Array | undefined> {
+  ensureReady();
+  const fetch = startIconFetch(websiteHost);
+  if (fetch === undefined) {
+    return undefined;
+  }
+  try {
+    const answer = await transport(takeRequest(call(() => fetch.request())));
+    try {
+      return call(() => fetch.finish(answer.status, answer.body));
+    } catch (e) {
+      if (e instanceof CoreError && e.code !== "server_rate_limited" && e.code !== "transport_failed") {
+        return undefined;
+      }
+      throw e;
+    }
+  } finally {
+    fetch.free();
+  }
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -12,7 +12,9 @@ import {
   checkPasswordBreach,
   checkServer,
   createPasskey,
+  fetchItemIcon,
   fetchTransport,
+  iconHost,
   generatePassphraseWithOptions,
   generatePasswordWithOptions,
   login,
@@ -243,5 +245,49 @@ describe("the breach check (ADR 0053)", () => {
     }
     const empty = await checkPasswordBreach(fixed(200, "{}").transport, "").catch((e: unknown) => e);
     expect((empty as CoreError).code).toBe("invalid_input");
+  });
+});
+
+describe("item icons (ADR 0052)", () => {
+  // A PNG signature and three more bytes, as base64url.
+  const png = "iVBORw0KGgoAAA";
+
+  it("sends the normalised hostname only, without Authorization, and returns the PNG", async () => {
+    const { transport, seen } = fixed(200, JSON.stringify({ content_type: "image/png", data: png }));
+    const bytes = await fetchItemIcon(transport, "Secret-Bank.Example.");
+    expect(bytes).toBeInstanceOf(Uint8Array);
+    expect(Array.from(bytes?.subarray(0, 8) ?? [])).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    expect(seen).toHaveLength(1);
+    const request = seen[0]!;
+    expect(request.method).toBe("POST");
+    expect(request.path).toBe("/api/v1/icons/fetch");
+    expect(request.headers["Authorization"]).toBeUndefined();
+    expect(new TextDecoder().decode(request.body)).toBe('{"host":"secret-bank.example"}');
+  });
+
+  it("normalises hosts and sends nothing for unusable ones", async () => {
+    expect(iconHost("WWW.Example.COM")).toBe("www.example.com");
+    expect(iconHost("b\u00fccher.de")).toBe("xn--bcher-kva.de");
+    expect(iconHost("[::1]")).toBeUndefined();
+    expect(iconHost("")).toBeUndefined();
+    const { transport, seen } = fixed(200, "{}");
+    expect(await fetchItemIcon(transport, "[2001:db8::1]")).toBeUndefined();
+    expect(seen).toHaveLength(0);
+  });
+
+  it("reads no icon, a bad answer and a missing role as no icon; a rate limit throws", async () => {
+    for (const [status, body] of [
+      [404, '{"error":"not_found"}'],
+      [500, '{"error":"internal"}'],
+      [200, JSON.stringify({ content_type: "image/svg+xml", data: png })],
+      [200, JSON.stringify({ content_type: "image/png", data: "PHN2Zy8-" })],
+      [200, "<html>"],
+    ] as const) {
+      expect(await fetchItemIcon(fixed(status, body).transport, "example.com")).toBeUndefined();
+    }
+    const error = await fetchItemIcon(fixed(429, '{"error":"rate_limited"}').transport, "example.com").catch(
+      (e: unknown) => e,
+    );
+    expect((error as CoreError).code).toBe("server_rate_limited");
   });
 });
