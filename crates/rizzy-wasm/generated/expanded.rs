@@ -18711,6 +18711,808 @@ pub mod http {
                 flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
         };
 }
+pub mod icons {
+    //! Item icons across the boundary ([ADR 0052] point 6; `rizzy_client::icons`).
+    //!
+    //! ```text
+    //! IconFetch.forHost(summary.websiteHost)
+    //!   -> fetch.request()        POST /api/v1/icons/fetch {"host":"<A-label hostname>"}
+    //!                             no Authorization header, no other field
+    //!   -> fetch.finish(status, body) -> PNG bytes (Uint8Array)
+    //! ```
+    //!
+    //! - **The request is not a session request.** It carries the normalised hostname only and no
+    //!   bearer token; the `icons` role would not read one and must not learn who asks.
+    //! - **The answer** follows [ADR 0028] items 2–3: `200` with an `image/png` whose bytes start
+    //!   with the PNG signature, at most `MAX_ICON_PNG_LEN` bytes; anything else is the server's
+    //!   code (`server_not_found` when there is no icon or no `icons` role, `server_rate_limited`
+    //!   past the limit). The host hands the bytes to its image decoder as an image only (the web
+    //!   vault: a `blob:` URL in an `<img>`), never as markup.
+    //!
+    //! [ADR 0028]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0028-api-v1-http-conventions.md
+    //! [ADR 0052]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0052-icon-proxy-role.md
+    use core::fmt;
+    use rizzy_client::icons::{icon_finish, icon_request};
+    use rizzy_client::rizzy_proto::http::paths::ICONS_FETCH;
+    use rizzy_client::rizzy_proto::icons::{
+        IconFetchRequest, IconFetchResponse,
+    };
+    use wasm_bindgen::prelude::wasm_bindgen;
+    use crate::error::{CoreError, CoreResult};
+    use crate::http::{HttpRequest, json};
+    #[wasm_bindgen()]
+    #[__wasm_bindgen_retried]
+    #[doc = " One icon fetch for one hostname. `Debug` prints no host."]
+    pub struct IconFetch {
+        #[doc = " The checked request."]
+        request: IconFetchRequest,
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsConstructor for IconFetch { }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for IconFetch {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsStaticProperty for IconFetch { }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribe for IconFetch {
+        fn describe() {
+            use wasm_bindgen::describe::*;
+            inform(RUST_STRUCT);
+            inform(9u32);
+            inform(73u32);
+            inform(99u32);
+            inform(111u32);
+            inform(110u32);
+            inform(70u32);
+            inform(101u32);
+            inform(116u32);
+            inform(99u32);
+            inform(104u32);
+            inform(27u32);
+            inform(114u32);
+            inform(105u32);
+            inform(122u32);
+            inform(122u32);
+            inform(121u32);
+            inform(45u32);
+            inform(119u32);
+            inform(97u32);
+            inform(115u32);
+            inform(109u32);
+            inform(45u32);
+            inform(101u32);
+            inform(48u32);
+            inform(57u32);
+            inform(99u32);
+            inform(99u32);
+            inform(48u32);
+            inform(101u32);
+            inform(98u32);
+            inform(51u32);
+            inform(53u32);
+            inform(102u32);
+            inform(56u32);
+            inform(98u32);
+            inform(53u32);
+            inform(56u32);
+            inform(51u32);
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::IntoWasmAbi for IconFetch {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<IconFetch>>;
+        fn into_abi(self) -> Self::Abi {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+            WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self))) as
+                    *mut WasmRefCell<IconFetch>)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::FromWasmAbi for IconFetch {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<IconFetch>>;
+        unsafe fn from_abi(js: Self::Abi) -> Self {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+            use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+            let ptr = js.into_ptr();
+            assert_not_null(ptr);
+            let rc = Rc::from_raw(ptr);
+            match Rc::try_unwrap(rc) {
+                Ok(cell) => cell.into_inner(),
+                Err(_) =>
+                    wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::core::convert::From<IconFetch> for
+        wasm_bindgen::JsValue {
+        fn from(value: IconFetch) -> Self {
+            let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_iconfetch_new_e09cc0eb35f8b583"]
+                fn __wbg_iconfetch_new(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<IconFetch>>)
+                -> u32;
+            }
+            unsafe {
+                <wasm_bindgen::JsValue as
+                        wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_iconfetch_new(ptr))
+            }
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[export_name = "__wbg_iconfetch_free_e09cc0eb35f8b583"]
+            #[doc(hidden)]
+            pub unsafe extern "C-unwind" fn __wbg_iconfetch_free(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<IconFetch>>,
+                allow_delayed: u32) {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                if allow_delayed != 0 {
+                    let ptr = ptr.into_ptr();
+                    wasm_bindgen::__rt::assert_not_null(ptr);
+                    drop(Rc::from_raw(ptr));
+                } else {
+                    let _ =
+                        <IconFetch as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                }
+            }
+        };
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefFromWasmAbi for IconFetch {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<IconFetch>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<IconFetch>;
+        unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRef::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefMutFromWasmAbi for IconFetch {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<IconFetch>>;
+        type Anchor = wasm_bindgen::__rt::RcRefMut<IconFetch>;
+        unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRefMut::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::LongRefFromWasmAbi for IconFetch {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<IconFetch>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<IconFetch>;
+        unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            <Self as wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionIntoWasmAbi for IconFetch {
+        #[inline]
+        fn none() -> Self::Abi {
+            <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<IconFetch>>>::null()
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionFromWasmAbi for IconFetch {
+        #[inline]
+        fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::TryFromJsValue for IconFetch {
+        fn try_from_js_value(value: wasm_bindgen::JsValue)
+            ->
+                wasm_bindgen::__rt::core::result::Result<Self,
+                wasm_bindgen::JsValue> {
+            Self::try_from_js_value_ref(&value).ok_or(value)
+        }
+        fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+            -> wasm_bindgen::__rt::core::option::Option<Self> {
+            let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_iconfetch_unwrap_e09cc0eb35f8b583"]
+                fn __wbg_iconfetch_unwrap(ptr: u32)
+                ->
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<IconFetch>>;
+            }
+            let ptr = unsafe { __wbg_iconfetch_unwrap(idx) };
+            if ptr.is_null() {
+                wasm_bindgen::__rt::core::option::Option::None
+            } else {
+                unsafe {
+                    wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                }
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribeVector for IconFetch {
+        fn describe_vector() {
+            use wasm_bindgen::describe::*;
+            inform(VECTOR);
+            <IconFetch as wasm_bindgen::describe::WasmDescribe>::describe();
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorIntoWasmAbi for IconFetch {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::IntoWasmAbi>::Abi;
+        fn vector_into_abi(vector:
+                wasm_bindgen::__rt::alloc::boxed::Box<[IconFetch]>)
+            -> Self::Abi {
+            wasm_bindgen::convert::js_value_vector_into_abi(vector)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorFromWasmAbi for IconFetch {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::FromWasmAbi>::Abi;
+        unsafe fn vector_from_abi(js: Self::Abi)
+            -> wasm_bindgen::__rt::alloc::boxed::Box<[IconFetch]> {
+            wasm_bindgen::convert::js_value_vector_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\x01\tIconFetch\0\x019 One icon fetch for one hostname. `Debug` prints no host.\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    impl fmt::Debug for IconFetch {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("IconFetch").finish_non_exhaustive()
+        }
+    }
+    impl IconFetch {
+        /// A fetch for `website_host`.
+        pub(crate) fn of(website_host: &str) -> CoreResult<Self> {
+            Ok(Self { request: icon_request(website_host)? })
+        }
+    }
+    impl IconFetch {
+        #[doc =
+        " A fetch for the host of an item\'s website (`ItemSummary.websiteHost`), normalised to"]
+        #[doc = " its lowercase A-label form."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " `invalid_input` for a host that is not a usable hostname (an IP literal in brackets,"]
+        #[doc = " empty, too long): nothing is to be sent for it."]
+        pub fn for_host(website_host: &str) -> Result<IconFetch, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " A fetch for the host of an item\'s website (`ItemSummary.websiteHost`), normalised to"]
+                    #[doc = " its lowercase A-label form."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `invalid_input` for a host that is not a usable hostname (an IP literal in brackets,"]
+                    #[doc = " empty, too long): nothing is to be sent for it."]
+                    #[export_name = "iconfetch_forHost_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_IconFetch_forHost(arg0_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg0_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg0_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg0_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<IconFetch, CoreError>
+                            as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg0 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg0_1, arg0_2,
+                                                            arg0_3, arg0_4))
+                                                };
+                                            let arg0 = &*arg0;
+                                            let _ret = IconFetch::for_host(arg0);
+                                            _ret
+                                        }
+                                    });
+                        <Result<IconFetch, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " A fetch for the host of an item\'s website (`ItemSummary.websiteHost`), normalised to"]
+                    #[doc = " its lowercase A-label form."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `invalid_input` for a host that is not a usable hostname (an IP literal in brackets,"]
+                    #[doc = " empty, too long): nothing is to be sent for it."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_iconfetch_forHost_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(1u32);
+                        <&str as WasmDescribe>::describe();
+                        <Result<IconFetch, CoreError> as WasmDescribe>::describe();
+                        <Result<IconFetch, CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\tIconFetch\x06U A fetch for the host of an item's website (`ItemSummary.websiteHost`), normalised to\x1c its lowercase A-label form.\0\t # ErrorsU `invalid_input` for a host that is not a usable hostname (an IP literal in brackets,0 empty, too long): nothing is to be sent for it.\0\x01\x0cwebsite_host\0\0\0\0\0\x07forHost\x01\x01\0\0\0\0\x01\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            Self::of(website_host)
+        }
+        #[doc =
+        " The normalised hostname the request carries, for the host\'s in-memory cache key."]
+        #[must_use]
+        pub fn host(&self) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The normalised hostname the request carries, for the host\'s in-memory cache key."]
+                    #[must_use]
+                    #[export_name = "iconfetch_host_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_IconFetch_host(me:
+                            <IconFetch as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<IconFetch>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<IconFetch>();
+                                            let me =
+                                                unsafe {
+                                                    <IconFetch as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.host();
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The normalised hostname the request carries, for the host\'s in-memory cache key."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_iconfetch_host_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\tIconFetch\x01Q The normalised hostname the request carries, for the host's in-memory cache key.\0\0\0\0\x04host\x01\x01\0\0\0\0\x01\0\x02\x04host\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.request.host.as_str().to_owned()
+        }
+        #[doc =
+        " The request: `POST /api/v1/icons/fetch`, the hostname as its only field, no"]
+        #[doc = " `Authorization`."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `internal` if the body cannot be serialised (never)."]
+        pub fn request(&self) -> Result<HttpRequest, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The request: `POST /api/v1/icons/fetch`, the hostname as its only field, no"]
+                    #[doc = " `Authorization`."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `internal` if the body cannot be serialised (never)."]
+                    #[export_name = "iconfetch_request_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_IconFetch_request(me:
+                            <IconFetch as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<IconFetch>();
+                                            let me =
+                                                unsafe {
+                                                    <IconFetch as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.request();
+                                            _ret
+                                        }
+                                    });
+                        <Result<HttpRequest, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The request: `POST /api/v1/icons/fetch`, the hostname as its only field, no"]
+                    #[doc = " `Authorization`."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " `internal` if the body cannot be serialised (never)."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_iconfetch_request_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Result<HttpRequest, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<HttpRequest, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\tIconFetch\x05L The request: `POST /api/v1/icons/fetch`, the hostname as its only field, no\x11 `Authorization`.\0\t # Errors5 `internal` if the body cannot be serialised (never).\0\0\0\0\x07request\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            HttpRequest::post(ICONS_FETCH, &self.request, None)
+        }
+        #[doc = " Reads the answer: the PNG bytes."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc =
+        " The server\'s code for a non-`200` answer; `invalid_server_response` for a body that"]
+        #[doc = " is not an `image/png` PNG within the size limit."]
+        pub fn finish(&self, status: u16, body: &[u8])
+            -> Result<Vec<u8>, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Reads the answer: the PNG bytes."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " The server\'s code for a non-`200` answer; `invalid_server_response` for a body that"]
+                    #[doc = " is not an `image/png` PNG within the size limit."]
+                    #[export_name = "iconfetch_finish_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_IconFetch_finish(me:
+                            <IconFetch as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg2_1:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<Vec<u8>, CoreError>
+                            as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<IconFetch>();
+                                            let me =
+                                                unsafe {
+                                                    <IconFetch as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u16>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <u16 as
+                                                            wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u16 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let arg2 = &*arg2;
+                                            let _ret = me.finish(arg1, arg2);
+                                            _ret
+                                        }
+                                    });
+                        <Result<Vec<u8>, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Reads the answer: the PNG bytes."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc =
+                    " The server\'s code for a non-`200` answer; `invalid_server_response` for a body that"]
+                    #[doc = " is not an `image/png` PNG within the size limit."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_iconfetch_finish_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(2u32);
+                        <u16 as WasmDescribe>::describe();
+                        <&[u8] as WasmDescribe>::describe();
+                        <Result<Vec<u8>, CoreError> as WasmDescribe>::describe();
+                        <Result<Vec<u8>, CoreError> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\tIconFetch\x05! Reads the answer: the PNG bytes.\0\t # ErrorsT The server's code for a non-`200` answer; `invalid_server_response` for a body that1 is not an `image/png` PNG within the size limit.\0\x02\x06status\0\0\0\x04body\0\0\0\0\0\x06finish\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            let response: IconFetchResponse = json(status, body)?;
+            Ok(icon_finish(response)?)
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+}
 pub mod items {
     //! Items across the boundary: what a list or an item view shows, and what an edit asks for
     //! (ADR 0013 §3 rule 3, "Plaintext crosses at the smallest useful size"; ADR 0018 §6–§7; the
@@ -62489,6 +63291,7 @@ pub use generator::{
     password_entropy,
 };
 pub use http::{HttpRequest, check_meta, expect_no_content, meta_request};
+pub use icons::IconFetch;
 pub use items::{
     FieldView, HistoryEntryView, ItemDraft, ItemSummary, generate_element_id,
 };
