@@ -163,6 +163,12 @@ pub mod paths {
     /// [ADR 0053]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0053-hibp-breach-check-egress.md
     pub const ICONS_BREACH_RANGE: &str = "/api/v1/icons/breach-range";
 
+    /// The favicon fetch of the `icons` role ([ADR 0052] point 6; [`crate::icons`]). Not in
+    /// [`ALL`], for the same reason as [`ICONS_BREACH_RANGE`].
+    ///
+    /// [ADR 0052]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0052-icon-proxy-role.md
+    pub const ICONS_FETCH: &str = "/api/v1/icons/fetch";
+
     /// The prefix of every path the `icons` role serves.
     pub const ICONS_PREFIX: &str = "/api/v1/icons/";
 
@@ -227,6 +233,7 @@ mod tests {
     #[test]
     fn icons_paths_stay_apart_from_the_api_role() {
         assert!(paths::ICONS_BREACH_RANGE.starts_with(paths::ICONS_PREFIX));
+        assert!(paths::ICONS_FETCH.starts_with(paths::ICONS_PREFIX));
         assert!(paths::ICONS_PREFIX.starts_with(API_V1_PREFIX));
         assert!(
             paths::ALL

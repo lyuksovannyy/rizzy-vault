@@ -10,8 +10,8 @@ publish.workspace = true
 
 # Internal dependencies: exactly the ADR 0016 §3 row (`rizzy-proto` only), checked by
 # `cargo xtask check-deps`; R3 keeps storage, the bus, the domains, sqlx and `rizzy-core` out
-# ("it handles no keys"). Every external crate below is already in Cargo.lock through
-# `rizzy-server` and `rizzy-cli`: this crate adds no package to the graph.
+# ("it handles no keys"). Every external crate below but `image` is already in Cargo.lock
+# through `rizzy-server` and `rizzy-cli`.
 [dependencies]
 # The shared request and response types of the breach check and its range parser.
 rizzy-proto.workspace = true
@@ -28,6 +28,9 @@ http-body-util.workspace = true
 tokio-rustls.workspace = true
 rustls.workspace = true
 webpki-roots.workspace = true
+# Decoding fetched favicons and re-encoding them as PNG (ADR 0052 point 4; INV-76). The pin
+# and the six codecs: the workspace entry.
+image.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "net", "time", "sync", "io-util", "macros"] }

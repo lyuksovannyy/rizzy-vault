@@ -110,6 +110,12 @@
 #                      rizzy-client's constant-time verdict over what it accepts
 #   passkey_pkcs8      rizzy-core's hand-written PKCS#8 reader and writers for CXF passkey keys
 #                      (ADR 0074 §4): never panic; what parses writes back to a fixed point
+#   icon_decode        the icons role's image path (ADR 0052 point 4, INV-76): rizzy-icon-proxy's
+#                      decode-under-limits and PNG re-encode on arbitrary bytes (crafted and
+#                      oversized headers, decompression bombs); output is a bounded 128×128 PNG
+#   icon_discover      the icons role's page scan and URL resolution (ADR 0052 points 2–3): the
+#                      bounded <link rel="icon"> scan and the Location/href resolver on arbitrary
+#                      bytes; every accepted target is http(s), an RFC 1123 host, port 80 or 443
 #
 # The `import_*` targets share `fuzz_targets/import_common/mod.rs` (the checks on an import
 # result and a counting RNG), included with `#[path]`; it is not a target.
@@ -174,6 +180,7 @@ rizzy-cli = { path = "../crates/rizzy-cli" }
 # crate over rizzy-core; its external crates (url, idna and the ICU4X stack, psl) are the ones
 # the main workspace already locks and `cargo deny` already checks.
 rizzy-match = { path = "../crates/rizzy-match" }
+rizzy-icon-proxy = { path = "../crates/rizzy-icon-proxy" }
 
 # One [[bin]] per target. `test`, `doc` and `bench` are off because a libFuzzer entry point
 # (`#![no_main]` with `fuzz_target!`) is not a test, has no API to document and is not a benchmark.
@@ -313,6 +320,20 @@ bench = false
 [[bin]]
 name = "breach_range"
 path = "fuzz_targets/breach_range.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "icon_decode"
+path = "fuzz_targets/icon_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "icon_discover"
+path = "fuzz_targets/icon_discover.rs"
 test = false
 doc = false
 bench = false
