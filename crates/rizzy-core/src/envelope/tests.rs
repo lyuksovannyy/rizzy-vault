@@ -10,11 +10,11 @@ use rand_core::Rng as _;
 
 use super::parse::{self, MAX_SYMMETRIC_ENVELOPE_LEN, parse_for_purpose};
 use super::purpose::{
-    AccountKeyDeviceGrantCtx, AccountKeyLocalWrapCtx, AccountKeyRecoveryWrapCtx,
-    AccountKeyServerWrapCtx, AccountSettingsCtx, DeviceSecretKeysCtx, ExportFileCtx,
-    IdentitySecretKeysCtx, ItemKeyWrapCtx, ItemOpCtx, ItemSnapshotCtx, RetiredSecretKeyCtx,
-    ServerDbBackupCtx, ServerLoginStateCtx, ServerSecretsBackupCtx, ServerTotpSecretCtx, Side,
-    VaultKeySelfGrantCtx,
+    AccountKeyDeviceGrantCtx, AccountKeyForwardCtx, AccountKeyKeystoreWrapCtx,
+    AccountKeyLocalWrapCtx, AccountKeyRecoveryWrapCtx, AccountKeyServerWrapCtx, AccountSettingsCtx,
+    DeviceSecretKeysCtx, ExportFileCtx, IdentitySecretKeysCtx, ItemKeyWrapCtx, ItemOpCtx,
+    ItemSnapshotCtx, RetiredSecretKeyCtx, ServerDbBackupCtx, ServerLoginStateCtx,
+    ServerSecretsBackupCtx, ServerTotpSecretCtx, Side, VaultKeySelfGrantCtx,
 };
 use super::symmetric::{self, MAX_PLAINTEXT_LEN, OVERHEAD, server_open, server_seal, test_hooks};
 use super::*;
@@ -333,6 +333,25 @@ fn m1_context_layouts_account_key_wraps() {
         recovery_epoch: 6,
     };
     check(&c, &cat(&[a.as_bytes(), &[0, 0, 0, 5], &[0, 0, 0, 6]]));
+
+    // ADR 0057 / §8.4: E_ks has no password epoch and no kdf_id.
+    let c = AccountKeyKeystoreWrapCtx {
+        account_id: a,
+        device_id: d,
+        account_key_epoch: 9,
+    };
+    check(&c, &cat(&[a.as_bytes(), d.as_bytes(), &[0, 0, 0, 9]]));
+
+    let c = AccountKeyForwardCtx {
+        account_id: a,
+        device_id: d,
+        from_account_key_epoch: 2,
+        to_account_key_epoch: 0x0102_0304,
+    };
+    check(
+        &c,
+        &cat(&[a.as_bytes(), d.as_bytes(), &[0, 0, 0, 2], &[1, 2, 3, 4]]),
+    );
 
     let other = DeviceId::from_bytes([0x33; 16]);
     let c = AccountKeyDeviceGrantCtx {
