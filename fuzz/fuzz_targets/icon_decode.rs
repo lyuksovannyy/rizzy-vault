@@ -29,7 +29,13 @@ fuzz_target!(|data: &[u8]| {
 
 /// The width and height in a PNG's IHDR chunk (bytes 16..24).
 fn dimensions(png: &[u8]) -> (u32, u32) {
-    let w = png.get(16..20).and_then(|s| s.try_into().ok()).map(u32::from_be_bytes);
-    let h = png.get(20..24).and_then(|s| s.try_into().ok()).map(u32::from_be_bytes);
+    let w = png
+        .get(16..20)
+        .and_then(|s| s.try_into().ok())
+        .map(u32::from_be_bytes);
+    let h = png
+        .get(20..24)
+        .and_then(|s| s.try_into().ok())
+        .map(u32::from_be_bytes);
     (w.expect("IHDR width"), h.expect("IHDR height"))
 }
