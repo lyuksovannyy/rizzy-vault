@@ -57,9 +57,9 @@
 //! - **The `icons` role** ([ADR 0010] §1–§2; [ADR 0053]): `--roles icons` runs it, alone. It
 //!   refuses to start combined with another role, with `RIZZY_DATABASE_URL` set, or (checked
 //!   at startup, [`crate::server`]) when the secrets file or the `SQLite` database is visible
-//!   to it. Its breach check has its own switch, `RIZZY_BREACH_CHECK` = `off` (the default) or
-//!   `on` (ADR 0053 item 5, owner answer 2); this build has no favicon fetch, so with the
-//!   switch off the role serves nothing. Its cache volume is `RIZZY_ICON_CACHE_DIR` (default
+//!   to it. Running the role turns the favicon fetch on (ADR 0052; the role is off by default,
+//!   ADR 0010 owner decision 5). Its breach check has its own switch, `RIZZY_BREACH_CHECK` =
+//!   `off` (the default) or `on` (ADR 0053 item 5, owner answer 2). Its cache volume is `RIZZY_ICON_CACHE_DIR` (default
 //!   `/cache`), with ADR 0052's `RIZZY_ICON_CACHE_TTL_SECS` (default 14 days, 60 s to 365
 //!   days) and `RIZZY_ICON_CACHE_MAX_BYTES` (default 256 MiB, at least 1 MiB). The names
 //!   `RIZZY_BREACH_CHECK` and `RIZZY_ICON_CACHE_DIR` and the bounds are this crate's choice,
