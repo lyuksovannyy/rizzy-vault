@@ -103,7 +103,7 @@ export interface VaultContext {
   readonly generator: GeneratorMemory;
   /** Item icons from the server's `icons` role, for this unlocked session (packages/ui
    * `itemIcons.ts`). */
-  readonly icons: IconLoader;
+  readonly icons: IconLoader | undefined;
 }
 
 /** The vault (module docs). */
@@ -137,8 +137,14 @@ export function VaultView(props: {
   const generator = useGeneratorMemory();
   // One loader per unlocked session: the vault view unmounts on lock, which revokes every icon
   // URL and stops the queue (packages/ui `itemIcons.ts`).
-  const icons = useMemo(() => new IconLoader((host) => client.call("itemIcon", host)), [client]);
-  useEffect(() => () => icons.clear(), [icons]);
+  const [icons, setIcons] = useState<IconLoader | undefined>(undefined);
+  useEffect(() => {
+    // Made in the effect, so that a cleared loader (an unmount, or React's development-mode
+    // remount) is never reused.
+    const loader = new IconLoader((host) => client.call("itemIcon", host));
+    setIcons(loader);
+    return () => loader.clear();
+  }, [client]);
   const lockedRef = useRef(false);
   /** The latest session state, for the auto-lock (which runs outside a render). */
   const sessionRef = useRef(props.initialSession);

@@ -67,7 +67,8 @@ function isPopupRequest(value: unknown): value is PopupRequest {
     type === "item_fields" ||
     type === "reveal_field" ||
     type === "generate_password" ||
-    type === "get_status"
+    type === "get_status" ||
+    type === "item_icon"
   );
 }
 

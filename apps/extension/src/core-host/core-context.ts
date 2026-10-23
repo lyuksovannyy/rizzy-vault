@@ -25,6 +25,7 @@ import {
   findItemForUpdate,
   initCore,
   itemCredentials,
+  itemIcon,
   newElementId,
   newLoginChangeset,
   newLoginWithPasskeyChangeset,
@@ -170,6 +171,9 @@ function addPendingSavePrompt(pending: PendingSavePrompt): string {
  * note on the save-prompt race this fixes). Deliberately short: a stale offer reachable for too
  * long after the user has moved on is the wrong default for a security prompt. */
 const SAVE_PROMPT_LOCATION_TTL_MS = 2 * 60 * 1000;
+
+/** The longest website host an `item_icon` request may carry (the core bounds it again). */
+const MAX_WEBSITE_HOST_CHARS = 1024;
 
 /** The save-prompt offer's *location* index (`save-prompt-location.ts`'s own module docs) —
  * never its credentials, which stay solely in {@link pendingSavePrompts} above. Cleared on lock
@@ -904,6 +908,26 @@ export async function handlePopupRequest(ext: WebExtNamespace, request: PopupReq
         return { type: "error", code: "locked" };
       }
       return { type: "items", items: session.items().map(toContractItemSummary) };
+    case "item_icon": {
+      // ADR 0052 point 6: only while unlocked, and only the hostname leaves (the core refuses
+      // anything that is not one, and sends nothing for it).
+      if (session === undefined) {
+        return { type: "error", code: "locked" };
+      }
+      if (typeof request.websiteHost !== "string" || request.websiteHost.length > MAX_WEBSITE_HOST_CHARS) {
+        return { type: "error", code: "invalid_input" };
+      }
+      try {
+        const { serverOrigin } = await readAccountConfig();
+        if (serverOrigin === undefined) {
+          return { type: "error", code: "not_enrolled" };
+        }
+        const png = await itemIcon(serverOrigin, request.websiteHost);
+        return { type: "icon", png: png === undefined ? null : bytesToBase64(png) };
+      } catch (e) {
+        return { type: "error", code: errorCode(e, "item_icon_failed") };
+      }
+    }
     case "item_fields":
       if (session === undefined) {
         return { type: "error", code: "locked" };

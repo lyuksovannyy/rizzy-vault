@@ -4,6 +4,7 @@
 // Fetches the list once on mount; detail fields are fetched lazily per item (ADR 0013 §3 rule
 // 3: list views never carry more than title/username, so the detail call is what reveals a
 // concealed field on the user's own request).
+import { IconLoader, ItemIcon } from "@rizzy-vault/ui";
 import { useEffect, useMemo, useState } from "react";
 
 import type { ExtensionClient } from "../../core/client.ts";
@@ -20,6 +21,7 @@ interface ItemRow {
   readonly itemId: string;
   readonly title: string;
   readonly username: string;
+  readonly websiteHost?: string;
 }
 
 interface FieldRow {
@@ -34,6 +36,17 @@ export function ItemsView({ client, revision }: ItemsViewProps) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
+  // Item icons from the server's `icons` role (ADR 0052 point 6), one loader while this view is
+  // shown: the popup closes on lock, and unmounting revokes every icon URL (packages/ui
+  // `itemIcons.ts`). Only the hostname leaves the browser; no third-party image is loaded.
+  const [icons, setIcons] = useState<IconLoader | undefined>(undefined);
+  useEffect(() => {
+    // Made in the effect, so that a cleared loader (an unmount, or React's development-mode
+    // remount) is never reused.
+    const loader = new IconLoader((host) => client.itemIcon(host));
+    setIcons(loader);
+    return () => loader.clear();
+  }, [client]);
 
   useEffect(() => {
     void client
@@ -76,6 +89,7 @@ export function ItemsView({ client, revision }: ItemsViewProps) {
           {filtered?.map((item) => (
             <li key={item.itemId}>
               <button type="button" onClick={() => setSelected(item.itemId)}>
+                <ItemIcon icons={icons} websiteHost={item.websiteHost} size={16} />
                 {item.title} {item.username !== "" ? `(${item.username})` : undefined}
               </button>
             </li>
