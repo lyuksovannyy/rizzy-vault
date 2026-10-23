@@ -63,12 +63,12 @@
 //! be lost while the database is open, so no watchdog runs. A `web`-only process opens no
 //! database and holds nothing.
 //!
-//! For the `icons` role, which runs alone ([ADR 0010] §2; [ADR 0053]): no database, no secrets.
-//! [`check_icons_isolation`] refuses to start when the secrets file or the `SQLite` database is
-//! visible to the process (a database URL was already refused by the configuration), then the
-//! cache directory is created if missing and [`serve_icons`] serves [`http::icons_router`] on
-//! the listener. With the breach check off and no favicon fetch in this build, the role serves
-//! only `404`s and logs a warning saying so.
+//! For the `icons` role, which runs alone ([ADR 0010] §2; ADR 0052; [ADR 0053]): no database,
+//! no secrets. [`check_icons_isolation`] refuses to start when the secrets file or the `SQLite`
+//! database is visible to the process (a database URL was already refused by the
+//! configuration), then the cache directory is created if missing and [`serve_icons`] serves
+//! [`http::icons_router`] on the listener: the favicon fetch always, the breach check when
+//! `RIZZY_BREACH_CHECK=on`.
 //!
 //! **Core dumps** (threat model INV-60) are already off when this runs: [`crate::cli::main`]
 //! disables them first and refuses to start otherwise ([`crate::coredump`], ADR 0024). The
@@ -590,34 +590,28 @@ pub fn check_icons_isolation(config: &Config) -> Result<(), ServeError> {
     Ok(())
 }
 
-/// Builds the `icons` router state from `config`: the breach check when it is on, with the
-/// production connector ([`rizzy_icon_proxy::connect::PinnedTls`]) and the cache in
+/// Builds the `icons` router state from `config`: the favicon fetch (ADR 0052; the role is its
+/// switch) and the breach check when it is on, both with the production connector
+/// ([`rizzy_icon_proxy::connect::PinnedTls`]) and the one shared cache in
 /// `RIZZY_ICON_CACHE_DIR`, which is created if missing.
 ///
 /// # Errors
 /// [`ServeError::IconsCache`], [`ServeError::IconsTls`].
 pub fn icons_state(config: &Config) -> Result<http::icons::Icons, ServeError> {
-    let breach = if config.breach_check {
-        std::fs::create_dir_all(&config.icon_cache_dir)
-            .map_err(|e| ServeError::IconsCache(e.kind()))?;
-        let cache = rizzy_icon_proxy::cache::Cache::new(
-            config.icon_cache_dir.clone(),
-            config.icon_cache_ttl,
-            config.icon_cache_max_bytes,
-        );
-        let connector =
-            rizzy_icon_proxy::connect::PinnedTls::new().map_err(|_| ServeError::IconsTls)?;
-        Some(rizzy_icon_proxy::breach::BreachService::new(
-            Arc::new(connector),
-            cache,
-        ))
-    } else {
-        None
-    };
-    Ok(http::icons::Icons::new(
-        breach,
-        config.trusted_proxies.clone(),
-    ))
+    std::fs::create_dir_all(&config.icon_cache_dir)
+        .map_err(|e| ServeError::IconsCache(e.kind()))?;
+    let cache = rizzy_icon_proxy::cache::Cache::new(
+        config.icon_cache_dir.clone(),
+        config.icon_cache_ttl,
+        config.icon_cache_max_bytes,
+    );
+    let connector =
+        Arc::new(rizzy_icon_proxy::connect::PinnedTls::new().map_err(|_| ServeError::IconsTls)?);
+    let breach = config
+        .breach_check
+        .then(|| rizzy_icon_proxy::breach::BreachService::new(connector.clone(), cache.clone()));
+    let favicon = rizzy_icon_proxy::favicon::FaviconService::new(connector, cache);
+    Ok(http::icons::Icons::new(breach, config.trusted_proxies.clone()).with_favicon(favicon))
 }
 
 /// Runs the `icons` role alone until a shutdown signal (module docs).
@@ -627,15 +621,6 @@ pub fn icons_state(config: &Config) -> Result<http::icons::Icons, ServeError> {
 pub async fn serve_icons(config: &Config) -> Result<(), ServeError> {
     check_icons_isolation(config)?;
     let state = icons_state(config)?;
-    if !state.breach_check_on() {
-        log::warn(
-            "icons_nothing_enabled",
-            &[Field::Str(
-                "hint",
-                "set RIZZY_BREACH_CHECK=on to serve the breach check",
-            )],
-        );
-    }
     let app = http::icons_router(Arc::new(state));
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
@@ -936,8 +921,8 @@ mod tests {
     }
 
     /// ADR 0010 §2: the `icons` role refuses to start when it can see the secrets file or the
-    /// `SQLite` database; a missing cache directory is created; the breach check is off unless
-    /// switched on.
+    /// `SQLite` database; a missing cache directory is created; the favicon fetch is always on
+    /// and the breach check is off unless switched on.
     #[test]
     fn icons_isolation_and_state() {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -977,15 +962,19 @@ mod tests {
             })
             .unwrap()
         };
-        // Nothing visible: accepted; the breach check off serves nothing and creates nothing.
+        // Nothing visible: accepted; favicons on, the breach check off; the cache directory
+        // is created.
         let off = config(&[]);
         assert!(check_icons_isolation(&off).is_ok());
-        assert!(!icons_state(&off).unwrap().breach_check_on());
         assert!(!dir.join("cache").exists());
-        // On: the cache directory is created.
-        let on = config(&[(crate::config::BREACH_CHECK, "on".to_owned())]);
-        assert!(icons_state(&on).unwrap().breach_check_on());
+        let state = icons_state(&off).unwrap();
+        assert!(!state.breach_check_on());
+        assert!(state.favicons_on());
         assert!(dir.join("cache").is_dir());
+        // Breach check on.
+        let on = config(&[(crate::config::BREACH_CHECK, "on".to_owned())]);
+        let state = icons_state(&on).unwrap();
+        assert!(state.breach_check_on() && state.favicons_on());
         // A visible SQLite database, then a visible secrets file, refuse the start.
         std::fs::create_dir_all(dir.join("data")).unwrap();
         std::fs::write(dir.join("data").join(crate::config::SQLITE_FILE_NAME), b"").unwrap();
