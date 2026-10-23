@@ -139,14 +139,16 @@ export interface RunningServer {
   stop(): void;
 }
 
-/** Starts a server with open signup. */
-export async function startServer(): Promise<RunningServer> {
+/** Starts a server with open signup. `publicOrigin`, when given, is the origin clients use
+ * (a proxy in front of the server, `icons.spec.ts`); the server's own listener is then
+ * reached only through it. */
+export async function startServer(options: { readonly publicOrigin?: string } = {}): Promise<RunningServer> {
   const binary = serverBinary();
   const dir = mkdtempSync(join(tmpdir(), "rizzy-ext-e2e-server-"));
   mkdirSync(join(dir, "data"));
   mkdirSync(join(dir, "secrets"));
   const settings = (port: number): Record<string, string> => ({
-    RIZZY_ORIGIN: `http://127.0.0.1:${port}`,
+    RIZZY_ORIGIN: options.publicOrigin ?? `http://127.0.0.1:${port}`,
     RIZZY_LISTEN: `127.0.0.1:${port}`,
     // An ephemeral admin port, so parallel servers never collide on 8081 (ADR 0060 §2).
     RIZZY_ADMIN_LISTEN: "127.0.0.1:0",

@@ -1014,7 +1014,10 @@ export type PopupRequest =
   | { readonly type: "item_fields"; readonly itemId: string }
   | { readonly type: "reveal_field"; readonly itemId: string; readonly fieldId: string }
   | { readonly type: "generate_password"; readonly options: GeneratorOptions }
-  | { readonly type: "get_status" };
+  | { readonly type: "get_status" }
+  /** The icon of an item's website host (ADR 0052 point 6), fetched by the core from the
+   * account's server; only the hostname leaves the browser. */
+  | { readonly type: "item_icon"; readonly websiteHost: string };
 
 export interface GeneratorOptions {
   readonly kind: "password" | "passphrase";
@@ -1025,6 +1028,8 @@ export interface ItemSummary {
   readonly itemId: string;
   readonly title: string;
   readonly username: string;
+  /** The host of the item's first website, never the full URI (for its icon). */
+  readonly websiteHost?: string;
 }
 
 /** One displayed field of an item, popup-facing (`item_fields`): a trimmed `FieldView` — never
@@ -1051,6 +1056,8 @@ export type PopupResponse =
   | { readonly type: "locked" }
   | { readonly type: "synced" }
   | { readonly type: "items"; readonly items: readonly ItemSummary[] }
+  /** `item_icon`'s answer: the PNG as base64 (`messaging/bytes.ts`), or `null` for none. */
+  | { readonly type: "icon"; readonly png: string | null }
   | { readonly type: "fields"; readonly fields: readonly ItemFieldSummary[] }
   | { readonly type: "revealed"; readonly value: string }
   | { readonly type: "generated"; readonly value: string }
@@ -1091,6 +1098,7 @@ export const MESSAGE_TYPES = [
   "reveal_field",
   "generate_password",
   "get_status",
+  "item_icon",
   "status",
   "enrolled",
   "unlocked",
@@ -1100,5 +1108,6 @@ export const MESSAGE_TYPES = [
   "fields",
   "revealed",
   "generated",
+  "icon",
   "error",
 ] as const;

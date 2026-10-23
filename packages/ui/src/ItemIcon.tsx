@@ -22,16 +22,17 @@ export function useItemIcon(icons: IconLoader | undefined, websiteHost: string |
   );
 }
 
-/** The icon of one item (module docs). `size` is the image's CSS pixel size. */
+/** The icon of one item (module docs). `size` is the image's CSS pixel size. Without
+ * `itemType`, nothing is shown until there is a site icon. */
 export function ItemIcon(props: {
   readonly icons: IconLoader | undefined;
   readonly websiteHost: string | undefined;
-  readonly itemType: IconItemType | "unknown";
+  readonly itemType?: IconItemType | "unknown";
   readonly size: number;
 }) {
   const url = useItemIcon(props.icons, props.websiteHost);
   if (url === null) {
-    return <TypeIcon type={props.itemType} />;
+    return props.itemType === undefined ? null : <TypeIcon type={props.itemType} />;
   }
   return (
     <img

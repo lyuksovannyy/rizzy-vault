@@ -33,6 +33,7 @@ import {
   createPasskey as coreCreatePasskey,
   decideMatchCandidates,
   enrolDevice as coreEnrolDevice,
+  fetchItemIcon,
   fetchTransport,
   init,
   newElementId,
@@ -282,8 +283,25 @@ export async function unlockDevice(
 /** The popup's `ItemSummary` shape, mapped from `@rizzy-vault/core`'s richer one
  * (`messaging/contract.ts`'s `ItemSummary`: title/username/itemId only, list views never carry
  * more, ADR 0013 §3 rule 3). */
-export function toContractItemSummary(item: ItemSummary): { itemId: string; title: string; username: string } {
-  return { itemId: item.id, title: item.title, username: item.username ?? "" };
+export function toContractItemSummary(item: ItemSummary): {
+  itemId: string;
+  title: string;
+  username: string;
+  websiteHost?: string;
+} {
+  return {
+    itemId: item.id,
+    title: item.title,
+    username: item.username ?? "",
+    ...(item.websiteHost !== undefined ? { websiteHost: item.websiteHost } : {}),
+  };
+}
+
+/** The icon of an item's website host from `serverOrigin`'s `icons` role (ADR 0052 point 6):
+ * PNG bytes the core checked, or `undefined` when there is none to show. Only the hostname is
+ * sent, with no Authorization header (packages/core `fetchItemIcon`). */
+export function itemIcon(serverOrigin: string, websiteHost: string): Promise<Uint8Array | undefined> {
+  return fetchItemIcon(fetchTransport(serverOrigin), websiteHost);
 }
 
 /** The `createItem` changeset for a brand-new Login saved from a submitted form (ROADMAP §4.4
