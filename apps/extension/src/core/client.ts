@@ -15,6 +15,7 @@
 // depends on nothing extension-specific beyond the injected `transport`.
 import type { PopupRequest, PopupResponse } from "../messaging/contract.ts";
 import { ENSURE_CORE_MESSAGE } from "../background/ensure-core.ts";
+import { base64ToBytes } from "../messaging/bytes.ts";
 
 export type Transport = (request: PopupRequest) => Promise<PopupResponse>;
 
@@ -82,12 +83,24 @@ export class ExtensionClient {
     }
   }
 
-  async listItems(): Promise<ReadonlyArray<{ itemId: string; title: string; username: string }>> {
+  async listItems(): Promise<
+    ReadonlyArray<{ itemId: string; title: string; username: string; websiteHost?: string }>
+  > {
     const response = await this.#transport({ type: "list_items" });
     if (response.type !== "items") {
       throw this.#unexpected(response);
     }
     return response.items;
+  }
+
+  /** The icon of an item's website host (ADR 0052 point 6): PNG bytes, or `null` for none.
+   * Throws {@link ClientError} with `server_rate_limited` when the role asks to wait. */
+  async itemIcon(websiteHost: string): Promise<Uint8Array | null> {
+    const response = await this.#transport({ type: "item_icon", websiteHost });
+    if (response.type === "icon") {
+      return response.png === null ? null : base64ToBytes(response.png);
+    }
+    throw this.#unexpected(response);
   }
 
   async itemFields(
