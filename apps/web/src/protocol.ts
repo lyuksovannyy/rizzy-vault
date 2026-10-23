@@ -138,6 +138,10 @@ export interface CoreApi {
   /** A breach check of a password the UI already holds (a generated one), as bytes the Worker
    * zeroes; only a 5-character hash prefix is sent. */
   breachCheckPassword(password: Uint8Array): BreachResult;
+  /** The icon of an item's website host (ADR 0052), from this server's `icons` role: PNG bytes
+   * the core checked, or `null` when there is none to show. Only the hostname is sent. Runs
+   * beside the call queue (it touches no session state), and only while unlocked. */
+  itemIcon(websiteHost: string): Uint8Array | null;
   exportEncrypted(password: Uint8Array): EncryptedExport;
   exportBlockers(): string[];
   csvExportWarning(): string;
@@ -236,6 +240,7 @@ export const METHODS: readonly Method[] = [
   "totp",
   "breachCheckItem",
   "breachCheckPassword",
+  "itemIcon",
   "exportEncrypted",
   "exportBlockers",
   "csvExportWarning",

@@ -13,6 +13,7 @@ import {
   IconPlus,
   IconStarFilled,
   IconStarOutline,
+  ItemIcon,
   TypeIcon,
 } from "@rizzy-vault/ui";
 import { type KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
@@ -278,7 +279,7 @@ export function ItemsPane(props: {
                   onClick={() => openDetail(i.id)}
                 >
                   <span className="row-icon">
-                    <TypeIcon type={i.itemType} />
+                    <ItemIcon icons={ctx.icons} websiteHost={i.websiteHost} itemType={i.itemType} size={20} />
                   </span>
                   <span className="row-text">
                     <span className="row-title">{i.title === "" ? "(untitled)" : i.title}</span>
