@@ -305,6 +305,7 @@ fn backup_and_restore_commands() {
     let summary = rizzy_server::admin::BackupSummary {
         len: piped.len(),
         digest: piped[piped.len() - file::DIGEST_LEN..].try_into().unwrap(),
+        encrypted: None,
     };
     let digest = summary.digest_hex();
     assert_eq!(digest.len(), 64);

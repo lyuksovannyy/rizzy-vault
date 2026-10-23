@@ -552,7 +552,7 @@ fn backup_wipe_restore_drill() {
         // 2. Back up next to the running server: `backup` on a read-only reader, and the
         //    encrypted secrets backup. `restore` cannot run next to it.
         let backup_path = root.join("db.rvbackup");
-        let summary = admin::backup(&config, &backup_path).await.unwrap();
+        let summary = admin::backup(&config, &backup_path, false).await.unwrap();
         let backup_file = std::fs::read(&backup_path).unwrap();
         assert_eq!(summary.len, backup_file.len());
         assert_eq!(
