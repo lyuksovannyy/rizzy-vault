@@ -573,3 +573,140 @@ fn retire_setups_command() {
     start_check(&data, &secrets, now).unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The encrypted backup (ADR 0071) as the operator runs it through the binary: `--encrypt`
+/// without a backup key is a usage error; `secrets rotate --backup-key`; `backup --encrypt` to
+/// a file and to a pipe (format version 2, mode 0600, the key id on stderr); a later rotation;
+/// a tampered file and another instance's secrets refused; `restore` from the encrypted file.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the commands read top to bottom as the operator runs them"
+)]
+fn encrypted_backup_and_restore_commands() {
+    use rizzy_server::db_backup;
+
+    let dir = temp_dir("encrypted-backup");
+    let data = dir.join("data");
+    let restored = dir.join("restored");
+    let secrets_dir = dir.join("secrets");
+    let other_dir = dir.join("other-secrets");
+    for d in [&data, &restored, &secrets_dir, &other_dir] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let secrets = secrets_dir.join("secrets.json");
+    let other = other_dir.join("secrets.json");
+    let env = [
+        ("RIZZY_DATA_DIR", data.as_path()),
+        ("RIZZY_SECRETS_FILE", secrets.as_path()),
+    ];
+    let restored_env = [
+        ("RIZZY_DATA_DIR", restored.as_path()),
+        ("RIZZY_SECRETS_FILE", secrets.as_path()),
+    ];
+    let other_env = [
+        ("RIZZY_DATA_DIR", restored.as_path()),
+        ("RIZZY_SECRETS_FILE", other.as_path()),
+    ];
+    assert!(rizzy(&["secrets", "init"], &env).status.success());
+    assert!(rizzy(&["migrate"], &env).status.success());
+    let backup = dir.join("db.rvbackup");
+    let path = backup.to_str().unwrap();
+
+    // No backup key yet: a usage error that says what to run, and no file.
+    let out = rizzy(&["backup", "--encrypt", "--out", path], &env);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("secrets rotate --backup-key"), "{stderr}");
+    assert!(!backup.exists());
+    let out = rizzy(&["secrets", "rotate", "--data-key", "--backup-key"], &env);
+    assert_eq!(out.status.code(), Some(2));
+
+    let out = rizzy(&["secrets", "rotate", "--backup-key"], &env);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("new backup key 1 added"), "{stdout}");
+
+    // To a file.
+    let out = rizzy(&["backup", "--encrypt", "--out", path], &env);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(out.status.success(), "{stderr}");
+    assert!(out.stdout.is_empty());
+    assert!(
+        stderr.contains("encrypted database backup written (format version 2)")
+            && stderr.contains("backup key 1"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("SHA-256"), "{stderr}");
+    let written = std::fs::read(&backup).unwrap();
+    assert_eq!(db_backup::format_version(&written), Some(2));
+    assert_eq!(db_backup::parse_header(&written).unwrap().backup_key_id, 1);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&backup).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    // To a pipe.
+    let out = rizzy(&["backup", "--out", "-", "--encrypt"], &env);
+    assert!(out.status.success());
+    let piped = out.stdout;
+    assert_eq!(db_backup::parse_header(&piped).unwrap().backup_key_id, 1);
+    assert_ne!(piped, written, "a fresh backup_id and nonces per run");
+
+    // A later rotation: new backups use key 2; the file above still names key 1.
+    let out = rizzy(&["secrets", "rotate", "--backup-key"], &env);
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("new backup key 2")
+    );
+
+    // Refusals, each into the empty target.
+    let mut damaged = written.clone();
+    let at = damaged.len() - 30;
+    damaged[at] ^= 0x10;
+    let out = rizzy_with_stdin(&["restore", "--in", "-"], &restored_env, &damaged);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("chunk 0 failed authentication"), "{stderr}");
+    assert!(rizzy(&["secrets", "init"], &other_env).status.success());
+    let out = rizzy(&["restore", "--in", path], &other_env);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("backup key 1, which the secrets file does not hold"),
+        "{stderr}"
+    );
+
+    // Restore from the encrypted file: the report and the INV-59 notice.
+    let out = rizzy(&["restore", "--in", path], &restored_env);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("restored 0 rows"), "{stdout}");
+    assert!(stdout.contains("INV-59"), "{stdout}");
+    // The piped copy restores too, but not into the now non-empty database.
+    let out = rizzy_with_stdin(&["restore", "--in", "-"], &restored_env, &piped);
+    assert_eq!(out.status.code(), Some(1));
+
+    // A plain backup is unchanged: format version 1.
+    let plain = dir.join("plain.rvbackup");
+    assert!(
+        rizzy(&["backup", "--out", plain.to_str().unwrap()], &env)
+            .status
+            .success()
+    );
+    assert_eq!(
+        db_backup::format_version(&std::fs::read(&plain).unwrap()),
+        Some(1)
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
