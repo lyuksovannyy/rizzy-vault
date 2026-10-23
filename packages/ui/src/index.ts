@@ -37,6 +37,17 @@ export {
   TypeIcon,
 } from "./icons.tsx";
 export { ConfirmDialog, type ConfirmDialogProps } from "./ConfirmDialog.tsx";
+export { ItemIcon, useItemIcon } from "./ItemIcon.tsx";
+export {
+  type IconFetcher,
+  IconLoader,
+  type IconTimers,
+  type IconUrls,
+  MAX_CONCURRENT as ICON_MAX_CONCURRENT,
+  RATE_LIMIT_WAIT_MS as ICON_RATE_LIMIT_WAIT_MS,
+  blobUrls,
+  iconKey,
+} from "./itemIcons.ts";
 export { nextFocusIndex, trapTab } from "./focusTrap.ts";
 export { isAnyModalOpen, setModalOpen } from "./modalRegistry.ts";
 export {
