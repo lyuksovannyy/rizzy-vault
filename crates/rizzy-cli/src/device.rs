@@ -477,7 +477,7 @@ impl Device {
         let lock = AccountLock::acquire(&env.data_dir, &account)?;
         let mut db = Db::open(&cache_path(&env.data_dir, &account)).await?;
         let mut rows = db.read().await?;
-        let mut record = load::open(&rows)?;
+        let mut record = load::open(&rows, false)?;
         let http = Http::new(record.server_origin().as_str(), &env.trust)?;
         let mut typed_password = None;
         if record.stage() == Stage::SignupPending {
@@ -532,7 +532,7 @@ impl Device {
             db.write(&store::finalize_writes(&record.committed())?)
                 .await?;
             rows = db.read().await?;
-            record = load::open(&rows)?;
+            record = load::open(&rows, false)?;
         }
         let password = match typed_password {
             Some(password) => password,
@@ -1610,7 +1610,7 @@ impl Device {
                 .as_ref()
                 .map_or(self.password.as_str(), |(_, p)| p.as_str()),
         )?;
-        let promoted = DeviceRecord::parse(&self.record.encode()?)?.promote_pending();
+        let promoted = DeviceRecord::parse(&self.record.encode()?, false)?.promote_pending();
         let mut view = self.account_view().await?;
         let mut applied = self
             .settled(

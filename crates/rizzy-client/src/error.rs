@@ -150,6 +150,11 @@ pub enum ClientError {
     /// The device state holds no `E_local` (ADR 0026 §2, `has_local = 0`): it cannot unlock;
     /// the one path left is CRYPTO.md §11.3 step 5, "I changed my password on another device".
     LocalUnlockUnavailable,
+    /// The keystore unlock is not available on this device state (ADR 0057 §2): no `E_ks`, an
+    /// `E_ks` the released secret does not open, or a keystore-only unlock that would extend
+    /// the `ACCOUNT_KEY_FORWARD` chain past [`crate::device::MAX_FORWARD_COUNT`] (owner
+    /// answer 2: read-only on that path). The host asks for the password instead.
+    KeystoreUnlockUnavailable,
     /// The server refused a registration's OPAQUE setup (`setup_retired`) again after the
     /// registration was restarted once under the current setup (ADR 0031 point 8, "Risks": at
     /// most one restart per commit attempt). The pending change is kept; the host reports it.
@@ -239,6 +244,7 @@ impl ClientError {
             Self::CacheCorrupt => "cache_corrupt",
             Self::SignupPending => "signup_pending",
             Self::LocalUnlockUnavailable => "local_unlock_unavailable",
+            Self::KeystoreUnlockUnavailable => "keystore_unlock_unavailable",
             Self::DeviceStateOutdated => "device_state_outdated",
             Self::SetupRetired => "setup_retired",
             Self::SettingsUpdateRequired => "settings_update_required",
@@ -319,6 +325,7 @@ impl fmt::Display for ClientError {
             }
             Self::SignupPending => "the signup has not been acknowledged yet",
             Self::LocalUnlockUnavailable => "this device can no longer unlock with a password",
+            Self::KeystoreUnlockUnavailable => "unlock with the password instead",
             Self::DeviceStateOutdated => "the local data is older than this device's own history",
             Self::SetupRetired => {
                 "the server refused the registration again after it was restarted; try later"
@@ -398,6 +405,7 @@ mod tests {
             ClientError::CacheCorrupt,
             ClientError::SignupPending,
             ClientError::LocalUnlockUnavailable,
+            ClientError::KeystoreUnlockUnavailable,
             ClientError::DeviceStateOutdated,
             ClientError::SetupRetired,
             ClientError::SettingsUpdateRequired,

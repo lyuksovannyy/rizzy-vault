@@ -653,7 +653,7 @@ impl DeviceSession {
         let migration = store::load::migration_writes(&stored).map_err(CoreError::from)?;
         let mut rows = decode_rows(&cache_rows).map_err(CoreError::from)?;
         rows.apply(&migration);
-        let record = store::load::open(&rows).map_err(CoreError::from)?;
+        let record = store::load::open(&rows, false).map_err(CoreError::from)?;
         let unlocked = record.unlock(password.as_str()).map_err(CoreError::from)?;
         let loaded =
             store::load::load(&rows, &record, &unlocked, now_ms).map_err(CoreError::from)?;

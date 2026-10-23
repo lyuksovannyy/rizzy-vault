@@ -148,10 +148,13 @@ pub fn migration_writes(rows: &CacheRows) -> Result<Changeset, ClientError> {
 /// A cache of an older format must be migrated first ([`migration_writes`]): [`open`] knows
 /// only the current format's key set, and refuses an older one as corrupt.
 ///
+/// `keystore_capable` is the host's platform gate for the device-state record (ADR 0057 §2,
+/// INV-81, [`DeviceRecord::parse`]): `rv` and `rizzy-wasm` pass `false`.
+///
 /// # Errors
 /// [`ClientError::CacheUpdateRequired`] for a cache format or record version this build does
 /// not know; [`ClientError::CacheCorrupt`].
-pub fn open(rows: &CacheRows) -> Result<DeviceRecord, ClientError> {
+pub fn open(rows: &CacheRows, keystore_capable: bool) -> Result<DeviceRecord, ClientError> {
     let corrupt = ClientError::CacheCorrupt;
     let format = rows.meta.get(meta::FORMAT).ok_or(corrupt)?;
     let format = u16::from_be_bytes(format.as_slice().try_into().map_err(|_| corrupt)?);
@@ -165,7 +168,7 @@ pub fn open(rows: &CacheRows) -> Result<DeviceRecord, ClientError> {
     if rows.meta.len() != meta::ALL.len() || !meta::ALL.iter().all(|k| rows.meta.contains_key(*k)) {
         return Err(corrupt);
     }
-    let record = DeviceRecord::parse(rows.device_state.as_ref().ok_or(corrupt)?)?;
+    let record = DeviceRecord::parse(rows.device_state.as_ref().ok_or(corrupt)?, keystore_capable)?;
     let meta_is = |key: &str, value: &[u8]| rows.meta.get(key).is_some_and(|held| held == value);
     if !meta_is(meta::ACCOUNT_ID, record.account_id().as_bytes())
         || !meta_is(meta::DEVICE_ID, record.device_id().as_bytes())
