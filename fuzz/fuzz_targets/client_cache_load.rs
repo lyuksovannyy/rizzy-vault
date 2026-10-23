@@ -507,7 +507,7 @@ fn fixture() -> &'static Fixture {
 /// Opens and loads `rows`; checks what a loaded cache must satisfy (module docs). `valid`
 /// says the rows are the unmutated fixture, whose further own op must be admitted.
 fn run(rows: &CacheRows, unlocked: &UnlockedDevice, valid: bool) -> Result<(), ClientError> {
-    let record = open(rows)?;
+    let record = open(rows, false)?;
     let mut loaded = load(rows, &record, unlocked, NOW + 100)?;
     assert_eq!(loaded.vaults.len(), rows.vaults.len());
     let counter = rows
@@ -565,7 +565,7 @@ fn run(rows: &CacheRows, unlocked: &UnlockedDevice, valid: bool) -> Result<(), C
         if created.is_ok() && admitted.is_ok() {
             let mut next = copy(rows);
             next.apply(&changeset);
-            open(&next).expect("the record is untouched by an op");
+            open(&next, false).expect("the record is untouched by an op");
         }
     }
     Ok(())

@@ -679,6 +679,7 @@ impl Reregistering {
                 },
                 device_keys,
                 local_unlock_key: None,
+                keystore_secret: None,
             },
             vault_keys,
             wraps,

@@ -31,7 +31,7 @@ fn assert_canonical(record: &DeviceRecord) {
     let encoded = record
         .encode()
         .expect("a record built from a parsed one encodes");
-    let again = DeviceRecord::parse(&encoded).expect("and its encoding parses");
+    let again = DeviceRecord::parse(&encoded, false).expect("and its encoding parses");
     assert_eq!(
         again.encode().expect("encodes again").as_slice(),
         encoded.as_slice()
@@ -39,7 +39,7 @@ fn assert_canonical(record: &DeviceRecord) {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let record = match DeviceRecord::parse(data) {
+    let record = match DeviceRecord::parse(data, false) {
         Ok(record) => record,
         Err(e) => {
             assert!(matches!(
@@ -56,14 +56,14 @@ fuzz_target!(|data: &[u8]| {
         assert!(record.has_local() && !record.has_pending());
     }
     let has_pending = record.has_pending();
-    let promoted = DeviceRecord::parse(data)
+    let promoted = DeviceRecord::parse(data, false)
         .expect("parses twice")
         .promote_pending();
     assert!(!promoted.has_pending());
     // A pending record always carries `E_local'`.
     assert!(!has_pending || promoted.has_local());
     assert_canonical(&promoted);
-    assert_canonical(&DeviceRecord::parse(data).expect("parses").without_pending());
+    assert_canonical(&DeviceRecord::parse(data, false).expect("parses").without_pending());
     let committed = record.committed();
     assert_eq!(committed.stage(), Stage::Committed);
     assert_canonical(&committed);

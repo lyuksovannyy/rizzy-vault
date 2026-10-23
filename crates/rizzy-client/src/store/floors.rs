@@ -133,6 +133,9 @@ pub struct Floors {
     ops: BTreeMap<(Id16, Id16, u64), OpFloor>,
     /// The `snapshots` rows.
     snapshots: BTreeMap<(Id16, Id16), SnapshotFloor>,
+    /// The host's platform gate for a written device-state record (ADR 0057 §2, INV-81):
+    /// `false` (the default) refuses a record with `has_ks = 1`.
+    keystore_capable: bool,
 }
 
 impl core::fmt::Debug for Floors {
@@ -187,6 +190,14 @@ impl Floors {
     #[must_use]
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    /// Sets the platform gate a written device-state record is parsed under, the same
+    /// `keystore_capable` the host passes to [`crate::store::load::open`] (ADR 0057 §2,
+    /// INV-81). Off by default: `rv` and `rizzy-wasm` never set it, and only a binding on a
+    /// keystore that enforces user presence turns it on.
+    pub const fn set_keystore_capable(&mut self, keystore_capable: bool) {
+        self.keystore_capable = keystore_capable;
     }
 
     /// The floors of the rows a load verified. `state` is the verified `account-state`'s
@@ -410,7 +421,8 @@ impl Pending<'_> {
         match write {
             Write::Meta { key, value } => self.meta(key, value),
             Write::DeviceState(bytes) => {
-                let record = DeviceRecord::parse(bytes).map_err(corrupt)?;
+                let record =
+                    DeviceRecord::parse(bytes, self.base.keystore_capable).map_err(corrupt)?;
                 self.record = Some((
                     record.account_id().to_bytes(),
                     record.device_id().to_bytes(),

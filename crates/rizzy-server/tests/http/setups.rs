@@ -500,7 +500,7 @@ fn pending_changes_cross_a_rotation_and_a_retirement() {
         assert_eq!(reply.status, StatusCode::CONFLICT);
         assert_eq!(reply.error(), "setup_retired");
         // The restart of ADR 0031 point 8 from the stored request, as `rv` runs it.
-        let promoted = DeviceRecord::parse(&record.encode().unwrap())
+        let promoted = DeviceRecord::parse(&record.encode().unwrap(), false)
             .unwrap()
             .promote_pending();
         let pending_unlocked = record.unlock_pending(PASSWORD).unwrap();

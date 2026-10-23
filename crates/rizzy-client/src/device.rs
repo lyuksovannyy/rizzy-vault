@@ -26,10 +26,14 @@
 
 use core::fmt;
 
-use rizzy_core::envelope::purpose::{AccountKeyLocalWrapCtx, DeviceSecretKeysCtx};
+use rizzy_core::envelope::purpose::{
+    AccountKeyForwardCtx, AccountKeyKeystoreWrapCtx, AccountKeyLocalWrapCtx, DeviceSecretKeysCtx,
+};
 use rizzy_core::ids::{AccountId, DeviceId};
 use rizzy_core::kdf::KdfId;
-use rizzy_core::keys::{AccountKey, DEVICE_SALT_LEN, DeviceKeys, LocalUnlockKey};
+use rizzy_core::keys::{
+    AccountKey, DEVICE_SALT_LEN, DeviceKeys, KeystoreUnlockSecret, LocalUnlockKey,
+};
 use rizzy_core::normalize::ServerOrigin;
 use rizzy_core::opaque::PasswordInput;
 use rizzy_core::rng::CryptoRng;
@@ -50,6 +54,35 @@ pub(crate) struct LocalWrap {
     pub(crate) account_key_epoch: u32,
     /// The password epoch of the local wrap.
     pub(crate) password_epoch: u32,
+}
+
+/// The most `ACCOUNT_KEY_FORWARD` envelopes a device state holds (ADR 0057 §2,
+/// `forward_count ≤ 8`). A keystore-only unlock that would write a ninth is refused until a
+/// password unlock collapses the chain (owner answer 2).
+pub const MAX_FORWARD_COUNT: usize = 8;
+
+/// `E_ks` with the epoch of its context (ADR 0057 §2 `[ks]`): the account key under the
+/// keystore unlock secret (`ACCOUNT_KEY_KEYSTORE_WRAP`, CRYPTO.md §8.4). The secret itself is
+/// never stored here (INV-82).
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct KeystoreWrap {
+    /// The `ACCOUNT_KEY_KEYSTORE_WRAP` envelope.
+    pub(crate) envelope: Vec<u8>,
+    /// The epoch of the wrapped account key.
+    pub(crate) account_key_epoch: u32,
+}
+
+/// One `ACCOUNT_KEY_FORWARD` envelope with the epochs of its context (ADR 0057 §2 `forward`):
+/// the account key of `to_account_key_epoch` under the one of `from_account_key_epoch`,
+/// written after a keystore unlock that crossed a rotation (CRYPTO.md §11.3 step 4.3).
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ForwardWrap {
+    /// The `ACCOUNT_KEY_FORWARD` envelope.
+    pub(crate) envelope: Vec<u8>,
+    /// The epoch of the wrapping (older) account key.
+    pub(crate) from_account_key_epoch: u32,
+    /// The epoch of the wrapped (newer) account key.
+    pub(crate) to_account_key_epoch: u32,
 }
 
 /// The state of an enrolled device (see the module docs). Not `Clone`; `Debug` shows ids and
@@ -73,6 +106,11 @@ pub struct DeviceState {
     pub(crate) local_wrap: LocalWrap,
     /// `E_dev`.
     pub(crate) device_keys_wrap: Vec<u8>,
+    /// `E_ks`, if keystore unlock is on (ADR 0057 §2).
+    pub(crate) keystore_wrap: Option<KeystoreWrap>,
+    /// The `ACCOUNT_KEY_FORWARD` chain from `E_local`'s epoch to the current account key,
+    /// oldest first; empty unless a keystore unlock crossed a rotation (ADR 0057 §2).
+    pub(crate) forward: Vec<ForwardWrap>,
     /// The pin of the last verified account answer.
     pub(crate) pin: AccountPin,
 }
@@ -162,6 +200,8 @@ impl DeviceState {
             kdf_id,
             local_wrap,
             device_keys_wrap,
+            keystore_wrap: None,
+            forward: Vec::new(),
             pin: new.pin,
         })
     }
@@ -218,9 +258,42 @@ impl DeviceState {
                 device_salt: &self.device_salt,
                 kdf_id: self.kdf_id,
                 local_wrap: &self.local_wrap,
+                forward: &self.forward,
                 device_keys_wrap: &self.device_keys_wrap,
             },
         )
+    }
+
+    /// The keystore unlock (CRYPTO.md §5.6 step 3, §11.3 step 1; ADR 0057 §2): `secret` is the
+    /// keystore unlock secret the OS released after its user-presence check. It opens `E_ks`
+    /// with the context rebuilt from the epoch stored next to it, then `E_dev`. No Argon2id runs
+    /// and `E_local` is not opened.
+    ///
+    /// # Errors
+    /// [`ClientError::KeystoreUnlockUnavailable`] without `E_ks`, or when `E_ks` does not open
+    /// under `secret` (a stale or replaced keystore item): the host falls back to the password;
+    /// [`ClientError::InvalidInput`] unless `secret` is 32 bytes; [`ClientError::CacheCorrupt`]
+    /// when `E_dev` does not open under the key `E_ks` gave.
+    pub fn unlock_keystore(&self, secret: &[u8]) -> Result<UnlockedDevice, ClientError> {
+        keystore_unlock(
+            secret,
+            self.account_id,
+            self.device_id,
+            self.keystore_wrap.as_ref(),
+            &self.device_keys_wrap,
+        )
+    }
+
+    /// Whether `E_ks` is present (keystore unlock is on).
+    #[must_use]
+    pub const fn has_keystore(&self) -> bool {
+        self.keystore_wrap.is_some()
+    }
+
+    /// How many `ACCOUNT_KEY_FORWARD` envelopes the state holds.
+    #[must_use]
+    pub const fn forward_count(&self) -> usize {
+        self.forward.len()
     }
 
     /// The device-state record of this state (ADR 0026 §2), without a pending record: what
@@ -242,6 +315,8 @@ impl DeviceState {
             kdf_id: self.kdf_id,
             device_keys_wrap: self.device_keys_wrap.clone(),
             local_wrap: Some(self.local_wrap.clone()),
+            keystore_wrap: self.keystore_wrap.clone(),
+            forward: self.forward.clone(),
             pending: None,
         })
     }
@@ -311,6 +386,8 @@ pub(crate) struct OfflineUnlock<'a> {
     pub(crate) kdf_id: KdfId,
     /// `E_local` and the epochs of its context.
     pub(crate) local_wrap: &'a LocalWrap,
+    /// The `ACCOUNT_KEY_FORWARD` chain from `E_local`'s epoch, oldest first.
+    pub(crate) forward: &'a [ForwardWrap],
     /// `E_dev`.
     pub(crate) device_keys_wrap: &'a [u8],
 }
@@ -347,6 +424,12 @@ pub(crate) fn offline_unlock(
     let account_key = local
         .unwrap_account_key(&ctx, &fields.local_wrap.envelope)
         .map_err(|_| ClientError::WrongPasswordOrSecretKey)?;
+    let account_key = follow_forward(
+        fields.account_id,
+        fields.device_id,
+        account_key,
+        fields.forward,
+    )?;
     let device_keys = account_key
         .unwrap_device_keys(
             &DeviceSecretKeysCtx {
@@ -362,6 +445,84 @@ pub(crate) fn offline_unlock(
         account_key,
         device_keys,
         local_unlock_key: Some(local),
+        keystore_secret: None,
+    })
+}
+
+/// Follows the `ACCOUNT_KEY_FORWARD` chain from the key `E_local` gave to the newest one
+/// (CRYPTO.md §5.6 step 3, §11.3 step 4.3). Each envelope must start at the epoch the previous
+/// one reached; the caller checks the final key against `state.account_key_id` online.
+///
+/// # Errors
+/// [`ClientError::CacheCorrupt`] for a broken chain or an envelope that does not open: the
+/// password was right (`E_local` opened), so the state is damaged (ADR 0026 §5 (d)).
+pub(crate) fn follow_forward(
+    account_id: AccountId,
+    device_id: DeviceId,
+    mut account_key: AccountKey,
+    forward: &[ForwardWrap],
+) -> Result<AccountKey, ClientError> {
+    for step in forward {
+        if step.from_account_key_epoch != account_key.epoch() {
+            return Err(ClientError::CacheCorrupt);
+        }
+        account_key = account_key
+            .unwrap_forward(
+                &AccountKeyForwardCtx {
+                    account_id,
+                    device_id,
+                    from_account_key_epoch: step.from_account_key_epoch,
+                    to_account_key_epoch: step.to_account_key_epoch,
+                },
+                &step.envelope,
+            )
+            .map_err(|_| ClientError::CacheCorrupt)?;
+    }
+    Ok(account_key)
+}
+
+/// The keystore unlock (CRYPTO.md §5.6 step 3): `E_ks` under the released secret, then
+/// `E_dev`. The secret is kept in the returned [`UnlockedDevice`] until the online part is
+/// done, to re-wrap `E_ks` if it crosses a rotation (§11.3 step 4.3).
+///
+/// # Errors
+/// As [`DeviceState::unlock_keystore`].
+pub(crate) fn keystore_unlock(
+    secret: &[u8],
+    account_id: AccountId,
+    device_id: DeviceId,
+    keystore_wrap: Option<&KeystoreWrap>,
+    device_keys_wrap: &[u8],
+) -> Result<UnlockedDevice, ClientError> {
+    let keystore_wrap = keystore_wrap.ok_or(ClientError::KeystoreUnlockUnavailable)?;
+    let secret = KeystoreUnlockSecret::from_slice(secret, account_id, device_id)
+        .map_err(|_| ClientError::InvalidInput)?;
+    let account_key = secret
+        .unwrap_account_key(
+            &AccountKeyKeystoreWrapCtx {
+                account_id,
+                device_id,
+                account_key_epoch: keystore_wrap.account_key_epoch,
+            },
+            &keystore_wrap.envelope,
+        )
+        .map_err(|_| ClientError::KeystoreUnlockUnavailable)?;
+    let device_keys = account_key
+        .unwrap_device_keys(
+            &DeviceSecretKeysCtx {
+                account_id,
+                device_id,
+            },
+            device_keys_wrap,
+        )
+        .map_err(|_| ClientError::CacheCorrupt)?;
+    Ok(UnlockedDevice {
+        account_id,
+        device_id,
+        account_key,
+        device_keys,
+        local_unlock_key: None,
+        keystore_secret: Some(secret),
     })
 }
 
@@ -405,6 +566,9 @@ pub struct UnlockedDevice {
     pub(crate) device_keys: DeviceKeys,
     /// The local unlock key, kept until the online part is done (§11.3 step 4.3).
     pub(crate) local_unlock_key: Option<LocalUnlockKey>,
+    /// The keystore unlock secret, kept until the online part is done (§11.3 step 4.3): set by
+    /// a keystore unlock, or attached by the host after a password unlock.
+    pub(crate) keystore_secret: Option<KeystoreUnlockSecret>,
 }
 
 impl fmt::Debug for UnlockedDevice {
@@ -439,5 +603,6 @@ impl UnlockedDevice {
     /// Drops the local unlock key once the online part of the unlock is done.
     pub fn forget_unlock_key(&mut self) {
         self.local_unlock_key = None;
+        self.keystore_secret = None;
     }
 }

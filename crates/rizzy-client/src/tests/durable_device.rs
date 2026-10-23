@@ -65,7 +65,7 @@ fn extension_device_enrols_persists_cache_reloads_and_syncs() {
     // A fresh browser session: nothing above is kept, only `rows` (as if just read back from
     // IndexedDB). The offline unlock first (CRYPTO.md §11.3 step 1), then the local verify of
     // every account object the cache holds, no network (ADR 0026 §4 step 5).
-    let reopened_record = load::open(&rows).unwrap();
+    let reopened_record = load::open(&rows, false).unwrap();
     assert_eq!(
         reopened_record.unlock("wrong password").unwrap_err(),
         ClientError::WrongPasswordOrSecretKey
@@ -150,7 +150,7 @@ fn extension_device_enrols_persists_cache_reloads_and_syncs() {
     // A third reopen, from the rows this cycle persisted, with nothing of `vault`/`floors`
     // carried over: the item this device wrote is there, through the same offline unlock and
     // local verify every reopen runs.
-    let third_record = load::open(&rows).unwrap();
+    let third_record = load::open(&rows, false).unwrap();
     let third_unlocked = third_record.unlock(PASSWORD).unwrap();
     let third_loaded = load::load(&rows, &third_record, &third_unlocked, T0 + 4000).unwrap();
     let mut third_vault = third_loaded.vaults.into_iter().next().unwrap();
