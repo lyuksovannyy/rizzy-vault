@@ -54,6 +54,9 @@
 #   db_backup_parse    rizzy-storage's logical backup file parser and writer (ADR 0023 §3):
 #                      arbitrary bytes, with and without a valid digest, and generated dumps
 #                      round-tripped
+#   db_backup_container rizzy-server's encrypted backup container, format version 2 (ADR 0071,
+#                      CRYPTO.md §9.8): arbitrary bytes, with and without the magic and
+#                      version, and sealed files mutated (flips, truncation, header edits)
 #   client_export      rizzy-client's export-file JSON reader: the whole-file cap, the strict
 #                      parser and the header checks (§11.14)
 #   client_export_payload rizzy-client's export payload reader and the import mapping behind
@@ -352,6 +355,13 @@ bench = false
 [[bin]]
 name = "db_backup_parse"
 path = "fuzz_targets/db_backup_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "db_backup_container"
+path = "fuzz_targets/db_backup_container.rs"
 test = false
 doc = false
 bench = false
