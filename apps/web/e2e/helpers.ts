@@ -7,11 +7,16 @@ import { type Locator, type Page, expect } from "@playwright/test";
 
 export const PASSWORD = "correct horse battery staple";
 
+/** The `icons` role's favicon endpoint (ADR 0052 point 6). */
+export const ICONS_FETCH_PATH = "/api/v1/icons/fetch";
+
 /** Collects console errors and page errors of a page. */
 export function watch(page: Page): { problems: string[] } {
   const problems: string[] = [];
   page.on("console", (m) => {
-    if (m.type() === "error") {
+    // The e2e server runs no `icons` role, so an item with a website gets `404` from
+    // `/api/v1/icons/fetch` (ADR 0052): the expected "no icon" answer, which the browser logs.
+    if (m.type() === "error" && !(/\b404\b/.test(m.text()) && m.location().url.endsWith(ICONS_FETCH_PATH))) {
       problems.push(`console: ${m.text()}`);
     }
   });
