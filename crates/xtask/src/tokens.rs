@@ -23,7 +23,7 @@
 //!
 //! # The source format
 //!
-//! [`SOURCE`] is a JSON object with exactly six top-level keys:
+//! [`SOURCE`] is a JSON object with exactly seven top-level keys:
 //!
 //! - `color`: `{ "light": {...}, "dark": {...} }`, each an object with exactly [`COLOR_KEYS`] as
 //!   keys and a `#rrggbb` string value.
@@ -39,12 +39,37 @@
 //! - `shadow`: `{ "light": {...}, "dark": {...} }`, each an object with exactly [`SHADOW_KEYS`]
 //!   as keys and a non-empty, single-line string value. Shadow tokens are new in this change
 //!   (ROADMAP §4.5 asks the one data file to cover "color incl. light/dark, spacing, type,
-//!   radius, shadow"); nothing consumes `--shadow-1`/`--shadow-2` yet.
+//!   radius, shadow"). The web vault and the extension use them as the elevation scale
+//!   (docs/design/README.md "Elevation").
+//! - `motion`: the motion system (docs/design/README.md "Motion"), an object with exactly the
+//!   keys `duration` ([`DURATION_KEYS`], each `"<n>ms"`), `easing` ([`EASING_KEYS`], each a
+//!   four-number cubic Bézier `[x1, y1, x2, y2]` with `x1`/`x2` in `[0, 1]`), `distance`
+//!   ([`DISTANCE_KEYS`], single-line strings), `scale` ([`SCALE_KEYS`], numbers in
+//!   `[0.5, 1]`), `stagger` (`step` in ms, `max-items` a whole number), `loop`
+//!   (`max-iterations`, a whole number) and `reduced` (`duration` in ms). See "Motion" below.
 //!
 //! Every reader here fails closed, like every other `xtask` reader ([`mod@crate::metadata`],
 //! [`crate::manifest`]): a missing key, an extra key (catches a typo silently turning into "this
 //! key is just missing, defaulted"), a value of the wrong JSON type, or a contrast pair naming a
 //! colour key that does not exist in [`COLOR_KEYS`] is an error, never a silent default or skip.
+//!
+//! # Motion
+//!
+//! The motion tokens carry the accessibility rules of docs/design/README.md "Motion" as checks,
+//! so a token edit cannot break them silently: no duration exceeds [`MOTION_MAX_MS`] (5 s, the
+//! limit WCAG 2.2.2 sets for motion that starts on its own), the one looping animation
+//! (`duration.shimmer` times `loop.max-iterations`) also stays within it, the whole stagger of
+//! a list (`stagger.step` times `stagger.max-items`) stays within [`STAGGER_MAX_MS`], and the
+//! reduced-motion crossfade (`reduced.duration`) stays within [`REDUCED_MAX_MS`].
+//!
+//! The CSS output declares every motion token in `:root` and then redefines them under
+//! `@media (prefers-reduced-motion: reduce)` (WCAG 2.3.3): every duration becomes the smaller of
+//! itself and `reduced.duration`, the shimmer and the stagger become `0ms`, the loop count
+//! `0`, every distance `0px` and every scale `1`. A component that animates only through
+//! these tokens thus degrades to a short crossfade with no movement, with no reduced-motion
+//! rule of its own. The native outputs carry durations as numbers (milliseconds, or seconds for
+//! Swift's `TimeInterval`) and easings as each toolkit's own cubic-Bézier form, both lossless;
+//! distances keep their CSS unit as a string, like spacing (module docs above).
 //!
 //! # Contrast
 //!
@@ -95,36 +120,74 @@ const OUTPUTS: [&str; 5] = [
 pub(crate) const COLOR_KEYS: &[&str] = &[
     "bg",
     "surface",
+    "surface-raised",
+    "surface-hover",
     "border",
+    "border-strong",
     "text",
     "text-muted",
     "accent",
+    "accent-hover",
+    "accent-subtle",
     "on-accent",
     "danger",
     "on-danger",
+    "success",
+    "on-success",
     "warning-bg",
     "warning-text",
     "focus",
 ];
 
 /// Spacing token keys (`--space-<key>`), in declaration order.
-const SPACING_KEYS: &[&str] = &["1", "2", "3", "4", "6", "8"];
+const SPACING_KEYS: &[&str] = &["1", "2", "3", "4", "5", "6", "8", "10", "12"];
 
 /// Type token keys (`--<key>`, the key itself already spelling out the property name), in
 /// declaration order.
 const TYPE_KEYS: &[&str] = &[
     "font-body",
     "font-mono",
+    "font-size-caption",
     "font-size-small",
     "font-size-body",
+    "font-size-heading",
     "font-size-title",
+    "font-size-display",
+    "font-weight-regular",
+    "font-weight-medium",
+    "font-weight-semibold",
+    "line-height-tight",
+    "line-height-body",
 ];
 
 /// Radius token keys (`--radius-<key>`), in declaration order.
-const RADIUS_KEYS: &[&str] = &["1", "2"];
+const RADIUS_KEYS: &[&str] = &["1", "2", "3", "full"];
 
-/// Shadow token keys (`--shadow-<key>`), in declaration order.
-const SHADOW_KEYS: &[&str] = &["1", "2"];
+/// Shadow (elevation) token keys (`--shadow-<key>`), in declaration order.
+const SHADOW_KEYS: &[&str] = &["1", "2", "3"];
+
+/// Motion duration keys (`--motion-duration-<key>`), in declaration order (module docs, "Motion").
+const DURATION_KEYS: &[&str] = &["instant", "fast", "base", "slow", "shimmer"];
+
+/// Motion easing keys (`--motion-easing-<key>`), in declaration order.
+const EASING_KEYS: &[&str] = &["standard", "emphasized", "decelerate", "accelerate"];
+
+/// Motion distance keys (`--motion-distance-<key>`), in declaration order.
+const DISTANCE_KEYS: &[&str] = &["1", "2", "3"];
+
+/// Motion scale keys (`--motion-scale-<key>`), in declaration order.
+const SCALE_KEYS: &[&str] = &["enter", "press"];
+
+/// The longest any motion may run, in milliseconds: WCAG 2.2.2 (Pause, Stop, Hide) exempts
+/// motion that starts on its own only when it lasts 5 seconds or less (module docs, "Motion").
+pub(crate) const MOTION_MAX_MS: u32 = 5_000;
+
+/// The longest a list's whole entrance stagger may add, in milliseconds (docs/design/README.md
+/// "Choreography": a long list never makes its last row wait).
+pub(crate) const STAGGER_MAX_MS: u32 = 240;
+
+/// The longest the reduced-motion crossfade may be, in milliseconds.
+pub(crate) const REDUCED_MAX_MS: u32 = 200;
 
 /// The lowest `min-ratio` a declared pair may ask for (module docs, "Contrast"): WCAG 2 AA's
 /// 3:1, which applies to large text (SC 1.4.3) and to UI components and focus indicators
@@ -146,6 +209,30 @@ pub(crate) struct ContrastPair {
 /// ([`COLOR_KEYS`] and friends).
 pub(crate) type Props = Vec<(String, String)>;
 
+/// A cubic Bézier easing's control points, `[x1, y1, x2, y2]` (CSS `cubic-bezier()` order).
+pub(crate) type Bezier = [f64; 4];
+
+/// The parsed motion tokens (module docs, "Motion"). Durations are whole milliseconds.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Motion {
+    /// Durations in milliseconds, keyed by [`DURATION_KEYS`].
+    pub(crate) duration: Vec<(String, u32)>,
+    /// Easings, keyed by [`EASING_KEYS`].
+    pub(crate) easing: Vec<(String, Bezier)>,
+    /// Movement distances (CSS units), keyed by [`DISTANCE_KEYS`].
+    pub(crate) distance: Props,
+    /// Scale factors in `[0.5, 1]`, keyed by [`SCALE_KEYS`].
+    pub(crate) scale: Vec<(String, f64)>,
+    /// The delay between two staggered list items, in milliseconds.
+    pub(crate) stagger_step_ms: u32,
+    /// How many items of a list get a staggered entrance; the rest enter with the last one.
+    pub(crate) stagger_max_items: u32,
+    /// How many times the one looping animation (the loading shimmer) may run.
+    pub(crate) loop_max_iterations: u32,
+    /// The reduced-motion crossfade's duration, in milliseconds.
+    pub(crate) reduced_ms: u32,
+}
+
 /// The fully parsed and validated token source (module docs).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Tokens {
@@ -163,6 +250,8 @@ pub(crate) struct Tokens {
     pub(crate) shadow_light: Props,
     /// Dark-theme shadows, keyed by [`SHADOW_KEYS`].
     pub(crate) shadow_dark: Props,
+    /// The motion tokens (module docs, "Motion").
+    pub(crate) motion: Motion,
     /// Every declared contrast pair, checked in both themes.
     pub(crate) contrast_pairs: Vec<ContrastPair>,
 }
@@ -357,6 +446,7 @@ pub(crate) fn parse(text: &str) -> Result<Tokens, String> {
             "type",
             "radius",
             "shadow",
+            "motion",
         ],
         SOURCE,
     )?;
@@ -407,6 +497,12 @@ pub(crate) fn parse(text: &str) -> Result<Tokens, String> {
         &format!("{SOURCE}.contrast-pairs"),
     )?;
 
+    let motion = parse_motion(
+        top.get("motion")
+            .ok_or_else(|| format!("{SOURCE}.motion: missing"))?,
+        &format!("{SOURCE}.motion"),
+    )?;
+
     Ok(Tokens {
         color_light,
         color_dark,
@@ -415,8 +511,274 @@ pub(crate) fn parse(text: &str) -> Result<Tokens, String> {
         radius,
         shadow_light,
         shadow_dark,
+        motion,
         contrast_pairs,
     })
+}
+
+/// Reads a `"<n>ms"` duration string as whole milliseconds, at most [`MOTION_MAX_MS`].
+///
+/// # Errors
+///
+/// Returns a message when `value` is not such a string or is longer than 5 s.
+fn parse_ms(value: &Value, context: &str) -> Result<u32, String> {
+    let Value::String(s) = value else {
+        return Err(format!("{context}: expected a string like \"140ms\""));
+    };
+    let digits = s
+        .strip_suffix("ms")
+        .filter(|d| !d.is_empty() && d.len() <= 5 && d.chars().all(|c| c.is_ascii_digit()))
+        .ok_or_else(|| format!("{context}: {s:?} is not a duration like \"140ms\""))?;
+    let ms: u32 = digits
+        .parse()
+        .map_err(|_| format!("{context}: {s:?} is not a duration like \"140ms\""))?;
+    if ms > MOTION_MAX_MS {
+        return Err(format!(
+            "{context}: {ms}ms is longer than {MOTION_MAX_MS}ms (WCAG 2.2.2: no motion over 5 s)"
+        ));
+    }
+    Ok(ms)
+}
+
+/// Reads a JSON number that must be a whole number in `0..=max`.
+///
+/// # Errors
+///
+/// Returns a message when `value` is not such a number.
+fn parse_whole(value: &Value, max: u32, context: &str) -> Result<u32, String> {
+    value
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|n| *n <= max)
+        .ok_or_else(|| format!("{context}: expected a whole number from 0 to {max}"))
+}
+
+/// Reads a finite JSON number.
+///
+/// # Errors
+///
+/// Returns a message when `value` is not a finite number.
+fn parse_number(value: &Value, context: &str) -> Result<f64, String> {
+    value
+        .as_f64()
+        .filter(|n| n.is_finite())
+        .ok_or_else(|| format!("{context}: expected a number"))
+}
+
+/// Reads an object whose keys are exactly `keys` and returns its values in `keys`' order,
+/// each passed through `read`.
+///
+/// # Errors
+///
+/// Returns a message when `value` is not an object, [`check_keys`] rejects its keys, or
+/// `read` rejects a value.
+fn require_map<T>(
+    value: &Value,
+    keys: &[&str],
+    context: &str,
+    read: impl Fn(&Value, &str) -> Result<T, String>,
+) -> Result<Vec<(String, T)>, String> {
+    let Value::Object(map) = value else {
+        return Err(format!("{context}: expected an object"));
+    };
+    check_keys(map, keys, context)?;
+    let mut out = Vec::with_capacity(keys.len());
+    for key in keys {
+        let entry = map
+            .get(*key)
+            .ok_or_else(|| format!("{context}.{key}: missing"))?;
+        out.push(((*key).to_owned(), read(entry, &format!("{context}.{key}"))?));
+    }
+    Ok(out)
+}
+
+/// Reads one easing: four numbers, `x1`/`x2` within `[0, 1]` (a CSS `cubic-bezier()` is
+/// invalid otherwise), `y1`/`y2` within `[-1, 2]` (a bounded overshoot).
+///
+/// # Errors
+///
+/// Returns a message when `value` is not such an array.
+fn parse_bezier(value: &Value, context: &str) -> Result<Bezier, String> {
+    let Value::Array(items) = value else {
+        return Err(format!("{context}: expected [x1, y1, x2, y2]"));
+    };
+    if items.len() != 4 {
+        return Err(format!("{context}: expected [x1, y1, x2, y2]"));
+    }
+    let mut out = [0.0; 4];
+    for (i, item) in items.iter().enumerate() {
+        let n = parse_number(item, &format!("{context}[{i}]"))?;
+        let (lo, hi) = if i % 2 == 0 { (0.0, 1.0) } else { (-1.0, 2.0) };
+        if !(lo..=hi).contains(&n) {
+            return Err(format!("{context}[{i}]: {n} is outside [{lo}, {hi}]"));
+        }
+        out[i] = n;
+    }
+    Ok(out)
+}
+
+/// Reads and checks the `motion` group (module docs, "Motion").
+///
+/// # Errors
+///
+/// Returns a message for a malformed group, or one that breaks a motion limit.
+fn parse_motion(value: &Value, context: &str) -> Result<Motion, String> {
+    let Value::Object(map) = value else {
+        return Err(format!("{context}: expected an object"));
+    };
+    check_keys(
+        map,
+        &[
+            "duration", "easing", "distance", "scale", "stagger", "loop", "reduced",
+        ],
+        context,
+    )?;
+    let get = |key: &str| {
+        map.get(key)
+            .ok_or_else(|| format!("{context}.{key}: missing"))
+    };
+    let duration = require_map(
+        get("duration")?,
+        DURATION_KEYS,
+        &format!("{context}.duration"),
+        parse_ms,
+    )?;
+    let easing = require_map(
+        get("easing")?,
+        EASING_KEYS,
+        &format!("{context}.easing"),
+        parse_bezier,
+    )?;
+    let distance = require_object(
+        get("distance")?,
+        DISTANCE_KEYS,
+        &format!("{context}.distance"),
+    )?;
+    validate_single_line(&distance, &format!("{context}.distance"))?;
+    let scale = require_map(
+        get("scale")?,
+        SCALE_KEYS,
+        &format!("{context}.scale"),
+        |v, c| {
+            let n = parse_number(v, c)?;
+            if (0.5..=1.0).contains(&n) {
+                Ok(n)
+            } else {
+                Err(format!("{c}: {n} is outside [0.5, 1]"))
+            }
+        },
+    )?;
+    let stagger_context = format!("{context}.stagger");
+    let Value::Object(stagger) = get("stagger")? else {
+        return Err(format!("{stagger_context}: expected an object"));
+    };
+    check_keys(stagger, &["step", "max-items"], &stagger_context)?;
+    let stagger_step_ms = parse_ms(
+        stagger.get("step").unwrap_or(&Value::Null),
+        &format!("{stagger_context}.step"),
+    )?;
+    let stagger_max_items = parse_whole(
+        stagger.get("max-items").unwrap_or(&Value::Null),
+        50,
+        &format!("{stagger_context}.max-items"),
+    )?;
+    let motion = Motion {
+        duration,
+        easing,
+        distance,
+        scale,
+        stagger_step_ms,
+        stagger_max_items,
+        loop_max_iterations: require_single(
+            get("loop")?,
+            "max-iterations",
+            &format!("{context}.loop"),
+            |v, c| parse_whole(v, 100, c),
+        )?,
+        reduced_ms: require_single(
+            get("reduced")?,
+            "duration",
+            &format!("{context}.reduced"),
+            parse_ms,
+        )?,
+    };
+    check_motion_limits(&motion, context)?;
+    Ok(motion)
+}
+
+/// Reads an object with exactly one key, `key`, and returns its value passed through `read`.
+///
+/// # Errors
+///
+/// Returns a message when `value` is not such an object or `read` rejects the value.
+fn require_single<T>(
+    value: &Value,
+    key: &str,
+    context: &str,
+    read: impl Fn(&Value, &str) -> Result<T, String>,
+) -> Result<T, String> {
+    let Value::Object(map) = value else {
+        return Err(format!("{context}: expected an object"));
+    };
+    check_keys(map, &[key], context)?;
+    read(
+        map.get(key).unwrap_or(&Value::Null),
+        &format!("{context}.{key}"),
+    )
+}
+
+/// The limits on the motion tokens as a whole (module docs, "Motion"): the list stagger, the
+/// shimmer loop and the reduced-motion crossfade. Each single duration is already capped by
+/// [`parse_ms`].
+///
+/// # Errors
+///
+/// Returns a message naming the first limit broken.
+fn check_motion_limits(motion: &Motion, context: &str) -> Result<(), String> {
+    let stagger_ms = motion
+        .stagger_step_ms
+        .saturating_mul(motion.stagger_max_items);
+    if stagger_ms > STAGGER_MAX_MS {
+        return Err(format!(
+            "{context}.stagger: step x max-items is {stagger_ms}ms, over the {STAGGER_MAX_MS}ms cap"
+        ));
+    }
+    let shimmer_ms = motion
+        .duration
+        .iter()
+        .find(|(k, _)| k == "shimmer")
+        .map_or(0, |(_, v)| *v);
+    let loop_ms = shimmer_ms.saturating_mul(motion.loop_max_iterations);
+    if loop_ms > MOTION_MAX_MS {
+        return Err(format!(
+            "{context}.loop: duration.shimmer x max-iterations is {loop_ms}ms, over \
+             {MOTION_MAX_MS}ms (WCAG 2.2.2: no motion over 5 s)"
+        ));
+    }
+    if motion.reduced_ms > REDUCED_MAX_MS {
+        return Err(format!(
+            "{context}.reduced.duration: {}ms is over the {REDUCED_MAX_MS}ms reduced-motion cap",
+            motion.reduced_ms
+        ));
+    }
+    Ok(())
+}
+
+/// A number in its shortest round-tripping decimal form (`1`, `0`, `0.2`), the form every
+/// generated file writes easing and scale values in.
+fn num(n: f64) -> String {
+    format!("{n}")
+}
+
+/// An easing as a CSS `cubic-bezier(x1, y1, x2, y2)`.
+fn css_bezier(b: &Bezier) -> String {
+    format!(
+        "cubic-bezier({}, {}, {}, {})",
+        num(b[0]),
+        num(b[1]),
+        num(b[2]),
+        num(b[3])
+    )
 }
 
 /// One sRGB channel (0-255) to linear light, the WCAG 2 relative-luminance formula's first step.
@@ -535,6 +897,71 @@ fn push_theme_vars(out: &mut String, colors: &Props, shadows: &Props, indent: &s
     let _ = writeln!(out);
     for (key, value) in shadows {
         push_decl(out, indent, &format!("shadow-{key}"), value);
+    }
+}
+
+/// Appends every motion custom property at `indent` (module docs, "Motion"); with `reduced`, the
+/// values the `prefers-reduced-motion: reduce` block redefines them to.
+fn push_motion_vars(out: &mut String, motion: &Motion, indent: &str, reduced: bool) {
+    for (key, ms) in &motion.duration {
+        let value = match (reduced, key.as_str()) {
+            (false, _) => *ms,
+            (true, "shimmer") => 0,
+            (true, _) => (*ms).min(motion.reduced_ms),
+        };
+        push_decl(
+            out,
+            indent,
+            &format!("motion-duration-{key}"),
+            &format!("{value}ms"),
+        );
+    }
+    if !reduced {
+        for (key, bezier) in &motion.easing {
+            push_decl(
+                out,
+                indent,
+                &format!("motion-easing-{key}"),
+                &css_bezier(bezier),
+            );
+        }
+    }
+    for (key, value) in &motion.distance {
+        let value = if reduced { "0px" } else { value.as_str() };
+        push_decl(out, indent, &format!("motion-distance-{key}"), value);
+    }
+    for (key, value) in &motion.scale {
+        let value = if reduced { 1.0 } else { *value };
+        push_decl(out, indent, &format!("motion-scale-{key}"), &num(value));
+    }
+    let step = if reduced { 0 } else { motion.stagger_step_ms };
+    push_decl(out, indent, "motion-stagger-step", &format!("{step}ms"));
+    if !reduced {
+        push_decl(
+            out,
+            indent,
+            "motion-stagger-max-items",
+            &motion.stagger_max_items.to_string(),
+        );
+    }
+    let iterations = if reduced {
+        0
+    } else {
+        motion.loop_max_iterations
+    };
+    push_decl(
+        out,
+        indent,
+        "motion-loop-max-iterations",
+        &iterations.to_string(),
+    );
+    if !reduced {
+        push_decl(
+            out,
+            indent,
+            "motion-duration-reduced",
+            &format!("{}ms", motion.reduced_ms),
+        );
     }
 }
 
@@ -696,6 +1123,20 @@ pub(crate) fn render_css(tokens: &Tokens) -> String {
     for (key, value) in &tokens.shadow_light {
         push_decl(&mut out, "  ", &format!("shadow-{key}"), value);
     }
+    let _ = writeln!(out);
+    push_motion_vars(&mut out, &tokens.motion, "  ", false);
+    let _ = writeln!(out, "}}");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "/* Reduced motion (WCAG 2.3.3; module docs on `generate-tokens`, \"Motion\"): every duration\n   \
+         is capped to a short crossfade, every distance and scale becomes a no-op, the shimmer\n   \
+         and the stagger stop. Anything animated through these tokens keeps only its fade. */"
+    );
+    let _ = writeln!(out, "@media (prefers-reduced-motion: reduce) {{");
+    let _ = writeln!(out, "  :root {{");
+    push_motion_vars(&mut out, &tokens.motion, "    ", true);
+    let _ = writeln!(out, "  }}");
     let _ = writeln!(out, "}}");
     let _ = writeln!(out);
     let _ = writeln!(
@@ -801,6 +1242,7 @@ pub(crate) fn render_swift(tokens: &Tokens) -> String {
         );
     }
     for (key, value) in &tokens.radius {
+        let key = kebab_to_pascal(key);
         let _ = writeln!(out, "    public static let radius{key} = \"{value}\"");
     }
     let _ = writeln!(out);
@@ -823,30 +1265,33 @@ pub(crate) fn render_swift(tokens: &Tokens) -> String {
             "    public static let shadow{name} = ShadowPalette({fields})"
         );
     }
+    let _ = writeln!(out);
+    push_native_motion(
+        &mut out,
+        &tokens.motion,
+        |l| format!("    // {l}"),
+        swift_motion_line,
+    );
     let _ = writeln!(out, "}}");
     let _ = writeln!(out);
-    let _ = writeln!(
-        out,
-        "/// Builds a `Color` from a `#rrggbb` string; the source only emits that form."
-    );
-    let _ = writeln!(out, "extension Color {{");
-    let _ = writeln!(out, "    init(hex: String) {{");
-    let _ = writeln!(
-        out,
-        "        let digits = hex.trimmingCharacters(in: CharacterSet(charactersIn: \"#\"))"
-    );
-    let _ = writeln!(out, "        var value: UInt64 = 0");
-    let _ = writeln!(out, "        Scanner(string: digits).scanHexInt64(&value)");
-    let _ = writeln!(
-        out,
-        "        self.init(red: Double((value & 0xFF0000) >> 16) / 255,\n                  \
-         green: Double((value & 0x00FF00) >> 8) / 255,\n                  \
-         blue: Double(value & 0x0000FF) / 255)"
-    );
-    let _ = writeln!(out, "    }}");
-    let _ = writeln!(out, "}}");
+    let _ = write!(out, "{SWIFT_COLOR_HEX}");
     out
 }
+
+/// The `Color(hex:)` initialiser [`render_swift`] appends after `RizzyTokens`.
+const SWIFT_COLOR_HEX: &str =
+    "/// Builds a `Color` from a `#rrggbb` string; the source only emits that form.
+extension Color {
+    init(hex: String) {
+        let digits = hex.trimmingCharacters(in: CharacterSet(charactersIn: \"#\"))
+        var value: UInt64 = 0
+        Scanner(string: digits).scanHexInt64(&value)
+        self.init(red: Double((value & 0xFF0000) >> 16) / 255,
+                  green: Double((value & 0x00FF00) >> 8) / 255,
+                  blue: Double(value & 0x0000FF) / 255)
+    }
+}
+";
 
 /// Renders [`KOTLIN_OUTPUT`].
 pub(crate) fn render_kotlin(tokens: &Tokens) -> String {
@@ -857,6 +1302,10 @@ pub(crate) fn render_kotlin(tokens: &Tokens) -> String {
     let _ = writeln!(out);
     let _ = writeln!(out, "package com.rizzyvault.tokens");
     let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "import androidx.compose.animation.core.CubicBezierEasing"
+    );
     let _ = writeln!(out, "import androidx.compose.ui.graphics.Color");
     let _ = writeln!(out);
     let _ = writeln!(
@@ -905,6 +1354,7 @@ pub(crate) fn render_kotlin(tokens: &Tokens) -> String {
         );
     }
     for (key, value) in &tokens.radius {
+        let key = kebab_to_pascal(key);
         let _ = writeln!(out, "    const val radius{key} = \"{value}\"");
     }
     let _ = writeln!(out);
@@ -924,6 +1374,13 @@ pub(crate) fn render_kotlin(tokens: &Tokens) -> String {
             .join(", ");
         let _ = writeln!(out, "    val shadow{name} = ShadowPalette({fields})");
     }
+    let _ = writeln!(out);
+    push_native_motion(
+        &mut out,
+        &tokens.motion,
+        |l| format!("    // {l}"),
+        kotlin_motion_line,
+    );
     let _ = writeln!(out, "}}");
     out
 }
@@ -988,6 +1445,7 @@ pub(crate) fn render_xaml(tokens: &Tokens) -> String {
         );
     }
     for (key, value) in &tokens.radius {
+        let key = kebab_to_pascal(key);
         let _ = writeln!(out, "  <x:String x:Key=\"Radius{key}\">{value}</x:String>");
     }
     for (name, shadows) in [
@@ -1003,8 +1461,160 @@ pub(crate) fn render_xaml(tokens: &Tokens) -> String {
             );
         }
     }
+    push_native_motion(
+        &mut out,
+        &tokens.motion,
+        |l| format!("  <!-- {l} -->"),
+        xaml_motion_line,
+    );
     let _ = writeln!(out, "</ResourceDictionary>");
     out
+}
+
+/// One motion token as a native output writes it (module docs, "Motion").
+#[derive(Clone, Copy, Debug)]
+enum NativeMotion<'a> {
+    /// A duration or delay, in milliseconds.
+    Ms(u32),
+    /// A cubic-Bézier easing.
+    Bezier(Bezier),
+    /// A CSS-unit string (a distance), kept as the web source writes it.
+    Text(&'a str),
+    /// A plain number (a scale factor).
+    Number(f64),
+    /// A whole count.
+    Count(u32),
+}
+
+/// Appends every motion token as one line each, `line(camelCaseName, value)` giving the
+/// toolkit's syntax, after a comment saying how the values map (module docs, "Motion"). A
+/// reduced-motion client uses `motionDurationReduced` for every transition and drops every
+/// distance, scale, stagger and loop, as the CSS output's reduced-motion block does.
+fn push_native_motion(
+    out: &mut String,
+    motion: &Motion,
+    comment: impl Fn(&str) -> String,
+    line: impl Fn(&str, NativeMotion) -> String,
+) {
+    for l in [
+        "Motion (docs/design/README.md \"Motion\"): durations in milliseconds (Swift: seconds),",
+        "easings as cubic-Bezier control points (x1, y1, x2, y2). Under the platform's reduce-motion",
+        "setting use motionDurationReduced for every transition, as a crossfade only: no distance,",
+        "scale, stagger or loop.",
+    ] {
+        let _ = writeln!(out, "{}", comment(l));
+    }
+    let camel = |prefix: &str, key: &str| kebab_to_camel(&format!("motion-{prefix}-{key}"));
+    let mut entries: Vec<(String, NativeMotion)> = Vec::new();
+    for (key, ms) in &motion.duration {
+        entries.push((camel("duration", key), NativeMotion::Ms(*ms)));
+    }
+    entries.push((
+        "motionDurationReduced".to_owned(),
+        NativeMotion::Ms(motion.reduced_ms),
+    ));
+    for (key, bezier) in &motion.easing {
+        entries.push((camel("easing", key), NativeMotion::Bezier(*bezier)));
+    }
+    for (key, value) in &motion.distance {
+        entries.push((camel("distance", key), NativeMotion::Text(value)));
+    }
+    for (key, value) in &motion.scale {
+        entries.push((camel("scale", key), NativeMotion::Number(*value)));
+    }
+    entries.push((
+        "motionStaggerStep".to_owned(),
+        NativeMotion::Ms(motion.stagger_step_ms),
+    ));
+    entries.push((
+        "motionStaggerMaxItems".to_owned(),
+        NativeMotion::Count(motion.stagger_max_items),
+    ));
+    entries.push((
+        "motionLoopMaxIterations".to_owned(),
+        NativeMotion::Count(motion.loop_max_iterations),
+    ));
+    for (name, value) in entries {
+        let _ = writeln!(out, "{}", line(&name, value));
+    }
+}
+
+/// One motion token as a Swift `RizzyTokens` member (seconds for `TimeInterval`; an easing as the
+/// four control points `Animation.timingCurve` takes).
+fn swift_motion_line(name: &str, value: NativeMotion) -> String {
+    match value {
+        NativeMotion::Ms(ms) => format!(
+            "    public static let {name}: TimeInterval = {}",
+            num(f64::from(ms) / 1000.0)
+        ),
+        NativeMotion::Bezier(b) => format!(
+            "    public static let {name}: (Double, Double, Double, Double) = ({}, {}, {}, {})",
+            num(b[0]),
+            num(b[1]),
+            num(b[2]),
+            num(b[3])
+        ),
+        NativeMotion::Text(s) => format!("    public static let {name} = \"{s}\""),
+        NativeMotion::Number(n) => format!("    public static let {name}: Double = {}", num(n)),
+        NativeMotion::Count(n) => format!("    public static let {name} = {n}"),
+    }
+}
+
+/// One motion token as a Kotlin `RizzyTokens` member (an easing as Compose's
+/// `CubicBezierEasing`).
+fn kotlin_motion_line(name: &str, value: NativeMotion) -> String {
+    match value {
+        NativeMotion::Ms(ms) => format!("    const val {name}: Int = {ms}"),
+        NativeMotion::Bezier(b) => format!(
+            "    val {name} = CubicBezierEasing({}f, {}f, {}f, {}f)",
+            num(b[0]),
+            num(b[1]),
+            num(b[2]),
+            num(b[3])
+        ),
+        NativeMotion::Text(s) => format!("    const val {name} = \"{s}\""),
+        NativeMotion::Number(n) => format!("    const val {name}: Float = {}f", num(n)),
+        NativeMotion::Count(n) => format!("    const val {name}: Int = {n}"),
+    }
+}
+
+/// One motion token as a XAML resource (milliseconds as `x:Double`; an easing as the
+/// `"x1,y1 x2,y2"` string a `WinUI` `KeySpline` parses).
+fn xaml_motion_line(name: &str, value: NativeMotion) -> String {
+    let key = kebab_to_pascal(name);
+    match value {
+        NativeMotion::Ms(ms) => format!("  <x:Double x:Key=\"{key}\">{ms}</x:Double>"),
+        NativeMotion::Bezier(b) => format!(
+            "  <x:String x:Key=\"{key}\">{},{} {},{}</x:String>",
+            num(b[0]),
+            num(b[1]),
+            num(b[2]),
+            num(b[3])
+        ),
+        NativeMotion::Text(s) => {
+            format!("  <x:String x:Key=\"{key}\">{}</x:String>", xml_escape(s))
+        }
+        NativeMotion::Number(n) => format!("  <x:Double x:Key=\"{key}\">{}</x:Double>", num(n)),
+        NativeMotion::Count(n) => format!("  <x:Int32 x:Key=\"{key}\">{n}</x:Int32>"),
+    }
+}
+
+/// One motion token as a QML singleton property (an easing as the `bezierCurve` list
+/// `Easing.Bezier` takes, ending at `1, 1`).
+fn qml_motion_line(name: &str, value: NativeMotion) -> String {
+    match value {
+        NativeMotion::Ms(ms) => format!("    readonly property int {name}: {ms}"),
+        NativeMotion::Bezier(b) => format!(
+            "    readonly property var {name}: [{}, {}, {}, {}, 1, 1]",
+            num(b[0]),
+            num(b[1]),
+            num(b[2]),
+            num(b[3])
+        ),
+        NativeMotion::Text(s) => format!("    readonly property string {name}: \"{s}\""),
+        NativeMotion::Number(n) => format!("    readonly property real {name}: {}", num(n)),
+        NativeMotion::Count(n) => format!("    readonly property int {name}: {n}"),
+    }
 }
 
 /// Escapes `&`, `<` and `>` for XML text content.
@@ -1058,6 +1668,7 @@ pub(crate) fn render_qml(tokens: &Tokens) -> String {
         );
     }
     for (key, value) in &tokens.radius {
+        let key = kebab_to_pascal(key);
         let _ = writeln!(out, "    readonly property string radius{key}: \"{value}\"");
     }
     let _ = writeln!(out);
@@ -1075,6 +1686,13 @@ pub(crate) fn render_qml(tokens: &Tokens) -> String {
         }
         let _ = writeln!(out, "    }}");
     }
+    let _ = writeln!(out);
+    push_native_motion(
+        &mut out,
+        &tokens.motion,
+        |l| format!("    // {l}"),
+        qml_motion_line,
+    );
     let _ = writeln!(out, "}}");
     out
 }
@@ -1192,31 +1810,66 @@ mod tests {
         serde_json::json!({
             "color": {
                 "light": {
-                    "bg": "#f7f7f8", "surface": "#ffffff", "border": "#c9cad1", "text": "#17181c",
-                    "text-muted": "#4d505b", "accent": "#2f4fd6", "on-accent": "#ffffff",
-                    "danger": "#b3261e", "on-danger": "#ffffff", "warning-bg": "#fff4d6",
-                    "warning-text": "#4a3500", "focus": "#2f4fd6",
+                    "bg": "#f7f7f8", "surface": "#ffffff", "surface-raised": "#ffffff",
+                    "surface-hover": "#eeeff2", "border": "#c9cad1", "border-strong": "#858b99",
+                    "text": "#17181c", "text-muted": "#4d505b", "accent": "#2f4fd6",
+                    "accent-hover": "#2440b8", "accent-subtle": "#e8ebff", "on-accent": "#ffffff",
+                    "danger": "#b3261e", "on-danger": "#ffffff", "success": "#147a4a",
+                    "on-success": "#ffffff", "warning-bg": "#fff4d6", "warning-text": "#4a3500",
+                    "focus": "#2f4fd6",
                 },
                 "dark": {
-                    "bg": "#121317", "surface": "#1c1d23", "border": "#3b3d47", "text": "#ececf1",
-                    "text-muted": "#b4b6c2", "accent": "#8fa6ff", "on-accent": "#0b1030",
-                    "danger": "#ffb4ab", "on-danger": "#410002", "warning-bg": "#3a2c00",
-                    "warning-text": "#ffe08a", "focus": "#8fa6ff",
+                    "bg": "#121317", "surface": "#1c1d23", "surface-raised": "#23252d",
+                    "surface-hover": "#282a33", "border": "#3b3d47", "border-strong": "#6f7686",
+                    "text": "#ececf1", "text-muted": "#b4b6c2", "accent": "#8fa6ff",
+                    "accent-hover": "#a9b8ff", "accent-subtle": "#252b4f", "on-accent": "#0b1030",
+                    "danger": "#ffb4ab", "on-danger": "#410002", "success": "#6ad49c",
+                    "on-success": "#00341b", "warning-bg": "#3a2c00", "warning-text": "#ffe08a",
+                    "focus": "#8fa6ff",
                 },
             },
             "contrast-pairs": [
                 { "fg": "text", "bg": "bg", "min-ratio": 4.5 },
                 { "fg": "focus", "bg": "bg", "min-ratio": 3.0 },
             ],
-            "spacing": { "1": "0.25rem", "2": "0.5rem", "3": "0.75rem", "4": "1rem", "6": "1.5rem", "8": "2rem" },
+            "spacing": {
+                "1": "0.25rem", "2": "0.5rem", "3": "0.75rem", "4": "1rem", "5": "1.25rem",
+                "6": "1.5rem", "8": "2rem", "10": "2.5rem", "12": "3rem",
+            },
             "type": {
                 "font-body": "system-ui", "font-mono": "ui-monospace",
-                "font-size-small": "0.875rem", "font-size-body": "1rem", "font-size-title": "1.375rem",
+                "font-size-caption": "0.75rem", "font-size-small": "0.875rem",
+                "font-size-body": "1rem", "font-size-heading": "1.125rem",
+                "font-size-title": "1.375rem", "font-size-display": "1.75rem",
+                "font-weight-regular": "400", "font-weight-medium": "500",
+                "font-weight-semibold": "600", "line-height-tight": "1.25",
+                "line-height-body": "1.5",
             },
-            "radius": { "1": "4px", "2": "8px" },
+            "radius": { "1": "4px", "2": "8px", "3": "12px", "full": "999px" },
             "shadow": {
-                "light": { "1": "0 1px 2px rgba(0,0,0,0.12)", "2": "0 4px 12px rgba(0,0,0,0.16)" },
-                "dark": { "1": "0 1px 2px rgba(0,0,0,0.4)", "2": "0 4px 16px rgba(0,0,0,0.55)" },
+                "light": {
+                    "1": "0 1px 2px rgba(0,0,0,0.12)", "2": "0 4px 12px rgba(0,0,0,0.16)",
+                    "3": "0 12px 32px rgba(0,0,0,0.2)",
+                },
+                "dark": {
+                    "1": "0 1px 2px rgba(0,0,0,0.4)", "2": "0 4px 16px rgba(0,0,0,0.55)",
+                    "3": "0 12px 40px rgba(0,0,0,0.6)",
+                },
+            },
+            "motion": {
+                "duration": {
+                    "instant": "90ms", "fast": "150ms", "base": "220ms", "slow": "320ms",
+                    "shimmer": "1400ms",
+                },
+                "easing": {
+                    "standard": [0.2, 0, 0, 1], "emphasized": [0.16, 1, 0.3, 1],
+                    "decelerate": [0, 0, 0.2, 1], "accelerate": [0.4, 0, 1, 1],
+                },
+                "distance": { "1": "4px", "2": "8px", "3": "16px" },
+                "scale": { "enter": 0.96, "press": 0.97 },
+                "stagger": { "step": "30ms", "max-items": 8 },
+                "loop": { "max-iterations": 3 },
+                "reduced": { "duration": "120ms" },
             },
         })
     }
@@ -1555,10 +2208,198 @@ mod tests {
             contrast_pairs_paragraph(&tokens),
             "Colour: the WCAG AA pairs `cargo xtask generate-tokens` checks (ADR 0014 §5; it \
              covers the declared pairs only) are (--color-text, --color-bg) and (--color-focus, \
-             --color-bg). --color-surface, --color-border, --color-text-muted, --color-accent, \
-             --color-on-accent, --color-danger, --color-on-danger, --color-warning-bg and \
+             --color-bg). --color-surface, --color-surface-raised, --color-surface-hover, \
+             --color-border, --color-border-strong, --color-text-muted, --color-accent, \
+             --color-accent-hover, --color-accent-subtle, --color-on-accent, --color-danger, \
+             --color-on-danger, --color-success, --color-on-success, --color-warning-bg and \
              --color-warning-text are not declared and not checked."
         );
+    }
+
+    #[test]
+    fn parse_reads_the_motion_group() {
+        let tokens = parse(&valid_json().to_string()).unwrap();
+        let m = &tokens.motion;
+        assert_eq!(m.duration.len(), DURATION_KEYS.len());
+        assert_eq!(m.duration[1], ("fast".to_owned(), 150));
+        assert_eq!(css_bezier(&m.easing[0].1), "cubic-bezier(0.2, 0, 0, 1)");
+        assert_eq!(m.stagger_step_ms, 30);
+        assert_eq!(m.stagger_max_items, 8);
+        assert_eq!(m.loop_max_iterations, 3);
+        assert_eq!(m.reduced_ms, 120);
+    }
+
+    #[test]
+    fn parse_rejects_motion_over_five_seconds() {
+        // WCAG 2.2.2: motion that starts on its own lasts 5 s or less (module docs, "Motion").
+        let mut doc = valid_json();
+        doc["motion"]["duration"]["slow"] = serde_json::json!("5001ms");
+        let err = parse(&doc.to_string()).unwrap_err();
+        assert!(err.contains("longer than 5000ms"), "{err}");
+        let mut doc = valid_json();
+        doc["motion"]["duration"]["slow"] = serde_json::json!("5000ms");
+        assert!(parse(&doc.to_string()).is_ok());
+    }
+
+    #[test]
+    fn parse_rejects_a_shimmer_loop_over_five_seconds() {
+        // 1400ms x 4 = 5600ms: each run is short, but the loop as a whole is not.
+        let mut doc = valid_json();
+        doc["motion"]["loop"]["max-iterations"] = serde_json::json!(4);
+        let err = parse(&doc.to_string()).unwrap_err();
+        assert!(err.contains("max-iterations is 5600ms"), "{err}");
+    }
+
+    #[test]
+    fn parse_rejects_a_stagger_over_its_cap() {
+        let mut doc = valid_json();
+        doc["motion"]["stagger"]["max-items"] = serde_json::json!(9);
+        let err = parse(&doc.to_string()).unwrap_err();
+        assert!(err.contains("over the 240ms cap"), "{err}");
+    }
+
+    #[test]
+    fn parse_rejects_a_long_reduced_motion_crossfade() {
+        let mut doc = valid_json();
+        doc["motion"]["reduced"]["duration"] = serde_json::json!("201ms");
+        let err = parse(&doc.to_string()).unwrap_err();
+        assert!(err.contains("reduced-motion cap"), "{err}");
+    }
+
+    #[test]
+    fn parse_rejects_malformed_motion_values() {
+        for (path, value, needle) in [
+            (
+                ["duration", "fast"],
+                serde_json::json!("150"),
+                "not a duration",
+            ),
+            (
+                ["duration", "fast"],
+                serde_json::json!("1.5s"),
+                "not a duration",
+            ),
+            (
+                ["duration", "fast"],
+                serde_json::json!(150),
+                "expected a string",
+            ),
+            (
+                ["easing", "standard"],
+                serde_json::json!([0.2, 0, 0]),
+                "expected [x1, y1, x2, y2]",
+            ),
+            (
+                ["easing", "standard"],
+                serde_json::json!([1.2, 0, 0, 1]),
+                "outside [0, 1]",
+            ),
+            (
+                ["easing", "standard"],
+                serde_json::json!([0.2, 3, 0, 1]),
+                "outside [-1, 2]",
+            ),
+            (
+                ["scale", "enter"],
+                serde_json::json!(0.4),
+                "outside [0.5, 1]",
+            ),
+            (
+                ["scale", "enter"],
+                serde_json::json!("0.96"),
+                "expected a number",
+            ),
+            (
+                ["stagger", "max-items"],
+                serde_json::json!(-1),
+                "whole number",
+            ),
+            (["distance", "1"], serde_json::json!(""), "non-empty"),
+        ] {
+            let mut doc = valid_json();
+            doc["motion"][path[0]][path[1]] = value;
+            let err = parse(&doc.to_string()).unwrap_err();
+            assert!(err.contains(needle), "{path:?}: {err}");
+        }
+        let mut doc = valid_json();
+        doc["motion"]["duration"]["glacial"] = serde_json::json!("400ms");
+        let err = parse(&doc.to_string()).unwrap_err();
+        assert!(err.contains("unexpected key(s) [\"glacial\"]"), "{err}");
+    }
+
+    #[test]
+    fn render_css_declares_motion_and_its_reduced_motion_overrides() {
+        let tokens = parse(&valid_json().to_string()).unwrap();
+        let css = render_css(&tokens);
+        let (root, reduced) = css
+            .split_once("@media (prefers-reduced-motion: reduce) {")
+            .unwrap();
+        assert!(root.contains("--motion-duration-fast: 150ms;"), "{css}");
+        assert!(root.contains("--motion-easing-standard: cubic-bezier(0.2, 0, 0, 1);"));
+        assert!(root.contains("--motion-easing-emphasized: cubic-bezier(0.16, 1, 0.3, 1);"));
+        assert!(root.contains("--motion-distance-2: 8px;"));
+        assert!(root.contains("--motion-scale-enter: 0.96;"));
+        assert!(root.contains("--motion-stagger-step: 30ms;"));
+        assert!(root.contains("--motion-loop-max-iterations: 3;"));
+        assert!(root.contains("--motion-duration-reduced: 120ms;"));
+        assert!(root.contains("--shadow-3:"));
+        assert!(root.contains("--radius-full: 999px;"));
+        // Reduced motion: durations capped at 120ms (90ms stays 90ms), no shimmer, no movement.
+        let reduced = reduced.split("}\n").next().unwrap_or_default();
+        assert!(
+            reduced.contains("--motion-duration-instant: 90ms;"),
+            "{reduced}"
+        );
+        assert!(
+            reduced.contains("--motion-duration-slow: 120ms;"),
+            "{reduced}"
+        );
+        assert!(
+            reduced.contains("--motion-duration-shimmer: 0ms;"),
+            "{reduced}"
+        );
+        assert!(reduced.contains("--motion-distance-3: 0px;"), "{reduced}");
+        assert!(reduced.contains("--motion-scale-press: 1;"), "{reduced}");
+        assert!(reduced.contains("--motion-stagger-step: 0ms;"), "{reduced}");
+        assert!(
+            reduced.contains("--motion-loop-max-iterations: 0;"),
+            "{reduced}"
+        );
+    }
+
+    #[test]
+    fn render_native_outputs_carry_motion_in_native_units() {
+        let tokens = parse(&valid_json().to_string()).unwrap();
+        let swift = render_swift(&tokens);
+        assert!(
+            swift.contains("public static let motionDurationFast: TimeInterval = 0.15"),
+            "{swift}"
+        );
+        assert!(swift.contains(
+            "public static let motionEasingStandard: (Double, Double, Double, Double) = (0.2, 0, 0, 1)"
+        ));
+        let kotlin = render_kotlin(&tokens);
+        assert!(kotlin.contains("import androidx.compose.animation.core.CubicBezierEasing"));
+        assert!(
+            kotlin.contains("const val motionDurationFast: Int = 150"),
+            "{kotlin}"
+        );
+        assert!(kotlin.contains("val motionEasingStandard = CubicBezierEasing(0.2f, 0f, 0f, 1f)"));
+        let xaml = render_xaml(&tokens);
+        assert!(
+            xaml.contains("<x:Double x:Key=\"MotionDurationFast\">150</x:Double>"),
+            "{xaml}"
+        );
+        assert!(xaml.contains("<x:String x:Key=\"MotionEasingStandard\">0.2,0 0,1</x:String>"));
+        let qml = render_qml(&tokens);
+        assert!(
+            qml.contains("readonly property int motionDurationFast: 150"),
+            "{qml}"
+        );
+        assert!(qml.contains("readonly property var motionEasingStandard: [0.2, 0, 0, 1, 1, 1]"));
+        for out in [&swift, &kotlin, &xaml, &qml] {
+            assert!(out.contains("motionDurationReduced"), "{out}");
+        }
     }
 
     #[test]
