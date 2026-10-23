@@ -656,6 +656,20 @@ impl DeviceRecord {
             self.secret_key = pending.secret_key;
             self.device_salt = pending.device_salt;
             self.kdf_id = pending.kdf_id;
+            // `E_local'` wraps the account key current at the commit: the forward envelopes up
+            // to its epoch are no longer needed, and an `E_ks` under an older key (a rotation
+            // committed here, `E_dev'` present) would open a key `E_dev'` no longer matches, so
+            // it is deleted (ADR 0057 §2; the host re-enables keystore unlock).
+            let epoch = pending.local_wrap.account_key_epoch;
+            self.forward
+                .retain(|step| step.from_account_key_epoch >= epoch);
+            if self
+                .keystore_wrap
+                .as_ref()
+                .is_some_and(|ks| ks.account_key_epoch < epoch)
+            {
+                self.keystore_wrap = None;
+            }
             self.local_wrap = Some(pending.local_wrap);
             if let Some(wrap) = pending.device_keys_wrap {
                 self.device_keys_wrap = wrap;
