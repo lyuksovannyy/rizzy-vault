@@ -99,6 +99,7 @@ pub mod device;
 pub mod error;
 pub mod generator;
 pub mod http;
+pub mod icons;
 pub mod items;
 mod login;
 pub mod matching;
@@ -118,6 +119,7 @@ pub use generator::{
     generator_limits, passphrase_entropy, password_entropy,
 };
 pub use http::{HttpRequest, check_meta, expect_no_content, meta_request};
+pub use icons::IconFetch;
 pub use items::{FieldView, HistoryEntryView, ItemDraft, ItemSummary, generate_element_id};
 pub use login::LoginFlow;
 pub use matching::{GlobalEquivalence, MatchDecision, decide_match_candidates, normalize_page_url};
