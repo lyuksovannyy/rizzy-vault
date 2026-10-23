@@ -65,7 +65,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0006 | [Key hierarchy, per-user keypairs and key wrapping](0006-key-hierarchy.md) | Partially superseded by [0022](0022-server-mode-only.md) (point 1 in part, point 11 in part, Risks in part) | M1 |
 | 0007 | [Versioned ciphertext envelope and crypto agility](0007-ciphertext-envelope.md) | Partially superseded by [0054](0054-attachments-envelope-and-api.md) (§3 in part) | M1 |
 | 0008 | [Account recovery: Emergency Kit](0008-account-recovery.md) | Partially superseded by [0022](0022-server-mode-only.md) (point 7) | M1 |
-| 0009 | [Cryptographic dependency and memory-hygiene policy](0009-crypto-dependency-policy.md) | Partially superseded by [0019](0019-native-clients.md) ("RNG rules" in part); [0052](0052-icon-proxy-role.md) (Amendments, 2026-10-05 entry, "Where it is applied" in part) | M1 |
+| 0009 | [Cryptographic dependency and memory-hygiene policy](0009-crypto-dependency-policy.md) | Partially superseded by [0019](0019-native-clients.md) ("RNG rules" in part); [0052](0052-icon-proxy-role.md) (Amendments, 2026-10-05 entry, "Where it is applied" in part); [0077](0077-webauthn-rs-integration-fixes.md) ("RNG rules" in part, owner decision 1 in part, Amendments 2026-10-22 entry in part) | M1 |
 | 0010 | [Server shape: modular monolith with roles](0010-server-shape.md) | Partially superseded by [0022](0022-server-mode-only.md) (§1 in part); [0053](0053-hibp-breach-check-egress.md) (§1 in part) | M1 (`api`, `web`, `worker`) / M3 (`notify`, `icons`) / M6 (`smtp`) |
 | 0011 | [Storage: SQLite and PostgreSQL via sqlx](0011-storage.md) | Partially superseded by [0022](0022-server-mode-only.md) (point 9 in part, "Transactions and concurrency" in part, "What is stored, by sync mode", "Backups" in part) | M1 (SQLite) / M3 (PostgreSQL supported) |
 | 0012 | [Sync engine: op log, HLC and version vectors](0012-sync-engine.md) | Partially superseded by [0018](0018-item-record-encoding.md) (§1 in part, §3 in part, §4 in part, §5 in part, §6 in part, §7 in part, §12 in part); [0021](0021-server-compaction.md) (§6 in part, §7 in part); [0022](0022-server-mode-only.md) (Milestone line, §5 in part, §6 in part, §8, §9 in part, §10, §11, §12 in part, owner decisions 3, 5 and 8, Risks in part); [0032](0032-healing-rotation-after-backup.md) (§7 in part); [0050](0050-paged-fetch-tombstone-boundary.md) (§7 in part) | M1 (engine, Server mode) |
@@ -94,7 +94,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0035 | [A private CA file holds CA certificates only](0035-ca-file-ca-certificates-only.md) | Accepted | M1 |
 | 0036 | [Browser extension: architecture and key custody](0036-browser-extension-architecture-and-key-custody.md) | Partially superseded by [0040](0040-extension-fill-request-from-inline-menu.md) (§4, first bullet, in part); [0043](0043-inline-menu-instance-token.md) (§4, first bullet, in part); [0076](0076-autocomplete-driven-autofill.md) (§4 in part) | M2 |
 | 0037 | [URL matching and autofill rules](0037-url-matching-and-autofill-rules.md) | Accepted | M2 |
-| 0038 | [Equivalent-domain list: format, signing and governance](0038-equivalent-domain-list.md) | Partially superseded by [0044](0044-equivalence-group-member-rules.md) (§1 in part) | M2 |
+| 0038 | [Equivalent-domain list: format, signing and governance](0038-equivalent-domain-list.md) | Partially superseded by [0044](0044-equivalence-group-member-rules.md) (§1 in part), [0080](0080-default-site-groups-vaultwarden-seed.md) (§2 in part) | M2 |
 | 0039 | [Passkeys in the vault and in the browser extension](0039-passkeys-vault-and-extension.md) | Accepted | M2 |
 | 0040 | [The extension's fill request comes from the inline menu, not the content script](0040-extension-fill-request-from-inline-menu.md) | Partially superseded by [0043](0043-inline-menu-instance-token.md) (point 1 in part, point 3 in part); [0076](0076-autocomplete-driven-autofill.md) (point 2; "What this ADR supersedes" in part) | M2 |
 | 0041 | [Approving the `p256` crate for ES256 (ECDSA P-256) in passkeys](0041-p256-crate-approval.md) | Accepted | M2 |
@@ -111,11 +111,11 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0052 | [Icon-proxy (favicon) role: fetch, cache and re-encode mechanism](0052-icon-proxy-role.md) | Accepted | M3 |
 | 0053 | [Watchtower/HIBP breach-check egress route](0053-hibp-breach-check-egress.md) | Accepted | M3 |
 | 0054 | [Encrypted attachments: chunk layout, storage shape and upload/download API](0054-attachments-envelope-and-api.md) | Accepted | M3 |
-| 0055 | [M3 item types: field keys for SSH key, API credential, software license, Wi-Fi and bank account](0055-m3-item-type-field-keys.md) | Accepted | M3 |
+| 0055 | [M3 item types: field keys for SSH key, API credential, software license, Wi-Fi and bank account](0055-m3-item-type-field-keys.md) | Partially superseded by [0078](0078-retire-bank-account-item-type.md) (§1 in part, §2, §3, §4 in part) | M3 |
 | 0056 | [M3 local index: recently-used tracking and client-side search](0056-local-index-recently-used-search.md) | Accepted | M3 |
 | 0057 | [Device-state record version 2: OS-keystore-backed local unlock (`E_ks`)](0057-device-state-v2-keystore.md) | Accepted | M3 |
-| 0058 | [WebAuthn/FIDO2 security keys as a server-side second factor](0058-webauthn-2fa-second-factor.md) | Accepted | M3 |
-| 0059 | [Crypto-crate approval: webauthn-rs for the FIDO2 2FA ceremony](0059-webauthn-rs-crate-approval.md) | Accepted | M3 |
+| 0058 | [WebAuthn/FIDO2 security keys as a server-side second factor](0058-webauthn-2fa-second-factor.md) | Partially superseded by [0077](0077-webauthn-rs-integration-fixes.md) (point 1 in part, points 2, 4 and 8, owner answer 3, "Owner answers at acceptance" closing paragraph in part) | M3 |
+| 0059 | [Crypto-crate approval: webauthn-rs for the FIDO2 2FA ceremony](0059-webauthn-rs-crate-approval.md) | Partially superseded by [0077](0077-webauthn-rs-integration-fixes.md) (Decision "Recommendation" in part, checklist item 7 in part, owner answers 1 and 6) | M3 |
 | 0060 | [Admin panel: web stack, directory and security boundary](0060-admin-panel-stack-boundary.md) | Accepted | M3 |
 | 0061 | [notify role: WebSocket connect authentication and message envelope](0061-notify-websocket-protocol.md) | Proposed | M3 |
 | 0062 | [Markdown-in-notes rendering: sanitization and rendering rules](0062-markdown-notes-sanitization.md) | Accepted | M3 |
@@ -133,10 +133,10 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0074 | [Passkey import/export via the FIDO Credential Exchange Format (CXF)](0074-passkey-cxf-import-export.md) | Accepted | M8 |
 | 0075 | [Session management: listing and ending sessions under `/api/v1/sessions`](0075-session-listing-and-ending.md) | Accepted | M3 |
 | 0076 | [Autocomplete-driven autofill: field detection, TOTP-code fill and custom-field autocomplete ids](0076-autocomplete-driven-autofill.md) | Accepted | M3 |
-| 0077 | [webauthn-rs integration: deny wrappers, ceremony-state storage, RNG rule and stored credential shape](0077-webauthn-rs-integration-fixes.md) | Proposed | M3 |
-| 0078 | [Retire the Bank account item type (`0x0009`) and its `bank.` field keys](0078-retire-bank-account-item-type.md) | Proposed | M3 |
-| 0079 | [Identity generator: pre-filled new identities, the `identity.sex` and `identity.birthday` keys, bundled name and address data, and the masked-email seam](0079-identity-generator.md) | Proposed | M3 / M6 |
-| 0080 | [Default site groups: seeding the signed global equivalence list from Vaultwarden's `global_domains.json`](0080-default-site-groups-vaultwarden-seed.md) | Proposed | M2 |
+| 0077 | [webauthn-rs integration: deny wrappers, ceremony-state storage, RNG rule and stored credential shape](0077-webauthn-rs-integration-fixes.md) | Accepted | M3 |
+| 0078 | [Retire the Bank account item type (`0x0009`) and its `bank.` field keys](0078-retire-bank-account-item-type.md) | Accepted | M3 |
+| 0079 | [Identity generator: pre-filled new identities, the `identity.sex` and `identity.birthday` keys, bundled name and address data, and the masked-email seam](0079-identity-generator.md) | Accepted | M3 / M6 |
+| 0080 | [Default site groups: seeding the signed global equivalence list from Vaultwarden's `global_domains.json`](0080-default-site-groups-vaultwarden-seed.md) | Accepted | M2 |
 
 ## Gates
 

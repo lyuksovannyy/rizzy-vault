@@ -83,7 +83,8 @@ MoSCoW is scored **against v1.0 (end of M8)**. Items for M9/M10 are listed so th
 | M | CLI client (`rv`) — list, get, add, generate, copy TOTP | M1 |
 | M | Web vault (minimal UI acceptable in M1) | M1 |
 | S | Attachments (encrypted, size-limited) | M3 |
-| S | Item types: SSH key, API credential, Software license, Wi-Fi, Bank account | M3 |
+| S | Item types: SSH key, API credential, Software license, Wi-Fi (Bank account removed on 2026-10-23, ADR 0078) | M3 |
+| S | Identity generator: new identities open pre-filled (sex, country, age preset, custom range or exact age; names by country, birthday, email, username, address, phone from fictional ranges) with per-field regenerate; web vault and rv ([ADR 0079](adr/0079-identity-generator.md)) | M3 |
 | S | Favorites, recently used, full-text search on decrypted index (client-side only) | M3 |
 | S | Item revision history (restore old versions) | M3 |
 | S | Scheduled encrypted backups to user-chosen storage (local folder, WebDAV, S3-compatible) | M8 |
@@ -197,7 +198,7 @@ This is the most operationally expensive feature in the whole plan. Read the ris
 
 | Pri | Item | When |
 |---|---|---|
-| M | Generate alias identity (random name, username, alias address, password) from item creation and from the extension on sign-up forms | M6 |
+| M | Generate alias identity (random name, username, alias address, password) from item creation and from the extension on sign-up forms; builds on the M3 identity generator ([ADR 0079](adr/0079-identity-generator.md) §9) | M6 |
 | M | Inbound SMTP receiver (Rust, e.g. `mail-parser` + own SMTP listener, or front with Postfix/Haraka and hand off) — **receive only** | M6 |
 | M | Catch-all per configured domain; alias → owner lookup without revealing which aliases exist (no SMTP user enumeration) | M6 |
 | M | **Encrypt at ingress** with the alias owner's public key; server stores ciphertext only; plaintext held in RAM for the minimum time | M6 |

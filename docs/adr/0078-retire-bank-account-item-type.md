@@ -1,7 +1,7 @@
 # ADR 0078: Retire the Bank account item type (`0x0009`) and its `bank.` field keys
 
-- Status: Proposed
-- Date: 2026-10-23
+- Status: Accepted
+- Date: 2026-10-23 (accepted 2026-10-23)
 - Deciders: project owner
 - Milestone: M3 (`rizzy-core`, `rizzy-client`, `rizzy-sync` vectors, `rizzy-wasm`, `rv`, web vault)
 - Supersedes: [ADR 0055](0055-m3-item-type-field-keys.md) (§1 in part, §2, §3, §4 in part), on acceptance. §7 below names the parts.
@@ -29,6 +29,10 @@
 - [ADR 0020](0020-partial-supersession.md) point 9 (partial supersession), and CLAUDE.md: an Accepted ADR is never edited; a ROADMAP scope change is the owner's edit.
 
 ## Decision
+
+### Owner answers at acceptance (2026-10-23)
+
+The owner accepted this ADR as drafted.
 
 No new construction, envelope purpose, algorithm id, value type, key, layout or `item_schema_version`. Retiring a type is a schema-layer change like ADR 0055's, made under ADR 0018 §11 ("no version bump is needed for … item types"). Items already written keep their bytes.
 

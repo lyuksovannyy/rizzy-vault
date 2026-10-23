@@ -1,7 +1,7 @@
 # ADR 0077: webauthn-rs integration: deny wrappers, ceremony-state storage, RNG rule and stored credential shape
 
-- Status: Proposed
-- Date: 2026-10-22
+- Status: Accepted
+- Date: 2026-10-22 (accepted 2026-10-23)
 - Deciders: project owner
 - Milestone: M3 (`rizzy-domain-auth`, `rizzy-server`, `deny.toml`, `deploy/Containerfile`, CI images)
 - Supersedes: [ADR 0059](0059-webauthn-rs-crate-approval.md) (Decision "Recommendation" in part, checklist item 7 in part, owner answers 1 and 6), [ADR 0009](0009-crypto-dependency-policy.md) ("RNG rules" in part, owner decision 1 in part, Amendments 2026-10-22 entry in part) and [ADR 0058](0058-webauthn-2fa-second-factor.md) (point 1 in part, points 2, 4 and 8, owner answer 3, "Owner answers at acceptance" closing paragraph in part), on acceptance. §9 lists the exact parts and their replacement text.
@@ -35,6 +35,10 @@ Other facts confirmed by the implementation attempt, needing no new decision (V 
 Adversaries in play: A1 (passive DB or backup theft) and a live DB reader or writer (the [ADR 0010 §5](0010-server-shape.md#5-short-lived-auth-state-lives-in-the-database) reasoning behind `SERVER_LOGIN_STATE`); the remote attacker who already holds the password and Secret Key, whom the second factor exists to stop ([THREAT_MODEL.md §4](../THREAT_MODEL.md#4-adversaries)).
 
 ## Decision
+
+### Owner answers at acceptance (2026-10-23)
+
+The owner accepted this ADR as drafted. The recommendations of the "Open questions for the owner" stand.
 
 ### 1. `deny.toml`: three named parents, nothing wider (B1)
 

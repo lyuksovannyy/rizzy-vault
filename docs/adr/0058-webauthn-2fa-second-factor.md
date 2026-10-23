@@ -1,6 +1,6 @@
 # ADR 0058: WebAuthn/FIDO2 security keys as a server-side second factor
 
-- Status: Accepted
+- Status: Partially superseded by [ADR 0077](0077-webauthn-rs-integration-fixes.md) (point 1 in part, points 2, 4 and 8, owner answer 3, "Owner answers at acceptance" closing paragraph in part)
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M3
