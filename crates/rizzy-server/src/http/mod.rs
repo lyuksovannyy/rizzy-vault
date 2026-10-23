@@ -84,16 +84,23 @@ pub fn router(api: Option<Arc<Api>>, web: bool) -> Router {
         .layer(middleware::map_response(finish))
 }
 
-/// Builds the router of the `icons` role ([ADR 0052] point 1, [ADR 0053]): the breach-check
-/// route when the breach check is on, nothing else. Every other path answers `404` like the
-/// public router with no role (so a disabled breach check is `404 not_found`, ADR 0028
-/// item 3: "a role not running"), and every response gets the common headers and one access
-/// line naming the route template, never the path or the body.
+/// Builds the router of the `icons` role ([ADR 0052] points 1 and 6, [ADR 0053]): the favicon
+/// route (whenever the role runs), the breach-check route when the breach check is on, nothing
+/// else. Every other path answers `404` like the public router with no role (so a disabled
+/// breach check is `404 not_found`, ADR 0028 item 3: "a role not running"), and every response
+/// gets the common headers and one access line naming the route template, never the path or
+/// the body.
 ///
 /// [ADR 0052]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0052-icon-proxy-role.md
 /// [ADR 0053]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0053-hibp-breach-check-egress.md
 pub fn icons_router(state: Arc<icons::Icons>) -> Router {
     let mut router = Router::new();
+    if state.favicons_on() {
+        router = router.route(
+            icons::FETCH_ROUTE,
+            post(icons::fetch).with_state(state.clone()),
+        );
+    }
     if state.breach_check_on() {
         router = router.route(
             icons::BREACH_RANGE_ROUTE,
