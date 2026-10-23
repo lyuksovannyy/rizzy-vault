@@ -123,7 +123,7 @@ impl Dev {
         let mut cache = Cache::new();
         cache.commit(pending.store_writes(COMMIT_JSON).unwrap());
         // The file of a crash here: stage 2, with the commit to resend.
-        let record = load::open(&cache.rows).unwrap();
+        let record = load::open(&cache.rows, false).unwrap();
         assert_eq!(record.stage(), Stage::SignupPending);
         assert_eq!(
             record.unlock(PASSWORD).unwrap_err(),
@@ -311,7 +311,7 @@ impl Dev {
 
 /// Opens and loads `rows` with the keys `unlocked` holds.
 fn load_rows(rows: &CacheRows, unlocked: &UnlockedDevice) -> Result<Loaded, ClientError> {
-    let record = load::open(rows)?;
+    let record = load::open(rows, false)?;
     load::load(rows, &record, unlocked, T0 + 100)
 }
 
@@ -423,6 +423,8 @@ fn vector_record(stage: Stage, has_local: bool, pending: bool) -> DeviceRecord {
             },
             device_keys_wrap: None,
         }),
+        keystore_wrap: None,
+        forward: Vec::new(),
     }
 }
 
@@ -434,14 +436,20 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
-/// The vector bytes, written out field by field from ADR 0026 §2.
+/// The version-2 vector bytes without `E_ks` or forward envelopes (ADR 0057 §2).
 fn vector_bytes(stage: u8, has_local: bool, pending: bool) -> Vec<u8> {
+    vector_bytes_of(2, stage, has_local, pending)
+}
+
+/// The vector bytes, written out field by field from ADR 0026 §2 (`version` 1) or ADR 0057
+/// §2 (`version` 2: `has_ks = 0`, `forward_count = 0`).
+fn vector_bytes_of(version: u8, stage: u8, has_local: bool, pending: bool) -> Vec<u8> {
     let bytes_of = |out: &mut Vec<u8>, x: &[u8]| {
         out.extend_from_slice(&u32::try_from(x.len()).unwrap().to_be_bytes());
         out.extend_from_slice(x);
     };
     let mut out = Vec::new();
-    out.extend_from_slice(&[0x00, 0x01, stage]);
+    out.extend_from_slice(&[0x00, version, stage]);
     bytes_of(&mut out, b"https://vault.example.com");
     out.extend_from_slice(&[0xa1; 16]);
     out.extend_from_slice(&[0xd2; 16]);
@@ -456,6 +464,9 @@ fn vector_bytes(stage: u8, has_local: bool, pending: bool) -> Vec<u8> {
         bytes_of(&mut out, &envelope(0x44));
     } else {
         out.push(0);
+    }
+    if version == 2 {
+        out.extend_from_slice(&[0, 0]);
     }
     if pending {
         out.push(1);
@@ -485,7 +496,7 @@ fn device_record_vectors() {
         let encoded = record.encode().unwrap();
         let expected = vector_bytes(stage_byte, has_local, pending);
         assert_eq!(hex(&encoded), hex(&expected), "{stage:?}");
-        let parsed = DeviceRecord::parse(&encoded).unwrap();
+        let parsed = DeviceRecord::parse(&encoded, false).unwrap();
         assert_eq!(parsed.stage(), stage);
         assert_eq!(parsed.has_local(), has_local);
         assert_eq!(parsed.has_pending(), pending);
@@ -498,14 +509,15 @@ fn device_record_vectors() {
         .unwrap();
     assert_eq!(
         committed.len(),
-        3 + 29 + 16 + 16 + 1 + 16 + 16 + 2 + 94 + 1 + 8 + 94 + 1
+        3 + 29 + 16 + 16 + 1 + 16 + 16 + 2 + 94 + 1 + 8 + 94 + 1 + 1 + 1
     );
     assert_eq!(
         hex(&committed[..36]),
-        "000101000000196874747073 3a2f2f7661756c742e6578616d706c652e636f6da1a1a1a1"
+        "000201000000196874747073 3a2f2f7661756c742e6578616d706c652e636f6da1a1a1a1"
             .replace(' ', "")
     );
-    assert_eq!(hex(&committed[committed.len() - 3..]), "444400");
+    // `E_local`'s last byte, `has_ks = 0`, `forward_count = 0`, `pending = 0`.
+    assert_eq!(hex(&committed[committed.len() - 4..]), "44000000");
 }
 
 /// The parser's refusals (ADR 0026 §2 "Parsing"). None panics.
@@ -515,18 +527,18 @@ fn device_record_refusals() {
         .encode()
         .unwrap()
         .to_vec();
-    assert!(DeviceRecord::parse(&good).is_ok());
+    assert!(DeviceRecord::parse(&good, false).is_ok());
     // A newer record version is "update required"; version 0 and everything else is corrupt.
     let mut newer = good.clone();
-    newer[1] = 2;
+    newer[1] = 3;
     assert_eq!(
-        DeviceRecord::parse(&newer).unwrap_err(),
+        DeviceRecord::parse(&newer, false).unwrap_err(),
         ClientError::CacheUpdateRequired
     );
-    assert_eq!(RECORD_VERSION, 1);
+    assert_eq!(RECORD_VERSION, 2);
     let corrupt = |bytes: &[u8]| {
         assert_eq!(
-            DeviceRecord::parse(bytes).unwrap_err(),
+            DeviceRecord::parse(bytes, false).unwrap_err(),
             ClientError::CacheCorrupt
         );
     };
@@ -638,7 +650,7 @@ mod record_properties {
                 record.stage = Stage::SignupPending;
             }
             let encoded = record.encode().unwrap();
-            let parsed = DeviceRecord::parse(&encoded).unwrap();
+            let parsed = DeviceRecord::parse(&encoded, false).unwrap();
             prop_assert_eq!(parsed.encode().unwrap().to_vec(), encoded.to_vec());
             prop_assert_eq!(parsed.has_local(), has_local);
             prop_assert_eq!(parsed.has_pending(), pending);
@@ -649,8 +661,8 @@ mod record_properties {
         fn arbitrary_bytes_parse_canonically_or_not_at_all(
             bytes in proptest::collection::vec(any::<u8>(), 0..600),
         ) {
-            if let Ok(record) = DeviceRecord::parse(&bytes) {
-                prop_assert_eq!(record.encode().unwrap().to_vec(), bytes.clone());
+            if let Ok(record) = DeviceRecord::parse(&bytes, false) {
+                prop_assert!(canonical_or_upgraded(&bytes, &record.encode().unwrap()));
             }
         }
 
@@ -660,9 +672,25 @@ mod record_properties {
             let mut bytes = vector_record(Stage::Committed, true, true).encode().unwrap().to_vec();
             let at = at % bytes.len();
             bytes[at] ^= flip;
-            if let Ok(record) = DeviceRecord::parse(&bytes) {
-                prop_assert_eq!(record.encode().unwrap().to_vec(), bytes.clone());
+            if let Ok(record) = DeviceRecord::parse(&bytes, false) {
+                prop_assert!(canonical_or_upgraded(&bytes, &record.encode().unwrap()));
             }
+        }
+    }
+
+    /// A parsed version-2 record encodes back to its input; a version-1 record to its
+    /// version-2 form (two bytes longer: `has_ks = 0`, `forward_count = 0`, ADR 0057 §3), which
+    /// is canonical in turn.
+    fn canonical_or_upgraded(input: &[u8], encoded: &[u8]) -> bool {
+        match input.get(..2) {
+            Some([0, 2]) => encoded == input,
+            Some([0, 1]) => {
+                encoded.len() == input.len() + 2
+                    && encoded.get(..2) == Some(&[0, 2][..])
+                    && DeviceRecord::parse(encoded, false)
+                        .is_ok_and(|again| again.encode().is_ok_and(|e| e.as_slice() == encoded))
+            }
+            _ => false,
         }
     }
 }
@@ -690,7 +718,7 @@ fn assert_crash_safe(history: &[CacheRows], unlocked: &[&UnlockedDevice]) {
     let mut previous: Option<&CacheRows> = None;
     let mut last_state_seq = 0;
     for rows in history {
-        let record = load::open(rows).unwrap();
+        let record = load::open(rows, false).unwrap();
         assert_eq!(meta_u64(rows, meta::NEXT_DEVICE_SEQ), max_own_seq(rows) + 1);
         if record.stage() == Stage::Committed {
             // The keys of one of the unlocks open this file (an own rotation changes them).
@@ -970,7 +998,7 @@ fn an_interrupted_signup_resends_the_stored_commit() {
     drop(pending);
 
     // Restart: only the file. Stage 2, nothing unlocks, the commit is there to resend.
-    let record = load::open(&cache.rows).unwrap();
+    let record = load::open(&cache.rows, false).unwrap();
     assert_eq!(record.stage(), Stage::SignupPending);
     assert_eq!(
         record.unlock(PASSWORD).unwrap_err(),
@@ -979,7 +1007,7 @@ fn an_interrupted_signup_resends_the_stored_commit() {
     assert_eq!(cache.rows.pending_commit.as_deref(), Some(COMMIT_JSON));
     // (The host sends `pending_commit` again; the server answers success for the same bytes.)
     cache.commit(store::finalize_writes(&record.committed()).unwrap());
-    let record = load::open(&cache.rows).unwrap();
+    let record = load::open(&cache.rows, false).unwrap();
     assert_eq!(record.stage(), Stage::Committed);
     assert!(cache.rows.pending_commit.is_none());
     let unlocked = record.unlock(PASSWORD).unwrap();
@@ -994,7 +1022,10 @@ fn an_interrupted_signup_resends_the_stored_commit() {
     // The file with the stage-2 record and no stored commit is no state this client writes.
     let mut broken = copy_rows(&cache.history[0]);
     broken.pending_commit = None;
-    assert_eq!(load::open(&broken).unwrap_err(), ClientError::CacheCorrupt);
+    assert_eq!(
+        load::open(&broken, false).unwrap_err(),
+        ClientError::CacheCorrupt
+    );
 }
 
 impl Server {
@@ -1078,7 +1109,7 @@ fn a_rotation_is_persisted_and_followed() {
 
     // A crash here: the file still unlocks to the old keys and loads the old state, and it
     // holds the pending record whose keys open once the commit is applied.
-    let crashed = load::open(&a.cache.rows).unwrap();
+    let crashed = load::open(&a.cache.rows, false).unwrap();
     assert!(crashed.has_pending());
     let old = crashed.unlock(PASSWORD).unwrap();
     assert_eq!(old.account_key.epoch(), 0);
@@ -1094,7 +1125,10 @@ fn a_rotation_is_persisted_and_followed() {
     // A pending record without its commit, or a commit without a pending record, is corrupt.
     let mut broken = copy_rows(&a.cache.rows);
     broken.pending_commit = None;
-    assert_eq!(load::open(&broken).unwrap_err(), ClientError::CacheCorrupt);
+    assert_eq!(
+        load::open(&broken, false).unwrap_err(),
+        ClientError::CacheCorrupt
+    );
 
     // The commit lands; the finalising transaction.
     server.commit_for_store(pending.commit_request()).unwrap();
@@ -1116,7 +1150,7 @@ fn a_rotation_is_persisted_and_followed() {
     changeset.append(a.vault.take_writes());
     a.cache.commit(changeset);
     // The finalised record is the pending one, byte for byte.
-    let finalised = load::open(&a.cache.rows).unwrap();
+    let finalised = load::open(&a.cache.rows, false).unwrap();
     assert!(!finalised.has_pending());
     assert_eq!(
         finalised.encode().unwrap().as_slice(),
@@ -1198,7 +1232,7 @@ fn a_rotation_is_persisted_and_followed() {
         Value::text("after").unwrap().expose_secret()
     );
     // A crash before that transaction left the old file, which still loads with the old keys.
-    let old_record = load::open(&before_follow).unwrap();
+    let old_record = load::open(&before_follow, false).unwrap();
     let old_unlocked = old_record.unlock(PASSWORD).unwrap();
     assert!(load::load(&before_follow, &old_record, &old_unlocked, T0).is_ok());
 
@@ -1441,9 +1475,11 @@ fn a_stale_answer_reissues_and_an_older_file_raises_the_alarm() {
         .history
         .iter()
         .rev()
-        .find(|rows| max_own_seq(rows) == 0 && load::open(rows).is_ok_and(|r| !r.has_pending()))
+        .find(|rows| {
+            max_own_seq(rows) == 0 && load::open(rows, false).is_ok_and(|r| !r.has_pending())
+        })
         .expect("a file from before B's first op");
-    let old_record = load::open(old_rows).unwrap();
+    let old_record = load::open(old_rows, false).unwrap();
     let Ok(old_unlocked) = old_record.unlock(PASSWORD) else {
         panic!("the old file unlocks");
     };
@@ -1804,7 +1840,10 @@ fn a_format_1_cache_migrates_to_format_2() {
     v1.meta.remove(meta::HIGHEST_EQUIVALENCE_LIST_VERSION);
     v1.meta
         .insert(meta::FORMAT.to_owned(), 1u16.to_be_bytes().to_vec());
-    assert_eq!(load::open(&v1).unwrap_err(), ClientError::CacheCorrupt);
+    assert_eq!(
+        load::open(&v1, false).unwrap_err(),
+        ClientError::CacheCorrupt
+    );
     let migration = load::migration_writes(&v1).unwrap();
     assert_eq!(migration.writes().len(), 2);
     v1.apply(&migration);
@@ -1910,7 +1949,7 @@ fn the_load_refuses_tampered_rows() {
         (CACHE_FORMAT + 1).to_be_bytes().to_vec(),
     );
     assert_eq!(
-        load::open(&t).unwrap_err(),
+        load::open(&t, false).unwrap_err(),
         ClientError::CacheUpdateRequired
     );
     // An older format is never opened as it is: the host migrates it first.
@@ -1919,7 +1958,10 @@ fn the_load_refuses_tampered_rows() {
         meta::FORMAT.to_owned(),
         (CACHE_FORMAT - 1).to_be_bytes().to_vec(),
     );
-    assert_eq!(load::open(&t).unwrap_err(), ClientError::CacheCorrupt);
+    assert_eq!(
+        load::open(&t, false).unwrap_err(),
+        ClientError::CacheCorrupt
+    );
     // ADR 0051 §1: a stored equivalence-list floor above `u32::MAX`, or not 8 bytes.
     for value in [
         (u64::from(u32::MAX) + 1).to_be_bytes().to_vec(),
@@ -1929,13 +1971,19 @@ fn the_load_refuses_tampered_rows() {
         let mut t = rows();
         t.meta
             .insert(meta::HIGHEST_EQUIVALENCE_LIST_VERSION.to_owned(), value);
-        assert_eq!(load::open(&t).unwrap_err(), ClientError::CacheCorrupt);
+        assert_eq!(
+            load::open(&t, false).unwrap_err(),
+            ClientError::CacheCorrupt
+        );
         corrupt(&t);
     }
     for key in meta::ALL {
         let mut t = rows();
         t.meta.remove(key);
-        assert_eq!(load::open(&t).unwrap_err(), ClientError::CacheCorrupt);
+        assert_eq!(
+            load::open(&t, false).unwrap_err(),
+            ClientError::CacheCorrupt
+        );
     }
     let mut t = rows();
     t.meta.insert("extra".to_owned(), vec![1]);
@@ -2086,7 +2134,7 @@ fn the_load_refuses_tampered_rows() {
     assert_eq!(
         load::load(
             &a.cache.rows,
-            &load::open(&a.cache.rows).unwrap(),
+            &load::open(&a.cache.rows, false).unwrap(),
             &b.unlocked,
             T0
         )

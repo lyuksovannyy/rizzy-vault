@@ -660,6 +660,37 @@ context! {
 }
 
 context! {
+    /// `ACCOUNT_KEY_KEYSTORE_WRAP` (`E_ks`, M3/M7):
+    /// `account_id ‖ device_id ‖ u32 account_key_epoch`. No `password_epoch` and no `kdf_id`:
+    /// the keystore unlock secret is random, not password-derived (ADR 0057 §2).
+    AccountKeyKeystoreWrapCtx: AccountKeyKeystoreWrap, SymmetricContext {
+        /// The account.
+        account_id: AccountId,
+        /// The device whose OS keystore holds the secret.
+        device_id: DeviceId,
+        /// Epoch of the wrapped account key.
+        account_key_epoch: u32,
+    }
+}
+
+context! {
+    /// `ACCOUNT_KEY_FORWARD` (M3/M7, device-local only):
+    /// `account_id ‖ device_id ‖ u32 from_account_key_epoch ‖ u32 to_account_key_epoch`. The
+    /// plaintext is the account key of `to_account_key_epoch`, sealed under the one of
+    /// `from_account_key_epoch` (CRYPTO.md §11.3 step 4.3).
+    AccountKeyForwardCtx: AccountKeyForward, SymmetricContext {
+        /// The account.
+        account_id: AccountId,
+        /// The device that wrote the envelope; it never leaves that device.
+        device_id: DeviceId,
+        /// Epoch of the wrapping (previous) account key.
+        from_account_key_epoch: u32,
+        /// Epoch of the wrapped (newer) account key.
+        to_account_key_epoch: u32,
+    }
+}
+
+context! {
     /// `ACCOUNT_KEY_DEVICE_GRANT` (HPKE PSK mode):
     /// `account_id ‖ u32 account_key_epoch (new) ‖ sender device_id ‖ recipient device_id`.
     AccountKeyDeviceGrantCtx: AccountKeyDeviceGrant, HpkeContext + HpkePskContext {

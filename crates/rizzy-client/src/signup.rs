@@ -460,6 +460,7 @@ impl SignupStarted {
                 account_key: g.account_key,
                 device_keys: g.device_keys,
                 local_unlock_key: None,
+                keystore_secret: None,
             },
             vault_key: g.vault_key,
         })
