@@ -20,7 +20,7 @@
 // reads the password inside the core and sends only a 5-character hash prefix, so the check
 // needs no reveal and puts no value on this thread.
 import type { FieldView, HistoryEntry, ItemSummary, TotpCode } from "@rizzy-vault/core";
-import { ConfirmDialog, IconStarFilled, IconStarOutline, SecretField, TypeIcon, useToast } from "@rizzy-vault/ui";
+import { ConfirmDialog, IconStarFilled, IconStarOutline, ItemIcon, SecretField, useToast } from "@rizzy-vault/ui";
 import { type ReactNode, useEffect, useId, useState } from "react";
 
 import { codeOf } from "../core-client.ts";
@@ -355,7 +355,7 @@ export function ItemView(props: {
     <article className="panel item" aria-labelledby="item-title">
       <div className="item-header">
         <span className="item-icon" aria-hidden="true">
-          <TypeIcon type={summary.itemType} />
+          <ItemIcon icons={ctx.icons} websiteHost={summary.websiteHost} itemType={summary.itemType} size={28} />
         </span>
         <h2 id="item-title">{summary.title === "" ? "(untitled)" : summary.title}</h2>
         {writable && !summary.trashed && canEditFields(summary.itemType) && (

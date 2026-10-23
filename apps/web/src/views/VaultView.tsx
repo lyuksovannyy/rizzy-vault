@@ -28,6 +28,7 @@ import {
   IconStarFilled,
   IconTag,
   IconTransfer,
+  IconLoader,
   IconTrash,
   TypeIcon,
   isAnyModalOpen,
@@ -100,6 +101,9 @@ export interface VaultContext {
   readonly revision: number;
   /** The generator's in-memory, session-only state (generator-memory.ts module docs). */
   readonly generator: GeneratorMemory;
+  /** Item icons from the server's `icons` role, for this unlocked session (packages/ui
+   * `itemIcons.ts`). */
+  readonly icons: IconLoader;
 }
 
 /** The vault (module docs). */
@@ -131,6 +135,10 @@ export function VaultView(props: {
   const [tags, setTags] = useState<readonly { readonly tag: string; readonly count: number }[]>([]);
   const clipboard = useMemo(() => new ClipboardGuard(browserClipboard), []);
   const generator = useGeneratorMemory();
+  // One loader per unlocked session: the vault view unmounts on lock, which revokes every icon
+  // URL and stops the queue (packages/ui `itemIcons.ts`).
+  const icons = useMemo(() => new IconLoader((host) => client.call("itemIcon", host)), [client]);
+  useEffect(() => () => icons.clear(), [icons]);
   const lockedRef = useRef(false);
   /** The latest session state, for the auto-lock (which runs outside a render). */
   const sessionRef = useRef(props.initialSession);
@@ -348,7 +356,7 @@ export function VaultView(props: {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [section, session.readOnly, shortcutsOpen, accountMenuOpen, sidebarOpen, paletteOpen]);
 
-  const ctx: VaultContext = { client, clipboard, session, afterWrite: sync, revision, generator };
+  const ctx: VaultContext = { client, clipboard, session, afterWrite: sync, revision, generator, icons };
 
   /** Chooses an item filter and switches to the item list. */
   const chooseScope = (next: Scope) => {

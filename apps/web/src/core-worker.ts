@@ -27,6 +27,7 @@ import {
   checkServer,
   cxfExportWarning,
   detectImportFormat,
+  fetchItemIcon,
   fetchTransport,
   generatePassphraseWithOptions,
   generatePasswordWithOptions,
@@ -305,6 +306,10 @@ async function run(m: CallMessage): Promise<unknown> {
     restoreLateAsNew: () => current().restoreLateAsNew(str(a[0]), str(a[1]) as never),
     totp: () => current().totp(str(a[0])),
     breachCheckItem: async () => (await current().checkItemBreach(str(a[0]))) ?? null,
+    itemIcon: async () => {
+      current();
+      return (await fetchItemIcon(transport, str(a[0]))) ?? null;
+    },
     breachCheckPassword: () => {
       current();
       return checkPasswordBreach(transport, bytes(a[0]));
@@ -434,7 +439,10 @@ scope.addEventListener("message", (event) => {
     totpWaiters.get(m.id)?.(m.code);
     return;
   }
-  if (m.method === "lock") {
+  // An icon fetch touches no session state and may wait on a slow site (the role's budget is
+  // 10 s), so it runs beside the queue instead of holding every user action behind it. A lock
+  // still aborts it (`bounded.abortAll`), and it refuses to start while locked.
+  if (m.method === "lock" || m.method === "itemIcon") {
     void serve(m);
     return;
   }

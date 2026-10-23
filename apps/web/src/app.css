@@ -515,6 +515,14 @@ button.row.selected {
   font-size: 1.15rem;
 }
 
+/* A site icon from the `icons` role (packages/ui `ItemIcon.tsx`): a server-re-encoded PNG of at most
+   128×128, shown in the type icon's place at a fixed size, so a row never shifts when it loads. */
+.item-favicon {
+  display: block;
+  object-fit: contain;
+  border-radius: var(--radius-sm, 4px);
+}
+
 .row-text {
   flex: 1;
   min-width: 0;
