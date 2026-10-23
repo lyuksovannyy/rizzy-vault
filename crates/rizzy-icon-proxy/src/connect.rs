@@ -22,6 +22,7 @@
 use core::fmt;
 use core::future::Future;
 use core::pin::Pin;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -60,6 +61,30 @@ pub type ConnectFuture<'a> = Pin<Box<dyn Future<Output = Result<BoxIo, ConnectEr
 pub trait Connector: Send + Sync {
     /// Connects to `host` (a fixed, compiled-in hostname for the breach check).
     fn connect<'a>(&'a self, host: &'a str) -> ConnectFuture<'a>;
+}
+
+/// The future a [`Dialer::resolve`] returns: the resolved addresses, unchecked.
+pub type ResolveFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<IpAddr>, ConnectError>> + Send + 'a>>;
+
+/// The steps of a connection, one by one, for the favicon fetch ([`crate::favicon`]): it checks
+/// the resolved addresses itself (INV-51), connects to exactly the one it checked, may retry
+/// that same address on port 80 when TCP to port 443 fails, and speaks plain HTTP there
+/// ([ADR 0052] point 2). Production passes [`PinnedTls`]; tests pass a dialer to a local fake
+/// upstream.
+///
+/// [ADR 0052]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0052-icon-proxy-role.md
+pub trait Dialer: Send + Sync {
+    /// Resolves `host` once, within [`RESOLVE_TIMEOUT`]: at most [`MAX_ADDRESSES`]
+    /// addresses, not yet checked against the allow-list.
+    fn resolve<'a>(&'a self, host: &'a str) -> ResolveFuture<'a>;
+
+    /// Opens TCP to exactly `address`, never resolving anything.
+    fn tcp(&self, address: SocketAddr) -> ConnectFuture<'_>;
+
+    /// Runs TLS over `io` with [`client_config`], verifying the certificate against `host`
+    /// (the name, not the address).
+    fn tls<'a>(&'a self, io: BoxIo, host: &'a str) -> ConnectFuture<'a>;
 }
 
 /// Why a connection failed. Carries no address and no host answer.
@@ -141,30 +166,63 @@ impl PinnedTls {
         })
     }
 
-    /// Steps 1–4 of the module docs.
+    /// Steps 1–4 of the module docs, through this type's [`Dialer`] steps.
     async fn open(&self, host: &str) -> Result<BoxIo, ConnectError> {
-        let name = ServerName::try_from(host.to_owned()).map_err(|_| ConnectError::Resolve)?;
-        let resolved =
-            tokio::time::timeout(RESOLVE_TIMEOUT, tokio::net::lookup_host((host, HTTPS_PORT)))
-                .await
-                .map_err(|_| ConnectError::Resolve)?
-                .map_err(|_| ConnectError::Resolve)?;
-        let address =
-            pick_address(resolved.take(MAX_ADDRESSES), HTTPS_PORT).ok_or(ConnectError::Refused)?;
+        let resolved = self.resolve(host).await?;
+        let candidates = resolved
+            .into_iter()
+            .map(|ip| SocketAddr::new(ip, HTTPS_PORT));
+        let address = pick_address(candidates, HTTPS_PORT).ok_or(ConnectError::Refused)?;
         let handshake = async {
-            let tcp = TcpStream::connect(address)
-                .await
-                .map_err(|_| ConnectError::Connect)?;
-            let _ = tcp.set_nodelay(true);
-            self.tls
-                .connect(name, tcp)
-                .await
-                .map_err(|_| ConnectError::Tls)
+            let tcp = self.tcp(address).await?;
+            self.tls(tcp, host).await
         };
-        let stream = tokio::time::timeout(CONNECT_TIMEOUT, handshake)
+        tokio::time::timeout(CONNECT_TIMEOUT, handshake)
             .await
-            .map_err(|_| ConnectError::Connect)??;
+            .map_err(|_| ConnectError::Connect)?
+    }
+
+    /// [`Dialer::resolve`].
+    async fn lookup(host: &str) -> Result<Vec<IpAddr>, ConnectError> {
+        let resolved = tokio::time::timeout(RESOLVE_TIMEOUT, tokio::net::lookup_host((host, 0)))
+            .await
+            .map_err(|_| ConnectError::Resolve)?
+            .map_err(|_| ConnectError::Resolve)?;
+        Ok(resolved.take(MAX_ADDRESSES).map(|a| a.ip()).collect())
+    }
+
+    /// [`Dialer::tcp`].
+    async fn open_tcp(address: SocketAddr) -> Result<BoxIo, ConnectError> {
+        let tcp = TcpStream::connect(address)
+            .await
+            .map_err(|_| ConnectError::Connect)?;
+        let _ = tcp.set_nodelay(true);
+        Ok(Box::new(tcp))
+    }
+
+    /// [`Dialer::tls`].
+    async fn handshake(&self, io: BoxIo, host: &str) -> Result<BoxIo, ConnectError> {
+        let name = ServerName::try_from(host.to_owned()).map_err(|_| ConnectError::Tls)?;
+        let stream = self
+            .tls
+            .connect(name, io)
+            .await
+            .map_err(|_| ConnectError::Tls)?;
         Ok(Box::new(stream))
+    }
+}
+
+impl Dialer for PinnedTls {
+    fn resolve<'a>(&'a self, host: &'a str) -> ResolveFuture<'a> {
+        Box::pin(Self::lookup(host))
+    }
+
+    fn tcp(&self, address: SocketAddr) -> ConnectFuture<'_> {
+        Box::pin(Self::open_tcp(address))
+    }
+
+    fn tls<'a>(&'a self, io: BoxIo, host: &'a str) -> ConnectFuture<'a> {
+        Box::pin(self.handshake(io, host))
     }
 }
 
