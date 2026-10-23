@@ -8,6 +8,11 @@
 #   docker compose --profile admin run --rm secrets-init
 #   docker compose up -d
 #
+# Optional, off by default (ADR 0010 owner decision 5): the `icons` role (item icons, and the
+# breach check when RIZZY_BREACH_CHECK=on), in its own container. To run it, set
+# RIZZY_ICONS_UPSTREAM=icons:8080 in .env and start with `docker compose --profile icons up -d`
+# (docs/self-hosting.md §14).
+#
 # Two volumes with different backup targets (ADR 0010 §4, THREAT_MODEL INV-50):
 #   rizzy-vault-data     the database: back it up with your data backups;
 #   rizzy-vault-secrets  the OPAQUE seed and server keys: back it up with `backup-secrets`,
@@ -66,12 +71,54 @@ services:
         max-size: "10m"
         max-file: "5"
 
+  # The `icons` role (ADR 0052, ADR 0053; ADR 0010 §1–§2, §4): fetches site icons and, when
+  # RIZZY_BREACH_CHECK=on, breach-check ranges; the one process that reaches the internet. It runs
+  # alone, with no database and no secrets: neither volume is mounted (the role refuses to start
+  # if it can see either), only its own cache volume. Only with `--profile icons`.
+  icons:
+    <<: *hardening
+    image: ${RIZZY_IMAGE:-localhost/rizzy-vault:dev}
+    profiles: [icons]
+    restart: unless-stopped
+    command: ["serve", "--roles", "icons"]
+    environment:
+      RIZZY_LISTEN: 0.0.0.0:8080
+      RIZZY_LOG_LEVEL: ${RIZZY_LOG_LEVEL:-info}
+      # The breach check has its own switch (ADR 0053 item 5); item icons are on whenever this
+      # container runs.
+      RIZZY_BREACH_CHECK: ${RIZZY_BREACH_CHECK:-off}
+      RIZZY_ICON_CACHE_DIR: /cache
+      # 14 days and 256 MiB (ADR 0052 owner answer 3).
+      RIZZY_ICON_CACHE_TTL_SECS: ${RIZZY_ICON_CACHE_TTL_SECS:-1209600}
+      RIZZY_ICON_CACHE_MAX_BYTES: ${RIZZY_ICON_CACHE_MAX_BYTES:-268435456}
+      # Its per-address rate limit reads X-Forwarded-For from the proxy only.
+      RIZZY_TRUSTED_PROXIES: ${RIZZY_PROXY_IP:-172.30.87.10}
+    volumes:
+      - icon-cache:/cache
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    # `edge` only (ADR 0010 §4: "icons joins only edge, plus outbound internet"); the bridge
+    # network's default route is its outbound internet. Its egress is limited by the INV-51
+    # allow-list in the binary (public unicast addresses, ports 80 and 443).
+    networks:
+      edge:
+    expose: ["8080"]
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
   proxy:
     image: ${RIZZY_PROXY_IMAGE:-docker.io/library/caddy:2-alpine}
     restart: unless-stopped
     depends_on: [rizzy-vault]
     environment:
       RIZZY_DOMAIN: ${RIZZY_DOMAIN:?set RIZZY_DOMAIN in deploy/.env}
+      # Where /api/v1/icons/ goes (ADR 0052 point 6): rizzy-vault itself by default, which
+      # answers 404 ("not enabled"); icons:8080 when the `icons` profile runs.
+      RIZZY_ICONS_UPSTREAM: ${RIZZY_ICONS_UPSTREAM:-rizzy-vault:8080}
     # High host ports, so rootless Podman needs no sysctl (ADR 0010 §4). For 80/443 on the
     # host, see docs/self-hosting.md "Ports".
     ports:
@@ -218,6 +265,10 @@ volumes:
     name: rizzy-vault-caddy-data
   caddy-config:
     name: rizzy-vault-caddy-config
+  # The `icons` role's cache (ADR 0010 §4): public, re-encoded icons and breach ranges only;
+  # nothing to back up.
+  icon-cache:
+    name: rizzy-vault-icon-cache
   # pg-data:
   #   name: rizzy-vault-pg-data
 

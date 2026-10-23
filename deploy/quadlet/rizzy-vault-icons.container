@@ -1,0 +1,56 @@
+# rizzy-vault, the optional `icons` role (item icons, ADR 0052; the breach check when
+# RIZZY_BREACH_CHECK=on, ADR 0053), Podman Quadlet unit. Mirrors the `icons` service of
+# ../compose.yaml (ADR 0010 §1–§2, §4). Operator guide: docs/self-hosting.md §13 and §14.
+#
+# OFF by default (ADR 0010 owner decision 5): this file is only an example. To run the role,
+# copy it, rizzy-vault-icon-cache.volume and rizzy-vault-icons.env (from
+# rizzy-vault-icons.env.example) into ~/.config/containers/systemd/, set
+# RIZZY_ICONS_UPSTREAM=rizzy-vault-icons:8080 in rizzy-vault-proxy.env, then
+# `systemctl --user daemon-reload` and start rizzy-vault-icons.service and restart the proxy.
+#
+# This file was written without a Podman install to test it against in this environment; see
+# docs/self-hosting.md §13 "Unverified" (the same keys as rizzy-vault.container).
+
+[Unit]
+Description=rizzy-vault icons role (item icons, breach check)
+
+[Container]
+ContainerName=rizzy-vault-icons
+Image=localhost/rizzy-vault:dev
+Exec=serve --roles icons
+
+# ---- the same hardening as rizzy-vault.container ----
+ReadOnly=true
+ReadOnlyTmpfs=false
+Tmpfs=/tmp:size=16m,mode=1777
+DropCapability=ALL
+NoNewPrivileges=true
+User=65532
+Group=65532
+# ---- end hardening ----
+
+# `edge` only, plus the network's outbound route (ADR 0010 §4). Egress is limited by the
+# INV-51 allow-list in the binary: public unicast addresses, ports 80 and 443.
+Network=rizzy-vault-edge.network
+# No PublishPort=: only the proxy reaches it.
+
+# Its cache volume only. Never mount rizzy-vault-data.volume or rizzy-vault-secrets.volume:
+# the role refuses to start if it can see the database or the secrets file (ADR 0010 §2).
+Volume=rizzy-vault-icon-cache.volume:/cache
+
+Environment=RIZZY_LISTEN=0.0.0.0:8080
+Environment=RIZZY_ICON_CACHE_DIR=/cache
+# RIZZY_BREACH_CHECK, RIZZY_ICON_CACHE_TTL_SECS, RIZZY_ICON_CACHE_MAX_BYTES,
+# RIZZY_TRUSTED_PROXIES and RIZZY_LOG_LEVEL come from the env file.
+EnvironmentFile=%h/.config/containers/systemd/rizzy-vault-icons.env
+
+# AutoUpdate=registry stays off for the reason rizzy-vault.container gives.
+
+[Service]
+Restart=always
+TimeoutStopSec=15
+LimitCORE=0
+
+# No [Install]: started by hand (`systemctl --user start rizzy-vault-icons`). Add
+# "[Install]" with "WantedBy=default.target" to start it at every login, once you have decided
+# to run the role.

@@ -16,5 +16,11 @@
 	# unless the operator decides to (THREAT_MODEL §3.4).
 	#
 	# rizzy-vault sets HSTS, CSP and the other security headers itself (INV-49).
+	#
+	# The `icons` role's endpoints (item icons, ADR 0052 point 6; the breach check, ADR 0053)
+	# go to its own container when it runs: set RIZZY_ICONS_UPSTREAM=icons:8080 (compose.yaml)
+	# or rizzy-vault-icons:8080 (Quadlet). The default sends them to rizzy-vault, which answers
+	# 404 not_found, the "not enabled" the clients expect. Matched before the catch-all.
+	reverse_proxy /api/v1/icons/* {$RIZZY_ICONS_UPSTREAM:rizzy-vault:8080}
 	reverse_proxy rizzy-vault:8080
 }

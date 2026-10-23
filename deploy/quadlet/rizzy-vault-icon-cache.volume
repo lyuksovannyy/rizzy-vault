@@ -1,0 +1,7 @@
+# The `icons` role's cache volume (ADR 0010 §4). Mirrors compose.yaml's `icon-cache` volume
+# (named `rizzy-vault-icon-cache`). It holds public, re-encoded site icons and breach-check
+# ranges only, shared by all users and keyed by what was fetched, never by who asked: nothing
+# in it needs a backup.
+
+[Volume]
+VolumeName=rizzy-vault-icon-cache
