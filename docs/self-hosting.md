@@ -165,7 +165,7 @@ Exit codes: 0 success, 1 a runtime failure, 2 a usage or configuration error. Me
 
 ## 5. The secrets file
 
-What it holds: every OPAQUE server setup (the OPRF seed and server keypair) by `setup_id`, `enum_key` (fake login answers for unknown names), every server data key by `data_key_id` (they seal 2FA secrets and in-flight login state), and the bootstrap token ([CRYPTO.md §5.11](CRYPTO.md#511-server-side-encryption-not-zero-knowledge)).
+What it holds: every OPAQUE server setup (the OPRF seed and server keypair) by `setup_id`, `enum_key` (fake login answers for unknown names), every server data key by `data_key_id` (they seal 2FA secrets and in-flight login state), the bootstrap token, and, once you add one, every backup key by `backup_key_id` (they seal encrypted database backups, [§8](#8-backup)) ([CRYPTO.md §5.11](CRYPTO.md#511-server-side-encryption-not-zero-knowledge)).
 
 **Handling.**
 - It lives on its own volume, `rizzy-vault-secrets`, mounted **read-only** into the server. Only `secrets init`, `secrets rotate` and `secrets retire-setups` mount it writable, as one-offs. The server never writes it.
@@ -196,7 +196,7 @@ The file is written with mode 0600 and never overwrites, so move it away before 
 >
 > In this build that encrypted copy is the **only** way to restore the secrets.
 
-**Rotation** ([CRYPTO.md §5.8](CRYPTO.md#58-loss-or-rotation-of-the-server-opaque-secrets), §5.11): `secrets rotate` adds a new OPAQUE setup, which new registrations use; an existing account moves to it the next time a client logs in, or unlocks an enrolled device, with the typed password (a transparent re-registration with the same password, [ADR 0031](adr/0031-retiring-old-opaque-setups.md)). `secrets rotate --data-key` adds a new data key and marks it current. Stop the server first (every replica, on PostgreSQL; the command refuses otherwise):
+**Rotation** ([CRYPTO.md §5.8](CRYPTO.md#58-loss-or-rotation-of-the-server-opaque-secrets), §5.11): `secrets rotate --backup-key` adds a new current backup key for `backup --encrypt` ([§8](#8-backup)). `secrets rotate` adds a new OPAQUE setup, which new registrations use; an existing account moves to it the next time a client logs in, or unlocks an enrolled device, with the typed password (a transparent re-registration with the same password, [ADR 0031](adr/0031-retiring-old-opaque-setups.md)). `secrets rotate --data-key` adds a new data key and marks it current. Stop the server first (every replica, on PostgreSQL; the command refuses otherwise):
 
 ```sh
 docker compose stop rizzy-vault
@@ -315,7 +315,7 @@ Under the Quadlet units ([§13](#13-podman-quadlet-systemd-managed-rootless)), r
 
 | What | How | Where to keep it |
 |---|---|---|
-| The database (`rizzy-vault-data`) | `rizzy-vault backup` below; also the native copy, for losing the disk | With your data backups, encrypted at rest |
+| The database (`rizzy-vault-data`) | `rizzy-vault backup` below, or `backup --encrypt`; also the native copy, for losing the disk | With your data backups, encrypted at rest (an encrypted backup already is) |
 | The secrets (`rizzy-vault-secrets`) | `backup-secrets`, plus the encrypted copy of [§5](#5-the-secrets-file) | **Apart** from the database backups |
 | `deploy/.env`, `deploy/Caddyfile` | Any | Anywhere (no secret in profile A) |
 
@@ -339,6 +339,38 @@ What the file is, and is not:
 - **At most 2 GiB** in this release, which reads the whole file into memory. `backup` refuses to write a larger one, so every backup it writes can be restored. **Attachments count toward it:** they are stored as database rows, so every attachment byte is in every backup ([ADR 0054](adr/0054-attachments-envelope-and-api.md) §5). A server with many large attachments reaches this limit sooner; watch the size `backup` prints. Sessions and in-flight login state are not in it: after a restore every user signs in again.
 
 It works the same on PostgreSQL (one `REPEATABLE READ` snapshot), and the same pair moves an instance from SQLite to PostgreSQL: `backup` on the SQLite instance, `restore` into the empty PostgreSQL database ([§9](#9-restore)).
+
+### The encrypted backup: `rizzy-vault backup --encrypt`
+
+`--encrypt` writes the same backup sealed under a **backup key** held in the secrets file: format version 2 of [ADR 0071](adr/0071-encrypted-db-backup-format.md) ([CRYPTO.md §9.8](CRYPTO.md#98-chunked-db-backup-format_version-2-m8)). No passphrase and no extra tool are involved, so it suits unattended runs and copies kept off site. It is optional: without the flag, `backup` writes format version 1 as above.
+
+1. **Add a backup key once**, with the server stopped, like any rotation ([§5](#5-the-secrets-file)):
+
+   ```sh
+   docker compose stop rizzy-vault
+   docker compose --profile admin run --rm secrets-rotate secrets rotate --backup-key
+   docker compose start rizzy-vault
+   ```
+
+   The key is 32 random bytes in the secrets file (`backup_keys`, [CRYPTO.md §5.11](CRYPTO.md#511-server-side-encryption-not-zero-knowledge); [INV-98](THREAT_MODEL.md#8-security-invariants)). It is never derived from a passphrase and never shared with another server key. **Then make a new secrets backup** (`backup-secrets`, [§5](#5-the-secrets-file)): no encrypted database backup can be restored without the secrets file that holds its key. `backup --encrypt` without a backup key is refused (exit 2) and names this command.
+
+2. **Back up** next to the running server, like the plain backup:
+
+   ```sh
+   mkdir -p backup-db
+   docker compose exec -T rizzy-vault /usr/local/bin/rizzy-vault backup --encrypt --out - \
+     > "backup-db/rizzy-db-$(date +%Y%m%dT%H%M%S).rvbackup"
+   ```
+
+   On stderr it prints the size, the chunk count and the id of the backup key it used. There is no SHA-256 to record: the file is authenticated chunk by chunk instead.
+
+What the file is:
+- **Encrypted and authenticated.** The whole format version 1 file, table names and row counts included, is split into 8 MiB chunks, each sealed with the server's `0x01` envelope under purpose `SERVER_DB_BACKUP`. Each chunk's associated data binds its position and the chunk count. Someone who can write to the backup storage but does not hold the secrets file cannot read the file, and cannot forge, truncate or reorder it, or splice in a chunk from another backup. `restore` refuses all of these before it loads anything.
+- **Bound to the secrets file.** A holder of the file **and** the secrets file has the same exposure as with a plain backup: store the encrypted backups apart from the secrets file and from its backup, exactly as before. At-rest encryption of the archive (`age`) is now optional defence in depth.
+- **Rotation keeps old backups restorable.** `secrets rotate --backup-key` adds a new current key. The older keys stay in the file and nothing drops them ([ADR 0071](adr/0071-encrypted-db-backup-format.md) owner answer 3), so a backup made under key 1 still restores after key 2 is added. Keep the secrets backup that holds a key for as long as you keep database backups sealed under it.
+- **One-way compatibility.** A secrets file that holds a backup key is refused by an older `rizzy-vault` binary, which does not know the field. Upgrade every instance that shares the file first, and keep the pre-rotation secrets backup if you might roll back.
+- **The same limits otherwise:** at most 2 GiB for the encrypted file (header, data and 90 bytes per 8 MiB chunk), so a database just under the plain limit may not fit encrypted. Restore needs a release of the same schema version, and the backup works the same on PostgreSQL.
+- **A lost secrets file strands every encrypted backup.** This build has no `secrets restore` command yet ([§5](#5-the-secrets-file)). Recover the file from your secrets backup by hand, as §5 describes.
 
 ### The native copy, for losing the disk
 
@@ -384,7 +416,7 @@ An account used only from the web vault has no device that can heal it, and stay
 
 `rizzy-vault restore` loads a `rizzy-vault backup` file into an **empty** database, with the server stopped. In order ([ADR 0023](adr/0023-logical-backup-format.md) §5), it:
 1. shuts every server process out, with the SQLite writer lock or the PostgreSQL instance lock (below; it refuses while a server runs), and checks that the database is empty: no row, and either new or at exactly this release's schema;
-2. reads the file (at most 2 GiB) and checks its magic, format version and SHA-256 before anything else, then parses it strictly;
+2. reads the file (at most 2 GiB) and checks its magic, format version and SHA-256 before anything else, then parses it strictly. An **encrypted** backup (format version 2, `backup --encrypt`) is opened first with the backup key its header names, which must still be in the secrets file (it need not be the current one). Every chunk is checked, and a damaged, truncated, reordered or foreign file, or a missing key, is refused before anything is loaded. The plain backup inside then goes through this step;
 3. requires the backup's schema version to be this release's;
 4. checks the secrets file against the backup, as the server's startup check does: the OPAQUE setups the backup records must be the secrets file's, and every data key a 2FA row names must be in it. A fresh secrets file is refused; restore the instance's own secrets first;
 5. loads every row in one transaction, draws a **new restore generation** and puts **every account into a reconciliation epoch**;
@@ -404,7 +436,7 @@ docker compose start rizzy-vault
 docker compose logs rizzy-vault        # expect: listening
 ```
 
-If the secrets volume was lost too, restore it **before** running `restore` (below). `restore` exits with 0 on success, 1 when it refused or failed (a running server, a non-empty database, a damaged file, another schema version, secrets that do not belong to the backup), and 2 on a usage error.
+If the secrets volume was lost too, restore it **before** running `restore` (below). `restore` exits with 0 on success, 1 when it refused or failed (a running server, a non-empty database, a damaged file, another schema version, secrets that do not belong to the backup or lack its backup key), and 2 on a usage error. An encrypted backup needs no `age -d`: pipe or name the file as it is.
 
 ### The PostgreSQL instance lock
 
@@ -466,6 +498,8 @@ A backup you have never restored is a hope, not a backup ([ROADMAP §4.9](ROADMA
 
 **Automated (runs with `cargo test`).** [`crates/rizzy-server/tests/drill.rs`](../crates/rizzy-server/tests/drill.rs) runs the backup → wipe → restore drill in a fast form, against real SQLite files, through the functions the binary runs: `secrets init`, a populated instance, a start with the startup checks, `rizzy-vault backup` to a file next to the running server, `backup-secrets`, the native copy, a wipe, the secrets restored byte for byte from the encrypted backup, `rizzy-vault restore` of the backup file into an empty database, and a restart. It checks that the data reads back exactly, that the restore draws a new restore generation and opens a reconciliation epoch for every account (INV-59), that the backup file holds none of the secrets file's secrets (INV-50: every OPAQUE server setup, `enum_key`, every data key and the bootstrap token, searched for both as bytes and as their base64url text), and that a restore next to the running server, into a non-empty database, with a fresh secrets file, or of a damaged file is refused, as is a wrong passphrase. It also checks the warning of [§9](#9-restore): a native copy restored in place starts, but keeps the old restore generation and opens no epoch. `crates/rizzy-server/tests/cli.rs` runs the two commands as processes: through a pipe and a file, the digest on stderr, and the refusals.
 
+The same file runs the **encrypted** drill ([ADR 0071](adr/0071-encrypted-db-backup-format.md)), in the same way. `backup --encrypt` without a backup key is refused. Then `secrets rotate --backup-key`, and `backup --encrypt` next to the running server, whose file must hold no table name, no row value and no secret of the secrets file. A second rotation follows: the backup still restores with its older key. A tampered file, a truncated one and another instance's secrets file (with and without a backup key 1) are each refused into an empty database, which stays empty. Then wipe, `restore` from the encrypted file, and start. A PostgreSQL variant is `#[ignore]`d unless `RIZZY_TEST_POSTGRES_URL` names an empty database: a tampered file is refused into PostgreSQL, the real one restored, and `backup --encrypt` from PostgreSQL gives the same dump back. `crates/rizzy-server/tests/cli.rs` runs the encrypted commands through the binary, and `crates/rizzy-server/tests/db_backup.rs` replays the container's known-answer vectors.
+
 > **Gap: the full drill of ADR 0011 is automated on SQLite only.** ADR 0011 requires simulated clients that change a password, enrol and revoke devices and rotate keys after the backup, then reconnect to the restored server and heal it, on SQLite and PostgreSQL. `rv`'s end-to-end tests run it on SQLite against the built binary: a restore after an enrolment and after vault edits (`crates/rizzy-cli/tests/e2e.rs`), and after a standard rotation, a revocation with a full rotation, a password change and a Secret Key change with a full rotation, with the login record re-registered, a device that missed the rotation catching up and the recovery repair ([ADR 0032](adr/0032-healing-rotation-after-backup.md); `crates/rizzy-cli/tests/healing.rs`). The same drill against PostgreSQL is not run yet.
 
 **Manual, on your own backups (monthly, and after every upgrade).** Restore the newest backups into **scratch volumes**, start a server on them **with no network**, and check that it passes its startup checks. The scratch server never talks to clients: it would honour the backup's old credentials.
@@ -503,7 +537,8 @@ The web vault's Settings → "What the server stores" tells your users what the 
 - [ ] `RIZZY_ORIGIN` is the exact `https://` origin users type, and will not change.
 - [ ] The secrets volume is mounted read-only into the server and is not inside the data volume.
 - [ ] A `backup-secrets` file **and** an encrypted copy of `secrets.json` exist, stored apart from the database backups; the passphrase is stored safely.
-- [ ] Database backups (`rizzy-vault backup`) run on a schedule, are encrypted, and are pruned; their SHA-256 is recorded.
+- [ ] Database backups (`rizzy-vault backup`) run on a schedule, are encrypted (`backup --encrypt`, or `age` over a plain backup), and are pruned; a plain backup's SHA-256 is recorded.
+- [ ] If you use `backup --encrypt`: a secrets backup taken after the last `secrets rotate --backup-key` exists, kept for as long as the database backups sealed under its keys.
 - [ ] No backup holds both volumes (whole-host snapshots included).
 - [ ] The database is on a local disk, not NFS or SMB.
 - [ ] `RIZZY_SIGNUP` is `closed` outside the first-accounts window.
