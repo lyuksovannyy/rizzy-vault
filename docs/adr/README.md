@@ -135,6 +135,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0076 | [Autocomplete-driven autofill: field detection, TOTP-code fill and custom-field autocomplete ids](0076-autocomplete-driven-autofill.md) | Accepted | M3 |
 | 0077 | [webauthn-rs integration: deny wrappers, ceremony-state storage, RNG rule and stored credential shape](0077-webauthn-rs-integration-fixes.md) | Proposed | M3 |
 | 0078 | [Retire the Bank account item type (`0x0009`) and its `bank.` field keys](0078-retire-bank-account-item-type.md) | Proposed | M3 |
+| 0079 | [Identity generator: pre-filled new identities, the `identity.sex` and `identity.birthday` keys, bundled name and address data, and the masked-email seam](0079-identity-generator.md) | Proposed | M3 / M6 |
 | 0080 | [Default site groups: seeding the signed global equivalence list from Vaultwarden's `global_domains.json`](0080-default-site-groups-vaultwarden-seed.md) | Proposed | M2 |
 
 ## Gates

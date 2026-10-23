@@ -10,7 +10,7 @@ rizzy-vault is a self-hostable, end-to-end encrypted, zero-knowledge password ma
    - If there is no row, the task is out of scope. Ask.
 2. Read [docs/adr/README.md](docs/adr/README.md), then every ADR your task touches. For security work, also read the relevant parts of [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and [docs/CRYPTO.md](docs/CRYPTO.md).
 3. Check the ADR's **Status** line. Only `Accepted` is binding, and so are the parts of a `Partially superseded` ADR that no later Accepted ADR names ([ADR 0020](docs/adr/0020-partial-supersession.md) point 9).
-   - As of 2026-10-22, ADRs 0001–0014, 0016–0032, 0034–0044, 0048–0060, 0062, 0071 and 0073–0076 are Accepted (0020 carries 0001 forward), several of them Partially superseded, as their status lines say; 0015 is Superseded by 0019. 0033 (protobuf), 0045–0047, 0061, 0063–0070, 0072, 0077, 0078 and 0080 are Proposed; titles in [docs/adr/README.md](docs/adr/README.md). 0033's recommendation, JSON only for now, is the owner's current call.
+   - As of 2026-10-22, ADRs 0001–0014, 0016–0032, 0034–0044, 0048–0060, 0062, 0071 and 0073–0076 are Accepted (0020 carries 0001 forward), several of them Partially superseded, as their status lines say; 0015 is Superseded by 0019. 0033 (protobuf), 0045–0047, 0061, 0063–0070, 0072, 0077, 0078, 0079 and 0080 are Proposed; titles in [docs/adr/README.md](docs/adr/README.md). 0033's recommendation, JSON only for now, is the owner's current call.
 4. Do not recreate `docs/ARCHITECTURE.md`. It was deliberately removed; do not link to it either.
 
 ## The ADR gate (hard stop)
