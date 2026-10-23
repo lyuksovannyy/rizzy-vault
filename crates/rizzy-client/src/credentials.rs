@@ -967,7 +967,7 @@ impl PendingCredentialChange {
                 let local_wrap = p.prepare(rng, device)?;
                 let pin = p.new_pin();
                 let authors = Authors::from_statements(&p.certificates, &p.revocations)?;
-                device.local_wrap = local_wrap;
+                device.set_local_wrap(local_wrap);
                 p.credential.apply(device, unlocked);
                 device.pin = pin;
                 Ok(RotationDone {
@@ -1025,7 +1025,7 @@ pub fn follow_credential_change<R: CryptoRng + ?Sized>(
         password_epoch,
     )?;
     device.adopt(&account);
-    device.local_wrap = local_wrap;
+    device.set_local_wrap(local_wrap);
     device.device_salt = device_salt;
     device.kdf_id = kdf_id;
     device.secret_key = secret_key;

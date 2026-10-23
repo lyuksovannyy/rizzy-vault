@@ -477,6 +477,8 @@ impl Device {
         let lock = AccountLock::acquire(&env.data_dir, &account)?;
         let mut db = Db::open(&cache_path(&env.data_dir, &account)).await?;
         let mut rows = db.read().await?;
+        // `keystore_capable = false`: `rv` never holds a keystore unlock secret (ADR 0019 §1.4,
+        // INV-62), so a record with `E_ks` is refused as corrupt (ADR 0057 §2, INV-81).
         let mut record = load::open(&rows, false)?;
         let http = Http::new(record.server_origin().as_str(), &env.trust)?;
         let mut typed_password = None;

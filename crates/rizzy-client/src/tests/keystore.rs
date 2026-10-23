@@ -3,7 +3,11 @@
 //! Device-state record version 2 ([ADR 0057] §5): known-answer vectors of a record with `E_ks`
 //! and forward envelopes and at the `forward_count` boundary, the canonical form, the
 //! `has_ks = 1 ⇒ has_local = 1` rule and the platform gate (INV-81) under both
-//! `keystore_capable` values, in the parser and in the floors, and the v1 → v2 upgrade.
+//! `keystore_capable` values, in the parser and in the floors, and the v1 → v2 upgrade; and the
+//! lifecycle with real keys against the fake server (CRYPTO.md §5.6 step 3, §11.3 step 4.3):
+//! enabling, the keystore unlock, rotations crossed by keystore unlocks up to the eighth forward
+//! envelope and the refused ninth, the password unlock that follows and collapses the chain,
+//! with and without the keystore secret attached, and disabling.
 //!
 //! [ADR 0057]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0057-device-state-v2-keystore.md
 
@@ -334,4 +338,399 @@ proptest! {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The lifecycle with real keys (CRYPTO.md §5.6 step 3, §11.3 step 4.3; ADR 0057 §2)
+// ---------------------------------------------------------------------------------------------
+
+use rizzy_core::envelope::purpose::{
+    AccountKeyDeviceGrantCtx, IdentitySecretKeysCtx, VaultKeySelfGrantCtx,
+};
+use rizzy_core::ids::VaultId;
+use rizzy_core::keys::{GrantSigner, VaultKey, seal_account_key_device_grant};
+use rizzy_proto::account::DeviceGrantsResponse;
+use rizzy_proto::objects::DeviceGrant;
+
+use crate::unlock::apply_device_grants;
+
+/// Device B, which rotates the account key and grants each new key to device A.
+struct Rotator {
+    account: crate::account::VerifiedAccount,
+    /// B's keys; `account_key` is replaced at each rotation.
+    unlocked: UnlockedDevice,
+    vault_key: VaultKey,
+    state: AccountState,
+    /// The grants A has not applied yet, oldest first.
+    grants: Vec<DeviceGrant>,
+}
+
+impl Rotator {
+    fn new(server: &mut Server, rng: &mut ChaCha20Rng, sk: &str, vault_id: VaultId) -> Self {
+        let b = login_and_enrol(server, rng, sk);
+        let mut account = b.account;
+        let vault_key = account.take_vault_key(vault_id).unwrap();
+        let state = account.state().clone();
+        Self {
+            account,
+            unlocked: b.unlocked,
+            vault_key,
+            state,
+            grants: Vec::new(),
+        }
+    }
+
+    /// One standard rotation (CRYPTO.md §11.6) granting the new key to `a`; serves the new
+    /// state, `E_id` and self-grant.
+    fn rotate(&mut self, server: &mut Server, rng: &mut ChaCha20Rng, a: &DeviceState) {
+        let account_id = self.account.account_id();
+        let new_key = self.unlocked.account_key.generate_next(rng).unwrap();
+        let epoch = new_key.epoch();
+        let a_cert = self
+            .account
+            .certificates()
+            .iter()
+            .find(|c| c.certificate.device_id == a.device_id())
+            .unwrap()
+            .certificate
+            .clone();
+        let grant = seal_account_key_device_grant(
+            rng,
+            &AccountKeyDeviceGrantCtx {
+                account_id,
+                account_key_epoch: epoch,
+                sender_device_id: self.unlocked.device_id,
+                recipient_device_id: a.device_id(),
+            },
+            &new_key,
+            &self.unlocked.account_key,
+            &a_cert,
+            GrantSigner::Device(self.unlocked.device_keys.signing_key()),
+        )
+        .unwrap();
+        let e_id = new_key
+            .wrap_identity_keys(
+                rng,
+                &IdentitySecretKeysCtx {
+                    account_id,
+                    identity_epoch: 0,
+                },
+                &self.account.identity,
+            )
+            .unwrap();
+        let self_grant = new_key
+            .wrap_vault_key(
+                rng,
+                &VaultKeySelfGrantCtx {
+                    account_id,
+                    vault_id: self.vault_key.vault_id(),
+                    account_key_epoch: epoch,
+                    vault_key_epoch: 0,
+                },
+                &self.vault_key,
+            )
+            .unwrap();
+        self.state.state_seq += 1;
+        self.state.account_key_epoch = epoch;
+        self.state.account_key_id = new_key.key_id().unwrap();
+        let wire = self
+            .state
+            .sign(self.account.identity.signing_key())
+            .unwrap();
+        let s = server.account.as_mut().unwrap();
+        s.state = wire;
+        s.e_id = IdentitySecretKeys {
+            identity_epoch: 0,
+            envelope: bytes(&e_id),
+        };
+        s.grants = vec![VaultSelfGrant {
+            vault_id: Id::from_bytes(self.vault_key.vault_id().to_bytes()),
+            account_key_epoch: epoch,
+            vault_key_epoch: 0,
+            envelope: bytes(&self_grant),
+        }];
+        self.grants.push(DeviceGrant {
+            account_key_epoch: epoch,
+            sender_device_id: Id::from_bytes(self.unlocked.device_id.to_bytes()),
+            recipient_device_id: Id::from_bytes(a.device_id().to_bytes()),
+            key_grant: bytes(&grant),
+        });
+        self.unlocked.account_key = new_key;
+    }
+
+    /// The grants A has not applied yet.
+    fn pending(&self) -> DeviceGrantsResponse {
+        DeviceGrantsResponse {
+            grants: List::new(self.grants.clone()).unwrap(),
+        }
+    }
+}
+
+/// The online part after an unlock (CRYPTO.md §11.3 steps 2–4): verify; on a rotation apply the
+/// grants and verify again. Returns the result of applying the grants, if any were needed.
+fn online(
+    rng: &mut ChaCha20Rng,
+    server: &Server,
+    b: &mut Rotator,
+    state: &mut DeviceState,
+    unlocked: &mut UnlockedDevice,
+) -> Option<Result<(), ClientError>> {
+    let view = server.view();
+    match verify_unlock(state, unlocked, &view, None) {
+        Ok(_) => None,
+        Err(ClientError::AccountKeyRotated) => {
+            let applied = apply_device_grants(rng, state, unlocked, &view, &b.pending(), None);
+            Some(applied.map(|_ack| {
+                b.grants.clear();
+                verify_unlock(state, unlocked, &view, None).unwrap();
+            }))
+        }
+        Err(e) => panic!("{e:?}"),
+    }
+}
+
+/// A copy of a device state, through its record (the state is not `Clone`).
+fn copy_state(state: &DeviceState) -> DeviceState {
+    let bytes = state.record(Stage::Committed).unwrap().encode().unwrap();
+    DeviceRecord::parse(&bytes, true)
+        .unwrap()
+        .to_state(state.pin().clone())
+        .unwrap()
+}
+
+fn record_bytes(state: &DeviceState) -> Vec<u8> {
+    state
+        .record(Stage::Committed)
+        .unwrap()
+        .encode()
+        .unwrap()
+        .to_vec()
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one story: enable, cross eight rotations by keystore unlock, refuse the ninth, collapse"
+)]
+fn keystore_unlock_lifecycle() {
+    let mut rng = ChaCha20Rng::seed_from_u64(57);
+    let mut server = Server::new(5757);
+    let a = signup(&mut server, &mut rng, DeviceKind::DesktopCli);
+    let mut state = a.device.unwrap();
+    let sk = secret_key_text(&state);
+    let mut b = Rotator::new(&mut server, &mut rng, &sk, a.vault_key.vault_id());
+
+    // Without `E_ks` there is no keystore unlock.
+    assert!(!state.has_keystore());
+    assert_eq!(
+        state.unlock_keystore(&[0; 32]).unwrap_err(),
+        ClientError::KeystoreUnlockUnavailable
+    );
+
+    // Enable after a password unlock (CRYPTO.md §4.2): the secret is returned, never stored.
+    let mut unlocked = state.unlock(PASSWORD).unwrap();
+    online(&mut rng, &server, &mut b, &mut state, &mut unlocked);
+    let secret = state.enable_keystore(&mut rng, &unlocked).unwrap();
+    let secret = secret.expose_secret().to_vec();
+    assert!(state.has_keystore());
+    let bytes = record_bytes(&state);
+    assert!(
+        !bytes.windows(secret.len()).any(|w| w == secret.as_slice()),
+        "INV-82: the secret is not in the record"
+    );
+    assert_eq!(
+        DeviceRecord::parse(&bytes, false).unwrap_err(),
+        ClientError::CacheCorrupt,
+        "INV-81"
+    );
+    let record = DeviceRecord::parse(&bytes, true).unwrap();
+    assert!(record.has_keystore());
+    // The keystore unlock: no Argon2id, the same keys as the password unlock.
+    let ks = record.unlock_keystore(&secret).unwrap();
+    assert_eq!(ks.account_key_epoch(), 0);
+    assert!(ks.has_keystore_secret());
+    assert_eq!(
+        ks.account_key.key().expose_secret(),
+        unlocked.account_key.key().expose_secret()
+    );
+    // A wrong or short secret.
+    assert_eq!(
+        state.unlock_keystore(&[0x5a; 32]).unwrap_err(),
+        ClientError::KeystoreUnlockUnavailable
+    );
+    assert_eq!(
+        state.unlock_keystore(&secret[..31]).unwrap_err(),
+        ClientError::InvalidInput
+    );
+    // Keys of another device cannot enable it.
+    assert_eq!(
+        state.enable_keystore(&mut rng, &b.unlocked).unwrap_err(),
+        ClientError::InvalidInput
+    );
+
+    // Eight rotations, each crossed by a keystore unlock: E_ks and E_dev move to the new key,
+    // E_local stays at epoch 0, and the forward chain grows by one (§11.3 step 4.3).
+    for n in 1..=8u32 {
+        b.rotate(&mut server, &mut rng, &state);
+        let mut ks = state.unlock_keystore(&secret).unwrap();
+        assert_eq!(ks.account_key_epoch(), n - 1);
+        assert_eq!(
+            online(&mut rng, &server, &mut b, &mut state, &mut ks),
+            Some(Ok(()))
+        );
+        assert_eq!(ks.account_key_epoch(), n);
+        assert_eq!(state.forward_count(), usize::try_from(n).unwrap());
+        assert_eq!(state.local_wrap.account_key_epoch, 0);
+        let again = state.unlock_keystore(&secret).unwrap();
+        assert_eq!(again.account_key_epoch(), n);
+    }
+    // The record of a full chain round-trips and a password unlock from it follows all eight
+    // forward envelopes to the newest key (§5.6 step 3).
+    let full = record_bytes(&state);
+    let record = DeviceRecord::parse(&full, true).unwrap();
+    assert_eq!(record.forward_count(), 8);
+    assert_eq!(record.encode().unwrap().as_slice(), full.as_slice());
+    let followed = record.unlock(PASSWORD).unwrap();
+    assert_eq!(followed.account_key_epoch(), 8);
+    assert_eq!(
+        followed.account_key.key().expose_secret(),
+        b.unlocked.account_key.key().expose_secret()
+    );
+
+    // A ninth rotation crossed by a keystore unlock is refused (owner answer 2): nothing changes,
+    // nothing is acknowledged, the grants stay to be fetched.
+    b.rotate(&mut server, &mut rng, &state);
+    let mut ks = state.unlock_keystore(&secret).unwrap();
+    assert_eq!(
+        online(&mut rng, &server, &mut b, &mut state, &mut ks),
+        Some(Err(ClientError::KeystoreUnlockUnavailable))
+    );
+    assert_eq!(record_bytes(&state), full);
+    assert_eq!(b.grants.len(), 1);
+
+    // The password unlock that follows: without the keystore secret, E_local and E_dev move to
+    // epoch 9, the chain is deleted, and E_ks is deleted with it (it cannot be re-wrapped).
+    let mut without = copy_state(&state);
+    let mut pw = without.unlock(PASSWORD).unwrap();
+    assert_eq!(pw.account_key_epoch(), 8);
+    let mut b_copy_grants = b.grants.clone();
+    assert_eq!(
+        online(&mut rng, &server, &mut b, &mut without, &mut pw),
+        Some(Ok(()))
+    );
+    assert_eq!(without.forward_count(), 0);
+    assert!(!without.has_keystore());
+    assert_eq!(without.local_wrap.account_key_epoch, 9);
+    assert_eq!(without.unlock(PASSWORD).unwrap().account_key_epoch(), 9);
+
+    // With the secret attached (a second presence check), E_ks is re-wrapped instead.
+    b.grants.append(&mut b_copy_grants);
+    let mut pw = state.unlock(PASSWORD).unwrap();
+    pw.attach_keystore_secret(&secret).unwrap();
+    assert_eq!(
+        pw.attach_keystore_secret(&secret[..16]).unwrap_err(),
+        ClientError::InvalidInput
+    );
+    assert_eq!(
+        online(&mut rng, &server, &mut b, &mut state, &mut pw),
+        Some(Ok(()))
+    );
+    assert_eq!(state.forward_count(), 0);
+    assert!(state.has_keystore());
+    assert_eq!(
+        state.unlock_keystore(&secret).unwrap().account_key_epoch(),
+        9
+    );
+    assert_eq!(state.unlock(PASSWORD).unwrap().account_key_epoch(), 9);
+    pw.forget_unlock_key();
+    assert!(!pw.has_keystore_secret());
+
+    // One more rotation crossed by a keystore unlock, then a password unlock with no rotation:
+    // the chain is collapsed after the answer verified (§11.3 step 4.3, "At the next password
+    // unlock").
+    b.rotate(&mut server, &mut rng, &state);
+    let mut ks = state.unlock_keystore(&secret).unwrap();
+    assert_eq!(
+        online(&mut rng, &server, &mut b, &mut state, &mut ks),
+        Some(Ok(()))
+    );
+    assert_eq!(state.forward_count(), 1);
+    // A keystore unlock cannot collapse: it has no local unlock key.
+    assert_eq!(
+        state.collapse_forward(&mut rng, &ks).unwrap_err(),
+        ClientError::InvalidInput
+    );
+    let mut pw = state.unlock(PASSWORD).unwrap();
+    assert_eq!(pw.account_key_epoch(), 10);
+    assert_eq!(online(&mut rng, &server, &mut b, &mut state, &mut pw), None);
+    assert!(state.collapse_forward(&mut rng, &pw).unwrap());
+    assert!(!state.collapse_forward(&mut rng, &pw).unwrap());
+    assert_eq!(state.forward_count(), 0);
+    assert_eq!(state.local_wrap.account_key_epoch, 10);
+    assert_eq!(state.unlock(PASSWORD).unwrap().account_key_epoch(), 10);
+
+    // Disabling deletes E_ks only; a live chain stays (ADR 0057 §2).
+    b.rotate(&mut server, &mut rng, &state);
+    let mut ks = state.unlock_keystore(&secret).unwrap();
+    online(&mut rng, &server, &mut b, &mut state, &mut ks);
+    assert_eq!(state.forward_count(), 1);
+    state.disable_keystore();
+    assert!(!state.has_keystore());
+    assert_eq!(state.forward_count(), 1);
+    let bytes = record_bytes(&state);
+    let record = DeviceRecord::parse(&bytes, false).unwrap();
+    assert_eq!(record.forward_count(), 1);
+    assert_eq!(record.unlock(PASSWORD).unwrap().account_key_epoch(), 11);
+    assert_eq!(
+        record.unlock_keystore(&secret).unwrap_err(),
+        ClientError::KeystoreUnlockUnavailable
+    );
+}
+
+/// A damaged forward envelope or a broken chain is `CacheCorrupt` after the password opened
+/// `E_local` (ADR 0026 §5 (d)); a wrong password stays `WrongPasswordOrSecretKey`.
+#[test]
+fn a_damaged_forward_chain_is_corrupt() {
+    let mut rng = ChaCha20Rng::seed_from_u64(5758);
+    let mut server = Server::new(5759);
+    let a = signup(&mut server, &mut rng, DeviceKind::DesktopCli);
+    let mut state = a.device.unwrap();
+    let sk = secret_key_text(&state);
+    let mut b = Rotator::new(&mut server, &mut rng, &sk, a.vault_key.vault_id());
+    let unlocked = state.unlock(PASSWORD).unwrap();
+    let secret = state.enable_keystore(&mut rng, &unlocked).unwrap();
+    b.rotate(&mut server, &mut rng, &state);
+    let mut ks = state.unlock_keystore(secret.expose_secret()).unwrap();
+    online(&mut rng, &server, &mut b, &mut state, &mut ks)
+        .unwrap()
+        .unwrap();
+    let good = record_bytes(&state);
+    // The last byte of the forward envelope (before `pending = 0`).
+    let mut flipped = good.clone();
+    let at = flipped.len() - 2;
+    flipped[at] ^= 1;
+    let record = DeviceRecord::parse(&flipped, true).unwrap();
+    assert_eq!(
+        record.unlock(PASSWORD).unwrap_err(),
+        ClientError::CacheCorrupt
+    );
+    assert_eq!(
+        record.unlock("not the password").unwrap_err(),
+        ClientError::WrongPasswordOrSecretKey
+    );
+    // The chain no longer starting at `E_local`'s epoch.
+    let mut broken = copy_state(&state);
+    broken.forward[0].from_account_key_epoch = 5;
+    assert_eq!(
+        broken.unlock(PASSWORD).unwrap_err(),
+        ClientError::CacheCorrupt
+    );
+    // The keystore path does not read the chain.
+    assert_eq!(
+        record
+            .unlock_keystore(secret.expose_secret())
+            .unwrap()
+            .account_key_epoch(),
+        1
+    );
 }
