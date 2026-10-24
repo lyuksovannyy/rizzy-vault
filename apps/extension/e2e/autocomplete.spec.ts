@@ -39,6 +39,11 @@ function totpAt(unixSeconds: number): string {
 }
 
 const PAGES: Readonly<Record<string, string>> = {
+  "/plain":
+    '<form id="login" onsubmit="return false">' +
+    '<label for="user">Email</label><input id="user" type="text" autocomplete="username">' +
+    '<label for="pass">Password</label><input id="pass" type="password" autocomplete="current-password">' +
+    '<button type="submit">Log in</button></form>',
   "/2fa":
     '<form id="mfa" action="/2fa" onsubmit="return false"><label for="code">Authentication code</label>' +
     '<input id="code" name="code" type="text" autocomplete="one-time-code" inputmode="numeric" maxlength="6">' +
@@ -365,6 +370,51 @@ test("the save dialog offers a submitted custom field in an extension-origin fra
     await verify.getByRole("button", { name: "Edit" }).click();
     await expect(verify.getByLabel("Custom field 1 autocomplete id", { exact: true })).toHaveValue("club-card");
     await verify.close();
+  } finally {
+    await pages.stop();
+  }
+});
+
+// ADR 0081 §A8: with two vaults, a new login's save prompt is the extension-origin dialog, whose
+// vault picker preselects the Personal vault every time; vault names never enter the page DOM.
+test("the save prompt's vault picker preselects Personal (ADR 0081 §A8)", async ({ context, extensionId, server }) => {
+  const pages = await startPages();
+  try {
+    const setup = await context.newPage();
+    const secretKey = await signUp(setup, server.origin, "acvaults");
+    await setup.getByRole("navigation", { name: "Vault navigation" }).getByRole("button", { name: "Manage vaults" }).click();
+    await setup.locator(".vaults-pane").getByLabel("Name", { exact: true }).fill("Work");
+    await setup.locator(".vaults-pane").getByRole("button", { name: "Create vault" }).click();
+    await expect(setup.locator(".vaults-pane tbody tr", { hasText: "Work" })).toBeVisible();
+    await setup.close();
+    const popup = await enrol(context, extensionId, server, "acvaults", secretKey);
+
+    const page = await context.newPage();
+    await page.goto(`http://127.0.0.1:${pages.port}/plain`);
+    await expect(page.locator("iframe[data-rizzy-inline-menu]")).toHaveCount(1, { timeout: 15_000 });
+    await page.locator("#user").fill("erin@example.com");
+    await page.locator("#pass").fill("erin-pw");
+    await page.getByRole("button", { name: "Log in" }).click();
+
+    await expect(page.locator("iframe[data-rizzy-save-dialog]")).toHaveCount(1, { timeout: 15_000 });
+    const dialog = page.frameLocator("iframe[data-rizzy-save-dialog]");
+    const picker = dialog.getByLabel("Vault", { exact: true });
+    await expect(picker).toBeVisible();
+    await expect(picker.locator("option:checked")).toHaveText("Personal");
+    await expect(picker.locator("option")).toHaveText(["Personal", "Work"]);
+    // The page never sees a vault name.
+    expect(await page.evaluate(() => document.body.innerText.includes("Work"))).toBe(false);
+    const audit = await new AxeBuilder({ page }).include("iframe[data-rizzy-save-dialog]").withTags(AXE_TAGS).analyze();
+    expect(audit.violations.map((v) => v.id + ": " + v.help), "save dialog with the vault picker: axe violations").toEqual([]);
+
+    await dialog.getByRole("button", { name: "Save" }).click();
+    await expect(page.locator("iframe[data-rizzy-save-dialog]")).toHaveCount(0, { timeout: 15_000 });
+    await popup.bringToFront();
+    await popup.getByRole("button", { name: "Sync" }).click();
+    await expect(popup.getByText("Synced.")).toBeVisible({ timeout: 15_000 });
+    await popup.getByLabel("Search").fill("erin");
+    // The row shows its vault: Personal, the preselected one.
+    await expect(popup.getByRole("button", { name: /erin@example\.com.*Personal/ })).toBeVisible();
   } finally {
     await pages.stop();
   }

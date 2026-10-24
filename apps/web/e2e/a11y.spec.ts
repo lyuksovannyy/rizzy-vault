@@ -434,3 +434,64 @@ test("a11y: the identity generator bar, both custom age modes, and its settings 
   await expectAccessible(page, "settings: identity generator, exact age and a refused domain");
   expect(problems).toEqual([]);
 });
+
+test("a11y: the vault switcher, the vault management screen and its dialogs (ADR 0081 §A8)", async ({ page }) => {
+  const { problems } = watch(page);
+  await signUp(page, server.origin, "a11yvaults");
+  const nav = page.getByRole("navigation", { name: "Vault navigation" });
+  await nav.getByRole("button", { name: "Manage vaults" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Vaults" })).toBeVisible();
+  await expectAccessible(page, "vault management (Personal only)");
+  const pane = page.locator(".vaults-pane");
+  await pane.getByLabel("Name", { exact: true }).fill("Work");
+  await pane.getByRole("button", { name: "Create vault" }).click();
+  await expect(pane.locator("tbody tr", { hasText: "Work" })).toBeVisible();
+  await dismissToasts(page);
+  await expectAccessible(page, "vault management (two vaults) and the vault switcher");
+
+  await pane.getByRole("button", { name: "Rename Work" }).click();
+  const rename = page.getByRole("dialog", { name: "Rename vault" });
+  await expectFocusTrapped(page, rename, "rename vault dialog");
+  await expectAccessible(page, "rename vault dialog");
+  await page.keyboard.press("Escape");
+  await expect(rename).toHaveCount(0);
+
+  await pane.getByRole("button", { name: "Delete Work" }).click();
+  const del = page.getByRole("dialog", { name: "Delete vault Work" });
+  await expect(del).toBeVisible();
+  await expectAccessible(page, "delete vault dialog (empty vault)");
+  await del.getByRole("button", { name: "Cancel" }).click();
+
+  // With an item: the two choices; the new-item picker; Move to… and Copy to….
+  await nav.getByRole("button", { name: "All items", exact: true }).click();
+  await newItem(page, "Login");
+  await expect(page.locator(".item-editor").getByLabel("Vault", { exact: true })).toBeVisible();
+  await expectAccessible(page, "item editor with the vault picker");
+  await page.locator(".item-editor").getByLabel("Vault", { exact: true }).selectOption({ label: "Work" });
+  await page.getByLabel("Title").fill("Desk");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("heading", { name: "Desk" })).toBeVisible();
+  await expectAccessible(page, "item list rows with their vault");
+  for (const action of ["Move", "Copy"] as const) {
+    await page.getByRole("button", { name: `${action} to…` }).click();
+    const dialog = page.getByRole("dialog", { name: action === "Move" ? "Move to another vault" : "Copy to another vault" });
+    await expectFocusTrapped(page, dialog, `${action.toLowerCase()} to dialog`);
+    await expectAccessible(page, `${action.toLowerCase()} to dialog`);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+  }
+  await nav.getByRole("button", { name: "Manage vaults" }).click();
+  await pane.getByRole("button", { name: "Delete Work" }).click();
+  await expect(del.getByRole("radio")).toHaveCount(2);
+  await expectFocusTrapped(page, del, "delete vault dialog");
+  await expectAccessible(page, "delete vault dialog (two choices)");
+  await del.getByRole("button", { name: "Cancel" }).click();
+
+  // The vault filter, and the export section's picker after the re-authentication.
+  await nav.getByRole("button", { name: "Work", exact: true }).click();
+  await expectAccessible(page, "items of one vault");
+  await nav.getByRole("button", { name: "Export and import" }).click();
+  await expect(page.locator("form", { has: page.locator("#import-file") }).getByLabel("Vault", { exact: true })).toBeVisible();
+  await expectAccessible(page, "export and import with the vault pickers");
+  expect(problems).toEqual([]);
+});
