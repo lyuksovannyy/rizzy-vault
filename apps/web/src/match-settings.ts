@@ -35,6 +35,44 @@ export function groupLabel(domains: readonly string[]): string {
   return domains.join(", ");
 }
 
+/** Groups up to this many domains are named in full; a longer one is summarised (ADR 0080
+ * "Negative": a 53-domain group needs a summarised label and a disclosure). */
+export const GROUP_LABEL_MAX_DOMAINS = 3;
+
+/** The domain a long group is named after: the `.com` of its most common first label when that
+ * label is shared by two or more members (`airbnb.com` for Airbnb's 53 country sites), else
+ * its first domain. Display only: matching never depends on it. */
+export function leadDomain(domains: readonly string[]): string {
+  const counts = new Map<string, number>();
+  for (const domain of domains) {
+    const label = domain.split(".")[0] ?? domain;
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  let best: string | undefined;
+  let bestCount = 1;
+  for (const [label, count] of counts) {
+    if (count > bestCount) {
+      best = label;
+      bestCount = count;
+    }
+  }
+  const brandCom = best === undefined ? undefined : `${best}.com`;
+  if (brandCom !== undefined && domains.includes(brandCom)) {
+    return brandCom;
+  }
+  return domains[0] ?? "";
+}
+
+/** A group's label: every domain for a short group, or "<lead> and <n> more" for a longer one,
+ * with `hidden` the number of domains the label leaves out (shown by the disclosure). */
+export function groupSummary(domains: readonly string[]): { readonly label: string; readonly hidden: number } {
+  if (domains.length <= GROUP_LABEL_MAX_DOMAINS) {
+    return { label: groupLabel(domains), hidden: 0 };
+  }
+  const hidden = domains.length - 1;
+  return { label: `${leadDomain(domains)} and ${hidden} more`, hidden };
+}
+
 /** One row of a "check a website" answer. */
 export interface CheckedItem {
   readonly id: string;

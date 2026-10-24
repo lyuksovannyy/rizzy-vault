@@ -19,23 +19,48 @@ import {
   ACCOUNT_DEFAULT_OPTIONS,
   type CheckedItem,
   checkedItems,
-  groupLabel,
+  groupSummary,
   parseGroupDomains,
 } from "../match-settings.ts";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText, useAction } from "./common.tsx";
 
+/** A group's domains: its label, and for a long group (`groupSummary`) a disclosure with every
+ * domain, so a 53-site group stays one line until it is opened. */
+export function GroupDomains(props: { readonly domains: readonly string[]; readonly muted?: boolean }) {
+  const { label, hidden } = groupSummary(props.domains);
+  const className = props.muted === true ? "muted" : undefined;
+  if (hidden === 0) {
+    return <span className={className}>{label}</span>;
+  }
+  return (
+    <div className={className === undefined ? "group-domains" : `group-domains ${className}`}>
+      <span>{label}</span>
+      <details>
+        <summary aria-label={`All ${props.domains.length} sites in the group ${label}`}>
+          All {props.domains.length} sites
+        </summary>
+        <ul aria-label={`Sites in the group ${label}`}>
+          {props.domains.map((d) => (
+            <li key={d}>{d}</li>
+          ))}
+        </ul>
+      </details>
+    </div>
+  );
+}
+
 /** One global group with its on/off switch. */
-function GlobalGroupRow(props: {
+export function GlobalGroupRow(props: {
   readonly group: EquivalenceGroupInfo;
   readonly busy: boolean;
   readonly onChange: (change: SettingsChange) => void;
 }) {
   const { group } = props;
-  const label = groupLabel(group.domains);
+  const { label } = groupSummary(group.domains);
   return (
     <li>
-      <span className={group.disabled ? "muted" : undefined}>{label}</span>{" "}
+      <GroupDomains domains={group.domains} muted={group.disabled} />{" "}
       <button
         type="button"
         className="secondary"
@@ -201,12 +226,12 @@ export function MatchingPane(props: { readonly ctx: VaultContext }) {
             <ul className="matching-list" aria-label="Your equivalence groups">
               {settings.userGroups.map((g) => (
                 <li key={g.id}>
-                  <span>{groupLabel(g.domains)}</span>{" "}
+                  <GroupDomains domains={g.domains} />{" "}
                   <button
                     type="button"
                     className="secondary"
                     disabled={busy}
-                    aria-label={`Remove the group ${groupLabel(g.domains)}`}
+                    aria-label={`Remove the group ${groupSummary(g.domains).label}`}
                     onClick={() => change({ kind: "removeUserGroup", id: g.id }, "The group is removed.")}
                   >
                     Remove
@@ -239,6 +264,11 @@ export function MatchingPane(props: { readonly ctx: VaultContext }) {
               This build ships no signed global list yet, so there is no global group to turn off.
             </p>
           ) : (
+            <>
+            <p className="hint">
+              Default site groups that ship signed with this build. Each is on unless you turn it
+              off here, and autofill warns before using one.
+            </p>
             <ul className="matching-list" aria-label="Global equivalence groups">
               {settings.globalGroups.map((g) => (
                 <GlobalGroupRow
@@ -251,6 +281,7 @@ export function MatchingPane(props: { readonly ctx: VaultContext }) {
                 />
               ))}
             </ul>
+            </>
           )}
           {settings.otherDisabled.length > 0 && (
             <>
