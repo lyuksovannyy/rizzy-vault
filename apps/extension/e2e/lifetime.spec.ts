@@ -20,15 +20,13 @@
 // extension's background page for introspection the way `chromium.launchPersistentContext`'s
 // `--load-extension` does for Chromium. Recorded in `README.md`'s "Known gaps," not re-derived
 // here.
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { type BrowserContext, chromium, test as base, expect } from "@playwright/test";
 
 import { TEST_ACCOUNT_PASSWORD, signUp } from "./account.ts";
 import { type RunningServer, startServer } from "./server.ts";
+import { withProfileDir } from "./profile.ts";
 
 const EXTENSION_PATH = fileURLToPath(new URL("../dist/chromium", import.meta.url));
 const IDLE_MS = 6 * 60 * 1000;
@@ -40,14 +38,18 @@ const test = base.extend<{ server: RunningServer; context: BrowserContext; exten
     server.stop();
   },
   context: async ({}, use) => {
-    const userDataDir = mkdtempSync(join(tmpdir(), "rizzy-ext-e2e-lifetime-"));
-    const context = await chromium.launchPersistentContext(userDataDir, {
-      headless: true,
-      channel: "chromium",
-      args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+    await withProfileDir("rizzy-ext-e2e-lifetime-", async (userDataDir) => {
+      const context = await chromium.launchPersistentContext(userDataDir, {
+        headless: true,
+        channel: "chromium",
+        args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+      });
+      try {
+        await use(context);
+      } finally {
+        await context.close();
+      }
     });
-    await use(context);
-    await context.close();
   },
   extensionId: async ({ context }, use) => {
     let [worker] = context.serviceWorkers();

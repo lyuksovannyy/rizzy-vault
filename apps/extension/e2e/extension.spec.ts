@@ -15,11 +15,9 @@
 // can (`launchPersistentContext` is required either way — extensions only load into a
 // persistent context).
 import { type BrowserContext, chromium, test as base, expect } from "@playwright/test";
-import { mkdtempSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { withProfileDir } from "./profile.ts";
 
 const EXTENSION_PATH = fileURLToPath(new URL("../dist/chromium", import.meta.url));
 
@@ -34,14 +32,18 @@ const TEST_LOGIN_PAGE =
 
 const test = base.extend<{ context: BrowserContext; extensionId: string; loginPageUrl: string }>({
   context: async ({}, use) => {
-    const userDataDir = mkdtempSync(join(tmpdir(), "rizzy-ext-e2e-"));
-    const context = await chromium.launchPersistentContext(userDataDir, {
-      headless: true,
-      channel: "chromium",
-      args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+    await withProfileDir("rizzy-ext-e2e-", async (userDataDir) => {
+      const context = await chromium.launchPersistentContext(userDataDir, {
+        headless: true,
+        channel: "chromium",
+        args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+      });
+      try {
+        await use(context);
+      } finally {
+        await context.close();
+      }
     });
-    await use(context);
-    await context.close();
   },
   extensionId: async ({ context }, use) => {
     let [worker] = context.serviceWorkers();
