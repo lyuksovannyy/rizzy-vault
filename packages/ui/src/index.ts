@@ -36,6 +36,14 @@ export {
   TypeIcon,
 } from "./icons.tsx";
 export { ConfirmDialog, type ConfirmDialogProps } from "./ConfirmDialog.tsx";
+export {
+  RecoveryNoticeBanner,
+  noticeTime,
+  recoveryNoticeText,
+  type PendingRecoveryNoticeView,
+  type RecoveryNoticeBannerProps,
+  type RecoveryNoticeText,
+} from "./RecoveryNoticeBanner.tsx";
 export { THIRD_PARTY_ATTRIBUTIONS, ThirdPartyNotices } from "./ThirdPartyNotices.tsx";
 export { ItemIcon, useItemIcon } from "./ItemIcon.tsx";
 export {

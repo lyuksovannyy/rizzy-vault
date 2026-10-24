@@ -42,6 +42,7 @@ import type {
   SecurityKeyInfo,
   SessionListView,
   SettingsChange,
+  RecoveryNotice,
   StorageUsage,
   TotpCode,
   TwoFactorSetup,
@@ -58,6 +59,9 @@ export interface SessionInfo {
   readonly unsentChanges: number;
   /** The storage usage the server last reported (ADR 0048 §5); unverified, for display. */
   readonly storageUsage?: StorageUsage | undefined;
+  /** The server's pending-recovery notice with its last account answer (ADR 0045), if any;
+   * advisory only, for the banner (INV-70). An honest server sends none to a web session. */
+  readonly recoveryNotice?: RecoveryNotice | undefined;
 }
 
 /** The Emergency Kit as it crosses to the UI: bytes the UI zeroes once rendered. */

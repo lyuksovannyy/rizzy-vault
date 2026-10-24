@@ -9049,6 +9049,318 @@ pub mod device {
                 };
             Ok(self.vaults.all().iter().map(|v| v.unacknowledged().0).sum())
         }
+        #[doc =
+        " When the pending recovery the server reported with the last account answer opened"]
+        #[doc =
+        " (ADR 0045), in Unix milliseconds; `undefined` when it reported none. The server\'s word,"]
+        #[doc =
+        " never verified and never read by a check (INV-70): for a banner only."]
+        #[must_use]
+        pub fn pending_recovery_opened_at_ms(&self) -> Option<u64> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When the pending recovery the server reported with the last account answer opened"]
+                    #[doc =
+                    " (ADR 0045), in Unix milliseconds; `undefined` when it reported none. The server\'s word,"]
+                    #[doc =
+                    " never verified and never read by a check (INV-70): for a banner only."]
+                    #[must_use]
+                    #[export_name =
+                    "devicesession_pendingRecoveryOpenedAtMs_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_pendingRecoveryOpenedAtMs(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<u64> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<DeviceSession>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.pending_recovery_opened_at_ms();
+                                            _ret
+                                        }
+                                    });
+                        <Option<u64> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When the pending recovery the server reported with the last account answer opened"]
+                    #[doc =
+                    " (ADR 0045), in Unix milliseconds; `undefined` when it reported none. The server\'s word,"]
+                    #[doc =
+                    " never verified and never read by a check (INV-70): for a banner only."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_pendingRecoveryOpenedAtMs_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<u64> as WasmDescribe>::describe();
+                        <Option<u64> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x03R When the pending recovery the server reported with the last account answer openedX (ADR 0045), in Unix milliseconds; `undefined` when it reported none. The server's word,F never verified and never read by a check (INV-70): for a banner only.\0\0\0\0\x19pendingRecoveryOpenedAtMs\x01\x01\0\0\0\0\x01\0\x02\x19pendingRecoveryOpenedAtMs\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.account.recovery_notice().map(|n| n.opened_at_ms)
+        }
+        #[doc =
+        " When that pending recovery\'s wait ends (ADR 0045), in Unix milliseconds; `undefined`"]
+        #[doc =
+        " when the server reported none. Unverified, for display only (INV-70)."]
+        #[must_use]
+        pub fn pending_recovery_available_at_ms(&self) -> Option<u64> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When that pending recovery\'s wait ends (ADR 0045), in Unix milliseconds; `undefined`"]
+                    #[doc =
+                    " when the server reported none. Unverified, for display only (INV-70)."]
+                    #[must_use]
+                    #[export_name =
+                    "devicesession_pendingRecoveryAvailableAtMs_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_pendingRecoveryAvailableAtMs(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<u64> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<DeviceSession>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.pending_recovery_available_at_ms();
+                                            _ret
+                                        }
+                                    });
+                        <Option<u64> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When that pending recovery\'s wait ends (ADR 0045), in Unix milliseconds; `undefined`"]
+                    #[doc =
+                    " when the server reported none. Unverified, for display only (INV-70)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_pendingRecoveryAvailableAtMs_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<u64> as WasmDescribe>::describe();
+                        <Option<u64> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x02U When that pending recovery's wait ends (ADR 0045), in Unix milliseconds; `undefined`F when the server reported none. Unverified, for display only (INV-70).\0\0\0\0\x1cpendingRecoveryAvailableAtMs\x01\x01\0\0\0\0\x01\0\x02\x1cpendingRecoveryAvailableAtMs\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.account.recovery_notice().map(|n| n.available_at_ms)
+        }
+        #[doc =
+        " When the account\'s previous recovery committed, as that notice says (ADR 0045 point 6);"]
+        #[doc =
+        " `undefined` without a notice or without the time. Unverified, for display only (INV-70)."]
+        #[must_use]
+        pub fn pending_recovery_last_at_ms(&self) -> Option<u64> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When the account\'s previous recovery committed, as that notice says (ADR 0045 point 6);"]
+                    #[doc =
+                    " `undefined` without a notice or without the time. Unverified, for display only (INV-70)."]
+                    #[must_use]
+                    #[export_name =
+                    "devicesession_pendingRecoveryLastAtMs_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_pendingRecoveryLastAtMs(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<u64> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<DeviceSession>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.pending_recovery_last_at_ms();
+                                            _ret
+                                        }
+                                    });
+                        <Option<u64> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When the account\'s previous recovery committed, as that notice says (ADR 0045 point 6);"]
+                    #[doc =
+                    " `undefined` without a notice or without the time. Unverified, for display only (INV-70)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_pendingRecoveryLastAtMs_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<u64> as WasmDescribe>::describe();
+                        <Option<u64> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x02X When the account's previous recovery committed, as that notice says (ADR 0045 point 6);Y `undefined` without a notice or without the time. Unverified, for display only (INV-70).\0\0\0\0\x17pendingRecoveryLastAtMs\x01\x01\0\0\0\0\x01\0\x02\x17pendingRecoveryLastAtMs\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.account.recovery_notice().and_then(|n| n.last_recovery_at_ms)
+        }
         #[doc = " Whether a sync is running."]
         #[must_use]
         pub fn syncing(&self) -> bool {
@@ -51210,6 +51522,345 @@ pub mod session {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             Ok(self.inner()?.account.usage().map(|u| u.quota_bytes))
+        }
+        #[doc =
+        " When the pending recovery the server reported with the last account answer opened"]
+        #[doc =
+        " (ADR 0045), in Unix milliseconds; `undefined` when it reported none. The server\'s word,"]
+        #[doc =
+        " never verified and never read by a check (INV-70): for a banner only."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `locked`."]
+        pub fn pending_recovery_opened_at_ms(&self)
+            -> Result<Option<u64>, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When the pending recovery the server reported with the last account answer opened"]
+                    #[doc =
+                    " (ADR 0045), in Unix milliseconds; `undefined` when it reported none. The server\'s word,"]
+                    #[doc =
+                    " never verified and never read by a check (INV-70): for a banner only."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[export_name =
+                    "session_pendingRecoveryOpenedAtMs_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_pendingRecoveryOpenedAtMs(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<Option<u64>,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<Session>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.pending_recovery_opened_at_ms();
+                                            _ret
+                                        }
+                                    });
+                        <Result<Option<u64>, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When the pending recovery the server reported with the last account answer opened"]
+                    #[doc =
+                    " (ADR 0045), in Unix milliseconds; `undefined` when it reported none. The server\'s word,"]
+                    #[doc =
+                    " never verified and never read by a check (INV-70): for a banner only."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_pendingRecoveryOpenedAtMs_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Result<Option<u64>, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<Option<u64>, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x06R When the pending recovery the server reported with the last account answer openedX (ADR 0045), in Unix milliseconds; `undefined` when it reported none. The server's word,F never verified and never read by a check (INV-70): for a banner only.\0\t # Errors\n `locked`.\0\0\0\0\x19pendingRecoveryOpenedAtMs\x01\x01\0\0\0\0\x01\0\x02\x19pendingRecoveryOpenedAtMs\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            Ok(self.inner()?.account.recovery_notice().map(|n|
+                        n.opened_at_ms))
+        }
+        #[doc =
+        " When that pending recovery\'s wait ends (ADR 0045), in Unix milliseconds; `undefined`"]
+        #[doc =
+        " when the server reported none. Unverified, for display only (INV-70)."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `locked`."]
+        pub fn pending_recovery_available_at_ms(&self)
+            -> Result<Option<u64>, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When that pending recovery\'s wait ends (ADR 0045), in Unix milliseconds; `undefined`"]
+                    #[doc =
+                    " when the server reported none. Unverified, for display only (INV-70)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[export_name =
+                    "session_pendingRecoveryAvailableAtMs_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_pendingRecoveryAvailableAtMs(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<Option<u64>,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<Session>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.pending_recovery_available_at_ms();
+                                            _ret
+                                        }
+                                    });
+                        <Result<Option<u64>, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When that pending recovery\'s wait ends (ADR 0045), in Unix milliseconds; `undefined`"]
+                    #[doc =
+                    " when the server reported none. Unverified, for display only (INV-70)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_pendingRecoveryAvailableAtMs_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Result<Option<u64>, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<Option<u64>, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x05U When that pending recovery's wait ends (ADR 0045), in Unix milliseconds; `undefined`F when the server reported none. Unverified, for display only (INV-70).\0\t # Errors\n `locked`.\0\0\0\0\x1cpendingRecoveryAvailableAtMs\x01\x01\0\0\0\0\x01\0\x02\x1cpendingRecoveryAvailableAtMs\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            Ok(self.inner()?.account.recovery_notice().map(|n|
+                        n.available_at_ms))
+        }
+        #[doc =
+        " When the account\'s previous recovery committed, as that notice says (ADR 0045 point 6);"]
+        #[doc =
+        " `undefined` without a notice or without the time. Unverified, for display only (INV-70)."]
+        #[doc = ""]
+        #[doc = " # Errors"]
+        #[doc = " `locked`."]
+        pub fn pending_recovery_last_at_ms(&self)
+            -> Result<Option<u64>, CoreError> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When the account\'s previous recovery committed, as that notice says (ADR 0045 point 6);"]
+                    #[doc =
+                    " `undefined` without a notice or without the time. Unverified, for display only (INV-70)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[export_name =
+                    "session_pendingRecoveryLastAtMs_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_pendingRecoveryLastAtMs(me:
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Result<Option<u64>,
+                            CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<Session>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                            let me =
+                                                unsafe {
+                                                    <Session as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.pending_recovery_last_at_ms();
+                                            _ret
+                                        }
+                                    });
+                        <Result<Option<u64>, CoreError> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " When the account\'s previous recovery committed, as that notice says (ADR 0045 point 6);"]
+                    #[doc =
+                    " `undefined` without a notice or without the time. Unverified, for display only (INV-70)."]
+                    #[doc = ""]
+                    #[doc = " # Errors"]
+                    #[doc = " `locked`."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_session_pendingRecoveryLastAtMs_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Result<Option<u64>, CoreError> as
+                                WasmDescribe>::describe();
+                        <Result<Option<u64>, CoreError> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x07Session\x05X When the account's previous recovery committed, as that notice says (ADR 0045 point 6);Y `undefined` without a notice or without the time. Unverified, for display only (INV-70).\0\t # Errors\n `locked`.\0\0\0\0\x17pendingRecoveryLastAtMs\x01\x01\0\0\0\0\x01\0\x02\x17pendingRecoveryLastAtMs\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            Ok(self.inner()?.account.recovery_notice().and_then(|n|
+                        n.last_recovery_at_ms))
         }
         #[doc = " Whether a sync is running."]
         #[doc = ""]

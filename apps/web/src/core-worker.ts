@@ -210,6 +210,7 @@ function info(s: VaultSession): SessionInfo {
     readOnly: s.readOnly,
     unsentChanges: s.unsentChanges,
     storageUsage: s.storageUsage,
+    recoveryNotice: s.recoveryNotice,
   };
 }
 

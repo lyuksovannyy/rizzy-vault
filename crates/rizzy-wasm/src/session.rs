@@ -385,6 +385,37 @@ impl Session {
         Ok(self.inner()?.account.usage().map(|u| u.quota_bytes))
     }
 
+    /// When the pending recovery the server reported with the last account answer opened
+    /// (ADR 0045), in Unix milliseconds; `undefined` when it reported none. The server's word,
+    /// never verified and never read by a check (INV-70): for a banner only.
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(getter, js_name = pendingRecoveryOpenedAtMs)]
+    pub fn pending_recovery_opened_at_ms(&self) -> Result<Option<u64>, CoreError> {
+        Ok(self.inner()?.account.recovery_notice().map(|n| n.opened_at_ms))
+    }
+
+    /// When that pending recovery's wait ends (ADR 0045), in Unix milliseconds; `undefined`
+    /// when the server reported none. Unverified, for display only (INV-70).
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(getter, js_name = pendingRecoveryAvailableAtMs)]
+    pub fn pending_recovery_available_at_ms(&self) -> Result<Option<u64>, CoreError> {
+        Ok(self.inner()?.account.recovery_notice().map(|n| n.available_at_ms))
+    }
+
+    /// When the account's previous recovery committed, as that notice says (ADR 0045 point 6);
+    /// `undefined` without a notice or without the time. Unverified, for display only (INV-70).
+    ///
+    /// # Errors
+    /// `locked`.
+    #[wasm_bindgen(getter, js_name = pendingRecoveryLastAtMs)]
+    pub fn pending_recovery_last_at_ms(&self) -> Result<Option<u64>, CoreError> {
+        Ok(self.inner()?.account.recovery_notice().and_then(|n| n.last_recovery_at_ms))
+    }
+
     /// Whether a sync is running.
     ///
     /// # Errors

@@ -31,6 +31,7 @@ import {
   IconTransfer,
   IconLoader,
   IconTrash,
+  RecoveryNoticeBanner,
   TypeIcon,
   isAnyModalOpen,
 } from "@rizzy-vault/ui";
@@ -652,6 +653,20 @@ export function VaultView(props: {
           </div>
         </header>
         <ErrorText code={syncError} />
+        {/* ADR 0045: the server's advisory notice, shown as given and read by nothing else
+            (INV-70). An honest server sends none to a web session (point 4), so this appears
+            only if one arrives anyway; it goes with the first answer without one. */}
+        {session.recoveryNotice !== undefined && (
+          <RecoveryNoticeBanner
+            notice={session.recoveryNotice}
+            nowMs={Date.now()}
+            action={
+              <button type="button" className="secondary small" onClick={() => chooseSection("settings")}>
+                Review your devices
+              </button>
+            }
+          />
+        )}
         <VaultAlarms alarms={vaultAlarms} />
         {discarded > 0 && (
           <p className="status" role="status">

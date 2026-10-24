@@ -1426,6 +1426,41 @@ export interface StorageUsage {
 }
 
 /**
+ * The server's notice that a recovery of the account with the Emergency Kit is pending (ADR
+ * 0045). **Advisory, unsigned and server-set (INV-70):** a host shows it as a banner and never
+ * treats its presence, absence or content as proof of anything; the core's verification of
+ * the account never reads it, and a notice is only ever reported for an answer that verified.
+ * Times are Unix milliseconds on the server's clock.
+ */
+export interface RecoveryNotice {
+  /** When the recovery was requested. */
+  readonly openedAtMs: number;
+  /** When its wait ends and it can be completed. */
+  readonly availableAtMs: number;
+  /** When the account's previous recovery completed, if the notice says. */
+  readonly lastRecoveryAtMs?: number | undefined;
+}
+
+/** The notice of the three core getters, or `undefined` (`RecoveryNotice`). */
+function recoveryNoticeOf(s: {
+  readonly pendingRecoveryOpenedAtMs: bigint | undefined;
+  readonly pendingRecoveryAvailableAtMs: bigint | undefined;
+  readonly pendingRecoveryLastAtMs: bigint | undefined;
+}): RecoveryNotice | undefined {
+  const opened = s.pendingRecoveryOpenedAtMs;
+  const available = s.pendingRecoveryAvailableAtMs;
+  if (opened === undefined || available === undefined) {
+    return undefined;
+  }
+  const last = s.pendingRecoveryLastAtMs;
+  return {
+    openedAtMs: Number(opened),
+    availableAtMs: Number(available),
+    ...(last !== undefined ? { lastRecoveryAtMs: Number(last) } : {}),
+  };
+}
+
+/**
  * An unlocked session. The keys live in the core's memory behind this handle; `lock` wipes
  * them. One call per user action (ADR 0013 §3 rule 6). Writes go to memory first; `sync`
  * uploads them.
@@ -1530,6 +1565,16 @@ export class VaultSession {
         ? undefined
         : { bytesUsed: Number(used), quotaBytes: Number(quota) };
     });
+  }
+
+  /**
+   * The server's notice of a pending recovery that came with its last account answer (ADR
+   * 0045), `undefined` when it sent none. Advisory only ({@link RecoveryNotice}, INV-70). A
+   * web-vault session's answers never carry one from an honest server (ADR 0045 point 4: an
+   * OPAQUE session cannot cancel a recovery); the getter reports what arrived.
+   */
+  get recoveryNotice(): RecoveryNotice | undefined {
+    return call(() => recoveryNoticeOf(this.#s()));
   }
 
   /**
@@ -3349,6 +3394,16 @@ export class DurableSession {
    * them, unlike {@link VaultSession}'s ephemeral device; a later unlock resends them). */
   get unsentChanges(): number {
     return call(() => this.#inner.unsentChanges);
+  }
+
+  /**
+   * The server's notice of a pending recovery that came with the last account answer of this
+   * session (ADR 0045), `undefined` when none did (and always right after an unlock, which is
+   * offline: the notice is never cached, point 9). Advisory only ({@link RecoveryNotice},
+   * INV-70).
+   */
+  get recoveryNotice(): RecoveryNotice | undefined {
+    return call(() => recoveryNoticeOf(this.#inner));
   }
 
   /** Every vault of the account (ADR 0081 §A2): the save prompts' picker, the rows' vault. */
