@@ -1,0 +1,112 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+
+/* The shared motion primitives of the design system (docs/design/README.md "Motion"): keyframes
+   and the reduced-motion and forced-colours rules every web surface that animates imports
+   (apps/web, the extension popup). Static CSS only (ADR 0014 §2; the INV-49 CSP refuses inline
+   styles), animated only through the --motion-* tokens of tokens.css.
+
+   Every keyframe below moves only by the --motion-distance-* and --motion-scale-* tokens and runs
+   only for a --motion-duration-* token, so under `prefers-reduced-motion: reduce` (where
+   tokens.css redefines those tokens: distances 0px, scales 1, durations capped to
+   --motion-duration-reduced) each one is a short crossfade with no movement, without a rule of
+   its own here (WCAG 2.3.3). Nothing loops more than --motion-loop-max-iterations times and
+   nothing runs longer than 5 s (WCAG 2.2.2; `cargo xtask generate-tokens` checks both). No
+   parallax, no zoom of the whole page, no motion tied to scrolling. */
+
+/* Enter: fade in place. Overlays (scrims) and anything that must not move. */
+@keyframes rv-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* Enter: rise into place. Panels, the opened item, list rows, toasts. */
+@keyframes rv-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--motion-distance-2));
+  }
+}
+
+/* Enter: grow from the anchor. Dialogs, menus, popovers, the command palette. */
+@keyframes rv-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--motion-distance-1)) scale(var(--motion-scale-enter));
+  }
+}
+
+/* Enter: slide in from the reading direction's end. The detail pane after a list choice, the
+   one "shared-element-like" step from a row to the item it opens. */
+@keyframes rv-slide-in-end {
+  from {
+    opacity: 0;
+    transform: translateX(var(--motion-distance-3));
+  }
+}
+
+/* Feedback: a short horizontal nudge for an error message (4px; none under reduced motion). */
+@keyframes rv-nudge {
+  25% {
+    transform: translateX(calc(-1 * var(--motion-distance-1)));
+  }
+  75% {
+    transform: translateX(var(--motion-distance-1));
+  }
+}
+
+/* Feedback: a success mark settling in. */
+@keyframes rv-settle {
+  from {
+    transform: scale(var(--motion-scale-enter));
+  }
+}
+
+/* Loading: a highlight sweeping a placeholder, at most --motion-loop-max-iterations times. */
+@keyframes rv-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0 0;
+  }
+}
+
+/* A skeleton placeholder (docs/design/README.md "Loading"): a muted block whose highlight sweeps a
+   few times and then rests, so a slow load never shows endless motion. */
+.rv-skeleton {
+  display: block;
+  min-height: 1em;
+  border-radius: var(--radius-1);
+  background: linear-gradient(
+      90deg,
+      var(--color-surface-hover) 0%,
+      var(--color-surface-hover) 40%,
+      var(--color-surface) 50%,
+      var(--color-surface-hover) 60%,
+      var(--color-surface-hover) 100%
+    )
+    0 0 / 300% 100%;
+  animation: rv-shimmer var(--motion-duration-shimmer) linear var(--motion-loop-max-iterations);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  /* The shimmer's duration and loop count are both 0 here (tokens.css); the placeholder still
+     shows, as a still block. */
+  .rv-skeleton {
+    animation: none;
+  }
+}
+
+/* Forced colours (Windows High Contrast): shadows and background tints disappear, so state that
+   only they carried gets a system-colour outline instead. No rule here opts out of forced colours
+   (`forced-color-adjust: none` is banned; e2e/a11y.ts checks it). */
+@media (forced-colors: active) {
+  .rv-skeleton {
+    border: 1px solid CanvasText;
+  }
+}
