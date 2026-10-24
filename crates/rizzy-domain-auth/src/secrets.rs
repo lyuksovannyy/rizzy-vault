@@ -37,11 +37,12 @@ use rizzy_core::opaque::{EnumKey, ServerSetup};
 use rizzy_core::rng::CryptoRng;
 use rizzy_core::server_seal::{ServerDataKey, ServerDbBackupKey};
 use rizzy_storage::tables::TABLES;
-use rizzy_storage::{Database, Dump, Value};
+use rizzy_storage::{Conn, Database, Dump, Value};
 use zeroize::Zeroizing;
 
 use crate::error::AuthError;
 use crate::sql::{self, exec, fetch_all, fetch_opt};
+use crate::trust::reborrow;
 
 /// The only secrets-file format this build knows (CRYPTO.md §5.11: "A versioned format
 /// (`format = 1`)"). Any other value is refused, never guessed.
@@ -212,6 +213,50 @@ impl ServerSecrets {
             data_keys,
             current_data_key_id: 1,
             bootstrap_token: Some(token),
+            backup_keys: BTreeMap::new(),
+            current_backup_key_id: None,
+        }
+    }
+
+    /// New secrets after a loss, for `rizzy-vault secrets invalidate` (ADR 0047 step 5): the
+    /// one OPAQUE setup `setup` at `setup_id`, which step 4 already generated and recorded in
+    /// the database, plus
+    /// - on a **setup-only loss**, everything else `carried` holds, unchanged: `enum_key`, the
+    ///   data keys with the current one, the bootstrap token if any, and the backup keys with
+    ///   the current one (ADR 0071: only the setup is wrong, so the backups sealed under them
+    ///   stay restorable). Every setup `carried` held is dropped: step 4 retired them all;
+    /// - on a **whole loss** (`carried` is `None`), a fresh `enum_key` and data key 1 marked
+    ///   current from the injected CSPRNG (step 4 deleted every row a data key sealed), no
+    ///   backup key, and **no** bootstrap token: a silent one would re-arm the first-run admin
+    ///   bootstrap (INV-69).
+    #[must_use]
+    pub fn generate_after_loss<R: CryptoRng + ?Sized>(
+        rng: &mut R,
+        setup_id: u32,
+        setup: ServerSetup,
+        carried: Option<Self>,
+    ) -> Self {
+        let mut setups = BTreeMap::new();
+        setups.insert(setup_id, setup);
+        if let Some(old) = carried {
+            return Self {
+                setups,
+                enum_key: old.enum_key,
+                data_keys: old.data_keys,
+                current_data_key_id: old.current_data_key_id,
+                bootstrap_token: old.bootstrap_token,
+                backup_keys: old.backup_keys,
+                current_backup_key_id: old.current_backup_key_id,
+            };
+        }
+        let mut data_keys = BTreeMap::new();
+        data_keys.insert(1, ServerDataKey::generate(rng, 1));
+        Self {
+            setups,
+            enum_key: EnumKey::generate(rng),
+            data_keys,
+            current_data_key_id: 1,
+            bootstrap_token: None,
             backup_keys: BTreeMap::new(),
             current_backup_key_id: None,
         }
@@ -563,11 +608,49 @@ impl ServerSecrets {
     ) -> Result<Result<(), StartupCheckError>, AuthError> {
         let now = sql::u64_sql(now_ms, "now_ms")?;
         let mut tx = db.begin_write().await?;
+        let unrecorded = match self.database_checks(tx.conn()).await? {
+            Ok(unrecorded) => unrecorded,
+            Err(e) => return Ok(Err(e)),
+        };
+        for (id, hash) in unrecorded {
+            exec!(tx.conn(), sql::SETUP_INSERT, i64::from(id), &hash[..], now)?;
+        }
+        tx.commit().await?;
+        Ok(Ok(()))
+    }
+
+    /// Checks 1–3 of [`ServerSecrets::check_database`], read-only: never inserting a setup
+    /// (ADR 0047 "New: `ServerSecrets::check_database_dry_run`"). `rizzy-vault secrets restore`
+    /// and `secrets invalidate` gate on this, never on `check_database`, whose success path
+    /// commits the setups it records even when the caller then fails to write the file. It
+    /// runs in one read transaction (a consistent snapshot) and returns the same refusal
+    /// `check_database` would, in the same order. The database must be at this release's
+    /// schema.
+    ///
+    /// # Errors
+    /// `Ok(Err(StartupCheckError))` when `check_database` would refuse; `Err(AuthError)` when
+    /// the database could not be read.
+    pub async fn check_database_dry_run(
+        &self,
+        db: &Database,
+    ) -> Result<Result<(), StartupCheckError>, AuthError> {
+        let mut tx = db.begin_read().await?;
+        let outcome = self.database_checks(tx.conn()).await?.map(|_| ());
+        tx.finish().await?;
+        Ok(outcome)
+    }
+
+    /// Checks 1–3 of [`ServerSecrets::check_database`] on `conn`, reading only. Returns the
+    /// loaded setups the database does not record yet, with their public-key hashes.
+    async fn database_checks(
+        &self,
+        mut conn: Conn<'_>,
+    ) -> Result<Result<Vec<(u32, [u8; 32])>, StartupCheckError>, AuthError> {
         let mut recorded_any = false;
         let mut unrecorded = Vec::new();
         for (id, setup) in &self.setups {
             let stored: Option<(Vec<u8>, Option<i64>)> = fetch_opt!(
-                tx.conn(),
+                reborrow(&mut conn),
                 (Vec<u8>, Option<i64>),
                 sql::SETUP_GET,
                 i64::from(*id)
@@ -585,12 +668,13 @@ impl ServerSecrets {
                 None => unrecorded.push((*id, setup.public_key_hash())),
             }
         }
-        let record_setups: Vec<(i64,)> = fetch_all!(tx.conn(), (i64,), sql::CREDENTIAL_SETUP_IDS)?;
+        let record_setups: Vec<(i64,)> =
+            fetch_all!(reborrow(&mut conn), (i64,), sql::CREDENTIAL_SETUP_IDS)?;
         if !record_setups.is_empty() && !recorded_any {
             return Ok(Err(StartupCheckError::NoRecordedSetup));
         }
         for query in [sql::TOTP_DATA_KEY_IDS, sql::LOGIN_STATE_DATA_KEY_IDS] {
-            let ids: Vec<(i64,)> = fetch_all!(tx.conn(), (i64,), query)?;
+            let ids: Vec<(i64,)> = fetch_all!(reborrow(&mut conn), (i64,), query)?;
             for (id,) in ids {
                 let id = sql::sql_u32(id, "data_key_id")?;
                 if !self.data_keys.contains_key(&id) {
@@ -598,11 +682,32 @@ impl ServerSecrets {
                 }
             }
         }
-        for (id, hash) in unrecorded {
-            exec!(tx.conn(), sql::SETUP_INSERT, i64::from(id), &hash[..], now)?;
+        Ok(Ok(unrecorded))
+    }
+
+    /// Every `setup_id` that OPAQUE records in the database name but these secrets do not
+    /// hold, with the number of records on each, ascending (ADR 0047 `secrets restore` step 4:
+    /// reported, never blocking; those accounts take the missing-setup path at login). Reads
+    /// only. The database must be at this release's schema.
+    ///
+    /// # Errors
+    /// Storage errors.
+    pub async fn records_on_missing_setups(
+        &self,
+        db: &Database,
+    ) -> Result<Vec<(u32, u64)>, AuthError> {
+        let mut tx = db.begin_read().await?;
+        let rows: Vec<(i64, i64)> =
+            fetch_all!(tx.conn(), (i64, i64), sql::CREDENTIAL_SETUP_COUNTS)?;
+        tx.finish().await?;
+        let mut missing = Vec::new();
+        for (id, count) in rows {
+            let id = sql::sql_u32(id, "setup_id")?;
+            if !self.setups.contains_key(&id) {
+                missing.push((id, sql::sql_u64(count, "record count")?));
+            }
         }
-        tx.commit().await?;
-        Ok(Ok(()))
+        Ok(missing)
     }
 
     /// The checks 1–3 of [`ServerSecrets::check_database`], on a logical backup before

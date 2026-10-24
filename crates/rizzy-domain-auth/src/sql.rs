@@ -44,6 +44,22 @@ queries! {
     SETUP_RETIRED_AT = "setup_retired_at";
     /// Retires one OPAQUE setup, keeping an earlier retirement time.
     SETUP_RETIRE = "setup_retire";
+    /// Retires every OPAQUE setup not retired yet (ADR 0047).
+    SETUPS_RETIRE_ALL = "setups_retire_all";
+    /// The highest recorded `setup_id`, if any (ADR 0047).
+    SETUP_MAX_ID = "setup_max_id";
+    /// How many OPAQUE records exist (ADR 0047).
+    CREDENTIALS_COUNT = "credentials_count";
+    /// How many TOTP credentials exist (ADR 0047).
+    TOTP_COUNT = "totp_count";
+    /// Deletes every account's TOTP credential (ADR 0047, a whole loss).
+    TOTP_DELETE_EVERY = "totp_delete_every";
+    /// The crash marker of `secrets invalidate` (ADR 0047).
+    INVALIDATE_PENDING_GET = "invalidate_pending_get";
+    /// Writes the crash marker of `secrets invalidate` (ADR 0047).
+    INVALIDATE_PENDING_PUT = "invalidate_pending_put";
+    /// Clears the crash marker of `secrets invalidate` (ADR 0047).
+    INVALIDATE_PENDING_CLEAR = "invalidate_pending_clear";
     /// How many OPAQUE records name each `setup_id`.
     CREDENTIAL_SETUP_COUNTS = "credential_setup_counts";
     /// Deletes every sealed login state.

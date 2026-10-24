@@ -144,6 +144,7 @@
 pub mod config;
 pub mod directory;
 pub mod error;
+pub mod invalidation;
 pub mod ports;
 pub mod retirement;
 pub mod rules;
