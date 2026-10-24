@@ -73,6 +73,7 @@ use rizzy_client::sessions::{
 use rizzy_client::signup::DeviceKind;
 use rizzy_client::store::rows::Alarm;
 use rizzy_client::sync::VaultSync;
+use rizzy_client::vaults::late_edit;
 use rizzy_core::encoding::Reader;
 use rizzy_core::generator::{
     CharClass, CharacterOptions, ClassRule, GeneratorError, MAX_LENGTH, MAX_WORDS, MIN_LENGTH,
@@ -967,12 +968,24 @@ fn print_notices(device: &Device, ui: &mut dyn Ui) {
 fn print_vault_notices(device: &Device, vault: &VaultSync, ui: &mut dyn Ui) {
     for item in vault.item_ids() {
         let id = hex(item.as_bytes());
-        let late = vault.late_edit_devices(item);
-        if !late.is_empty() {
-            let from: Vec<String> = late.iter().map(|d| device_label(device, *d)).collect();
+        if let Some(late) = late_edit(vault, item, device.recorded_moves()) {
+            let from: Vec<String> = late
+                .devices
+                .iter()
+                .map(|d| device_label(device, *d))
+                .collect();
+            // ADR 0081 §A6 step 2: the prompt names the target vault when this device
+            // recorded the move.
+            let what = match late.moved_to {
+                Some(target) => format!(
+                    "an item you moved to the vault \"{}\"",
+                    vault_label(device, target)
+                ),
+                None => "an item you deleted permanently".to_owned(),
+            };
             ui.note(&format!(
-                "An edit from {} arrived for an item you deleted permanently ({id}). Restore it \
-                 as a new item? `rv item restore-late {id} --type <type>`",
+                "An edit from {} arrived for {what} ({id}). Restore it as a new item? \
+                 `rv item restore-late {id} --type <type>`",
                 from.join(" and ")
             ));
         }

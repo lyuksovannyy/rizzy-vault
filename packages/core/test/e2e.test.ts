@@ -1488,6 +1488,21 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     expect(b.vaults().map((v) => v.name)).toEqual([undefined, "Office"]);
     expect(b.items().length).toBe(2);
 
+    // ADR 0081 §A6 step 2: `a` moves the copy to Personal while `b`, not having heard of it,
+    // edits it. That edit is a late op on the purged source (ADR 0012 §5): it does not bring the
+    // item back, and `a`, which recorded the move, names the vault the item went to.
+    const again = await a.moveItem(copy, personal);
+    b.editItem(copy, [{ op: "set", key: "item.notes", value: "edited before the move arrived" }]);
+    await b.sync();
+    await a.sync();
+    expect(a.items().map((i) => i.id)).not.toContain(copy);
+    expect(a.items().map((i) => i.id)).toContain(again);
+    expect(a.takeNotices()).toEqual([
+      { kind: "late-edit", item: copy, devices: [b.deviceId], conflictId: undefined, movedTo: personal },
+    ]);
+    // `b` recorded no move: whatever it surfaces names no vault.
+    expect(b.takeNotices().every((n) => n.movedTo === undefined)).toBe(true);
+
     // Delete, keeping the items: they land in Personal. The Personal vault is never deleted.
     await expect(a.deleteVault(personal, true)).rejects.toMatchObject({ code: "personal_vault_protected" });
     await a.deleteVault(work, true);

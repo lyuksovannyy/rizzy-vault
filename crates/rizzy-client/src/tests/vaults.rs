@@ -9,6 +9,8 @@
 //! - the same `item_id` in two vaults never crosses, in the merges or the local index (INV-103);
 //! - a move purges the source only after the target is acknowledged, resumes from its row, and
 //!   a deleted vault is dropped by the other session;
+//! - a late edit on a moved and purged item names the target vault when this session recorded
+//!   the move (§A6 step 2);
 //! - property: random ops over 1–4 vaults on two sessions, delivered per vault in any
 //!   interleaving, converge per vault, with `device_seq` gap-free per device across vaults and
 //!   `vault_prev_seq` chained per vault (ADR 0081 §A7);
@@ -38,8 +40,8 @@ use crate::store::index;
 use crate::store::rows::CacheRows;
 use crate::sync::DeviceCounters;
 use crate::vaults::{
-    MoveStep, PendingMove, VaultAlarm, VaultCatalog, VaultStatus, create_vault, delete_vault,
-    rename_vault, vault_name,
+    LateEdit, MoveStep, PendingMove, VaultAlarm, VaultCatalog, VaultStatus, create_vault,
+    delete_vault, late_edit, rename_vault, vault_name,
 };
 
 impl Server {
@@ -546,6 +548,88 @@ fn a_move_waits_for_the_target_and_a_deleted_vault_is_dropped_elsewhere() {
         name_of(&theirs[0], mv.target_item).as_deref(),
         Some("to move")
     );
+}
+
+/// ADR 0081 §A6 step 2: an edit made offline on another session arrives after this session
+/// moved the item and purged its source. It is a late op (ADR 0012 §5), surfaced once, and the
+/// prompt names the vault the item went to, because this session recorded the move. Without
+/// that record (another device, or a move of an item with the same id in another vault,
+/// INV-103), the prompt is the plain "deleted permanently" one.
+#[test]
+fn late_ops_after_a_move_and_purge_name_the_target_vault() {
+    let mut rng = ChaCha20Rng::seed_from_u64(850);
+    let mut server = Server::new(851);
+    let (mut web, sk) = web_account(&mut server, &mut rng);
+    let (counters, mut vaults) = open_all(&server, &mut web, T0 + 10);
+    let personal = vaults[0].vault_id();
+    let pending = create_vault(&mut rng, &web.account, &web.unlocked).unwrap();
+    let owned_id = pending.vault_id();
+    let mut owned = commit_change(&mut server, &mut web, pending, &counters).unwrap();
+    let item = new_item(&mut owned, &mut rng, &web.unlocked, "to move", T0 + 20);
+    upload(&mut server, &mut owned, &mut rng, &web.unlocked, true);
+    // The other session holds the item, then goes offline.
+    let mut other = web_login(&mut server, &mut rng, &sk);
+    let (_, mut theirs) = open_all(&server, &mut other, T0 + 25);
+    assert_eq!(
+        name_of(find(&mut theirs, owned_id), item).as_deref(),
+        Some("to move")
+    );
+
+    // This session moves the item to the Personal vault: copy, acknowledged, source purged.
+    let mv = PendingMove::new(&mut rng, &owned, item, personal).unwrap();
+    let p = find(&mut vaults, personal);
+    mv.copy(&mut rng, &web.unlocked, &owned, p, T0 + 30)
+        .unwrap();
+    upload(&mut server, p, &mut rng, &web.unlocked, true);
+    assert_eq!(
+        mv.finish(&mut rng, &web.unlocked, &mut owned, p, true, T0 + 31)
+            .unwrap(),
+        MoveStep::SourcePurged
+    );
+    upload(&mut server, &mut owned, &mut rng, &web.unlocked, true);
+    assert_eq!(owned.item_lifecycle(item), ItemLifecycle::Purged);
+    assert_eq!(late_edit(&owned, item, &[mv]), None, "nothing late yet");
+
+    // The offline edit is injected after the move and the purge: concurrent with the purge.
+    let o = find(&mut theirs, owned_id);
+    rename_item(
+        o,
+        &mut rng,
+        &other.unlocked,
+        item,
+        "edited offline",
+        T0 + 40,
+    );
+    upload(&mut server, o, &mut rng, &other.unlocked, true);
+    fetch(&server, &mut owned, T0 + 50);
+
+    // It does not resurrect the item (ADR 0012 §5) and is surfaced naming the target vault.
+    assert_eq!(owned.item_lifecycle(item), ItemLifecycle::Purged);
+    assert_eq!(
+        late_edit(&owned, item, &[mv]),
+        Some(LateEdit {
+            devices: vec![other.unlocked.device_id],
+            moved_to: Some(personal),
+        })
+    );
+    // Without this device's record of the move: the plain prompt.
+    assert_eq!(late_edit(&owned, item, &[]).map(|l| l.moved_to), Some(None));
+    // A record of a move of the same item id out of another vault names nothing (INV-103).
+    let elsewhere = PendingMove {
+        source_vault: personal,
+        ..mv
+    };
+    assert_eq!(
+        late_edit(&owned, item, &[elsewhere]).map(|l| l.moved_to),
+        Some(None)
+    );
+    // The copy in the target is untouched by the late edit.
+    let p = find(&mut vaults, personal);
+    fetch(&server, p, T0 + 51);
+    assert_eq!(name_of(p, mv.target_item).as_deref(), Some("to move"));
+    // Surfaced once.
+    owned.mark_late_edits_surfaced(item);
+    assert_eq!(late_edit(&owned, item, &[mv]), None);
 }
 
 // --- Property tests ----------------------------------------------------------------------------

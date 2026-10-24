@@ -73,9 +73,12 @@ pub const ITEM_INDEX_TABLE: &str = "CREATE TABLE item_index(vault_id BLOB NOT NU
      search_text TEXT NOT NULL, last_used_ms BLOB, use_count INTEGER NOT NULL DEFAULT 0, \
      PRIMARY KEY (vault_id, item_id))";
 
-/// The `pending_move` table of [ADR 0081] §A7: one row per move in progress, written before
-/// the copy and deleted after the source is purged (INV-104, [`crate::vaults::PendingMove`]).
-/// Ids only, no user content.
+/// The `pending_move` table of [ADR 0081] §A7: one row per move, written before the copy
+/// (INV-104, [`crate::vaults::PendingMove`]). A host may delete it once the source's purge is
+/// uploaded ([`crate::vaults::PendingMove::done_write`]), or keep it as its record of the move,
+/// so a late edit on the purged source names the target vault (§A6 step 2,
+/// [`crate::vaults::late_edit`]); `rv` keeps it. Either way it goes with either vault
+/// ([`Write::DropVault`]). Ids only, no user content.
 ///
 /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
 pub const PENDING_MOVE_TABLE: &str = "CREATE TABLE pending_move(source_vault_id BLOB NOT NULL, \

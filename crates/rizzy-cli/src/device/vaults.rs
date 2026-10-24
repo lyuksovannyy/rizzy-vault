@@ -21,7 +21,10 @@
 //! - **Moves and copies** (§A6): a copy is a new item in the target; a move writes its
 //!   `pending_move` row first, copies, uploads the target with every attachment, and only then
 //!   trashes and purges the source (INV-104). Rows left by an interrupted run are resumed by
-//!   the next sync.
+//!   the next sync. A finished move keeps its row: it is this device's record of the move, so
+//!   an edit from another device that arrives later for the purged source is surfaced naming
+//!   the vault the item went to (§A6 step 2, "when this device recorded the move"). Such rows
+//!   are never resumed again (their source is purged) and go with either vault (§A7).
 //!
 //! [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
 
@@ -769,15 +772,30 @@ impl Device {
         Ok((pending.target_item, done))
     }
 
-    /// Resumes every move a `pending_move` row holds (INV-104): a target already stored is not
-    /// created again, a source not yet purged is purged. Moves whose vaults are not open here
-    /// wait.
+    /// The moves this device recorded, one per `pending_move` row (§A6 step 3): what a late
+    /// edit on a moved item's purged source is checked against, so its notice names the vault
+    /// the item went to (§A6 step 2, [`rizzy_client::vaults::late_edit`]).
+    #[must_use]
+    pub fn recorded_moves(&self) -> &[PendingMove] {
+        &self.pending_moves
+    }
+
+    /// Resumes every move a `pending_move` row holds whose source is not purged yet (INV-104):
+    /// a target already stored is not created again, a source not yet purged is purged. A row
+    /// whose source is purged is a finished move, kept as this device's record of it (module
+    /// docs); a purge not uploaded yet goes with the vault's next upload like any own op. Moves
+    /// whose vaults are not open here wait.
     pub(super) async fn resume_moves(&mut self, ui: &mut dyn Ui) -> Result<(), CliError> {
         let moves: Vec<PendingMove> = self
             .pending_moves
             .iter()
             .copied()
             .filter(|m| self.vaults.is_open(m.source_vault) && self.vaults.is_open(m.target_vault))
+            .filter(|m| {
+                self.vaults.get(m.source_vault).is_some_and(|source| {
+                    source.item_lifecycle(m.source_item) != ItemLifecycle::Purged
+                })
+            })
             .collect();
         let mut waiting = 0;
         for pending in moves {
@@ -838,8 +856,8 @@ impl Device {
     }
 
     /// Step 2 of a move, every attachment of the copy stored: the target uploaded, then the
-    /// source trashed and purged, uploaded, and the row dropped. Returns whether the move is
-    /// done.
+    /// source trashed and purged and uploaded. The row stays as this device's record of the
+    /// move (module docs). Returns whether the move is done.
     async fn finish_move(
         &mut self,
         ui: &mut dyn Ui,
@@ -864,9 +882,6 @@ impl Device {
             MoveStep::AwaitTarget => Ok(false),
             MoveStep::SourcePurged => {
                 self.upload_vault(ui, pending.source_vault).await?;
-                self.commit(core::iter::once(pending.done_write()).collect())
-                    .await?;
-                self.pending_moves.retain(|m| *m != pending);
                 Ok(true)
             }
         }
