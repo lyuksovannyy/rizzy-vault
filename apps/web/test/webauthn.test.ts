@@ -56,7 +56,7 @@ describe("options", () => {
           challenge: "AA",
           rpId: "vault.example.com",
           allowCredentials: [{ type: "public-key", id: "AQ" }],
-          userVerification: "preferred",
+          userVerification: "discouraged",
         },
       }),
     );

@@ -463,8 +463,9 @@ says how they fit with the token check and the extension's audit.
   the login's security-key prompt (`SecurityKeyDialog.tsx`), cancel and removal, the axe audit of
   the section, the prompt and the removal dialog, and the keyboard-only walk through them. The
   browser's `navigator.credentials` calls run on the UI thread (`webauthn.ts`), never in the
-  Worker. Until the owner decides the Chromium credProtect refusal (ADR 0077 §7, reported), the
-  spec deletes the credProtect members from the enrolment options in the test only.
+  Worker. The server's options reach the browser unaltered: security keys are touch-only (ADR
+  0082), and a virtual key with user verification that never succeeds still enrols and logs in,
+  with the options read as served (UV `"discouraged"`, no credProtect).
 - **What is not covered.** Real screen readers (NVDA, JAWS, VoiceOver, Orca): the rules catch
   missing names, labels and structure, not whether the result reads well, so a UI change still
   needs a manual pass with one. Firefox and Safari (Chromium only). Contrast of colours the token
