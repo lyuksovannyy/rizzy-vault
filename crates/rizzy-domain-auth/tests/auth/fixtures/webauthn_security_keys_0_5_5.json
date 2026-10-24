@@ -1,0 +1,16 @@
+[
+  {
+    "credential_id": "UFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFA",
+    "flags": 1,
+    "test_es256_scalar": "pe8YqUnOQ3TdgiK7u6p81za11qxsNs93ILLS6C1GFpg",
+    "security_key": "{\"cred\":{\"cred_id\":\"UFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFA\",\"cred\":{\"type_\":\"ES256\",\"key\":{\"EC_EC2\":{\"curve\":\"SECP256R1\",\"x\":\"6t8f421KGoJDIgfLAUf-3uMrLKHURMA1QJqlWa8TysQ\",\"y\":\"4bSBPC0ZrWXqZKKqyrYgBQxOQUxviM71laFgp_yzhI8\"}}},\"counter\":7,\"transports\":null,\"user_verified\":false,\"backup_eligible\":false,\"backup_state\":false,\"registration_policy\":\"preferred\",\"extensions\":{\"cred_protect\":\"Ignored\",\"hmac_create_secret\":\"NotRequested\",\"appid\":\"NotRequested\",\"cred_props\":\"Ignored\"},\"attestation\":{\"data\":\"None\",\"metadata\":\"None\"},\"attestation_format\":\"none\"}}",
+    "sign_count": 7
+  },
+  {
+    "credential_id": "UVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVE",
+    "flags": 5,
+    "test_es256_scalar": "Vnvtc7Q-EQ4LgpMqaXx3U4WeEseZ_gPko8dDI1D4vzY",
+    "security_key": "{\"cred\":{\"cred_id\":\"UVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVE\",\"cred\":{\"type_\":\"ES256\",\"key\":{\"EC_EC2\":{\"curve\":\"SECP256R1\",\"x\":\"V_3sMfUiM37aV-bfVbqgdY7V77AlTo19Px3Dy0C99D4\",\"y\":\"xbhvOClxJ7ss8IFJditwrGdm565MHg8v_Str4zblHc4\"}}},\"counter\":7,\"transports\":null,\"user_verified\":true,\"backup_eligible\":false,\"backup_state\":false,\"registration_policy\":\"preferred\",\"extensions\":{\"cred_protect\":\"Ignored\",\"hmac_create_secret\":\"NotRequested\",\"appid\":\"NotRequested\",\"cred_props\":\"Ignored\"},\"attestation\":{\"data\":\"Self_\",\"metadata\":\"None\"},\"attestation_format\":\"packed\"}}",
+    "sign_count": 7
+  }
+]

@@ -896,6 +896,38 @@ impl Env {
             .await
     }
 
+    /// Runs an OPAQUE login for `client` that must stop at the second factor, and returns its
+    /// `login_id`: the `pending_id` of a `WebAuthn` second factor (ADR 0058 point 3).
+    pub(crate) async fn login_pending(&mut self, client: &Client) -> Id {
+        let pw_in = PasswordInput::derive(&client.password, &client.secret_key).unwrap();
+        let (state, ke1) = client_login_start(&mut self.rng, &pw_in).unwrap();
+        let start = LoginStartRequest {
+            login_name: Text::new(client.name.clone()).unwrap(),
+            ke1: bytes(ke1),
+        };
+        let started = self
+            .svc
+            .login_start(&mut self.rng, &start, &self.source, None, self.now)
+            .await
+            .unwrap();
+        let context =
+            OpaqueContext::for_login(&origin(), started.kdf_id, started.server_origin.as_str())
+                .unwrap();
+        let fin = client_login_finish(
+            &mut self.rng,
+            state,
+            &pw_in,
+            started.ke2.as_slice(),
+            &context,
+        )
+        .unwrap();
+        let answer = self
+            .finish_login(started.login_id, fin.ke3, None, None)
+            .await;
+        assert!(matches!(answer, Err(AuthError::SecondFactorRequired)));
+        started.login_id
+    }
+
     /// Logs `client` in with its password.
     pub(crate) async fn login(&mut self, client: &Client) -> Login {
         let (name, password) = (client.name.clone(), client.password.clone());

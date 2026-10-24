@@ -19,6 +19,7 @@
 //! | `secrets` | the startup checks and what the database never holds (INV-8, INV-50) |
 //! | `setups` | retiring old OPAQUE setups: the `reregister` flag, the echoed `setup_id`, the two steps of `retire-setups`, the startup refusal, an account left on a retired setup (ADR 0031) |
 //! | `data_key` | after a data-key rotation: TOTP rows re-sealed under the account lock, the old key dropped once no row names it (§5.11 "Rotation") |
+//! | `webauthn` | security keys: enrolment, login, single use and TTL of the ceremony state, RP ID and origin, UV, INV-83 against the counter of record, attestation, ES256 only, rate limits, the 0.5.5 fixture rows (ADR 0058, ADR 0077) |
 //! | `window` | the replay window at its edges, through the database: the first counter, `max − 63`, `max − 64`, jumps, forged requests, a restart, the highest recordable counter (ADR 0028 item 5) |
 
 #![expect(
@@ -43,4 +44,5 @@ mod sessions;
 mod setups;
 mod single_use;
 mod state;
+mod webauthn;
 mod window;
