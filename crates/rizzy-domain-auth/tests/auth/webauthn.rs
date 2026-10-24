@@ -312,7 +312,7 @@ async fn sql_exec(env: &Env, sql: &'static str, binds: &[i64]) {
         for b in binds {
             q = q.bind(*b);
         }
-        q.execute(&mut *c).await.map(|_| ()).unwrap()
+        q.execute(&mut *c).await.map(|_| ()).unwrap();
     });
     tx.commit().await.unwrap();
 }
