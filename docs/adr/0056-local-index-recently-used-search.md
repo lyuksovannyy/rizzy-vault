@@ -1,6 +1,6 @@
 # ADR 0056: M3 local index: recently-used tracking and client-side search
 
-- Status: Accepted
+- Status: Partially superseded by [ADR 0081](0081-multiple-vaults-personal-and-shared.md) (§3 in part)
 - Date: 2026-10-11
 - Deciders: project owner
 - Milestone: M3 (`rv`, `rizzy-ffi`)

@@ -1,6 +1,6 @@
 # ADR 0028: `/api/v1` HTTP conventions
 
-- Status: Partially superseded by [ADR 0031](0031-retiring-old-opaque-setups.md) (item 3 in part); [ADR 0032](0032-healing-rotation-after-backup.md) (item 3 in part); [ADR 0048](0048-per-account-storage-quota.md) (item 3 in part, item 12 in part); [ADR 0049](0049-web-role-route-table.md) (item 10 in part, item 15); [ADR 0052](0052-icon-proxy-role.md) (item 1 in part; item 10 in part: the `blob:` token of `img-src`); [ADR 0071](0071-encrypted-db-backup-format.md) (item 13); [ADR 0075](0075-session-listing-and-ending.md) (item 1 in part)
+- Status: Partially superseded by [ADR 0031](0031-retiring-old-opaque-setups.md) (item 3 in part); [ADR 0032](0032-healing-rotation-after-backup.md) (item 3 in part); [ADR 0048](0048-per-account-storage-quota.md) (item 3 in part, item 12 in part); [ADR 0049](0049-web-role-route-table.md) (item 10 in part, item 15); [ADR 0052](0052-icon-proxy-role.md) (item 1 in part; item 10 in part: the `blob:` token of `img-src`); [ADR 0071](0071-encrypted-db-backup-format.md) (item 13); [ADR 0075](0075-session-listing-and-ending.md) (item 1 in part); [ADR 0081](0081-multiple-vaults-personal-and-shared.md) (item 1 in part)
 - Date: 2026-09-29
 - Deciders: project owner
 - Milestone: M1
