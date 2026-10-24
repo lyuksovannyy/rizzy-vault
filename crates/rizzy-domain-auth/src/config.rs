@@ -145,6 +145,12 @@ pub struct RateLimits {
     /// Security-key assertions per account at `webauthn/login/finish` (CRYPTO.md §11.17). Only
     /// a client that verified KE3 reaches one; cleared by a successful assertion.
     pub webauthn_per_account: RateRule,
+    /// Vault creations per account ([ADR 0081] §D: "20 per account per 24 h"): a fixed window,
+    /// `max_attempts` creations per `window_ms`, then `rate_limited` until the window ends. The
+    /// backoff fields are not used.
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    pub vault_create_per_account: RateRule,
 }
 
 impl Default for RateLimits {
@@ -166,6 +172,12 @@ impl Default for RateLimits {
             recovery_per_name: backoff(20, 60 * 60_000),
             totp_per_account: backoff(10, 15 * 60_000),
             webauthn_per_account: backoff(10, 15 * 60_000),
+            vault_create_per_account: RateRule {
+                max_attempts: 20,
+                window_ms: 24 * 60 * 60_000,
+                backoff_base_ms: 0,
+                backoff_max_ms: 0,
+            },
         }
     }
 }

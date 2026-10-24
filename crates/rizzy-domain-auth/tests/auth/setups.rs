@@ -183,6 +183,8 @@ fn reregistration_change(
         device_revocations: List::empty(),
         device_grants: List::empty(),
         vault_rotation: None,
+        vault_create: None,
+        vault_delete: None,
     };
     (change, next)
 }

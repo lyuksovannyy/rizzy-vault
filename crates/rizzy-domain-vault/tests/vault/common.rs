@@ -23,7 +23,7 @@ use rizzy_core::sign::statements::DeviceKind;
 use rizzy_core::sign::{DeviceSigningKey, OpStatement, SnapshotStatement};
 use rizzy_domain_vault::{
     AccountKeyState, AuthorCertificate, AuthorStatus, Authors, DeviceDirectory, DirectoryError,
-    FetchOutcome, VaultDomain, create_vault,
+    FetchOutcome, VaultDomain, VaultKind, create_vault,
 };
 use rizzy_proto::objects::{self, Envelope, KeyEnvelope, VaultSelfGrant};
 use rizzy_proto::vault::{
@@ -489,7 +489,9 @@ impl Env {
             vault_key_epoch: 0,
             envelope: KeyEnvelope::new(vec![0x5a; 98]).unwrap(),
         };
-        create_vault(&mut tx, ACCOUNT, &grant, NOW).await.unwrap();
+        create_vault(&mut tx, ACCOUNT, &grant, VaultKind::Personal, NOW)
+            .await
+            .unwrap();
         tx.commit().await.unwrap();
         Self::over(slot, db)
     }

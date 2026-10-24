@@ -363,6 +363,8 @@ fn flow_futures_are_send() {
             device_revocations: rizzy_proto::wire::List::empty(),
             device_grants: rizzy_proto::wire::List::empty(),
             vault_rotation: None,
+            vault_create: None,
+            vault_delete: None,
         };
         send(svc.commit_change(&session, &change, now));
         let bundles = rizzy_proto::account::PublishBundlesRequest {

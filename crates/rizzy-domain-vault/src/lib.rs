@@ -154,8 +154,9 @@ pub use authors::{
 pub use compact::{CompactionFailure, CompactionReport, CompactionRun};
 pub use error::{HealingError, VaultError};
 pub use fetch::{FetchOutcome, IntegrityError, PAGE_BYTES, PAGE_MAX_OPS};
-pub use keys::create_vault;
+pub use keys::{create_owned_vault, create_vault, delete_vault};
 pub use port::PersonalVaultOutcome;
+pub use repo::VaultKind;
 pub use usage::Quota;
 
 /// The vault domain: a database handle, the `auth` domain's certificates through

@@ -105,10 +105,14 @@ pub async fn apply_rotation(
     now_ms: u64,
 ) -> Result<(), VaultError> {
     let now = to_sql_time(now_ms)?;
-    // Check 1: one entry per vault, none other. Both lists are ascending by id.
+    // Check 1: one entry per vault, none other. Both lists are ascending by id. No vault is
+    // shared before ADR 0081 Part B, so every vault is in V and `regrants` must be empty (ADR
+    // 0081 §0 item 3, §A9: "the server refuses a `regrants` list that does not name exactly
+    // those vaults").
     let vaults = repo::list_vaults(tx.conn(), account_id).await?;
     let entries = upload.vaults();
-    if vaults.len() != entries.len()
+    if !upload.regrants().is_empty()
+        || vaults.len() != entries.len()
         || vaults
             .iter()
             .zip(entries)

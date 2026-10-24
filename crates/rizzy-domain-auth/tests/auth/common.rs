@@ -34,6 +34,7 @@ use rizzy_domain_auth::{
     AuthConfig, AuthError, AuthService, PersonalVault, RequestParts, ServerSecrets, Session,
     SignupPolicy, VaultPort,
 };
+use rizzy_proto::account::VaultSummary;
 use rizzy_proto::auth::{
     DeviceAuthFinishRequest, DeviceAuthStartRequest, LoginFinishRequest, LoginFinishResponse,
     LoginStartRequest, RecoveryRegistration, RegisterFinishRequest, RegisterStartRequest,
@@ -236,6 +237,80 @@ impl VaultPort for SharedVault {
             .get(&(account_id.to_bytes(), device_id.to_bytes()))
             .copied()
             .unwrap_or(0))
+    }
+
+    /// ADR 0081 §A3 as the vault domain decides it, in memory: the account's first grant is its
+    /// Personal vault, the rest are owned.
+    async fn create_owned_vault(
+        &self,
+        _tx: &mut WriteTx,
+        account_id: AccountId,
+        grant: &VaultSelfGrant,
+        account_key_epoch: u32,
+        _account_key_id: [u8; 16],
+        _now_ms: u64,
+    ) -> Result<(), AuthError> {
+        let mut grants = self.grants.lock().unwrap();
+        if grants
+            .values()
+            .flatten()
+            .any(|g| g.vault_id == grant.vault_id)
+        {
+            return Err(AuthError::StateConflict);
+        }
+        let held = grants.entry(account_id.to_bytes()).or_default();
+        if grant.vault_key_epoch != 0
+            || grant.account_key_epoch != account_key_epoch
+            || held.len() >= rizzy_proto::limits::MAX_OWNED_VAULTS
+        {
+            return Err(AuthError::InvalidRequest);
+        }
+        held.push(grant.clone());
+        Ok(())
+    }
+
+    /// ADR 0081 §A5 in memory: the Personal (first) vault is refused, an unknown one not found.
+    async fn delete_vault(
+        &self,
+        _tx: &mut WriteTx,
+        account_id: AccountId,
+        vault_id: VaultId,
+        _now_ms: u64,
+    ) -> Result<(), AuthError> {
+        let mut grants = self.grants.lock().unwrap();
+        let held = grants.entry(account_id.to_bytes()).or_default();
+        match held
+            .iter()
+            .position(|g| g.vault_id.to_bytes() == vault_id.to_bytes())
+        {
+            Some(0) => Err(AuthError::InvalidRequest),
+            Some(i) => {
+                held.remove(i);
+                Ok(())
+            }
+            None => Err(AuthError::NotFound),
+        }
+    }
+
+    async fn vault_summaries(
+        &self,
+        _conn: Conn<'_>,
+        account_id: AccountId,
+    ) -> Result<Vec<VaultSummary>, AuthError> {
+        let grants = self.grants.lock().unwrap();
+        Ok(grants
+            .get(&account_id.to_bytes())
+            .map(|g| {
+                g.iter()
+                    .enumerate()
+                    .map(|(i, g)| VaultSummary {
+                        vault_id: g.vault_id,
+                        kind: if i == 0 { 1 } else { 2 },
+                        bytes_used: 0,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 }
 

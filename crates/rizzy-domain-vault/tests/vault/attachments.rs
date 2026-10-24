@@ -13,7 +13,7 @@
 use rizzy_core::attachment::{CHUNK_SIZE, MAX_ATTACHMENT_LEN};
 use rizzy_core::ids::{AttachmentId, VaultId};
 use rizzy_domain_vault::attachments::SWEEP_AGE_MS;
-use rizzy_domain_vault::{NewAttachment, Quota, VaultError, create_vault};
+use rizzy_domain_vault::{NewAttachment, Quota, VaultError, VaultKind, create_vault};
 use rizzy_proto::objects::{KeyEnvelope, VaultSelfGrant};
 use rizzy_proto::wire::Id;
 use rizzy_storage::lock_account;
@@ -63,7 +63,7 @@ async fn other_vault(env: &Env) {
         vault_key_epoch: 0,
         envelope: KeyEnvelope::new(vec![0x5b; 98]).unwrap(),
     };
-    create_vault(&mut tx, OTHER_ACCOUNT, &grant, NOW)
+    create_vault(&mut tx, OTHER_ACCOUNT, &grant, VaultKind::Personal, NOW)
         .await
         .unwrap();
     tx.commit().await.unwrap();

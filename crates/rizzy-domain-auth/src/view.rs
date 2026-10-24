@@ -88,6 +88,10 @@ pub(crate) async fn build<V: VaultPort>(
     // ADR 0048 §5: the counter is `rizzy-storage`'s, read on the same connection.
     let bytes_used =
         rizzy_storage::quota::bytes_used(reborrow(&mut conn), trust.account_id.as_bytes()).await?;
+    // ADR 0081 §A9, §A11: the per-vault summaries, the vault domain's figures.
+    let vaults = vault
+        .vault_summaries(reborrow(&mut conn), trust.account_id)
+        .await?;
     Ok(AccountView {
         account_state: Bytes::new(trust.state_wire.clone()).map_err(over_limit)?,
         bundles: List::new(bundles).map_err(over_limit)?,
@@ -117,7 +121,7 @@ pub(crate) async fn build<V: VaultPort>(
         vault_self_grants: List::new(grants).map_err(over_limit)?,
         bytes_used,
         quota_bytes,
-        vaults: List::empty(),
+        vaults: List::new(vaults).map_err(over_limit)?,
     })
 }
 
