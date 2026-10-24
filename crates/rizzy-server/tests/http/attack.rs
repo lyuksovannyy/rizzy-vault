@@ -685,7 +685,11 @@ fn seed_value(endpoint: Endpoint, me: &Account) -> Value {
         }),
         // GET with no body (`DeviceGrants`) or a 0 body-limit endpoint (`RecoveryCancel`,
         // `TotpEnrolStart`): no body at all.
-        Endpoint::DeviceGrants | Endpoint::RecoveryCancel | Endpoint::TotpEnrolStart => Value::Null,
+        Endpoint::DeviceGrants
+        | Endpoint::RecoveryCancel
+        | Endpoint::TotpEnrolStart
+        | Endpoint::WebauthnEnrolStart
+        | Endpoint::WebauthnList => Value::Null,
         // The empty-body `sessions` endpoints (ADR 0075 §2): no body either.
         Endpoint::SessionsList | Endpoint::SessionsCurrentEnd | Endpoint::SessionsOthersEnd => {
             Value::Null
@@ -694,6 +698,17 @@ fn seed_value(endpoint: Endpoint, me: &Account) -> Value {
         Endpoint::SessionsEnd => json!({ "session_id": b64(&[0u8; 16]) }),
         Endpoint::TotpEnrolConfirm => json!({ "totp_credential_seq": 1, "code": "123456" }),
         Endpoint::TotpDisable => json!({ "code": "123456" }),
+        Endpoint::WebauthnEnrolConfirm => json!({
+            "enrolment_id": b64(&[0u8; 16]),
+            "label": "key",
+            "credential": "{}",
+        }),
+        Endpoint::WebauthnRemove => json!({ "credential_id": b64(&[0u8; 32]) }),
+        Endpoint::WebauthnLoginChallenge => json!({ "pending_id": b64(&[0u8; 16]) }),
+        Endpoint::WebauthnLoginFinish => json!({
+            "pending_id": b64(&[0u8; 16]),
+            "credential": "{}",
+        }),
         Endpoint::Upload => json!({
             "vault_id": b64(&me.vault_id.to_bytes()),
             "records": [],
