@@ -58,6 +58,16 @@ fn uniform_index_is_unbiased() {
     assert_eq!(uniform_index(&mut rng, 0), Err(GeneratorError::NoClasses));
 }
 
+/// ADR 0079 §2: the public accessor is the same routine, draw for draw.
+#[test]
+fn public_uniform_is_uniform_index() {
+    let (mut a, mut b) = (seeded_rng(9), seeded_rng(9));
+    for n in [1u32, 2, 3, 10, 26, 100, 7776, u32::MAX] {
+        assert_eq!(uniform(&mut a, n), uniform_index(&mut b, n), "{n}");
+    }
+    assert_eq!(uniform(&mut a, 0), Err(GeneratorError::NoClasses));
+}
+
 #[test]
 fn the_bias_test_has_power() {
     // The naive `byte % 94` sampler the spec forbids: 256 = 2·94 + 68, so values below 68 are

@@ -871,9 +871,10 @@ fn fixed_keys_belong_to_their_types() {
         .iter()
         .filter(|(k, _)| k.starts_with("identity."))
         .count();
-    assert_eq!((card, identity), (7, 18));
-    // ADR 0055 §3 as ADR 0078 §7 amends it: 6 ssh + 4 api + 4 license + 3 wifi = 17, and 52
-    // keys in all; the retired `bank.` prefix has none (ADR 0078 §2).
+    // ADR 0018 §7's 18 identity keys plus ADR 0079 §1's `identity.sex` and `identity.birthday`.
+    assert_eq!((card, identity), (7, 20));
+    // ADR 0055 §3 as ADR 0078 §7 amends it: 6 ssh + 4 api + 4 license + 3 wifi = 17, and 54
+    // keys in all with ADR 0079 §1's two; the retired `bank.` prefix has none (ADR 0078 §2).
     let count = |prefix: &str| {
         FIXED_KEYS
             .iter()
@@ -890,7 +891,7 @@ fn fixed_keys_belong_to_their_types() {
         ],
         [6, 4, 4, 3, 0]
     );
-    assert_eq!(FIXED_KEYS.len(), 52);
+    assert_eq!(FIXED_KEYS.len(), 54);
     for (k, s) in FIXED_KEYS {
         let expected = match k.split('.').next() {
             Some("card") => Applies::Only(SupportedType::Card),
@@ -2798,5 +2799,123 @@ fn bank_keys_are_retired_and_reserved() {
                 "{k}"
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// ADR 0079 §1: `identity.sex` and `identity.birthday`
+// ---------------------------------------------------------------------------------------------
+
+/// ADR 0079 §1 and §12 "Schema tests": both keys are Known, Text, Identity-only, written by
+/// anyone and not concealed.
+#[test]
+fn identity_sex_and_birthday_are_adr_0079s_rows() {
+    for k in [schema::IDENTITY_SEX, schema::IDENTITY_BIRTHDAY] {
+        let KeyClass::Known(spec) = classify(key(k)) else {
+            panic!("{k} is not known");
+        };
+        assert_eq!(spec.expected, Expected::Text, "{k}");
+        assert_eq!(spec.applies, Applies::Only(SupportedType::Identity), "{k}");
+        assert_eq!(spec.writers, Writers::Any, "{k}");
+        assert_eq!(spec.concealment, Concealment::Shown, "{k}");
+        assert!(!spec.concealed(CustomFieldKind::Text), "{k}");
+        assert_eq!(key(k).kind(), KeyKind::Fixed);
+    }
+    assert_eq!(schema::IDENTITY_SEX, "identity.sex");
+    assert_eq!(schema::IDENTITY_BIRTHDAY, "identity.birthday");
+    assert_eq!(
+        (schema::IDENTITY_SEX_MALE, schema::IDENTITY_SEX_FEMALE),
+        ("male", "female")
+    );
+}
+
+/// ADR 0079 §1: Text "stored as entered": the UI's `male` and `YYYY-MM-DD`, and any other text
+/// (an import's `04/17/1998`, a sex value outside the two), are accepted on an identity and on
+/// no other type.
+#[test]
+fn identity_sex_and_birthday_take_any_text_on_identities_only() {
+    use WriteMode::{Create, Edit, Import};
+    let values = ["male", "female", "diverse", "1998-04-17", "04/17/1998"];
+    for k in [schema::IDENTITY_SEX, schema::IDENTITY_BIRTHDAY] {
+        for v in values {
+            let text = Value::text(v).unwrap();
+            for mode in [Create, Import, Edit] {
+                assert_eq!(
+                    check_write(ItemType::IDENTITY, mode, k.as_bytes(), text.expose_secret()),
+                    Ok(()),
+                    "{k} {v}"
+                );
+                assert_eq!(
+                    check_write(ItemType::LOGIN, mode, k.as_bytes(), text.expose_secret()),
+                    Err(WriteError::WrongItemType),
+                    "{k} {v}"
+                );
+            }
+        }
+        assert_eq!(
+            check_write(ItemType::IDENTITY, Edit, k.as_bytes(), CLEARED),
+            Ok(())
+        );
+    }
+}
+
+/// ADR 0079 §1 "What older clients see" and §12, through the ADR 0018 §11 harness of
+/// `a_newer_clients_key_and_value_are_carried`: a client whose registry predates the two rows
+/// sees an unassigned `identity.` key, which is `Unknown`; it carries the key and its Text value
+/// byte for byte, may clear it in an edit, and never writes a new value. `identity.zodiac` stands
+/// in for the two keys exactly as they classify on such a client.
+#[test]
+fn an_older_client_carries_identity_sex_and_birthday() {
+    let older_view = "identity.zodiac";
+    assert!(!FIXED_KEYS.iter().any(|(f, _)| *f == older_view));
+    assert_eq!(classify(key(older_view)), KeyClass::Unknown);
+    for v in ["female", "1998-04-17"] {
+        let written = Value::text(v).unwrap();
+        let carried = Value::copy_from_encoded(written.expose_secret()).unwrap();
+        assert_eq!(carried.expose_secret(), written.expose_secret());
+        // Shown as its raw text by any reader.
+        assert!(read_value(Expected::Text, carried.expose_secret()).is_some());
+        assert_eq!(
+            check_write(
+                ItemType::IDENTITY,
+                WriteMode::Edit,
+                older_view.as_bytes(),
+                carried.expose_secret()
+            ),
+            Err(WriteError::UnknownKey)
+        );
+        assert_eq!(
+            check_write(
+                ItemType::IDENTITY,
+                WriteMode::Edit,
+                older_view.as_bytes(),
+                CLEARED
+            ),
+            Ok(())
+        );
+        for mode in [WriteMode::Create, WriteMode::Edit] {
+            assert_eq!(
+                check_carried(
+                    ItemType::IDENTITY,
+                    mode,
+                    older_view.as_bytes(),
+                    carried.expose_secret()
+                ),
+                Ok(())
+            );
+        }
+    }
+    // On this client both keys are Known, so the same verbatim copy still passes.
+    for k in [schema::IDENTITY_SEX, schema::IDENTITY_BIRTHDAY] {
+        let v = Value::text("x").unwrap();
+        assert_eq!(
+            check_carried(
+                ItemType::IDENTITY,
+                WriteMode::Create,
+                k.as_bytes(),
+                v.expose_secret()
+            ),
+            Ok(())
+        );
     }
 }

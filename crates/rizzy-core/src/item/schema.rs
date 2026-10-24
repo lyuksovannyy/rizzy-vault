@@ -22,6 +22,7 @@
 //! | `attachment/<id>/name` · `/mime` · `/size` · `/order` | Text · Text · U64 · `SortKey` | all | any | no |
 //! | `card.holder`, `.number`, `.brand`, `.exp_month`, `.exp_year`, `.code`, `.pin` | Text | Card | any | number, code, PIN |
 //! | `identity.` + 18 names | Text | Identity | any | `ssn`, `passport_number` |
+//! | `identity.sex`, `identity.birthday` | Text | Identity | any | no |
 //! | `ssh.host`, `.port`, `.username`, `.private_key`, `.public_key`, `.passphrase` | Text | SSH key | any | `private_key`, `passphrase` |
 //! | `api.name`, `.key`, `.secret`, `.endpoint` | Text | API credential | any | `key`, `secret` |
 //! | `license.name`, `.key`, `.seats`, `.expires` | Text | Software license | any | `key` |
@@ -35,6 +36,12 @@
 //! [`ReservedFor::Retired`], carried byte for byte and never assigned again. Every one is Text, "stored as entered": `ssh.port`, `license.seats` and
 //! `license.expires` follow `card.exp_month`'s precedent, not U64. `ssh.port` absent means
 //! [`SSH_DEFAULT_PORT`] (`22`), a display default and not a stored value.
+//!
+//! The `identity.sex` and `identity.birthday` row is [ADR 0079] §1's (Accepted 2026-10-23),
+//! added under the same §7 rule. Both are Text, "stored as entered": writers that pick from the
+//! UI write `male` or `female` ([`IDENTITY_SEX_MALE`], [`IDENTITY_SEX_FEMALE`]) and an RFC 3339
+//! `full-date` (`YYYY-MM-DD`); readers show any other text as entered. A client that predates
+//! the row classifies both as [`KeyClass::Unknown`] and carries them byte for byte (ADR 0018 §11).
 //!
 //! The `attachment/<id>/…` rows are [ADR 0054] §4's (Accepted 2026-10-22): `<id>` is the
 //! attachment's own 16-byte id, which also names its storage row. No `/wrap` attribute exists:
@@ -114,6 +121,7 @@
 //! [ADR 0054]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0054-attachments-envelope-and-api.md
 //! [ADR 0055]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0055-m3-item-type-field-keys.md
 //! [ADR 0078]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0078-retire-bank-account-item-type.md
+//! [ADR 0079]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0079-identity-generator.md
 //!
 //! **`uri/<id>/match` is writable from M2** (ADR 0037, Accepted, assigns its enum values
 //! `0x0000`–`0x0006`; unassigned values above that are still accepted here, as any other Enum
@@ -199,6 +207,16 @@ pub const IDENTITY_SSN: &str = "identity.ssn";
 pub const IDENTITY_PASSPORT_NUMBER: &str = "identity.passport_number";
 /// `identity.drivers_license`: Text.
 pub const IDENTITY_DRIVERS_LICENSE: &str = "identity.drivers_license";
+/// `identity.sex`: Text (ADR 0079 §1). UI writers write [`IDENTITY_SEX_MALE`] or
+/// [`IDENTITY_SEX_FEMALE`]; any other text is shown as entered. Absent means not set.
+pub const IDENTITY_SEX: &str = "identity.sex";
+/// `identity.birthday`: Text (ADR 0079 §1), a civil date. Date-control writers write the
+/// RFC 3339 `full-date` form `YYYY-MM-DD`; any other text is shown and edited as entered.
+pub const IDENTITY_BIRTHDAY: &str = "identity.birthday";
+/// The value a UI writer stores in [`IDENTITY_SEX`] for "Male" (ADR 0079 §1).
+pub const IDENTITY_SEX_MALE: &str = "male";
+/// The value a UI writer stores in [`IDENTITY_SEX`] for "Female" (ADR 0079 §1).
+pub const IDENTITY_SEX_FEMALE: &str = "female";
 /// `ssh.host`: Text, the host the key logs in to (SSH key; ADR 0055 §1).
 pub const SSH_HOST: &str = "ssh.host";
 /// `ssh.port`: Text, as entered. Absent means [`SSH_DEFAULT_PORT`], a display default and
@@ -545,7 +563,7 @@ const VAULT: Applies = Applies::Only(SupportedType::VaultSettings);
 
 /// Every fixed key of the schema, with its entry: ADR 0018 §7's 35, and ADR 0055 §1's 17 for
 /// the M3 types (6 of them concealed, ADR 0055 §3–§4, as ADR 0078 §7 amends them).
-pub const FIXED_KEYS: [(&str, KeySpec); 52] = [
+pub const FIXED_KEYS: [(&str, KeySpec); 54] = [
     (
         ITEM_TYPE,
         spec(
@@ -603,6 +621,8 @@ pub const FIXED_KEYS: [(&str, KeySpec); 52] = [
     (IDENTITY_SSN, secret_text(IDENTITY)),
     (IDENTITY_PASSPORT_NUMBER, secret_text(IDENTITY)),
     (IDENTITY_DRIVERS_LICENSE, text(IDENTITY)),
+    (IDENTITY_SEX, text(IDENTITY)),
+    (IDENTITY_BIRTHDAY, text(IDENTITY)),
     (SSH_HOST, text(SSH)),
     (SSH_PORT, text(SSH)),
     (SSH_USERNAME, text(SSH)),
