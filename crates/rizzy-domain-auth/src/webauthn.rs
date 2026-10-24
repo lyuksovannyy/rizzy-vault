@@ -684,7 +684,9 @@ impl<V: VaultPort> AuthService<V> {
         let result = match rp.finish_securitykey_authentication(&credential, &state) {
             Ok(result) => result,
             Err(WebauthnError::CredentialPossibleCompromise) => {
-                return Err(AuthError::PossibleClone);
+                return Err(AuthError::PossibleClone {
+                    account_id: account.to_bytes(),
+                });
             }
             Err(_) => return Err(AuthError::Unauthorized),
         };
@@ -699,7 +701,9 @@ impl<V: VaultPort> AuthService<V> {
         };
         let received = result.counter();
         if !counter_accepted(stored.sign_count, received) {
-            return Err(AuthError::PossibleClone);
+            return Err(AuthError::PossibleClone {
+                account_id: account.to_bytes(),
+            });
         }
         let mut key = stored.decode()?;
         key.update_credential(&result);
