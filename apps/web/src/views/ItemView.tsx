@@ -29,6 +29,7 @@ import {
   type Grouped,
   SSH_DEFAULT_PORT,
   canEditFields,
+  displayValue,
   group,
   isMultiline,
   labelOf,
@@ -105,7 +106,7 @@ function FieldValue(props: {
             <NoteMarkdown source={field.value ?? ""} />
           ) : (
             <span className="field-value">
-              {props.link === true ? <SafeLink url={field.value ?? ""} /> : (field.value ?? "")}
+              {props.link === true ? <SafeLink url={field.value ?? ""} /> : displayValue(field.key, field.value ?? "")}
             </span>
           )}
         </>

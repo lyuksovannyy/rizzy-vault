@@ -23,6 +23,9 @@ import type {
   Generated,
   GeneratorLimits,
   HistoryEntry,
+  IdentityCountry,
+  IdentityDefaults,
+  IdentityGeneratorOptions,
   ImportFormat,
   ImportReport,
   CustomFieldAutofill,
@@ -58,6 +61,19 @@ export interface KitMessage {
   readonly loginName: string;
   readonly secretKey: Uint8Array;
   readonly recoveryCode: Uint8Array | undefined;
+}
+
+/**
+ * An identity draft as it crosses to the UI (ADR 0079 §3): the Worker keeps the core's
+ * `IdentityDraft` under `handle` (`identity-drafts.ts`) and sends its plain values. They are
+ * generated values, which ADR 0013 §3 rule 3 lets cross.
+ */
+export interface IdentityDraftMessage {
+  readonly handle: number;
+  /** The filled fields, by ADR 0018 §7 key. */
+  readonly fields: Readonly<Record<string, string>>;
+  /** "First Last", the default item name. */
+  readonly itemName: string;
 }
 
 /**
@@ -187,6 +203,19 @@ export interface CoreApi {
   plaintextExportPhrase(): string;
   /** The CXF passkey export's own warning (ADR 0074 §2). */
   cxfExportWarning(): string;
+  /** The identity generator's bundled countries, CLDR English names (ADR 0079 §5). */
+  identityCountries(): IdentityCountry[];
+  /** The identity generator's synced defaults, or `null` until first set (ADR 0079 OQ 7). */
+  identityDefaults(): IdentityDefaults | null;
+  /** An email domain lower-cased, or `identity_email_domain`(`_not_ascii`) (ADR 0079 §3). */
+  normalizeEmailDomain(domain: string): string;
+  /** Draws a new identity (ADR 0079 §3, §4); options checked with {@link isIdentityOptions}. */
+  identityGenerate(options: IdentityGeneratorOptions): IdentityDraftMessage;
+  /** Redraws `fieldKey` and its dependents of draft `handle` (ADR 0079 §4), which is freed: the
+   * answer carries the new draft's handle. */
+  identityRegenerate(handle: number, fieldKey: string, options: IdentityGeneratorOptions): IdentityDraftMessage;
+  /** Frees draft `handle` (an unknown one is a no-op). */
+  identityRelease(handle: number): void;
   /** A fresh element id for a new website or custom-field row (`@rizzy-vault/core`'s `newElementId`). */
   newElementId(): string;
   /** The attachments of an item: ids, names, media types and sizes (ADR 0054 §4). */
@@ -274,6 +303,12 @@ export const METHODS: readonly Method[] = [
   "plaintextExportWarning",
   "plaintextExportPhrase",
   "cxfExportWarning",
+  "identityCountries",
+  "identityDefaults",
+  "normalizeEmailDomain",
+  "identityGenerate",
+  "identityRegenerate",
+  "identityRelease",
   "newElementId",
   "attachments",
   "addAttachment",
@@ -388,9 +423,60 @@ export function isSettingsChange(value: unknown): value is SettingsChange {
     case "disableGlobalGroup":
     case "enableGlobalGroup":
       return typeof c["id"] === "string";
+    case "identityDefaults":
+      return isIdentityDefaults(c["defaults"]);
     default:
       return false;
   }
+}
+
+/** The longest email domain a message may carry: the core's limit is 253 bytes (ADR 0079 §3);
+ * this only keeps an oversized message from being built, the core checks the rest. */
+export const MAX_EMAIL_DOMAIN_TEXT = 1024;
+
+/** A whole age in `0..=255` (the core checks 18–99). */
+function isAge(v: unknown): v is number {
+  return typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 255;
+}
+
+/** An optional domain: `null`, `undefined` or a string of bounded length. */
+function isDomainText(v: unknown): boolean {
+  return v === null || v === undefined || (typeof v === "string" && v.length <= MAX_EMAIL_DOMAIN_TEXT);
+}
+
+/** Whether `value` is an {@link IdentityDefaults} (shape only; the core checks every value). */
+export function isIdentityDefaults(value: unknown): value is IdentityDefaults {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const d = value as Record<string, unknown>;
+  return (
+    (d["sex"] === "random" || d["sex"] === "male" || d["sex"] === "female") &&
+    (d["country"] === null || (typeof d["country"] === "string" && d["country"].length <= 8)) &&
+    isAge(d["ageMin"]) &&
+    isAge(d["ageMax"]) &&
+    (d["emailStyle"] === "name" || d["emailStyle"] === "nickname") &&
+    d["emailDomain"] !== undefined &&
+    isDomainText(d["emailDomain"])
+  );
+}
+
+/** Whether `value` is an {@link IdentityGeneratorOptions} (shape only; the core checks every
+ * value). A `today` is not taken from the UI: the Worker reads its own clock. */
+export function isIdentityOptions(value: unknown): value is IdentityGeneratorOptions {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const o = value as Record<string, unknown>;
+  return (
+    (o["sex"] === "random" || o["sex"] === "male" || o["sex"] === "female") &&
+    typeof o["country"] === "string" &&
+    o["country"].length <= 8 &&
+    isAge(o["ageMin"]) &&
+    isAge(o["ageMax"]) &&
+    (o["emailStyle"] === "name" || o["emailStyle"] === "nickname") &&
+    isDomainText(o["emailDomain"])
+  );
 }
 
 /** The buffers of the byte arrays in `values`, to transfer rather than copy. */

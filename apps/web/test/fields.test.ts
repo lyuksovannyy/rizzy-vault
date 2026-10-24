@@ -12,6 +12,11 @@ import {
   UNSUPPORTED_ITEM,
   canEditFields,
   compareFavoriteFirst,
+  controlOf,
+  displayValue,
+  formatIsoDate,
+  isIsoDate,
+  sexLabel,
   fixedChanges,
   group,
   isMultiline,
@@ -343,3 +348,53 @@ describe("MATCH_MODE_OPTIONS / matchModeLabel", () => {
     expect(matchModeLabel("not a number")).toContain("Unknown");
   });
 });
+
+describe("Sex and Birthday (ADR 0079 §1, §10)", () => {
+  const fields = FIXED_FIELDS.identity ?? [];
+  const sex = fields.find((f) => f.key === "identity.sex");
+  const birthday = fields.find((f) => f.key === "identity.birthday");
+
+  it("sit right after the name fields", () => {
+    const keys = fields.map((f) => f.key);
+    expect(keys.indexOf("identity.sex")).toBe(keys.indexOf("identity.last_name") + 1);
+    expect(keys.indexOf("identity.birthday")).toBe(keys.indexOf("identity.sex") + 1);
+    expect(labelOf("identity.sex")).toBe("Sex");
+    expect(labelOf("identity.birthday")).toBe("Birthday");
+  });
+
+  it("show the picked values localized and any other text as entered", () => {
+    expect(sexLabel("male")).toBe("Male");
+    expect(sexLabel("female")).toBe("Female");
+    expect(sexLabel("nonbinary")).toBe("nonbinary");
+    expect(sexLabel("Male")).toBe("Male");
+    expect(displayValue("identity.sex", "x")).toBe("x");
+    expect(displayValue("identity.birthday", "1998-04-17")).toBe(formatIsoDate("1998-04-17"));
+    expect(formatIsoDate("1998-04-17", "en-US")).toBe("April 17, 1998");
+    expect(displayValue("identity.birthday", "04/17/1998")).toBe("04/17/1998");
+    expect(displayValue("identity.city", "male")).toBe("male");
+  });
+
+  it("read a date as a civil day: no time zone shift, real days only", () => {
+    expect(isIsoDate("2024-02-29")).toBe(true);
+    expect(isIsoDate("2023-02-29")).toBe(false);
+    expect(isIsoDate("1998-13-01")).toBe(false);
+    expect(isIsoDate("1998-4-17")).toBe(false);
+    expect(isIsoDate("1998-04-31")).toBe(false);
+    expect(formatIsoDate("2000-01-01", "en-US")).toBe("January 1, 2000");
+  });
+
+  it("offer the select or date input only for a value they show unchanged", () => {
+    expect(sex !== undefined && birthday !== undefined).toBe(true);
+    if (sex === undefined || birthday === undefined) {
+      return;
+    }
+    expect(controlOf(sex, "male")).toBe("sex");
+    expect(controlOf(sex, "")).toBe("sex");
+    expect(controlOf(sex, "Other text")).toBe("text");
+    expect(controlOf(birthday, "1998-04-17")).toBe("date");
+    expect(controlOf(birthday, "")).toBe("date");
+    expect(controlOf(birthday, "04/17/1998")).toBe("text");
+    expect(controlOf({ key: "identity.city", label: "City" }, "1998-04-17")).toBe("text");
+  });
+});
+

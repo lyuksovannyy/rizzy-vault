@@ -6,13 +6,16 @@
 // "What the server stores" group (ROADMAP §4.5) is `TransparencyPane.tsx`. The "Getting started"
 // group re-opens the guide shown after signup (`onboarding.ts`), which is remembered nowhere.
 // "Website matching" (`MatchingPane.tsx`) is the account match default and equivalence groups
-// (ADR 0042). "Third-party notices" carries the attributions THIRD_PARTY_NOTICES.md requires
-// (the EFF wordlist; the default site groups, ADR 0080).
+// (ADR 0042). "Identity generator" (`IdentityDefaultsPane.tsx`) is the synced defaults of a new
+// identity and its email domain (ADR 0079 Open question 7). "Third-party notices" carries the
+// attributions THIRD_PARTY_NOTICES.md requires (the EFF wordlist; the default site groups,
+// ADR 0080; the identity generator's data, ADR 0079).
 import { ThirdPartyNotices } from "@rizzy-vault/ui";
 
 import { isTheme, useThemeContext } from "../theme.ts";
 import type { VaultContext } from "./VaultView.tsx";
 import { DevicesPane } from "./DevicesPane.tsx";
+import { IdentityDefaultsPane } from "./IdentityDefaultsPane.tsx";
 import { MatchingPane } from "./MatchingPane.tsx";
 import { TransparencyPane } from "./TransparencyPane.tsx";
 import { TwoFactorPane } from "./TwoFactorPane.tsx";
@@ -72,6 +75,7 @@ export function SettingsView(props: { readonly ctx: VaultContext; readonly onOpe
       <TwoFactorPane ctx={props.ctx} />
       <DevicesPane ctx={props.ctx} />
       <MatchingPane ctx={props.ctx} />
+      <IdentityDefaultsPane ctx={props.ctx} />
       <AppearanceGroup />
       <TransparencyPane ctx={props.ctx} />
       <GettingStartedGroup onOpenGuide={props.onOpenGuide} />

@@ -1452,6 +1452,22 @@ button.sidebar-item .sidebar-item-count {
   margin-bottom: var(--space-3);
 }
 
+/* A generated identity field and its Regenerate button (ADR 0079 §10). */
+.field-edit-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.field-edit-row > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.field-edit-row > button {
+  flex: none;
+}
+
 .secret-edit .actions {
   margin-top: var(--space-2);
   align-items: center;
