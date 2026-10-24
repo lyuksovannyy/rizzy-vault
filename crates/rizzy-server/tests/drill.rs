@@ -307,7 +307,7 @@ fn populated(secrets_path: &Path) -> Dump {
         ),
         (
             "vault_vaults",
-            vec![vec![v1(), a1(), int(0), int(2), int(28)]],
+            vec![vec![v1(), a1(), int(0), int(2), int(28), int(1)]],
         ),
         (
             "vault_self_grants",

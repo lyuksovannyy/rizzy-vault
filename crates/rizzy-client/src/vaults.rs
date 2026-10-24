@@ -506,6 +506,36 @@ pub fn vault_name(vault: &VaultSync) -> Option<Zeroizing<String>> {
     }
 }
 
+/// How a client labels a vault (§A1, §A3 step 3).
+#[derive(Clone, PartialEq, Eq)]
+pub enum VaultLabel {
+    /// The Personal vault: the client's localised "Personal", whatever `vault.name` says.
+    Personal,
+    /// An owned vault with a name.
+    Named(Zeroizing<String>),
+    /// An owned vault without one yet: "Untitled vault".
+    Untitled,
+}
+
+impl fmt::Debug for VaultLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Personal => "Personal",
+            Self::Named(_) => "Named([REDACTED])",
+            Self::Untitled => "Untitled",
+        })
+    }
+}
+
+/// The label of `vault` under `catalog`: a `vault.name` in the Personal vault is ignored (§A1).
+#[must_use]
+pub fn vault_label(catalog: &VaultCatalog, vault: &VaultSync) -> VaultLabel {
+    if catalog.personal() == Some(vault.vault_id()) {
+        return VaultLabel::Personal;
+    }
+    vault_name(vault).map_or(VaultLabel::Untitled, VaultLabel::Named)
+}
+
 /// Sets an owned vault's name (§A3 step 3, §A4): an edit of `vault.name` in its vault-settings
 /// item, or the item itself when the vault has none yet. An ordinary op, synced and merged like
 /// any other.
