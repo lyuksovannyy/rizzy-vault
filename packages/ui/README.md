@@ -4,11 +4,19 @@ The web design system of [ADR 0014](../../docs/adr/0014-ui-stack.md) §5
 ([ADR 0019](../../docs/adr/0019-native-clients.md) §13 for the other toolkits):
 
 - `tokens/tokens.json`: the one platform-neutral token source (colour incl. light/dark, spacing,
-  type, radius, shadow) and its declared WCAG AA contrast pairs. `cargo xtask generate-tokens
-  --check` (in CI) fails when a pair is below its `min-ratio` in either theme, and refuses a
-  `min-ratio` below 3:1, so no pair can be declared into passing below AA.
+  type, radius, elevation, motion) and its declared WCAG AA contrast pairs. `cargo xtask
+  generate-tokens --check` (in CI) fails when a pair is below its `min-ratio` in either theme,
+  and refuses a `min-ratio` below 3:1, so no pair can be declared into passing below AA. It also
+  refuses motion over 5 s, a loading loop over 5 s, a list stagger over 240 ms and a
+  reduced-motion crossfade over 200 ms. The design language these tokens implement is
+  [docs/design/README.md](../../docs/design/README.md).
 - `src/tokens.css`: generated from `tokens/tokens.json` by `cargo xtask generate-tokens`, as CSS
   custom properties. Every M1 property name is kept, so nothing that reads this file changed.
+  Under `prefers-reduced-motion: reduce` it redefines the motion tokens (durations capped,
+  distances 0, scales 1, stagger and loops off).
+- `src/motion.css`: the shared keyframes, the capped loading skeleton and the reduced-motion and
+  forced-colours rules. Built only from the motion tokens, so every animation becomes a short
+  crossfade under reduced motion with no rule of its own.
   `cargo xtask generate-tokens --check` fails if it (or any file below) is stale.
 - `tokens/generated/Tokens.{swift,kt,xaml,qml}`: the same source, generated for the other
   toolkits ADR 0019 §13 names. No client in this repository consumes them yet (the native clients

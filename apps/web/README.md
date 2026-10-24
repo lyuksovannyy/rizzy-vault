@@ -340,20 +340,46 @@ was not built; see "Not yet done".
 
 ### Colour contrast (item 7 of the redesign brief)
 
-The token pairs declared in `packages/ui/src/tokens.css` (WCAG 2.1 contrast ratio, computed
-from the sRGB hex values; AA requires 4.5:1 for normal text and 3:1 for large text/UI, which
-every pair here clears with margin to spare):
+The token pairs declared in `packages/ui/tokens/tokens.json` for the M3 design refresh
+([docs/design/README.md](../../docs/design/README.md) §2) (WCAG 2.x contrast ratio, computed from
+the sRGB hex values; AA requires 4.5:1 for normal text and 3:1 for UI components and the focus
+indicator, the floor each pair declares):
 
-| Pair | Light | Dark |
-| --- | --- | --- |
-| `--color-text` on `--color-bg` | 16.57:1 | 15.77:1 |
-| `--color-text` on `--color-surface` | 17.74:1 | 14.27:1 |
-| `--color-text-muted` on `--color-bg` | 7.50:1 | 9.20:1 |
-| `--color-on-accent` on `--color-accent` | 6.54:1 | 8.02:1 |
-| `--color-on-danger` on `--color-danger` | 6.54:1 | 10.09:1 |
-| `--color-warning-text` on `--color-warning-bg` | 10.64:1 | 10.57:1 |
+| Pair | AA floor | Light | Dark |
+| --- | --- | --- | --- |
+| `--color-text` on `--color-bg` | 4.5:1 | 16.60:1 | 16.40:1 |
+| `--color-text` on `--color-surface` | 4.5:1 | 18.10:1 | 15.15:1 |
+| `--color-text` on `--color-surface-raised` | 4.5:1 | 18.10:1 | 13.72:1 |
+| `--color-text` on `--color-surface-hover` | 4.5:1 | 15.59:1 | 12.71:1 |
+| `--color-text` on `--color-accent-subtle` | 4.5:1 | 15.30:1 | 11.77:1 |
+| `--color-text-muted` on `--color-bg` | 4.5:1 | 6.54:1 | 8.56:1 |
+| `--color-text-muted` on `--color-surface` | 4.5:1 | 7.13:1 | 7.90:1 |
+| `--color-text-muted` on `--color-surface-raised` | 4.5:1 | 7.13:1 | 7.16:1 |
+| `--color-text-muted` on `--color-surface-hover` | 4.5:1 | 6.14:1 | 6.63:1 |
+| `--color-text-muted` on `--color-accent-subtle` | 4.5:1 | 6.03:1 | 6.14:1 |
+| `--color-on-accent` on `--color-accent` | 4.5:1 | 6.20:1 | 7.28:1 |
+| `--color-on-accent` on `--color-accent-hover` | 4.5:1 | 7.80:1 | 9.30:1 |
+| `--color-accent` on `--color-surface` | 4.5:1 | 6.20:1 | 6.88:1 |
+| `--color-accent` on `--color-bg` | 4.5:1 | 5.69:1 | 7.45:1 |
+| `--color-accent` on `--color-accent-subtle` | 4.5:1 | 5.24:1 | 5.35:1 |
+| `--color-on-danger` on `--color-danger` | 4.5:1 | 5.92:1 | 8.78:1 |
+| `--color-danger` on `--color-bg` | 4.5:1 | 5.43:1 | 9.58:1 |
+| `--color-danger` on `--color-surface` | 4.5:1 | 5.92:1 | 8.85:1 |
+| `--color-danger` on `--color-surface-raised` | 4.5:1 | 5.92:1 | 8.01:1 |
+| `--color-on-success` on `--color-success` | 4.5:1 | 5.37:1 | 7.64:1 |
+| `--color-success` on `--color-surface` | 4.5:1 | 5.37:1 | 9.64:1 |
+| `--color-success` on `--color-bg` | 4.5:1 | 4.92:1 | 10.44:1 |
+| `--color-warning-text` on `--color-warning-bg` | 4.5:1 | 10.55:1 | 10.57:1 |
+| `--color-focus` on `--color-bg` | 3:1 | 5.69:1 | 7.45:1 |
+| `--color-focus` on `--color-surface` | 3:1 | 6.20:1 | 6.88:1 |
+| `--color-focus` on `--color-surface-raised` | 3:1 | 6.20:1 | 6.23:1 |
+| `--color-focus` on `--color-accent-subtle` | 3:1 | 5.24:1 | 5.35:1 |
+| `--color-focus` on `--color-surface-hover` | 3:1 | 5.34:1 | 5.77:1 |
+| `--color-border-strong` on `--color-bg` | 3:1 | 3.13:1 | 4.18:1 |
+| `--color-border-strong` on `--color-surface` | 3:1 | 3.41:1 | 3.86:1 |
+| `--color-border-strong` on `--color-surface-raised` | 3:1 | 3.41:1 | 3.50:1 |
 
-The same pairs, declared in `packages/ui/tokens/tokens.json`, are checked by `cargo xtask
+These pairs are checked by `cargo xtask
 generate-tokens --check` in CI, which fails below AA. The rendered pages are checked too (next
 section).
 
