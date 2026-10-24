@@ -139,6 +139,7 @@ Refactors that keep behaviour, bug fixes, tests, docs, UI work within an accepte
 | 0080 | [Default site groups: seeding the signed global equivalence list from Vaultwarden's `global_domains.json`](0080-default-site-groups-vaultwarden-seed.md) | Accepted | M2 |
 | 0081 | [Multiple vaults per account: the Personal vault, user-created vaults, and sharing a vault with other users](0081-multiple-vaults-personal-and-shared.md) | Accepted | M3 (Part A) / M9 (Part B) |
 | 0082 | [Security keys: user presence only (`danger-user-presence-only-security-keys`)](0082-security-keys-user-presence-only.md) | Accepted | M3 |
+| 0083 | [Erratum to ADR 0071: `plaintext_len` is bound by the canonical reader's framing, not by chunk AAD](0083-db-backup-plaintext-len-erratum.md) | Proposed | M8 |
 
 ## Gates
 
