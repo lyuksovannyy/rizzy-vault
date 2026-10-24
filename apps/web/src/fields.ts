@@ -26,7 +26,8 @@ export interface CreatableType {
 }
 
 /** The item types this web vault creates: the writable M1 types of ADR 0018 §7 and the M3 types
- * of ADR 0055 §2. */
+ * of ADR 0055 §2. Not the Bank account type ADR 0078 §1 retired: an item of it shows as
+ * {@link UNSUPPORTED_ITEM}, its `bank.` fields concealed (§2). */
 export const CREATABLE_TYPES: readonly CreatableType[] = [
   { type: "login", label: "Login", noun: "login" },
   { type: "note", label: "Secure note", noun: "note" },
@@ -36,7 +37,6 @@ export const CREATABLE_TYPES: readonly CreatableType[] = [
   { type: "api-credential", label: "API credential", noun: "API credential" },
   { type: "software-license", label: "Software license", noun: "software license" },
   { type: "wifi", label: "Wi-Fi", noun: "Wi-Fi network" },
-  { type: "bank-account", label: "Bank account", noun: "bank account" },
 ];
 
 /** What an item of a type this build does not support shows instead of its type (ADR 0018 §8:
@@ -140,15 +140,6 @@ export const FIXED_FIELDS: Readonly<Partial<Record<ItemType, readonly FixedField
     { key: "wifi.ssid", label: "Network name (SSID)" },
     { key: "wifi.password", label: "Wi-Fi password", secret: true },
     { key: "wifi.security_type", label: "Security type" },
-    NOTES,
-  ],
-  "bank-account": [
-    NAME,
-    { key: "bank.bank_name", label: "Bank" },
-    { key: "bank.account_holder", label: "Account holder" },
-    { key: "bank.account_number", label: "Account number", secret: true },
-    { key: "bank.routing_number", label: "Routing number", secret: true },
-    { key: "bank.account_type", label: "Account type" },
     NOTES,
   ],
 };

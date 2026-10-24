@@ -91,5 +91,11 @@ test("M3 item types: create, view, reveal and filter each type", async ({ page }
   }
   await page.getByRole("button", { name: "All items", exact: true }).click();
   await expect(page.locator(".row-title")).toHaveCount(M3_TYPES.length);
+  // ADR 0078 §5: the retired Bank account type is neither a sidebar filter nor a menu entry.
+  await expect(page.getByRole("button", { name: "Bank account", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "New item" }).click();
+  await expect(page.getByRole("menuitem", { name: "Wi-Fi" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Bank account" })).toHaveCount(0);
+  await page.keyboard.press("Escape");
   expect(problems).toEqual([]);
 });

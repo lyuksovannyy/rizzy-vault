@@ -24,7 +24,6 @@ export type IconItemType =
   | "api-credential"
   | "software-license"
   | "wifi"
-  | "bank-account"
   | "passkey";
 
 function base(children: ReactNode, props: IconProps) {
@@ -140,18 +139,6 @@ export function IconWifi(props: IconProps) {
   );
 }
 
-/** A bank account (ADR 0055): a bank building. */
-export function IconBankAccount(props: IconProps) {
-  return base(
-    <>
-      <path d="M3 9l9-5 9 5z" />
-      <path d="M5 10v7M9.5 10v7M14.5 10v7M19 10v7" />
-      <path d="M3 20h18" />
-    </>,
-    props,
-  );
-}
-
 /** An unrecognised item type. */
 export function IconUnknown(props: IconProps) {
   return base(
@@ -182,8 +169,6 @@ export function TypeIcon(props: IconProps & { readonly type: IconItemType | "unk
       return <IconSoftwareLicense className={props.className} />;
     case "wifi":
       return <IconWifi className={props.className} />;
-    case "bank-account":
-      return <IconBankAccount className={props.className} />;
     default:
       return <IconUnknown className={props.className} />;
   }

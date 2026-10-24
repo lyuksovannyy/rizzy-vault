@@ -9,7 +9,6 @@ export {
   IconAllItems,
   IconApiCredential,
   IconBack,
-  IconBankAccount,
   IconCard,
   IconChevronDown,
   IconClose,
