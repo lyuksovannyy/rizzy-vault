@@ -272,6 +272,20 @@ fn populated(secrets_path: &Path) -> Dump {
             "auth_key_grants",
             vec![vec![a1(), d1(), int(1), d3(), blob(17, 160), int(24)]],
         ),
+        // ADR 0077 §4: one security key; its SecurityKey JSON is opaque to the backup.
+        (
+            "auth_webauthn_credentials",
+            vec![vec![
+                a1(),
+                blob(40, 64),
+                int(1),
+                Value::Text("{\"cred\":{}}".to_owned()),
+                int(1),
+                int(9),
+                Value::Text("Desk key".to_owned()),
+                int(41),
+            ]],
+        ),
         (
             "auth_totp_credentials",
             vec![vec![
