@@ -2,7 +2,9 @@
 
 //! Differential test for INV-39 (`THREAT_MODEL.md` §8: "Clients accept a global equivalence list
 //! only with a valid signature from the list key and a version strictly higher than the last
-//! one they accepted") against `EquivalenceList::verify`.
+//! one they accepted") against `EquivalenceList::verify`, as amended by ADR 0080 §6: a list
+//! whose version *equals* the last one accepted is the same list re-verified and is accepted
+//! (without raising the floor, which is the caller's job); only a lower version is refused.
 //!
 //! This is a small, exhaustive table over the two dimensions INV-39's text names — signature
 //! validity and version freshness — rather than a proptest generator: the decision space is
@@ -76,8 +78,10 @@ fn oracle_decide(signing: Signing, relation: VersionRelation) -> Expected {
     match signing {
         Signing::WrongKey | Signing::CorruptedByte => Expected::BadSignature,
         Signing::Valid => match relation {
-            VersionRelation::Lower | VersionRelation::Equal => Expected::NotNewer,
-            VersionRelation::Higher => Expected::Accept,
+            // ADR 0080 §6 (amending ADR 0038 §2): an equal version is the same list
+            // re-verified and is accepted; only a lower one is a downgrade.
+            VersionRelation::Lower => Expected::NotNewer,
+            VersionRelation::Equal | VersionRelation::Higher => Expected::Accept,
         },
     }
 }

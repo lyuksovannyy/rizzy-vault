@@ -406,9 +406,15 @@ impl EquivalenceList {
     /// signature; the structural errors of `EquivalenceList::decode_ctx`
     /// ([`EquivalenceListError::UnsupportedVersion`], [`EquivalenceListError::Malformed`]);
     /// [`EquivalenceListError::BadSignature`] if the signature does not verify;
-    /// [`EquivalenceListError::NotNewer`] if `list_version` is not strictly greater than
-    /// `highest_accepted_version` (INV-39; ADR 0038 §2: "reject a list with an equal or lower
-    /// version").
+    /// [`EquivalenceListError::NotNewer`] if `list_version` is lower than
+    /// `highest_accepted_version` (INV-39; ADR 0038 §2 as amended by ADR 0080 §6: "reject a
+    /// list with a lower version"), or is the reserved value `0`, whatever the floor (ADR 0080
+    /// §6: version 0 is never published, because floor 0 means "nothing accepted yet").
+    ///
+    /// A list whose version **equals** `highest_accepted_version` is accepted (ADR 0080 §6): it
+    /// is the same list re-verified, typically the compiled-in list at the next start. Raising
+    /// the persisted floor is the caller's job and happens only for a strictly newer list (ADR
+    /// 0051 §3–§4), so an equal version never writes anything.
     pub fn verify(
         wire: &[u8],
         public_key: &[u8; 32],
@@ -432,7 +438,7 @@ impl EquivalenceList {
             &signature,
         )
         .map_err(|_| EquivalenceListError::BadSignature)?;
-        if list.list_version <= highest_accepted_version {
+        if list.list_version == 0 || list.list_version < highest_accepted_version {
             return Err(EquivalenceListError::NotNewer);
         }
         Ok(list)
@@ -651,9 +657,22 @@ mod tests {
         assert_eq!(list.groups().len(), 1);
         assert_eq!(list.groups()[0].domains(), ["apple.com", "icloud.com"]);
 
-        // The same version is not newer than itself (INV-39): rejected.
+        // ADR 0080 §6: floor = version is the same list re-verified (accepted), floor =
+        // version + 1 is a downgrade (rejected), floor = version − 1 is a newer list (accepted).
         assert_eq!(
-            EquivalenceList::verify(&wire, &public_key, 1).unwrap_err(),
+            EquivalenceList::verify(&wire, &public_key, 1).unwrap(),
+            list
+        );
+        assert_eq!(
+            EquivalenceList::verify(&wire, &public_key, 2).unwrap_err(),
+            EquivalenceListError::NotNewer
+        );
+        assert_eq!(
+            EquivalenceList::verify(&wire, &public_key, 0).unwrap(),
+            list
+        );
+        assert_eq!(
+            EquivalenceList::verify(&wire, &public_key, u32::MAX).unwrap_err(),
             EquivalenceListError::NotNewer
         );
         // A tampered byte fails signature verification.
@@ -829,7 +848,73 @@ mod tests {
         );
     }
 
+    /// Signs `ctx` with a test seed the way `cargo xtask equivalence-list` does.
+    fn sign_test_list(list: &EquivalenceList, seed: &[u8; 32]) -> Vec<u8> {
+        let mut wire = list.encode_ctx().unwrap();
+        let signature =
+            rizzy_core::sign::sign_detached(labels::SIG_EQUIVALENCE_LIST, &wire, seed).unwrap();
+        wire.extend_from_slice(&signature);
+        wire
+    }
+
+    fn test_public_key(seed: &[u8; 32]) -> [u8; 32] {
+        ed25519_dalek::SigningKey::from_bytes(seed)
+            .verifying_key()
+            .to_bytes()
+    }
+
+    /// ADR 0080 §6: `list_version` 0 is reserved and never published, so a correctly signed
+    /// version-0 list is `NotNewer` at floor 0 (where `>=` alone would accept it) and above.
+    #[test]
+    fn verify_rejects_a_version_zero_list_at_every_floor() {
+        let seed = [0x24; 32];
+        let list =
+            EquivalenceList::new(0, 0, vec![group(1, &["apple.com", "icloud.com"])]).unwrap();
+        let wire = sign_test_list(&list, &seed);
+        for floor in [0, 1, u32::MAX] {
+            assert_eq!(
+                EquivalenceList::verify(&wire, &test_public_key(&seed), floor).unwrap_err(),
+                EquivalenceListError::NotNewer,
+                "floor {floor}"
+            );
+        }
+    }
+
     proptest::proptest! {
+        /// ADR 0080 §8: a correctly signed list is accepted exactly when
+        /// `list_version >= floor && list_version >= 1`, and is otherwise `NotNewer`.
+        #[test]
+        fn verify_accepts_exactly_versions_at_or_above_the_floor_and_never_zero(
+            list_version in proptest::prop_oneof![
+                proptest::strategy::Just(0u32),
+                proptest::strategy::Just(1u32),
+                proptest::strategy::Just(u32::MAX),
+                0u32..8,
+                proptest::prelude::any::<u32>(),
+            ],
+            floor in proptest::prop_oneof![
+                proptest::strategy::Just(0u32),
+                proptest::strategy::Just(u32::MAX),
+                0u32..8,
+                proptest::prelude::any::<u32>(),
+            ],
+        ) {
+            let seed = [0x31; 32];
+            let list = EquivalenceList::new(
+                list_version,
+                1_700_000_000_000,
+                vec![group(1, &["apple.com", "icloud.com"])],
+            )
+            .unwrap();
+            let wire = sign_test_list(&list, &seed);
+            let result = EquivalenceList::verify(&wire, &test_public_key(&seed), floor);
+            if list_version >= floor && list_version >= 1 {
+                proptest::prop_assert_eq!(result, Ok(list));
+            } else {
+                proptest::prop_assert_eq!(result, Err(EquivalenceListError::NotNewer));
+            }
+        }
+
         #[test]
         fn verify_never_panics(bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..2048)) {
             let key = [0x11u8; 32];

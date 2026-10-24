@@ -103,8 +103,9 @@ pub enum EquivalenceListError {
     /// The signature did not verify against the given public key ([`rizzy_core::error::VerifyError`]
     /// via [`rizzy_core::sign::verify_detached`]).
     BadSignature,
-    /// `list_version` is not strictly greater than the caller's highest accepted version
-    /// (INV-39: "reject a list with an equal or lower version").
+    /// `list_version` is lower than the caller's highest accepted version, or is the reserved
+    /// value `0` (INV-39; ADR 0038 §2 as amended by ADR 0080 §6: "reject a list with a lower
+    /// version"; an equal version is the same list re-verified and is accepted).
     NotNewer,
 }
 
