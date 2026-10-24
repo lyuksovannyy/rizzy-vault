@@ -828,6 +828,7 @@ class InlineMenu {
                 needsWarning: c.needsWarning,
                 savedHost: c.savedHost,
                 hasTotp: c.hasTotp,
+                ...(c.vault === undefined ? {} : { vault: c.vault }),
               })),
               ...(scope.only === undefined ? {} : { only: scope.only }),
               scope,

@@ -3583,6 +3583,12 @@ test("an ordinary, non-modal open <dialog> elsewhere on screen, with overflow:vi
 
     const visit = await context.newPage();
     await visit.addInitScript(() => {
+      // The page's own dialog only: an init script also runs in the extension-origin menu
+      // frame, which no page script can reach, and a dialog there would sit over the menu's
+      // rows (once a row wraps to a fourth line, as one naming its vault does, ADR 0081 §A7).
+      if (window.top !== window) {
+        return;
+      }
       window.addEventListener("DOMContentLoaded", () => {
         const dialog = document.createElement("dialog");
         dialog.id = "rizzy-test-ordinary-dialog";

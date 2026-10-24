@@ -313,13 +313,20 @@ export function matchCandidatesFor(
 /** `content-handler.ts`'s own title/username lookup for one match candidate (ADR 0013 §3 rule
  * 3: list views never carry more than title/username). `undefined` while locked, or if the item
  * no longer exists (deleted between the match decision and this lookup). */
-export function itemSummaryFor(itemId: string): { title: string; username: string } | undefined {
+export function itemSummaryFor(itemId: string): { title: string; username: string; vault?: string } | undefined {
   if (session === undefined) {
     return undefined;
   }
   try {
     const item = session.item(itemId);
-    return { title: item.title, username: item.username ?? "" };
+    // ADR 0081 §A7: every list row shows its vault, the inline menu's candidate rows too; the
+    // label ("Personal", a name, "Untitled vault") is the popup's (`vaultLabel`).
+    const vault = session.vaults().find((v) => v.id === item.vaultId);
+    return {
+      title: item.title,
+      username: item.username ?? "",
+      ...(vault === undefined ? {} : { vault: vaultLabel(vault) }),
+    };
   } catch {
     return undefined;
   }

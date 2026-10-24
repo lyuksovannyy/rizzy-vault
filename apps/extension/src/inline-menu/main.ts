@@ -193,6 +193,14 @@ function renderCandidate(candidate: InlineMenuCandidate, offered: OfferCandidate
   const disclosure = disclosureText(offered);
   const paint = () => {
     item.textContent = label();
+    // ADR 0081 §A7: every list row shows its vault, here as in the popup (" · Work"). Static
+    // text only: this framed security surface gets no opacity or transform animation.
+    if (candidate.vault !== undefined) {
+      const vault = document.createElement("span");
+      vault.className = "item-vault";
+      vault.textContent = ` · ${candidate.vault}`;
+      item.appendChild(vault);
+    }
     if (disclosure !== "") {
       const also = document.createElement("span");
       also.className = "also-fills";
