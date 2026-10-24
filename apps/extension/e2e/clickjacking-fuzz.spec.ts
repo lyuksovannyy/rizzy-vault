@@ -64,16 +64,14 @@
 //    actually discriminates "paint lag" from "the occlusion really did persist through the
 //    fill" — not a wait value, which this investigation bracketed at 0ms / 80ms / 150ms / two
 //    rAF frames and found a failure mode on both sides of every value tried.
-import { mkdtempSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { type BrowserContext, type Page, chromium, test as base, expect } from "@playwright/test";
 
 import { TEST_ACCOUNT_PASSWORD, createLoginItem, signUp } from "./account.ts";
 import { type RunningServer, startServer } from "./server.ts";
+import { withProfileDir } from "./profile.ts";
 import { type FuzzCase, type Rect, applyAmbient, applyTricks, generateCase } from "./support/clickjack-cases.ts";
 import { type DecodedPng, decodePng, lumaStdDev, pixelSimilarity } from "./support/png-pixels.ts";
 
@@ -129,14 +127,18 @@ const test = base.extend<{ server: RunningServer; context: BrowserContext; exten
     server.stop();
   },
   context: async ({}, use) => {
-    const userDataDir = mkdtempSync(join(tmpdir(), "rizzy-ext-e2e-clickjack-fuzz-"));
-    const context = await chromium.launchPersistentContext(userDataDir, {
-      headless: true,
-      channel: "chromium",
-      args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+    await withProfileDir("rizzy-ext-e2e-clickjack-fuzz-", async (userDataDir) => {
+      const context = await chromium.launchPersistentContext(userDataDir, {
+        headless: true,
+        channel: "chromium",
+        args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+      });
+      try {
+        await use(context);
+      } finally {
+        await context.close();
+      }
     });
-    await use(context);
-    await context.close();
   },
   extensionId: async ({ context }, use) => {
     let [worker] = context.serviceWorkers();

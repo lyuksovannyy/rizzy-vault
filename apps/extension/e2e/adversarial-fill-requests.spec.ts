@@ -34,16 +34,14 @@
 // Setup mirrors `autofill-and-save.spec.ts` (real server, real signup, real popup enrolment) —
 // duplicated rather than imported, for the same reason that file gives for not importing from
 // `apps/web/e2e`: a small, self-contained spec is worth more here than a cross-file dependency.
-import { mkdtempSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { type BrowserContext, type Frame, type Locator, type Page, chromium, test as base, expect } from "@playwright/test";
 
 import { TEST_ACCOUNT_PASSWORD, createLoginItem, signUp } from "./account.ts";
 import { type RunningServer, startServer } from "./server.ts";
+import { withProfileDir } from "./profile.ts";
 
 const EXTENSION_PATH = fileURLToPath(new URL("../dist/chromium", import.meta.url));
 
@@ -86,14 +84,18 @@ const test = base.extend<{ server: RunningServer; context: BrowserContext; exten
     server.stop();
   },
   context: async ({}, use) => {
-    const userDataDir = mkdtempSync(join(tmpdir(), "rizzy-ext-e2e-adversarial-fill-"));
-    const context = await chromium.launchPersistentContext(userDataDir, {
-      headless: true,
-      channel: "chromium",
-      args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+    await withProfileDir("rizzy-ext-e2e-adversarial-fill-", async (userDataDir) => {
+      const context = await chromium.launchPersistentContext(userDataDir, {
+        headless: true,
+        channel: "chromium",
+        args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+      });
+      try {
+        await use(context);
+      } finally {
+        await context.close();
+      }
     });
-    await use(context);
-    await context.close();
   },
   extensionId: async ({ context }, use) => {
     let [worker] = context.serviceWorkers();

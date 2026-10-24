@@ -11,15 +11,13 @@
 // icons. Self-contained (its own server and account):
 // `pnpm --filter @rizzy-vault/extension exec playwright test e2e/icons.spec.ts`.
 import { type BrowserContext, chromium, test as base, expect } from "@playwright/test";
-import { mkdtempSync } from "node:fs";
 import { type IncomingMessage, type Server, type ServerResponse, createServer, request as httpRequest } from "node:http";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { expectAccessible } from "./a11y.ts";
 import { TEST_ACCOUNT_PASSWORD, createLoginItem, signUp } from "./account.ts";
 import { type RunningServer, startServer } from "./server.ts";
+import { withProfileDir } from "./profile.ts";
 
 const EXTENSION_PATH = fileURLToPath(new URL("../dist/chromium", import.meta.url));
 
@@ -109,14 +107,18 @@ const test = base.extend<{ edge: Proxy; server: RunningServer; context: BrowserC
     server.stop();
   },
   context: async ({}, use) => {
-    const userDataDir = mkdtempSync(join(tmpdir(), "rizzy-ext-e2e-icons-"));
-    const context = await chromium.launchPersistentContext(userDataDir, {
-      headless: true,
-      channel: "chromium",
-      args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+    await withProfileDir("rizzy-ext-e2e-icons-", async (userDataDir) => {
+      const context = await chromium.launchPersistentContext(userDataDir, {
+        headless: true,
+        channel: "chromium",
+        args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+      });
+      try {
+        await use(context);
+      } finally {
+        await context.close();
+      }
     });
-    await use(context);
-    await context.close();
   },
   extensionId: async ({ context }, use) => {
     let [worker] = context.serviceWorkers();

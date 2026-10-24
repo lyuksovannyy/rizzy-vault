@@ -162,21 +162,27 @@ export async function startServer(options: { readonly publicOrigin?: string } = 
     stdio: ["ignore", "ignore", "pipe"],
     encoding: "utf8",
   });
-  if (init.status !== 0) {
-    throw new Error(`rizzy-vault secrets init failed: ${init.status}\n${tail(init.stderr)}`);
-  }
-  for (let attempt = 0; attempt < START_ATTEMPTS; attempt++) {
-    const port = await freePort();
-    const child = await spawnListening(binary, settings(port), port);
-    if (child !== undefined) {
-      return {
-        origin: `http://127.0.0.1:${port}`,
-        stop() {
-          child.kill();
-          rmSync(dir, { recursive: true, force: true });
-        },
-      };
+  // A start that fails removes the directory too: no `stop` will.
+  try {
+    if (init.status !== 0) {
+      throw new Error(`rizzy-vault secrets init failed: ${init.status}\n${tail(init.stderr)}`);
     }
+    for (let attempt = 0; attempt < START_ATTEMPTS; attempt++) {
+      const port = await freePort();
+      const child = await spawnListening(binary, settings(port), port);
+      if (child !== undefined) {
+        return {
+          origin: `http://127.0.0.1:${port}`,
+          stop() {
+            child.kill();
+            rmSync(dir, { recursive: true, force: true });
+          },
+        };
+      }
+    }
+    throw new Error("rizzy-vault found every port it tried taken");
+  } catch (error) {
+    rmSync(dir, { recursive: true, force: true });
+    throw error;
   }
-  throw new Error("rizzy-vault found every port it tried taken");
 }

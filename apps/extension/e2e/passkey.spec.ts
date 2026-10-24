@@ -11,9 +11,6 @@
 //
 // Headless (`headless: true, channel: "chromium"`), same reasoning as every other spec in this
 // directory: only the installed full Chromium's headless mode can load an unpacked extension.
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { type BrowserContext, type Page, chromium, test as base, expect } from "@playwright/test";
@@ -21,6 +18,7 @@ import { type BrowserContext, type Page, chromium, test as base, expect } from "
 import { signUp } from "./account.ts";
 import { type RunningHttpsServer, startHttpsTestPage } from "./https-server.ts";
 import { type RunningServer, startServer } from "./server.ts";
+import { withProfileDir } from "./profile.ts";
 import { extractEs256PublicKeyFromAttestationObject, verifyEs256Assertion } from "./webauthn-verify.ts";
 
 const EXTENSION_PATH = fileURLToPath(new URL("../dist/chromium", import.meta.url));
@@ -134,15 +132,19 @@ const test = base.extend<{ server: RunningServer; rp: RunningHttpsServer; contex
     await rp.stop();
   },
   context: async ({}, use) => {
-    const userDataDir = mkdtempSync(join(tmpdir(), "rizzy-ext-e2e-passkey-"));
-    const context = await chromium.launchPersistentContext(userDataDir, {
-      headless: true,
-      channel: "chromium",
-      ignoreHTTPSErrors: true,
-      args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+    await withProfileDir("rizzy-ext-e2e-passkey-", async (userDataDir) => {
+      const context = await chromium.launchPersistentContext(userDataDir, {
+        headless: true,
+        channel: "chromium",
+        ignoreHTTPSErrors: true,
+        args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
+      });
+      try {
+        await use(context);
+      } finally {
+        await context.close();
+      }
     });
-    await use(context);
-    await context.close();
   },
   extensionId: async ({ context }, use) => {
     let [worker] = context.serviceWorkers();
