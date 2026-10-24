@@ -100,6 +100,7 @@ pub mod error;
 pub mod generator;
 pub mod http;
 pub mod icons;
+pub mod identity;
 pub mod items;
 mod login;
 pub mod matching;
