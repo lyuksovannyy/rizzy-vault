@@ -167,7 +167,42 @@ Delete or rewrite this file when its next steps are done. §2–§7 are carried 
     - 0058/0059: blocked; ADR 0077, Proposed, would unblock them.
     - 0060's screens: they need new ADRs.
     - 0073: blocked on its supply-chain approval records.
-- **What is left for agents:** nothing in the accepted batch is unblocked. Next owner actions: accept or answer ADR 0077; write or accept the admin-login ADR family; the approval records for 0073; the 0043/0076 bullet reconciliation; the ADR 0071 `plaintext_len` sentence; ADR 0074 question 4 (the ROADMAP §4.10 edit); and the open owner items above.
+- **2026-10-23/24 batch (owner requests, ADRs 0077–0080 accepted 2026-10-23; each full-gated):**
+  - **ADR 0078 (Bank account retired):** `0x0009` is retired and never reused, and the `bank.` prefix is reserved forever. Old items show as "Unsupported item".
+  - **ADR 0080 (default site groups):**
+    - `data/equivalence/groups.txt` holds the 22 Bitwarden-maintained groups (184 domains).
+    - Version-equal lists are now accepted. This fixes "default groups vanish after the first unlock".
+    - xtask errors now name the member and the rule. A shared `ThirdPartyNotices` component is shown in web Settings and the extension options page.
+    - **Owner still to do:**
+      - fill in `EVIDENCE.md` (every ownership cell is "TODO (owner)");
+      - generate the offline key and sign v1;
+      - set both `compiled.rs` constants.
+      Until then no list ships.
+  - **ADR 0079 (identity generator):**
+    - New identities open pre-filled, with presets 18–27 and 28+, AliasVault's 5-year bands, a custom range and an exact age. `identity.sex` and `identity.birthday` keys.
+    - Data: faker-js 10.6.0 plus CLDR 49 (347 KB), built by `cargo xtask identity-data`. Defaults live in ACCOUNT_SETTINGS tag **0x0004** (0x0002/0x0003 are kept free for ADR 0081).
+    - `rv generate identity` and `rv item create --type identity --generate`.
+    - **Deviations:**
+      - GB/AU/IE/NL/SE cities are synthesised (faker has no real lists);
+      - phones only for US/CA/GB/DE;
+      - rv uses the UTC date;
+      - the last-used age range is not synced (settings writes need a fresh session).
+  - **Motion design system (ROADMAP §4.5, no ADR needed):**
+    - Tokens for colour roles, scales and motion (durations, easings, limits enforced by `generate-tokens`), emitted for CSS and the native targets.
+    - Restyled web vault and extension. In-page security frames deliberately get no opacity or transform animation.
+    - Reduced-motion collapses everything to ≤120 ms fades. `motion.spec.ts`; spec and screenshots in `docs/design/`.
+  - **WebAuthn (ADRs 0058/0059 as amended by 0077):** built and gated; enrolment does not yet work in Chrome/Edge (blocker below).
+    - Migration **0008**, backup schema_version 8; six endpoints; login prompt plus Settings → Security keys.
+    - **Blocker:** Chromium rejects webauthn-rs 0.5.5's security-key options (credProtect `userVerificationRequired` with UV `preferred` gives `NotSupportedError`). So enrolment fails in Chrome/Edge. The e2e strips credProtect in the test only. **The owner must choose:** (a) `danger-user-presence-only-security-keys` (recommended), (b) the web client lowers credProtect, or (c) other. Then a short ADR follows.
+    - The possible-clone signal is a log line only. Recovery keeps keys, as it does for TOTP.
+  - **Build environment:**
+    - `env.sh` exports `OPENSSL_INCLUDE_DIR` and `OPENSSL_LIB_DIR` (this host has no pkg-config).
+    - The CI workflow installs OpenSSL (the edit ADR 0077 authorises); its macOS and Windows steps have never run.
+  - **Advisories:** RUSTSEC-2026-0385 (ctutils → 0.4.5) and RUSTSEC-2026-0386 (tokio → 1.54.1), lockfile bumps.
+  - **Proposed, awaiting the owner:** ADR 0081 (multiple vaults: Personal plus user vaults in M3, shared vaults in M9; 11 open questions).
+- **What is left for agents:**
+  - The "On acceptance" doc edits of 0077/0079/0080 that the owner didn't make (CRYPTO §11.17, THREAT_MODEL INV-39/INV-75/A6, ADR 0042 tag-0x0004 amendment).
+  - After the owner's call: the WebAuthn credProtect fix, ADR 0081, and the 0060 admin screens (new ADRs).
 - The gap-numbered audit (`docs/handoff/gap-audit.json`), which older gap ids below trace back to, still lives only on branch `wip/client-m1`. Keep that branch; its code is superseded by the commits in §2. `wip/match-core` (one unfinished commit off `main`) is likewise superseded and kept only for reference.
 
 ## 2. Done since the last rewrite
