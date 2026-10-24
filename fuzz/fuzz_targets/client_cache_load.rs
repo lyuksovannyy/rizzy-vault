@@ -124,6 +124,7 @@ fn copy(rows: &CacheRows) -> CacheRows {
         snapshots: rows.snapshots.clone(),
         item_index: rows.item_index.clone(),
         item_index_unreadable: rows.item_index_unreadable,
+        pending_moves: rows.pending_moves.clone(),
     }
 }
 
@@ -279,6 +280,7 @@ fn build() -> Fixture {
             .expect("one grant"),
         bytes_used: 0,
         quota_bytes: 0,
+        vaults: List::empty(),
     };
     let e_srv = commit_request.account_key_server_wrap.clone();
     let signed_up = pending.finalize().expect("finalised");
