@@ -3,7 +3,7 @@
 //! The account side of several vaults per account (ADR 0081 Part A, §A3, §A5, §A11, §D): a
 //! `vault_create` or `vault_delete` rides only on `settings_seq + 1`, at most one per commit;
 //! a delete needs a fresh OPAQUE session; creation counts against the per-account bucket; the
-//! account answer lists the vaults. The vault domain's own checks run against the in-memory
+//! account answer lists the vaults. On PostgreSQL too, when `RIZZY_TEST_POSTGRES_URL` is set. The vault domain's own checks run against the in-memory
 //! [`crate::common::TestVault`] here and against the database in `rizzy-domain-vault`'s
 //! `tests/vault/vaults.rs`.
 
@@ -101,7 +101,7 @@ async fn vaults(env: &Env, session: &Session) -> Vec<([u8; 16], u8)> {
 #[test]
 fn a_vault_create_rides_only_on_a_settings_commit() {
     block_on(async {
-        let mut env = Env::new(81).await;
+        let mut env = Env::on_either_engine(81, |_| {}).await;
         let mut client = env.signup("vera", "pw").await;
         let mut ds = env.device_auth(&client, &client.devices[0]).await.unwrap();
         let session = env
@@ -167,7 +167,7 @@ fn a_vault_create_rides_only_on_a_settings_commit() {
 #[test]
 fn a_vault_delete_needs_a_fresh_opaque_session() {
     block_on(async {
-        let mut env = Env::new(82).await;
+        let mut env = Env::on_either_engine(82, |_| {}).await;
         let mut client = env.signup("wim", "pw").await;
         let mut ds = env.device_auth(&client, &client.devices[0]).await.unwrap();
         let device = env
@@ -231,7 +231,7 @@ fn a_vault_delete_needs_a_fresh_opaque_session() {
 #[test]
 fn vault_creation_is_rate_limited_per_account() {
     block_on(async {
-        let mut env = Env::with_config(83, |c| {
+        let mut env = Env::on_either_engine(83, |c| {
             c.rate_limits.vault_create_per_account.max_attempts = 2;
         })
         .await;

@@ -52,5 +52,6 @@ mod rotation;
 mod sessions;
 mod setups;
 mod signing;
+mod vaults;
 mod webauthn;
 mod worker;
