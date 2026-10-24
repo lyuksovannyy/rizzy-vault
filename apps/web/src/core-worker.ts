@@ -19,9 +19,12 @@
 // A trap (a Rust panic under `panic = "abort"`) leaves the instance in an unknown state: every
 // later call answers `core_crashed`, and the UI asks for a reload.
 import {
+  type AskSecurityKey,
   CoreError,
   type IdentityDraft,
   type IdentityGeneratorOptions,
+  type SecondFactorPrompts,
+  type SecurityKeyAnswer,
   Signup,
   type Transport,
   type VaultSession,
@@ -61,6 +64,7 @@ import {
   type CoreApi,
   type FromWorker,
   type KitMessage,
+  SECURITY_KEY_CANCELLED,
   type SessionInfo,
   TOTP_CANCELLED,
   isIdentityOptions,
@@ -112,6 +116,39 @@ function askTotp(id: number): () => Promise<string> {
       });
       scope.postMessage({ kind: "ask-totp", id }, []);
     });
+}
+
+/** Pending security-key prompts, by call id. */
+const keyWaiters = new Map<number, (answer: SecurityKeyAnswer | null) => void>();
+
+/** Asks the UI thread to run the security-key prompt of call `id` (ADR 0058): the browser's
+ * `navigator.credentials` does not exist in a Worker. */
+function askSecurityKey(id: number): AskSecurityKey {
+  return (request) =>
+    new Promise<SecurityKeyAnswer>((resolve, reject) => {
+      keyWaiters.set(id, (answer) => {
+        keyWaiters.delete(id);
+        if (answer === null) {
+          reject(new CoreError(SECURITY_KEY_CANCELLED));
+        } else {
+          resolve(answer);
+        }
+      });
+      scope.postMessage(
+        {
+          kind: "ask-security-key",
+          id,
+          options: request.options,
+          totpAllowed: request.totpAllowed,
+        },
+        [],
+      );
+    });
+}
+
+/** Both second-factor prompts of call `id`. */
+function prompts(id: number): SecondFactorPrompts {
+  return { totp: askTotp(id), securityKey: askSecurityKey(id) };
 }
 
 /** The current session, or `locked`. */
@@ -249,7 +286,7 @@ async function run(m: CallMessage): Promise<unknown> {
       const s = await login(
         transport,
         { origin, loginName: str(a[0]), secretKey: bytes(a[1]), password: bytes(a[2]) },
-        askTotp(m.id),
+        prompts(m.id),
       );
       return setSession(s, epoch);
     },
@@ -349,7 +386,7 @@ async function run(m: CallMessage): Promise<unknown> {
     exportEncrypted: () => current().exportEncrypted(bytes(a[0])),
     exportBlockers: () => current().exportBlockers(),
     csvExportWarning: () => current().csvExportWarning(),
-    reauthenticate: () => current().reauthenticate(bytes(a[0]), bytes(a[1]), askTotp(m.id)),
+    reauthenticate: () => current().reauthenticate(bytes(a[0]), bytes(a[1]), prompts(m.id)),
     reauthFresh: () => current().reauthFresh(),
     plaintextWarningShown: () => current().plaintextWarningShown(),
     exportPlaintext: () => {
@@ -374,7 +411,7 @@ async function run(m: CallMessage): Promise<unknown> {
     sessions: () => current().sessions(),
     endSession: () => current().endSession(str(a[0])),
     endOtherSessions: () => current().endOtherSessions(),
-    refreshSession: () => current().refreshSession(bytes(a[0]), bytes(a[1]), askTotp(m.id)),
+    refreshSession: () => current().refreshSession(bytes(a[0]), bytes(a[1]), prompts(m.id)),
     sessionNotices: () => ({
       ended: sessionEndedNotice(),
       othersEnded: othersEndedNotice(),
@@ -383,6 +420,10 @@ async function run(m: CallMessage): Promise<unknown> {
     enableTwoFactor: () => current().enableTwoFactor(),
     confirmTwoFactor: () => current().confirmTwoFactor(str(a[0])),
     disableTwoFactor: () => current().disableTwoFactor(str(a[0])),
+    startSecurityKeyEnrolment: () => current().startSecurityKeyEnrolment(),
+    confirmSecurityKey: () => current().confirmSecurityKey(str(a[0]), str(a[1]), str(a[2])),
+    listSecurityKeys: () => current().listSecurityKeys(),
+    removeSecurityKey: () => current().removeSecurityKey(str(a[0])),
     matchSettings: () => current().matchSettings(),
     matchCandidates: () => current().matchCandidates(str(a[0])),
     changeMatchSettings: async () => {
@@ -484,6 +525,10 @@ scope.addEventListener("message", (event) => {
     if (typeof id === "number") {
       answer(id, { code: BAD_MESSAGE });
     }
+    return;
+  }
+  if (m.kind === "security-key") {
+    keyWaiters.get(m.id)?.(m.answer);
     return;
   }
   if (m.kind === "totp") {

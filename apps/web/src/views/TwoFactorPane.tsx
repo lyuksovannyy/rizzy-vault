@@ -10,6 +10,7 @@ import { ConfirmDialog, SecretField } from "@rizzy-vault/ui";
 import { type FormEvent, useId, useState } from "react";
 
 import type { VaultContext } from "./VaultView.tsx";
+import { SecurityKeysSection } from "./SecurityKeysSection.tsx";
 import { ErrorText, useAction } from "./common.tsx";
 
 /** The two-factor settings (module docs). */
@@ -117,6 +118,7 @@ export function TwoFactorPane(props: { readonly ctx: VaultContext }) {
         onConfirm={disable}
         onCancel={() => setConfirmDisable(false)}
       />
+      <SecurityKeysSection ctx={ctx} />
     </div>
   );
 }

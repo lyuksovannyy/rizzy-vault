@@ -131,7 +131,10 @@ async fn empty(server: &Server, path: &str, auth: Auth<'_>) -> Reply {
 }
 
 #[test]
-#[expect(clippy::too_many_lines, reason = "one ceremony end to end reads best in one test")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ceremony end to end reads best in one test"
+)]
 fn enrolment_and_login_with_a_security_key() {
     block_on(async {
         let server = Server::start().await;

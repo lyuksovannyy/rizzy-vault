@@ -21,6 +21,11 @@ export const en = {
   "errors.server_unauthorized": "Wrong login name, master password or Secret Key.",
   "errors.server_second_factor_required": "This account needs a two-factor code.",
   "errors.totp_cancelled": "Login cancelled.",
+  "errors.security_key_cancelled": "Login cancelled.",
+  "errors.security_key_refused":
+    "The security key was not accepted, or the login took too long. Log in again.",
+  "errors.security_key_required":
+    "This account signs in with a security key, which can only be used in the web vault.",
   "errors.server_rate_limited": "Too many attempts. Wait a little and try again.",
   "errors.server_api_version_gone": "This server no longer speaks the API this web vault uses. Reload the page.",
   "errors.server_client_too_old": "This web vault is older than the server allows. Reload the page.",
@@ -122,6 +127,12 @@ export const en = {
   "totp.title": "Two-factor code",
   "totp.prompt": "Enter the current code from your authenticator app.",
   "totp.code": "Code",
+  "securityKey.title": "Security key",
+  "securityKey.prompt": "Insert your security key and touch it when it blinks.",
+  "securityKey.use": "Use security key",
+  "securityKey.useCode": "Use a code instead",
+  "securityKey.failed": "The security key did not answer. Try again.",
+  "securityKey.unavailable": "This browser cannot use security keys here.",
 
   // ---- Passkey export and import, CXF (apps/web/src/views/TransferPane.tsx; ADR 0074) ----
   "transfer.cxfTitle": "Passkey export (CXF)",

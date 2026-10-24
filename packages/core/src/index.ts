@@ -367,6 +367,45 @@ export interface LoginInput {
 export type AskTotp = () => Promise<string>;
 
 /**
+ * What a login needs from a security key (ADR 0058; CRYPTO.md §11.17): the server's request
+ * options for `navigator.credentials.get` (JSON text, binary values as base64url), and whether a
+ * TOTP code would also do.
+ */
+export interface SecurityKeyRequest {
+  readonly options: string;
+  readonly totpAllowed: boolean;
+}
+
+/** The host's answer to a {@link SecurityKeyRequest}. */
+export type SecurityKeyAnswer =
+  /** The browser's assertion, `PublicKeyCredential` JSON. */
+  | { readonly kind: "credential"; readonly credential: string }
+  /** A TOTP code instead (only when `totpAllowed`): the OPAQUE login starts again with it. */
+  | { readonly kind: "totp"; readonly code: string }
+  /** The browser prompt was cancelled or timed out: ask the server for a fresh challenge. */
+  | { readonly kind: "retry" };
+
+/**
+ * Runs the browser's security-key prompt for a login. It must run where
+ * `navigator.credentials` exists: the web vault's UI thread, on the server's own origin.
+ */
+export type AskSecurityKey = (request: SecurityKeyRequest) => Promise<SecurityKeyAnswer>;
+
+/** Every second-factor prompt a host can answer. A bare function is the TOTP prompt alone. */
+export interface SecondFactorPrompts {
+  readonly totp?: AskTotp;
+  readonly securityKey?: AskSecurityKey;
+}
+
+/** The prompts of an `ask` argument. */
+function promptsOf(ask: AskTotp | SecondFactorPrompts | undefined): SecondFactorPrompts {
+  if (typeof ask === "function") {
+    return { totp: ask };
+  }
+  return ask ?? {};
+}
+
+/**
  * The shape every request/response flow of the core shares (module docs, "The shape of every
  * flow"): `LoginFlow` and `EnrolFlow` both satisfy this structurally, so {@link drive} drives
  * either without the core needing to export a common base class (`wasm-bindgen` classes cannot
@@ -377,29 +416,60 @@ interface RequestResponseFlow {
   request(): HttpRequest;
   respond(status: number, body: Uint8Array, now_ms: bigint): void;
   provideTotp(code: string): void;
+  /** `LoginFlow` only: the security-key second factor (ADR 0058). */
+  readonly securityKeyOptions?: string | undefined;
+  readonly securityKeyTotp?: boolean;
+  provideSecurityKey?(credentialJson: string): void;
+  retrySecurityKey?(): void;
 }
 
-/** Drives a login or enrolment flow to `"done"` or `"needs_totp"`. */
+/** Drives a login or enrolment flow to `"done"`, answering its second-factor prompts. */
 async function drive(
   flow: RequestResponseFlow,
   transport: Transport,
   clock: Clock,
-  askTotp: AskTotp | undefined,
+  ask: AskTotp | SecondFactorPrompts | undefined,
 ): Promise<void> {
+  const prompts = promptsOf(ask);
   for (;;) {
     const state = flow.state;
     if (state === "request") {
       const answer = await transport(takeRequest(call(() => flow.request())));
       call(() => flow.respond(answer.status, answer.body, nowOf(clock)));
     } else if (state === "needs_totp") {
-      if (askTotp === undefined) {
+      if (prompts.totp === undefined) {
         throw new CoreError("server_second_factor_required");
       }
-      const code = await askTotp();
+      const code = await prompts.totp();
       call(() => flow.provideTotp(code));
+    } else if (state === "needs_security_key") {
+      await answerSecurityKey(flow, prompts);
     } else {
       return;
     }
+  }
+}
+
+/** One `"needs_security_key"` step of {@link drive}. */
+async function answerSecurityKey(
+  flow: RequestResponseFlow,
+  prompts: SecondFactorPrompts,
+): Promise<void> {
+  const options = flow.securityKeyOptions;
+  const provide = flow.provideSecurityKey?.bind(flow);
+  if (prompts.securityKey === undefined || options === undefined || provide === undefined) {
+    throw new CoreError("security_key_required");
+  }
+  const answer = await prompts.securityKey({
+    options,
+    totpAllowed: flow.securityKeyTotp === true,
+  });
+  if (answer.kind === "credential") {
+    call(() => provide(answer.credential));
+  } else if (answer.kind === "totp") {
+    call(() => flow.provideTotp(answer.code));
+  } else {
+    call(() => flow.retrySecurityKey?.());
   }
 }
 
@@ -410,7 +480,7 @@ async function drive(
 export async function login(
   transport: Transport,
   input: LoginInput,
-  askTotp?: AskTotp,
+  askTotp?: AskTotp | SecondFactorPrompts,
   clock: Clock = Date.now,
 ): Promise<VaultSession> {
   // `ensureReady` inside, so that byte secrets are zeroed even before the module is loaded.
@@ -549,7 +619,7 @@ export class Signup {
   }
 
   /** The first session, after the commit was acknowledged. Consumes the signup. */
-  async login(askTotp?: AskTotp): Promise<VaultSession> {
+  async login(askTotp?: AskTotp | SecondFactorPrompts): Promise<VaultSession> {
     const flow = this.#current();
     this.#flow = undefined;
     const loginFlow = call(() => flow.login());
@@ -937,6 +1007,19 @@ export function sessionEndedByYouNotice(): string {
 export interface TwoFactorSetup {
   readonly otpauthUri: string;
   readonly secret: string;
+}
+
+/** A started security-key enrolment (ADR 0058): its id and the creation options JSON. */
+export interface SecurityKeyEnrolmentInfo {
+  readonly enrolmentId: string;
+  readonly options: string;
+}
+
+/** One enrolled security key. `credentialId` is base64url, the handle for removal. */
+export interface SecurityKeyInfo {
+  readonly credentialId: string;
+  readonly label: string;
+  readonly createdMs: number;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1791,7 +1874,7 @@ export class VaultSession {
   async reauthenticate(
     secretKey: SecretInput,
     password: SecretInput,
-    askTotp?: AskTotp,
+    askTotp?: AskTotp | SecondFactorPrompts,
     totp?: string,
   ): Promise<void> {
     const s = this.#s();
@@ -2019,7 +2102,7 @@ export class VaultSession {
   async refreshSession(
     secretKey: SecretInput,
     password: SecretInput,
-    askTotp?: AskTotp,
+    askTotp?: AskTotp | SecondFactorPrompts,
   ): Promise<void> {
     const s = this.#s();
     const flow = withSecrets([secretKey, password], (b) =>
@@ -2060,6 +2143,67 @@ export class VaultSession {
     call(() => expectNoContent(answer.status, answer.body));
     enrolment.free();
     this.#enrolment = undefined;
+  }
+
+  /** Starts a security-key enrolment (ADR 0058 point 2): the options for
+   * `navigator.credentials.create`, which the UI thread runs. Needs a fresh session. */
+  async startSecurityKeyEnrolment(): Promise<SecurityKeyEnrolmentInfo> {
+    const s = this.#s();
+    const answer = await this.#transport(takeRequest(call(() => s.securityKeyEnrolRequest())));
+    if (answer.status === 401) {
+      await this.#confirmEnded();
+    }
+    const enrolment = call(() => s.securityKeyEnrolResponse(answer.status, answer.body));
+    try {
+      return { enrolmentId: enrolment.enrolmentId, options: enrolment.options };
+    } finally {
+      enrolment.free();
+    }
+  }
+
+  /** Confirms an enrolment with the browser's `create()` result (JSON) and the user's label. */
+  async confirmSecurityKey(enrolmentId: string, label: string, credential: string): Promise<void> {
+    const s = this.#s();
+    const answer = await this.#transport(
+      takeRequest(call(() => s.securityKeyConfirmRequest(enrolmentId, label, credential))),
+    );
+    if (answer.status === 401) {
+      await this.#confirmEnded();
+    }
+    call(() => expectNoContent(answer.status, answer.body));
+  }
+
+  /** The account's security keys, oldest first (the server's word, for display). */
+  async listSecurityKeys(): Promise<SecurityKeyInfo[]> {
+    const s = this.#s();
+    const answer = await this.#transport(takeRequest(call(() => s.securityKeyListRequest())));
+    if (answer.status === 401) {
+      await this.#confirmEnded();
+    }
+    const rows = call(() => s.securityKeyListResponse(answer.status, answer.body));
+    return rows.map((row) => {
+      try {
+        return {
+          credentialId: row.credentialId,
+          label: row.label,
+          createdMs: Number(row.createdMs),
+        };
+      } finally {
+        row.free();
+      }
+    });
+  }
+
+  /** Removes one security key. Needs a fresh session. */
+  async removeSecurityKey(credentialId: string): Promise<void> {
+    const s = this.#s();
+    const answer = await this.#transport(
+      takeRequest(call(() => s.securityKeyRemoveRequest(credentialId))),
+    );
+    if (answer.status === 401) {
+      await this.#confirmEnded();
+    }
+    call(() => expectNoContent(answer.status, answer.body));
   }
 
   /** Removes 2FA with a current code. */
@@ -2800,7 +2944,7 @@ export async function enrolDevice(
   transport: Transport,
   input: EnrolInput,
   cacheStore: CacheStore,
-  askTotp?: AskTotp,
+  askTotp?: AskTotp | SecondFactorPrompts,
   clock: Clock = Date.now,
 ): Promise<DurableSession> {
   const flow = withSecrets([input.secretKey, input.password], (b) => {
