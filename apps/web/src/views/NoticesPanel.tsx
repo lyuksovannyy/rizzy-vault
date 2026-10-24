@@ -3,13 +3,15 @@
 // The late-edit and trash notices the last syncs handed over (gap 02; `notices.ts`): each with
 // a Dismiss button, and for an edit that arrived for an item deleted permanently, a type picker
 // and "Restore as new item" (ADR 0018 §3 "Surfacing": the user picks the type, it is never
-// inferred). The notices live in the vault view's state only (`notices.ts` module docs).
+// inferred). A late edit on an item this session moved names the vault it went to (ADR 0081
+// §A6 step 2). The notices live in the vault view's state only (`notices.ts` module docs).
 import type { DeviceView, ItemType, Notice } from "@rizzy-vault/core";
 import { useToast } from "@rizzy-vault/ui";
 import { useEffect, useState } from "react";
 
 import { CREATABLE_TYPES } from "../fields.ts";
 import { deviceLabel, noticeKey, noticeText } from "../notices.ts";
+import { vaultLabelOf } from "../vaults.ts";
 import type { VaultContext } from "./VaultView.tsx";
 import { ErrorText, useAction } from "./common.tsx";
 
@@ -54,7 +56,7 @@ function NoticeLine(props: {
 
   return (
     <div className="notice" role="status" data-notice={notice.kind} data-item={notice.item}>
-      <p>{noticeText(notice, label, title)}</p>
+      <p>{noticeText(notice, label, title, (id) => vaultLabelOf(ctx.vaults, id))}</p>
       <div className="actions">
         {notice.kind === "late-edit" && !ctx.session.readOnly && (
           <>

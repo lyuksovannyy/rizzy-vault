@@ -20,6 +20,8 @@
 //!   the target vault through the importer path; a move is a copy, then, only after the server
 //!   acknowledged the target, a `Trash` and a `Purge` op on the source. A pending-move row
 //!   written before the copy makes a crash resume instead of lose: the worst case is a duplicate.
+//!   An edit that arrives later for the purged source is surfaced as ADR 0012 §5 says, and
+//!   [`late_edit`] names the vault the item went to when this device recorded the move.
 //! - **One `device_seq` per device** ([`crate::sync::DeviceCounters`], §A7) and the
 //!   revocation cut-off check over every vault ([`revoked_cutoff_gaps`], §0 item 2).
 //!
@@ -706,8 +708,9 @@ pub enum MoveStep {
     /// The copy is written: upload the target vault and the listed attachments, then call
     /// [`PendingMove::finish`] again.
     AwaitTarget,
-    /// The source is trashed and purged (queued in one upload): upload the source vault and
-    /// drop the pending-move row ([`PendingMove::done_write`]).
+    /// The source is trashed and purged (queued in one upload): upload the source vault; the
+    /// pending-move row may then go ([`PendingMove::done_write`]) or stay as the record of the
+    /// move ([`late_edit`]).
     SourcePurged,
 }
 
@@ -764,7 +767,8 @@ impl PendingMove {
         })
     }
 
-    /// The write that drops the row once the source's purge is uploaded.
+    /// The write that drops the row once the source's purge is uploaded, for a host that does
+    /// not keep it as its record of the move ([`late_edit`]).
     #[must_use]
     pub fn done_write(&self) -> Write {
         Write::PendingMoveDelete {
@@ -842,6 +846,43 @@ impl PendingMove {
         }
         Ok(MoveStep::SourcePurged)
     }
+}
+
+// --- Late ops on a moved item (§A6 step 2) ----------------------------------------------------
+
+/// An edit that arrived for an item deleted permanently (ADR 0012 §5 "Late ops after a purge",
+/// ADR 0018 §3 "Surfacing"), with where the item went when this device moved it (ADR 0081 §A6
+/// step 2: "the prompt names the target vault when this device recorded the move").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LateEdit {
+    /// The devices whose edits arrived, as [`VaultSync::late_edit_devices`] lists them.
+    pub devices: Vec<DeviceId>,
+    /// The vault this device moved the item to, when one of `moves` records that move: the
+    /// prompt says "an item you moved to `<vault>`" instead of "an item you deleted permanently".
+    /// `None` for an item purged otherwise, or moved by another device.
+    pub moved_to: Option<VaultId>,
+}
+
+/// The late edit not yet surfaced on `item` of `vault`, if any (module docs, "Copy and move").
+/// `moves` are the moves this device recorded: a host's `pending_move` rows, or the moves of
+/// its session. Only a move whose source is exactly `(vault, item)` names a vault (INV-103),
+/// and only once the item is purged, which every late edit implies. Surfacing marks are the
+/// caller's ([`VaultSync::mark_late_edits_surfaced`]).
+#[must_use]
+pub fn late_edit(vault: &VaultSync, item: ItemId, moves: &[PendingMove]) -> Option<LateEdit> {
+    let devices = vault.late_edit_devices(item);
+    if devices.is_empty() {
+        return None;
+    }
+    let moved_to = if vault.item_lifecycle(item) == ItemLifecycle::Purged {
+        moves
+            .iter()
+            .find(|m| m.source_vault == vault.vault_id() && m.source_item == item)
+            .map(|m| m.target_vault)
+    } else {
+        None
+    };
+    Some(LateEdit { devices, moved_to })
 }
 
 // --- Revocation cut-offs over every vault (§0 item 2) ----------------------------------------

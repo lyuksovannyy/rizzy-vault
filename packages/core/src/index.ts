@@ -907,13 +907,16 @@ export interface ConflictValue {
  * conflict's own identity for `concurrent-trash` (`undefined` for `late-edit`, which has none):
  * fold it into a host-side dedup key alongside `item` and `devices`, so a second, genuinely
  * distinct race between the same two devices on the same item is not dropped as a repeat of
- * the first.
+ * the first. `movedTo`, for `late-edit` only: the vault this session moved the item to before
+ * its source was purged (ADR 0081 §A6 step 2, "the prompt names the target vault when this
+ * device recorded the move"); name it from {@link VaultSession.vaults}. `undefined` otherwise.
  */
 export interface Notice {
   readonly kind: "late-edit" | "concurrent-trash";
   readonly item: string;
   readonly devices: readonly string[];
   readonly conflictId: string | undefined;
+  readonly movedTo: string | undefined;
 }
 
 /** A current TOTP code. */
@@ -1822,6 +1825,7 @@ export class VaultSession {
         item: n.item,
         devices: n.devices,
         conflictId: n.conflictId,
+        movedTo: n.movedTo,
       }),
     );
   }

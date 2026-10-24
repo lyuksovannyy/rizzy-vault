@@ -272,6 +272,9 @@ impl Session {
             // The user deleted it here: its unsent changes go with it, not reported.
             inner.vaults.forget(vault_id);
             inner.moves.retain(|m| !m.involves(vault_id));
+            inner
+                .moved
+                .retain(|m| m.source_vault != vault_id && m.target_vault != vault_id);
             inner.vaults.set_catalog(catalog);
             Ok(None)
         }
@@ -460,7 +463,11 @@ impl Session {
                 !m.attachments_pending,
                 now_ms,
             ) {
-                Ok(MoveStep::SourcePurged) => done = done.saturating_add(1),
+                Ok(MoveStep::SourcePurged) => {
+                    done = done.saturating_add(1);
+                    // This session's record of the move (§A6 step 2), for a late edit later.
+                    inner.moved.push(m.mv);
+                }
                 Ok(MoveStep::AwaitTarget) => kept.push(m),
                 Err(e) => {
                     first_error.get_or_insert(e);

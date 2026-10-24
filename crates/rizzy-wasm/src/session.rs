@@ -96,6 +96,7 @@ use rizzy_client::sessions::{
 use rizzy_client::settings::{PendingSettingsChange, SettingsCache, SettingsEdit, change_settings};
 use rizzy_client::sync::{Authors, VaultSync};
 use rizzy_client::two_factor::{TotpEnrolment, disable_request};
+use rizzy_client::vaults::{PendingMove, late_edit};
 use wasm_bindgen::prelude::wasm_bindgen;
 use zeroize::Zeroizing;
 
@@ -157,6 +158,11 @@ struct Inner {
     /// session has no cache (CRYPTO.md §11.4), so they live in memory: a closed tab before
     /// the purge leaves the item in both vaults, a duplicate, never a loss.
     moves: Vec<WebMove>,
+    /// The moves of this session whose source was purged: this device's record of each move,
+    /// so a late edit that arrives for the purged source names the vault the item went to
+    /// (ADR 0081 §A6 step 2, [`late_edit`]). Memory only, like [`Inner::moves`]: the web
+    /// device is this session's, and so is what it recorded.
+    moved: Vec<PendingMove>,
     /// The sync step driver.
     sync: SyncDriver,
     /// The export gates: the re-authentication every export needs and the hold after the
@@ -240,6 +246,7 @@ impl Session {
                 vaults,
                 vault_pending: None,
                 moves: Vec::new(),
+                moved: Vec::new(),
                 sync: SyncDriver::default(),
                 gate: ExportGate::new(),
                 rng: os_rng(),
@@ -806,14 +813,14 @@ impl Session {
         for vault in inner.vaults.all_mut() {
             let vault_id = vault.vault_id();
             for item in vault.item_ids() {
-                let late = vault.late_edit_devices(item);
-                if !late.is_empty() {
+                if let Some(late) = late_edit(vault, item, &inner.moved) {
                     vault.mark_late_edits_surfaced(item);
                     out.push(Notice {
                         kind: NOTICE_LATE_EDIT,
                         item: item_ref(vault_id, item),
-                        devices: late.iter().map(|d| hex(d.as_bytes())).collect(),
+                        devices: late.devices.iter().map(|d| hex(d.as_bytes())).collect(),
                         conflict_id: None,
+                        moved_to: late.moved_to.map(|v| hex(v.as_bytes())),
                     });
                 }
                 if let Some(trash) = vault.concurrent_trash(item)
@@ -835,6 +842,7 @@ impl Session {
                             trash.trashed_dot,
                             trash.edited_dot,
                         )),
+                        moved_to: None,
                     });
                 }
             }
@@ -2227,6 +2235,10 @@ pub struct Notice {
     /// devices, not one op. Not a persistent or wire format (ADR 0018 §3 "Surfacing"):
     /// computed fresh for one in-memory host call, never stored.
     conflict_id: Option<String>,
+    /// For a late edit on an item this session moved to another vault and purged, that vault,
+    /// hex (ADR 0081 §A6 step 2: "the prompt names the target vault when this device recorded
+    /// the move"). `None` otherwise.
+    moved_to: Option<String>,
 }
 
 #[wasm_bindgen]
@@ -2261,6 +2273,15 @@ impl Notice {
     #[must_use]
     pub fn conflict_id(&self) -> Option<String> {
         self.conflict_id.clone()
+    }
+
+    /// For `late-edit` only: the vault, 32 hex digits, this session moved the item to before
+    /// its source was purged (ADR 0081 §A6 step 2); the host names it from
+    /// [`Session::vaults`]. `undefined` for an item deleted permanently otherwise.
+    #[wasm_bindgen(getter, js_name = movedTo)]
+    #[must_use]
+    pub fn moved_to(&self) -> Option<String> {
+        self.moved_to.clone()
     }
 }
 

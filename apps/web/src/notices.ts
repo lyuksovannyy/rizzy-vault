@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 // The late-edit and trash notices (gap 02): "An edit from <device> arrived for an item you
-// deleted permanently. Restore it as a new item?" (ADR 0018 §3 "Surfacing") and "deleted on X
+// deleted permanently. Restore it as a new item?" (ADR 0018 §3 "Surfacing"; "… an item you
+// moved to the vault “Work” …" when this session moved it, ADR 0081 §A6 step 2) and "deleted on X
 // while it was being edited on Y" (ADR 0012 §5 "Active wins"), worded from the ids the Worker
 // hands over. Pure: no wasm, no DOM.
 //
@@ -56,11 +57,22 @@ export function joinNames(names: readonly string[]): string {
 
 /**
  * The notice's text. `label` names a device (`deviceLabel`); `title` is the item's name for a
- * concurrent trash (the item is still in the list), empty when it has none.
+ * concurrent trash (the item is still in the list), empty when it has none. `vault` names a
+ * vault (`vaultLabelOf`): a late edit on an item this session moved to another vault, whose
+ * source was then purged, names the vault it went to (ADR 0081 §A6 step 2).
  */
-export function noticeText(notice: Notice, label: (id: string) => string, title: string): string {
+export function noticeText(
+  notice: Notice,
+  label: (id: string) => string,
+  title: string,
+  vault?: (id: string) => string,
+): string {
   if (notice.kind === "late-edit") {
-    return `An edit from ${joinNames(notice.devices.map(label))} arrived for an item you deleted permanently. Restore it as a new item?`;
+    const from = joinNames(notice.devices.map(label));
+    if (notice.movedTo !== undefined && vault !== undefined) {
+      return `An edit from ${from} arrived for an item you moved to the vault “${vault(notice.movedTo)}”. Restore it as a new item?`;
+    }
+    return `An edit from ${from} arrived for an item you deleted permanently. Restore it as a new item?`;
   }
   const [deletedOn = "", editedOn = ""] = notice.devices;
   const name = title === "" ? "An item" : `“${title}”`;

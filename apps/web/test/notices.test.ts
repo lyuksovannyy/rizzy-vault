@@ -44,10 +44,29 @@ describe("notice text", () => {
       item: "11".repeat(16),
       devices: [LAPTOP, PHONE],
       conflictId: undefined,
+      movedTo: undefined,
     };
     expect(noticeText(late, label, "")).toBe(
       `An edit from ${DEVICE_KINDS["desktop-cli"]} abababababababab and Mobile cdcdcdcdcdcdcdcd arrived for an item you deleted permanently. Restore it as a new item?`,
     );
+  });
+
+  // ADR 0081 §A6 step 2: the prompt names the target vault when this device recorded the move.
+  it("names the vault a moved item went to", () => {
+    const work = "77".repeat(16);
+    const late: Notice = {
+      kind: "late-edit",
+      item: "11".repeat(16),
+      devices: [LAPTOP],
+      conflictId: undefined,
+      movedTo: work,
+    };
+    const vault = (id: string) => (id === work ? "Work" : "?");
+    expect(noticeText(late, label, "", vault)).toBe(
+      `An edit from ${DEVICE_KINDS["desktop-cli"]} abababababababab arrived for an item you moved to the vault “Work”. Restore it as a new item?`,
+    );
+    // Without a way to name vaults, the plain question still reads.
+    expect(noticeText(late, label, "")).toMatch(/an item you deleted permanently/);
   });
 
   it("words a concurrent trash as deleted on X while edited on Y", () => {
@@ -56,6 +75,7 @@ describe("notice text", () => {
       item: "22".repeat(16),
       devices: [OWN, LAPTOP],
       conflictId: "dot-a:dot-b",
+      movedTo: undefined,
     };
     expect(noticeText(trash, label, "Mail")).toBe(
       `“Mail” was deleted on this browser while it was being edited on ${DEVICE_KINDS["desktop-cli"]} abababababababab. The edit kept it.`,
@@ -65,12 +85,19 @@ describe("notice text", () => {
 });
 
 describe("held notices", () => {
-  const a: Notice = { kind: "late-edit", item: "11".repeat(16), devices: [LAPTOP], conflictId: undefined };
+  const a: Notice = {
+    kind: "late-edit",
+    item: "11".repeat(16),
+    devices: [LAPTOP],
+    conflictId: undefined,
+    movedTo: undefined,
+  };
   const b: Notice = {
     kind: "concurrent-trash",
     item: "11".repeat(16),
     devices: [OWN, LAPTOP],
     conflictId: "dot-a:dot-b",
+    movedTo: undefined,
   };
 
   it("appends fresh notices once, keyed by kind, item and devices", () => {
