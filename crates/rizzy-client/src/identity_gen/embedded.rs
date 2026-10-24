@@ -15,7 +15,7 @@ pub const VERSION: u32 = 1;
 
 /// `identity-data-v1.txt`, the output of `cargo xtask identity-data` (provenance in
 /// `data/identity/SOURCES.md`).
-pub(crate) const RAW: &str = include_str!("fixture-placeholder.txt");
+pub(crate) const RAW: &str = include_str!("identity-data-v1.txt");
 
 /// The parsed embedded data (or its error), built on first use.
 static PARSED: OnceLock<Result<IdentityData<'static>, IdentityDataError>> = OnceLock::new();

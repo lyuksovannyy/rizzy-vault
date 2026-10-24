@@ -817,3 +817,371 @@ fn identity_defaults_encode_to_the_open_question_7_layout() {
         Err(crate::ClientError::InvalidServerResponse)
     );
 }
+
+// --- the embedded data (ADR 0079 §5, §12 "Data tests") ----------------------------------------
+
+/// The v1 country set of Open question 6.
+const V1_COUNTRIES: [&str; 13] = [
+    "AT", "AU", "CA", "CH", "DE", "ES", "FR", "GB", "IE", "IT", "NL", "SE", "US",
+];
+
+/// The embedded file parses, is within the 384 KiB budget, holds exactly the v1 countries, and
+/// keeps the content rules (the parser enforces the per-entry rules; checked again here).
+#[test]
+fn the_embedded_data_parses_within_its_budget() {
+    assert_eq!((NAME, VERSION), ("identity-data", 1));
+    let raw = embedded::RAW;
+    assert!(raw.len() <= MAX_DATA_LEN, "{} bytes", raw.len());
+    let data = embedded_data().unwrap();
+    let codes: Vec<&str> = data.countries().iter().map(Country::code).collect();
+    assert_eq!(codes, V1_COUNTRIES);
+    for c in data.countries() {
+        let lists: [(&str, usize); 4] = [
+            ("first.female", c.first_female.len()),
+            ("first.male", c.first_male.len()),
+            ("street", c.streets.len()),
+            ("city", c.cities.len()),
+        ];
+        for (name, len) in lists {
+            assert!(len >= data::MIN_LIST, "{} {name}: {len}", c.code());
+        }
+        let names = c
+            .first_female
+            .iter()
+            .chain(&c.first_male)
+            .chain(match &c.last {
+                data::Surnames::Shared(all) => all.iter().chain([].iter()),
+                data::Surnames::Split { female, male } => female.iter().chain(male.iter()),
+            });
+        for n in names {
+            assert!(
+                data::display(n.display) && data::ascii(n.ascii),
+                "{}",
+                n.display
+            );
+        }
+        for p in c.all_postcode_patterns() {
+            assert!(data::postcode(p), "{p}");
+        }
+        assert!(!c.subdivisions.is_empty());
+        // Titles are the sex-derived ones of Open question 4.
+        assert!(!c.title_male.is_empty() && !c.title_female.is_empty());
+    }
+}
+
+/// ADR 0079 §12: one vector pins the data file's SHA-256 and `VERSION`. A data change is a new
+/// `VERSION` with new known-answer vectors (§4 "Determinism").
+#[test]
+fn the_embedded_data_is_pinned() {
+    // `client_data_hash` is SHA-256 of its input; used here only as a test digest.
+    let digest = rizzy_core::passkey::client_data_hash(embedded::RAW.as_bytes());
+    let hex = digest.iter().fold(String::new(), |mut s, b| {
+        s.push(char::from(b"0123456789abcdef"[usize::from(b >> 4)]));
+        s.push(char::from(b"0123456789abcdef"[usize::from(b & 15)]));
+        s
+    });
+    assert_eq!((hex.as_str(), VERSION), (DATA_V1_SHA256, 1));
+}
+
+/// Every country generates, with every field the ADR fills, over many seeds.
+#[test]
+fn every_bundled_country_generates() {
+    let data = embedded_data().unwrap();
+    let today = date(2026, 10, 23);
+    for code in V1_COUNTRIES {
+        for seed in 0..40 {
+            let mut o = options(code);
+            o.email_domain = Some(EmailDomain::parse("example.org").unwrap());
+            o.email_style = if seed % 2 == 0 {
+                EmailStyle::NameAndBirthday
+            } else {
+                EmailStyle::Nickname
+            };
+            let id =
+                generate_identity(&mut ChaCha20Rng::seed_from_u64(seed), data, &o, today).unwrap();
+            check_identity(data, &o, today, &id);
+        }
+    }
+}
+
+// --- known-answer vectors (ADR 0079 §12) ------------------------------------------------------
+
+/// One known-answer vector: the options, the seed and today, and the exact output pairs.
+struct Kat {
+    seed: u64,
+    country: &'static str,
+    sex: SexChoice,
+    style: EmailStyle,
+    domain: Option<&'static str>,
+    age: (u8, u8),
+    today: (i32, u8, u8),
+    expected: &'static [(&'static str, &'static str)],
+}
+
+impl Kat {
+    fn options(&self) -> IdentityOptions {
+        IdentityOptions {
+            sex: self.sex,
+            country: CountryCode::parse(self.country).unwrap(),
+            age: AgeRange::new(self.age.0, self.age.1).unwrap(),
+            email_style: self.style,
+            email_domain: self.domain.map(|d| EmailDomain::parse(d).unwrap()),
+            title: true,
+            phone: true,
+        }
+    }
+
+    fn run(&self) -> GeneratedIdentity {
+        let (y, m, d) = self.today;
+        generate_identity(
+            &mut ChaCha20Rng::seed_from_u64(self.seed),
+            embedded_data().unwrap(),
+            &self.options(),
+            date(y, m, d),
+        )
+        .unwrap()
+    }
+}
+
+/// Prints the vectors' current outputs, for a reviewed data or draw change (run with
+/// `--ignored --nocapture`).
+#[test]
+#[ignore = "prints the vectors for a reviewed update; not a check"]
+fn print_known_answer_vectors() {
+    for kat in KATS {
+        println!("seed {} {}:", kat.seed, kat.country);
+        for (k, v) in kat.run().fields() {
+            println!("    (\"{k}\", \"{v}\"),");
+        }
+    }
+}
+
+#[test]
+fn known_answer_vectors() {
+    for kat in KATS {
+        let got = kat.run().fields();
+        let got: Vec<(&str, &str)> = got.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        assert_eq!(got, kat.expected, "seed {} {}", kat.seed, kat.country);
+    }
+}
+
+/// SHA-256 of `identity-data-v1.txt`, as `data/identity/SOURCES.md` records it.
+const DATA_V1_SHA256: &str = "a4738097349e9f0aaaef6ca251c449e7dccb90b8290077aac70f48a7a30a42c7";
+/// The vectors: DE, US, FR, GB and AU, both sexes, both email styles, a domain and none, the
+/// presets 18–27 and 28+, a custom range, the exact age 28 (also on 29 February 2028), and a
+/// 29 February birthday.
+const KATS: &[Kat] = &[
+    Kat {
+        seed: 1,
+        country: "DE",
+        sex: SexChoice::Female,
+        style: EmailStyle::NameAndBirthday,
+        domain: Some("example.org"),
+        age: (18, 27),
+        today: (2026, 10, 23),
+        expected: &[
+            ("identity.sex", "female"),
+            ("identity.title", "Frau"),
+            ("identity.first_name", "Charleen"),
+            ("identity.last_name", "Giesa"),
+            ("identity.birthday", "2005-06-18"),
+            ("identity.username", "preseasoncilantro21"),
+            ("identity.email", "charleen.giesa05@example.org"),
+            ("identity.phone", "+49 176 04069026"),
+            ("identity.address1", "Neuenhausgasse 663"),
+            ("identity.city", "Stralsund"),
+            ("identity.state", "Hessen"),
+            ("identity.postal_code", "14595"),
+            ("identity.country", "DE"),
+        ],
+    },
+    Kat {
+        seed: 2,
+        country: "DE",
+        sex: SexChoice::Male,
+        style: EmailStyle::Nickname,
+        domain: Some("example.org"),
+        age: (28, 65),
+        today: (2026, 10, 23),
+        expected: &[
+            ("identity.sex", "male"),
+            ("identity.title", "Herr"),
+            ("identity.first_name", "Yves"),
+            ("identity.last_name", "Freisen"),
+            ("identity.birthday", "1973-10-12"),
+            ("identity.username", "arrivedeceiver26"),
+            ("identity.email", "arrivedeceiver26@example.org"),
+            ("identity.phone", "+49 221 4710597"),
+            ("identity.address1", "Grüner Weg 828"),
+            ("identity.city", "Braunschweig"),
+            ("identity.state", "Saarland"),
+            ("identity.postal_code", "48859"),
+            ("identity.country", "DE"),
+        ],
+    },
+    Kat {
+        seed: 3,
+        country: "US",
+        sex: SexChoice::Female,
+        style: EmailStyle::Nickname,
+        domain: Some("mail.example"),
+        age: (30, 44),
+        today: (2026, 10, 23),
+        expected: &[
+            ("identity.sex", "female"),
+            ("identity.title", "Ms"),
+            ("identity.first_name", "Maribel"),
+            ("identity.last_name", "Shields"),
+            ("identity.birthday", "1991-12-23"),
+            ("identity.username", "manhuntastonish35"),
+            ("identity.email", "manhuntastonish35@mail.example"),
+            ("identity.phone", "+1 512-555-0199"),
+            ("identity.address1", "1501 Koby Falls"),
+            ("identity.city", "Stamford"),
+            ("identity.state", "VT"),
+            ("identity.postal_code", "05414"),
+            ("identity.country", "US"),
+        ],
+    },
+    Kat {
+        seed: 4,
+        country: "US",
+        sex: SexChoice::Male,
+        style: EmailStyle::NameAndBirthday,
+        domain: Some("mail.example"),
+        age: (28, 28),
+        today: (2026, 10, 23),
+        expected: &[
+            ("identity.sex", "male"),
+            ("identity.title", "Mr"),
+            ("identity.first_name", "Akeem"),
+            ("identity.last_name", "Denesik"),
+            ("identity.birthday", "1997-11-17"),
+            ("identity.username", "scoffdawdler50"),
+            ("identity.email", "akeemdenesik97@mail.example"),
+            ("identity.phone", "+1 212-555-0114"),
+            ("identity.address1", "3902 Jackson Street"),
+            ("identity.city", "Rancho Palos Verdes"),
+            ("identity.state", "RI"),
+            ("identity.postal_code", "02920"),
+            ("identity.country", "US"),
+        ],
+    },
+    Kat {
+        seed: 5,
+        country: "FR",
+        sex: SexChoice::Female,
+        style: EmailStyle::NameAndBirthday,
+        domain: Some("example.net"),
+        age: (21, 25),
+        today: (2026, 10, 23),
+        expected: &[
+            ("identity.sex", "female"),
+            ("identity.title", "Mme"),
+            ("identity.first_name", "Francia"),
+            ("identity.last_name", "Jean"),
+            ("identity.birthday", "2001-10-01"),
+            ("identity.username", "morphinecorrosive02"),
+            ("identity.email", "francia.jean2001@example.net"),
+            ("identity.address1", "6650 Avenue des Saussaies"),
+            ("identity.city", "Montpellier"),
+            ("identity.state", "Corse"),
+            ("identity.postal_code", "49091"),
+            ("identity.country", "FR"),
+        ],
+    },
+    Kat {
+        seed: 6,
+        country: "FR",
+        sex: SexChoice::Male,
+        style: EmailStyle::Nickname,
+        domain: None,
+        age: (21, 65),
+        today: (2026, 10, 23),
+        expected: &[
+            ("identity.sex", "male"),
+            ("identity.title", "M."),
+            ("identity.first_name", "Émeric"),
+            ("identity.last_name", "Brun"),
+            ("identity.birthday", "1974-10-17"),
+            ("identity.username", "eradicatedetector74"),
+            ("identity.address1", "9627 Boulevard de Paris"),
+            ("identity.city", "Le Mans"),
+            ("identity.state", "Pays de la Loire"),
+            ("identity.postal_code", "05689"),
+            ("identity.country", "FR"),
+        ],
+    },
+    Kat {
+        seed: 7,
+        country: "GB",
+        sex: SexChoice::Random,
+        style: EmailStyle::NameAndBirthday,
+        domain: Some("example.org"),
+        age: (28, 28),
+        today: (2028, 2, 29),
+        expected: &[
+            ("identity.sex", "female"),
+            ("identity.title", "Ms"),
+            ("identity.first_name", "Imelda"),
+            ("identity.last_name", "Stamm"),
+            ("identity.birthday", "1999-12-04"),
+            ("identity.username", "recycledgainfully42"),
+            ("identity.email", "imelda_stamm0412@example.org"),
+            ("identity.phone", "+44 113 496 0724"),
+            ("identity.address1", "372 Yasmeen Meadows"),
+            ("identity.city", "Nicolas-under-Dietrich"),
+            ("identity.state", "Wales"),
+            ("identity.postal_code", "DT8 1IH"),
+            ("identity.country", "GB"),
+        ],
+    },
+    // A 29 February birthday: the exact age 22 on 2026-10-23 spans 2003-10-24..=2004-10-23.
+    Kat {
+        seed: 2,
+        country: "AU",
+        sex: SexChoice::Random,
+        style: EmailStyle::NameAndBirthday,
+        domain: Some("example.com"),
+        age: (22, 22),
+        today: (2026, 10, 23),
+        expected: &[
+            ("identity.sex", "male"),
+            ("identity.title", "Mr"),
+            ("identity.first_name", "Nate"),
+            ("identity.last_name", "Lockman"),
+            ("identity.birthday", "2004-02-29"),
+            ("identity.username", "jobcompanion41"),
+            ("identity.email", "natelockman2004@example.com"),
+            ("identity.address1", "7996 Jerde Terrace"),
+            ("identity.city", "Bartolettifort"),
+            ("identity.state", "SA"),
+            ("identity.postal_code", "4885"),
+            ("identity.country", "AU"),
+        ],
+    },
+];
+
+/// Finds the first seed whose AU identity with the exact age 22 on 2026-10-23 is born on
+/// 29 February 2004 (for the vector below; run with `--ignored --nocapture`).
+#[test]
+#[ignore = "a search helper for the 29 February birthday vector; not a check"]
+fn find_a_29_february_birthday_seed() {
+    let data = embedded_data().unwrap();
+    let mut o = options("AU");
+    o.age = AgeRange::exact(22).unwrap();
+    o.email_domain = Some(EmailDomain::parse("example.com").unwrap());
+    for seed in 0..100_000u64 {
+        let id = generate_identity(
+            &mut ChaCha20Rng::seed_from_u64(seed),
+            data,
+            &o,
+            date(2026, 10, 23),
+        )
+        .unwrap();
+        if id.birthday() == date(2004, 2, 29) {
+            println!("seed {seed}");
+            return;
+        }
+    }
+}
