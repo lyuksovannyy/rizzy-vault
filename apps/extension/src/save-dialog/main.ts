@@ -8,6 +8,8 @@ import "@rizzy-vault/ui/tokens.css";
 import "../surface.css";
 
 import { SAVE_DIALOG_DONE, dialogTitle, isSaveDialogShowMessage, rowText } from "./protocol.ts";
+import { isVaultView } from "../passkey-consent/protocol.ts";
+import { MAX_PICKER_VAULTS } from "../messaging/contract.ts";
 import type {
   SaveDialogChoicesMessage,
   SaveDialogRequestMessage,
@@ -29,6 +31,8 @@ const rowsBox = byId("rows", HTMLFieldSetElement);
 const saveButton = byId("save", HTMLButtonElement);
 const dismissButton = byId("dismiss", HTMLButtonElement);
 const errorLine = byId("dialog-error", HTMLElement);
+const vaultRow = byId("vault-row", HTMLDivElement);
+const vaultSelect = byId("vault", HTMLSelectElement);
 
 let replyOrigin: string | undefined;
 let instanceToken: string | undefined;
@@ -69,7 +73,31 @@ function isChoices(value: unknown): value is SaveDialogChoicesMessage {
   );
 }
 
+/** ADR 0081 §A8: the picker's vaults, or none (one vault, or an update). */
+function validVaults(choices: SaveDialogChoicesMessage): readonly { readonly id: string; readonly label: string }[] {
+  const vaults = choices.vaults;
+  if (vaults === undefined || vaults.length > MAX_PICKER_VAULTS || !vaults.every(isVaultView)) {
+    return [];
+  }
+  return vaults.some((v) => v.id === choices.defaultVaultId) ? vaults : [];
+}
+
+/** The vault picker: shown for a new login with two or more vaults, Personal preselected. */
+function renderVaults(choices: SaveDialogChoicesMessage): void {
+  const vaults = choices.suggestion === "save" ? validVaults(choices) : [];
+  vaultSelect.replaceChildren();
+  for (const vault of vaults) {
+    const option = document.createElement("option");
+    option.value = vault.id;
+    option.textContent = vault.label;
+    option.selected = vault.id === choices.defaultVaultId;
+    vaultSelect.appendChild(option);
+  }
+  vaultRow.hidden = vaults.length < 2;
+}
+
 function render(choices: SaveDialogChoicesMessage): void {
+  renderVaults(choices);
   suggestion = choices.suggestion;
   title.textContent = dialogTitle(choices.suggestion, choices.itemTitle);
   host.textContent = choices.pageHost;
@@ -153,10 +181,11 @@ function finish(action: "save" | "update" | "dismiss", event: MouseEvent): void 
     return;
   }
   const rows = action === "dismiss" ? [] : rendered.filter((r) => r.box.checked).map((r) => ({ index: r.index, label: r.name?.value ?? "" }));
+  const vault = action === "save" && !vaultRow.hidden && vaultSelect.value !== "" ? { vaultId: vaultSelect.value } : {};
   saveButton.disabled = true;
   dismissButton.disabled = true;
   void ext.runtime
-    .sendMessage({ type: "save_dialog_resolve", instanceToken: token, token: prompt, action, rows } satisfies SaveDialogResolveMessage)
+    .sendMessage({ type: "save_dialog_resolve", instanceToken: token, token: prompt, action, rows, ...vault } satisfies SaveDialogResolveMessage)
     .catch(() => undefined)
     .then((answer: unknown) => {
       const done = typeof answer === "object" && answer !== null && (answer as Record<string, unknown>)["type"] === "save_prompt_done";

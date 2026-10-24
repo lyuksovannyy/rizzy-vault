@@ -335,6 +335,25 @@ export interface SaveDialogRowView {
   readonly checked: boolean;
 }
 
+/** One vault a new login may be saved to (ADR 0081 §A8): its id and its label ("Personal",
+ * a name, or "Untitled vault"). Shown only in the extension-origin dialog, never in the page. */
+export interface SaveDialogVaultView {
+  readonly id: string;
+  readonly label: string;
+}
+
+/** ADR 0081 §A8: at most this many vaults are offered in a save prompt's picker
+ * (`MAX_DIRECTORY_ENTRIES`). */
+export const MAX_PICKER_VAULTS = 128;
+/** The longest vault label a picker shows, in UTF-16 code units (64 scalar values, each at most
+ * two units). */
+export const MAX_VAULT_LABEL_LEN = 128;
+
+/** A vault id: 16 bytes, lowercase hex. */
+export function isVaultId(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{32}$/.test(value);
+}
+
 /** The answer to a {@link SaveDialogRequestMessage}. */
 export interface SaveDialogChoicesMessage {
   readonly type: "save_dialog_choices";
@@ -342,6 +361,11 @@ export interface SaveDialogChoicesMessage {
   readonly itemTitle?: string;
   readonly pageHost: string;
   readonly rows: readonly SaveDialogRowView[];
+  /** ADR 0081 §A8: for a new login, the vaults it may be saved to (only when there are two or
+   * more), with {@link SaveDialogChoicesMessage.defaultVaultId}, the Personal vault,
+   * preselected every time. */
+  readonly vaults?: readonly SaveDialogVaultView[];
+  readonly defaultVaultId?: string;
 }
 
 export type SaveDialogChoicesResponse = SaveDialogChoicesMessage | ContentErrorMessage;
@@ -354,6 +378,9 @@ export interface SaveDialogResolveMessage {
   readonly token: string;
   readonly action: "save" | "update" | "dismiss";
   readonly rows: readonly { readonly index: number; readonly label: string }[];
+  /** ADR 0081 §A8: the vault the user picked for a new login; the Personal vault when absent.
+   * The long-lived context accepts only a vault it offered. */
+  readonly vaultId?: string;
 }
 
 export type SaveDialogResolveResponse = SavePromptDoneMessage | ContentErrorMessage;
@@ -384,7 +411,8 @@ export function isSaveDialogResolveMessage(value: unknown): value is SaveDialogR
     !isInstanceToken(v["instanceToken"]) ||
     !isBoundedString(v["token"], 256) ||
     (v["action"] !== "save" && v["action"] !== "update" && v["action"] !== "dismiss") ||
-    !hasOnlyKeys(v, ["type", "instanceToken", "token", "action", "rows"])
+    !hasOnlyKeys(v, ["type", "instanceToken", "token", "action", "rows", "vaultId"]) ||
+    (v["vaultId"] !== undefined && !isVaultId(v["vaultId"]))
   ) {
     return false;
   }
@@ -471,6 +499,9 @@ export interface PasskeyCeremonyApprovedMessage {
   readonly instanceToken: string;
   readonly ceremonyToken: string;
   readonly chosenPasskeyRef?: string;
+  /** ADR 0081 §A8: the vault a `create` that saves a new login goes to, picked in the consent
+   * UI (the Personal vault preselected); accepted only if it is a vault the session may write. */
+  readonly vaultId?: string;
 }
 
 /** The user declined, in the same consent UI, on the same trusted-gesture requirement. */
@@ -641,6 +672,10 @@ export interface PasskeyOfferMessage {
   /** Set for `get` only; always at least one entry (content-handler.ts refuses the request with
    * {@link ContentErrorMessage} rather than ever offering an empty list). */
   readonly candidates?: readonly PasskeyCandidateSummary[];
+  /** ADR 0081 §A8, `create` of a new login with two or more vaults to save to: the picker's
+   * vaults, the Personal vault preselected every time. Display only, for the consent iframe. */
+  readonly vaults?: readonly SaveDialogVaultView[];
+  readonly defaultVaultId?: string;
 }
 
 /** An explicit failure answer (e.g. the device is locked, or — for
@@ -860,7 +895,11 @@ export function isPasskeyCeremonyMessage(value: unknown): value is PasskeyCeremo
   if (v["type"] === "passkey_ceremony_declined") {
     return true;
   }
-  return v["type"] === "passkey_ceremony_approved" && (v["chosenPasskeyRef"] === undefined || isBoundedString(v["chosenPasskeyRef"], 256));
+  return (
+    v["type"] === "passkey_ceremony_approved" &&
+    (v["chosenPasskeyRef"] === undefined || isBoundedString(v["chosenPasskeyRef"], 256)) &&
+    (v["vaultId"] === undefined || isVaultId(v["vaultId"]))
+  );
 }
 
 /** Shared by {@link isApplyFillMessage} and {@link isRelayApplyFillMessage}: both carry the
@@ -1025,9 +1064,12 @@ export interface GeneratorOptions {
 }
 
 export interface ItemSummary {
+  /** The item reference, `<vault hex>:<item hex>` (ADR 0081 §A7, INV-103). */
   readonly itemId: string;
   readonly title: string;
   readonly username: string;
+  /** The label of the item's vault (ADR 0081 §A7: every row shows its vault). */
+  readonly vault?: string;
   /** The host of the item's first website, never the full URI (for its icon). */
   readonly websiteHost?: string;
 }

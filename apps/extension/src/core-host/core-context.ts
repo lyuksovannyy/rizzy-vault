@@ -29,8 +29,11 @@ import {
   newElementId,
   newLoginChangeset,
   newLoginWithPasskeyChangeset,
+  saveTargets,
+  saveVault,
   sessionPasskeyCandidatesForRpId,
   toContractItemSummary,
+  vaultLabel,
   unlockDevice,
   updateLoginChangeset,
 } from "./bindings.ts";
@@ -232,8 +235,21 @@ export function checkPendingSavePromptByLocation(
     suggestion: pending.action,
     ...(pending.itemTitle !== undefined ? { itemTitle: pending.itemTitle } : {}),
     // ADR 0076 §5.2: the same dialog/banner choice as the immediate answer made.
-    ...(hasDialogRows(pending) ? { dialog: true as const } : {}),
+    ...(hasDialogRows(pending) || severalSaveTargets(pending.action) ? { dialog: true as const } : {}),
   };
+}
+
+/** ADR 0081 §A8: a new login with two or more vaults to save to is asked in the extension-origin
+ * dialog, whose picker preselects the Personal vault; vault names never enter the page DOM. */
+function severalSaveTargets(action: "save" | "update"): boolean {
+  if (action !== "save" || session === undefined) {
+    return false;
+  }
+  try {
+    return saveTargets(session).length > 1;
+  } catch {
+    return false;
+  }
 }
 
 /** Whether a pending prompt's captured custom fields give save-dialog rows (ADR 0076 §5.3). */
@@ -257,7 +273,13 @@ async function applySavePromptAction(pending: PendingSavePrompt, action: "save" 
     return;
   }
   if (action === "save") {
-    await session.createItem("login", newLoginChangeset(pending.pageUrl, pending.usernameValue, pending.passwordValue));
+    // ADR 0081 §A8: the page-DOM banner offers no picker (vault names never enter the page), so
+    // it saves to the Personal vault; with several vaults the dialog asks (`wantsDialog`).
+    await session.createItem(
+      saveVault(session, undefined),
+      "login",
+      newLoginChangeset(pending.pageUrl, pending.usernameValue, pending.passwordValue),
+    );
   } else if (pending.updateItemId !== undefined) {
     await session.editItem(pending.updateItemId, updateLoginChangeset(pending.usernameValue, pending.passwordValue));
   }
@@ -378,7 +400,14 @@ export function offerPasskeyCreate(
   userName: string,
   userDisplayName: string,
   challengeB64: string,
-): { readonly ceremonyToken: string; readonly rpId: string; readonly rpName: string; readonly userName: string } | undefined {
+): {
+  readonly ceremonyToken: string;
+  readonly rpId: string;
+  readonly rpName: string;
+  readonly userName: string;
+  readonly vaults?: readonly { readonly id: string; readonly label: string }[];
+  readonly defaultVaultId?: string;
+} | undefined {
   if (session === undefined) {
     return undefined;
   }
@@ -397,7 +426,20 @@ export function offerPasskeyCreate(
     challengeB64,
   };
   const ceremonyToken = passkeyCeremonies.create(request, tabId, origin, Date.now());
-  return { ceremonyToken, rpId, rpName, userName };
+  // ADR 0081 §A8: a passkey that saves a new login offers the vault picker (Personal
+  // preselected); one added to an existing login stays in that login's vault.
+  const attaches = sessionPasskeyCandidatesForRpId(session, rpId).length > 0;
+  const targets = attaches ? [] : saveTargets(session);
+  const personal = targets.find((v) => v.id === session?.personalVaultId) ?? targets[0];
+  return {
+    ceremonyToken,
+    rpId,
+    rpName,
+    userName,
+    ...(targets.length > 1 && personal !== undefined
+      ? { vaults: targets.map((v) => ({ id: v.id, label: vaultLabel(v) })), defaultVaultId: personal.id }
+      : {}),
+  };
 }
 
 /** `content-handler.ts`'s `passkey_get_request` handling: registers a pending "sign in with a
@@ -465,7 +507,9 @@ function hostOf(origin: string): string | undefined {
 }
 
 function splitPasskeyRef(passkeyRef: string): { readonly itemId: string; readonly elementId: string } | undefined {
-  const i = passkeyRef.indexOf(":");
+  // The item part is an item reference, `<vault hex>:<item hex>` (ADR 0081 §A7); the element
+  // id after the last colon has none.
+  const i = passkeyRef.lastIndexOf(":");
   if (i < 0) {
     return undefined;
   }
@@ -488,6 +532,7 @@ export async function approvePasskeyCeremony(
   liveTabId: number,
   liveOrigin: string,
   chosenPasskeyRef: string | undefined,
+  vaultId?: string,
 ): Promise<PasskeyResultPayload | undefined> {
   const request = passkeyCeremonies.take(ceremonyToken, liveTabId, liveOrigin, Date.now());
   if (request === undefined || session === undefined) {
@@ -495,7 +540,7 @@ export async function approvePasskeyCeremony(
   }
   try {
     if (request.kind === "create") {
-      return await runCreatePasskey(session, request);
+      return await runCreatePasskey(session, request, vaultId);
     }
     return runGetPasskey(session, request, chosenPasskeyRef);
   } catch {
@@ -516,6 +561,7 @@ export function declinePasskeyCeremony(ceremonyToken: string, liveTabId: number,
 async function runCreatePasskey(
   s: DurableSession,
   request: Extract<PasskeyCeremonyRequest, { kind: "create" }>,
+  vaultId: string | undefined,
 ): Promise<PasskeyResultPayload> {
   const created = createPasskey(request.origin, request.rpId, base64ToBytes(request.challengeB64));
   const passkeyInput: AddPasskeyInput = {
@@ -536,7 +582,11 @@ async function runCreatePasskey(
   if (existing !== undefined) {
     await s.editItem(existing.itemId, [addPasskeyChange(passkeyInput)]);
   } else {
-    await s.createItem("login", newLoginWithPasskeyChangeset(request.rpName, request.userName, passkeyInput));
+    await s.createItem(
+      saveVault(s, vaultId),
+      "login",
+      newLoginWithPasskeyChangeset(request.rpName, request.userName, passkeyInput),
+    );
   }
   try {
     // Pushes the new/updated Login to the server right away, rather than waiting for the popup
@@ -618,7 +668,7 @@ export function offerSavePrompt(
   if (existing === undefined) {
     const token = addPendingSavePrompt({ action: "save", pageUrl, usernameValue: username, passwordValue, ...custom });
     rememberPendingOfferByLocation(tabId, pageUrl, token);
-    return { token, suggestion: "save", ...dialog(undefined) };
+    return { token, suggestion: "save", ...(severalSaveTargets("save") ? { dialog: true as const } : dialog(undefined)) };
   }
   const token = addPendingSavePrompt({
     action: "update",
@@ -661,11 +711,17 @@ export function saveDialogChoices(
   const rows = session
     .customSavePlan(pending.action === "update" ? pending.updateItemId : undefined, pending.customFields ?? [])
     .map((r) => ({ index: r.index, kind: r.kind, label: r.label, concealed: r.concealed, checked: r.checked }));
+  // ADR 0081 §A8: a new login's vault picker, the Personal vault preselected every time.
+  const targets = pending.action === "save" ? saveTargets(session) : [];
+  const personal = targets.find((v) => v.id === session?.personalVaultId) ?? targets[0];
   return {
     suggestion: pending.action,
     ...(pending.itemTitle !== undefined ? { itemTitle: pending.itemTitle } : {}),
     pageHost,
     rows,
+    ...(targets.length > 1 && personal !== undefined
+      ? { vaults: targets.map((v) => ({ id: v.id, label: vaultLabel(v) })), defaultVaultId: personal.id }
+      : {}),
   };
 }
 
@@ -684,6 +740,7 @@ export async function resolveSaveDialog(
   token: string,
   action: "save" | "update" | "dismiss",
   chosen: readonly { readonly index: number; readonly label: string }[],
+  vaultId?: string,
 ): Promise<boolean> {
   const pending = takePendingSavePrompt(token);
   if (pending === undefined) {
@@ -719,7 +776,10 @@ export async function resolveSaveDialog(
     }
   }
   if (pending.action === "save") {
-    await session.createItem("login", [...newLoginChangeset(pending.pageUrl, pending.usernameValue, pending.passwordValue), ...extra]);
+    await session.createItem(saveVault(session, vaultId), "login", [
+      ...newLoginChangeset(pending.pageUrl, pending.usernameValue, pending.passwordValue),
+      ...extra,
+    ]);
   } else if (pending.updateItemId !== undefined) {
     await session.editItem(pending.updateItemId, [...updateLoginChangeset(pending.usernameValue, pending.passwordValue), ...extra]);
   }
@@ -907,7 +967,10 @@ export async function handlePopupRequest(ext: WebExtNamespace, request: PopupReq
       if (session === undefined) {
         return { type: "error", code: "locked" };
       }
-      return { type: "items", items: session.items().map(toContractItemSummary) };
+      {
+        const vaults = session.vaults();
+        return { type: "items", items: session.items().map((i) => toContractItemSummary(i, vaults)) };
+      }
     case "item_icon": {
       // ADR 0052 point 6: only while unlocked, and only the hostname leaves (the core refuses
       // anything that is not one, and sends nothing for it).

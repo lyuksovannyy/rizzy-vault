@@ -20,7 +20,17 @@
 // independent message (`passkey_ceremony_approved`/`passkey_ceremony_declined`,
 // `messaging/contract.ts`) the consent iframe sends straight to the long-lived context, never
 // through this `postMessage` channel and never relayed by the content script.
-import { MAX_FIELD_VALUE_LEN, MAX_RP_ID_LEN, MAX_RP_NAME_LEN, MAX_TITLE_LEN, MAX_USER_NAME_LEN, isInstanceToken } from "../messaging/contract.ts";
+import {
+  MAX_FIELD_VALUE_LEN,
+  MAX_PICKER_VAULTS,
+  MAX_RP_ID_LEN,
+  MAX_RP_NAME_LEN,
+  MAX_TITLE_LEN,
+  MAX_USER_NAME_LEN,
+  MAX_VAULT_LABEL_LEN,
+  isInstanceToken,
+  isVaultId,
+} from "../messaging/contract.ts";
 
 export const PASSKEY_CONSENT_SHOW = "rizzy-passkey-consent-show";
 export const PASSKEY_CONSENT_DONE = "rizzy-passkey-consent-done";
@@ -46,6 +56,10 @@ export interface PasskeyConsentShowMessage {
   readonly rpName?: string;
   readonly userName?: string;
   readonly candidates?: readonly PasskeyConsentCandidate[];
+  /** ADR 0081 §A8: the vault picker of a `create` that saves a new login (two or more vaults),
+   * with the Personal vault preselected. */
+  readonly vaults?: readonly { readonly id: string; readonly label: string }[];
+  readonly defaultVaultId?: string;
 }
 
 export interface PasskeyConsentDoneMessage {
@@ -54,6 +68,15 @@ export interface PasskeyConsentDoneMessage {
 
 function isBoundedString(value: unknown, maxLen: number): value is string {
   return typeof value === "string" && value.length <= maxLen;
+}
+
+/** One vault of the picker (ADR 0081 §A8). */
+export function isVaultView(value: unknown): value is { readonly id: string; readonly label: string } {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  return isVaultId(v["id"]) && isBoundedString(v["label"], MAX_VAULT_LABEL_LEN);
 }
 
 function isCandidate(value: unknown): value is PasskeyConsentCandidate {
@@ -86,6 +109,18 @@ export function isPasskeyConsentShowMessage(value: unknown): value is PasskeyCon
   }
   if (v["candidates"] !== undefined && (!Array.isArray(v["candidates"]) || !v["candidates"].every(isCandidate))) {
     return false;
+  }
+  if (v["vaults"] !== undefined || v["defaultVaultId"] !== undefined) {
+    const vaults = v["vaults"];
+    if (
+      !Array.isArray(vaults) ||
+      vaults.length > MAX_PICKER_VAULTS ||
+      !vaults.every(isVaultView) ||
+      !isVaultId(v["defaultVaultId"]) ||
+      !vaults.some((x) => (x as { id: string }).id === v["defaultVaultId"])
+    ) {
+      return false;
+    }
   }
   return true;
 }

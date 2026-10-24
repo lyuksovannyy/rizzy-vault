@@ -21,6 +21,8 @@ interface ItemRow {
   readonly itemId: string;
   readonly title: string;
   readonly username: string;
+  /** The item's vault label (ADR 0081 §A7: every row shows its vault). */
+  readonly vault?: string;
   readonly websiteHost?: string;
 }
 
@@ -91,6 +93,7 @@ export function ItemsView({ client, revision }: ItemsViewProps) {
               <button type="button" onClick={() => setSelected(item.itemId)}>
                 <ItemIcon icons={icons} websiteHost={item.websiteHost} size={16} />
                 {item.title} {item.username !== "" ? `(${item.username})` : undefined}
+                {item.vault !== undefined && <span className="item-vault"> · {item.vault}</span>}
               </button>
             </li>
           ))}

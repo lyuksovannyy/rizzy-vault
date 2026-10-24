@@ -212,7 +212,17 @@ export async function handleContentScriptRequest(
       if (offer === undefined) {
         return refused("passkey_create_request: the device is locked");
       }
-      return { type: "passkey_offer", ceremonyToken: offer.ceremonyToken, kind: "create", rpId: offer.rpId, rpName: offer.rpName, userName: offer.userName };
+      return {
+        type: "passkey_offer",
+        ceremonyToken: offer.ceremonyToken,
+        kind: "create",
+        rpId: offer.rpId,
+        rpName: offer.rpName,
+        userName: offer.userName,
+        ...(offer.vaults !== undefined && offer.defaultVaultId !== undefined
+          ? { vaults: offer.vaults, defaultVaultId: offer.defaultVaultId }
+          : {}),
+      };
     }
     case "passkey_get_request": {
       if (!pageUrlMatchesSender(message.pageUrl, trustedOrigin) || trustedTabId === undefined) {
@@ -275,7 +285,7 @@ export async function handlePasskeyCeremonyApproval(
     await pushApplyPasskeyResult(ext, tabId, { ceremonyToken: message.ceremonyToken, outcome: "fallback" });
     return { type: "passkey_ceremony_dispatched" };
   }
-  const result = await approvePasskeyCeremony(message.ceremonyToken, tabId, origin, message.chosenPasskeyRef);
+  const result = await approvePasskeyCeremony(message.ceremonyToken, tabId, origin, message.chosenPasskeyRef, message.vaultId);
   await pushApplyPasskeyResult(
     ext,
     tabId,
@@ -480,7 +490,7 @@ export function handleSaveDialogRequest(message: SaveDialogRequestMessage): Prom
 
 /** Handles a {@link SaveDialogResolveMessage}: the user's choice in the dialog (ADR 0076 §5.3). */
 export async function handleSaveDialogResolve(message: SaveDialogResolveMessage): Promise<SaveDialogResolveResponse> {
-  const resolved = await resolveSaveDialog(message.token, message.action, message.rows);
+  const resolved = await resolveSaveDialog(message.token, message.action, message.rows, message.vaultId);
   if (!resolved) {
     return refused("save_dialog_resolve: unknown or already-resolved token");
   }
