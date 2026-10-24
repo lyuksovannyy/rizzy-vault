@@ -60,6 +60,9 @@ use rizzy_client::export::gate::{
 use rizzy_client::export::plaintext::{
     PLAINTEXT_EXPORT_PHRASE, PLAINTEXT_EXPORT_WARNING, PlaintextExportAck, csv_export_warning,
 };
+use rizzy_client::identity_gen::{
+    self, CivilDate, CountryCode, GeneratedIdentity, IdentityGenError, IdentityOptions,
+};
 use rizzy_client::items::{Dot, FieldEdit, FieldKey, ItemId, ItemLifecycle, ItemType, Value};
 use rizzy_client::lists::split_order_ops;
 use rizzy_client::rizzy_import::{self, Format};
@@ -86,7 +89,10 @@ use rizzy_core::totp::{OtpAuthUri, TotpParams, TotpSecret};
 use zeroize::Zeroizing;
 
 use crate::account;
-use crate::args::{Command, ExportFormat, FieldArgs, Generate, ImportFormat, Invocation, USAGE};
+use crate::args::{
+    Command, DEFAULT_IDENTITY_COUNTRY, ExportFormat, FieldArgs, Generate, IdentityArgs,
+    ImportFormat, Invocation, USAGE,
+};
 use crate::db::Db;
 use crate::device::{CredentialChange, Device, Env, pick_account};
 use crate::enrol;
@@ -229,6 +235,7 @@ async fn run_command(invocation: Invocation, env: &mut Env<'_>) -> Result<(), Cl
             Box::pin(item_restore_history(env, &item, &field, &entry)).await
         }
         Command::Generate(options) => generate(env.ui, options),
+        Command::GenerateIdentity { options, json } => generate_identity(env.ui, &options, json),
         Command::Totp(item) => {
             let mut device = Device::open(env).await?;
             let shown = totp(&device, env.ui, &item)?;
@@ -815,6 +822,19 @@ async fn item_create(
     fields: &FieldArgs,
 ) -> Result<(), CliError> {
     let item_type = type_named(type_text)?;
+    // `--generate` pre-fills the identity (ADR 0079 §10) before the device opens, so a bad
+    // option fails without unlocking. A `--field` of the same key wins.
+    let generated;
+    let fields = match &fields.generate {
+        Some(options) => {
+            if item_type != ItemType::IDENTITY {
+                return Err(CliError::Usage("--generate needs --type identity".into()));
+            }
+            generated = with_generated(fields, &new_identity(options)?);
+            &generated
+        }
+        None => fields,
+    };
     let mut device = Device::open(env).await?;
     // A new item has no element whose `order` a rewrite would write: one op at most.
     let writes: Vec<(FieldKey, Value)> = collect_writes(env.ui, device.vault(), None, fields)?
@@ -995,6 +1015,91 @@ fn generate(ui: &mut dyn Ui, options: Generate) -> Result<(), CliError> {
     };
     ui.note(&format!("{:.0} bits of entropy", generated.entropy_bits()));
     ui.print(generated.expose_secret())
+}
+
+/// Today's civil date for the identity generator. `rv` uses the UTC date: reading the local
+/// time zone needs either the C library (`unsafe`) or a time-zone crate, and neither is
+/// admitted. Near midnight the date, and so an exact age's birthday window, can be a day off
+/// the local one.
+fn today_utc() -> Result<CivilDate, CliError> {
+    let days = i64::try_from(now_ms() / 86_400_000).map_err(|_| ClientError::Internal)?;
+    CivilDate::from_days(days).ok_or(CliError::Client(ClientError::Internal))
+}
+
+/// Draws an identity with `rv`'s options (ADR 0079 §10): the OS RNG and today's date.
+fn new_identity(options: &IdentityArgs) -> Result<GeneratedIdentity, CliError> {
+    let data = identity_gen::embedded_data().map_err(|_| ClientError::Internal)?;
+    let country = match options.country {
+        Some(c) => c,
+        None => CountryCode::parse(DEFAULT_IDENTITY_COUNTRY).map_err(|_| ClientError::Internal)?,
+    };
+    let mut o = IdentityOptions::new(country);
+    o.sex = options.sex;
+    o.age = options.age;
+    o.email_style = options.email_style;
+    o.email_domain.clone_from(&options.domain);
+    identity_gen::generate_identity(&mut os_rng(), data, &o, today_utc()?).map_err(|e| match e {
+        IdentityGenError::UnsupportedCountry => {
+            let codes: Vec<&str> = data
+                .countries()
+                .iter()
+                .map(identity_gen::Country::code)
+                .collect();
+            CliError::Usage(format!("--country takes one of {}", codes.join(", ")))
+        }
+        IdentityGenError::AgeRange => CliError::Usage("--age is out of range".into()),
+        _ => CliError::Client(ClientError::Internal),
+    })
+}
+
+/// `fields` with the generated identity's fields and its default name ("First Last") added,
+/// except where `fields` already sets the key (a `--field` or `--secret` of it wins).
+fn with_generated(fields: &FieldArgs, identity: &GeneratedIdentity) -> FieldArgs {
+    let taken = |key: &str| {
+        fields.fields.iter().any(|(k, _)| k == key) || fields.secrets.iter().any(|k| k == key)
+    };
+    let mut merged = fields.clone();
+    let mut generated: Vec<(String, String)> = Vec::new();
+    if !taken(ITEM_NAME) {
+        generated.push((ITEM_NAME.to_owned(), identity.item_name()));
+    }
+    for (key, value) in identity.fields() {
+        if !taken(key) {
+            generated.push((key.to_owned(), value));
+        }
+    }
+    generated.append(&mut merged.fields);
+    merged.fields = generated;
+    merged.generate = None;
+    merged
+}
+
+/// `generate identity` (ADR 0079 §10): `key=value` lines in the generator's order, or with
+/// `--json` one object `{"name": …, "fields": {key: value, …}}`. A generated identity is not
+/// a secret (ADR 0079 §2).
+fn generate_identity(ui: &mut dyn Ui, options: &IdentityArgs, json: bool) -> Result<(), CliError> {
+    let identity = new_identity(options)?;
+    if json {
+        let mut fields = serde_json::Map::new();
+        for (key, value) in identity.fields() {
+            fields.insert(key.to_owned(), serde_json::Value::String(value));
+        }
+        let mut object = serde_json::Map::new();
+        object.insert(
+            "name".to_owned(),
+            serde_json::Value::String(identity.item_name()),
+        );
+        object.insert("fields".to_owned(), serde_json::Value::Object(fields));
+        let text = serde_json::to_string_pretty(&serde_json::Value::Object(object))
+            .map_err(|_| ClientError::Internal)?;
+        return ui.print(&text);
+    }
+    ui.note("Generated details are random and may match real people or places.");
+    ui.print(&format!("{ITEM_NAME}={}", identity.item_name()))?;
+    for (key, value) in identity.fields() {
+        ui.print(&format!("{key}={value}"))?;
+    }
+    Ok(())
 }
 
 /// What to tell the user when the generator refuses the options: which rule they broke, in
