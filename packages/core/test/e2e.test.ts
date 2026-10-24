@@ -49,6 +49,16 @@ import {
 } from "../src/index.js";
 import { loadCore } from "./load.js";
 
+/** The Personal vault of `s` (ADR 0081 §A8: every new item and import goes there unless
+ * another vault is picked). */
+function pv(s: { readonly personalVaultId: string | undefined }): string {
+  const vault = s.personalVaultId;
+  if (vault === undefined) {
+    throw new Error("no Personal vault");
+  }
+  return vault;
+}
+
 /** Whether two byte arrays hold the same bytes. */
 function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
   return a.length === b.length && a.every((v, i) => v === b[i]);
@@ -302,7 +312,7 @@ describe.skipIf(binary === undefined)("against a real server", () => {
 
     // Items, written in memory, uploaded by a sync.
     expect(first.items()).toEqual([]);
-    const id = first.createItem("login", [
+    const id = first.createItem(pv(first), "login", [
       { op: "set", key: "item.name", value: "Example" },
       { op: "set", key: "login.username", value: "alice@example.com" },
       { op: "set", key: "login.password", value: "hunter2-but-longer" },
@@ -316,7 +326,9 @@ describe.skipIf(binary === undefined)("against a real server", () => {
       },
       { op: "tag", name: "work" },
     ]);
-    expect(id).toMatch(/^[0-9a-f]{32}$/);
+    // ADR 0081 §A7, INV-103: an item is named by its vault and its id.
+    expect(id).toMatch(/^[0-9a-f]{32}:[0-9a-f]{32}$/);
+    expect(id.startsWith(`${pv(first)}:`)).toBe(true);
     expect(first.unsentChanges).toBe(1);
     await first.sync();
     expect(first.unsentChanges).toBe(0);
@@ -389,20 +401,20 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     // unaffected: gone for good on this session, rejected on a non-trashed or unknown item,
     // and gone on the second session once it syncs (gap 03; the web vault's confirm dialog and
     // the durable-device binding below have their own tests).
-    const toPurge = first.createItem("login", [{ op: "set", key: "item.name", value: "To purge" }]);
+    const toPurge = first.createItem(pv(first), "login", [{ op: "set", key: "item.name", value: "To purge" }]);
     first.trashItem(toPurge);
     first.purgeItem(toPurge);
     expect(first.items().some((i) => i.id === toPurge)).toBe(false);
     expect(first.items(true).some((i) => i.id === toPurge)).toBe(false);
     expect(() => first.purgeItem(toPurge)).toThrowError(expect.objectContaining({ code: "unknown_item" }));
-    expect(() => first.purgeItem("0".repeat(32))).toThrowError(expect.objectContaining({ code: "unknown_item" }));
+    expect(() => first.purgeItem(`${pv(first)}:${"0".repeat(32)}`)).toThrowError(expect.objectContaining({ code: "unknown_item" }));
     await first.sync();
     await second.sync();
     expect(second.items().some((i) => i.id === toPurge)).toBe(false);
     expect(second.items(true).some((i) => i.id === toPurge)).toBe(false);
 
     // TOTP from an item's secret (RFC 6238's SHA-1 key, as Base32).
-    const totpItem = first.createItem("login", [
+    const totpItem = first.createItem(pv(first), "login", [
       { op: "set", key: "item.name", value: "With 2FA" },
       { op: "set", key: "login.totp", value: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ" },
     ]);
@@ -418,7 +430,7 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     const created = createPasskey(passkeyOrigin, passkeyRpId, new Uint8Array([1, 2, 3, 4]));
     expect(created.credentialId).toHaveLength(32);
     const passkeyElement = newElementId();
-    const passkeyItem = first.createItem("login", [
+    const passkeyItem = first.createItem(pv(first), "login", [
       { op: "set", key: "item.name", value: "Has a passkey" },
       {
         op: "addPasskey",
@@ -498,62 +510,62 @@ describe.skipIf(binary === undefined)("against a real server", () => {
 
     // Encrypted export (behind a re-authentication: a wrong password is refused and allows
     // nothing), imported back as new items; the file is recognised from its bytes.
-    expect(() => first.exportEncrypted("export password 1")).toThrowError(
+    expect(() => first.exportEncrypted(pv(first), "export password 1")).toThrowError(
       expect.objectContaining({ code: "reauth_required" }),
     );
     await expect(first.reauthenticate(secretKey, "not the password")).rejects.toMatchObject({
       code: "wrong_password_or_secret_key",
     });
     expect(first.reauthFresh()).toBe(false);
-    expect(() => first.exportEncrypted("export password 1")).toThrowError(
+    expect(() => first.exportEncrypted(pv(first), "export password 1")).toThrowError(
       expect.objectContaining({ code: "reauth_required" }),
     );
     await first.reauthenticate(secretKey, PASSWORD);
     expect(first.reauthFresh()).toBe(true);
     // A refused file password spends nothing.
-    expect(() => first.exportEncrypted("")).toThrowError(
+    expect(() => first.exportEncrypted(pv(first), "")).toThrowError(
       expect.objectContaining({ code: "invalid_input" }),
     );
-    const exported = first.exportEncrypted("export password 1");
+    const exported = first.exportEncrypted(pv(first), "export password 1");
     expect(first.reauthFresh()).toBe(false);
     expect(detectImportFormat(exported.file)).toBe("rizzy-encrypted");
     expect(exported.items).toBe(3);
     expect(exported.file.byteLength).toBeGreaterThan(0);
     await expect(
-      Promise.resolve().then(() => first.importEncrypted(exported.file, "wrong")),
+      Promise.resolve().then(() => first.importEncrypted(pv(first), exported.file, "wrong")),
     ).rejects.toMatchObject({ code: "export_decryption_failed" });
-    const imported = first.importEncrypted(exported.file, "export password 1");
+    const imported = first.importEncrypted(pv(first), exported.file, "export password 1");
     expect(imported.imported).toBe(3);
     expect(first.items()).toHaveLength(6);
     await first.sync();
 
     // A plaintext export needs a re-authentication first.
-    expect(() => first.exportPlaintext("json", plaintextExportPhrase())).toThrowError(
+    expect(() => first.exportPlaintext(pv(first), "json", plaintextExportPhrase())).toThrowError(
       expect.objectContaining({ code: "reauth_required" }),
     );
     await first.reauthenticate(secretKey, PASSWORD);
-    expect(() => first.exportPlaintext("json", "export plaintext")).toThrowError(
+    expect(() => first.exportPlaintext(pv(first), "json", "export plaintext")).toThrowError(
       expect.objectContaining({ code: "plaintext_export_not_acknowledged" }),
     );
     // The warning must be shown, and its hold of ten seconds over.
-    expect(() => first.exportPlaintext("json", plaintextExportPhrase())).toThrowError(
+    expect(() => first.exportPlaintext(pv(first), "json", plaintextExportPhrase())).toThrowError(
       expect.objectContaining({ code: "plaintext_export_hold" }),
     );
     expect(plaintextExportHoldMs()).toBe(10_000);
     expect(first.plaintextWarningShown()).toBe(10_000);
     skew += 9_000;
     expect(first.plaintextHoldRemainingMs()).toBeGreaterThan(0);
-    expect(() => first.exportPlaintext("json", plaintextExportPhrase())).toThrowError(
+    expect(() => first.exportPlaintext(pv(first), "json", plaintextExportPhrase())).toThrowError(
       expect.objectContaining({ code: "plaintext_export_hold" }),
     );
     skew += 1_000;
     expect(first.plaintextHoldRemainingMs()).toBe(0);
-    const jsonBytes = first.exportPlaintext("json", plaintextExportPhrase());
+    const jsonBytes = first.exportPlaintext(pv(first), "json", plaintextExportPhrase());
     expect(detectImportFormat(jsonBytes)).toBe("rizzy-json");
     const json = new TextDecoder().decode(jsonBytes);
     expect(json).toContain("a-new-password");
     // One export per re-authentication.
-    expect(() => first.exportPlaintext("csv", plaintextExportPhrase())).toThrowError(
+    expect(() => first.exportPlaintext(pv(first), "csv", plaintextExportPhrase())).toThrowError(
       expect.objectContaining({ code: "reauth_required" }),
     );
 
@@ -561,31 +573,31 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     // imported back through the CXF reader, one Login per passkey (§3). The passkey item was
     // duplicated by the encrypted round trip above, so there are two.
     expect(cxfExportWarning()).toMatch(/^Once decrypted with its export password/);
-    expect(first.cxfExportPasskeys()).toBe(2);
-    expect(() => first.exportCxf(plaintextExportPhrase(), "cxf password")).toThrowError(
+    expect(first.cxfExportPasskeys(pv(first))).toBe(2);
+    expect(() => first.exportCxf(pv(first), plaintextExportPhrase(), "cxf password")).toThrowError(
       expect.objectContaining({ code: "reauth_required" }),
     );
     await first.reauthenticate(secretKey, PASSWORD);
-    expect(() => first.exportCxf(plaintextExportPhrase(), "cxf password")).toThrowError(
+    expect(() => first.exportCxf(pv(first), plaintextExportPhrase(), "cxf password")).toThrowError(
       expect.objectContaining({ code: "plaintext_export_hold" }),
     );
     expect(first.plaintextWarningShown()).toBe(10_000);
     skew += 10_000;
-    expect(() => first.exportCxf("EXPORT PASSKEYS", "cxf password")).toThrowError(
+    expect(() => first.exportCxf(pv(first), "EXPORT PASSKEYS", "cxf password")).toThrowError(
       expect.objectContaining({ code: "plaintext_export_not_acknowledged" }),
     );
-    const cxf = first.exportCxf(plaintextExportPhrase(), "cxf password");
+    const cxf = first.exportCxf(pv(first), plaintextExportPhrase(), "cxf password");
     expect(cxf.passkeys).toBe(2);
     expect(detectImportFormat(cxf.file)).toBe("rizzy-cxf-encrypted");
     expect(new TextDecoder().decode(cxf.file)).toMatch(/^\{"format":"rizzy-vault-cxf-export"/);
     await expect(
-      Promise.resolve().then(() => first.importCxfEncrypted(cxf.file, "wrong")),
+      Promise.resolve().then(() => first.importCxfEncrypted(pv(first), cxf.file, "wrong")),
     ).rejects.toMatchObject({ code: "export_decryption_failed" });
     await expect(
-      Promise.resolve().then(() => first.importEncrypted(cxf.file, "cxf password")),
+      Promise.resolve().then(() => first.importEncrypted(pv(first), cxf.file, "cxf password")),
     ).rejects.toMatchObject({ code: "invalid_export_file" });
     const before = first.items().length;
-    const cxfImported = first.importCxfEncrypted(cxf.file, "cxf password");
+    const cxfImported = first.importCxfEncrypted(pv(first), cxf.file, "cxf password");
     expect(cxfImported).toMatchObject({ imported: 2, skipped: 0, credentialsSkipped: 0 });
     expect(first.items()).toHaveLength(before + 2);
     await first.sync();
@@ -618,7 +630,7 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     expect(passwordBytes.every((b) => b === 0)).toBe(true);
     await third.sync();
     for (const when of ["before", "after"] as const) {
-      const flakyItem = third.createItem("login", [
+      const flakyItem = third.createItem(pv(third), "login", [
         { op: "set", key: "item.name", value: `flaky ${when}` },
       ]);
       failUpload = when;
@@ -642,7 +654,7 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     // without a code stops at the second factor.
     const setup = await first.enableTwoFactor();
     expect(setup.otpauthUri).toMatch(/^otpauth:\/\/totp\//);
-    const helper = first.createItem("login", [
+    const helper = first.createItem(pv(first), "login", [
       { op: "set", key: "item.name", value: "authenticator" },
       { op: "set", key: "login.totp", value: setup.secret },
     ]);
@@ -751,7 +763,7 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     // a subdomain that its Base domain own-mode twin is offered on.
     expect(session.decideMatchCandidates("https://www.example.com/", top, saved(MatchMode.AccountDefault)).candidates).toEqual([]);
     expect(session.decideMatchCandidates("https://www.example.com/", top, saved(MatchMode.BaseDomain)).candidates).toHaveLength(1);
-    const id = await session.createItem("login", [
+    const id = await session.createItem(pv(session), "login", [
       { op: "set", key: "item.name", value: "Extension item" },
       { op: "set", key: "login.username", value: "extension-user" },
     ]);
@@ -802,14 +814,22 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     const be64 = (n: number) => new Uint8Array([0, 0, 0, 0, n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255]);
     expect(await store.get("cache_meta", FLOOR)).toEqual(be64(0));
     // Cache format 3 (ADR 0056 §3): the extension keeps no `item_index` (owner answer 4), so its
-    // format-3 store is its format-2 one with the format bumped.
-    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 3]));
+    // format-3 store is its format-2 one with the format bumped; format 4 (ADR 0081 §A7) re-keys
+    // that table and adds `pending_move`, neither of which this host keeps (it makes no moves).
+    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 4]));
+
+    // A format-3 store (as a pre-ADR-0081 build wrote it): unlocking bumps the format.
+    await store.put("cache_meta", FORMAT, new Uint8Array([0, 3]));
+    const fromThree = await unlockDurableDevice(transport, store, PASSWORD);
+    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 4]));
+    expect(fromThree.items()).toEqual([]);
+    fromThree.lock();
 
     // A format-2 store (as a pre-ADR-0056 build wrote it): unlocking bumps the format and
     // changes nothing else.
     await store.put("cache_meta", FORMAT, new Uint8Array([0, 2]));
     const bumped = await unlockDurableDevice(transport, store, PASSWORD);
-    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 3]));
+    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 4]));
     expect(await store.get("cache_meta", FLOOR)).toEqual(be64(0));
     expect(bumped.items()).toEqual([]);
     bumped.lock();
@@ -819,7 +839,7 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     await store.delete("cache_meta", FLOOR);
     await store.put("cache_meta", FORMAT, new Uint8Array([0, 1]));
     const migrated = await unlockDurableDevice(transport, store, PASSWORD);
-    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 3]));
+    expect(await store.get("cache_meta", FORMAT)).toEqual(new Uint8Array([0, 4]));
     expect(await store.get("cache_meta", FLOOR)).toEqual(be64(0));
     expect(migrated.items()).toEqual([]);
     migrated.lock();
@@ -829,7 +849,7 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     await store.put("cache_meta", FLOOR, be64(5));
     const restarted = await unlockDurableDevice(transport, store, PASSWORD);
     // A later drained write still carries the floor the load rehydrated, never 0.
-    await restarted.createItem("login", [{ op: "set", key: "item.name", value: "After restart" }]);
+    await restarted.createItem(pv(restarted), "login", [{ op: "set", key: "item.name", value: "After restart" }]);
     restarted.lock();
     expect(await store.get("cache_meta", FLOOR)).toEqual(be64(5));
 
@@ -862,7 +882,7 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     await signup.confirm(lastGroup);
     const first = await signup.login();
 
-    const id = first.createItem("login", [{ op: "set", key: "item.name", value: "To expire" }]);
+    const id = first.createItem(pv(first), "login", [{ op: "set", key: "item.name", value: "To expire" }]);
     await first.sync();
     first.trashItem(id);
     await first.sync();
@@ -913,11 +933,11 @@ describe.skipIf(binary === undefined)("against a real server", () => {
   it("lists password history without values and reveals one entry on request", async () => {
     const frozen = Date.now();
     const { session: s } = await freshAccount("Dave", () => frozen);
-    const id = s.createItem("login", [
+    const id = s.createItem(pv(s), "login", [
       { op: "set", key: "item.name", value: "Mail" },
       { op: "set", key: "login.password", value: "v0" },
     ]);
-    const bare = s.createItem("note", [{ op: "set", key: "item.name", value: "No history" }]);
+    const bare = s.createItem(pv(s), "note", [{ op: "set", key: "item.name", value: "No history" }]);
 
     // Empty: one value only, or no password at all.
     expect(s.passwordHistory(id)).toEqual([]);
@@ -1069,7 +1089,7 @@ describe.skipIf(binary === undefined)("against a real server", () => {
         ],
       }),
     );
-    expect(s.importFile("bitwarden-json", file).imported).toBe(1);
+    expect(s.importFile(pv(s), "bitwarden-json", file).imported).toBe(1);
     const id = s.items().find((i) => i.title === "Imported login")?.id ?? "";
     expect(id).not.toBe("");
 
@@ -1127,7 +1147,7 @@ describe.skipIf(binary === undefined)("against a real server", () => {
         ],
       }),
     );
-    expect(s.importFile("bitwarden-json", noDatesFile).imported).toBe(1);
+    expect(s.importFile(pv(s), "bitwarden-json", noDatesFile).imported).toBe(1);
     const noDatesId = s.items().find((i) => i.title === "No dates")?.id ?? "";
     expect(noDatesId).not.toBe("");
 
@@ -1166,8 +1186,8 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     const transport = fetchTransport(origin);
     const { session: first, secretKey } = await freshAccount("Erin");
     erinSecretKey = secretKey;
-    const kept = first.createItem("note", [{ op: "set", key: "item.name", value: "Kept" }]);
-    const gone = first.createItem("note", [{ op: "set", key: "item.name", value: "Gone" }]);
+    const kept = first.createItem(pv(first), "note", [{ op: "set", key: "item.name", value: "Kept" }]);
+    const gone = first.createItem(pv(first), "note", [{ op: "set", key: "item.name", value: "Gone" }]);
     await first.sync();
     // No notice on a quiet vault.
     expect(first.takeNotices()).toEqual([]);
@@ -1234,7 +1254,7 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     // Finding 3: a second, genuinely distinct conflict between the very same two devices,
     // within this one session, is handed over too -- not silently dropped because it shares
     // a device pair with a conflict already shown.
-    const raced = first.createItem("note", [{ op: "set", key: "item.name", value: "Raced" }]);
+    const raced = first.createItem(pv(first), "note", [{ op: "set", key: "item.name", value: "Raced" }]);
     await first.sync();
     await second.sync();
     first.trashItem(raced);
@@ -1304,7 +1324,7 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     // it has heard of the other's edit, so both values stay and the field conflicts.
     await unlocked.sync();
     await second.sync();
-    const login1 = unlocked.createItem("login", [
+    const login1 = unlocked.createItem(pv(unlocked), "login", [
       { op: "set", key: "item.name", value: "Shared" },
       { op: "set", key: "login.password", value: "base" },
     ]);
@@ -1389,7 +1409,7 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     const web = () => login(transport, { origin, loginName: "erin", secretKey, password: PASSWORD });
     const a = await web();
     await a.sync();
-    const item = a.createItem("login", [{ op: "set", key: "item.name", value: "With a file" }]);
+    const item = a.createItem(pv(a), "login", [{ op: "set", key: "item.name", value: "With a file" }]);
     await a.sync();
     // Two chunks: one full 512 KiB chunk and a short last one (ADR 0054 §2).
     const data = new Uint8Array(600_000);
@@ -1426,6 +1446,65 @@ describe.skipIf(binary === undefined)("against a real server", () => {
     await a.sync();
     a.lock();
     b.lock();
+  });
+
+  // ADR 0081 Part A: several vaults per account, through the web session.
+  it("creates, renames, moves into, copies and deletes vaults (ADR 0081 Part A)", async () => {
+    const { session: a, secretKey } = await freshAccount("vaulty");
+    await a.sync();
+    const personal = pv(a);
+    expect(a.vaults().map((v) => [v.kind, v.name, v.status])).toEqual([["personal", undefined, "open"]]);
+    expect(a.vaultAlarms()).toEqual([]);
+
+    // Create: one atomic account change, then the name as the vault's first op.
+    const work = await a.createVault("  Work  ");
+    expect(work).toMatch(/^[0-9a-f]{32}$/);
+    expect(a.vaults().map((v) => [v.kind, v.name])).toEqual([
+      ["personal", undefined],
+      ["owned", "Work"],
+    ]);
+    expect(a.vaultAlarms()).toEqual([]);
+    await expect(a.renameVault(personal, "Mine")).rejects.toMatchObject({ code: "personal_vault_protected" });
+    await a.renameVault(work, "Office");
+
+    // A move: the copy in the target, then the original purged once the copy is stored.
+    const item = a.createItem(personal, "login", [{ op: "set", key: "item.name", value: "Mail" }]);
+    const file = await a.addAttachment(item, "note.txt", "text/plain", new Uint8Array([7, 8, 9]));
+    expect(file).not.toBe("");
+    const moved = await a.moveItem(item, work);
+    expect(moved.startsWith(`${work}:`)).toBe(true);
+    expect(a.items().map((i) => [i.vaultId, i.title])).toEqual([[work, "Mail"]]);
+    expect(a.attachments(moved).map((x) => x.name)).toEqual(["note.txt"]);
+    expect(await a.downloadAttachment(moved, a.attachments(moved)[0]?.id ?? "")).toEqual(new Uint8Array([7, 8, 9]));
+    // And back, and a copy: two items, each in its own vault.
+    const back = await a.moveItem(moved, personal);
+    const copy = await a.copyItem(back, work);
+    expect(a.items().map((i) => i.vaultId).sort()).toEqual([personal, work].sort());
+    expect(copy.startsWith(`${work}:`)).toBe(true);
+
+    // Another session sees the same vaults and items.
+    const b = await login(fetchTransport(origin), { origin, loginName: "vaulty", secretKey, password: PASSWORD });
+    await b.sync();
+    expect(b.vaults().map((v) => v.name)).toEqual([undefined, "Office"]);
+    expect(b.items().length).toBe(2);
+
+    // Delete, keeping the items: they land in Personal. The Personal vault is never deleted.
+    await expect(a.deleteVault(personal, true)).rejects.toMatchObject({ code: "personal_vault_protected" });
+    await a.deleteVault(work, true);
+    expect(a.vaults().map((v) => v.kind)).toEqual(["personal"]);
+    expect(a.items().map((i) => i.vaultId)).toEqual([personal, personal]);
+    // The other session drops it at its next sync and reports nothing lost.
+    await b.sync();
+    expect(b.vaults().map((v) => v.kind)).toEqual(["personal"]);
+    expect(b.takeDiscardedChanges()).toBe(0);
+
+    // Delete with its items: they go with it.
+    const temp = await a.createVault("Temp");
+    a.createItem(temp, "note", [{ op: "set", key: "item.name", value: "Scratch" }]);
+    await a.sync();
+    await a.deleteVault(temp, false);
+    expect(a.items().map((i) => i.title).sort()).toEqual(["Mail", "Mail"]);
+    lockAll(a, b);
   });
 
   it("lists sessions, ends another one, and ends its own on lock", async () => {
