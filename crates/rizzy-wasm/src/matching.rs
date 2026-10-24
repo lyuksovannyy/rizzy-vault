@@ -42,7 +42,7 @@ use rizzy_client::settings::AccountSettingsRecord;
 use wasm_bindgen::prelude::wasm_bindgen;
 
 use crate::error::{CoreError, CoreResult};
-use crate::items::{hex, parse_id};
+use crate::items::{hex, item_ref, parse_id, parse_ref};
 
 /// Decodes a wire `MatchMode` value (ADR 0037 §4), refusing `0x0007`–`0xFFFF`.
 fn mode_of(value: u16) -> Result<MatchMode, CoreError> {
@@ -290,8 +290,10 @@ pub fn decide_match_candidates(
 ) -> Result<MatchDecision, CoreError> {
     let account_default = mode_of(account_default_mode)?;
     let mut owned_ids = Vec::with_capacity(uris.len());
-    for input in &uris {
-        let item_id = parse_id(&input.item_id)?;
+    let mut names = Vec::with_capacity(uris.len());
+    for (index, input) in uris.iter().enumerate() {
+        names.push(item_key(&input.item_id)?);
+        let item_id = synthetic_id(index);
         let uri_id = parse_id(&input.uri_id)?;
         let mode = mode_of(input.mode)?;
         owned_ids.push((item_id, uri_id, mode));
@@ -321,11 +323,49 @@ pub fn decide_match_candidates(
     let decision =
         matching::decide_candidates(page_url, &frame, account_default, &item_uris, &equivalence)
             .map_err(CoreError::from)?;
-    Ok(decision_view(decision))
+    Ok(decision_view_named(decision, &names))
 }
 
-/// The JavaScript form of a decision.
-pub(crate) fn decision_view(decision: matching::Decision) -> MatchDecision {
+/// The stand-in item id of the `index`th URI of a decision over several vaults: the matcher
+/// keys candidates by a 16-byte item id, which is unique only within a vault (ADR 0081 §A7,
+/// INV-103), so each URI gets its index as its id and [`decision_view_named`] maps it back to
+/// the item reference.
+pub(crate) fn synthetic_id(index: usize) -> [u8; 16] {
+    u128::try_from(index).unwrap_or(u128::MAX).to_be_bytes()
+}
+
+/// An item key as a host passes it in a URI input: an item reference
+/// (`crate::items::item_ref`) or, for a caller without vaults, a bare 32-digit id;
+/// normalised to lowercase.
+///
+/// # Errors
+/// `invalid_input` for anything else.
+pub(crate) fn item_key(text: &str) -> CoreResult<String> {
+    if text.contains(':') {
+        let (vault, item) = parse_ref(text)?;
+        Ok(item_ref(vault, item))
+    } else {
+        Ok(hex(&parse_id(text)?))
+    }
+}
+
+/// [`decision_view`] for a decision keyed by [`synthetic_id`]s: each candidate gets the name
+/// at its index in `names`.
+pub(crate) fn decision_view_named(decision: matching::Decision, names: &[String]) -> MatchDecision {
+    decision_view_with(decision, |id| {
+        usize::try_from(u128::from_be_bytes(*id))
+            .ok()
+            .and_then(|i| names.get(i))
+            .cloned()
+            .unwrap_or_default()
+    })
+}
+
+/// The JavaScript form of a decision, each candidate's item named by `name`.
+fn decision_view_with(
+    decision: matching::Decision,
+    name: impl Fn(&[u8; 16]) -> String,
+) -> MatchDecision {
     MatchDecision {
         page_host: decision.page_host,
         page_port: decision.page_port,
@@ -333,7 +373,7 @@ pub(crate) fn decision_view(decision: matching::Decision) -> MatchDecision {
             .candidates
             .into_iter()
             .map(|c| MatchCandidate {
-                item_id: hex(&c.item_id),
+                item_id: name(&c.item_id),
                 uri_id: hex(&c.uri_id),
                 needs_warning: matches!(c.matched_via, MatchedVia::Equivalence(_)),
                 saved_host: c.saved_host,
@@ -359,9 +399,11 @@ pub(crate) fn decide_with_account(
     global: &[EquivalenceGroup],
 ) -> Result<MatchDecision, CoreError> {
     let mut owned_ids = Vec::with_capacity(uris.len());
-    for input in uris {
+    let mut names = Vec::with_capacity(uris.len());
+    for (index, input) in uris.iter().enumerate() {
+        names.push(item_key(&input.item_id)?);
         owned_ids.push((
-            parse_id(&input.item_id)?,
+            synthetic_id(index),
             parse_id(&input.uri_id)?,
             mode_of(input.mode)?,
         ));
@@ -381,7 +423,7 @@ pub(crate) fn decide_with_account(
         frame_origin,
     };
     let decision = matching::decide_with_settings(page_url, &frame, &item_uris, settings, global)?;
-    Ok(decision_view(decision))
+    Ok(decision_view_named(decision, &names))
 }
 
 /// One equivalence group, as the settings screen shows it: public global-list data, or the
@@ -601,6 +643,64 @@ mod tests {
     /// this call builds, so `rizzy_match::compiled::GLOBAL_LIST` being `None` today means
     /// exactly what it always meant — no equivalence-only candidate — never a different
     /// outcome than before this binding wired the global list in.
+    /// ADR 0081 §A7, INV-103: the same item id in two vaults stays two candidates, each named
+    /// by its own item reference.
+    #[test]
+    fn candidates_of_several_vaults_keep_their_item_references() {
+        use rizzy_client::items::ItemId;
+        use rizzy_client::rizzy_core::ids::VaultId;
+        let item = ItemId::from_bytes([1; 16]);
+        let first = item_ref(VaultId::from_bytes([0xa1; 16]), item);
+        let second = item_ref(VaultId::from_bytes([0xb2; 16]), item);
+        let uris = vec![
+            UriInput::new(
+                first.to_uppercase(),
+                hex(&[2; 16]),
+                "https://example.com/login".to_owned(),
+                0x0001,
+            ),
+            UriInput::new(
+                second.clone(),
+                hex(&[3; 16]),
+                "https://example.com/".to_owned(),
+                0x0001,
+            ),
+        ];
+        let decision = decide_match_candidates(
+            "https://example.com/",
+            true,
+            "",
+            0x0001,
+            uris,
+            &GlobalEquivalence::without_cache(),
+        )
+        .unwrap();
+        let mut named: Vec<String> = decision
+            .candidates()
+            .iter()
+            .map(MatchCandidate::item_id)
+            .collect();
+        named.sort();
+        assert_eq!(named, vec![first, second]);
+        let bad = vec![UriInput::new(
+            format!("{}:", hex(&[0xa1; 16])),
+            hex(&[2; 16]),
+            "https://example.com/".to_owned(),
+            0x0001,
+        )];
+        assert!(
+            decide_match_candidates(
+                "https://example.com/",
+                true,
+                "",
+                0x0001,
+                bad,
+                &GlobalEquivalence::without_cache(),
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn with_no_compiled_in_global_list_matching_is_unchanged() {
         let uris = vec![UriInput::new(

@@ -64,11 +64,18 @@
 //!   Format 3 ([ADR 0056] §3) adds `SQLite`'s `item_index` table, which this host does not
 //!   keep: the browser extension keeps its M2 item list (ADR 0056 owner answer 4), so its
 //!   format-3 cache is its format-2 one with the format bumped, no store is added to
-//!   [`STORE_NAMES`], and no index row is ever encoded or decoded here.
+//!   [`STORE_NAMES`], and no index row is ever encoded or decoded here. Format 4 ([ADR 0081]
+//!   §A7) re-keys that table by `(vault_id, item_id)` and adds `pending_move`: this host makes
+//!   no moves between vaults (the extension offers none, only the web vault and `rv` do), so
+//!   it keeps no `pending_move` store either, and its format-4 cache is its format-3 one with
+//!   the format bumped (`rizzy_client::store::load::migration_writes` at unlock). A vault
+//!   deleted elsewhere leaves through `Write::DropVault`, which
+//!   [`rizzy_client::store::rows::CacheRows::apply`] executes on the mirror like any write.
 //!
 //! [ADR 0026]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0026-client-device-state-and-cache.md
 //! [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
 //! [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
+//! [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
 
 use rizzy_client::ClientError;
 use rizzy_client::rizzy_core::encoding::{Reader, put_bytes, put_u8, put_u64};

@@ -125,7 +125,7 @@ pub mod autofill {
     use wasm_bindgen::prelude::wasm_bindgen;
     use zeroize::Zeroizing;
     use crate::error::{CoreError, CoreResult};
-    use crate::items::{item_id, visible_item};
+    use crate::items::{item_in, visible_item};
     #[wasm_bindgen()]
     #[__wasm_bindgen_retried]
     #[doc =
@@ -2107,7 +2107,7 @@ pub mod autofill {
     /// `invalid_input` for an id that is not 32 hex digits.
     pub(crate) fn autofill_offer(vault: &VaultSync, id: &str,
         tokens: &[String]) -> CoreResult<AutofillOffer> {
-        let item = item_id(id)?;
+        let item = item_in(vault, id)?;
         let tokens: Vec<&str> = tokens.iter().map(String::as_str).collect();
         let custom =
             vault.custom_fill_offer(item,
@@ -2935,7 +2935,7 @@ pub mod autofill {
     /// lengths; `unknown_item` unless the item is an Active Login.
     pub(crate) fn fill_plan(vault: &VaultSync, id: &str, args: &FillArgs<'_>,
         now_ms: u64) -> CoreResult<FillValues> {
-        let item = item_id(id)?;
+        let item = item_in(vault, id)?;
         if args.tokens.len() != args.elements.len() {
             return Err(ClientError::InvalidInput.into());
         }
@@ -3838,7 +3838,7 @@ pub mod autofill {
     pub(crate) fn save_plan(vault: &VaultSync, id: Option<&str>,
         tokens: &[String], values: &[Zeroizing<String>], masked: &[u8])
         -> CoreResult<Vec<SaveRowView>> {
-        let item = id.map(item_id).transpose()?;
+        let item = id.map(|id| item_in(vault, id)).transpose()?;
         if tokens.len() != values.len() || tokens.len() != masked.len() {
             return Err(ClientError::InvalidInput.into());
         }
@@ -5328,7 +5328,7 @@ pub mod device {
     };
     use rizzy_client::settings::SettingsCache;
     use rizzy_client::store::floors::Floors;
-    use rizzy_client::store::rows::{CacheRows, Changeset};
+    use rizzy_client::store::rows::{CacheRows, Changeset, Write};
     use rizzy_client::store::{self, record::Stage as RecordStage};
     use rizzy_client::sync::{Authors, VaultSync};
     use rizzy_client::webauthn::{self, SecondFactor};
@@ -5339,8 +5339,7 @@ pub mod device {
     };
     use crate::http::{self, HttpRequest};
     use crate::items::{
-        self, FieldView, ItemDraft, ItemSummary, hex, type_from_name,
-        visible_item,
+        self, FieldView, ItemDraft, ItemSummary, hex, item_ref, type_from_name,
     };
     use crate::matching::{self, MatchDecision, MatchSettingsView, UriInput};
     use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
@@ -5348,6 +5347,7 @@ pub mod device {
     use crate::secret::take_secret;
     use crate::store::{CacheDelta, KvRow, decode_rows, encode_rows};
     use crate::sync::{Ctx, Signer, SyncDriver};
+    use crate::vaults::{VaultSet, catalog_of};
     /// A copy of a bearer token (as `rv`'s `copy_token` does): the only way to keep using one after
     /// the value that owns it (here, [`LoggedIn`]) is consumed by the next step.
     fn copy_token(token: &SessionToken) -> SessionToken {
@@ -6968,10 +6968,11 @@ pub mod device {
         /// this device's certificate on the server while persisting nothing of it locally — not a
         /// state a fallback default may paper over (advisor review).
         ///
-        /// Also builds this device's driver of the account's first vault, exactly as
+        /// Also builds this device's driver of every vault the account's catalog opens, exactly as
         /// [`crate::session::Session::from_web`] does for the ephemeral device (module docs, "Sync
-        /// and items"): [`VaultSync::new`] at `next_device_seq` 1, with
-        /// [`VaultSync::persist`] turned on so the very first write journals its own cache rows.
+        /// and items"; ADR 0081 §A7): [`VaultSync::new`] from `next_device_seq` 1 on one shared
+        /// counter, with [`VaultSync::persist`] turned on so the very first write journals its own
+        /// cache rows.
         ///
         /// # Errors
         /// [`ClientError::Internal`] if the device-state record, the first changeset, or a vault's
@@ -6987,19 +6988,15 @@ pub mod device {
             rows.apply(&changeset);
             let cache_rows = encode_rows(&rows)?;
             let mut account = enrolled.account;
-            let vault_id =
-                account.vault_ids().next().ok_or(ClientError::InvalidServerResponse)?;
-            let vault_key =
-                account.take_vault_key(vault_id).ok_or(ClientError::InvalidServerResponse)?;
             let authors = Authors::from_account(&account)?;
-            let mut vault = VaultSync::new(vault_key, &enrolled.unlocked, 1)?;
-            vault.persist();
+            let vaults =
+                VaultSet::open_all(&mut account, &enrolled.unlocked,
+                            true).map_err(|_| ClientError::InvalidServerResponse)?;
             Ok(Self {
                     cache_rows,
                     session: Some(DeviceSession::from_parts(enrolled.device,
-                            enrolled.unlocked, account, authors,
-                            <[_]>::into_vec(::alloc::boxed::box_new([vault])), rows,
-                            floors, Changeset::new())),
+                            enrolled.unlocked, account, authors, vaults, rows, floors,
+                            Changeset::new())),
                 })
         }
     }
@@ -7278,7 +7275,7 @@ pub mod device {
         #[doc =
         " This device\'s driver of each vault the account holds a self-grant for; `[0]` is the"]
         #[doc = " personal vault every call below operates on (struct docs)."]
-        vaults: Vec<VaultSync>,
+        vaults: VaultSet,
         #[doc =
         " A mirror of every row this device\'s cache holds, kept in step with `vaults`\'/`account`\'s"]
         #[doc =
@@ -7596,7 +7593,7 @@ pub mod device {
             f.debug_struct("DeviceSession").field("account_id",
                             &self.unlocked.account_id()).field("device_id",
                         &self.unlocked.device_id()).field("vaults",
-                    &self.vaults.len()).finish_non_exhaustive()
+                    &self.vaults.all().len()).finish_non_exhaustive()
         }
     }
     /// ADR 0051 §4: once per session, at its start, against the floor the load rehydrated: the
@@ -7616,9 +7613,9 @@ pub mod device {
         #[expect(clippy::too_many_arguments, reason =
         "one private constructor over the session's parts; a parts struct would only rename them")]
         fn from_parts(device: DeviceState, unlocked: UnlockedDevice,
-            account: VerifiedAccount, authors: Authors,
-            vaults: Vec<VaultSync>, cache: CacheRows, floors: Floors,
-            mut start_writes: Changeset) -> Self {
+            account: VerifiedAccount, authors: Authors, vaults: VaultSet,
+            cache: CacheRows, floors: Floors, mut start_writes: Changeset)
+            -> Self {
             let global_groups =
                 start_global_groups(&floors, &mut start_writes);
             Self {
@@ -7638,18 +7635,6 @@ pub mod device {
                 start_writes,
             }
         }
-        /// The personal vault, read-only (struct docs). A write goes through a direct
-        /// `self.vaults.first_mut()` instead, inline beside the other fields it needs at once
-        /// (`self.rng`, `self.unlocked`): a `&mut self` accessor here would borrow every field for
-        /// as long as the vault reference lives, which is exactly what `create_item`/`sync_start`
-        /// must not do.
-        ///
-        /// # Errors
-        /// [`ClientError::Internal`] if this device holds no vault at all, which [`EnrolResult::new`]
-        /// and [`DeviceSession::unlock`] never produce.
-        fn vault_ref(&self) -> CoreResult<&VaultSync> {
-            self.vaults.first().ok_or_else(|| ClientError::Internal.into())
-        }
         /// The cache writes of every step since the last drain, diffed against the current
         /// `cache` mirror (`crate::store::CacheDelta`'s module docs): this device's own vault
         /// writes ([`VaultSync::take_writes`]) and the account's current object rows
@@ -7662,8 +7647,13 @@ pub mod device {
         /// device's own steps produced over its own `floors`) or a row does not encode.
         fn drain_cache_writes(&mut self) -> CoreResult<CacheDelta> {
             let mut changeset = core::mem::take(&mut self.start_writes);
+            for vault_id in self.sync.take_dropped() {
+                changeset.push(Write::DropVault {
+                        vault_id: vault_id.to_bytes(),
+                    });
+            }
             changeset.append(store::account_writes(&self.account));
-            for vault in &mut self.vaults {
+            for vault in self.vaults.all_mut() {
                 changeset.append(vault.take_writes());
             }
             if changeset.is_empty() { return Ok(CacheDelta::default()); }
@@ -7681,10 +7671,7 @@ pub mod device {
             if self.sync.running() {
                 return Err(CoreError::new(WRONG_STATE));
             }
-            let item = items::item_id(id)?;
-            let vault =
-                self.vaults.first_mut().ok_or_else(||
-                            CoreError::from(ClientError::Internal))?;
+            let (vault, item) = self.vaults.item_mut(id)?;
             op(vault, &mut self.rng, &self.unlocked, item, now_ms)?;
             Ok(())
         }
@@ -7888,9 +7875,10 @@ pub mod device {
             let loaded =
                 store::load::load(&rows, &record, &unlocked,
                             now_ms).map_err(CoreError::from)?;
+            let catalog = catalog_of(&loaded.account, &unlocked);
+            let vaults = VaultSet::new(loaded.vaults, catalog, true);
             Ok(Self::from_parts(loaded.device, unlocked, loaded.account,
-                    loaded.authors, loaded.vaults, stored, loaded.floors,
-                    migration))
+                    loaded.authors, vaults, stored, loaded.floors, migration))
         }
         #[doc = " The account, hex."]
         #[must_use]
@@ -8951,7 +8939,7 @@ pub mod device {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            Ok(self.vault_ref()?.is_read_only())
+            Ok(!self.vaults.personal_vault().is_ok_and(|v| !v.is_read_only()))
         }
         #[doc =
         " How many own ops the server has not acknowledged yet: what a lock now would lose (the"]
@@ -9059,7 +9047,7 @@ pub mod device {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            Ok(self.vault_ref()?.unacknowledged().0)
+            Ok(self.vaults.all().iter().map(|v| v.unacknowledged().0).sum())
         }
         #[doc = " Whether a sync is running."]
         #[must_use]
@@ -9267,8 +9255,7 @@ pub mod device {
                 };
             let mut ctx =
                 Ctx {
-                    vault: self.vaults.first_mut().ok_or_else(||
-                                CoreError::from(ClientError::Internal))?,
+                    vaults: &mut self.vaults,
                     account: &mut self.account,
                     authors: &mut self.authors,
                     unlocked: &self.unlocked,
@@ -9557,8 +9544,7 @@ pub mod device {
                 };
             let ctx =
                 Ctx {
-                    vault: self.vaults.first_mut().ok_or_else(||
-                                CoreError::from(ClientError::Internal))?,
+                    vaults: &mut self.vaults,
                     account: &mut self.account,
                     authors: &mut self.authors,
                     unlocked: &self.unlocked,
@@ -9671,9 +9657,492 @@ pub mod device {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            self.sync.abort(self.vaults.first_mut().ok_or_else(||
-                            CoreError::from(ClientError::Internal))?);
+            self.sync.abort(&mut self.vaults);
             Ok(())
+        }
+        #[doc =
+        " Every vault the account\'s directory lists (ADR 0081 §A2): the Personal vault first, then"]
+        #[doc =
+        " the others by name; the save prompts\' picker and the item rows\' vault label."]
+        #[must_use]
+        pub fn vaults(&self) -> Vec<crate::vaults::VaultView> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Every vault the account\'s directory lists (ADR 0081 §A2): the Personal vault first, then"]
+                    #[doc =
+                    " the others by name; the save prompts\' picker and the item rows\' vault label."]
+                    #[must_use]
+                    #[export_name = "devicesession_vaults_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_vaults(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Vec<crate::vaults::VaultView>
+                            as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.vaults();
+                                            _ret
+                                        }
+                                    });
+                        <Vec<crate::vaults::VaultView> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " Every vault the account\'s directory lists (ADR 0081 §A2): the Personal vault first, then"]
+                    #[doc =
+                    " the others by name; the save prompts\' picker and the item rows\' vault label."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_vaults_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Vec<crate::vaults::VaultView> as WasmDescribe>::describe();
+                        <Vec<crate::vaults::VaultView> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x02Z Every vault the account's directory lists (ADR 0081 \xc2\xa7A2): the Personal vault first, thenM the others by name; the save prompts' picker and the item rows' vault label.\0\0\0\0\x06vaults\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.vaults.views(|vault| self.account.vault_bytes_used(vault))
+        }
+        #[doc =
+        " The Personal vault, which every save prompt preselects (ADR 0081 §A8); `undefined`"]
+        #[doc = " while the vault set raises an alarm that hides it."]
+        #[must_use]
+        pub fn personal_vault_id(&self) -> Option<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The Personal vault, which every save prompt preselects (ADR 0081 §A8); `undefined`"]
+                    #[doc =
+                    " while the vault set raises an alarm that hides it."]
+                    #[must_use]
+                    #[export_name =
+                    "devicesession_personalVaultId_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_personalVaultId(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<DeviceSession>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.personal_vault_id();
+                                            _ret
+                                        }
+                                    });
+                        <Option<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The Personal vault, which every save prompt preselects (ADR 0081 §A8); `undefined`"]
+                    #[doc =
+                    " while the vault set raises an alarm that hides it."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_personalVaultId_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<String> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x02T The Personal vault, which every save prompt preselects (ADR 0081 \xc2\xa7A8); `undefined`3 while the vault set raises an alarm that hides it.\0\0\0\0\x0fpersonalVaultId\x01\x01\0\0\0\0\x01\0\x02\x0fpersonalVaultId\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.vaults.personal().ok().map(|v| hex(v.as_bytes()))
+        }
+        #[doc = " The vault completeness check\'s alarms (INV-102)."]
+        #[must_use]
+        pub fn vault_alarms(&self) -> Vec<crate::vaults::VaultAlarmView> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The vault completeness check\'s alarms (INV-102)."]
+                    #[must_use]
+                    #[export_name =
+                    "devicesession_vaultAlarms_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_vaultAlarms(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Vec<crate::vaults::VaultAlarmView>
+                            as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.vault_alarms();
+                                            _ret
+                                        }
+                                    });
+                        <Vec<crate::vaults::VaultAlarmView> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The vault completeness check\'s alarms (INV-102)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_vaultAlarms_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Vec<crate::vaults::VaultAlarmView> as
+                                WasmDescribe>::describe();
+                        <Vec<crate::vaults::VaultAlarmView> as
+                                WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x011 The vault completeness check's alarms (INV-102).\0\0\0\0\x0bvaultAlarms\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.vaults.alarm_views()
+        }
+        #[doc =
+        " How many unsent changes were discarded with vaults deleted on another device since the"]
+        #[doc = " last call (reported once; ADR 0081 §A5)."]
+        pub fn take_discarded_changes(&mut self) -> usize {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " How many unsent changes were discarded with vaults deleted on another device since the"]
+                    #[doc = " last call (reported once; ADR 0081 §A5)."]
+                    #[export_name =
+                    "devicesession_takeDiscardedChanges_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_takeDiscardedChanges(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefMutFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<usize as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () = {};
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let mut me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                };
+                                            let me = &mut *me;
+                                            let _ret = me.take_discarded_changes();
+                                            _ret
+                                        }
+                                    });
+                        <usize as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " How many unsent changes were discarded with vaults deleted on another device since the"]
+                    #[doc = " last call (reported once; ADR 0081 §A5)."]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_takeDiscardedChanges_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <usize as WasmDescribe>::describe();
+                        <usize as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x02W How many unsent changes were discarded with vaults deleted on another device since the* last call (reported once; ADR 0081 \xc2\xa7A5).\0\0\0\0\x14takeDiscardedChanges\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.vaults.take_discarded()
+        }
+        #[doc =
+        " The revoked devices whose ops are missing below their cut-off in every vault after the"]
+        #[doc = " last sync (ADR 0081 §0 item 2): 0 for an honest server."]
+        #[must_use]
+        pub fn revoked_data_missing(&self) -> usize {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The revoked devices whose ops are missing below their cut-off in every vault after the"]
+                    #[doc =
+                    " last sync (ADR 0081 §0 item 2): 0 for an honest server."]
+                    #[must_use]
+                    #[export_name =
+                    "devicesession_revokedDataMissing_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_DeviceSession_revokedDataMissing(me:
+                            <DeviceSession as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<usize as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<DeviceSession>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<DeviceSession>();
+                                            let me =
+                                                unsafe {
+                                                    <DeviceSession as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.revoked_data_missing();
+                                            _ret
+                                        }
+                                    });
+                        <usize as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The revoked devices whose ops are missing below their cut-off in every vault after the"]
+                    #[doc =
+                    " last sync (ADR 0081 §0 item 2): 0 for an honest server."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_devicesession_revokedDataMissing_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <usize as WasmDescribe>::describe();
+                        <usize as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\rDeviceSession\x02W The revoked devices whose ops are missing below their cut-off in every vault after the9 last sync (ADR 0081 \xc2\xa70 item 2): 0 for an honest server.\0\0\0\0\x12revokedDataMissing\x01\x01\0\0\0\0\x01\0\x02\x12revokedDataMissing\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.vaults.cutoff_gaps()
         }
         #[doc =
         " The cache writes of every step since the last call (struct docs,"]
@@ -9918,7 +10387,8 @@ pub mod device {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            Ok(items::summaries(self.vault_ref()?, trash))
+            Ok(self.vaults.all().iter().flat_map(|v|
+                            items::summaries(v, trash)).collect())
         }
         #[doc = " One item\'s summary."]
         #[doc = ""]
@@ -10043,8 +10513,7 @@ pub mod device {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            let vault = self.vault_ref()?;
-            let item = visible_item(vault, id)?;
+            let (vault, item) = self.vaults.item(id)?;
             items::summary(vault, item).ok_or(ClientError::UnknownItem.into())
         }
         #[doc =
@@ -10168,8 +10637,7 @@ pub mod device {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            let vault = self.vault_ref()?;
-            let item = visible_item(vault, id)?;
+            let (vault, item) = self.vaults.item(id)?;
             Ok(items::fields(vault, item))
         }
         #[doc =
@@ -10297,7 +10765,8 @@ pub mod device {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            crate::autofill::custom_field_autofill(self.vault_ref()?, id)
+            crate::autofill::custom_field_autofill(self.vaults.item(id)?.0,
+                id)
         }
         #[doc =
         " The offer of one inline-menu candidate (ADR 0076 §4.1): whether it fills a TOTP code,"]
@@ -10461,7 +10930,8 @@ pub mod device {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            crate::autofill::autofill_offer(self.vault_ref()?, id, &tokens)
+            crate::autofill::autofill_offer(self.vaults.item(id)?.0, id,
+                &tokens)
         }
         #[doc =
         " The values of one fill click (ADR 0076 §4.2): one coarse call. `only` is `username`,"]
@@ -10778,7 +11248,7 @@ pub mod device {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            crate::autofill::fill_plan(self.vault_ref()?, id,
+            crate::autofill::fill_plan(self.vaults.item(id)?.0, id,
                 &crate::autofill::FillArgs {
                         only: only.as_deref(),
                         totp,
@@ -11001,8 +11471,13 @@ pub mod device {
                 };
             let values: Vec<Zeroizing<String>> =
                 values.into_iter().map(Zeroizing::new).collect();
-            crate::autofill::save_plan(self.vault_ref()?, id.as_deref(),
-                &tokens, &values, &masked)
+            let vault =
+                match id.as_deref() {
+                    Some(id) => self.vaults.item(id)?.0,
+                    None => self.vaults.personal_vault()?,
+                };
+            crate::autofill::save_plan(vault, id.as_deref(), &tokens, &values,
+                &masked)
         }
         #[doc =
         " One field\'s value as text, concealed or not: call it only on the user\'s request."]
@@ -11153,8 +11628,7 @@ pub mod device {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            let vault = self.vault_ref()?;
-            let item = visible_item(vault, id)?;
+            let (vault, item) = self.vaults.item(id)?;
             Ok(items::reveal(vault, item, key)?.as_str().to_owned())
         }
         #[doc =
@@ -11487,8 +11961,7 @@ pub mod device {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            let vault = self.vault_ref()?;
-            let item = visible_item(vault, id)?;
+            let (vault, item) = self.vaults.item(id)?;
             let bad = || CoreError::from(ClientError::InvalidInput);
             let element = ElementId::from_bytes(items::parse_id(passkey_id)?);
             let bytes_field =
@@ -11668,8 +12141,7 @@ pub mod device {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            let vault = self.vault_ref()?;
-            let item = visible_item(vault, id)?;
+            let (vault, item) = self.vaults.item(id)?;
             let mut out = Vec::new();
             for element in vault.list_elements(item, LIST_PASSKEY) {
                 let element_id = element.element.as_str();
@@ -11730,8 +12202,8 @@ pub mod device {
         " `wrong_state` while a sync runs; as `DeviceSession::vault_ref`; `invalid_input` for an"]
         #[doc =
         " unknown type; `invalid_edit` for a write the schema refuses; `read_only`."]
-        pub fn create_item(&mut self, item_type: &str, draft: &ItemDraft,
-            now_ms: u64) -> Result<String, CoreError> {
+        pub fn create_item(&mut self, vault_id: &str, item_type: &str,
+            draft: &ItemDraft, now_ms: u64) -> Result<String, CoreError> {
             #[automatically_derived]
             const _: () =
                 {
@@ -11763,27 +12235,39 @@ pub mod device {
                             <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4,
                         arg2_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg3_1:
                             <<ItemDraft as wasm_bindgen::convert::RefFromWasmAbi>::Abi
                             as wasm_bindgen::convert::WasmAbi>::Prim1,
-                        arg2_2:
+                        arg3_2:
                             <<ItemDraft as wasm_bindgen::convert::RefFromWasmAbi>::Abi
                             as wasm_bindgen::convert::WasmAbi>::Prim2,
-                        arg2_3:
+                        arg3_3:
                             <<ItemDraft as wasm_bindgen::convert::RefFromWasmAbi>::Abi
                             as wasm_bindgen::convert::WasmAbi>::Prim3,
-                        arg2_4:
+                        arg3_4:
                             <<ItemDraft as wasm_bindgen::convert::RefFromWasmAbi>::Abi
                             as wasm_bindgen::convert::WasmAbi>::Prim4,
-                        arg3_1:
+                        arg4_1:
                             <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim1,
-                        arg3_2:
+                        arg4_2:
                             <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim2,
-                        arg3_3:
+                        arg4_3:
                             <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim3,
-                        arg3_4:
+                        arg4_4:
                             <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4)
                         ->
@@ -11811,26 +12295,36 @@ pub mod device {
                                                             arg1_3, arg1_4))
                                                 };
                                             let arg1 = &*arg1;
-                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<ItemDraft>();
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
                                             let arg2 =
                                                 unsafe {
-                                                    <ItemDraft as
-                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<ItemDraft
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
                                                                 as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                                                                 wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
                                                             arg2_3, arg2_4))
                                                 };
                                             let arg2 = &*arg2;
-                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<ItemDraft>();
                                             let arg3 =
+                                                unsafe {
+                                                    <ItemDraft as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<ItemDraft
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
+                                                };
+                                            let arg3 = &*arg3;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg4 =
                                                 unsafe {
                                                     <u64 as
                                                             wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
                                                                 wasm_bindgen::convert::FromWasmAbi>::Abi as
-                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
-                                                            arg3_3, arg3_4))
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                            arg4_3, arg4_4))
                                                 };
-                                            let _ret = me.create_item(arg1, arg2, arg3);
+                                            let _ret = me.create_item(arg1, arg2, arg3, arg4);
                                             _ret
                                         }
                                     });
@@ -11859,7 +12353,8 @@ pub mod device {
                         wasm_bindgen::__rt::link_mem_intrinsics();
                         inform(FUNCTION);
                         inform(0);
-                        inform(3u32);
+                        inform(4u32);
+                        <&str as WasmDescribe>::describe();
                         <&str as WasmDescribe>::describe();
                         <&ItemDraft as WasmDescribe>::describe();
                         <u64 as WasmDescribe>::describe();
@@ -11875,7 +12370,7 @@ pub mod device {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\rDeviceSession\x07T Creates an item of `item_type` (a name of [`crate::items::TYPES`]) with the draft'sR writes. Returns the new item's id. `DeviceSession::drain_cache_writes` after this0 call returns the rows to persist (struct docs).\0\t # ErrorsW `wrong_state` while a sync runs; as `DeviceSession::vault_ref`; `invalid_input` for anJ unknown type; `invalid_edit` for a write the schema refuses; `read_only`.\0\x03\titem_type\0\0\0\x05draft\0\0\0\x06now_ms\0\0\0\0\0\ncreateItem\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\rDeviceSession\x07T Creates an item of `item_type` (a name of [`crate::items::TYPES`]) with the draft'sR writes. Returns the new item's id. `DeviceSession::drain_cache_writes` after this0 call returns the rows to persist (struct docs).\0\t # ErrorsW `wrong_state` while a sync runs; as `DeviceSession::vault_ref`; `invalid_input` for anJ unknown type; `invalid_edit` for a write the schema refuses; `read_only`.\0\x04\x08vault_id\0\0\0\titem_type\0\0\0\x05draft\0\0\0\x06now_ms\0\0\0\0\0\ncreateItem\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -11905,17 +12400,16 @@ pub mod device {
                 return Err(CoreError::new(WRONG_STATE));
             }
             let item_type = type_from_name(item_type)?;
-            let writes = items::writes(self.vault_ref()?, None, draft)?;
+            let target = items::vault_id(vault_id)?;
+            let vault = self.vaults.get_mut(target)?;
+            let writes = items::writes(vault, None, draft)?;
             let edits: Vec<FieldEdit<'_>> =
                 writes.iter().map(|(key, value)|
                             FieldEdit { key, value }).collect();
-            let vault =
-                self.vaults.first_mut().ok_or_else(||
-                            CoreError::from(ClientError::Internal))?;
             let item =
                 vault.create_item(&mut self.rng, &self.unlocked, item_type,
                         &edits, now_ms)?;
-            Ok(hex(item.as_bytes()))
+            Ok(item_ref(target, item))
         }
         #[doc = " Edits an active item with the draft\'s writes, as one op."]
         #[doc =
@@ -12098,14 +12592,11 @@ pub mod device {
             if self.sync.running() {
                 return Err(CoreError::new(WRONG_STATE));
             }
-            let item = items::item_id(id)?;
-            let writes = items::writes(self.vault_ref()?, Some(item), draft)?;
+            let (vault, item) = self.vaults.item_mut(id)?;
+            let writes = items::writes(vault, Some(item), draft)?;
             let edits: Vec<FieldEdit<'_>> =
                 writes.iter().map(|(key, value)|
                             FieldEdit { key, value }).collect();
-            let vault =
-                self.vaults.first_mut().ok_or_else(||
-                            CoreError::from(ClientError::Internal))?;
             vault.edit_item(&mut self.rng, &self.unlocked, item, &edits,
                     now_ms)?;
             Ok(())
@@ -12695,13 +13186,17 @@ pub mod device {
             if self.sync.running() {
                 return Err(CoreError::new(WRONG_STATE));
             }
-            let vault =
-                self.vaults.first_mut().ok_or_else(||
-                            CoreError::from(ClientError::Internal))?;
-            let purged =
-                vault.auto_purge_due(&mut self.rng, &self.unlocked, now_ms,
-                        TRASH_RETENTION_MS)?;
-            Ok(purged.into_iter().map(|id| hex(id.as_bytes())).collect())
+            let mut out = Vec::new();
+            for vault in self.vaults.all_mut() {
+                if vault.is_read_only() { continue; }
+                let vault_id = vault.vault_id();
+                let purged =
+                    vault.auto_purge_due(&mut self.rng, &self.unlocked, now_ms,
+                            TRASH_RETENTION_MS)?;
+                out.extend(purged.into_iter().map(|id|
+                            item_ref(vault_id, id)));
+            }
+            Ok(out)
         }
         #[doc =
         " Zeroizes every handle this session holds (ADR 0013 §3 rule 1). Consumes the session;"]
@@ -23538,6 +24033,7 @@ pub mod items {
         Dot, FieldKey, ItemId, ItemLifecycle, ItemType, Value,
     };
     use rizzy_client::lists::{ListMove, ListPlace, MAX_WRITES_PER_OP};
+    use rizzy_client::rizzy_core::ids::VaultId;
     use rizzy_client::rizzy_core::item::key::ElementId;
     use rizzy_client::rizzy_core::item::schema::{
         ATTR_ALG, ATTR_CREATED_MS, ATTR_CREDENTIAL_ID, ATTR_DISCOVERABLE,
@@ -23624,6 +24120,33 @@ pub mod items {
     /// The item a hex id names.
     pub(crate) fn item_id(text: &str) -> CoreResult<ItemId> {
         Ok(ItemId::from_bytes(parse_id(text)?))
+    }
+    /// The vault a hex id names.
+    pub(crate) fn vault_id(text: &str) -> CoreResult<VaultId> {
+        Ok(VaultId::from_bytes(parse_id(text)?))
+    }
+    /// The item reference every export takes and hands out ([ADR 0081] §A7, INV-103: an item is
+    /// named by `(vault_id, item_id)` everywhere): the vault's 32 hex digits, `:`, the item's 32
+    /// hex digits, lowercase.
+    ///
+    /// [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    #[must_use]
+    pub fn item_ref(vault: VaultId, item: ItemId) -> String {
+        let mut out = hex(vault.as_bytes());
+        out.push(':');
+        out.push_str(&hex(item.as_bytes()));
+        out
+    }
+    /// The `(vault, item)` an [`item_ref`] names, upper or lower case. Host input: bounded and
+    /// parsed without panics; a bare item id (no vault) is refused, as nothing looks an item up by
+    /// its id alone (INV-103).
+    ///
+    /// # Errors
+    /// `invalid_input` for anything but two 32-digit hex ids joined by `:`.
+    pub fn parse_ref(text: &str) -> CoreResult<(VaultId, ItemId)> {
+        let (vault, item) =
+            text.split_once(':').ok_or(CoreError::from(ClientError::InvalidInput))?;
+        Ok((vault_id(vault)?, item_id(item)?))
     }
     /// The element id a hex id names.
     fn element_id_of(text: &str) -> CoreResult<ElementId> {
@@ -23745,8 +24268,10 @@ pub mod items {
     #[__wasm_bindgen_retried]
     #[doc = " One row of an item list (module docs). Wiped when freed."]
     pub struct ItemSummary {
-        #[doc = " The item id, 32 hex digits."]
+        #[doc = " The item reference ([`item_ref`])."]
         id: String,
+        #[doc = " The item\'s vault, 32 hex digits."]
+        vault_id: String,
         #[doc = " The type\'s name ([`TYPES`])."]
         item_type: &'static str,
         #[doc = " `item.name`, or empty."]
@@ -24037,13 +24562,15 @@ pub mod items {
         }
     }
     impl ItemSummary {
-        #[doc = " The item id, 32 lowercase hex digits."]
+        #[doc =
+        " The item reference, `<vault hex>:<item hex>` ([`item_ref`]): what every item call takes."]
         #[must_use]
         pub fn id(&self) -> String {
             #[automatically_derived]
             const _: () =
                 {
-                    #[doc = " The item id, 32 lowercase hex digits."]
+                    #[doc =
+                    " The item reference, `<vault hex>:<item hex>` ([`item_ref`]): what every item call takes."]
                     #[must_use]
                     #[export_name = "itemsummary_id_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_ItemSummary_id(me:
@@ -24078,7 +24605,8 @@ pub mod items {
             #[automatically_derived]
             const _: () =
                 {
-                    #[doc = " The item id, 32 lowercase hex digits."]
+                    #[doc =
+                    " The item reference, `<vault hex>:<item hex>` ([`item_ref`]): what every item call takes."]
                     #[must_use]
                     #[no_mangle]
                     #[doc(hidden)]
@@ -24100,7 +24628,7 @@ pub mod items {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x0bItemSummary\x01& The item id, 32 lowercase hex digits.\0\0\0\0\x02id\x01\x01\0\0\0\0\x01\0\x02\x02id\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x0bItemSummary\x01Y The item reference, `<vault hex>:<item hex>` ([`item_ref`]): what every item call takes.\0\0\0\0\x02id\x01\x01\0\0\0\0\x01\0\x02\x02id\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -24127,6 +24655,97 @@ pub mod items {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             self.id.clone()
+        }
+        #[doc = " The item\'s vault, 32 lowercase hex digits."]
+        #[must_use]
+        pub fn vault_id(&self) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The item\'s vault, 32 lowercase hex digits."]
+                    #[must_use]
+                    #[export_name = "itemsummary_vaultId_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_ItemSummary_vaultId(me:
+                            <ItemSummary as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<ItemSummary>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<ItemSummary>();
+                                            let me =
+                                                unsafe {
+                                                    <ItemSummary as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.vault_id();
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The item\'s vault, 32 lowercase hex digits."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_itemsummary_vaultId_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0bItemSummary\x01+ The item's vault, 32 lowercase hex digits.\0\0\0\0\x07vaultId\x01\x01\0\0\0\0\x01\0\x02\x07vaultId\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.vault_id.clone()
         }
         #[doc =
         " The type\'s name: `login`, `note`, `card`, `identity`, `ssh-key`, `api-credential`,"]
@@ -24933,7 +25552,8 @@ pub mod items {
                         _ => false,
                     });
         Some(ItemSummary {
-                id: hex(item.as_bytes()),
+                id: item_ref(vault.vault_id(), item),
+                vault_id: hex(vault.vault_id().as_bytes()),
                 item_type: type_name(item_type),
                 title: text_field(vault, item, ITEM_NAME).unwrap_or_default(),
                 username: text_field(vault, item,
@@ -26200,10 +26820,28 @@ pub mod items {
             Ok(ValueRef::Cleared) | Err(_) => ("unknown", None),
         }
     }
-    /// The item that `id` names, if it is active or trashed.
+    /// The item that the reference `id` ([`item_ref`]) names in `vault`, if it is active or
+    /// trashed; `unknown_item` for a reference into another vault.
     pub(crate) fn visible_item(vault: &VaultSync, id: &str)
         -> CoreResult<ItemId> {
-        let item = item_id(id)?;
+        let (vault_id, item) = parse_ref(id)?;
+        if vault_id != vault.vault_id() {
+            return Err(ClientError::UnknownItem.into());
+        }
+        visible(vault, item)
+    }
+    /// The item the reference `id` names in `vault`, whatever its lifecycle; `unknown_item` for a
+    /// reference into another vault.
+    pub(crate) fn item_in(vault: &VaultSync, id: &str) -> CoreResult<ItemId> {
+        let (vault_id, item) = parse_ref(id)?;
+        if vault_id != vault.vault_id() {
+            return Err(ClientError::UnknownItem.into());
+        }
+        Ok(item)
+    }
+    /// `item` if it is active or trashed in `vault`.
+    pub(crate) fn visible(vault: &VaultSync, item: ItemId)
+        -> CoreResult<ItemId> {
         match vault.item_lifecycle(item) {
             ItemLifecycle::Active | ItemLifecycle::Trashed => Ok(item),
             _ => Err(ClientError::UnknownItem.into()),
@@ -33479,7 +34117,7 @@ pub mod matching {
     use rizzy_client::settings::AccountSettingsRecord;
     use wasm_bindgen::prelude::wasm_bindgen;
     use crate::error::{CoreError, CoreResult};
-    use crate::items::{hex, parse_id};
+    use crate::items::{hex, item_ref, parse_id, parse_ref};
     /// Decodes a wire `MatchMode` value (ADR 0037 §4), refusing `0x0007`–`0xFFFF`.
     fn mode_of(value: u16) -> Result<MatchMode, CoreError> {
         MatchMode::from_wire(value).ok_or_else(||
@@ -36412,8 +37050,10 @@ pub mod matching {
         global: &GlobalEquivalence) -> Result<MatchDecision, CoreError> {
         let account_default = mode_of(account_default_mode)?;
         let mut owned_ids = Vec::with_capacity(uris.len());
-        for input in &uris {
-            let item_id = parse_id(&input.item_id)?;
+        let mut names = Vec::with_capacity(uris.len());
+        for (index, input) in uris.iter().enumerate() {
+            names.push(item_key(&input.item_id)?);
+            let item_id = synthetic_id(index);
             let uri_id = parse_id(&input.uri_id)?;
             let mode = mode_of(input.mode)?;
             owned_ids.push((item_id, uri_id, mode));
@@ -36435,7 +37075,7 @@ pub mod matching {
         let decision =
             matching::decide_candidates(page_url, &frame, account_default,
                         &item_uris, &equivalence).map_err(CoreError::from)?;
-        Ok(decision_view(decision))
+        Ok(decision_view_named(decision, &names))
     }
     #[automatically_derived]
     const _: () =
@@ -36686,15 +37326,45 @@ pub mod matching {
             static _GENERATED: [u8; _LEN] =
                 flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
         };
-    /// The JavaScript form of a decision.
-    pub(crate) fn decision_view(decision: matching::Decision)
-        -> MatchDecision {
+    /// The stand-in item id of the `index`th URI of a decision over several vaults: the matcher
+    /// keys candidates by a 16-byte item id, which is unique only within a vault (ADR 0081 §A7,
+    /// INV-103), so each URI gets its index as its id and [`decision_view_named`] maps it back to
+    /// the item reference.
+    pub(crate) fn synthetic_id(index: usize) -> [u8; 16] {
+        u128::try_from(index).unwrap_or(u128::MAX).to_be_bytes()
+    }
+    /// An item key as a host passes it in a URI input: an item reference
+    /// (`crate::items::item_ref`) or, for a caller without vaults, a bare 32-digit id;
+    /// normalised to lowercase.
+    ///
+    /// # Errors
+    /// `invalid_input` for anything else.
+    pub(crate) fn item_key(text: &str) -> CoreResult<String> {
+        if text.contains(':') {
+            let (vault, item) = parse_ref(text)?;
+            Ok(item_ref(vault, item))
+        } else { Ok(hex(&parse_id(text)?)) }
+    }
+    /// [`decision_view`] for a decision keyed by [`synthetic_id`]s: each candidate gets the name
+    /// at its index in `names`.
+    pub(crate) fn decision_view_named(decision: matching::Decision,
+        names: &[String]) -> MatchDecision {
+        decision_view_with(decision,
+            |id|
+                {
+                    usize::try_from(u128::from_be_bytes(*id)).ok().and_then(|i|
+                                    names.get(i)).cloned().unwrap_or_default()
+                })
+    }
+    /// The JavaScript form of a decision, each candidate's item named by `name`.
+    fn decision_view_with(decision: matching::Decision,
+        name: impl Fn(&[u8; 16]) -> String) -> MatchDecision {
         MatchDecision {
             page_host: decision.page_host,
             page_port: decision.page_port,
             candidates: decision.candidates.into_iter().map(|c|
                         MatchCandidate {
-                            item_id: hex(&c.item_id),
+                            item_id: name(&c.item_id),
                             uri_id: hex(&c.uri_id),
                             needs_warning: #[allow(non_exhaustive_omitted_patterns)] match c.matched_via
                                 {
@@ -36718,9 +37388,11 @@ pub mod matching {
         settings: &AccountSettingsRecord, global: &[EquivalenceGroup])
         -> Result<MatchDecision, CoreError> {
         let mut owned_ids = Vec::with_capacity(uris.len());
-        for input in uris {
-            owned_ids.push((parse_id(&input.item_id)?,
-                    parse_id(&input.uri_id)?, mode_of(input.mode)?));
+        let mut names = Vec::with_capacity(uris.len());
+        for (index, input) in uris.iter().enumerate() {
+            names.push(item_key(&input.item_id)?);
+            owned_ids.push((synthetic_id(index), parse_id(&input.uri_id)?,
+                    mode_of(input.mode)?));
         }
         let item_uris: Vec<ItemUri<'_>> =
             uris.iter().zip(&owned_ids).map(|(input, (item_id, uri_id, mode))|
@@ -36734,7 +37406,7 @@ pub mod matching {
         let decision =
             matching::decide_with_settings(page_url, &frame, &item_uris,
                     settings, global)?;
-        Ok(decision_view(decision))
+        Ok(decision_view_named(decision, &names))
     }
     #[wasm_bindgen()]
     #[__wasm_bindgen_retried]
@@ -41144,8 +41816,8 @@ pub mod session {
     use crate::identity::{self, IdentityDefaultsView};
     use crate::items::{
         self, ConflictValueView, FieldHistoryView, FieldView,
-        HistoryEntryView, ItemDraft, ItemSummary, hex, parse_id,
-        type_from_name, visible_item,
+        HistoryEntryView, ItemDraft, ItemSummary, hex, item_ref, parse_id,
+        type_from_name,
     };
     use crate::login::{Credentials, LoginFlow, Purpose};
     use crate::matching::{self, MatchDecision, MatchSettingsView};
@@ -41153,6 +41825,8 @@ pub mod session {
     use crate::rng::{Rng, os_rng};
     use crate::secret::take_secret;
     use crate::sync::{Ctx, Signer, SyncDriver};
+    use crate::vaults::VaultSet;
+    use rizzy_client::rizzy_core::ids::VaultId;
     mod attachments {
         //! Encrypted attachments for the web vault ([ADR 0054]; `rizzy_client::attachments`).
         //!
@@ -41486,8 +42160,17 @@ pub mod session {
             }
         }
         impl AttachmentView {
+            /// A copy, for a view handed out twice.
+            pub(crate) fn duplicate(&self) -> Self {
+                Self {
+                    id: self.id.clone(),
+                    name: self.name.clone(),
+                    mime: self.mime.clone(),
+                    size: self.size,
+                }
+            }
             /// The view of a listed attachment.
-            fn of(info: &AttachmentInfo) -> Self {
+            pub(crate) fn of(info: &AttachmentInfo) -> Self {
                 Self {
                     id: hex(&info.attachment_id.to_bytes()),
                     name: info.name.as_str().to_owned(),
@@ -42018,8 +42701,8 @@ pub mod session {
                         static _GENERATED: [u8; _LEN] =
                             flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                     };
-                let item = items::item_id(id)?;
-                Ok(self.inner()?.vault.attachments(item).iter().map(AttachmentView::of).collect())
+                let (vault, item) = items::parse_ref(id)?;
+                Ok(self.inner()?.vaults.get(vault)?.attachments(item).iter().map(AttachmentView::of).collect())
             }
             #[doc =
             " Adds a file to an item: writes the item op naming it (ADR 0054 §7), wraps a fresh"]
@@ -42248,11 +42931,11 @@ pub mod session {
                         static _GENERATED: [u8; _LEN] =
                             flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                     };
-                let item = items::item_id(id)?;
+                let (vault, item) = items::parse_ref(id)?;
                 let inner = self.writable()?;
                 let upload =
-                    inner.vault.add_attachment(&mut inner.rng, &inner.unlocked,
-                            item, name, mime, data, now_ms)?;
+                    inner.vaults.get_mut(vault)?.add_attachment(&mut inner.rng,
+                            &inner.unlocked, item, name, mime, data, now_ms)?;
                 let attachment = upload.attachment_id();
                 inner.uploads.insert(attachment, upload);
                 Ok(hex(&attachment.to_bytes()))
@@ -42514,7 +43197,7 @@ pub mod session {
                 if let Some(upload) = inner.uploads.get(&id) {
                     return Ok(upload.chunk_count());
                 }
-                Ok(inner.downloads.get(&id).ok_or(ClientError::InvalidInput)?.chunk_count())
+                Ok(inner.downloads.get(&id).ok_or(ClientError::InvalidInput)?.1.chunk_count())
             }
             #[doc =
             " The `attachments/upload-chunk` request of chunk `index`."]
@@ -42948,12 +43631,13 @@ pub mod session {
                         static _GENERATED: [u8; _LEN] =
                             flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                     };
-                let item = items::item_id(id)?;
+                let (vault, item) = items::parse_ref(id)?;
                 let attachment = attachment_id(attachment)?;
                 let inner = self.inner_mut()?;
-                let download = inner.vault.begin_download(item, attachment)?;
+                let download =
+                    inner.vaults.get(vault)?.begin_download(item, attachment)?;
                 let count = download.chunk_count();
-                inner.downloads.insert(attachment, download);
+                inner.downloads.insert(attachment, (vault, download));
                 Ok(count)
             }
             #[doc = " The `attachments/get` request of a download."]
@@ -43081,7 +43765,7 @@ pub mod session {
                 let download =
                     inner.downloads.get(&attachment_id(attachment)?).ok_or(ClientError::InvalidInput)?;
                 HttpRequest::post(paths::ATTACHMENTS_GET,
-                    &download.get_request(), Some(&inner.token))
+                    &download.1.get_request(), Some(&inner.token))
             }
             #[doc =
             " Reads the `attachments/get` answer: the wrap, opened with the item key its header names."]
@@ -43259,9 +43943,10 @@ pub mod session {
                 let id = attachment_id(attachment)?;
                 let answer: GetAttachmentResponse = http::json(status, body)?;
                 let inner = self.inner_mut()?;
-                let download =
+                let (vault, download) =
                     inner.downloads.get_mut(&id).ok_or(ClientError::InvalidInput)?;
-                inner.vault.accept_attachment_key(download, &answer)?;
+                inner.vaults.get(*vault)?.accept_attachment_key(download,
+                        &answer)?;
                 Ok(())
             }
             #[doc =
@@ -43414,7 +44099,7 @@ pub mod session {
                 let download =
                     inner.downloads.get(&attachment_id(attachment)?).ok_or(ClientError::InvalidInput)?;
                 HttpRequest::post(paths::ATTACHMENTS_DOWNLOAD_CHUNK,
-                    &download.chunk_request(index)?, Some(&inner.token))
+                    &download.1.chunk_request(index)?, Some(&inner.token))
             }
             #[doc =
             " Reads the answer for chunk `index` and opens it against this client\'s own layout."]
@@ -43616,7 +44301,7 @@ pub mod session {
                 let inner = self.inner_mut()?;
                 let download =
                     inner.downloads.get_mut(&id).ok_or(ClientError::InvalidInput)?;
-                download.accept_response(index, &answer)?;
+                download.1.accept_response(index, &answer)?;
                 Ok(())
             }
             #[doc =
@@ -43747,7 +44432,7 @@ pub mod session {
                 let id = attachment_id(attachment)?;
                 let download =
                     self.inner_mut()?.downloads.remove(&id).ok_or(ClientError::InvalidInput)?;
-                let file = download.finish()?;
+                let file = download.1.finish()?;
                 Ok(file.as_slice().to_vec())
             }
             #[doc = " Forgets a download without assembling it."]
@@ -44170,12 +44855,2930 @@ pub mod session {
                         static _GENERATED: [u8; _LEN] =
                             flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                     };
-                let item = items::item_id(id)?;
+                let (vault, item) = items::parse_ref(id)?;
                 let attachment = attachment_id(attachment)?;
                 let inner = self.writable()?;
-                inner.vault.remove_attachment(&mut inner.rng, &inner.unlocked,
-                        item, attachment, now_ms)?;
+                inner.vaults.get_mut(vault)?.remove_attachment(&mut inner.rng,
+                        &inner.unlocked, item, attachment, now_ms)?;
                 Ok(())
+            }
+        }
+        #[automatically_derived]
+        const _: () =
+            {
+                use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                static _INCLUDED_FILES: &[&str] = &[];
+                const _ENCODED_BYTES: &[u8] =
+                    {
+                        const _CHUNK_SLICES: [&[u8]; 1usize] =
+                            [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        #[allow(long_running_const_eval)]
+                        const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                        #[allow(long_running_const_eval)]
+                        const _CHUNKS: [u8; _CHUNK_LEN] =
+                            flat_byte_slices(_CHUNK_SLICES);
+                        const _LEN_BYTES: [u8; 4] =
+                            (_CHUNK_LEN as u32).to_le_bytes();
+                        const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                        #[allow(long_running_const_eval)]
+                        const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                            flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                        &_ENCODED_BYTES
+                    };
+                const _PREFIX_JSON_BYTES: &[u8] =
+                    b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                const _PREFIX_JSON_BYTES_LEN: usize =
+                    _PREFIX_JSON_BYTES.len();
+                const _LEN: usize =
+                    _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                #[link_section = "__wasm_bindgen_unstable"]
+                #[allow(long_running_const_eval)]
+                static _GENERATED: [u8; _LEN] =
+                    flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+            };
+    }
+    mod vault_ops {
+        //! The web vault's vault management and moves between vaults ([ADR 0081] §A3–§A6).
+        //!
+        //! | Action | Calls |
+        //! |---|---|
+        //! | Vault list, switcher, pickers | [`Session::vaults`], [`Session::personal_vault_id`], [`Session::vault_alarms`] |
+        //! | Create | [`Session::create_vault_request`] → carry → [`Session::vault_respond`] (the name is the new vault's first op) |
+        //! | Rename | [`Session::rename_vault`] (never the Personal vault) |
+        //! | Delete | [`Session::delete_vault_request`] → carry → [`Session::vault_respond`]; the server needs a fresh OPAQUE session (`server_fresh_session_required`: [`Session::refresh`], then build the request again) |
+        //! | Copy | [`Session::copy_item`]; then each listed attachment downloaded from the source and uploaded to the copy |
+        //! | Move | [`Session::move_item`], the attachments as for a copy, [`Session::move_attachments_stored`], a sync, [`Session::finish_moves`], a sync |
+        //!
+        //! A move purges its source only after the server acknowledged the copy and the host said
+        //! every attachment of it is stored (INV-104). A web session has no cache (CRYPTO.md §11.4):
+        //! its pending moves live in memory, and a lock before the purge leaves the item in both
+        //! vaults, a duplicate, never a loss. Deleting a vault with "Move its items to Personal" is
+        //! these moves into the Personal vault, a sync, then the delete: the vault's deletion removes
+        //! the sources, so no purge of each is needed.
+        //!
+        //! [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+        use rizzy_client::ClientError;
+        use rizzy_client::rizzy_core::ids::VaultId;
+        use rizzy_client::rizzy_proto::error::ErrorCode;
+        use rizzy_client::rizzy_proto::http::paths;
+        use rizzy_client::vaults::{
+            MAX_VAULT_NAME_CHARS, MoveStep, PendingMove, PendingVaultChange,
+            VaultCatalog, copy_item, create_vault, delete_vault, rename_vault,
+        };
+        use wasm_bindgen::prelude::wasm_bindgen;
+        use zeroize::Zeroizing;
+        use super::{AttachmentView, Session};
+        use crate::error::{CoreError, CoreResult, WRONG_STATE};
+        use crate::http::{self, HttpRequest};
+        use crate::items::{self, hex, item_ref, parse_ref};
+        use crate::vaults::{VaultAlarmView, VaultView};
+        /// A vault change waiting for `account/commit`.
+        pub(super) struct PendingVault {
+            /// The change.
+            change: PendingVaultChange,
+            /// The name a creation writes as the vault's first op.
+            name: Option<Zeroizing<String>>,
+        }
+        /// A move of this session whose source is not purged yet.
+        pub(super) struct WebMove {
+            /// The move.
+            mv: PendingMove,
+            /// Whether attachments of the copy are still to be uploaded by the host.
+            attachments_pending: bool,
+        }
+        impl WebMove {
+            /// Whether this move touches `vault`.
+            fn involves(&self, vault: VaultId) -> bool {
+                self.mv.source_vault == vault || self.mv.target_vault == vault
+            }
+        }
+        /// A vault name as the clients accept it (§A4): trimmed, 1 to 64 Unicode scalar values.
+        fn check_name(name: &str) -> CoreResult<Zeroizing<String>> {
+            let name = name.trim();
+            if name.is_empty() || name.chars().count() > MAX_VAULT_NAME_CHARS
+                {
+                return Err(ClientError::InvalidInput.into());
+            }
+            Ok(Zeroizing::new(name.to_owned()))
+        }
+        #[wasm_bindgen()]
+        #[__wasm_bindgen_retried]
+        #[doc =
+        " What a copy or move wrote: the new item, and the source\'s attachments the host carries"]
+        #[doc =
+        " over (download from the source item, upload to the new one)."]
+        pub struct ItemCopyView {
+            #[doc = " The new item\'s reference."]
+            id: String,
+            #[doc = " Whether this call wrote it."]
+            created: bool,
+            #[doc = " The source\'s attachments the copy does not hold yet."]
+            attachments: Vec<AttachmentView>,
+        }
+        #[automatically_derived]
+        impl ::core::fmt::Debug for ItemCopyView {
+            #[inline]
+            fn fmt(&self, f: &mut ::core::fmt::Formatter)
+                -> ::core::fmt::Result {
+                ::core::fmt::Formatter::debug_struct_field3_finish(f,
+                    "ItemCopyView", "id", &self.id, "created", &self.created,
+                    "attachments", &&self.attachments)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::__rt::marker::SupportsConstructor for ItemCopyView
+            {
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for
+            ItemCopyView {
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::__rt::marker::SupportsStaticProperty for
+            ItemCopyView {
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::describe::WasmDescribe for ItemCopyView {
+            fn describe() {
+                use wasm_bindgen::describe::*;
+                inform(RUST_STRUCT);
+                inform(12u32);
+                inform(73u32);
+                inform(116u32);
+                inform(101u32);
+                inform(109u32);
+                inform(67u32);
+                inform(111u32);
+                inform(112u32);
+                inform(121u32);
+                inform(86u32);
+                inform(105u32);
+                inform(101u32);
+                inform(119u32);
+                inform(27u32);
+                inform(114u32);
+                inform(105u32);
+                inform(122u32);
+                inform(122u32);
+                inform(121u32);
+                inform(45u32);
+                inform(119u32);
+                inform(97u32);
+                inform(115u32);
+                inform(109u32);
+                inform(45u32);
+                inform(101u32);
+                inform(48u32);
+                inform(57u32);
+                inform(99u32);
+                inform(99u32);
+                inform(48u32);
+                inform(101u32);
+                inform(98u32);
+                inform(51u32);
+                inform(53u32);
+                inform(102u32);
+                inform(56u32);
+                inform(98u32);
+                inform(53u32);
+                inform(56u32);
+                inform(51u32);
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::IntoWasmAbi for ItemCopyView {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<ItemCopyView>>;
+            fn into_abi(self) -> Self::Abi {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+                WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self)))
+                        as *mut WasmRefCell<ItemCopyView>)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::FromWasmAbi for ItemCopyView {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<ItemCopyView>>;
+            unsafe fn from_abi(js: Self::Abi) -> Self {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+                use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+                let ptr = js.into_ptr();
+                assert_not_null(ptr);
+                let rc = Rc::from_raw(ptr);
+                match Rc::try_unwrap(rc) {
+                    Ok(cell) => cell.into_inner(),
+                    Err(_) =>
+                        wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+                }
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::__rt::core::convert::From<ItemCopyView> for
+            wasm_bindgen::JsValue {
+            fn from(value: ItemCopyView) -> Self {
+                let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+                #[link(wasm_import_module = "__wbindgen_placeholder__")]
+                extern "C" {
+                    #[link_name = "__wbg_itemcopyview_new_e09cc0eb35f8b583"]
+                    fn __wbg_itemcopyview_new(ptr:
+                        wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<ItemCopyView>>)
+                    -> u32;
+                }
+                unsafe {
+                    <wasm_bindgen::JsValue as
+                            wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_itemcopyview_new(ptr))
+                }
+            }
+        }
+        #[automatically_derived]
+        const _: () =
+            {
+                #[export_name = "__wbg_itemcopyview_free_e09cc0eb35f8b583"]
+                #[doc(hidden)]
+                pub unsafe extern "C-unwind" fn __wbg_itemcopyview_free(ptr:
+                        wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<ItemCopyView>>,
+                    allow_delayed: u32) {
+                    use wasm_bindgen::__rt::alloc::rc::Rc;
+                    if allow_delayed != 0 {
+                        let ptr = ptr.into_ptr();
+                        wasm_bindgen::__rt::assert_not_null(ptr);
+                        drop(Rc::from_raw(ptr));
+                    } else {
+                        let _ =
+                            <ItemCopyView as
+                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                    }
+                }
+            };
+        #[automatically_derived]
+        impl wasm_bindgen::convert::RefFromWasmAbi for ItemCopyView {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<ItemCopyView>>;
+            type Anchor = wasm_bindgen::__rt::RcRef<ItemCopyView>;
+            unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                let js = js.into_ptr();
+                wasm_bindgen::__rt::assert_not_null(js);
+                Rc::increment_strong_count(js);
+                let rc = Rc::from_raw(js);
+                wasm_bindgen::__rt::RcRef::new(rc)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::RefMutFromWasmAbi for ItemCopyView {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<ItemCopyView>>;
+            type Anchor = wasm_bindgen::__rt::RcRefMut<ItemCopyView>;
+            unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                let js = js.into_ptr();
+                wasm_bindgen::__rt::assert_not_null(js);
+                Rc::increment_strong_count(js);
+                let rc = Rc::from_raw(js);
+                wasm_bindgen::__rt::RcRefMut::new(rc)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::LongRefFromWasmAbi for ItemCopyView {
+            type Abi =
+                wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<ItemCopyView>>;
+            type Anchor = wasm_bindgen::__rt::RcRef<ItemCopyView>;
+            unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+                <Self as
+                        wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::OptionIntoWasmAbi for ItemCopyView {
+            #[inline]
+            fn none() -> Self::Abi {
+                <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<ItemCopyView>>>::null()
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::OptionFromWasmAbi for ItemCopyView {
+            #[inline]
+            fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::TryFromJsValue for ItemCopyView {
+            fn try_from_js_value(value: wasm_bindgen::JsValue)
+                ->
+                    wasm_bindgen::__rt::core::result::Result<Self,
+                    wasm_bindgen::JsValue> {
+                Self::try_from_js_value_ref(&value).ok_or(value)
+            }
+            fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+                -> wasm_bindgen::__rt::core::option::Option<Self> {
+                let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+                #[link(wasm_import_module = "__wbindgen_placeholder__")]
+                extern "C" {
+                    #[link_name = "__wbg_itemcopyview_unwrap_e09cc0eb35f8b583"]
+                    fn __wbg_itemcopyview_unwrap(ptr: u32)
+                    ->
+                        wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<ItemCopyView>>;
+                }
+                let ptr = unsafe { __wbg_itemcopyview_unwrap(idx) };
+                if ptr.is_null() {
+                    wasm_bindgen::__rt::core::option::Option::None
+                } else {
+                    unsafe {
+                        wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                    wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                    }
+                }
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::describe::WasmDescribeVector for ItemCopyView {
+            fn describe_vector() {
+                use wasm_bindgen::describe::*;
+                inform(VECTOR);
+                <ItemCopyView as
+                        wasm_bindgen::describe::WasmDescribe>::describe();
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::VectorIntoWasmAbi for ItemCopyView {
+            type Abi =
+                <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]>
+                as wasm_bindgen::convert::IntoWasmAbi>::Abi;
+            fn vector_into_abi(vector:
+                    wasm_bindgen::__rt::alloc::boxed::Box<[ItemCopyView]>)
+                -> Self::Abi {
+                wasm_bindgen::convert::js_value_vector_into_abi(vector)
+            }
+        }
+        #[automatically_derived]
+        impl wasm_bindgen::convert::VectorFromWasmAbi for ItemCopyView {
+            type Abi =
+                <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]>
+                as wasm_bindgen::convert::FromWasmAbi>::Abi;
+            unsafe fn vector_from_abi(js: Self::Abi)
+                -> wasm_bindgen::__rt::alloc::boxed::Box<[ItemCopyView]> {
+                wasm_bindgen::convert::js_value_vector_from_abi(js)
+            }
+        }
+        #[automatically_derived]
+        const _: () =
+            {
+                use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                static _INCLUDED_FILES: &[&str] = &[];
+                const _ENCODED_BYTES: &[u8] =
+                    {
+                        const _CHUNK_SLICES: [&[u8]; 1usize] =
+                            [b"\0\0\0\x01\x0cItemCopyView\0\x02W What a copy or move wrote: the new item, and the source's attachments the host carries= over (download from the source item, upload to the new one).\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        #[allow(long_running_const_eval)]
+                        const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                        #[allow(long_running_const_eval)]
+                        const _CHUNKS: [u8; _CHUNK_LEN] =
+                            flat_byte_slices(_CHUNK_SLICES);
+                        const _LEN_BYTES: [u8; 4] =
+                            (_CHUNK_LEN as u32).to_le_bytes();
+                        const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                        #[allow(long_running_const_eval)]
+                        const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                            flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                        &_ENCODED_BYTES
+                    };
+                const _PREFIX_JSON_BYTES: &[u8] =
+                    b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                const _PREFIX_JSON_BYTES_LEN: usize =
+                    _PREFIX_JSON_BYTES.len();
+                const _LEN: usize =
+                    _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                #[link_section = "__wasm_bindgen_unstable"]
+                #[allow(long_running_const_eval)]
+                static _GENERATED: [u8; _LEN] =
+                    flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+            };
+        impl ItemCopyView {
+            #[doc = " The new item\'s reference (`<vault hex>:<item hex>`)."]
+            #[must_use]
+            pub fn id(&self) -> String {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The new item\'s reference (`<vault hex>:<item hex>`)."]
+                        #[must_use]
+                        #[export_name = "itemcopyview_id_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_ItemCopyView_id(me:
+                                <ItemCopyView as
+                                wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<String as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () =
+                                {
+                                    let _:
+                                            wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<ItemCopyView>;
+                                };
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<ItemCopyView>();
+                                                let me =
+                                                    unsafe {
+                                                        <ItemCopyView as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.id();
+                                                _ret
+                                            }
+                                        });
+                            <String as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The new item\'s reference (`<vault hex>:<item hex>`)."]
+                        #[must_use]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_itemcopyview_id_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <String as WasmDescribe>::describe();
+                            <String as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x0cItemCopyView\x015 The new item's reference (`<vault hex>:<item hex>`).\0\0\0\0\x02id\x01\x01\0\0\0\0\x01\0\x02\x02id\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                self.id.clone()
+            }
+            #[doc =
+            " Whether this call wrote the copy (`false`: it was there already)."]
+            #[must_use]
+            pub fn created(&self) -> bool {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Whether this call wrote the copy (`false`: it was there already)."]
+                        #[must_use]
+                        #[export_name = "itemcopyview_created_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_ItemCopyView_created(me:
+                                <ItemCopyView as
+                                wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<bool as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () =
+                                {
+                                    let _:
+                                            wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<ItemCopyView>;
+                                };
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<ItemCopyView>();
+                                                let me =
+                                                    unsafe {
+                                                        <ItemCopyView as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.created();
+                                                _ret
+                                            }
+                                        });
+                            <bool as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Whether this call wrote the copy (`false`: it was there already)."]
+                        #[must_use]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_itemcopyview_created_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <bool as WasmDescribe>::describe();
+                            <bool as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x0cItemCopyView\x01B Whether this call wrote the copy (`false`: it was there already).\0\0\0\0\x07created\x01\x01\0\0\0\0\x01\0\x02\x07created\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                self.created
+            }
+            #[doc =
+            " The source item\'s attachments to carry over, by their ids in the source item."]
+            #[must_use]
+            pub fn attachments(&self) -> Vec<AttachmentView> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The source item\'s attachments to carry over, by their ids in the source item."]
+                        #[must_use]
+                        #[export_name = "itemcopyview_attachments_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_ItemCopyView_attachments(me:
+                                <ItemCopyView as
+                                wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Vec<AttachmentView> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<ItemCopyView>();
+                                                let me =
+                                                    unsafe {
+                                                        <ItemCopyView as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.attachments();
+                                                _ret
+                                            }
+                                        });
+                            <Vec<AttachmentView> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The source item\'s attachments to carry over, by their ids in the source item."]
+                        #[must_use]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_itemcopyview_attachments_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <Vec<AttachmentView> as WasmDescribe>::describe();
+                            <Vec<AttachmentView> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x0cItemCopyView\x01N The source item's attachments to carry over, by their ids in the source item.\0\0\0\0\x0battachments\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                self.attachments.iter().map(AttachmentView::duplicate).collect()
+            }
+        }
+        #[automatically_derived]
+        const _: () =
+            {
+                use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                static _INCLUDED_FILES: &[&str] = &[];
+                const _ENCODED_BYTES: &[u8] =
+                    {
+                        const _CHUNK_SLICES: [&[u8]; 1usize] =
+                            [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                        #[allow(long_running_const_eval)]
+                        const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                        #[allow(long_running_const_eval)]
+                        const _CHUNKS: [u8; _CHUNK_LEN] =
+                            flat_byte_slices(_CHUNK_SLICES);
+                        const _LEN_BYTES: [u8; 4] =
+                            (_CHUNK_LEN as u32).to_le_bytes();
+                        const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                        #[allow(long_running_const_eval)]
+                        const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                            flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                        &_ENCODED_BYTES
+                    };
+                const _PREFIX_JSON_BYTES: &[u8] =
+                    b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                const _PREFIX_JSON_BYTES_LEN: usize =
+                    _PREFIX_JSON_BYTES.len();
+                const _LEN: usize =
+                    _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                #[link_section = "__wasm_bindgen_unstable"]
+                #[allow(long_running_const_eval)]
+                static _GENERATED: [u8; _LEN] =
+                    flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+            };
+        impl Session {
+            #[doc =
+            " Every vault the account\'s directory lists (or the legacy Personal vault, §A10): the"]
+            #[doc =
+            " Personal vault first, then the others by name. The host shows the Personal vault as"]
+            #[doc =
+            " \"Personal\" (localised) and an owned vault without a name as \"Untitled vault\"."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " `locked`."]
+            pub fn vaults(&self) -> Result<Vec<VaultView>, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Every vault the account\'s directory lists (or the legacy Personal vault, §A10): the"]
+                        #[doc =
+                        " Personal vault first, then the others by name. The host shows the Personal vault as"]
+                        #[doc =
+                        " \"Personal\" (localised) and an owned vault without a name as \"Untitled vault\"."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`."]
+                        #[export_name = "session_vaults_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_vaults(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<Vec<VaultView>,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.vaults();
+                                                _ret
+                                            }
+                                        });
+                            <Result<Vec<VaultView>, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Every vault the account\'s directory lists (or the legacy Personal vault, §A10): the"]
+                        #[doc =
+                        " Personal vault first, then the others by name. The host shows the Personal vault as"]
+                        #[doc =
+                        " \"Personal\" (localised) and an owned vault without a name as \"Untitled vault\"."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_vaults_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <Result<Vec<VaultView>, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<Vec<VaultView>, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x06U Every vault the account's directory lists (or the legacy Personal vault, \xc2\xa7A10): theT Personal vault first, then the others by name. The host shows the Personal vault asN \"Personal\" (localised) and an owned vault without a name as \"Untitled vault\".\0\t # Errors\n `locked`.\0\0\0\0\x06vaults\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let inner = self.inner()?;
+                Ok(inner.vaults.views(|vault|
+                            inner.account.vault_bytes_used(vault)))
+            }
+            #[doc =
+            " The Personal vault: the target every new item, import and save prompt preselects (§A1,"]
+            #[doc =
+            " §A8); `undefined` while the vault set raises an alarm that hides it."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " `locked`."]
+            pub fn personal_vault_id(&self)
+                -> Result<Option<String>, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The Personal vault: the target every new item, import and save prompt preselects (§A1,"]
+                        #[doc =
+                        " §A8); `undefined` while the vault set raises an alarm that hides it."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`."]
+                        #[export_name = "session_personalVaultId_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_personalVaultId(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<Option<String>,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () =
+                                {
+                                    let _:
+                                            wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<Session>;
+                                };
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.personal_vault_id();
+                                                _ret
+                                            }
+                                        });
+                            <Result<Option<String>, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The Personal vault: the target every new item, import and save prompt preselects (§A1,"]
+                        #[doc =
+                        " §A8); `undefined` while the vault set raises an alarm that hides it."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_personalVaultId_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <Result<Option<String>, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<Option<String>, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05X The Personal vault: the target every new item, import and save prompt preselects (\xc2\xa7A1,F \xc2\xa7A8); `undefined` while the vault set raises an alarm that hides it.\0\t # Errors\n `locked`.\0\0\0\0\x0fpersonalVaultId\x01\x01\0\0\0\0\x01\0\x02\x0fpersonalVaultId\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                Ok(self.inner()?.vaults.personal().ok().map(|v|
+                            hex(v.as_bytes())))
+            }
+            #[doc =
+            " The vault completeness check\'s alarms (INV-102): a listed vault withheld, an unlisted"]
+            #[doc =
+            " vault served, several vaults without a directory. Empty for an honest server."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " `locked`."]
+            pub fn vault_alarms(&self)
+                -> Result<Vec<VaultAlarmView>, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The vault completeness check\'s alarms (INV-102): a listed vault withheld, an unlisted"]
+                        #[doc =
+                        " vault served, several vaults without a directory. Empty for an honest server."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`."]
+                        #[export_name = "session_vaultAlarms_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_vaultAlarms(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<Vec<VaultAlarmView>,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.vault_alarms();
+                                                _ret
+                                            }
+                                        });
+                            <Result<Vec<VaultAlarmView>, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The vault completeness check\'s alarms (INV-102): a listed vault withheld, an unlisted"]
+                        #[doc =
+                        " vault served, several vaults without a directory. Empty for an honest server."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_vaultAlarms_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <Result<Vec<VaultAlarmView>, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<Vec<VaultAlarmView>, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05V The vault completeness check's alarms (INV-102): a listed vault withheld, an unlistedN vault served, several vaults without a directory. Empty for an honest server.\0\t # Errors\n `locked`.\0\0\0\0\x0bvaultAlarms\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                Ok(self.inner()?.vaults.alarm_views())
+            }
+            #[doc =
+            " How many unsent changes were discarded with vaults deleted on another device since the"]
+            #[doc = " last call (reported once)."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " `locked`."]
+            pub fn take_discarded_changes(&mut self)
+                -> Result<usize, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " How many unsent changes were discarded with vaults deleted on another device since the"]
+                        #[doc = " last call (reported once)."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`."]
+                        #[export_name =
+                        "session_takeDiscardedChanges_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_takeDiscardedChanges(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<usize, CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                let _ret = me.take_discarded_changes();
+                                                _ret
+                                            }
+                                        });
+                            <Result<usize, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " How many unsent changes were discarded with vaults deleted on another device since the"]
+                        #[doc = " last call (reported once)."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_takeDiscardedChanges_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <Result<usize, CoreError> as WasmDescribe>::describe();
+                            <Result<usize, CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05W How many unsent changes were discarded with vaults deleted on another device since the\x1b last call (reported once).\0\t # Errors\n `locked`.\0\0\0\0\x14takeDiscardedChanges\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let inner = self.inner_mut()?;
+                inner.sync.take_dropped();
+                Ok(inner.vaults.take_discarded())
+            }
+            #[doc =
+            " The `account/commit` request that creates an owned vault (§A3). After a 204,"]
+            #[doc =
+            " [`Session::vault_respond`] adds it and writes `name` as its first op."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `wrong_state` while a sync runs; `invalid_input` for an empty name or one"]
+            #[doc =
+            " over 64 characters; `vault_limit_reached`; `vault_set_mismatch` while the vault set"]
+            #[doc = " raises an alarm; `account_key_rotated`."]
+            pub fn create_vault_request(&mut self, name: &str)
+                -> Result<HttpRequest, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `account/commit` request that creates an owned vault (§A3). After a 204,"]
+                        #[doc =
+                        " [`Session::vault_respond`] adds it and writes `name` as its first op."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` while a sync runs; `invalid_input` for an empty name or one"]
+                        #[doc =
+                        " over 64 characters; `vault_limit_reached`; `vault_set_mismatch` while the vault set"]
+                        #[doc = " raises an alarm; `account_key_rotated`."]
+                        #[export_name =
+                        "session_createVaultRequest_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_createVaultRequest(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.create_vault_request(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<HttpRequest, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `account/commit` request that creates an owned vault (§A3). After a 204,"]
+                        #[doc =
+                        " [`Session::vault_respond`] adds it and writes `name` as its first op."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` while a sync runs; `invalid_input` for an empty name or one"]
+                        #[doc =
+                        " over 64 characters; `vault_limit_reached`; `vault_set_mismatch` while the vault set"]
+                        #[doc = " raises an alarm; `account_key_rotated`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_createVaultRequest_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x07N The `account/commit` request that creates an owned vault (\xc2\xa7A3). After a 204,F [`Session::vault_respond`] adds it and writes `name` as its first op.\0\t # ErrorsT `locked`; `wrong_state` while a sync runs; `invalid_input` for an empty name or oneT over 64 characters; `vault_limit_reached`; `vault_set_mismatch` while the vault set( raises an alarm; `account_key_rotated`.\0\x01\x04name\0\0\0\0\0\x12createVaultRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let name = check_name(name)?;
+                let inner = self.writable()?;
+                let change =
+                    create_vault(&mut inner.rng, &inner.account,
+                            &inner.unlocked)?;
+                let request =
+                    HttpRequest::post(paths::ACCOUNT_COMMIT,
+                            change.commit_request(), Some(&inner.token))?;
+                inner.vault_pending =
+                    Some(PendingVault { change, name: Some(name) });
+                Ok(request)
+            }
+            #[doc =
+            " The `account/commit` request that deletes an owned vault and everything in it (§A5)."]
+            #[doc =
+            " The server needs a fresh OPAQUE session: on `server_fresh_session_required` the host"]
+            #[doc =
+            " re-authenticates ([`Session::refresh`]) and builds this request again. To keep the"]
+            #[doc =
+            " items, the host moves them to the Personal vault first ([`Session::move_item`]) and"]
+            #[doc = " syncs."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `wrong_state` while a sync runs; `invalid_input` for a malformed id;"]
+            #[doc =
+            " `personal_vault_protected` for the Personal vault; `unknown_vault`;"]
+            #[doc = " `vault_set_mismatch`."]
+            pub fn delete_vault_request(&mut self, vault_id: &str)
+                -> Result<HttpRequest, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `account/commit` request that deletes an owned vault and everything in it (§A5)."]
+                        #[doc =
+                        " The server needs a fresh OPAQUE session: on `server_fresh_session_required` the host"]
+                        #[doc =
+                        " re-authenticates ([`Session::refresh`]) and builds this request again. To keep the"]
+                        #[doc =
+                        " items, the host moves them to the Personal vault first ([`Session::move_item`]) and"]
+                        #[doc = " syncs."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` while a sync runs; `invalid_input` for a malformed id;"]
+                        #[doc =
+                        " `personal_vault_protected` for the Personal vault; `unknown_vault`;"]
+                        #[doc = " `vault_set_mismatch`."]
+                        #[export_name =
+                        "session_deleteVaultRequest_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_deleteVaultRequest(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.delete_vault_request(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<HttpRequest, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The `account/commit` request that deletes an owned vault and everything in it (§A5)."]
+                        #[doc =
+                        " The server needs a fresh OPAQUE session: on `server_fresh_session_required` the host"]
+                        #[doc =
+                        " re-authenticates ([`Session::refresh`]) and builds this request again. To keep the"]
+                        #[doc =
+                        " items, the host moves them to the Personal vault first ([`Session::move_item`]) and"]
+                        #[doc = " syncs."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` while a sync runs; `invalid_input` for a malformed id;"]
+                        #[doc =
+                        " `personal_vault_protected` for the Personal vault; `unknown_vault`;"]
+                        #[doc = " `vault_set_mismatch`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_deleteVaultRequest_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\nV The `account/commit` request that deletes an owned vault and everything in it (\xc2\xa7A5).U The server needs a fresh OPAQUE session: on `server_fresh_session_required` the hostS re-authenticates ([`Session::refresh`]) and builds this request again. To keep theT items, the host moves them to the Personal vault first ([`Session::move_item`]) and\x07 syncs.\0\t # ErrorsO `locked`; `wrong_state` while a sync runs; `invalid_input` for a malformed id;D `personal_vault_protected` for the Personal vault; `unknown_vault`;\x16 `vault_set_mismatch`.\0\x01\x08vault_id\0\0\0\0\0\x12deleteVaultRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let vault_id = items::vault_id(vault_id)?;
+                let inner = self.writable()?;
+                if inner.vaults.catalog().personal() == Some(vault_id) {
+                    return Err(ClientError::PersonalVaultProtected.into());
+                }
+                let change =
+                    delete_vault(&mut inner.rng, &inner.account,
+                            &inner.unlocked, vault_id)?;
+                let request =
+                    HttpRequest::post(paths::ACCOUNT_COMMIT,
+                            change.commit_request(), Some(&inner.token))?;
+                inner.vault_pending =
+                    Some(PendingVault { change, name: None });
+                Ok(request)
+            }
+            #[doc =
+            " The answer to a vault change\'s `account/commit`. On success the account takes the new"]
+            #[doc =
+            " state; a creation adds the vault and writes its name as its first op (a name that"]
+            #[doc =
+            " cannot be written leaves it \"Untitled vault\" until renamed), and returns its id; a"]
+            #[doc =
+            " deletion drops the vault, its unsent changes and its pending moves. On"]
+            #[doc =
+            " `server_state_conflict` the change is kept for [`Session::vault_retry_request`] after a"]
+            #[doc = " sync."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `wrong_state` with no change outstanding; the server\'s code."]
+            pub fn vault_respond(&mut self, status: u16, body: &[u8],
+                now_ms: u64) -> Result<Option<String>, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The answer to a vault change\'s `account/commit`. On success the account takes the new"]
+                        #[doc =
+                        " state; a creation adds the vault and writes its name as its first op (a name that"]
+                        #[doc =
+                        " cannot be written leaves it \"Untitled vault\" until renamed), and returns its id; a"]
+                        #[doc =
+                        " deletion drops the vault, its unsent changes and its pending moves. On"]
+                        #[doc =
+                        " `server_state_conflict` the change is kept for [`Session::vault_retry_request`] after a"]
+                        #[doc = " sync."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` with no change outstanding; the server\'s code."]
+                        #[export_name = "session_vaultRespond_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_vaultRespond(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<u16 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg3_1:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg3_2:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg3_3:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg3_4:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<Option<String>,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u16>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <u16 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u16 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <[u8] as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                let arg2 = &*arg2;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                                let arg3 =
+                                                    unsafe {
+                                                        <u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                                arg3_3, arg3_4))
+                                                    };
+                                                let _ret = me.vault_respond(arg1, arg2, arg3);
+                                                _ret
+                                            }
+                                        });
+                            <Result<Option<String>, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The answer to a vault change\'s `account/commit`. On success the account takes the new"]
+                        #[doc =
+                        " state; a creation adds the vault and writes its name as its first op (a name that"]
+                        #[doc =
+                        " cannot be written leaves it \"Untitled vault\" until renamed), and returns its id; a"]
+                        #[doc =
+                        " deletion drops the vault, its unsent changes and its pending moves. On"]
+                        #[doc =
+                        " `server_state_conflict` the change is kept for [`Session::vault_retry_request`] after a"]
+                        #[doc = " sync."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` with no change outstanding; the server\'s code."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_vaultRespond_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(3u32);
+                            <u16 as WasmDescribe>::describe();
+                            <&[u8] as WasmDescribe>::describe();
+                            <u64 as WasmDescribe>::describe();
+                            <Result<Option<String>, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<Option<String>, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\tV The answer to a vault change's `account/commit`. On success the account takes the newR state; a creation adds the vault and writes its name as its first op (a name thatS cannot be written leaves it \"Untitled vault\" until renamed), and returns its id; aG deletion drops the vault, its unsent changes and its pending moves. OnX `server_state_conflict` the change is kept for [`Session::vault_retry_request`] after a\x06 sync.\0\t # ErrorsG `locked`; `wrong_state` with no change outstanding; the server's code.\0\x03\x06status\0\0\0\x04body\0\0\0\x06now_ms\0\0\0\0\0\x0cvaultRespond\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let inner = self.inner_mut()?;
+                let pending =
+                    inner.vault_pending.take().ok_or(CoreError::new(WRONG_STATE))?;
+                if let Err(e) = http::empty(status, body) {
+                    if http::server_code(status, body) ==
+                            Some(ErrorCode::StateConflict) {
+                        inner.vault_pending = Some(pending);
+                    }
+                    return Err(e);
+                }
+                let vault_id = pending.change.vault_id();
+                let created = pending.change.finalize(&mut inner.account)?;
+                inner.settings.clear();
+                let mut served = inner.account.served_vault_ids();
+                if created.is_some() {
+                    served.push(vault_id);
+                } else { served.retain(|v| *v != vault_id); }
+                let record =
+                    inner.settings.get(&inner.account, &inner.unlocked)?;
+                let catalog =
+                    VaultCatalog::check(record.vault_directory(), &served);
+                if let Some(created) = created {
+                    inner.vaults.add_key(created.key, &inner.unlocked)?;
+                    inner.vaults.set_catalog(catalog);
+                    if let Some(name) = pending.name {
+                        let (catalog, vault) =
+                            inner.vaults.with_catalog_mut(vault_id)?;
+                        let _named =
+                            rename_vault(&mut inner.rng, &inner.unlocked, catalog,
+                                vault, &name, now_ms);
+                    }
+                    Ok(Some(hex(vault_id.as_bytes())))
+                } else {
+                    inner.vaults.forget(vault_id);
+                    inner.moves.retain(|m| !m.involves(vault_id));
+                    inner.vaults.set_catalog(catalog);
+                    Ok(None)
+                }
+            }
+            #[doc =
+            " After `server_state_conflict` and a sync: the vault change rebuilt on the account the"]
+            #[doc = " sync verified (a rollback or fork stops it)."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `wrong_state` with no change kept or while a sync runs; `rollback`, `fork`;"]
+            #[doc = " the errors of building the change."]
+            pub fn vault_retry_request(&mut self)
+                -> Result<HttpRequest, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " After `server_state_conflict` and a sync: the vault change rebuilt on the account the"]
+                        #[doc = " sync verified (a rollback or fork stops it)."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` with no change kept or while a sync runs; `rollback`, `fork`;"]
+                        #[doc = " the errors of building the change."]
+                        #[export_name =
+                        "session_vaultRetryRequest_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_vaultRetryRequest(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<HttpRequest,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                let _ret = me.vault_retry_request();
+                                                _ret
+                                            }
+                                        });
+                            <Result<HttpRequest, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " After `server_state_conflict` and a sync: the vault change rebuilt on the account the"]
+                        #[doc = " sync verified (a rollback or fork stops it)."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` with no change kept or while a sync runs; `rollback`, `fork`;"]
+                        #[doc = " the errors of building the change."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_vaultRetryRequest_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<HttpRequest, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x06V After `server_state_conflict` and a sync: the vault change rebuilt on the account the- sync verified (a rollback or fork stops it).\0\t # ErrorsV `locked`; `wrong_state` with no change kept or while a sync runs; `rollback`, `fork`;# the errors of building the change.\0\0\0\0\x11vaultRetryRequest\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let inner = self.writable()?;
+                let pending =
+                    inner.vault_pending.take().ok_or(CoreError::new(WRONG_STATE))?;
+                let change =
+                    pending.change.on_state_conflict(&mut inner.rng,
+                            &inner.account, &inner.unlocked)?;
+                let request =
+                    HttpRequest::post(paths::ACCOUNT_COMMIT,
+                            change.commit_request(), Some(&inner.token))?;
+                inner.vault_pending =
+                    Some(PendingVault { change, name: pending.name });
+                Ok(request)
+            }
+            #[doc =
+            " Renames an owned vault (§A4): an ordinary op in its vault-settings item, sent with the"]
+            #[doc = " next sync."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `wrong_state` while a sync runs; `invalid_input` for a malformed id, an empty"]
+            #[doc =
+            " name or one over 64 characters; `personal_vault_protected`; `unknown_vault`;"]
+            #[doc = " `read_only`."]
+            pub fn rename_vault(&mut self, vault_id: &str, name: &str,
+                now_ms: u64) -> Result<(), CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Renames an owned vault (§A4): an ordinary op in its vault-settings item, sent with the"]
+                        #[doc = " next sync."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` while a sync runs; `invalid_input` for a malformed id, an empty"]
+                        #[doc =
+                        " name or one over 64 characters; `personal_vault_protected`; `unknown_vault`;"]
+                        #[doc = " `read_only`."]
+                        #[export_name = "session_renameVault_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_renameVault(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg3_1:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg3_2:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg3_3:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg3_4:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                let arg2 = &*arg2;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                                let arg3 =
+                                                    unsafe {
+                                                        <u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                                arg3_3, arg3_4))
+                                                    };
+                                                let _ret = me.rename_vault(arg1, arg2, arg3);
+                                                _ret
+                                            }
+                                        });
+                            <Result<(), CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Renames an owned vault (§A4): an ordinary op in its vault-settings item, sent with the"]
+                        #[doc = " next sync."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` while a sync runs; `invalid_input` for a malformed id, an empty"]
+                        #[doc =
+                        " name or one over 64 characters; `personal_vault_protected`; `unknown_vault`;"]
+                        #[doc = " `read_only`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_renameVault_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(3u32);
+                            <&str as WasmDescribe>::describe();
+                            <&str as WasmDescribe>::describe();
+                            <u64 as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x07X Renames an owned vault (\xc2\xa7A4): an ordinary op in its vault-settings item, sent with the\x0b next sync.\0\t # ErrorsX `locked`; `wrong_state` while a sync runs; `invalid_input` for a malformed id, an emptyM name or one over 64 characters; `personal_vault_protected`; `unknown_vault`;\r `read_only`.\0\x03\x08vault_id\0\0\0\x04name\0\0\0\x06now_ms\0\0\0\0\0\x0brenameVault\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let vault_id = items::vault_id(vault_id)?;
+                let name = check_name(name)?;
+                let inner = self.writable()?;
+                let (catalog, vault) =
+                    inner.vaults.with_catalog_mut(vault_id)?;
+                rename_vault(&mut inner.rng, &inner.unlocked, catalog, vault,
+                        &name, now_ms)?;
+                Ok(())
+            }
+            #[doc =
+            " Copies an item into another vault (§A6 step 1): a new item with a new id; field values,"]
+            #[doc =
+            " tags, passkeys, TOTP and history travel. The host then carries each listed attachment"]
+            #[doc =
+            " over (download from the source, upload to the copy) and syncs."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `wrong_state` while a sync runs; `invalid_input` for a malformed reference or"]
+            #[doc =
+            " the item\'s own vault; `unknown_vault`; `unknown_item`; `read_only`."]
+            pub fn copy_item(&mut self, id: &str, target_vault: &str,
+                now_ms: u64) -> Result<ItemCopyView, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Copies an item into another vault (§A6 step 1): a new item with a new id; field values,"]
+                        #[doc =
+                        " tags, passkeys, TOTP and history travel. The host then carries each listed attachment"]
+                        #[doc =
+                        " over (download from the source, upload to the copy) and syncs."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` while a sync runs; `invalid_input` for a malformed reference or"]
+                        #[doc =
+                        " the item\'s own vault; `unknown_vault`; `unknown_item`; `read_only`."]
+                        #[export_name = "session_copyItem_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_copyItem(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg3_1:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg3_2:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg3_3:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg3_4:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<ItemCopyView,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                let arg2 = &*arg2;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                                let arg3 =
+                                                    unsafe {
+                                                        <u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                                arg3_3, arg3_4))
+                                                    };
+                                                let _ret = me.copy_item(arg1, arg2, arg3);
+                                                _ret
+                                            }
+                                        });
+                            <Result<ItemCopyView, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Copies an item into another vault (§A6 step 1): a new item with a new id; field values,"]
+                        #[doc =
+                        " tags, passkeys, TOTP and history travel. The host then carries each listed attachment"]
+                        #[doc =
+                        " over (download from the source, upload to the copy) and syncs."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` while a sync runs; `invalid_input` for a malformed reference or"]
+                        #[doc =
+                        " the item\'s own vault; `unknown_vault`; `unknown_item`; `read_only`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_copyItem_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(3u32);
+                            <&str as WasmDescribe>::describe();
+                            <&str as WasmDescribe>::describe();
+                            <u64 as WasmDescribe>::describe();
+                            <Result<ItemCopyView, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<ItemCopyView, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x07Y Copies an item into another vault (\xc2\xa7A6 step 1): a new item with a new id; field values,V tags, passkeys, TOTP and history travel. The host then carries each listed attachment? over (download from the source, upload to the copy) and syncs.\0\t # ErrorsX `locked`; `wrong_state` while a sync runs; `invalid_input` for a malformed reference orD the item's own vault; `unknown_vault`; `unknown_item`; `read_only`.\0\x03\x02id\0\0\0\x0ctarget_vault\0\0\0\x06now_ms\0\0\0\0\0\x08copyItem\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let (source_id, item) = parse_ref(id)?;
+                let target_id = items::vault_id(target_vault)?;
+                let inner = self.writable()?;
+                if !inner.vaults.is_writable(target_id) {
+                    return Err(ClientError::ReadOnly.into());
+                }
+                let (source, target) =
+                    inner.vaults.pair_mut(source_id, target_id)?;
+                let copy =
+                    copy_item(&mut inner.rng, &inner.unlocked, source, item,
+                            target, now_ms)?;
+                Ok(ItemCopyView {
+                        id: item_ref(target_id, copy.item_id),
+                        created: copy.created,
+                        attachments: copy.attachments.iter().map(AttachmentView::of).collect(),
+                    })
+            }
+            #[doc =
+            " Moves an item into another vault (§A6): the copy now; the source is trashed and purged"]
+            #[doc =
+            " by [`Session::finish_moves`] once a sync has the copy acknowledged and the host said its"]
+            #[doc =
+            " attachments are stored ([`Session::move_attachments_stored`]; at once when it has none)."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " As [`Session::copy_item`]; `read_only` for a source vault that cannot be written."]
+            pub fn move_item(&mut self, id: &str, target_vault: &str,
+                now_ms: u64) -> Result<ItemCopyView, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Moves an item into another vault (§A6): the copy now; the source is trashed and purged"]
+                        #[doc =
+                        " by [`Session::finish_moves`] once a sync has the copy acknowledged and the host said its"]
+                        #[doc =
+                        " attachments are stored ([`Session::move_attachments_stored`]; at once when it has none)."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " As [`Session::copy_item`]; `read_only` for a source vault that cannot be written."]
+                        #[export_name = "session_moveItem_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_moveItem(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg2_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg2_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg2_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg2_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4,
+                            arg3_1:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg3_2:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg3_3:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg3_4:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<ItemCopyView,
+                                CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg2 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                                arg2_3, arg2_4))
+                                                    };
+                                                let arg2 = &*arg2;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                                let arg3 =
+                                                    unsafe {
+                                                        <u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                                arg3_3, arg3_4))
+                                                    };
+                                                let _ret = me.move_item(arg1, arg2, arg3);
+                                                _ret
+                                            }
+                                        });
+                            <Result<ItemCopyView, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Moves an item into another vault (§A6): the copy now; the source is trashed and purged"]
+                        #[doc =
+                        " by [`Session::finish_moves`] once a sync has the copy acknowledged and the host said its"]
+                        #[doc =
+                        " attachments are stored ([`Session::move_attachments_stored`]; at once when it has none)."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " As [`Session::copy_item`]; `read_only` for a source vault that cannot be written."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_moveItem_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(3u32);
+                            <&str as WasmDescribe>::describe();
+                            <&str as WasmDescribe>::describe();
+                            <u64 as WasmDescribe>::describe();
+                            <Result<ItemCopyView, CoreError> as
+                                    WasmDescribe>::describe();
+                            <Result<ItemCopyView, CoreError> as
+                                    WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x06X Moves an item into another vault (\xc2\xa7A6): the copy now; the source is trashed and purgedY by [`Session::finish_moves`] once a sync has the copy acknowledged and the host said itsY attachments are stored ([`Session::move_attachments_stored`]; at once when it has none).\0\t # ErrorsR As [`Session::copy_item`]; `read_only` for a source vault that cannot be written.\0\x03\x02id\0\0\0\x0ctarget_vault\0\0\0\x06now_ms\0\0\0\0\0\x08moveItem\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let (source_id, item) = parse_ref(id)?;
+                let target_id = items::vault_id(target_vault)?;
+                let inner = self.writable()?;
+                if !inner.vaults.is_writable(target_id) ||
+                        !inner.vaults.is_writable(source_id) {
+                    return Err(ClientError::ReadOnly.into());
+                }
+                if let Some(existing) =
+                        inner.moves.iter().find(|m|
+                                m.mv.source_vault == source_id && m.mv.source_item == item)
+                    {
+                    return Ok(ItemCopyView {
+                                id: item_ref(existing.mv.target_vault,
+                                    existing.mv.target_item),
+                                created: false,
+                                attachments: Vec::new(),
+                            });
+                }
+                let (source, target) =
+                    inner.vaults.pair_mut(source_id, target_id)?;
+                let mv =
+                    PendingMove::new(&mut inner.rng, source, item, target_id)?;
+                let copy =
+                    mv.copy(&mut inner.rng, &inner.unlocked, source, target,
+                            now_ms)?;
+                let view =
+                    ItemCopyView {
+                        id: item_ref(target_id, copy.item_id),
+                        created: copy.created,
+                        attachments: copy.attachments.iter().map(AttachmentView::of).collect(),
+                    };
+                inner.moves.push(WebMove {
+                        mv,
+                        attachments_pending: !view.attachments.is_empty(),
+                    });
+                Ok(view)
+            }
+            #[doc =
+            " The host uploaded every attachment of the moved item `id` (the copy\'s reference)."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `invalid_input` for a malformed reference; `unknown_item` for no pending move"]
+            #[doc = " to that item."]
+            pub fn move_attachments_stored(&mut self, id: &str)
+                -> Result<(), CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The host uploaded every attachment of the moved item `id` (the copy\'s reference)."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for a malformed reference; `unknown_item` for no pending move"]
+                        #[doc = " to that item."]
+                        #[export_name =
+                        "session_moveAttachmentsStored_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_moveAttachmentsStored(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<(), CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <str as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                    as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let arg1 = &*arg1;
+                                                let _ret = me.move_attachments_stored(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<(), CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The host uploaded every attachment of the moved item `id` (the copy\'s reference)."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `invalid_input` for a malformed reference; `unknown_item` for no pending move"]
+                        #[doc = " to that item."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_moveAttachmentsStored_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <&str as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                            <Result<(), CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x05R The host uploaded every attachment of the moved item `id` (the copy's reference).\0\t # ErrorsX `locked`; `invalid_input` for a malformed reference; `unknown_item` for no pending move\x0e to that item.\0\x01\x02id\0\0\0\0\0\x15moveAttachmentsStored\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let (vault, item) = parse_ref(id)?;
+                let inner = self.inner_mut()?;
+                let found =
+                    inner.moves.iter_mut().find(|m|
+                                    m.mv.target_vault == vault &&
+                                        m.mv.target_item == item).ok_or(ClientError::UnknownItem)?;
+                found.attachments_pending = false;
+                Ok(())
+            }
+            #[doc =
+            " Step 2 of every pending move whose copy the server acknowledged (INV-104): the source"]
+            #[doc =
+            " trashed and purged, sent with the next sync. Returns how many sources were purged;"]
+            #[doc =
+            " moves still waiting stay pending. Moves whose vaults are gone are dropped."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc =
+            " `locked`; `wrong_state` while a sync runs; the first error a purge met (its move stays)."]
+            pub fn finish_moves(&mut self, now_ms: u64)
+                -> Result<u32, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Step 2 of every pending move whose copy the server acknowledged (INV-104): the source"]
+                        #[doc =
+                        " trashed and purged, sent with the next sync. Returns how many sources were purged;"]
+                        #[doc =
+                        " moves still waiting stay pending. Moves whose vaults are gone are dropped."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` while a sync runs; the first error a purge met (its move stays)."]
+                        #[export_name = "session_finishMoves_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_finishMoves(me:
+                                <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
+                            arg1_1:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim1,
+                            arg1_2:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim2,
+                            arg1_3:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim3,
+                            arg1_4:
+                                <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                wasm_bindgen::convert::WasmAbi>::Prim4)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<u32, CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () = {};
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let mut me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
+                                                    };
+                                                let me = &mut *me;
+                                                wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                                let arg1 =
+                                                    unsafe {
+                                                        <u64 as
+                                                                wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
+                                                                    wasm_bindgen::convert::FromWasmAbi>::Abi as
+                                                                    wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                                arg1_3, arg1_4))
+                                                    };
+                                                let _ret = me.finish_moves(arg1);
+                                                _ret
+                                            }
+                                        });
+                            <Result<u32, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " Step 2 of every pending move whose copy the server acknowledged (INV-104): the source"]
+                        #[doc =
+                        " trashed and purged, sent with the next sync. Returns how many sources were purged;"]
+                        #[doc =
+                        " moves still waiting stay pending. Moves whose vaults are gone are dropped."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc =
+                        " `locked`; `wrong_state` while a sync runs; the first error a purge met (its move stays)."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_finishMoves_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(1u32);
+                            <u64 as WasmDescribe>::describe();
+                            <Result<u32, CoreError> as WasmDescribe>::describe();
+                            <Result<u32, CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x06V Step 2 of every pending move whose copy the server acknowledged (INV-104): the sourceS trashed and purged, sent with the next sync. Returns how many sources were purged;K moves still waiting stay pending. Moves whose vaults are gone are dropped.\0\t # ErrorsY `locked`; `wrong_state` while a sync runs; the first error a purge met (its move stays).\0\x01\x06now_ms\0\0\0\0\0\x0bfinishMoves\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                let inner = self.writable()?;
+                let mut done = 0_u32;
+                let mut first_error = None;
+                let mut kept = Vec::new();
+                for m in core::mem::take(&mut inner.moves) {
+                    let Ok((source, target)) =
+                        inner.vaults.pair_mut(m.mv.source_vault,
+                            m.mv.target_vault) else { continue; };
+                    match m.mv.finish(&mut inner.rng, &inner.unlocked, source,
+                            target, !m.attachments_pending, now_ms) {
+                        Ok(MoveStep::SourcePurged) => done = done.saturating_add(1),
+                        Ok(MoveStep::AwaitTarget) => kept.push(m),
+                        Err(e) => { first_error.get_or_insert(e); kept.push(m); }
+                    }
+                }
+                inner.moves = kept;
+                match first_error {
+                    Some(e) => Err(e.into()),
+                    None => Ok(done),
+                }
+            }
+            #[doc =
+            " The revoked devices whose ops are missing below their revocation cut-off in every"]
+            #[doc =
+            " vault after the last sync (ADR 0081 §0 item 2, the cross-vault check of ADR 0021 §9):"]
+            #[doc = " 0 for an honest server."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " `locked`."]
+            pub fn revoked_data_missing(&self) -> Result<usize, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The revoked devices whose ops are missing below their revocation cut-off in every"]
+                        #[doc =
+                        " vault after the last sync (ADR 0081 §0 item 2, the cross-vault check of ADR 0021 §9):"]
+                        #[doc = " 0 for an honest server."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`."]
+                        #[export_name =
+                        "session_revokedDataMissing_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_revokedDataMissing(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<usize, CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () =
+                                {
+                                    let _:
+                                            wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<Session>;
+                                };
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.revoked_data_missing();
+                                                _ret
+                                            }
+                                        });
+                            <Result<usize, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The revoked devices whose ops are missing below their revocation cut-off in every"]
+                        #[doc =
+                        " vault after the last sync (ADR 0081 §0 item 2, the cross-vault check of ADR 0021 §9):"]
+                        #[doc = " 0 for an honest server."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_revokedDataMissing_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <Result<usize, CoreError> as WasmDescribe>::describe();
+                            <Result<usize, CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x06R The revoked devices whose ops are missing below their revocation cut-off in everyX vault after the last sync (ADR 0081 \xc2\xa70 item 2, the cross-vault check of ADR 0021 \xc2\xa79):\x18 0 for an honest server.\0\t # Errors\n `locked`.\0\0\0\0\x12revokedDataMissing\x01\x01\0\0\0\0\x01\0\x02\x12revokedDataMissing\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                Ok(self.inner()?.vaults.cutoff_gaps())
+            }
+            #[doc =
+            " The moves of this session whose source is not purged yet."]
+            #[doc = ""]
+            #[doc = " # Errors"]
+            #[doc = " `locked`."]
+            pub fn pending_moves(&self) -> Result<usize, CoreError> {
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The moves of this session whose source is not purged yet."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`."]
+                        #[export_name = "session_pendingMoves_e09cc0eb35f8b583"]
+                        pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_pendingMoves(me:
+                                <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            ->
+                                wasm_bindgen::convert::WasmRet<<Result<usize, CoreError> as
+                                wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                            const _: () =
+                                {
+                                    let _:
+                                            wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<Session>;
+                                };
+                            let _ret =
+                                wasm_bindgen::__rt::maybe_catch_unwind(||
+                                        {
+                                            {
+                                                wasm_bindgen::__rt::ensure_ref_unwind_safe::<Session>();
+                                                let me =
+                                                    unsafe {
+                                                        <Session as
+                                                                wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                    };
+                                                let me = &*me;
+                                                let _ret = me.pending_moves();
+                                                _ret
+                                            }
+                                        });
+                            <Result<usize, CoreError> as
+                                        wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        #[doc =
+                        " The moves of this session whose source is not purged yet."]
+                        #[doc = ""]
+                        #[doc = " # Errors"]
+                        #[doc = " `locked`."]
+                        #[no_mangle]
+                        #[doc(hidden)]
+                        pub extern "C-unwind" fn __wbindgen_describe_session_pendingMoves_e09cc0eb35f8b583() {
+                            use wasm_bindgen::describe::*;
+                            wasm_bindgen::__rt::link_mem_intrinsics();
+                            inform(FUNCTION);
+                            inform(0);
+                            inform(0u32);
+                            <Result<usize, CoreError> as WasmDescribe>::describe();
+                            <Result<usize, CoreError> as WasmDescribe>::describe();
+                        }
+                    };
+                #[automatically_derived]
+                const _: () =
+                    {
+                        use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                        static _INCLUDED_FILES: &[&str] = &[];
+                        const _ENCODED_BYTES: &[u8] =
+                            {
+                                const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                    [b"\x01\x01\x07Session\x04: The moves of this session whose source is not purged yet.\0\t # Errors\n `locked`.\0\0\0\0\x0cpendingMoves\x01\x01\0\0\0\0\x01\0\x02\x0cpendingMoves\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                #[allow(long_running_const_eval)]
+                                const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                                #[allow(long_running_const_eval)]
+                                const _CHUNKS: [u8; _CHUNK_LEN] =
+                                    flat_byte_slices(_CHUNK_SLICES);
+                                const _LEN_BYTES: [u8; 4] =
+                                    (_CHUNK_LEN as u32).to_le_bytes();
+                                const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                                #[allow(long_running_const_eval)]
+                                const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                    flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                                &_ENCODED_BYTES
+                            };
+                        const _PREFIX_JSON_BYTES: &[u8] =
+                            b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                        const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                        const _PREFIX_JSON_BYTES_LEN: usize =
+                            _PREFIX_JSON_BYTES.len();
+                        const _LEN: usize =
+                            _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                        #[link_section = "__wasm_bindgen_unstable"]
+                        #[allow(long_running_const_eval)]
+                        static _GENERATED: [u8; _LEN] =
+                            flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                    };
+                Ok(self.inner()?.moves.len())
             }
         }
         #[automatically_derived]
@@ -46296,6 +49899,8 @@ pub mod session {
             };
     }
     pub use attachments::AttachmentView;
+    pub use vault_ops::ItemCopyView;
+    use vault_ops::{PendingVault, WebMove};
     /// How long a re-authentication allows one export: 5 minutes (module docs;
     /// `rizzy_client::export::gate::REAUTH_WINDOW_MS`).
     pub const REAUTH_WINDOW_MS: u64 = gate::REAUTH_WINDOW_MS;
@@ -46320,8 +49925,14 @@ pub mod session {
         account: VerifiedAccount,
         /// The authors, for op verification.
         authors: Authors,
-        /// The personal vault.
-        vault: VaultSync,
+        /// The vaults the account's catalog opens, sharing one device counter (ADR 0081 §A7).
+        vaults: VaultSet,
+        /// A vault creation or deletion waiting for `account/commit` (ADR 0081 §A3, §A5).
+        vault_pending: Option<PendingVault>,
+        /// The moves of this session whose source is not purged yet (ADR 0081 §A6, INV-104). A web
+        /// session has no cache (CRYPTO.md §11.4), so they live in memory: a closed tab before
+        /// the purge leaves the item in both vaults, a duplicate, never a loss.
+        moves: Vec<WebMove>,
         /// The sync step driver.
         sync: SyncDriver,
         /// The export gates: the re-authentication every export needs and the hold after the
@@ -46340,7 +49951,7 @@ pub mod session {
         /// cache, a persistent-format change that needs an ADR 0026 amendment first (gap 02). The
         /// late-edit notices' marks live in the same place for the same reason (`rizzy-client`'s
         /// `VaultSync::mark_late_edits_surfaced`).
-        shown_trash_notices: BTreeSet<(ItemId, Dot, Dot)>,
+        shown_trash_notices: BTreeSet<(VaultId, ItemId, Dot, Dot)>,
         /// The account settings of the verified account, read once per object (ADR 0042 §6).
         settings: SettingsCache,
         /// A settings change sent to `account/commit` and not yet answered, or kept after a
@@ -46355,7 +49966,7 @@ pub mod session {
         /// Attachments sealed and not yet fully sent, by id (ADR 0054; [`attachments`]).
         uploads: BTreeMap<AttachmentId, AttachmentUpload>,
         /// Attachments being downloaded and verified, by id.
-        downloads: BTreeMap<AttachmentId, AttachmentDownload>,
+        downloads: BTreeMap<AttachmentId, (VaultId, AttachmentDownload)>,
     }
     #[wasm_bindgen()]
     #[__wasm_bindgen_retried]
@@ -46627,19 +50238,16 @@ pub mod session {
         }
     }
     impl Session {
-        /// The session of a verified web login: the personal vault's driver at `device_seq` 1
-        /// (a new device), the authors of the verified account.
+        /// The session of a verified web login: a driver for every vault the account's catalog
+        /// opens (ADR 0081 §A2, §A7), all sharing one `device_seq` counter from 1 (a new device),
+        /// the authors of the verified account.
         ///
         /// # Errors
-        /// `invalid_server_response` if the account answer carries no vault key.
+        /// `invalid_server_response` if the account answer carries no key of an open vault.
         pub(crate) fn from_web(web: WebSession, origin: String,
             login_name: String) -> CoreResult<Self> {
             let WebSession { unlocked, mut account, session_token, .. } = web;
-            let vault_id =
-                account.vault_ids().next().ok_or(ClientError::InvalidServerResponse)?;
-            let vault_key =
-                account.take_vault_key(vault_id).ok_or(ClientError::InvalidServerResponse)?;
-            let vault = VaultSync::new(vault_key, &unlocked, 1)?;
+            let vaults = VaultSet::open_all(&mut account, &unlocked, false)?;
             let authors = Authors::from_account(&account)?;
             Ok(Self {
                     inner: Some(Box::new(Inner {
@@ -46650,7 +50258,9 @@ pub mod session {
                                 unlocked,
                                 authors,
                                 account,
-                                vault,
+                                vaults,
+                                vault_pending: None,
+                                moves: Vec::new(),
                                 sync: SyncDriver::default(),
                                 gate: ExportGate::new(),
                                 rng: os_rng(),
@@ -46686,9 +50296,8 @@ pub mod session {
                 fn(&mut VaultSync, &mut Rng, &UnlockedDevice, ItemId, u64)
                     -> Result<(), ClientError>, now_ms: u64) -> CoreResult<()> {
             let inner = self.writable()?;
-            let item = items::item_id(id)?;
-            op(&mut inner.vault, &mut inner.rng, &inner.unlocked, item,
-                    now_ms)?;
+            let (vault, item) = inner.vaults.item_mut(id)?;
+            op(vault, &mut inner.rng, &inner.unlocked, item, now_ms)?;
             Ok(())
         }
     }
@@ -47269,7 +50878,8 @@ pub mod session {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            Ok(self.inner()?.vault.is_read_only())
+            Ok(!self.inner()?.vaults.personal_vault().is_ok_and(|v|
+                            !v.is_read_only()))
         }
         #[doc =
         " How many own ops the server has not acknowledged yet: what a lock now would lose."]
@@ -47369,7 +50979,8 @@ pub mod session {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            Ok(self.inner()?.vault.unacknowledged().0)
+            Ok(self.inner()?.vaults.all().iter().map(|v|
+                            v.unacknowledged().0).sum())
         }
         #[doc =
         " The account\'s counted bytes the server reported with the last account answer (ADR 0048"]
@@ -47779,7 +51390,7 @@ pub mod session {
             let inner = self.inner_mut()?;
             let mut ctx =
                 Ctx {
-                    vault: &mut inner.vault,
+                    vaults: &mut inner.vaults,
                     account: &mut inner.account,
                     authors: &mut inner.authors,
                     unlocked: &inner.unlocked,
@@ -48054,7 +51665,7 @@ pub mod session {
             let inner = self.inner_mut()?;
             let ctx =
                 Ctx {
-                    vault: &mut inner.vault,
+                    vaults: &mut inner.vaults,
                     account: &mut inner.account,
                     authors: &mut inner.authors,
                     unlocked: &inner.unlocked,
@@ -48173,7 +51784,7 @@ pub mod session {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             let inner = self.inner_mut()?;
-            inner.sync.abort(&mut inner.vault);
+            inner.sync.abort(&mut inner.vaults);
             Ok(())
         }
         #[doc =
@@ -48295,7 +51906,8 @@ pub mod session {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            Ok(items::summaries(&self.inner()?.vault, trash))
+            Ok(self.inner()?.vaults.all().iter().flat_map(|v|
+                            items::summaries(v, trash)).collect())
         }
         #[doc = " One item\'s summary."]
         #[doc = ""]
@@ -48416,8 +52028,7 @@ pub mod session {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            let vault = &self.inner()?.vault;
-            let item = visible_item(vault, id)?;
+            let (vault, item) = self.inner()?.vaults.item(id)?;
             items::summary(vault, item).ok_or(ClientError::UnknownItem.into())
         }
         #[doc =
@@ -48540,8 +52151,7 @@ pub mod session {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            let vault = &self.inner()?.vault;
-            let item = visible_item(vault, id)?;
+            let (vault, item) = self.inner()?.vaults.item(id)?;
             Ok(items::fields(vault, item))
         }
         #[doc =
@@ -48694,8 +52304,7 @@ pub mod session {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            let vault = &self.inner()?.vault;
-            let item = visible_item(vault, id)?;
+            let (vault, item) = self.inner()?.vaults.item(id)?;
             Ok(items::reveal(vault, item, key)?.as_str().to_owned())
         }
         #[doc =
@@ -48707,8 +52316,8 @@ pub mod session {
         " `locked`; `wrong_state` while a sync runs; `invalid_input` for an unknown type;"]
         #[doc =
         " `invalid_edit` for a write the schema refuses; `read_only`."]
-        pub fn create_item(&mut self, item_type: &str, draft: &ItemDraft,
-            now_ms: u64) -> Result<String, CoreError> {
+        pub fn create_item(&mut self, vault_id: &str, item_type: &str,
+            draft: &ItemDraft, now_ms: u64) -> Result<String, CoreError> {
             #[automatically_derived]
             const _: () =
                 {
@@ -48737,27 +52346,39 @@ pub mod session {
                             <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4,
                         arg2_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg2_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg2_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg2_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg3_1:
                             <<ItemDraft as wasm_bindgen::convert::RefFromWasmAbi>::Abi
                             as wasm_bindgen::convert::WasmAbi>::Prim1,
-                        arg2_2:
+                        arg3_2:
                             <<ItemDraft as wasm_bindgen::convert::RefFromWasmAbi>::Abi
                             as wasm_bindgen::convert::WasmAbi>::Prim2,
-                        arg2_3:
+                        arg3_3:
                             <<ItemDraft as wasm_bindgen::convert::RefFromWasmAbi>::Abi
                             as wasm_bindgen::convert::WasmAbi>::Prim3,
-                        arg2_4:
+                        arg3_4:
                             <<ItemDraft as wasm_bindgen::convert::RefFromWasmAbi>::Abi
                             as wasm_bindgen::convert::WasmAbi>::Prim4,
-                        arg3_1:
+                        arg4_1:
                             <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim1,
-                        arg3_2:
+                        arg4_2:
                             <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim2,
-                        arg3_3:
+                        arg4_3:
                             <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim3,
-                        arg3_4:
+                        arg4_4:
                             <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4)
                         ->
@@ -48785,26 +52406,36 @@ pub mod session {
                                                             arg1_3, arg1_4))
                                                 };
                                             let arg1 = &*arg1;
-                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<ItemDraft>();
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
                                             let arg2 =
                                                 unsafe {
-                                                    <ItemDraft as
-                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<ItemDraft
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
                                                                 as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                                                                 wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
                                                             arg2_3, arg2_4))
                                                 };
                                             let arg2 = &*arg2;
-                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<ItemDraft>();
                                             let arg3 =
+                                                unsafe {
+                                                    <ItemDraft as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<ItemDraft
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
+                                                };
+                                            let arg3 = &*arg3;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg4 =
                                                 unsafe {
                                                     <u64 as
                                                             wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
                                                                 wasm_bindgen::convert::FromWasmAbi>::Abi as
-                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
-                                                            arg3_3, arg3_4))
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                            arg4_3, arg4_4))
                                                 };
-                                            let _ret = me.create_item(arg1, arg2, arg3);
+                                            let _ret = me.create_item(arg1, arg2, arg3, arg4);
                                             _ret
                                         }
                                     });
@@ -48831,7 +52462,8 @@ pub mod session {
                         wasm_bindgen::__rt::link_mem_intrinsics();
                         inform(FUNCTION);
                         inform(0);
-                        inform(3u32);
+                        inform(4u32);
+                        <&str as WasmDescribe>::describe();
                         <&str as WasmDescribe>::describe();
                         <&ItemDraft as WasmDescribe>::describe();
                         <u64 as WasmDescribe>::describe();
@@ -48847,7 +52479,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\x06T Creates an item of `item_type` (a name of [`crate::items::TYPES`]) with the draft's# writes. Returns the new item's id.\0\t # ErrorsP `locked`; `wrong_state` while a sync runs; `invalid_input` for an unknown type;< `invalid_edit` for a write the schema refuses; `read_only`.\0\x03\titem_type\0\0\0\x05draft\0\0\0\x06now_ms\0\0\0\0\0\ncreateItem\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\x06T Creates an item of `item_type` (a name of [`crate::items::TYPES`]) with the draft's# writes. Returns the new item's id.\0\t # ErrorsP `locked`; `wrong_state` while a sync runs; `invalid_input` for an unknown type;< `invalid_edit` for a write the schema refuses; `read_only`.\0\x04\x08vault_id\0\0\0\titem_type\0\0\0\x05draft\0\0\0\x06now_ms\0\0\0\0\0\ncreateItem\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -48874,15 +52506,17 @@ pub mod session {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             let item_type = type_from_name(item_type)?;
+            let target = items::vault_id(vault_id)?;
             let inner = self.writable()?;
-            let writes = items::writes(&inner.vault, None, draft)?;
+            let vault = inner.vaults.get_mut(target)?;
+            let writes = items::writes(vault, None, draft)?;
             let edits: Vec<FieldEdit<'_>> =
                 writes.iter().map(|(key, value)|
                             FieldEdit { key, value }).collect();
             let item =
-                inner.vault.create_item(&mut inner.rng, &inner.unlocked,
-                        item_type, &edits, now_ms)?;
-            Ok(hex(item.as_bytes()))
+                vault.create_item(&mut inner.rng, &inner.unlocked, item_type,
+                        &edits, now_ms)?;
+            Ok(item_ref(target, item))
         }
         #[doc = " Edits an active item with the draft\'s writes, as one op."]
         #[doc = ""]
@@ -49056,13 +52690,13 @@ pub mod session {
                 return Err(ClientError::InvalidEdit.into());
             }
             let inner = self.writable()?;
-            let item = items::item_id(id)?;
-            let writes = items::writes(&inner.vault, Some(item), draft)?;
+            let (vault, item) = inner.vaults.item_mut(id)?;
+            let writes = items::writes(&*vault, Some(item), draft)?;
             let edits: Vec<FieldEdit<'_>> =
                 writes.iter().map(|(key, value)|
                             FieldEdit { key, value }).collect();
-            inner.vault.edit_item(&mut inner.rng, &inner.unlocked, item,
-                    &edits, now_ms)?;
+            vault.edit_item(&mut inner.rng, &inner.unlocked, item, &edits,
+                    now_ms)?;
             Ok(())
         }
         #[doc = " Moves an active item to the trash."]
@@ -49629,10 +53263,17 @@ pub mod session {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             let inner = self.writable()?;
-            let purged =
-                inner.vault.auto_purge_due(&mut inner.rng, &inner.unlocked,
-                        now_ms, TRASH_RETENTION_MS)?;
-            Ok(purged.into_iter().map(|id| hex(id.as_bytes())).collect())
+            let mut out = Vec::new();
+            for vault in inner.vaults.all_mut() {
+                if vault.is_read_only() { continue; }
+                let vault_id = vault.vault_id();
+                let purged =
+                    vault.auto_purge_due(&mut inner.rng, &inner.unlocked,
+                            now_ms, TRASH_RETENTION_MS)?;
+                out.extend(purged.into_iter().map(|id|
+                            item_ref(vault_id, id)));
+            }
+            Ok(out)
         }
         #[doc =
         " One item\'s password history without values (gap 01; [`crate::items`] module docs):"]
@@ -49760,8 +53401,7 @@ pub mod session {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            let vault = &self.inner()?.vault;
-            let item = visible_item(vault, id)?;
+            let (vault, item) = self.inner()?.vaults.item(id)?;
             Ok(items::password_history(vault, item))
         }
         #[doc =
@@ -49981,8 +53621,7 @@ pub mod session {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            let vault = &self.inner()?.vault;
-            let item = visible_item(vault, id)?;
+            let (vault, item) = self.inner()?.vaults.item(id)?;
             Ok(items::reveal_history(vault, item, source, index,
                                 entry_id)?.as_str().to_owned())
         }
@@ -50118,8 +53757,7 @@ pub mod session {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            let vault = &self.inner()?.vault;
-            let item = visible_item(vault, id)?;
+            let (vault, item) = self.inner()?.vaults.item(id)?;
             Ok(items::item_history(vault, item))
         }
         #[doc =
@@ -50338,8 +53976,7 @@ pub mod session {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            let vault = &self.inner()?.vault;
-            let item = visible_item(vault, id)?;
+            let (vault, item) = self.inner()?.vaults.item(id)?;
             Ok(items::reveal_field_history(vault, item, key, index,
                                 entry_id)?.as_str().to_owned())
         }
@@ -50587,12 +54224,12 @@ pub mod session {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             let inner = self.writable()?;
-            let item = items::item_id(id)?;
+            let (vault, item) = inner.vaults.item_mut(id)?;
             let dot =
-                items::restore_field_history_dot(&inner.vault, item, key,
-                        index, entry_id)?;
-            inner.vault.restore_field_history(&mut inner.rng, &inner.unlocked,
-                    item, key, dot, now_ms)?;
+                items::restore_field_history_dot(&*vault, item, key, index,
+                        entry_id)?;
+            vault.restore_field_history(&mut inner.rng, &inner.unlocked, item,
+                    key, dot, now_ms)?;
             Ok(())
         }
         #[doc =
@@ -50750,8 +54387,7 @@ pub mod session {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            let vault = &self.inner()?.vault;
-            let item = visible_item(vault, id)?;
+            let (vault, item) = self.inner()?.vaults.item(id)?;
             items::field_conflict(vault, item, key)
         }
         #[doc =
@@ -50959,8 +54595,7 @@ pub mod session {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            let vault = &self.inner()?.vault;
-            let item = visible_item(vault, id)?;
+            let (vault, item) = self.inner()?.vaults.item(id)?;
             Ok(items::reveal_conflict_value(vault, item, key, index,
                                 value_id)?.as_str().to_owned())
         }
@@ -51193,12 +54828,12 @@ pub mod session {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             let inner = self.writable()?;
-            let item = items::item_id(id)?;
+            let (vault, item) = inner.vaults.item_mut(id)?;
             let dot =
-                items::conflict_value(&inner.vault, item, key, index,
+                items::conflict_value(&*vault, item, key, index,
                             value_id)?.dot;
-            inner.vault.resolve_conflict_pick(&mut inner.rng, &inner.unlocked,
-                    item, key, dot, now_ms)?;
+            vault.resolve_conflict_pick(&mut inner.rng, &inner.unlocked, item,
+                    key, dot, now_ms)?;
             Ok(())
         }
         #[doc =
@@ -51474,13 +55109,13 @@ pub mod session {
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
             let inner = self.writable()?;
-            let item = items::item_id(id)?;
+            let (vault, item) = inner.vaults.item_mut(id)?;
             let keep =
-                items::conflict_value(&inner.vault, item, key, index,
+                items::conflict_value(&*vault, item, key, index,
                             value_id)?.dot;
             let label = label.map(Zeroizing::new);
             let elements =
-                inner.vault.resolve_conflict_keep_both(&mut inner.rng,
+                vault.resolve_conflict_keep_both(&mut inner.rng,
                         &inner.unlocked, item, key, keep,
                         label.as_ref().map(|l| l.as_str()), now_ms)?;
             Ok(elements.iter().map(|e| e.as_str().to_owned()).collect())
@@ -51639,28 +55274,31 @@ pub mod session {
                 };
             let inner = self.inner_mut()?;
             let mut out = Vec::new();
-            for item in inner.vault.item_ids() {
-                let late = inner.vault.late_edit_devices(item);
-                if !late.is_empty() {
-                    inner.vault.mark_late_edits_surfaced(item);
-                    out.push(Notice {
-                            kind: NOTICE_LATE_EDIT,
-                            item: hex(item.as_bytes()),
-                            devices: late.iter().map(|d| hex(d.as_bytes())).collect(),
-                            conflict_id: None,
-                        });
-                }
-                if let Some(trash) = inner.vault.concurrent_trash(item) &&
-                        inner.shown_trash_notices.insert((item, trash.trashed_dot,
-                                trash.edited_dot)) {
-                    out.push(Notice {
-                            kind: NOTICE_CONCURRENT_TRASH,
-                            item: hex(item.as_bytes()),
-                            devices: <[_]>::into_vec(::alloc::boxed::box_new([hex(trash.trashed_by.as_bytes()),
-                                            hex(trash.edited_by.as_bytes())])),
-                            conflict_id: Some(concurrent_trash_conflict_id(trash.trashed_dot,
-                                    trash.edited_dot)),
-                        });
+            for vault in inner.vaults.all_mut() {
+                let vault_id = vault.vault_id();
+                for item in vault.item_ids() {
+                    let late = vault.late_edit_devices(item);
+                    if !late.is_empty() {
+                        vault.mark_late_edits_surfaced(item);
+                        out.push(Notice {
+                                kind: NOTICE_LATE_EDIT,
+                                item: item_ref(vault_id, item),
+                                devices: late.iter().map(|d| hex(d.as_bytes())).collect(),
+                                conflict_id: None,
+                            });
+                    }
+                    if let Some(trash) = vault.concurrent_trash(item) &&
+                            inner.shown_trash_notices.insert((vault_id, item,
+                                    trash.trashed_dot, trash.edited_dot)) {
+                        out.push(Notice {
+                                kind: NOTICE_CONCURRENT_TRASH,
+                                item: item_ref(vault_id, item),
+                                devices: <[_]>::into_vec(::alloc::boxed::box_new([hex(trash.trashed_by.as_bytes()),
+                                                hex(trash.edited_by.as_bytes())])),
+                                conflict_id: Some(concurrent_trash_conflict_id(trash.trashed_dot,
+                                        trash.edited_dot)),
+                            });
+                    }
                 }
             }
             Ok(out)
@@ -51851,11 +55489,11 @@ pub mod session {
                 };
             let item_type = type_from_name(item_type)?;
             let inner = self.writable()?;
-            let item = items::item_id(id)?;
+            let (vault, item) = inner.vaults.item_mut(id)?;
             let restored =
-                inner.vault.restore_late_as_new_item(&mut inner.rng,
+                vault.restore_late_as_new_item(&mut inner.rng,
                         &inner.unlocked, item, item_type, now_ms)?;
-            Ok(hex(restored.as_bytes()))
+            Ok(item_ref(vault.vault_id(), restored))
         }
         #[doc =
         " What each custom field\'s autocomplete id does, in list order (ADR 0076 §2.4–§2.5, §3):"]
@@ -51987,7 +55625,8 @@ pub mod session {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            crate::autofill::custom_field_autofill(&self.inner()?.vault, id)
+            let (vault, _) = self.inner()?.vaults.item(id)?;
+            crate::autofill::custom_field_autofill(vault, id)
         }
         #[doc =
         " A breach check of an item\'s `login.password` (CRYPTO.md §11.16; [`crate::breach`]): the"]
@@ -52115,8 +55754,7 @@ pub mod session {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            let vault = &self.inner()?.vault;
-            let item = visible_item(vault, id)?;
+            let (vault, item) = self.inner()?.vaults.item(id)?;
             if vault.field_value(item,
                             LOGIN_PASSWORD).filter(|v| !v.is_cleared()).is_none() {
                 return Ok(None);
@@ -52274,8 +55912,7 @@ pub mod session {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            let vault = &self.inner()?.vault;
-            let item = visible_item(vault, id)?;
+            let (vault, item) = self.inner()?.vaults.item(id)?;
             let bad = || CoreError::from(ClientError::InvalidInput);
             let value = vault.field_value(item, LOGIN_TOTP).ok_or_else(bad)?;
             let stored =
@@ -52606,8 +56243,7 @@ pub mod session {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            let vault = &self.inner()?.vault;
-            let item = visible_item(vault, id)?;
+            let (vault, item) = self.inner()?.vaults.item(id)?;
             let bad = || CoreError::from(ClientError::InvalidInput);
             let element = ElementId::from_bytes(items::parse_id(passkey_id)?);
             let bytes_field =
@@ -52786,8 +56422,7 @@ pub mod session {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            let vault = &self.inner()?.vault;
-            let item = visible_item(vault, id)?;
+            let (vault, item) = self.inner()?.vaults.item(id)?;
             let mut out = Vec::new();
             for element in vault.list_elements(item, LIST_PASSKEY) {
                 let element_id = element.element.as_str();
@@ -52855,8 +56490,9 @@ pub mod session {
         #[doc =
         " `export_oversize_items`; `export_too_large`. `export_password` is UTF-8 bytes, zeroed"]
         #[doc = " on return ([`crate::secret`])."]
-        pub fn export_encrypted(&mut self, export_password: &mut [u8],
-            now_ms: u64) -> Result<EncryptedExport, CoreError> {
+        pub fn export_encrypted(&mut self, vault_id: &str,
+            export_password: &mut [u8], now_ms: u64)
+            -> Result<EncryptedExport, CoreError> {
             #[automatically_derived]
             const _: () =
                 {
@@ -52882,27 +56518,39 @@ pub mod session {
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_exportEncrypted(me:
                             <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
                         arg1_1:
-                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim1,
                         arg1_2:
-                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim2,
                         arg1_3:
-                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim3,
                         arg1_4:
-                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4,
                         arg2_1:
-                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim1,
                         arg2_2:
-                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim2,
                         arg2_3:
-                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim3,
                         arg2_4:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg3_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg3_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg3_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg3_4:
                             <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4)
                         ->
@@ -52920,26 +56568,36 @@ pub mod session {
                                                             wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
                                                 };
                                             let me = &mut *me;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
                                             wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
-                                            let mut arg1 =
+                                            let mut arg2 =
                                                 unsafe {
                                                     <[u8] as
                                                             wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(<<[u8]
                                                                 as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
-                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
-                                                            arg1_3, arg1_4))
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
                                                 };
-                                            let arg1 = &mut *arg1;
+                                            let arg2 = &mut *arg2;
                                             wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
-                                            let arg2 =
+                                            let arg3 =
                                                 unsafe {
                                                     <u64 as
                                                             wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
                                                                 wasm_bindgen::convert::FromWasmAbi>::Abi as
-                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
-                                                            arg2_3, arg2_4))
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
                                                 };
-                                            let _ret = me.export_encrypted(arg1, arg2);
+                                            let _ret = me.export_encrypted(arg1, arg2, arg3);
                                             _ret
                                         }
                                     });
@@ -52975,7 +56633,8 @@ pub mod session {
                         wasm_bindgen::__rt::link_mem_intrinsics();
                         inform(FUNCTION);
                         inform(0);
-                        inform(2u32);
+                        inform(3u32);
+                        <&str as WasmDescribe>::describe();
                         <&mut [u8] as WasmDescribe>::describe();
                         <u64 as WasmDescribe>::describe();
                         <Result<EncryptedExport, CoreError> as
@@ -52992,7 +56651,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\x0bQ The vault as an encrypted export file (CRYPTO.md \xc2\xa711.14; ADR 0027), under a newP password for that file, which is needed to import it. Needs a re-authenticationY confirmed within [`REAUTH_WINDOW_MS`] ([`Session::reauth`], [`Session::confirm_reauth`];U owner decision 2026-10-05), and spends it. Ciphertext: the host saves the bytes as a\n download.\0\t # ErrorsV `locked`; `invalid_input` for an empty export password or one with an unassigned code@ point (checked first, so it spends nothing); `reauth_required`;V `export_oversize_items`; `export_too_large`. `export_password` is UTF-8 bytes, zeroed\x1f on return ([`crate::secret`]).\0\x02\x0fexport_password\0\0\0\x06now_ms\0\0\0\0\0\x0fexportEncrypted\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\x0bQ The vault as an encrypted export file (CRYPTO.md \xc2\xa711.14; ADR 0027), under a newP password for that file, which is needed to import it. Needs a re-authenticationY confirmed within [`REAUTH_WINDOW_MS`] ([`Session::reauth`], [`Session::confirm_reauth`];U owner decision 2026-10-05), and spends it. Ciphertext: the host saves the bytes as a\n download.\0\t # ErrorsV `locked`; `invalid_input` for an empty export password or one with an unassigned code@ point (checked first, so it spends nothing); `reauth_required`;V `export_oversize_items`; `export_too_large`. `export_password` is UTF-8 bytes, zeroed\x1f on return ([`crate::secret`]).\0\x03\x08vault_id\0\0\0\x0fexport_password\0\0\0\x06now_ms\0\0\0\0\0\x0fexportEncrypted\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -53023,8 +56682,8 @@ pub mod session {
             check_export_password(&export_password)?;
             let auth = inner.gate.authorize_encrypted(now_ms)?;
             let exported =
-                inner.vault.export_encrypted(&mut inner.rng, auth,
-                        &export_password, now_ms)?;
+                inner.vaults.get_mut(items::vault_id(vault_id)?)?.export_encrypted(&mut inner.rng,
+                        auth, &export_password, now_ms)?;
             Ok(EncryptedExport {
                     file: exported.file,
                     items: exported.items,
@@ -53036,7 +56695,8 @@ pub mod session {
         #[doc = ""]
         #[doc = " # Errors"]
         #[doc = " `locked`; `export_oversize_items`."]
-        pub fn cxf_export_passkeys(&self) -> Result<usize, CoreError> {
+        pub fn cxf_export_passkeys(&self, vault_id: &str)
+            -> Result<usize, CoreError> {
             #[automatically_derived]
             const _: () =
                 {
@@ -53048,7 +56708,19 @@ pub mod session {
                     #[export_name =
                     "session_cxfExportPasskeys_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_cxfExportPasskeys(me:
-                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
                         ->
                             wasm_bindgen::convert::WasmRet<<Result<usize, CoreError> as
                             wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
@@ -53064,7 +56736,17 @@ pub mod session {
                                                             wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
                                                 };
                                             let me = &*me;
-                                            let _ret = me.cxf_export_passkeys();
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            let _ret = me.cxf_export_passkeys(arg1);
                                             _ret
                                         }
                                     });
@@ -53087,7 +56769,8 @@ pub mod session {
                         wasm_bindgen::__rt::link_mem_intrinsics();
                         inform(FUNCTION);
                         inform(0);
-                        inform(0u32);
+                        inform(1u32);
+                        <&str as WasmDescribe>::describe();
                         <Result<usize, CoreError> as WasmDescribe>::describe();
                         <Result<usize, CoreError> as WasmDescribe>::describe();
                     }
@@ -53100,7 +56783,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\x04S The number of passkeys a CXF export would hold now (ADR 0074 \xc2\xa72), for the dialog.\0\t # Errors# `locked`; `export_oversize_items`.\0\0\0\0\x11cxfExportPasskeys\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\x04S The number of passkeys a CXF export would hold now (ADR 0074 \xc2\xa72), for the dialog.\0\t # Errors# `locked`; `export_oversize_items`.\0\x01\x08vault_id\0\0\0\0\0\x11cxfExportPasskeys\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -53126,7 +56809,7 @@ pub mod session {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            Ok(self.inner()?.vault.cxf_export_passkeys()?)
+            Ok(self.inner()?.vaults.get(items::vault_id(vault_id)?)?.cxf_export_passkeys()?)
         }
         #[doc =
         " The vault\'s passkeys as a CXF export file (ADR 0074 §2): a CXF document sealed under a"]
@@ -53151,7 +56834,7 @@ pub mod session {
         #[doc =
         " `export_too_large`. `export_password` is UTF-8 bytes, zeroed on return"]
         #[doc = " ([`crate::secret`])."]
-        pub fn export_cxf(&mut self, typed_phrase: &str,
+        pub fn export_cxf(&mut self, vault_id: &str, typed_phrase: &str,
             export_password: &mut [u8], now_ms: u64)
             -> Result<CxfExport, CoreError> {
             #[automatically_derived]
@@ -53196,27 +56879,39 @@ pub mod session {
                             <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4,
                         arg2_1:
-                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim1,
                         arg2_2:
-                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim2,
                         arg2_3:
-                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim3,
                         arg2_4:
-                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4,
                         arg3_1:
-                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim1,
                         arg3_2:
-                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim2,
                         arg3_3:
-                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim3,
                         arg3_4:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg4_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg4_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg4_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg4_4:
                             <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4)
                         ->
@@ -53244,26 +56939,36 @@ pub mod session {
                                                             arg1_3, arg1_4))
                                                 };
                                             let arg1 = &*arg1;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg2 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let arg2 = &*arg2;
                                             wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
-                                            let mut arg2 =
+                                            let mut arg3 =
                                                 unsafe {
                                                     <[u8] as
                                                             wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(<<[u8]
                                                                 as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
-                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
-                                                            arg2_3, arg2_4))
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
                                                 };
-                                            let arg2 = &mut *arg2;
+                                            let arg3 = &mut *arg3;
                                             wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
-                                            let arg3 =
+                                            let arg4 =
                                                 unsafe {
                                                     <u64 as
                                                             wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
                                                                 wasm_bindgen::convert::FromWasmAbi>::Abi as
-                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
-                                                            arg3_3, arg3_4))
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                            arg4_3, arg4_4))
                                                 };
-                                            let _ret = me.export_cxf(arg1, arg2, arg3);
+                                            let _ret = me.export_cxf(arg1, arg2, arg3, arg4);
                                             _ret
                                         }
                                     });
@@ -53304,7 +57009,8 @@ pub mod session {
                         wasm_bindgen::__rt::link_mem_intrinsics();
                         inform(FUNCTION);
                         inform(0);
-                        inform(3u32);
+                        inform(4u32);
+                        <&str as WasmDescribe>::describe();
                         <&str as WasmDescribe>::describe();
                         <&mut [u8] as WasmDescribe>::describe();
                         <u64 as WasmDescribe>::describe();
@@ -53320,7 +57026,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\rX The vault's passkeys as a CXF export file (ADR 0074 \xc2\xa72): a CXF document sealed under aV new password for that file (`rizzy-vault-cxf-export`). Gated like a plaintext export:X a re-authentication confirmed within [`REAUTH_WINDOW_MS`], [`cxf_export_warning`] shownU ([`Session::plaintext_warning_shown`]) and its hold over, and `typed_phrase` exactlyT [`plaintext_export_phrase`]; spends them. Ciphertext: the host saves the bytes as aL download. No bare, unencrypted CXF export exists (ADR 0074 owner answer 4).\0\t # ErrorsV `locked`; `invalid_input` for an empty export password or one with an unassigned code@ point (checked first, so it spends nothing); `reauth_required`;W `plaintext_export_not_acknowledged`; `plaintext_export_hold`; `export_oversize_items`;G `export_too_large`. `export_password` is UTF-8 bytes, zeroed on return\x15 ([`crate::secret`]).\0\x03\x0ctyped_phrase\0\0\0\x0fexport_password\0\0\0\x06now_ms\0\0\0\0\0\texportCxf\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\rX The vault's passkeys as a CXF export file (ADR 0074 \xc2\xa72): a CXF document sealed under aV new password for that file (`rizzy-vault-cxf-export`). Gated like a plaintext export:X a re-authentication confirmed within [`REAUTH_WINDOW_MS`], [`cxf_export_warning`] shownU ([`Session::plaintext_warning_shown`]) and its hold over, and `typed_phrase` exactlyT [`plaintext_export_phrase`]; spends them. Ciphertext: the host saves the bytes as aL download. No bare, unencrypted CXF export exists (ADR 0074 owner answer 4).\0\t # ErrorsV `locked`; `invalid_input` for an empty export password or one with an unassigned code@ point (checked first, so it spends nothing); `reauth_required`;W `plaintext_export_not_acknowledged`; `plaintext_export_hold`; `export_oversize_items`;G `export_too_large`. `export_password` is UTF-8 bytes, zeroed on return\x15 ([`crate::secret`]).\0\x04\x08vault_id\0\0\0\x0ctyped_phrase\0\0\0\x0fexport_password\0\0\0\x06now_ms\0\0\0\0\0\texportCxf\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -53355,8 +57061,8 @@ pub mod session {
             let ack = PlaintextExportAck::from_typed_phrase(typed_phrase)?;
             let auth = inner.gate.authorize_plaintext(now_ms)?;
             let exported =
-                inner.vault.export_cxf(&mut inner.rng, auth, ack,
-                        &export_password, now_ms)?;
+                inner.vaults.get_mut(items::vault_id(vault_id)?)?.export_cxf(&mut inner.rng,
+                        auth, ack, &export_password, now_ms)?;
             Ok(CxfExport { file: exported.file, passkeys: exported.passkeys })
         }
         #[doc =
@@ -53365,7 +57071,8 @@ pub mod session {
         #[doc = ""]
         #[doc = " # Errors"]
         #[doc = " `locked`."]
-        pub fn export_blockers(&self) -> Result<Vec<String>, CoreError> {
+        pub fn export_blockers(&self, vault_id: &str)
+            -> Result<Vec<String>, CoreError> {
             #[automatically_derived]
             const _: () =
                 {
@@ -53377,7 +57084,19 @@ pub mod session {
                     #[doc = " `locked`."]
                     #[export_name = "session_exportBlockers_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_exportBlockers(me:
-                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
                         ->
                             wasm_bindgen::convert::WasmRet<<Result<Vec<String>,
                             CoreError> as wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
@@ -53393,7 +57112,17 @@ pub mod session {
                                                             wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
                                                 };
                                             let me = &*me;
-                                            let _ret = me.export_blockers();
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            let _ret = me.export_blockers(arg1);
                                             _ret
                                         }
                                     });
@@ -53417,7 +57146,8 @@ pub mod session {
                         wasm_bindgen::__rt::link_mem_intrinsics();
                         inform(FUNCTION);
                         inform(0);
-                        inform(0u32);
+                        inform(1u32);
+                        <&str as WasmDescribe>::describe();
                         <Result<Vec<String>, CoreError> as
                                 WasmDescribe>::describe();
                         <Result<Vec<String>, CoreError> as
@@ -53432,7 +57162,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\x05T The ids of the items that stop an export (too large to encode; ADR 0027 \xc2\xa71). Empty\x1f when an export can be written.\0\t # Errors\n `locked`.\0\0\0\0\x0eexportBlockers\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\x05T The ids of the items that stop an export (too large to encode; ADR 0027 \xc2\xa71). Empty\x1f when an export can be written.\0\t # Errors\n `locked`.\0\x01\x08vault_id\0\0\0\0\0\x0eexportBlockers\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -53458,8 +57188,9 @@ pub mod session {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            Ok(self.inner()?.vault.export_blockers().iter().map(|i|
-                            hex(i.as_bytes())).collect())
+            let target = items::vault_id(vault_id)?;
+            Ok(self.inner()?.vaults.get(target)?.export_blockers().iter().map(|i|
+                            item_ref(target, *i)).collect())
         }
         #[doc =
         " The warning the host shows before a CSV export, after [`plaintext_export_warning`]: the"]
@@ -53468,7 +57199,8 @@ pub mod session {
         #[doc = ""]
         #[doc = " # Errors"]
         #[doc = " `locked`; `export_oversize_items`."]
-        pub fn csv_export_warning(&self) -> Result<String, CoreError> {
+        pub fn csv_export_warning(&self, vault_id: &str)
+            -> Result<String, CoreError> {
             #[automatically_derived]
             const _: () =
                 {
@@ -53481,7 +57213,19 @@ pub mod session {
                     #[doc = " `locked`; `export_oversize_items`."]
                     #[export_name = "session_csvExportWarning_e09cc0eb35f8b583"]
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_csvExportWarning(me:
-                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                            <Session as wasm_bindgen::convert::RefFromWasmAbi>::Abi,
+                        arg1_1:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg1_2:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg1_3:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg1_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4)
                         ->
                             wasm_bindgen::convert::WasmRet<<Result<String, CoreError> as
                             wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
@@ -53497,7 +57241,17 @@ pub mod session {
                                                             wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
                                                 };
                                             let me = &*me;
-                                            let _ret = me.csv_export_warning();
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
+                                            let arg1 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
+                                                            arg1_3, arg1_4))
+                                                };
+                                            let arg1 = &*arg1;
+                                            let _ret = me.csv_export_warning(arg1);
                                             _ret
                                         }
                                     });
@@ -53522,7 +57276,8 @@ pub mod session {
                         wasm_bindgen::__rt::link_mem_intrinsics();
                         inform(FUNCTION);
                         inform(0);
-                        inform(0u32);
+                        inform(1u32);
+                        <&str as WasmDescribe>::describe();
                         <Result<String, CoreError> as WasmDescribe>::describe();
                         <Result<String, CoreError> as WasmDescribe>::describe();
                     }
@@ -53535,7 +57290,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\x05X The warning the host shows before a CSV export, after [`plaintext_export_warning`]: theJ frozen text with the number of items that would lose data (ADR 0027 \xc2\xa75).\0\t # Errors# `locked`; `export_oversize_items`.\0\0\0\0\x10csvExportWarning\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\x05X The warning the host shows before a CSV export, after [`plaintext_export_warning`]: theJ frozen text with the number of items that would lose data (ADR 0027 \xc2\xa75).\0\t # Errors# `locked`; `export_oversize_items`.\0\x01\x08vault_id\0\0\0\0\0\x10csvExportWarning\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -53561,7 +57316,8 @@ pub mod session {
                     static _GENERATED: [u8; _LEN] =
                         flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
                 };
-            let loss = self.inner()?.vault.csv_export_loss()?;
+            let loss =
+                self.inner()?.vaults.get(items::vault_id(vault_id)?)?.csv_export_loss()?;
             Ok(csv_export_warning(loss.items_losing_data()))
         }
         #[doc =
@@ -54318,8 +58074,8 @@ pub mod session {
         " `locked`; `reauth_required`; `unknown_format`; `plaintext_export_not_acknowledged`;"]
         #[doc =
         " `plaintext_export_hold`; `export_oversize_items`; `export_too_large`."]
-        pub fn export_plaintext(&mut self, format: &str, typed_phrase: &str,
-            now_ms: u64) -> Result<Vec<u8>, CoreError> {
+        pub fn export_plaintext(&mut self, vault_id: &str, format: &str,
+            typed_phrase: &str, now_ms: u64) -> Result<Vec<u8>, CoreError> {
             #[automatically_derived]
             const _: () =
                 {
@@ -54369,15 +58125,27 @@ pub mod session {
                             <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4,
                         arg3_1:
-                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim1,
                         arg3_2:
-                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim2,
                         arg3_3:
-                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim3,
                         arg3_4:
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg4_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg4_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg4_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg4_4:
                             <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4)
                         ->
@@ -54415,16 +58183,26 @@ pub mod session {
                                                             arg2_3, arg2_4))
                                                 };
                                             let arg2 = &*arg2;
-                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
                                             let arg3 =
+                                                unsafe {
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
+                                                };
+                                            let arg3 = &*arg3;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg4 =
                                                 unsafe {
                                                     <u64 as
                                                             wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
                                                                 wasm_bindgen::convert::FromWasmAbi>::Abi as
-                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
-                                                            arg3_3, arg3_4))
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                            arg4_3, arg4_4))
                                                 };
-                                            let _ret = me.export_plaintext(arg1, arg2, arg3);
+                                            let _ret = me.export_plaintext(arg1, arg2, arg3, arg4);
                                             _ret
                                         }
                                     });
@@ -54460,7 +58238,8 @@ pub mod session {
                         wasm_bindgen::__rt::link_mem_intrinsics();
                         inform(FUNCTION);
                         inform(0);
-                        inform(3u32);
+                        inform(4u32);
+                        <&str as WasmDescribe>::describe();
                         <&str as WasmDescribe>::describe();
                         <&str as WasmDescribe>::describe();
                         <u64 as WasmDescribe>::describe();
@@ -54476,7 +58255,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\nZ The plaintext export (ADR 0027 \xc2\xa73\xe2\x80\x93\xc2\xa75): `format` is `json` or `csv`; `typed_phrase` is= what the user typed after the warning, which must be exactlyH [`plaintext_export_phrase`]. Needs a re-authentication confirmed withinX [`REAUTH_WINDOW_MS`] and the hold after [`Session::plaintext_warning_shown`] to be overV (owner decision 2026-10-05), and spends both. The bytes are plaintext: the host hands2 them to the user as a download and keeps no copy.\0\t # ErrorsT `locked`; `reauth_required`; `unknown_format`; `plaintext_export_not_acknowledged`;F `plaintext_export_hold`; `export_oversize_items`; `export_too_large`.\0\x03\x06format\0\0\0\x0ctyped_phrase\0\0\0\x06now_ms\0\0\0\0\0\x0fexportPlaintext\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\nZ The plaintext export (ADR 0027 \xc2\xa73\xe2\x80\x93\xc2\xa75): `format` is `json` or `csv`; `typed_phrase` is= what the user typed after the warning, which must be exactlyH [`plaintext_export_phrase`]. Needs a re-authentication confirmed withinX [`REAUTH_WINDOW_MS`] and the hold after [`Session::plaintext_warning_shown`] to be overV (owner decision 2026-10-05), and spends both. The bytes are plaintext: the host hands2 them to the user as a download and keeps no copy.\0\t # ErrorsT `locked`; `reauth_required`; `unknown_format`; `plaintext_export_not_acknowledged`;F `plaintext_export_hold`; `export_oversize_items`; `export_too_large`.\0\x04\x08vault_id\0\0\0\x06format\0\0\0\x0ctyped_phrase\0\0\0\x06now_ms\0\0\0\0\0\x0fexportPlaintext\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -54516,8 +58295,12 @@ pub mod session {
             let auth = inner.gate.authorize_plaintext(now_ms)?;
             let bytes =
                 if json {
-                    inner.vault.export_plaintext_json(auth, ack, now_ms)?
-                } else { inner.vault.export_plaintext_csv(auth, ack)? };
+                    inner.vaults.get_mut(items::vault_id(vault_id)?)?.export_plaintext_json(auth,
+                            ack, now_ms)?
+                } else {
+                    inner.vaults.get_mut(items::vault_id(vault_id)?)?.export_plaintext_csv(auth,
+                            ack)?
+                };
             Ok(bytes.expose_secret().to_vec())
         }
         #[doc =
@@ -54535,8 +58318,8 @@ pub mod session {
         #[doc =
         " over [`MAX_IMPORT_FILE_LEN`]; `import_failed` when the file as a whole is refused;"]
         #[doc = " `read_only`."]
-        pub fn import_file(&mut self, format: &str, file: &[u8], now_ms: u64)
-            -> Result<ImportReport, CoreError> {
+        pub fn import_file(&mut self, vault_id: &str, format: &str,
+            file: &[u8], now_ms: u64) -> Result<ImportReport, CoreError> {
             #[automatically_derived]
             const _: () =
                 {
@@ -54571,27 +58354,39 @@ pub mod session {
                             <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4,
                         arg2_1:
-                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim1,
                         arg2_2:
-                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim2,
                         arg2_3:
-                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim3,
                         arg2_4:
-                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4,
                         arg3_1:
-                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim1,
                         arg3_2:
-                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim2,
                         arg3_3:
-                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim3,
                         arg3_4:
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg4_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg4_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg4_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg4_4:
                             <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4)
                         ->
@@ -54619,26 +58414,36 @@ pub mod session {
                                                             arg1_3, arg1_4))
                                                 };
                                             let arg1 = &*arg1;
-                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
                                             let arg2 =
                                                 unsafe {
-                                                    <[u8] as
-                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
                                                                 as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                                                                 wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
                                                             arg2_3, arg2_4))
                                                 };
                                             let arg2 = &*arg2;
-                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
                                             let arg3 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
+                                                };
+                                            let arg3 = &*arg3;
+                                            wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
+                                            let arg4 =
                                                 unsafe {
                                                     <u64 as
                                                             wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
                                                                 wasm_bindgen::convert::FromWasmAbi>::Abi as
-                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
-                                                            arg3_3, arg3_4))
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                            arg4_3, arg4_4))
                                                 };
-                                            let _ret = me.import_file(arg1, arg2, arg3);
+                                            let _ret = me.import_file(arg1, arg2, arg3, arg4);
                                             _ret
                                         }
                                     });
@@ -54671,7 +58476,8 @@ pub mod session {
                         wasm_bindgen::__rt::link_mem_intrinsics();
                         inform(FUNCTION);
                         inform(0);
-                        inform(3u32);
+                        inform(4u32);
+                        <&str as WasmDescribe>::describe();
                         <&str as WasmDescribe>::describe();
                         <&[u8] as WasmDescribe>::describe();
                         <u64 as WasmDescribe>::describe();
@@ -54689,7 +58495,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\tS Imports a file of another product, or our own plaintext JSON export, as new items.Q `format` is one of `bitwarden-json`, `1pux`, `keepass-xml`, `csv`, `chrome-csv`,U `firefox-csv`, `rizzy-json`, `aliasvault-csv`, `aliasvault-avux`, `cxf-json` (a bareF CXF passkey file, ADR 0074 \xc2\xa73). The report has counts only (INV-48).\0\t # ErrorsX `locked`; `wrong_state` while a sync runs; `unknown_format`; `invalid_input` for a fileS over [`MAX_IMPORT_FILE_LEN`]; `import_failed` when the file as a whole is refused;\r `read_only`.\0\x03\x06format\0\0\0\x04file\0\0\0\x06now_ms\0\0\0\0\0\nimportFile\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\tS Imports a file of another product, or our own plaintext JSON export, as new items.Q `format` is one of `bitwarden-json`, `1pux`, `keepass-xml`, `csv`, `chrome-csv`,U `firefox-csv`, `rizzy-json`, `aliasvault-csv`, `aliasvault-avux`, `cxf-json` (a bareF CXF passkey file, ADR 0074 \xc2\xa73). The report has counts only (INV-48).\0\t # ErrorsX `locked`; `wrong_state` while a sync runs; `unknown_format`; `invalid_input` for a fileS over [`MAX_IMPORT_FILE_LEN`]; `import_failed` when the file as a whole is refused;\r `read_only`.\0\x04\x08vault_id\0\0\0\x06format\0\0\0\x04file\0\0\0\x06now_ms\0\0\0\0\0\nimportFile\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -54737,8 +58543,8 @@ pub mod session {
                 rizzy_import::import(format, file,
                             &mut inner.rng).map_err(|_| CoreError::new(IMPORT_FAILED))?;
             let done =
-                inner.vault.import_items(&mut inner.rng, &inner.unlocked,
-                        &parsed.items, now_ms)?;
+                inner.vaults.get_mut(items::vault_id(vault_id)?)?.import_items(&mut inner.rng,
+                        &inner.unlocked, &parsed.items, now_ms)?;
             let counts = parsed.counts;
             Ok(ImportReport {
                     imported: done.imported.len(),
@@ -54765,7 +58571,7 @@ pub mod session {
         #[doc =
         " `export_password` is UTF-8 bytes, zeroed on return whatever the outcome"]
         #[doc = " ([`crate::secret`])."]
-        pub fn import_cxf_encrypted(&mut self, file: &[u8],
+        pub fn import_cxf_encrypted(&mut self, vault_id: &str, file: &[u8],
             export_password: &mut [u8], now_ms: u64)
             -> Result<ImportReport, CoreError> {
             #[automatically_derived]
@@ -54791,39 +58597,51 @@ pub mod session {
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_importCxfEncrypted(me:
                             <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
                         arg1_1:
-                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim1,
                         arg1_2:
-                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim2,
                         arg1_3:
-                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim3,
                         arg1_4:
-                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4,
                         arg2_1:
-                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim1,
                         arg2_2:
-                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim2,
                         arg2_3:
-                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim3,
                         arg2_4:
-                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4,
                         arg3_1:
-                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim1,
                         arg3_2:
-                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim2,
                         arg3_3:
-                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim3,
                         arg3_4:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg4_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg4_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg4_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg4_4:
                             <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4)
                         ->
@@ -54841,36 +58659,46 @@ pub mod session {
                                                             wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
                                                 };
                                             let me = &mut *me;
-                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
                                             let arg1 =
                                                 unsafe {
-                                                    <[u8] as
-                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
                                                                 as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                                                                 wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
                                                             arg1_3, arg1_4))
                                                 };
                                             let arg1 = &*arg1;
                                             wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
-                                            let mut arg2 =
+                                            let arg2 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let arg2 = &*arg2;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            let mut arg3 =
                                                 unsafe {
                                                     <[u8] as
                                                             wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(<<[u8]
                                                                 as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
-                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
-                                                            arg2_3, arg2_4))
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
                                                 };
-                                            let arg2 = &mut *arg2;
+                                            let arg3 = &mut *arg3;
                                             wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
-                                            let arg3 =
+                                            let arg4 =
                                                 unsafe {
                                                     <u64 as
                                                             wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
                                                                 wasm_bindgen::convert::FromWasmAbi>::Abi as
-                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
-                                                            arg3_3, arg3_4))
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                            arg4_3, arg4_4))
                                                 };
-                                            let _ret = me.import_cxf_encrypted(arg1, arg2, arg3);
+                                            let _ret = me.import_cxf_encrypted(arg1, arg2, arg3, arg4);
                                             _ret
                                         }
                                     });
@@ -54903,7 +58731,8 @@ pub mod session {
                         wasm_bindgen::__rt::link_mem_intrinsics();
                         inform(FUNCTION);
                         inform(0);
-                        inform(3u32);
+                        inform(4u32);
+                        <&str as WasmDescribe>::describe();
                         <&[u8] as WasmDescribe>::describe();
                         <&mut [u8] as WasmDescribe>::describe();
                         <u64 as WasmDescribe>::describe();
@@ -54921,7 +58750,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\t[ Imports our own CXF passkey export (`rizzy-vault-cxf-export`, ADR 0074 \xc2\xa72\xe2\x80\x93\xc2\xa73) with itsV export password, one new Login item per passkey. The report has counts only (INV-48).\0\t # ErrorsK `locked`; `wrong_state` while a sync runs; `invalid_input` for a file overO [`MAX_IMPORT_FILE_LEN`]; `invalid_export_file` (another tag or payload versionN included); `export_decryption_failed`; `export_update_required`; `read_only`.H `export_password` is UTF-8 bytes, zeroed on return whatever the outcome\x15 ([`crate::secret`]).\0\x03\x04file\0\0\0\x0fexport_password\0\0\0\x06now_ms\0\0\0\0\0\x12importCxfEncrypted\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\t[ Imports our own CXF passkey export (`rizzy-vault-cxf-export`, ADR 0074 \xc2\xa72\xe2\x80\x93\xc2\xa73) with itsV export password, one new Login item per passkey. The report has counts only (INV-48).\0\t # ErrorsK `locked`; `wrong_state` while a sync runs; `invalid_input` for a file overO [`MAX_IMPORT_FILE_LEN`]; `invalid_export_file` (another tag or payload versionN included); `export_decryption_failed`; `export_update_required`; `read_only`.H `export_password` is UTF-8 bytes, zeroed on return whatever the outcome\x15 ([`crate::secret`]).\0\x04\x08vault_id\0\0\0\x04file\0\0\0\x0fexport_password\0\0\0\x06now_ms\0\0\0\0\0\x12importCxfEncrypted\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -54953,7 +58782,7 @@ pub mod session {
             }
             let inner = self.writable()?;
             let done =
-                inner.vault.import_cxf_encrypted(&mut inner.rng,
+                inner.vaults.get_mut(items::vault_id(vault_id)?)?.import_cxf_encrypted(&mut inner.rng,
                         &inner.unlocked, file, &export_password, now_ms)?;
             Ok(ImportReport {
                     imported: done.imported.len(),
@@ -54976,7 +58805,7 @@ pub mod session {
         #[doc =
         " `export_update_required`; `read_only`. `export_password` is UTF-8 bytes, zeroed on"]
         #[doc = " return whatever the outcome ([`crate::secret`])."]
-        pub fn import_encrypted(&mut self, file: &[u8],
+        pub fn import_encrypted(&mut self, vault_id: &str, file: &[u8],
             export_password: &mut [u8], now_ms: u64)
             -> Result<ImportReport, CoreError> {
             #[automatically_derived]
@@ -54997,39 +58826,51 @@ pub mod session {
                     pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_Session_importEncrypted(me:
                             <Session as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi,
                         arg1_1:
-                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim1,
                         arg1_2:
-                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim2,
                         arg1_3:
-                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim3,
                         arg1_4:
-                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                            <<str as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4,
                         arg2_1:
-                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim1,
                         arg2_2:
-                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim2,
                         arg2_3:
-                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim3,
                         arg2_4:
-                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4,
                         arg3_1:
-                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim1,
                         arg3_2:
-                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim2,
                         arg3_3:
-                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim3,
                         arg3_4:
+                            <<[u8] as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim4,
+                        arg4_1:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim1,
+                        arg4_2:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim2,
+                        arg4_3:
+                            <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
+                            wasm_bindgen::convert::WasmAbi>::Prim3,
+                        arg4_4:
                             <<u64 as wasm_bindgen::convert::FromWasmAbi>::Abi as
                             wasm_bindgen::convert::WasmAbi>::Prim4)
                         ->
@@ -55047,36 +58888,46 @@ pub mod session {
                                                             wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(me)
                                                 };
                                             let me = &mut *me;
-                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<str>();
                                             let arg1 =
                                                 unsafe {
-                                                    <[u8] as
-                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                    <str as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<str
                                                                 as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
                                                                 wasm_bindgen::convert::WasmAbi>::join(arg1_1, arg1_2,
                                                             arg1_3, arg1_4))
                                                 };
                                             let arg1 = &*arg1;
                                             wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
-                                            let mut arg2 =
+                                            let arg2 =
+                                                unsafe {
+                                                    <[u8] as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(<<[u8]
+                                                                as wasm_bindgen::convert::RefFromWasmAbi>::Abi as
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
+                                                            arg2_3, arg2_4))
+                                                };
+                                            let arg2 = &*arg2;
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<[u8]>();
+                                            let mut arg3 =
                                                 unsafe {
                                                     <[u8] as
                                                             wasm_bindgen::convert::RefMutFromWasmAbi>::ref_mut_from_abi(<<[u8]
                                                                 as wasm_bindgen::convert::RefMutFromWasmAbi>::Abi as
-                                                                wasm_bindgen::convert::WasmAbi>::join(arg2_1, arg2_2,
-                                                            arg2_3, arg2_4))
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
+                                                            arg3_3, arg3_4))
                                                 };
-                                            let arg2 = &mut *arg2;
+                                            let arg3 = &mut *arg3;
                                             wasm_bindgen::__rt::ensure_unwind_safe::<u64>();
-                                            let arg3 =
+                                            let arg4 =
                                                 unsafe {
                                                     <u64 as
                                                             wasm_bindgen::convert::FromWasmAbi>::from_abi(<<u64 as
                                                                 wasm_bindgen::convert::FromWasmAbi>::Abi as
-                                                                wasm_bindgen::convert::WasmAbi>::join(arg3_1, arg3_2,
-                                                            arg3_3, arg3_4))
+                                                                wasm_bindgen::convert::WasmAbi>::join(arg4_1, arg4_2,
+                                                            arg4_3, arg4_4))
                                                 };
-                                            let _ret = me.import_encrypted(arg1, arg2, arg3);
+                                            let _ret = me.import_encrypted(arg1, arg2, arg3, arg4);
                                             _ret
                                         }
                                     });
@@ -55105,7 +58956,8 @@ pub mod session {
                         wasm_bindgen::__rt::link_mem_intrinsics();
                         inform(FUNCTION);
                         inform(0);
-                        inform(3u32);
+                        inform(4u32);
+                        <&str as WasmDescribe>::describe();
                         <&[u8] as WasmDescribe>::describe();
                         <&mut [u8] as WasmDescribe>::describe();
                         <u64 as WasmDescribe>::describe();
@@ -55123,7 +58975,7 @@ pub mod session {
                     const _ENCODED_BYTES: &[u8] =
                         {
                             const _CHUNK_SLICES: [&[u8]; 1usize] =
-                                [b"\x01\x01\x07Session\x07N Imports our own encrypted export file with its export password, as new items.\0\t # ErrorsK `locked`; `wrong_state` while a sync runs; `invalid_input` for a file overL [`MAX_IMPORT_FILE_LEN`]; `invalid_export_file`; `export_decryption_failed`;S `export_update_required`; `read_only`. `export_password` is UTF-8 bytes, zeroed on1 return whatever the outcome ([`crate::secret`]).\0\x03\x04file\0\0\0\x0fexport_password\0\0\0\x06now_ms\0\0\0\0\0\x0fimportEncrypted\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                                [b"\x01\x01\x07Session\x07N Imports our own encrypted export file with its export password, as new items.\0\t # ErrorsK `locked`; `wrong_state` while a sync runs; `invalid_input` for a file overL [`MAX_IMPORT_FILE_LEN`]; `invalid_export_file`; `export_decryption_failed`;S `export_update_required`; `read_only`. `export_password` is UTF-8 bytes, zeroed on1 return whatever the outcome ([`crate::secret`]).\0\x04\x08vault_id\0\0\0\x04file\0\0\0\x0fexport_password\0\0\0\x06now_ms\0\0\0\0\0\x0fimportEncrypted\x01\x01\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
                             #[allow(long_running_const_eval)]
                             const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
                             #[allow(long_running_const_eval)]
@@ -55155,8 +59007,8 @@ pub mod session {
             }
             let inner = self.writable()?;
             let done =
-                inner.vault.import_encrypted(&mut inner.rng, &inner.unlocked,
-                        file, &export_password, now_ms)?;
+                inner.vaults.get_mut(items::vault_id(vault_id)?)?.import_encrypted(&mut inner.rng,
+                        &inner.unlocked, file, &export_password, now_ms)?;
             Ok(ImportReport {
                     imported: done.imported.len(),
                     skipped: done.skipped_items,
@@ -57210,7 +61062,17 @@ pub mod session {
                 };
             let inner = self.inner_mut()?;
             let record = inner.settings.get(&inner.account, &inner.unlocked)?;
-            let saved = vault_item_uris(&inner.vault);
+            let mut names = Vec::new();
+            let mut saved = Vec::new();
+            for vault in inner.vaults.all() {
+                for mut uri in vault_item_uris(vault) {
+                    let name =
+                        item_ref(vault.vault_id(), ItemId::from_bytes(uri.item_id));
+                    uri.item_id = matching::synthetic_id(names.len());
+                    names.push(name);
+                    saved.push(uri);
+                }
+            }
             let uris: Vec<ItemUri<'_>> =
                 saved.iter().map(SavedUri::as_item_uri).collect();
             let frame =
@@ -57218,7 +61080,7 @@ pub mod session {
             let decision =
                 decide_with_settings(page_url, &frame, &uris, record,
                         &inner.global_groups)?;
-            Ok(matching::decision_view(decision))
+            Ok(matching::decision_view_named(decision, &names))
         }
         #[doc =
         " The identity generator\'s synced defaults (`ACCOUNT_SETTINGS` tag `0x0004`, ADR 0079 Open"]
@@ -58574,7 +62436,8 @@ pub mod session {
         fn settings_change(&mut self, edit: SettingsEdit)
             -> CoreResult<HttpRequest> {
             let inner = self.writable()?;
-            if inner.vault.is_read_only() {
+            if !inner.vaults.personal_vault().is_ok_and(|v| !v.is_read_only())
+                {
                 return Err(ClientError::ReadOnly.into());
             }
             let pending =
@@ -67352,11 +71215,18 @@ pub mod store {
     //!   Format 3 ([ADR 0056] §3) adds `SQLite`'s `item_index` table, which this host does not
     //!   keep: the browser extension keeps its M2 item list (ADR 0056 owner answer 4), so its
     //!   format-3 cache is its format-2 one with the format bumped, no store is added to
-    //!   [`STORE_NAMES`], and no index row is ever encoded or decoded here.
+    //!   [`STORE_NAMES`], and no index row is ever encoded or decoded here. Format 4 ([ADR 0081]
+    //!   §A7) re-keys that table by `(vault_id, item_id)` and adds `pending_move`: this host makes
+    //!   no moves between vaults (the extension offers none, only the web vault and `rv` do), so
+    //!   it keeps no `pending_move` store either, and its format-4 cache is its format-3 one with
+    //!   the format bumped (`rizzy_client::store::load::migration_writes` at unlock). A vault
+    //!   deleted elsewhere leaves through `Write::DropVault`, which
+    //!   [`rizzy_client::store::rows::CacheRows::apply`] executes on the mirror like any write.
     //!
     //! [ADR 0026]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0026-client-device-state-and-cache.md
     //! [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
     //! [ADR 0056]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0056-local-index-recently-used-search.md
+    //! [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
     use rizzy_client::ClientError;
     use rizzy_client::rizzy_core::encoding::{
         Reader, put_bytes, put_u8, put_u64,
@@ -69831,11 +73701,19 @@ pub mod sync {
     //! - **An older copy of this device's history** cannot exist for an ephemeral device; if the
     //!   server shows one anyway (`own_history_ahead`, `own_conflict`), the vault becomes read-only
     //!   and the sync ends with `device_state_outdated`, as in `rv`.
-    //! - **One healing round per sync**, as `rv` does; a second need is `cannot_heal`.
+    //! - **One healing round per vault and sync**, as `rv` does; a second need is `cannot_heal`.
+    //! - **Every vault, one after the other** ([ADR 0081] §A7): after the account answer the vault
+    //!   set follows the catalog (`crate::vaults`: new vaults get a driver, dropped ones are
+    //!   removed), then each open vault runs Fetch → heal → Upload → Fetch in turn, the Personal
+    //!   vault first. A `client_too_old` refusal of one vault's request marks only that vault as
+    //!   needing an update (§A12) and the next vault follows; any other error ends the sync.
+    //!
+    //! [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
     use rizzy_client::ClientError;
     use rizzy_client::account::VerifiedAccount;
     use rizzy_client::device::UnlockedDevice;
     use rizzy_client::login::{verify_web_refresh, web_account_query};
+    use rizzy_client::rizzy_core::ids::VaultId;
     use rizzy_client::rizzy_proto::account::AccountView;
     use rizzy_client::rizzy_proto::error::ErrorCode;
     use rizzy_client::rizzy_proto::http::paths;
@@ -69849,6 +73727,7 @@ pub mod sync {
     use crate::error::{CoreError, CoreResult, VAULT_KEY_ROTATED, WRONG_STATE};
     use crate::http::{self, HttpRequest};
     use crate::rng::Rng;
+    use crate::vaults::VaultSet;
     /// How a step signs the request it builds (module docs; `crate::device`'s module docs, "Sync
     /// and items"): a bearer-only OPAQUE session (the web vault) or a device-authenticated one,
     /// which additionally signs every request with the device key (CRYPTO.md §5.10; ADR 0028 item
@@ -70006,8 +73885,8 @@ pub mod sync {
     }
     /// What a step works on: the session's parts, borrowed.
     pub(crate) struct Ctx<'a> {
-        /// The vault.
-        pub(crate) vault: &'a mut VaultSync,
+        /// The vaults (ADR 0081 §A7: a sync round fetches every vault in the directory).
+        pub(crate) vaults: &'a mut VaultSet,
         /// The verified account of the last login or refresh.
         pub(crate) account: &'a mut VerifiedAccount,
         /// The account's authors.
@@ -70025,21 +73904,40 @@ pub mod sync {
         phase: Phase,
         /// The outstanding request.
         pending: Option<HttpRequest>,
-        /// Whether this sync already sent a healing request.
+        /// Whether this sync already sent a healing request for the current vault.
         healed: bool,
+        /// The vaults still to sync, in order (ADR 0081 §A7).
+        queue: Vec<VaultId>,
+        /// The vault being synced.
+        current: Option<VaultId>,
+        /// The vaults the last account answer dropped (deleted elsewhere, ADR 0081 §A5), for a
+        /// host with a cache to delete their rows.
+        dropped: Vec<VaultId>,
     }
     #[automatically_derived]
     impl ::core::fmt::Debug for SyncDriver {
         #[inline]
         fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-            ::core::fmt::Formatter::debug_struct_field3_finish(f,
-                "SyncDriver", "phase", &self.phase, "pending", &self.pending,
-                "healed", &&self.healed)
+            let names: &'static _ =
+                &["phase", "pending", "healed", "queue", "current",
+                            "dropped"];
+            let values: &[&dyn ::core::fmt::Debug] =
+                &[&self.phase, &self.pending, &self.healed, &self.queue,
+                            &self.current, &&self.dropped];
+            ::core::fmt::Formatter::debug_struct_fields_finish(f,
+                "SyncDriver", names, values)
         }
     }
     impl Default for SyncDriver {
         fn default() -> Self {
-            Self { phase: Phase::Idle, pending: None, healed: false }
+            Self {
+                phase: Phase::Idle,
+                pending: None,
+                healed: false,
+                queue: Vec::new(),
+                current: None,
+                dropped: Vec::new(),
+            }
         }
     }
     impl SyncDriver {
@@ -70052,6 +73950,8 @@ pub mod sync {
         pub(crate) fn start(&mut self, ctx: &mut Ctx<'_>) -> CoreResult<()> {
             if self.running() { return Err(CoreError::new(WRONG_STATE)); }
             self.healed = false;
+            self.queue.clear();
+            self.current = None;
             let query = web_account_query(ctx.account);
             self.pending =
                 Some(ctx.signer.build(paths::ACCOUNT_STATE, &query,
@@ -70080,8 +73980,46 @@ pub mod sync {
             if result.is_err() {
                 self.phase = Phase::Idle;
                 self.pending = None;
+                self.queue.clear();
+                self.current = None;
             }
             result
+        }
+        /// The vaults the account answers of this sync dropped, since the last call.
+        pub(crate) fn take_dropped(&mut self) -> Vec<VaultId> {
+            core::mem::take(&mut self.dropped)
+        }
+        /// The driver of the vault being synced.
+        fn vault<'v>(&self, vaults: &'v mut VaultSet)
+            -> CoreResult<&'v mut VaultSync> {
+            vaults.get_mut(self.current.ok_or(CoreError::new(WRONG_STATE))?)
+        }
+        /// The next vault's Fetch, or the end of the sync after the last vault.
+        fn next_vault(&mut self, ctx: &mut Ctx<'_>) -> CoreResult<()> {
+            loop {
+                if self.queue.is_empty() {
+                    self.current = None;
+                    self.phase = Phase::Idle;
+                    return Ok(());
+                }
+                let vault_id = self.queue.remove(0);
+                if ctx.vaults.get(vault_id).is_err() { continue; }
+                self.current = Some(vault_id);
+                self.healed = false;
+                return self.fetch(ctx, AfterFetch::HealOrUpload);
+            }
+        }
+        /// ADR 0081 §A12: a `client_too_old` refusal of one vault's request marks only that vault
+        /// "needs an update" and the sync goes on with the next vault.
+        fn too_old(&mut self, ctx: &mut Ctx<'_>, status: u16, body: &[u8])
+            -> Option<CoreResult<()>> {
+            if http::server_code(status, body) !=
+                    Some(ErrorCode::ClientTooOld) {
+                return None;
+            }
+            let vault_id = self.current?;
+            ctx.vaults.mark_too_new(vault_id);
+            Some(self.next_vault(ctx))
         }
         /// Ends the running sync without an answer: the host could not carry the outstanding
         /// request (the connection failed, the answer was too large or broke off mid-read). A no-op
@@ -70098,10 +74036,15 @@ pub mod sync {
         ///   changes, the vault stays read-only, and the next sync's Fetch shows whether the server
         ///   stored it; an own op it carried is then acknowledged through the upload path ("already
         ///   stored"), as `rizzy-client`'s healing docs describe for a lost healing answer.
-        pub(crate) fn abort(&mut self, vault: &mut VaultSync) {
-            if self.phase == Phase::Heal { vault.healing_refused(); }
+        pub(crate) fn abort(&mut self, vaults: &mut VaultSet) {
+            if self.phase == Phase::Heal && let Ok(vault) = self.vault(vaults)
+                {
+                vault.healing_refused();
+            }
             self.phase = Phase::Idle;
             self.pending = None;
+            self.queue.clear();
+            self.current = None;
         }
         /// One answer in `phase`.
         fn step(&mut self, ctx: &mut Ctx<'_>, phase: Phase, status: u16,
@@ -70110,43 +74053,59 @@ pub mod sync {
                 Phase::Idle => Err(CoreError::new(WRONG_STATE)),
                 Phase::Account => {
                     let view: AccountView = http::json(status, body)?;
-                    adopt_account(ctx, &view)?;
-                    self.fetch(ctx, AfterFetch::HealOrUpload)
+                    let dropped = adopt_account(ctx, &view)?;
+                    self.dropped.extend(dropped);
+                    self.queue = ctx.vaults.sync_order();
+                    self.next_vault(ctx)
                 }
                 Phase::Fetch(then) => {
+                    if let Some(next) = self.too_old(ctx, status, body) {
+                        return next;
+                    }
                     let response: FetchResponse = http::json(status, body)?;
+                    let vault = self.vault(ctx.vaults)?;
                     let outcome =
-                        ctx.vault.apply_fetch(&*ctx.authors, &response, now_ms)?;
+                        vault.apply_fetch(&*ctx.authors, &response, now_ms)?;
                     if outcome.own_history_ahead {
-                        ctx.vault.set_read_only(true);
+                        vault.set_read_only(true);
                         return Err(ClientError::DeviceStateOutdated.into());
                     }
                     if !response.complete { return self.fetch(ctx, then); }
                     match then {
                         AfterFetch::HealOrUpload => self.heal_or_upload(ctx),
                         AfterFetch::CheckHealed => {
-                            if ctx.vault.needs_healing() {
+                            if self.vault(ctx.vaults)?.needs_healing() {
                                 return Err(ClientError::CannotHeal.into());
                             }
                             self.upload_next(ctx)
                         }
-                        AfterFetch::Done => { self.phase = Phase::Idle; Ok(()) }
+                        AfterFetch::Done => self.next_vault(ctx),
                     }
                 }
                 Phase::Heal => {
                     let response: HealingResponse =
                         match http::json(status, body) {
                             Ok(response) => response,
-                            Err(e) => { ctx.vault.healing_refused(); return Err(e); }
+                            Err(e) => {
+                                self.vault(ctx.vaults)?.healing_refused();
+                                if let Some(next) = self.too_old(ctx, status, body) {
+                                    return next;
+                                }
+                                return Err(e);
+                            }
                         };
-                    ctx.vault.apply_healing_response(&response)?;
+                    self.vault(ctx.vaults)?.apply_healing_response(&response)?;
                     self.fetch(ctx, AfterFetch::CheckHealed)
                 }
                 Phase::Upload => {
+                    if let Some(next) = self.too_old(ctx, status, body) {
+                        return next;
+                    }
                     let response: UploadResponse = http::json(status, body)?;
-                    let outcome = ctx.vault.apply_upload_response(&response)?;
+                    let vault = self.vault(ctx.vaults)?;
+                    let outcome = vault.apply_upload_response(&response)?;
                     if outcome.own_conflict {
-                        ctx.vault.set_read_only(true);
+                        vault.set_read_only(true);
                         return Err(ClientError::DeviceStateOutdated.into());
                     }
                     if outcome.rejected.contains(&ErrorCode::StaleEpoch) {
@@ -70162,7 +74121,7 @@ pub mod sync {
         /// Sends a Fetch page; `then` follows the complete Fetch.
         fn fetch(&mut self, ctx: &mut Ctx<'_>, then: AfterFetch)
             -> CoreResult<()> {
-            let request = ctx.vault.fetch_request()?;
+            let request = self.vault(ctx.vaults)?.fetch_request()?;
             self.pending =
                 Some(ctx.signer.build(paths::VAULT_FETCH, &request,
                             ctx.unlocked)?);
@@ -70172,9 +74131,11 @@ pub mod sync {
         /// After a complete Fetch: a healing request when the server is behind and this sync has
         /// not healed yet, else the uploads.
         fn heal_or_upload(&mut self, ctx: &mut Ctx<'_>) -> CoreResult<()> {
-            if !ctx.vault.needs_healing() { return self.upload_next(ctx); }
+            if !self.vault(ctx.vaults)?.needs_healing() {
+                return self.upload_next(ctx);
+            }
             if self.healed { return Err(ClientError::CannotHeal.into()); }
-            match ctx.vault.healing_request()? {
+            match self.vault(ctx.vaults)?.healing_request()? {
                 Some(request) => {
                     self.healed = true;
                     self.pending =
@@ -70188,7 +74149,8 @@ pub mod sync {
         }
         /// The next upload, or the final Fetch when nothing is queued.
         fn upload_next(&mut self, ctx: &mut Ctx<'_>) -> CoreResult<()> {
-            match ctx.vault.upload_request(ctx.rng, ctx.unlocked) {
+            let vault = self.vault(ctx.vaults)?;
+            match vault.upload_request(ctx.rng, ctx.unlocked) {
                 Ok(Some(request)) => {
                     self.pending =
                         Some(ctx.signer.build(paths::VAULT_UPLOAD, &request,
@@ -70206,34 +74168,2003 @@ pub mod sync {
             }
         }
     }
-    /// Verifies a refreshed account answer and adopts it: the authors, and the vault key at a new
-    /// epoch (module docs, "The account first"). A rollback or fork makes the vault read-only.
+    /// Verifies a refreshed account answer and adopts it: the authors, and the vault set brought in
+    /// step with the account's catalog (module docs, "The account first"; `crate::vaults`): each
+    /// held vault's key at a new epoch, new vaults, dropped vaults (returned). A rollback or fork
+    /// makes the vaults read-only.
     fn adopt_account(ctx: &mut Ctx<'_>, view: &AccountView)
-        -> CoreResult<()> {
+        -> CoreResult<Vec<VaultId>> {
         let mut fresh =
             match verify_web_refresh(ctx.account, ctx.unlocked, view) {
                 Ok(fresh) => fresh,
                 Err(e @ (ClientError::Rollback | ClientError::Fork)) => {
-                    ctx.vault.set_read_only(true);
+                    for vault in ctx.vaults.all_mut() {
+                        vault.set_read_only(true);
+                    }
                     return Err(e.into());
                 }
                 Err(e) => return Err(e.into()),
             };
         let authors = Authors::from_account(&fresh)?;
-        let key =
-            fresh.take_vault_key(ctx.vault.vault_id()).ok_or(ClientError::InvalidServerResponse)?;
-        match ctx.vault.adopt_vault_key(key) {
-            Ok(()) => {}
-            Err(e @ ClientError::Rollback) => {
-                ctx.vault.set_read_only(true);
-                return Err(e.into());
-            }
-            Err(e) => return Err(e.into()),
-        }
+        let dropped = ctx.vaults.reconcile(&mut fresh, ctx.unlocked)?;
         *ctx.authors = authors;
         *ctx.account = fresh;
-        Ok(())
+        Ok(dropped)
     }
+}
+pub mod vaults {
+    //! The vaults of one session, web or durable ([ADR 0081] Part A, §A2, §A7, §A12).
+    //!
+    //! A `VaultSet` holds one [`VaultSync`] driver per vault the account's catalog opens
+    //! ([`VaultCatalog`]: the authenticated vault directory checked against the served
+    //! self-grants, INV-102), and every driver shares one [`DeviceCounters`], so `device_seq`
+    //! stays one gap-free counter per device across vaults (§A7). Nothing here decides a
+    //! format or a check: `rizzy-client` does ([`rizzy_client::vaults`]); this module keeps the
+    //! drivers in step with the catalog after each account answer:
+    //!
+    //! - a vault the directory no longer lists (deleted on another device, §A5) is dropped with its
+    //!   unsent changes, which are counted and reported once (`VaultSet::take_discarded`); a host
+    //!   with a cache deletes its rows ([`rizzy_client::store::rows::Write::DropVault`]);
+    //! - a vault listed and served but not held yet gets a new driver;
+    //! - a listed vault the server withholds keeps its driver read-only (§A2), and a vault a
+    //!   `client_too_old` refusal named is shown as needing an update while the others keep
+    //!   working (§A12).
+    //!
+    //! Items are named by `(vault_id, item_id)` ([`crate::items::item_ref`], INV-103).
+    //!
+    //! [ADR 0081]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0081-multiple-vaults-personal-and-shared.md
+    use std::collections::BTreeSet;
+    use rizzy_client::ClientError;
+    use rizzy_client::account::VerifiedAccount;
+    use rizzy_client::device::UnlockedDevice;
+    use rizzy_client::items::{ItemId, ItemLifecycle, ItemType};
+    use rizzy_client::rizzy_core::ids::VaultId;
+    use rizzy_client::rizzy_core::keys::VaultKey;
+    use rizzy_client::sync::{DeviceCounters, VaultSync};
+    use rizzy_client::vaults::{
+        DirectoryKind, VaultAlarm, VaultCatalog, VaultLabel, VaultStatus,
+        revoked_cutoff_gaps, vault_label,
+    };
+    use wasm_bindgen::prelude::wasm_bindgen;
+    use zeroize::Zeroizing;
+    use crate::error::{CoreError, CoreResult};
+    use crate::items::{hex, parse_ref, visible};
+    /// The catalog of `account`; an account whose settings record this build cannot read is
+    /// checked as one without a directory (so a single served vault still opens, and two raise
+    /// the alarm), as `rv` does.
+    pub(crate) fn catalog_of(account: &VerifiedAccount,
+        unlocked: &UnlockedDevice) -> VaultCatalog {
+        VaultCatalog::of_account(account,
+                unlocked).unwrap_or_else(|_|
+                VaultCatalog::check(None, &account.served_vault_ids()))
+    }
+    /// The user items of `vault` in one of `lifecycles`: never the vault-settings item.
+    pub(crate) fn user_items(vault: &VaultSync, lifecycles: &[ItemLifecycle])
+        -> Vec<ItemId> {
+        vault.item_ids().into_iter().filter(|item|
+                    {
+                        lifecycles.contains(&vault.item_lifecycle(*item)) &&
+                            vault.item_type(*item) != Some(ItemType::VAULT_SETTINGS)
+                    }).collect()
+    }
+    /// The drivers of a session's vaults (module docs).
+    pub(crate) struct VaultSet {
+        /// One driver per held vault, ascending by id.
+        vaults: Vec<VaultSync>,
+        /// The per-device counters every driver shares.
+        counters: DeviceCounters,
+        /// The catalog of the last account answer (or of the last vault change).
+        catalog: VaultCatalog,
+        /// Vaults a `client_too_old` refusal named in this session (§A12).
+        too_new: BTreeSet<VaultId>,
+        /// Unsent changes of dropped vaults, not reported yet.
+        discarded: usize,
+        /// Whether new drivers journal their writes (a host with a cache).
+        persist: bool,
+    }
+    #[automatically_derived]
+    impl ::core::fmt::Debug for VaultSet {
+        #[inline]
+        fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+            let names: &'static _ =
+                &["vaults", "counters", "catalog", "too_new", "discarded",
+                            "persist"];
+            let values: &[&dyn ::core::fmt::Debug] =
+                &[&self.vaults, &self.counters, &self.catalog, &self.too_new,
+                            &self.discarded, &&self.persist];
+            ::core::fmt::Formatter::debug_struct_fields_finish(f, "VaultSet",
+                names, values)
+        }
+    }
+    impl VaultSet {
+        /// The set of `vaults` under `catalog`; only the vaults the catalog lists are kept (an
+        /// unlisted vault is never opened, INV-102).
+        pub(crate) fn new(vaults: Vec<VaultSync>, catalog: VaultCatalog,
+            persist: bool) -> Self {
+            let mut set =
+                Self {
+                    vaults: Vec::with_capacity(vaults.len()),
+                    counters: DeviceCounters::new(),
+                    catalog,
+                    too_new: BTreeSet::new(),
+                    discarded: 0,
+                    persist,
+                };
+            for vault in vaults {
+                let id = vault.vault_id();
+                if set.catalog.entries().iter().any(|e| e.vault_id == id) {
+                    set.insert(vault);
+                }
+            }
+            set.update_read_only();
+            set
+        }
+        /// The set of a fresh login or enrolment: a driver for every vault the catalog of
+        /// `account` opens, from the keys the answer carried.
+        ///
+        /// # Errors
+        /// `invalid_server_response` if an open vault's key is missing; as [`VaultSync::new`].
+        pub(crate) fn open_all(account: &mut VerifiedAccount,
+            unlocked: &UnlockedDevice, persist: bool) -> CoreResult<Self> {
+            let catalog = catalog_of(account, unlocked);
+            let mut set = Self::new(Vec::new(), catalog, persist);
+            let open: Vec<VaultId> = set.catalog.open_vaults().collect();
+            for vault_id in open {
+                set.add_from(account, unlocked, vault_id)?;
+            }
+            set.update_read_only();
+            Ok(set)
+        }
+        /// Every driver, ascending by vault id.
+        pub(crate) fn all(&self) -> &[VaultSync] { &self.vaults }
+        /// Every driver, mutably.
+        pub(crate) fn all_mut(&mut self) -> &mut [VaultSync] {
+            &mut self.vaults
+        }
+        /// The catalog.
+        pub(crate) const fn catalog(&self) -> &VaultCatalog { &self.catalog }
+        /// The driver of `vault_id`.
+        ///
+        /// # Errors
+        /// `unknown_vault` for a vault this session does not hold.
+        pub(crate) fn get(&self, vault_id: VaultId)
+            -> CoreResult<&VaultSync> {
+            self.vaults.iter().find(|v|
+                        v.vault_id() ==
+                            vault_id).ok_or_else(|| ClientError::UnknownVault.into())
+        }
+        /// The driver of `vault_id`, mutably.
+        ///
+        /// # Errors
+        /// `unknown_vault` for a vault this session does not hold.
+        pub(crate) fn get_mut(&mut self, vault_id: VaultId)
+            -> CoreResult<&mut VaultSync> {
+            self.vaults.iter_mut().find(|v|
+                        v.vault_id() ==
+                            vault_id).ok_or_else(|| ClientError::UnknownVault.into())
+        }
+        /// Two different drivers, mutably: `(a, b)`.
+        ///
+        /// # Errors
+        /// `unknown_vault` for a vault this session does not hold; `invalid_input` for `a == b`.
+        pub(crate) fn pair_mut(&mut self, a: VaultId, b: VaultId)
+            -> CoreResult<(&mut VaultSync, &mut VaultSync)> {
+            if a == b { return Err(ClientError::InvalidInput.into()); }
+            let unknown = || CoreError::from(ClientError::UnknownVault);
+            let i =
+                self.vaults.iter().position(|v|
+                                v.vault_id() == a).ok_or_else(unknown)?;
+            let j =
+                self.vaults.iter().position(|v|
+                                v.vault_id() == b).ok_or_else(unknown)?;
+            if i < j {
+                let (left, right) = self.vaults.split_at_mut(j);
+                Ok((left.get_mut(i).ok_or_else(unknown)?,
+                        right.first_mut().ok_or_else(unknown)?))
+            } else {
+                let (left, right) = self.vaults.split_at_mut(i);
+                Ok((right.first_mut().ok_or_else(unknown)?,
+                        left.get_mut(j).ok_or_else(unknown)?))
+            }
+        }
+        /// The catalog and one driver, mutably (a rename needs both).
+        ///
+        /// # Errors
+        /// `unknown_vault` for a vault this session does not hold.
+        pub(crate) fn with_catalog_mut(&mut self, vault_id: VaultId)
+            -> CoreResult<(&VaultCatalog, &mut VaultSync)> {
+            let vault =
+                self.vaults.iter_mut().find(|v|
+                                v.vault_id() == vault_id).ok_or(ClientError::UnknownVault)?;
+            Ok((&self.catalog, vault))
+        }
+        /// The visible item an [`crate::items::item_ref`] names, with its vault's driver.
+        ///
+        /// # Errors
+        /// `invalid_input` for a malformed reference; `unknown_vault`; `unknown_item`.
+        pub(crate) fn item(&self, id: &str)
+            -> CoreResult<(&VaultSync, ItemId)> {
+            let (vault_id, item) = parse_ref(id)?;
+            let vault = self.get(vault_id)?;
+            Ok((vault, visible(vault, item)?))
+        }
+        /// The item an [`crate::items::item_ref`] names (visible or not), with its driver, mutably.
+        ///
+        /// # Errors
+        /// `invalid_input` for a malformed reference; `unknown_vault`.
+        pub(crate) fn item_mut(&mut self, id: &str)
+            -> CoreResult<(&mut VaultSync, ItemId)> {
+            let (vault_id, item) = parse_ref(id)?;
+            Ok((self.get_mut(vault_id)?, item))
+        }
+        /// The Personal vault, held: the default target of every new item (§A1, §A8).
+        ///
+        /// # Errors
+        /// `vault_set_mismatch` while the catalog cannot name it (no directory and several vaults)
+        /// or its driver is not held.
+        pub(crate) fn personal(&self) -> CoreResult<VaultId> {
+            self.catalog.personal().filter(|v|
+                        self.vaults.iter().any(|d|
+                                d.vault_id() ==
+                                    *v)).ok_or_else(|| ClientError::VaultSetMismatch.into())
+        }
+        /// The Personal vault's driver.
+        ///
+        /// # Errors
+        /// As [`VaultSet::personal`].
+        pub(crate) fn personal_vault(&self) -> CoreResult<&VaultSync> {
+            self.get(self.personal()?)
+        }
+        /// The vaults a sync fetches, in order: every held vault the catalog opens and no
+        /// `client_too_old` refusal named, the Personal vault first.
+        pub(crate) fn sync_order(&self) -> Vec<VaultId> {
+            let personal = self.catalog.personal();
+            let mut order: Vec<VaultId> =
+                self.vaults.iter().map(VaultSync::vault_id).filter(|v|
+                            self.catalog.is_open(*v) &&
+                                !self.too_new.contains(v)).collect();
+            order.sort_by_key(|v| Some(*v) != personal);
+            order
+        }
+        /// Whether `vault_id` is open and writable on this device now.
+        pub(crate) fn is_writable(&self, vault_id: VaultId) -> bool {
+            self.catalog.is_open(vault_id) &&
+                    !self.too_new.contains(&vault_id) &&
+                self.get(vault_id).is_ok_and(|v| !v.is_read_only())
+        }
+        /// Inserts a driver, sharing the counters.
+        pub(crate) fn insert(&mut self, mut vault: VaultSync) {
+            vault.share_counters(&self.counters);
+            let at =
+                self.vaults.partition_point(|v|
+                        v.vault_id() < vault.vault_id());
+            self.vaults.insert(at, vault);
+        }
+        /// A new driver for `vault_id` from the key `account` carries.
+        fn add_from(&mut self, account: &mut VerifiedAccount,
+            unlocked: &UnlockedDevice, vault_id: VaultId) -> CoreResult<()> {
+            let key =
+                account.take_vault_key(vault_id).ok_or(ClientError::InvalidServerResponse)?;
+            self.add_key(key, unlocked)
+        }
+        /// A new driver for a vault key: the device's next `device_seq`, the shared counters.
+        ///
+        /// # Errors
+        /// As [`VaultSync::new`].
+        pub(crate) fn add_key(&mut self, key: VaultKey,
+            unlocked: &UnlockedDevice) -> CoreResult<()> {
+            let mut vault =
+                VaultSync::new(key, unlocked, self.next_device_seq())?;
+            if self.persist { vault.persist(); }
+            self.insert(vault);
+            Ok(())
+        }
+        /// Removes a driver; its unsent changes are counted as discarded.
+        pub(crate) fn remove(&mut self, vault_id: VaultId)
+            -> Option<VaultSync> {
+            let at =
+                self.vaults.iter().position(|v| v.vault_id() == vault_id)?;
+            self.too_new.remove(&vault_id);
+            let vault = self.vaults.remove(at);
+            self.discarded =
+                self.discarded.saturating_add(vault.unacknowledged().0);
+            Some(vault)
+        }
+        /// Removes a driver whose vault the user deleted on this device: its unsent changes go
+        /// with it and are not reported.
+        pub(crate) fn forget(&mut self, vault_id: VaultId) {
+            if let Some(at) =
+                    self.vaults.iter().position(|v| v.vault_id() == vault_id) {
+                self.too_new.remove(&vault_id);
+                self.vaults.remove(at);
+            }
+        }
+        /// The next `device_seq` of this device.
+        fn next_device_seq(&self) -> u64 {
+            self.vaults.iter().map(VaultSync::next_device_seq).chain(core::iter::once(self.counters.next_device_seq())).max().unwrap_or(1).max(1)
+        }
+        /// Replaces the catalog (after a vault change the server acknowledged).
+        pub(crate) fn set_catalog(&mut self, catalog: VaultCatalog) {
+            self.catalog = catalog;
+            self.update_read_only();
+        }
+        /// A driver whose vault the catalog does not open, or a `client_too_old` refusal named,
+        /// is read-only.
+        pub(crate) fn update_read_only(&mut self) {
+            for vault in &mut self.vaults {
+                let id = vault.vault_id();
+                if !self.catalog.is_open(id) || self.too_new.contains(&id) {
+                    vault.set_read_only(true);
+                }
+            }
+        }
+        /// A `client_too_old` refusal for one vault (§A12): it is shown as needing an update and
+        /// kept read-only; the other vaults keep working.
+        pub(crate) fn mark_too_new(&mut self, vault_id: VaultId) {
+            self.too_new.insert(vault_id);
+            if let Ok(vault) = self.get_mut(vault_id) {
+                vault.set_read_only(true);
+            }
+        }
+        /// The unsent changes of dropped vaults since the last call (reported once).
+        pub(crate) fn take_discarded(&mut self) -> usize {
+            core::mem::take(&mut self.discarded)
+        }
+        /// The cross-vault revocation cut-off check over every open vault (§0 item 2): how many
+        /// revoked devices have ops missing below their cut-off in every vault.
+        pub(crate) fn cutoff_gaps(&self) -> usize {
+            let open: Vec<&VaultSync> =
+                self.vaults.iter().filter(|v|
+                            self.catalog.is_open(v.vault_id())).collect();
+            revoked_cutoff_gaps(&open).len()
+        }
+        /// After an account answer verified (module docs): the catalog of `account`, the held open
+        /// vaults' keys adopted, the dropped vaults removed, new open vaults added. Returns the
+        /// dropped vaults (a host with a cache deletes their rows).
+        ///
+        /// # Errors
+        /// `rollback` or `fork` from a vault key (that vault is read-only then); `invalid_server_response`
+        /// for a missing key.
+        pub(crate) fn reconcile(&mut self, account: &mut VerifiedAccount,
+            unlocked: &UnlockedDevice) -> CoreResult<Vec<VaultId>> {
+            let catalog = catalog_of(account, unlocked);
+            let held_open: Vec<VaultId> =
+                self.vaults.iter().map(VaultSync::vault_id).filter(|v|
+                            catalog.is_open(*v)).collect();
+            for vault_id in held_open {
+                let key =
+                    account.take_vault_key(vault_id).ok_or(ClientError::InvalidServerResponse)?;
+                let vault = self.get_mut(vault_id)?;
+                match vault.adopt_vault_key(key) {
+                    Ok(()) => {}
+                    Err(e @ (ClientError::Rollback | ClientError::Fork)) => {
+                        vault.set_read_only(true);
+                        return Err(e.into());
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            let mut dropped = Vec::new();
+            if catalog.has_directory() {
+                let gone: Vec<VaultId> =
+                    self.vaults.iter().map(VaultSync::vault_id).filter(|v|
+                                !catalog.entries().iter().any(|e|
+                                            e.vault_id == *v)).collect();
+                for vault_id in gone {
+                    self.remove(vault_id);
+                    dropped.push(vault_id);
+                }
+            }
+            let new: Vec<VaultId> =
+                catalog.open_vaults().filter(|v|
+                            !self.vaults.iter().any(|d| d.vault_id() == *v)).collect();
+            for vault_id in new {
+                self.add_from(account, unlocked, vault_id)?;
+            }
+            self.catalog = catalog;
+            self.update_read_only();
+            Ok(dropped)
+        }
+        /// The views of every vault the catalog lists (the vault list, the switcher and the
+        /// pickers): the Personal vault first, then the named vaults by name, then the unnamed.
+        pub(crate) fn views(&self,
+            bytes_used: impl Fn(VaultId) -> Option<u64>) -> Vec<VaultView> {
+            let mut views: Vec<VaultView> =
+                self.catalog.entries().iter().map(|entry|
+                            {
+                                let driver =
+                                    self.vaults.iter().find(|v| v.vault_id() == entry.vault_id);
+                                let kind =
+                                    match &entry.kind {
+                                        DirectoryKind::Personal => "personal",
+                                        DirectoryKind::Owned(None) => "owned",
+                                        DirectoryKind::Owned(Some(_)) => "shared",
+                                        DirectoryKind::Joined { .. } => "joined",
+                                        DirectoryKind::Unknown { .. } => "unknown",
+                                    };
+                                let status =
+                                    if self.too_new.contains(&entry.vault_id) {
+                                        "needs_update"
+                                    } else {
+                                        match entry.status {
+                                            VaultStatus::Open => "open",
+                                            VaultStatus::Withheld => "withheld",
+                                            VaultStatus::NeedsUpdate => "needs_update",
+                                        }
+                                    };
+                                let name =
+                                    driver.and_then(|v|
+                                            match vault_label(&self.catalog, v) {
+                                                VaultLabel::Named(name) => Some(name),
+                                                VaultLabel::Personal | VaultLabel::Untitled => None,
+                                            });
+                                let item_count =
+                                    driver.map_or(0,
+                                        |v|
+                                            {
+                                                user_items(v,
+                                                        &[ItemLifecycle::Active, ItemLifecycle::Trashed]).len()
+                                            });
+                                VaultView {
+                                    id: hex(entry.vault_id.as_bytes()),
+                                    kind,
+                                    name,
+                                    status,
+                                    read_only: driver.is_none_or(VaultSync::is_read_only),
+                                    item_count: u32::try_from(item_count).unwrap_or(u32::MAX),
+                                    bytes_used: bytes_used(entry.vault_id),
+                                }
+                            }).collect();
+            views.sort_by(|a, b|
+                    {
+                        let rank = |v: &VaultView| u8::from(v.kind != "personal");
+                        rank(a).cmp(&rank(b)).then_with(||
+                                        a.name.is_none().cmp(&b.name.is_none())).then_with(||
+                                    {
+                                        let an = a.name.as_deref().map(|n| n.to_lowercase());
+                                        let bn = b.name.as_deref().map(|n| n.to_lowercase());
+                                        an.cmp(&bn)
+                                    }).then_with(|| a.id.cmp(&b.id))
+                    });
+            views
+        }
+        /// The alarms of the catalog (INV-102), as views.
+        pub(crate) fn alarm_views(&self) -> Vec<VaultAlarmView> {
+            self.catalog.alarms().iter().map(|alarm|
+                        match alarm {
+                            VaultAlarm::Withheld(v) =>
+                                VaultAlarmView {
+                                    kind: "withheld",
+                                    vault_id: Some(hex(v.as_bytes())),
+                                },
+                            VaultAlarm::Unlisted(v) =>
+                                VaultAlarmView {
+                                    kind: "unlisted",
+                                    vault_id: Some(hex(v.as_bytes())),
+                                },
+                            VaultAlarm::NoDirectory =>
+                                VaultAlarmView { kind: "no_directory", vault_id: None },
+                        }).collect()
+        }
+    }
+    #[wasm_bindgen()]
+    #[__wasm_bindgen_retried]
+    #[doc =
+    " One vault of the account, for the vault list, the switcher and the pickers. Wiped when"]
+    #[doc = " freed (the name is user content)."]
+    pub struct VaultView {
+        #[doc = " The vault id, 32 hex digits."]
+        id: String,
+        #[doc = " `personal`, `owned`, `shared`, `joined` or `unknown`."]
+        kind: &'static str,
+        #[doc =
+        " `vault.name` of an owned vault; `None` for the Personal vault (its label is the"]
+        #[doc =
+        " localised \"Personal\", §A1) and for a vault without a name yet (\"Untitled vault\")."]
+        name: Option<Zeroizing<String>>,
+        #[doc = " `open`, `withheld` or `needs_update`."]
+        status: &'static str,
+        #[doc = " Whether nothing can be written to it on this device now."]
+        read_only: bool,
+        #[doc = " Its items, active and trashed (0 for a vault not opened)."]
+        item_count: u32,
+        #[doc =
+        " The server\'s counted bytes of the vault (informational, unsigned), if served."]
+        bytes_used: Option<u64>,
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsConstructor for VaultView { }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for VaultView {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsStaticProperty for VaultView { }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribe for VaultView {
+        fn describe() {
+            use wasm_bindgen::describe::*;
+            inform(RUST_STRUCT);
+            inform(9u32);
+            inform(86u32);
+            inform(97u32);
+            inform(117u32);
+            inform(108u32);
+            inform(116u32);
+            inform(86u32);
+            inform(105u32);
+            inform(101u32);
+            inform(119u32);
+            inform(27u32);
+            inform(114u32);
+            inform(105u32);
+            inform(122u32);
+            inform(122u32);
+            inform(121u32);
+            inform(45u32);
+            inform(119u32);
+            inform(97u32);
+            inform(115u32);
+            inform(109u32);
+            inform(45u32);
+            inform(101u32);
+            inform(48u32);
+            inform(57u32);
+            inform(99u32);
+            inform(99u32);
+            inform(48u32);
+            inform(101u32);
+            inform(98u32);
+            inform(51u32);
+            inform(53u32);
+            inform(102u32);
+            inform(56u32);
+            inform(98u32);
+            inform(53u32);
+            inform(56u32);
+            inform(51u32);
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::IntoWasmAbi for VaultView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<VaultView>>;
+        fn into_abi(self) -> Self::Abi {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+            WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self))) as
+                    *mut WasmRefCell<VaultView>)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::FromWasmAbi for VaultView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<VaultView>>;
+        unsafe fn from_abi(js: Self::Abi) -> Self {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+            use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+            let ptr = js.into_ptr();
+            assert_not_null(ptr);
+            let rc = Rc::from_raw(ptr);
+            match Rc::try_unwrap(rc) {
+                Ok(cell) => cell.into_inner(),
+                Err(_) =>
+                    wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::core::convert::From<VaultView> for
+        wasm_bindgen::JsValue {
+        fn from(value: VaultView) -> Self {
+            let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_vaultview_new_e09cc0eb35f8b583"]
+                fn __wbg_vaultview_new(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<VaultView>>)
+                -> u32;
+            }
+            unsafe {
+                <wasm_bindgen::JsValue as
+                        wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_vaultview_new(ptr))
+            }
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[export_name = "__wbg_vaultview_free_e09cc0eb35f8b583"]
+            #[doc(hidden)]
+            pub unsafe extern "C-unwind" fn __wbg_vaultview_free(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<VaultView>>,
+                allow_delayed: u32) {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                if allow_delayed != 0 {
+                    let ptr = ptr.into_ptr();
+                    wasm_bindgen::__rt::assert_not_null(ptr);
+                    drop(Rc::from_raw(ptr));
+                } else {
+                    let _ =
+                        <VaultView as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                }
+            }
+        };
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefFromWasmAbi for VaultView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<VaultView>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<VaultView>;
+        unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRef::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefMutFromWasmAbi for VaultView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<VaultView>>;
+        type Anchor = wasm_bindgen::__rt::RcRefMut<VaultView>;
+        unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRefMut::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::LongRefFromWasmAbi for VaultView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<VaultView>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<VaultView>;
+        unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            <Self as wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionIntoWasmAbi for VaultView {
+        #[inline]
+        fn none() -> Self::Abi {
+            <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<VaultView>>>::null()
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionFromWasmAbi for VaultView {
+        #[inline]
+        fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::TryFromJsValue for VaultView {
+        fn try_from_js_value(value: wasm_bindgen::JsValue)
+            ->
+                wasm_bindgen::__rt::core::result::Result<Self,
+                wasm_bindgen::JsValue> {
+            Self::try_from_js_value_ref(&value).ok_or(value)
+        }
+        fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+            -> wasm_bindgen::__rt::core::option::Option<Self> {
+            let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_vaultview_unwrap_e09cc0eb35f8b583"]
+                fn __wbg_vaultview_unwrap(ptr: u32)
+                ->
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<VaultView>>;
+            }
+            let ptr = unsafe { __wbg_vaultview_unwrap(idx) };
+            if ptr.is_null() {
+                wasm_bindgen::__rt::core::option::Option::None
+            } else {
+                unsafe {
+                    wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                }
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribeVector for VaultView {
+        fn describe_vector() {
+            use wasm_bindgen::describe::*;
+            inform(VECTOR);
+            <VaultView as wasm_bindgen::describe::WasmDescribe>::describe();
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorIntoWasmAbi for VaultView {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::IntoWasmAbi>::Abi;
+        fn vector_into_abi(vector:
+                wasm_bindgen::__rt::alloc::boxed::Box<[VaultView]>)
+            -> Self::Abi {
+            wasm_bindgen::convert::js_value_vector_into_abi(vector)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorFromWasmAbi for VaultView {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::FromWasmAbi>::Abi;
+        unsafe fn vector_from_abi(js: Self::Abi)
+            -> wasm_bindgen::__rt::alloc::boxed::Box<[VaultView]> {
+            wasm_bindgen::convert::js_value_vector_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\x01\tVaultView\0\x02W One vault of the account, for the vault list, the switcher and the pickers. Wiped when\" freed (the name is user content).\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    impl core::fmt::Debug for VaultView {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("VaultView").field("id",
+                            &self.id).field("kind",
+                        &self.kind).field("status",
+                    &self.status).finish_non_exhaustive()
+        }
+    }
+    impl VaultView {
+        #[doc = " The vault id, 32 lowercase hex digits."]
+        #[must_use]
+        pub fn id(&self) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The vault id, 32 lowercase hex digits."]
+                    #[must_use]
+                    #[export_name = "vaultview_id_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_VaultView_id(me:
+                            <VaultView as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<VaultView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<VaultView>();
+                                            let me =
+                                                unsafe {
+                                                    <VaultView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.id();
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " The vault id, 32 lowercase hex digits."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_vaultview_id_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\tVaultView\x01' The vault id, 32 lowercase hex digits.\0\0\0\0\x02id\x01\x01\0\0\0\0\x01\0\x02\x02id\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.id.clone()
+        }
+        #[doc =
+        " `personal`, `owned`, `shared` (Part B), `joined` (Part B) or `unknown` (a kind this"]
+        #[doc = " build does not know)."]
+        #[must_use]
+        pub fn kind(&self) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " `personal`, `owned`, `shared` (Part B), `joined` (Part B) or `unknown` (a kind this"]
+                    #[doc = " build does not know)."]
+                    #[must_use]
+                    #[export_name = "vaultview_kind_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_VaultView_kind(me:
+                            <VaultView as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<VaultView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<VaultView>();
+                                            let me =
+                                                unsafe {
+                                                    <VaultView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.kind();
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " `personal`, `owned`, `shared` (Part B), `joined` (Part B) or `unknown` (a kind this"]
+                    #[doc = " build does not know)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_vaultview_kind_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\tVaultView\x02T `personal`, `owned`, `shared` (Part B), `joined` (Part B) or `unknown` (a kind this\x16 build does not know).\0\0\0\0\x04kind\x01\x01\0\0\0\0\x01\0\x02\x04kind\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.kind.to_owned()
+        }
+        #[doc =
+        " The vault\'s name; `undefined` for the Personal vault (shown as \"Personal\", localised)"]
+        #[doc =
+        " and for an owned vault without one (shown as \"Untitled vault\")."]
+        #[must_use]
+        pub fn name(&self) -> Option<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The vault\'s name; `undefined` for the Personal vault (shown as \"Personal\", localised)"]
+                    #[doc =
+                    " and for an owned vault without one (shown as \"Untitled vault\")."]
+                    #[must_use]
+                    #[export_name = "vaultview_name_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_VaultView_name(me:
+                            <VaultView as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<VaultView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<VaultView>();
+                                            let me =
+                                                unsafe {
+                                                    <VaultView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.name();
+                                            _ret
+                                        }
+                                    });
+                        <Option<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The vault\'s name; `undefined` for the Personal vault (shown as \"Personal\", localised)"]
+                    #[doc =
+                    " and for an owned vault without one (shown as \"Untitled vault\")."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_vaultview_name_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<String> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\tVaultView\x02V The vault's name; `undefined` for the Personal vault (shown as \"Personal\", localised)@ and for an owned vault without one (shown as \"Untitled vault\").\0\0\0\0\x04name\x01\x01\0\0\0\0\x01\0\x02\x04name\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.name.as_ref().map(|n| n.as_str().to_owned())
+        }
+        #[doc =
+        " `open`, `withheld` (listed but not served: read-only, an alarm) or `needs_update`"]
+        #[doc = " (\"This vault needs a newer rizzy-vault\", §A12)."]
+        #[must_use]
+        pub fn status(&self) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " `open`, `withheld` (listed but not served: read-only, an alarm) or `needs_update`"]
+                    #[doc =
+                    " (\"This vault needs a newer rizzy-vault\", §A12)."]
+                    #[must_use]
+                    #[export_name = "vaultview_status_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_VaultView_status(me:
+                            <VaultView as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<VaultView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<VaultView>();
+                                            let me =
+                                                unsafe {
+                                                    <VaultView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.status();
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " `open`, `withheld` (listed but not served: read-only, an alarm) or `needs_update`"]
+                    #[doc =
+                    " (\"This vault needs a newer rizzy-vault\", §A12)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_vaultview_status_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\tVaultView\x02R `open`, `withheld` (listed but not served: read-only, an alarm) or `needs_update`1 (\"This vault needs a newer rizzy-vault\", \xc2\xa7A12).\0\0\0\0\x06status\x01\x01\0\0\0\0\x01\0\x02\x06status\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.status.to_owned()
+        }
+        #[doc = " Whether nothing can be written to it now."]
+        #[must_use]
+        pub fn read_only(&self) -> bool {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Whether nothing can be written to it now."]
+                    #[must_use]
+                    #[export_name = "vaultview_readOnly_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_VaultView_readOnly(me:
+                            <VaultView as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<bool as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<VaultView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<VaultView>();
+                                            let me =
+                                                unsafe {
+                                                    <VaultView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.read_only();
+                                            _ret
+                                        }
+                                    });
+                        <bool as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Whether nothing can be written to it now."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_vaultview_readOnly_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <bool as WasmDescribe>::describe();
+                        <bool as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\tVaultView\x01* Whether nothing can be written to it now.\0\0\0\0\x08readOnly\x01\x01\0\0\0\0\x01\0\x02\x08readOnly\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.read_only
+        }
+        #[doc = " Its items, active and trashed."]
+        #[must_use]
+        pub fn item_count(&self) -> u32 {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Its items, active and trashed."]
+                    #[must_use]
+                    #[export_name = "vaultview_itemCount_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_VaultView_itemCount(me:
+                            <VaultView as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<u32 as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<VaultView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<VaultView>();
+                                            let me =
+                                                unsafe {
+                                                    <VaultView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.item_count();
+                                            _ret
+                                        }
+                                    });
+                        <u32 as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc = " Its items, active and trashed."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_vaultview_itemCount_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <u32 as WasmDescribe>::describe();
+                        <u32 as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\tVaultView\x01\x1f Its items, active and trashed.\0\0\0\0\titemCount\x01\x01\0\0\0\0\x01\0\x02\titemCount\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.item_count
+        }
+        #[doc = " The server\'s counted bytes of the vault, if served."]
+        #[must_use]
+        pub fn bytes_used(&self) -> Option<u64> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The server\'s counted bytes of the vault, if served."]
+                    #[must_use]
+                    #[export_name = "vaultview_bytesUsed_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_VaultView_bytesUsed(me:
+                            <VaultView as wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<u64> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<VaultView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<VaultView>();
+                                            let me =
+                                                unsafe {
+                                                    <VaultView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.bytes_used();
+                                            _ret
+                                        }
+                                    });
+                        <Option<u64> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The server\'s counted bytes of the vault, if served."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_vaultview_bytesUsed_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<u64> as WasmDescribe>::describe();
+                        <Option<u64> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\tVaultView\x014 The server's counted bytes of the vault, if served.\0\0\0\0\tbytesUsed\x01\x01\0\0\0\0\x01\0\x02\tbytesUsed\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.bytes_used
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    #[wasm_bindgen()]
+    #[__wasm_bindgen_retried]
+    #[doc = " One alarm of the vault completeness check (INV-102)."]
+    pub struct VaultAlarmView {
+        #[doc = " `withheld`, `unlisted` or `no_directory`."]
+        kind: &'static str,
+        #[doc = " The vault it names (none for `no_directory`)."]
+        vault_id: Option<String>,
+    }
+    #[automatically_derived]
+    impl ::core::clone::Clone for VaultAlarmView {
+        #[inline]
+        fn clone(&self) -> VaultAlarmView {
+            VaultAlarmView {
+                kind: ::core::clone::Clone::clone(&self.kind),
+                vault_id: ::core::clone::Clone::clone(&self.vault_id),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl ::core::fmt::Debug for VaultAlarmView {
+        #[inline]
+        fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+            ::core::fmt::Formatter::debug_struct_field2_finish(f,
+                "VaultAlarmView", "kind", &self.kind, "vault_id",
+                &&self.vault_id)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsConstructor for VaultAlarmView {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsInstanceProperty for
+        VaultAlarmView {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::marker::SupportsStaticProperty for VaultAlarmView
+        {
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribe for VaultAlarmView {
+        fn describe() {
+            use wasm_bindgen::describe::*;
+            inform(RUST_STRUCT);
+            inform(14u32);
+            inform(86u32);
+            inform(97u32);
+            inform(117u32);
+            inform(108u32);
+            inform(116u32);
+            inform(65u32);
+            inform(108u32);
+            inform(97u32);
+            inform(114u32);
+            inform(109u32);
+            inform(86u32);
+            inform(105u32);
+            inform(101u32);
+            inform(119u32);
+            inform(27u32);
+            inform(114u32);
+            inform(105u32);
+            inform(122u32);
+            inform(122u32);
+            inform(121u32);
+            inform(45u32);
+            inform(119u32);
+            inform(97u32);
+            inform(115u32);
+            inform(109u32);
+            inform(45u32);
+            inform(101u32);
+            inform(48u32);
+            inform(57u32);
+            inform(99u32);
+            inform(99u32);
+            inform(48u32);
+            inform(101u32);
+            inform(98u32);
+            inform(51u32);
+            inform(53u32);
+            inform(102u32);
+            inform(56u32);
+            inform(98u32);
+            inform(53u32);
+            inform(56u32);
+            inform(51u32);
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::IntoWasmAbi for VaultAlarmView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<VaultAlarmView>>;
+        fn into_abi(self) -> Self::Abi {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::{WasmPtr, WasmRefCell};
+            WasmPtr::from_ptr(Rc::into_raw(Rc::new(WasmRefCell::new(self))) as
+                    *mut WasmRefCell<VaultAlarmView>)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::FromWasmAbi for VaultAlarmView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<VaultAlarmView>>;
+        unsafe fn from_abi(js: Self::Abi) -> Self {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            use wasm_bindgen::__rt::core::result::Result::{Ok, Err};
+            use wasm_bindgen::__rt::{assert_not_null, WasmRefCell};
+            let ptr = js.into_ptr();
+            assert_not_null(ptr);
+            let rc = Rc::from_raw(ptr);
+            match Rc::try_unwrap(rc) {
+                Ok(cell) => cell.into_inner(),
+                Err(_) =>
+                    wasm_bindgen::throw_str("attempted to take ownership of Rust value while it was borrowed"),
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::__rt::core::convert::From<VaultAlarmView> for
+        wasm_bindgen::JsValue {
+        fn from(value: VaultAlarmView) -> Self {
+            let ptr = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_vaultalarmview_new_e09cc0eb35f8b583"]
+                fn __wbg_vaultalarmview_new(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<VaultAlarmView>>)
+                -> u32;
+            }
+            unsafe {
+                <wasm_bindgen::JsValue as
+                        wasm_bindgen::convert::FromWasmAbi>::from_abi(__wbg_vaultalarmview_new(ptr))
+            }
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            #[export_name = "__wbg_vaultalarmview_free_e09cc0eb35f8b583"]
+            #[doc(hidden)]
+            pub unsafe extern "C-unwind" fn __wbg_vaultalarmview_free(ptr:
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<VaultAlarmView>>,
+                allow_delayed: u32) {
+                use wasm_bindgen::__rt::alloc::rc::Rc;
+                if allow_delayed != 0 {
+                    let ptr = ptr.into_ptr();
+                    wasm_bindgen::__rt::assert_not_null(ptr);
+                    drop(Rc::from_raw(ptr));
+                } else {
+                    let _ =
+                        <VaultAlarmView as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr);
+                }
+            }
+        };
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefFromWasmAbi for VaultAlarmView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<VaultAlarmView>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<VaultAlarmView>;
+        unsafe fn ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRef::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::RefMutFromWasmAbi for VaultAlarmView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<VaultAlarmView>>;
+        type Anchor = wasm_bindgen::__rt::RcRefMut<VaultAlarmView>;
+        unsafe fn ref_mut_from_abi(js: Self::Abi) -> Self::Anchor {
+            use wasm_bindgen::__rt::alloc::rc::Rc;
+            let js = js.into_ptr();
+            wasm_bindgen::__rt::assert_not_null(js);
+            Rc::increment_strong_count(js);
+            let rc = Rc::from_raw(js);
+            wasm_bindgen::__rt::RcRefMut::new(rc)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::LongRefFromWasmAbi for VaultAlarmView {
+        type Abi =
+            wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<VaultAlarmView>>;
+        type Anchor = wasm_bindgen::__rt::RcRef<VaultAlarmView>;
+        unsafe fn long_ref_from_abi(js: Self::Abi) -> Self::Anchor {
+            <Self as wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionIntoWasmAbi for VaultAlarmView {
+        #[inline]
+        fn none() -> Self::Abi {
+            <wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<VaultAlarmView>>>::null()
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::OptionFromWasmAbi for VaultAlarmView {
+        #[inline]
+        fn is_none(abi: &Self::Abi) -> bool { abi.is_null() }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::TryFromJsValue for VaultAlarmView {
+        fn try_from_js_value(value: wasm_bindgen::JsValue)
+            ->
+                wasm_bindgen::__rt::core::result::Result<Self,
+                wasm_bindgen::JsValue> {
+            Self::try_from_js_value_ref(&value).ok_or(value)
+        }
+        fn try_from_js_value_ref(value: &wasm_bindgen::JsValue)
+            -> wasm_bindgen::__rt::core::option::Option<Self> {
+            let idx = wasm_bindgen::convert::IntoWasmAbi::into_abi(value);
+            #[link(wasm_import_module = "__wbindgen_placeholder__")]
+            extern "C" {
+                #[link_name = "__wbg_vaultalarmview_unwrap_e09cc0eb35f8b583"]
+                fn __wbg_vaultalarmview_unwrap(ptr: u32)
+                ->
+                    wasm_bindgen::__rt::WasmPtr<wasm_bindgen::__rt::WasmRefCell<VaultAlarmView>>;
+            }
+            let ptr = unsafe { __wbg_vaultalarmview_unwrap(idx) };
+            if ptr.is_null() {
+                wasm_bindgen::__rt::core::option::Option::None
+            } else {
+                unsafe {
+                    wasm_bindgen::__rt::core::option::Option::Some(<Self as
+                                wasm_bindgen::convert::FromWasmAbi>::from_abi(ptr))
+                }
+            }
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::describe::WasmDescribeVector for VaultAlarmView {
+        fn describe_vector() {
+            use wasm_bindgen::describe::*;
+            inform(VECTOR);
+            <VaultAlarmView as
+                    wasm_bindgen::describe::WasmDescribe>::describe();
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorIntoWasmAbi for VaultAlarmView {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::IntoWasmAbi>::Abi;
+        fn vector_into_abi(vector:
+                wasm_bindgen::__rt::alloc::boxed::Box<[VaultAlarmView]>)
+            -> Self::Abi {
+            wasm_bindgen::convert::js_value_vector_into_abi(vector)
+        }
+    }
+    #[automatically_derived]
+    impl wasm_bindgen::convert::VectorFromWasmAbi for VaultAlarmView {
+        type Abi =
+            <wasm_bindgen::__rt::alloc::boxed::Box<[wasm_bindgen::JsValue]> as
+            wasm_bindgen::convert::FromWasmAbi>::Abi;
+        unsafe fn vector_from_abi(js: Self::Abi)
+            -> wasm_bindgen::__rt::alloc::boxed::Box<[VaultAlarmView]> {
+            wasm_bindgen::convert::js_value_vector_from_abi(js)
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\x01\x0eVaultAlarmView\0\x015 One alarm of the vault completeness check (INV-102).\0\x01\0\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
+    impl VaultAlarmView {
+        #[doc =
+        " `withheld` (the directory lists the vault, the server served no key: it stays"]
+        #[doc =
+        " read-only), `unlisted` (the server served a vault the directory does not list: not"]
+        #[doc =
+        " opened) or `no_directory` (several vaults, no directory: none is opened for changes)."]
+        #[must_use]
+        pub fn kind(&self) -> String {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " `withheld` (the directory lists the vault, the server served no key: it stays"]
+                    #[doc =
+                    " read-only), `unlisted` (the server served a vault the directory does not list: not"]
+                    #[doc =
+                    " opened) or `no_directory` (several vaults, no directory: none is opened for changes)."]
+                    #[must_use]
+                    #[export_name = "vaultalarmview_kind_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_VaultAlarmView_kind(me:
+                            <VaultAlarmView as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<String as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<VaultAlarmView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<VaultAlarmView>();
+                                            let me =
+                                                unsafe {
+                                                    <VaultAlarmView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.kind();
+                                            _ret
+                                        }
+                                    });
+                        <String as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " `withheld` (the directory lists the vault, the server served no key: it stays"]
+                    #[doc =
+                    " read-only), `unlisted` (the server served a vault the directory does not list: not"]
+                    #[doc =
+                    " opened) or `no_directory` (several vaults, no directory: none is opened for changes)."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_vaultalarmview_kind_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <String as WasmDescribe>::describe();
+                        <String as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0eVaultAlarmView\x03N `withheld` (the directory lists the vault, the server served no key: it staysS read-only), `unlisted` (the server served a vault the directory does not list: notV opened) or `no_directory` (several vaults, no directory: none is opened for changes).\0\0\0\0\x04kind\x01\x01\0\0\0\0\x01\0\x02\x04kind\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.kind.to_owned()
+        }
+        #[doc = " The vault, 32 hex digits; `undefined` for `no_directory`."]
+        #[must_use]
+        pub fn vault_id(&self) -> Option<String> {
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The vault, 32 hex digits; `undefined` for `no_directory`."]
+                    #[must_use]
+                    #[export_name = "vaultalarmview_vaultId_e09cc0eb35f8b583"]
+                    pub unsafe extern "C-unwind" fn __wasm_bindgen_generated_VaultAlarmView_vaultId(me:
+                            <VaultAlarmView as
+                            wasm_bindgen::convert::RefFromWasmAbi>::Abi)
+                        ->
+                            wasm_bindgen::convert::WasmRet<<Option<String> as
+                            wasm_bindgen::convert::ReturnWasmAbi>::Abi> {
+                        const _: () =
+                            {
+                                let _:
+                                        wasm_bindgen::__rt::marker::CheckSupportsInstanceProperty<VaultAlarmView>;
+                            };
+                        let _ret =
+                            wasm_bindgen::__rt::maybe_catch_unwind(||
+                                    {
+                                        {
+                                            wasm_bindgen::__rt::ensure_ref_unwind_safe::<VaultAlarmView>();
+                                            let me =
+                                                unsafe {
+                                                    <VaultAlarmView as
+                                                            wasm_bindgen::convert::RefFromWasmAbi>::ref_from_abi(me)
+                                                };
+                                            let me = &*me;
+                                            let _ret = me.vault_id();
+                                            _ret
+                                        }
+                                    });
+                        <Option<String> as
+                                    wasm_bindgen::convert::ReturnWasmAbi>::return_abi(_ret).into()
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    #[doc =
+                    " The vault, 32 hex digits; `undefined` for `no_directory`."]
+                    #[must_use]
+                    #[no_mangle]
+                    #[doc(hidden)]
+                    pub extern "C-unwind" fn __wbindgen_describe_vaultalarmview_vaultId_e09cc0eb35f8b583() {
+                        use wasm_bindgen::describe::*;
+                        wasm_bindgen::__rt::link_mem_intrinsics();
+                        inform(FUNCTION);
+                        inform(0);
+                        inform(0u32);
+                        <Option<String> as WasmDescribe>::describe();
+                        <Option<String> as WasmDescribe>::describe();
+                    }
+                };
+            #[automatically_derived]
+            const _: () =
+                {
+                    use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+                    static _INCLUDED_FILES: &[&str] = &[];
+                    const _ENCODED_BYTES: &[u8] =
+                        {
+                            const _CHUNK_SLICES: [&[u8]; 1usize] =
+                                [b"\x01\x01\x0eVaultAlarmView\x01: The vault, 32 hex digits; `undefined` for `no_directory`.\0\0\0\0\x07vaultId\x01\x01\0\0\0\0\x01\0\x02\x07vaultId\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                            #[allow(long_running_const_eval)]
+                            const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                            #[allow(long_running_const_eval)]
+                            const _CHUNKS: [u8; _CHUNK_LEN] =
+                                flat_byte_slices(_CHUNK_SLICES);
+                            const _LEN_BYTES: [u8; 4] =
+                                (_CHUNK_LEN as u32).to_le_bytes();
+                            const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                            #[allow(long_running_const_eval)]
+                            const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                                flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                            &_ENCODED_BYTES
+                        };
+                    const _PREFIX_JSON_BYTES: &[u8] =
+                        b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+                    const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+                    const _PREFIX_JSON_BYTES_LEN: usize =
+                        _PREFIX_JSON_BYTES.len();
+                    const _LEN: usize =
+                        _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+                    #[link_section = "__wasm_bindgen_unstable"]
+                    #[allow(long_running_const_eval)]
+                    static _GENERATED: [u8; _LEN] =
+                        flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+                };
+            self.vault_id.clone()
+        }
+    }
+    #[automatically_derived]
+    const _: () =
+        {
+            use wasm_bindgen::__rt::{flat_len, flat_byte_slices};
+            static _INCLUDED_FILES: &[&str] = &[];
+            const _ENCODED_BYTES: &[u8] =
+                {
+                    const _CHUNK_SLICES: [&[u8]; 1usize] =
+                        [b"\0\0\0\0\0\0\0\x1brizzy-wasm-e09cc0eb35f8b583\0\0"];
+                    #[allow(long_running_const_eval)]
+                    const _CHUNK_LEN: usize = flat_len(_CHUNK_SLICES);
+                    #[allow(long_running_const_eval)]
+                    const _CHUNKS: [u8; _CHUNK_LEN] =
+                        flat_byte_slices(_CHUNK_SLICES);
+                    const _LEN_BYTES: [u8; 4] =
+                        (_CHUNK_LEN as u32).to_le_bytes();
+                    const _ENCODED_BYTES_LEN: usize = _CHUNK_LEN + 4;
+                    #[allow(long_running_const_eval)]
+                    const _ENCODED_BYTES: [u8; _ENCODED_BYTES_LEN] =
+                        flat_byte_slices([&_LEN_BYTES, &_CHUNKS]);
+                    &_ENCODED_BYTES
+                };
+            const _PREFIX_JSON_BYTES: &[u8] =
+                b"0\0\0\0{\"schema_version\":\"0.2.128\",\"version\":\"0.2.129\"}";
+            const _ENCODED_BYTES_LEN: usize = _ENCODED_BYTES.len();
+            const _PREFIX_JSON_BYTES_LEN: usize = _PREFIX_JSON_BYTES.len();
+            const _LEN: usize = _PREFIX_JSON_BYTES_LEN + _ENCODED_BYTES_LEN;
+            #[link_section = "__wasm_bindgen_unstable"]
+            #[allow(long_running_const_eval)]
+            static _GENERATED: [u8; _LEN] =
+                flat_byte_slices([_PREFIX_JSON_BYTES, _ENCODED_BYTES]);
+        };
 }
 pub use breach::{BreachCheck, BreachVerdict};
 pub use device::{DeviceSession, EnrolFlow};
@@ -70264,6 +76195,7 @@ pub use session::{
 };
 pub use signup::{EmergencyKit, SignupFlow};
 pub use store::{KvRow, cache_store_names};
+pub use vaults::{VaultAlarmView, VaultView};
 use wasm_bindgen::prelude::wasm_bindgen;
 #[allow(dead_code)]
 #[doc = " This build\'s version, as the `Rizzy-Client` header carries it."]

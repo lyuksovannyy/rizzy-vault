@@ -105,7 +105,7 @@ use crate::http::{self, HttpRequest};
 use crate::identity::{self, IdentityDefaultsView};
 use crate::items::{
     self, ConflictValueView, FieldHistoryView, FieldView, HistoryEntryView, ItemDraft, ItemSummary,
-    hex, parse_id, type_from_name, visible_item,
+    hex, item_ref, parse_id, type_from_name,
 };
 use crate::login::{Credentials, LoginFlow, Purpose};
 use crate::matching::{self, MatchDecision, MatchSettingsView};
@@ -113,11 +113,16 @@ use crate::passkey::{PasskeyAssertion, PasskeyCandidate};
 use crate::rng::{Rng, os_rng};
 use crate::secret::take_secret;
 use crate::sync::{Ctx, Signer, SyncDriver};
+use crate::vaults::VaultSet;
+use rizzy_client::rizzy_core::ids::VaultId;
 
 mod attachments;
+mod vault_ops;
 mod webauthn;
 
 pub use attachments::AttachmentView;
+pub use vault_ops::ItemCopyView;
+use vault_ops::{PendingVault, WebMove};
 
 /// How long a re-authentication allows one export: 5 minutes (module docs;
 /// `rizzy_client::export::gate::REAUTH_WINDOW_MS`).
@@ -144,8 +149,14 @@ struct Inner {
     account: VerifiedAccount,
     /// The authors, for op verification.
     authors: Authors,
-    /// The personal vault.
-    vault: VaultSync,
+    /// The vaults the account's catalog opens, sharing one device counter (ADR 0081 §A7).
+    vaults: VaultSet,
+    /// A vault creation or deletion waiting for `account/commit` (ADR 0081 §A3, §A5).
+    vault_pending: Option<PendingVault>,
+    /// The moves of this session whose source is not purged yet (ADR 0081 §A6, INV-104). A web
+    /// session has no cache (CRYPTO.md §11.4), so they live in memory: a closed tab before
+    /// the purge leaves the item in both vaults, a duplicate, never a loss.
+    moves: Vec<WebMove>,
     /// The sync step driver.
     sync: SyncDriver,
     /// The export gates: the re-authentication every export needs and the hold after the
@@ -164,7 +175,7 @@ struct Inner {
     /// cache, a persistent-format change that needs an ADR 0026 amendment first (gap 02). The
     /// late-edit notices' marks live in the same place for the same reason (`rizzy-client`'s
     /// `VaultSync::mark_late_edits_surfaced`).
-    shown_trash_notices: BTreeSet<(ItemId, Dot, Dot)>,
+    shown_trash_notices: BTreeSet<(VaultId, ItemId, Dot, Dot)>,
     /// The account settings of the verified account, read once per object (ADR 0042 §6).
     settings: SettingsCache,
     /// A settings change sent to `account/commit` and not yet answered, or kept after a
@@ -179,7 +190,7 @@ struct Inner {
     /// Attachments sealed and not yet fully sent, by id (ADR 0054; [`attachments`]).
     uploads: BTreeMap<AttachmentId, AttachmentUpload>,
     /// Attachments being downloaded and verified, by id.
-    downloads: BTreeMap<AttachmentId, AttachmentDownload>,
+    downloads: BTreeMap<AttachmentId, (VaultId, AttachmentDownload)>,
 }
 
 /// An unlocked web-vault session (module docs). `Debug` shows nothing secret.
@@ -198,11 +209,12 @@ impl fmt::Debug for Session {
 }
 
 impl Session {
-    /// The session of a verified web login: the personal vault's driver at `device_seq` 1
-    /// (a new device), the authors of the verified account.
+    /// The session of a verified web login: a driver for every vault the account's catalog
+    /// opens (ADR 0081 §A2, §A7), all sharing one `device_seq` counter from 1 (a new device),
+    /// the authors of the verified account.
     ///
     /// # Errors
-    /// `invalid_server_response` if the account answer carries no vault key.
+    /// `invalid_server_response` if the account answer carries no key of an open vault.
     pub(crate) fn from_web(
         web: WebSession,
         origin: String,
@@ -214,14 +226,7 @@ impl Session {
             session_token,
             ..
         } = web;
-        let vault_id = account
-            .vault_ids()
-            .next()
-            .ok_or(ClientError::InvalidServerResponse)?;
-        let vault_key = account
-            .take_vault_key(vault_id)
-            .ok_or(ClientError::InvalidServerResponse)?;
-        let vault = VaultSync::new(vault_key, &unlocked, 1)?;
+        let vaults = VaultSet::open_all(&mut account, &unlocked, false)?;
         let authors = Authors::from_account(&account)?;
         Ok(Self {
             inner: Some(Box::new(Inner {
@@ -232,7 +237,9 @@ impl Session {
                 unlocked,
                 authors,
                 account,
-                vault,
+                vaults,
+                vault_pending: None,
+                moves: Vec::new(),
                 sync: SyncDriver::default(),
                 gate: ExportGate::new(),
                 rng: os_rng(),
@@ -274,14 +281,8 @@ impl Session {
         now_ms: u64,
     ) -> CoreResult<()> {
         let inner = self.writable()?;
-        let item = items::item_id(id)?;
-        op(
-            &mut inner.vault,
-            &mut inner.rng,
-            &inner.unlocked,
-            item,
-            now_ms,
-        )?;
+        let (vault, item) = inner.vaults.item_mut(id)?;
+        op(vault, &mut inner.rng, &inner.unlocked, item, now_ms)?;
         Ok(())
     }
 }
@@ -335,7 +336,11 @@ impl Session {
     /// `locked`.
     #[wasm_bindgen(getter, js_name = readOnly)]
     pub fn read_only(&self) -> Result<bool, CoreError> {
-        Ok(self.inner()?.vault.is_read_only())
+        Ok(!self
+            .inner()?
+            .vaults
+            .personal_vault()
+            .is_ok_and(|v| !v.is_read_only()))
     }
 
     /// How many own ops the server has not acknowledged yet: what a lock now would lose.
@@ -344,7 +349,13 @@ impl Session {
     /// `locked`.
     #[wasm_bindgen(getter, js_name = unsentChanges)]
     pub fn unsent_changes(&self) -> Result<usize, CoreError> {
-        Ok(self.inner()?.vault.unacknowledged().0)
+        Ok(self
+            .inner()?
+            .vaults
+            .all()
+            .iter()
+            .map(|v| v.unacknowledged().0)
+            .sum())
     }
 
     /// The account's counted bytes the server reported with the last account answer (ADR 0048
@@ -384,7 +395,7 @@ impl Session {
     pub fn sync_start(&mut self) -> Result<(), CoreError> {
         let inner = self.inner_mut()?;
         let mut ctx = Ctx {
-            vault: &mut inner.vault,
+            vaults: &mut inner.vaults,
             account: &mut inner.account,
             authors: &mut inner.authors,
             unlocked: &inner.unlocked,
@@ -412,7 +423,7 @@ impl Session {
     pub fn sync_respond(&mut self, status: u16, body: &[u8], now_ms: u64) -> Result<(), CoreError> {
         let inner = self.inner_mut()?;
         let ctx = Ctx {
-            vault: &mut inner.vault,
+            vaults: &mut inner.vaults,
             account: &mut inner.account,
             authors: &mut inner.authors,
             unlocked: &inner.unlocked,
@@ -432,7 +443,7 @@ impl Session {
     #[wasm_bindgen(js_name = syncAbort)]
     pub fn sync_abort(&mut self) -> Result<(), CoreError> {
         let inner = self.inner_mut()?;
-        inner.sync.abort(&mut inner.vault);
+        inner.sync.abort(&mut inner.vaults);
         Ok(())
     }
 
@@ -441,7 +452,13 @@ impl Session {
     /// # Errors
     /// `locked`.
     pub fn items(&self, trash: bool) -> Result<Vec<ItemSummary>, CoreError> {
-        Ok(items::summaries(&self.inner()?.vault, trash))
+        Ok(self
+            .inner()?
+            .vaults
+            .all()
+            .iter()
+            .flat_map(|v| items::summaries(v, trash))
+            .collect())
     }
 
     /// One item's summary.
@@ -449,8 +466,7 @@ impl Session {
     /// # Errors
     /// `locked`; `invalid_input` for an id that is not 32 hex digits; `unknown_item`.
     pub fn item(&self, id: &str) -> Result<ItemSummary, CoreError> {
-        let vault = &self.inner()?.vault;
-        let item = visible_item(vault, id)?;
+        let (vault, item) = self.inner()?.vaults.item(id)?;
         items::summary(vault, item).ok_or(ClientError::UnknownItem.into())
     }
 
@@ -460,8 +476,7 @@ impl Session {
     /// As [`Session::item`].
     #[wasm_bindgen(js_name = itemFields)]
     pub fn item_fields(&self, id: &str) -> Result<Vec<FieldView>, CoreError> {
-        let vault = &self.inner()?.vault;
-        let item = visible_item(vault, id)?;
+        let (vault, item) = self.inner()?.vaults.item(id)?;
         Ok(items::fields(vault, item))
     }
 
@@ -472,8 +487,7 @@ impl Session {
     /// `invalid_input` for a value with no text form (bytes, an order key).
     #[wasm_bindgen(js_name = revealField)]
     pub fn reveal_field(&self, id: &str, key: &str) -> Result<String, CoreError> {
-        let vault = &self.inner()?.vault;
-        let item = visible_item(vault, id)?;
+        let (vault, item) = self.inner()?.vaults.item(id)?;
         Ok(items::reveal(vault, item, key)?.as_str().to_owned())
     }
 
@@ -486,22 +500,22 @@ impl Session {
     #[wasm_bindgen(js_name = createItem)]
     pub fn create_item(
         &mut self,
+        vault_id: &str,
         item_type: &str,
         draft: &ItemDraft,
         now_ms: u64,
     ) -> Result<String, CoreError> {
         let item_type = type_from_name(item_type)?;
+        let target = items::vault_id(vault_id)?;
         let inner = self.writable()?;
-        let writes = items::writes(&inner.vault, None, draft)?;
+        let vault = inner.vaults.get_mut(target)?;
+        let writes = items::writes(vault, None, draft)?;
         let edits: Vec<FieldEdit<'_>> = writes
             .iter()
             .map(|(key, value)| FieldEdit { key, value })
             .collect();
-        let item =
-            inner
-                .vault
-                .create_item(&mut inner.rng, &inner.unlocked, item_type, &edits, now_ms)?;
-        Ok(hex(item.as_bytes()))
+        let item = vault.create_item(&mut inner.rng, &inner.unlocked, item_type, &edits, now_ms)?;
+        Ok(item_ref(target, item))
     }
 
     /// Edits an active item with the draft's writes, as one op.
@@ -515,15 +529,13 @@ impl Session {
             return Err(ClientError::InvalidEdit.into());
         }
         let inner = self.writable()?;
-        let item = items::item_id(id)?;
-        let writes = items::writes(&inner.vault, Some(item), draft)?;
+        let (vault, item) = inner.vaults.item_mut(id)?;
+        let writes = items::writes(&*vault, Some(item), draft)?;
         let edits: Vec<FieldEdit<'_>> = writes
             .iter()
             .map(|(key, value)| FieldEdit { key, value })
             .collect();
-        inner
-            .vault
-            .edit_item(&mut inner.rng, &inner.unlocked, item, &edits, now_ms)?;
+        vault.edit_item(&mut inner.rng, &inner.unlocked, item, &edits, now_ms)?;
         Ok(())
     }
 
@@ -565,13 +577,21 @@ impl Session {
     #[wasm_bindgen(js_name = autoPurge)]
     pub fn auto_purge(&mut self, now_ms: u64) -> Result<Vec<String>, CoreError> {
         let inner = self.writable()?;
-        let purged = inner.vault.auto_purge_due(
-            &mut inner.rng,
-            &inner.unlocked,
-            now_ms,
-            TRASH_RETENTION_MS,
-        )?;
-        Ok(purged.into_iter().map(|id| hex(id.as_bytes())).collect())
+        let mut out = Vec::new();
+        for vault in inner.vaults.all_mut() {
+            if vault.is_read_only() {
+                continue;
+            }
+            let vault_id = vault.vault_id();
+            let purged = vault.auto_purge_due(
+                &mut inner.rng,
+                &inner.unlocked,
+                now_ms,
+                TRASH_RETENTION_MS,
+            )?;
+            out.extend(purged.into_iter().map(|id| item_ref(vault_id, id)));
+        }
+        Ok(out)
     }
 
     /// One item's password history without values (gap 01; [`crate::items`] module docs):
@@ -581,8 +601,7 @@ impl Session {
     /// As [`Session::item`].
     #[wasm_bindgen(js_name = passwordHistory)]
     pub fn password_history(&self, id: &str) -> Result<Vec<HistoryEntryView>, CoreError> {
-        let vault = &self.inner()?.vault;
-        let item = visible_item(vault, id)?;
+        let (vault, item) = self.inner()?.vaults.item(id)?;
         Ok(items::password_history(vault, item))
     }
 
@@ -603,8 +622,7 @@ impl Session {
         index: usize,
         entry_id: &str,
     ) -> Result<String, CoreError> {
-        let vault = &self.inner()?.vault;
-        let item = visible_item(vault, id)?;
+        let (vault, item) = self.inner()?.vaults.item(id)?;
         Ok(items::reveal_history(vault, item, source, index, entry_id)?
             .as_str()
             .to_owned())
@@ -618,8 +636,7 @@ impl Session {
     /// As [`Session::item`].
     #[wasm_bindgen(js_name = itemHistory)]
     pub fn item_history(&self, id: &str) -> Result<Vec<FieldHistoryView>, CoreError> {
-        let vault = &self.inner()?.vault;
-        let item = visible_item(vault, id)?;
+        let (vault, item) = self.inner()?.vaults.item(id)?;
         Ok(items::item_history(vault, item))
     }
 
@@ -640,8 +657,7 @@ impl Session {
         index: usize,
         entry_id: &str,
     ) -> Result<String, CoreError> {
-        let vault = &self.inner()?.vault;
-        let item = visible_item(vault, id)?;
+        let (vault, item) = self.inner()?.vaults.item(id)?;
         Ok(
             items::reveal_field_history(vault, item, key, index, entry_id)?
                 .as_str()
@@ -669,16 +685,9 @@ impl Session {
         now_ms: u64,
     ) -> Result<(), CoreError> {
         let inner = self.writable()?;
-        let item = items::item_id(id)?;
-        let dot = items::restore_field_history_dot(&inner.vault, item, key, index, entry_id)?;
-        inner.vault.restore_field_history(
-            &mut inner.rng,
-            &inner.unlocked,
-            item,
-            key,
-            dot,
-            now_ms,
-        )?;
+        let (vault, item) = inner.vaults.item_mut(id)?;
+        let dot = items::restore_field_history_dot(&*vault, item, key, index, entry_id)?;
+        vault.restore_field_history(&mut inner.rng, &inner.unlocked, item, key, dot, now_ms)?;
         Ok(())
     }
 
@@ -690,8 +699,7 @@ impl Session {
     /// As [`Session::item`]; `invalid_input` for a key outside the grammar.
     #[wasm_bindgen(js_name = fieldConflict)]
     pub fn field_conflict(&self, id: &str, key: &str) -> Result<Vec<ConflictValueView>, CoreError> {
-        let vault = &self.inner()?.vault;
-        let item = visible_item(vault, id)?;
+        let (vault, item) = self.inner()?.vaults.item(id)?;
         items::field_conflict(vault, item, key)
     }
 
@@ -710,8 +718,7 @@ impl Session {
         index: usize,
         value_id: &str,
     ) -> Result<String, CoreError> {
-        let vault = &self.inner()?.vault;
-        let item = visible_item(vault, id)?;
+        let (vault, item) = self.inner()?.vaults.item(id)?;
         Ok(
             items::reveal_conflict_value(vault, item, key, index, value_id)?
                 .as_str()
@@ -736,16 +743,9 @@ impl Session {
         now_ms: u64,
     ) -> Result<(), CoreError> {
         let inner = self.writable()?;
-        let item = items::item_id(id)?;
-        let dot = items::conflict_value(&inner.vault, item, key, index, value_id)?.dot;
-        inner.vault.resolve_conflict_pick(
-            &mut inner.rng,
-            &inner.unlocked,
-            item,
-            key,
-            dot,
-            now_ms,
-        )?;
+        let (vault, item) = inner.vaults.item_mut(id)?;
+        let dot = items::conflict_value(&*vault, item, key, index, value_id)?.dot;
+        vault.resolve_conflict_pick(&mut inner.rng, &inner.unlocked, item, key, dot, now_ms)?;
         Ok(())
     }
 
@@ -770,10 +770,10 @@ impl Session {
         now_ms: u64,
     ) -> Result<Vec<String>, CoreError> {
         let inner = self.writable()?;
-        let item = items::item_id(id)?;
-        let keep = items::conflict_value(&inner.vault, item, key, index, value_id)?.dot;
+        let (vault, item) = inner.vaults.item_mut(id)?;
+        let keep = items::conflict_value(&*vault, item, key, index, value_id)?.dot;
         let label = label.map(Zeroizing::new);
-        let elements = inner.vault.resolve_conflict_keep_both(
+        let elements = vault.resolve_conflict_keep_both(
             &mut inner.rng,
             &inner.unlocked,
             item,
@@ -803,34 +803,40 @@ impl Session {
     pub fn take_notices(&mut self) -> Result<Vec<Notice>, CoreError> {
         let inner = self.inner_mut()?;
         let mut out = Vec::new();
-        for item in inner.vault.item_ids() {
-            let late = inner.vault.late_edit_devices(item);
-            if !late.is_empty() {
-                inner.vault.mark_late_edits_surfaced(item);
-                out.push(Notice {
-                    kind: NOTICE_LATE_EDIT,
-                    item: hex(item.as_bytes()),
-                    devices: late.iter().map(|d| hex(d.as_bytes())).collect(),
-                    conflict_id: None,
-                });
-            }
-            if let Some(trash) = inner.vault.concurrent_trash(item)
-                && inner
-                    .shown_trash_notices
-                    .insert((item, trash.trashed_dot, trash.edited_dot))
-            {
-                out.push(Notice {
-                    kind: NOTICE_CONCURRENT_TRASH,
-                    item: hex(item.as_bytes()),
-                    devices: vec![
-                        hex(trash.trashed_by.as_bytes()),
-                        hex(trash.edited_by.as_bytes()),
-                    ],
-                    conflict_id: Some(concurrent_trash_conflict_id(
+        for vault in inner.vaults.all_mut() {
+            let vault_id = vault.vault_id();
+            for item in vault.item_ids() {
+                let late = vault.late_edit_devices(item);
+                if !late.is_empty() {
+                    vault.mark_late_edits_surfaced(item);
+                    out.push(Notice {
+                        kind: NOTICE_LATE_EDIT,
+                        item: item_ref(vault_id, item),
+                        devices: late.iter().map(|d| hex(d.as_bytes())).collect(),
+                        conflict_id: None,
+                    });
+                }
+                if let Some(trash) = vault.concurrent_trash(item)
+                    && inner.shown_trash_notices.insert((
+                        vault_id,
+                        item,
                         trash.trashed_dot,
                         trash.edited_dot,
-                    )),
-                });
+                    ))
+                {
+                    out.push(Notice {
+                        kind: NOTICE_CONCURRENT_TRASH,
+                        item: item_ref(vault_id, item),
+                        devices: vec![
+                            hex(trash.trashed_by.as_bytes()),
+                            hex(trash.edited_by.as_bytes()),
+                        ],
+                        conflict_id: Some(concurrent_trash_conflict_id(
+                            trash.trashed_dot,
+                            trash.edited_dot,
+                        )),
+                    });
+                }
             }
         }
         Ok(out)
@@ -853,15 +859,15 @@ impl Session {
     ) -> Result<String, CoreError> {
         let item_type = type_from_name(item_type)?;
         let inner = self.writable()?;
-        let item = items::item_id(id)?;
-        let restored = inner.vault.restore_late_as_new_item(
+        let (vault, item) = inner.vaults.item_mut(id)?;
+        let restored = vault.restore_late_as_new_item(
             &mut inner.rng,
             &inner.unlocked,
             item,
             item_type,
             now_ms,
         )?;
-        Ok(hex(restored.as_bytes()))
+        Ok(item_ref(vault.vault_id(), restored))
     }
 
     /// What each custom field's autocomplete id does, in list order (ADR 0076 §2.4–§2.5, §3):
@@ -874,7 +880,8 @@ impl Session {
         &self,
         id: &str,
     ) -> Result<Vec<crate::autofill::CustomFieldAutofillView>, CoreError> {
-        crate::autofill::custom_field_autofill(&self.inner()?.vault, id)
+        let (vault, _) = self.inner()?.vaults.item(id)?;
+        crate::autofill::custom_field_autofill(vault, id)
     }
 
     /// A breach check of an item's `login.password` (CRYPTO.md §11.16; [`crate::breach`]): the
@@ -884,8 +891,7 @@ impl Session {
     /// As [`Session::item`].
     #[wasm_bindgen(js_name = breachCheckItem)]
     pub fn breach_check_item(&self, id: &str) -> Result<Option<BreachCheck>, CoreError> {
-        let vault = &self.inner()?.vault;
-        let item = visible_item(vault, id)?;
+        let (vault, item) = self.inner()?.vaults.item(id)?;
         if vault
             .field_value(item, LOGIN_PASSWORD)
             .filter(|v| !v.is_cleared())
@@ -906,8 +912,7 @@ impl Session {
     /// # Errors
     /// As [`Session::item`]; `invalid_input` when the item has no valid time-based secret.
     pub fn totp(&self, id: &str, now_ms: u64) -> Result<TotpCode, CoreError> {
-        let vault = &self.inner()?.vault;
-        let item = visible_item(vault, id)?;
+        let (vault, item) = self.inner()?.vaults.item(id)?;
         let bad = || CoreError::from(ClientError::InvalidInput);
         let value = vault.field_value(item, LOGIN_TOTP).ok_or_else(bad)?;
         let stored = match value.decode() {
@@ -966,8 +971,7 @@ impl Session {
         rp_id: &str,
         challenge: &[u8],
     ) -> Result<PasskeyAssertion, CoreError> {
-        let vault = &self.inner()?.vault;
-        let item = visible_item(vault, id)?;
+        let (vault, item) = self.inner()?.vaults.item(id)?;
         let bad = || CoreError::from(ClientError::InvalidInput);
         let element = ElementId::from_bytes(items::parse_id(passkey_id)?);
 
@@ -1031,8 +1035,7 @@ impl Session {
     /// As [`Session::item`].
     #[wasm_bindgen(js_name = passkeyCandidates)]
     pub fn passkey_candidates(&self, id: &str) -> Result<Vec<PasskeyCandidate>, CoreError> {
-        let vault = &self.inner()?.vault;
-        let item = visible_item(vault, id)?;
+        let (vault, item) = self.inner()?.vaults.item(id)?;
         let mut out = Vec::new();
         for element in vault.list_elements(item, LIST_PASSKEY) {
             let element_id = element.element.as_str();
@@ -1092,6 +1095,7 @@ impl Session {
     #[wasm_bindgen(js_name = exportEncrypted)]
     pub fn export_encrypted(
         &mut self,
+        vault_id: &str,
         export_password: &mut [u8],
         now_ms: u64,
     ) -> Result<EncryptedExport, CoreError> {
@@ -1099,10 +1103,10 @@ impl Session {
         let inner = self.inner_mut()?;
         check_export_password(&export_password)?;
         let auth = inner.gate.authorize_encrypted(now_ms)?;
-        let exported =
-            inner
-                .vault
-                .export_encrypted(&mut inner.rng, auth, &export_password, now_ms)?;
+        let exported = inner
+            .vaults
+            .get_mut(items::vault_id(vault_id)?)?
+            .export_encrypted(&mut inner.rng, auth, &export_password, now_ms)?;
         Ok(EncryptedExport {
             file: exported.file,
             items: exported.items,
@@ -1115,8 +1119,12 @@ impl Session {
     /// # Errors
     /// `locked`; `export_oversize_items`.
     #[wasm_bindgen(js_name = cxfExportPasskeys)]
-    pub fn cxf_export_passkeys(&self) -> Result<usize, CoreError> {
-        Ok(self.inner()?.vault.cxf_export_passkeys()?)
+    pub fn cxf_export_passkeys(&self, vault_id: &str) -> Result<usize, CoreError> {
+        Ok(self
+            .inner()?
+            .vaults
+            .get(items::vault_id(vault_id)?)?
+            .cxf_export_passkeys()?)
     }
 
     /// The vault's passkeys as a CXF export file (ADR 0074 §2): a CXF document sealed under a
@@ -1135,6 +1143,7 @@ impl Session {
     #[wasm_bindgen(js_name = exportCxf)]
     pub fn export_cxf(
         &mut self,
+        vault_id: &str,
         typed_phrase: &str,
         export_password: &mut [u8],
         now_ms: u64,
@@ -1147,10 +1156,10 @@ impl Session {
         }
         let ack = PlaintextExportAck::from_typed_phrase(typed_phrase)?;
         let auth = inner.gate.authorize_plaintext(now_ms)?;
-        let exported =
-            inner
-                .vault
-                .export_cxf(&mut inner.rng, auth, ack, &export_password, now_ms)?;
+        let exported = inner
+            .vaults
+            .get_mut(items::vault_id(vault_id)?)?
+            .export_cxf(&mut inner.rng, auth, ack, &export_password, now_ms)?;
         Ok(CxfExport {
             file: exported.file,
             passkeys: exported.passkeys,
@@ -1163,13 +1172,15 @@ impl Session {
     /// # Errors
     /// `locked`.
     #[wasm_bindgen(js_name = exportBlockers)]
-    pub fn export_blockers(&self) -> Result<Vec<String>, CoreError> {
+    pub fn export_blockers(&self, vault_id: &str) -> Result<Vec<String>, CoreError> {
+        let target = items::vault_id(vault_id)?;
         Ok(self
             .inner()?
-            .vault
+            .vaults
+            .get(target)?
             .export_blockers()
             .iter()
-            .map(|i| hex(i.as_bytes()))
+            .map(|i| item_ref(target, *i))
             .collect())
     }
 
@@ -1179,8 +1190,12 @@ impl Session {
     /// # Errors
     /// `locked`; `export_oversize_items`.
     #[wasm_bindgen(js_name = csvExportWarning)]
-    pub fn csv_export_warning(&self) -> Result<String, CoreError> {
-        let loss = self.inner()?.vault.csv_export_loss()?;
+    pub fn csv_export_warning(&self, vault_id: &str) -> Result<String, CoreError> {
+        let loss = self
+            .inner()?
+            .vaults
+            .get(items::vault_id(vault_id)?)?
+            .csv_export_loss()?;
         Ok(csv_export_warning(loss.items_losing_data()))
     }
 
@@ -1278,6 +1293,7 @@ impl Session {
     #[wasm_bindgen(js_name = exportPlaintext)]
     pub fn export_plaintext(
         &mut self,
+        vault_id: &str,
         format: &str,
         typed_phrase: &str,
         now_ms: u64,
@@ -1294,9 +1310,15 @@ impl Session {
         let ack = PlaintextExportAck::from_typed_phrase(typed_phrase)?;
         let auth = inner.gate.authorize_plaintext(now_ms)?;
         let bytes = if json {
-            inner.vault.export_plaintext_json(auth, ack, now_ms)?
+            inner
+                .vaults
+                .get_mut(items::vault_id(vault_id)?)?
+                .export_plaintext_json(auth, ack, now_ms)?
         } else {
-            inner.vault.export_plaintext_csv(auth, ack)?
+            inner
+                .vaults
+                .get_mut(items::vault_id(vault_id)?)?
+                .export_plaintext_csv(auth, ack)?
         };
         Ok(bytes.expose_secret().to_vec())
     }
@@ -1313,6 +1335,7 @@ impl Session {
     #[wasm_bindgen(js_name = importFile)]
     pub fn import_file(
         &mut self,
+        vault_id: &str,
         format: &str,
         file: &[u8],
         now_ms: u64,
@@ -1336,10 +1359,10 @@ impl Session {
         let inner = self.writable()?;
         let parsed = rizzy_import::import(format, file, &mut inner.rng)
             .map_err(|_| CoreError::new(IMPORT_FAILED))?;
-        let done =
-            inner
-                .vault
-                .import_items(&mut inner.rng, &inner.unlocked, &parsed.items, now_ms)?;
+        let done = inner
+            .vaults
+            .get_mut(items::vault_id(vault_id)?)?
+            .import_items(&mut inner.rng, &inner.unlocked, &parsed.items, now_ms)?;
         let counts = parsed.counts;
         Ok(ImportReport {
             imported: done.imported.len(),
@@ -1364,6 +1387,7 @@ impl Session {
     #[wasm_bindgen(js_name = importCxfEncrypted)]
     pub fn import_cxf_encrypted(
         &mut self,
+        vault_id: &str,
         file: &[u8],
         export_password: &mut [u8],
         now_ms: u64,
@@ -1373,13 +1397,16 @@ impl Session {
             return Err(ClientError::InvalidInput.into());
         }
         let inner = self.writable()?;
-        let done = inner.vault.import_cxf_encrypted(
-            &mut inner.rng,
-            &inner.unlocked,
-            file,
-            &export_password,
-            now_ms,
-        )?;
+        let done = inner
+            .vaults
+            .get_mut(items::vault_id(vault_id)?)?
+            .import_cxf_encrypted(
+                &mut inner.rng,
+                &inner.unlocked,
+                file,
+                &export_password,
+                now_ms,
+            )?;
         Ok(ImportReport {
             imported: done.imported.len(),
             skipped: done.skipped.len().saturating_add(done.counts.skipped_items),
@@ -1401,6 +1428,7 @@ impl Session {
     #[wasm_bindgen(js_name = importEncrypted)]
     pub fn import_encrypted(
         &mut self,
+        vault_id: &str,
         file: &[u8],
         export_password: &mut [u8],
         now_ms: u64,
@@ -1410,13 +1438,16 @@ impl Session {
             return Err(ClientError::InvalidInput.into());
         }
         let inner = self.writable()?;
-        let done = inner.vault.import_encrypted(
-            &mut inner.rng,
-            &inner.unlocked,
-            file,
-            &export_password,
-            now_ms,
-        )?;
+        let done = inner
+            .vaults
+            .get_mut(items::vault_id(vault_id)?)?
+            .import_encrypted(
+                &mut inner.rng,
+                &inner.unlocked,
+                file,
+                &export_password,
+                now_ms,
+            )?;
         Ok(ImportReport {
             imported: done.imported.len(),
             skipped: done.skipped_items,
@@ -1699,14 +1730,25 @@ impl Session {
     pub fn match_candidates(&mut self, page_url: &str) -> Result<MatchDecision, CoreError> {
         let inner = self.inner_mut()?;
         let record = inner.settings.get(&inner.account, &inner.unlocked)?;
-        let saved = vault_item_uris(&inner.vault);
+        // ADR 0081 §A7: every vault's items; the matcher keys by a stand-in id per URI, mapped
+        // back to the item reference (`matching::synthetic_id`, INV-103).
+        let mut names = Vec::new();
+        let mut saved = Vec::new();
+        for vault in inner.vaults.all() {
+            for mut uri in vault_item_uris(vault) {
+                let name = item_ref(vault.vault_id(), ItemId::from_bytes(uri.item_id));
+                uri.item_id = matching::synthetic_id(names.len());
+                names.push(name);
+                saved.push(uri);
+            }
+        }
         let uris: Vec<ItemUri<'_>> = saved.iter().map(SavedUri::as_item_uri).collect();
         let frame = FrameContext {
             is_top_frame: true,
             frame_origin: page_url,
         };
         let decision = decide_with_settings(page_url, &frame, &uris, record, &inner.global_groups)?;
-        Ok(matching::decision_view(decision))
+        Ok(matching::decision_view_named(decision, &names))
     }
 
     /// The identity generator's synced defaults (`ACCOUNT_SETTINGS` tag `0x0004`, ADR 0079 Open
@@ -1874,7 +1916,11 @@ impl Session {
     /// (no write is built over them, ADR 0042 §2); `account_key_rotated`.
     fn settings_change(&mut self, edit: SettingsEdit) -> CoreResult<HttpRequest> {
         let inner = self.writable()?;
-        if inner.vault.is_read_only() {
+        if !inner
+            .vaults
+            .personal_vault()
+            .is_ok_and(|v| !v.is_read_only())
+        {
             return Err(ClientError::ReadOnly.into());
         }
         let pending = change_settings(&mut inner.rng, &inner.account, &inner.unlocked, edit)?;
