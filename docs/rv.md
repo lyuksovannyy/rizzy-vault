@@ -206,6 +206,8 @@ If such a change is interrupted after it was sent, it is kept like an interrupte
 
 `2fa enable` shows the secret once, as an `otpauth://` URI and in Base32, for your authenticator app, then asks for the app's current code. From then on every login asks for a code. `2fa disable` needs a current code too, a newer one than the code its own login used. Codes are typed at the terminal or piped in, never given on the command line. Losing the authenticator needs the server administrator.
 
+**Security keys.** A hardware security key (FIDO2/WebAuthn) can be the account's second factor too, added in the web vault under Settings, Two-factor authentication ([ADR 0058](adr/0058-webauthn-2fa-second-factor.md)). `rv` cannot complete a security-key login: it is not a browser on the server's origin. When the account's only second factor is a security key, `rv`'s login says so and stops; log in with the web vault, or add an authenticator app there as well and type its code to `rv`. When the account has both, `rv` asks for the code.
+
 ## Forgotten master password
 
 ```sh

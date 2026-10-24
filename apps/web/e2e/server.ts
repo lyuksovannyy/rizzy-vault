@@ -136,14 +136,18 @@ export interface RunningServer {
   stop(): void;
 }
 
-/** Starts a server with open signup. */
-export async function startServer(): Promise<RunningServer> {
+/** Starts a server with open signup. `host` names its origin: `127.0.0.1` by default, or
+ * `localhost`, which the WebAuthn tests need (a browser refuses an IP address as an RP ID; the
+ * listener stays on 127.0.0.1 either way). */
+export async function startServer(
+  host: "127.0.0.1" | "localhost" = "127.0.0.1",
+): Promise<RunningServer> {
   const binary = serverBinary();
   const dir = mkdtempSync(join(tmpdir(), "rizzy-web-e2e-"));
   mkdirSync(join(dir, "data"));
   mkdirSync(join(dir, "secrets"));
   const settings = (port: number): Record<string, string> => ({
-    RIZZY_ORIGIN: `http://127.0.0.1:${port}`,
+    RIZZY_ORIGIN: `http://${host}:${port}`,
     RIZZY_LISTEN: `127.0.0.1:${port}`,
     // An ephemeral admin port, so parallel servers never collide on 8081 (ADR 0060 §2).
     RIZZY_ADMIN_LISTEN: "127.0.0.1:0",
@@ -165,7 +169,7 @@ export async function startServer(): Promise<RunningServer> {
     const child = await spawnListening(binary, settings(port), port);
     if (child !== undefined) {
       return {
-        origin: `http://127.0.0.1:${port}`,
+        origin: `http://${host}:${port}`,
         stop() {
           child.kill();
           rmSync(dir, { recursive: true, force: true });
