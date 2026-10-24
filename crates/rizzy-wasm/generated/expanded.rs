@@ -7565,6 +7565,17 @@ pub mod device {
                     &self.vaults.len()).finish_non_exhaustive()
         }
     }
+    /// ADR 0051 §4: once per session, at its start, against the floor the load rehydrated: the
+    /// compiled-in global groups, with a raised floor appended to `start_writes`. An unlock at a
+    /// floor equal to the compiled-in list's version (every unlock after the first) keeps the
+    /// groups and appends nothing (ADR 0080 §6).
+    fn start_global_groups(floors: &Floors, start_writes: &mut Changeset)
+        -> Vec<EquivalenceGroup> {
+        let (global_groups, floor_writes) =
+            startup_equivalence_groups(floors);
+        start_writes.append(floor_writes);
+        global_groups
+    }
     impl DeviceSession {
         /// Wraps an already-unlocked device (used by [`EnrolResult::new`] and
         /// [`DeviceSession::unlock`]).
@@ -7574,9 +7585,8 @@ pub mod device {
             account: VerifiedAccount, authors: Authors,
             vaults: Vec<VaultSync>, cache: CacheRows, floors: Floors,
             mut start_writes: Changeset) -> Self {
-            let (global_groups, floor_writes) =
-                startup_equivalence_groups(&floors);
-            start_writes.append(floor_writes);
+            let global_groups =
+                start_global_groups(&floors, &mut start_writes);
             Self {
                 device,
                 unlocked,

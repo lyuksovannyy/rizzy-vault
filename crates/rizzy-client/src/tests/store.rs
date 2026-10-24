@@ -1867,6 +1867,56 @@ fn the_equivalence_list_floor_survives_a_restart_and_never_goes_back() {
     a.assert_loads();
 }
 
+/// ADR 0080 §6 with INV-75, over a real cache and a list signed by a test key (the
+/// known-answer list, `list_version` 1): the first start accepts the list and persists floor
+/// 1; every later start re-verifies the same list at that floor, keeps its groups and writes
+/// nothing; after a newer list raised the floor, the older list is refused and the floor never
+/// goes back.
+#[test]
+fn the_same_list_at_the_persisted_floor_keeps_its_groups_across_restarts() {
+    let mut rng = ChaCha20Rng::seed_from_u64(88);
+    let mut server = Server::new(89);
+    let (mut a, _sk, _code) = Dev::signed_up(&mut server, &mut rng);
+    a.fetch(&server);
+    let list_v1 = crate::matching::tests::known_answer_list;
+
+    // First start on a fresh cache (floor 0): the list is accepted and floor 1 is written.
+    let (first_groups, writes) =
+        crate::matching::startup_equivalence_groups_with(&a.reload().floors, list_v1);
+    assert_eq!(first_groups.len(), 1);
+    assert_eq!(writes.writes().len(), 1);
+    let mut floors = a.reload().floors;
+    floors.admit(&writes).unwrap();
+    a.cache.commit(writes);
+    assert_eq!(a.reload().floors.highest_equivalence_list_version(), 1);
+
+    // Every later start (here three): the same list at floor = version keeps its groups and
+    // writes nothing (before ADR 0080 §6 it was refused and the device ran with no groups).
+    for _ in 0..3 {
+        let (groups, writes) =
+            crate::matching::startup_equivalence_groups_with(&a.reload().floors, list_v1);
+        assert_eq!(groups, first_groups);
+        assert!(writes.is_empty(), "an equal version never writes the floor");
+        assert_eq!(a.reload().floors.highest_equivalence_list_version(), 1);
+    }
+
+    // A newer list raised the floor to 3; a rolled-back build's list 1 is refused (INV-75),
+    // with no groups and no write, and the floor stays at 3 after a restart.
+    a.cache.commit(
+        [Write::Meta {
+            key: meta::HIGHEST_EQUIVALENCE_LIST_VERSION,
+            value: 3_u64.to_be_bytes().to_vec(),
+        }]
+        .into_iter()
+        .collect(),
+    );
+    let (groups, writes) =
+        crate::matching::startup_equivalence_groups_with(&a.reload().floors, list_v1);
+    assert!(groups.is_empty() && writes.is_empty());
+    assert_eq!(a.reload().floors.highest_equivalence_list_version(), 3);
+    a.assert_loads();
+}
+
 /// ADR 0051 §2: a format-1 cache (no `highest_equivalence_list_version` row) is migrated to
 /// format 2 by adding only that row at 0, then opens and loads unchanged; every other format
 /// is handled without a write.

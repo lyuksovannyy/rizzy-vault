@@ -526,6 +526,16 @@ impl fmt::Debug for DeviceSession {
     }
 }
 
+/// ADR 0051 §4: once per session, at its start, against the floor the load rehydrated: the
+/// compiled-in global groups, with a raised floor appended to `start_writes`. An unlock at a
+/// floor equal to the compiled-in list's version (every unlock after the first) keeps the
+/// groups and appends nothing (ADR 0080 §6).
+fn start_global_groups(floors: &Floors, start_writes: &mut Changeset) -> Vec<EquivalenceGroup> {
+    let (global_groups, floor_writes) = startup_equivalence_groups(floors);
+    start_writes.append(floor_writes);
+    global_groups
+}
+
 impl DeviceSession {
     /// Wraps an already-unlocked device (used by [`EnrolResult::new`] and
     /// [`DeviceSession::unlock`]).
@@ -543,9 +553,7 @@ impl DeviceSession {
         floors: Floors,
         mut start_writes: Changeset,
     ) -> Self {
-        // ADR 0051 §4: once per session, at its start, against the floor the load rehydrated.
-        let (global_groups, floor_writes) = startup_equivalence_groups(&floors);
-        start_writes.append(floor_writes);
+        let global_groups = start_global_groups(&floors, &mut start_writes);
         Self {
             device,
             unlocked,
@@ -1486,6 +1494,38 @@ mod tests {
             "wrong_state"
         );
         assert_eq!(flow.state(), "request");
+    }
+
+    /// ADR 0080 §6 on the unlock path (`from_parts`): the first unlock of a fresh cache and
+    /// every later unlock, at the floor the first one persisted, run with the same compiled-in
+    /// global groups, and a later unlock never appends a floor write. While no signed list is
+    /// compiled in (`rizzy_match::compiled::GLOBAL_LIST` is `None` until the owner signs one)
+    /// both unlocks have no groups and no writes; once one ships, this is the check that the
+    /// default site groups survive the second unlock.
+    #[test]
+    fn every_unlock_after_the_first_keeps_the_compiled_in_groups_without_a_write() {
+        let mut floors = Floors::empty();
+        let mut first_writes = Changeset::new();
+        let first = start_global_groups(&floors, &mut first_writes);
+        floors.admit(&first_writes).unwrap();
+        let expected_floor = rizzy_client::rizzy_match::compiled::global_list(0)
+            .unwrap()
+            .map_or(0, |list| list.list_version());
+        assert_eq!(floors.highest_equivalence_list_version(), expected_floor);
+        assert_eq!(
+            first.is_empty(),
+            rizzy_client::rizzy_match::compiled::GLOBAL_LIST.is_none()
+        );
+
+        for _ in 0..3 {
+            let mut later_writes = Changeset::new();
+            let later = start_global_groups(&floors, &mut later_writes);
+            assert_eq!(later, first);
+            assert!(
+                later_writes.is_empty(),
+                "an equal version never writes the floor"
+            );
+        }
     }
 
     #[test]

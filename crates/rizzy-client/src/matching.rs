@@ -58,10 +58,12 @@ use crate::sync::VaultSync;
 /// list's groups when [`rizzy_match::compiled::global_list`] verifies one, and empty when none
 /// is compiled in or verification fails for any reason (bad signature, malformed, wrong key,
 /// or `NotNewer`, which narrows matching to plain registrable-domain equality: the intended
-/// effect of the no-downgrade rule, ADR 0051 §3; ADR 0044 "A PSL bump"). The second slot is
-/// `Some(list_version)` only for a verified list strictly newer than `highest_accepted_version`:
-/// the value the host writes back, once, in its load transaction (point 3); every other case
-/// is `None` and the stored value is left untouched. [`startup_equivalence_groups`] does both
+/// effect of the no-downgrade rule, ADR 0051 §3; ADR 0044 "A PSL bump"). A list whose version
+/// equals `highest_accepted_version` is the same compiled-in list re-verified at a later start
+/// and keeps its groups ([ADR 0080] §6). The second slot is `Some(list_version)` only for a
+/// verified list strictly newer than `highest_accepted_version`: the value the host writes
+/// back, once, in its load transaction (point 3); every other case, the equal version
+/// included, is `None` and the stored value is left untouched. [`startup_equivalence_groups`] does both
 /// for a host with a cache.
 ///
 /// **Call it once per session or process, at startup**, never per decision (ADR 0051 §4): the
@@ -70,6 +72,7 @@ use crate::sync::VaultSync;
 ///
 /// [ADR 0042]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0042-account-settings-matching-layout.md
 /// [ADR 0051]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0051-equivalence-list-version-persistence.md
+/// [ADR 0080]: https://github.com/lyuksovannyy/rizzy-vault/blob/main/docs/adr/0080-default-site-groups-vaultwarden-seed.md
 #[must_use]
 pub fn global_equivalence_groups(
     highest_accepted_version: u32,
@@ -106,7 +109,18 @@ fn groups_and_new_floor(
 pub fn startup_equivalence_groups(
     floors: &crate::store::floors::Floors,
 ) -> (Vec<EquivalenceGroup>, crate::store::rows::Changeset) {
-    let (groups, raised) = global_equivalence_groups(floors.highest_equivalence_list_version());
+    startup_equivalence_groups_with(floors, rizzy_match::compiled::global_list)
+}
+
+/// [`startup_equivalence_groups`] over any verifier in place of
+/// [`rizzy_match::compiled::global_list`], so the store tests can run a restart cycle with a
+/// list signed by a test key (INV-75; ADR 0080 §6).
+pub(crate) fn startup_equivalence_groups_with(
+    floors: &crate::store::floors::Floors,
+    verify: impl FnOnce(u32) -> Result<Option<EquivalenceList>, rizzy_match::EquivalenceListError>,
+) -> (Vec<EquivalenceGroup>, crate::store::rows::Changeset) {
+    let floor = floors.highest_equivalence_list_version();
+    let (groups, raised) = groups_and_new_floor(verify(floor), floor);
     (groups, floor_writes(raised))
 }
 
@@ -403,7 +417,7 @@ fn element_id(hex: &str) -> Option<[u8; 16]> {
     clippy::indexing_slicing,
     reason = "test code indexes fixtures; a panic there fails the test, which CLAUDE.md allows"
 )]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
@@ -706,7 +720,7 @@ mod tests {
 
     /// `rizzy-match`'s known-answer list (`equivalence.rs`, `verify_known_answer_with_a_test_key`):
     /// `list_version` 1, one group, signed by a test key.
-    fn known_answer_list(
+    pub(crate) fn known_answer_list(
         highest_accepted_version: u32,
     ) -> Result<Option<EquivalenceList>, rizzy_match::EquivalenceListError> {
         let hex = |text: &str| -> Vec<u8> {
@@ -730,9 +744,10 @@ mod tests {
     }
 
     /// ADR 0051 §4: a verified, strictly newer list returns its groups and its version as the
-    /// new floor; the same list against that floor is `NotNewer`: no groups, no write.
+    /// new floor. ADR 0080 §6: the same list against that floor (the next start) keeps its
+    /// groups and writes nothing; an older list against a higher floor is still refused.
     #[test]
-    fn a_newer_list_raises_the_floor_and_the_same_list_never_does_again() {
+    fn a_newer_list_raises_the_floor_and_the_same_list_keeps_its_groups_without_a_write() {
         let (groups, raised) = groups_and_new_floor(known_answer_list(0), 0);
         assert_eq!(raised, Some(1));
         assert_eq!(groups.len(), 1);
@@ -754,15 +769,22 @@ mod tests {
             _ => panic!("not a meta write"),
         }
 
-        // A restart with the persisted floor: the same (or a rolled-back, older) build's list
-        // is refused, matching narrows to plain registrable-domain equality, nothing is written.
+        // A restart with the persisted floor (ADR 0080 §6): the same build's list is the same
+        // list re-verified. It keeps its groups, and the floor is not written again.
+        let (groups_again, raised_again) = groups_and_new_floor(known_answer_list(1), 1);
+        assert_eq!(groups_again, groups);
         assert_eq!(
-            known_answer_list(1).unwrap_err(),
-            rizzy_match::EquivalenceListError::NotNewer
+            raised_again, None,
+            "an equal version never writes the floor"
         );
+        assert!(floor_writes(raised_again).is_empty());
+
+        // A rolled-back, older build's list against a higher persisted floor is still refused
+        // (INV-39, INV-75): matching narrows to plain registrable-domain equality, nothing is
+        // written, and the floor never decreases.
         assert_eq!(
-            groups_and_new_floor(known_answer_list(1), 1),
-            (Vec::new(), None)
+            known_answer_list(7).unwrap_err(),
+            rizzy_match::EquivalenceListError::NotNewer
         );
         assert_eq!(
             groups_and_new_floor(known_answer_list(7), 7),
@@ -782,8 +804,9 @@ mod tests {
             assert_eq!(groups_and_new_floor(Err(error), 3), (Vec::new(), None));
         }
         assert_eq!(groups_and_new_floor(Ok(None), 3), (Vec::new(), None));
-        // A verified list that is not strictly above the caller's floor (unreachable through
-        // `verify`, which already refuses it) still never produces a write.
+        // A verified list that is not strictly above the caller's floor (since ADR 0080 §6
+        // `verify` accepts an equal version) never produces a write.
+        assert_eq!(groups_and_new_floor(known_answer_list(1), 1).1, None);
         assert_eq!(groups_and_new_floor(known_answer_list(0), 1).1, None);
     }
 
