@@ -52,6 +52,18 @@ websites (URIs), custom fields (text, hidden, boolean) and tags, not only its fi
   longer created, and its `bank.` fields stay concealed, revealable and copyable, so the data
   can be moved out by hand; trash, restore and purge work.
 
+- **The identity generator** (ADR 0079 §10; `src/views/IdentityGenerator.tsx`,
+  `src/identity-form.ts`): "New identity" opens already filled by the core's draw, with a
+  generator bar above the fields (Sex, Country, Age with its presets, "Custom range" and "Exact
+  age", Email style, Regenerate all, Start blank) and a Regenerate button on each generated
+  field. A field the user typed in is only replaced by its own Regenerate button. The core's
+  draft stays in the Worker under a handle (`src/identity-drafts.ts`). The defaults and the
+  email domain are set in Settings → Identity generator (`src/views/IdentityDefaultsPane.tsx`,
+  synced in the account settings); the last-used age range of the session is kept in memory
+  only (`src/identity-memory.ts`). The edit form has no generator. Sex (a Male/Female select)
+  and Birthday (a date input) are identity fields everywhere; other stored text in them is
+  shown and edited as entered.
+
 - **Idempotent save.** Adding a website or custom field mints its element id on the client
   (`newElementId` of `@rizzy-vault/core`) the moment the row is added to the form, not when
   Save is pressed, and sends that same id on every attempt to save the row. Writing the same
