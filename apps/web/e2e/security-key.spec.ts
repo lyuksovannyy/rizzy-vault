@@ -7,13 +7,12 @@
 // that asks for the key after the password, removal, the accessibility audit of the section and
 // of the login prompt, and the keyboard-only walk through both.
 //
-// Blocked on the owner (reported): Chromium refuses the creation options webauthn-rs 0.5.5 emits
-// for a security key (credProtect `userVerificationRequired` with `userVerification:
-// "preferred"`, ADR 0077 §7) with a NotSupportedError before any authenticator is asked. Until
-// the owner decides, these tests delete the two credProtect members from the
-// `webauthn/enrol/start` answer on its way to the page (`withoutCredProtect`), test-only; the
-// server does not enforce the extension. The product code is unchanged.
-import { type BrowserContext, type CDPSession, type Page, expect, test } from "@playwright/test";
+// Security keys are touch-only (ADR 0082): the server's options ask for user verification
+// "discouraged" and carry no credProtect extension, which Chromium refused with a
+// NotSupportedError under the earlier options (credProtect `userVerificationRequired` with
+// `userVerification: "preferred"`). Nothing here alters the server's answers: the real options
+// reach the browser, and a key that verified its user at enrolment logs in with a touch alone.
+import { type CDPSession, type Page, expect, test } from "@playwright/test";
 
 import { expectAccessible, tabTo } from "./a11y.ts";
 import { PASSWORD, lockVault, signUp, watch } from "./helpers.ts";
@@ -29,37 +28,44 @@ test.afterAll(() => {
   server.stop();
 });
 
-/** The test-only interception of the module docs: `webauthn/enrol/start`'s options without the
- * credProtect members Chromium refuses. */
-async function withoutCredProtect(context: BrowserContext): Promise<void> {
-  await context.route("**/api/v1/webauthn/enrol/start", async (route) => {
-    const response = await route.fetch();
-    const body = (await response.json()) as { options: string };
-    const options = JSON.parse(body.options) as {
-      publicKey: { extensions?: Record<string, unknown> };
-    };
-    delete options.publicKey.extensions?.["credentialProtectionPolicy"];
-    delete options.publicKey.extensions?.["enforceCredentialProtectionPolicy"];
-    await route.fulfill({ response, json: { ...body, options: JSON.stringify(options) } });
-  });
-}
-
-/** A virtual CTAP2 security key on `page`, without user verification (a key with no PIN). */
-async function virtualKey(page: Page): Promise<{ cdp: CDPSession; authenticatorId: string }> {
-  await withoutCredProtect(page.context());
+/** A virtual CTAP2 security key on `page`. By default it has no user verification (a key with no
+ * PIN); `canVerify` gives it built-in user verification, which succeeds until
+ * `WebAuthn.setUserVerified` turns it off. */
+async function virtualKey(
+  page: Page,
+  canVerify = false,
+): Promise<{ cdp: CDPSession; authenticatorId: string }> {
   const cdp = await page.context().newCDPSession(page);
   await cdp.send("WebAuthn.enable");
   const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", {
     options: {
       protocol: "ctap2",
+      ctap2Version: "ctap2_1",
       transport: "usb",
       hasResidentKey: false,
-      hasUserVerification: false,
-      isUserVerified: false,
+      hasUserVerification: canVerify,
+      isUserVerified: canVerify,
       automaticPresenceSimulation: true,
     },
   });
   return { cdp, authenticatorId };
+}
+
+/** The `publicKey` member of the options in the next answer from `path`, read as served (the
+ * Worker's requests included), without touching the answer. */
+async function servedOptions(
+  page: Page,
+  path: string,
+): Promise<{
+  userVerification?: string;
+  authenticatorSelection?: { userVerification?: string };
+  extensions?: Record<string, unknown>;
+}> {
+  const response = await page
+    .context()
+    .waitForEvent("response", { predicate: (r) => r.url().endsWith(path) });
+  const body = (await response.json()) as { options: string };
+  return (JSON.parse(body.options) as { publicKey: Record<string, unknown> }).publicKey;
 }
 
 /** The accessibility audit (`a11y.ts`). Its runner opens and closes a helper page, after which
@@ -168,6 +174,39 @@ test("security key: enrol, log in with it, remove it", async ({ page }) => {
   await page.getByLabel("Master password", { exact: true }).fill(PASSWORD);
   await page.getByRole("button", { name: "Unlock" }).click();
   await expect(page.getByRole("button", { name: "Account menu" })).toBeVisible();
+  expect(problems).toEqual([]);
+});
+
+test("security key: a key that can verify its user logs in with a touch alone", async ({
+  page,
+}) => {
+  const { problems } = watch(page);
+  const secretKey = await signUp(page, server.origin, "touchuser");
+  const section = await openSecurityKeys(page);
+  // A key with built-in user verification. Chromium has it verify at enrolment even under
+  // "discouraged" (observed: flags UP|UV|AT), as CTAP 2.1 keys with a PIN do; the facade's
+  // earlier rule then demanded UV at every login.
+  const { cdp, authenticatorId } = await virtualKey(page, true);
+  const enrolOptions = servedOptions(page, "/api/v1/webauthn/enrol/start");
+  await section.getByLabel("Name for the new key").fill("PIN key");
+  await section.getByRole("button", { name: "Add security key" }).click();
+  const creation = await enrolOptions;
+  expect(creation.authenticatorSelection?.userVerification).toBe("discouraged");
+  expect(creation.extensions ?? {}).not.toHaveProperty("credentialProtectionPolicy");
+  expect(creation.extensions ?? {}).not.toHaveProperty("enforceCredentialProtectionPolicy");
+  await expect(section.getByText('Security key "PIN key" added.')).toBeVisible();
+  const { credentials } = await cdp.send("WebAuthn.getCredentials", { authenticatorId });
+  expect(credentials).toHaveLength(1);
+
+  // From now on the key cannot verify its user: a login that needed UV would fail.
+  await cdp.send("WebAuthn.setUserVerified", { authenticatorId, isUserVerified: false });
+  const loginOptions = servedOptions(page, "/api/v1/webauthn/login/challenge");
+  const prompt = await unlockToKeyPrompt(page, secretKey);
+  await prompt.getByRole("button", { name: "Use security key" }).click();
+  expect((await loginOptions).userVerification).toBe("discouraged");
+  await expect(page.getByRole("button", { name: "Account menu" })).toBeVisible();
+  const after = await cdp.send("WebAuthn.getCredentials", { authenticatorId });
+  expect(after.credentials[0]?.signCount).toBeGreaterThan(credentials[0]?.signCount ?? 0);
   expect(problems).toEqual([]);
 });
 
