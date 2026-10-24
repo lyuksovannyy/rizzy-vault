@@ -3306,6 +3306,74 @@ fn rv_reaches_the_server_through_a_tls_proxy() {
 /// `item show` lists password history (gap 01; ADR 0012 §5 "Password history is the history
 /// of `login.password`"): concealed unless `--reveal`, newest first, never through the
 /// generic field loop.
+/// ADR 0079 §10, §12 "rv": `item create --type identity --generate` saves a generated identity
+/// (the two new keys included) and a `--field` of the same key wins; `--generate` needs an
+/// identity.
+#[test]
+fn item_create_generates_an_identity() {
+    let server = Server::start();
+    let origin = server.origin();
+    let a = Rv::new("idgen");
+    sign_up(&a, &origin, "alice");
+    let item = a
+        .ok(
+            &[
+                "item",
+                "create",
+                "--type",
+                "identity",
+                "--generate",
+                "--country",
+                "FR",
+                "--sex",
+                "female",
+                "--age",
+                "28",
+                "--field",
+                "identity.city=Lyon",
+            ],
+            &[],
+        )
+        .out[0]
+        .clone();
+    let shown = a.ok(&["item", "show", &item], &[]);
+    let line = |key: &str| {
+        shown
+            .out
+            .iter()
+            .find_map(|l| l.strip_prefix(&format!("{key}: ")))
+            .map(str::to_owned)
+    };
+    assert!(
+        shown.out.iter().any(|l| l == "type:  identity"),
+        "{:?}",
+        shown.out
+    );
+    assert_eq!(line("identity.sex").as_deref(), Some("female"));
+    assert_eq!(line("identity.country").as_deref(), Some("FR"));
+    assert_eq!(line("identity.city").as_deref(), Some("Lyon"));
+    let birthday = line("identity.birthday").unwrap();
+    assert!(
+        rizzy_client::identity_gen::CivilDate::parse(&birthday).is_some(),
+        "{birthday}"
+    );
+    for key in [
+        "identity.first_name",
+        "identity.last_name",
+        "identity.postal_code",
+        "identity.title",
+    ] {
+        assert!(line(key).is_some(), "{key}: {:?}", shown.out);
+    }
+    let (outcome, _) = a.try_run(
+        &["item", "create", "--type", "login", "--generate"],
+        &[],
+        &[],
+        &[],
+    );
+    assert!(matches!(outcome, Err(CliError::Usage(_))), "{outcome:?}");
+}
+
 /// ADR 0055: `item create` makes an item of each M3 type with its own keys, a concealed key
 /// only from a prompt, and `item show` conceals the six keys of §4 unless `--reveal`. An
 /// SSH key without `ssh.port` shows the default port 22 (§1), which is never stored. A key of

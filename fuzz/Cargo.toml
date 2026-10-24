@@ -108,6 +108,10 @@
 #   breach_range       the breach-check range response (CRYPTO.md §11.16, ADR 0053): rizzy-proto's
 #                      bounded `SUFFIX:COUNT` parser on arbitrary bytes and JSON, and
 #                      rizzy-client's constant-time verdict over what it accepts
+#   identity_data      rizzy-client's identity data parser (ADR 0079 §5): never panic on
+#                      arbitrary bytes; an accepted file generates for each of its countries
+#   identity_options   the identity generator's options (ADR 0079 §3, OQ7): age text (preset,
+#                      range, exact), email domain, country, and the tag 0x0004 defaults layout
 #   passkey_pkcs8      rizzy-core's hand-written PKCS#8 reader and writers for CXF passkey keys
 #                      (ADR 0074 §4): never panic; what parses writes back to a fixed point
 #   icon_decode        the icons role's image path (ADR 0052 point 4, INV-76): rizzy-icon-proxy's
@@ -558,6 +562,20 @@ bench = false
 [[bin]]
 name = "client_account_settings"
 path = "fuzz_targets/client_account_settings.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "identity_data"
+path = "fuzz_targets/identity_data.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "identity_options"
+path = "fuzz_targets/identity_options.rs"
 test = false
 doc = false
 bench = false
