@@ -116,6 +116,7 @@ pub mod error;
 pub mod export;
 pub mod healing;
 pub mod icons;
+pub mod identity_gen;
 pub mod items;
 pub mod lists;
 pub mod login;

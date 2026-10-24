@@ -221,10 +221,11 @@ fn an_oversize_entry_and_too_many_entries_are_rejected() {
     let record = AccountSettingsRecord::decode(&largest).unwrap();
     assert_eq!(record.encode().unwrap().as_slice(), largest);
 
-    // n = 257 entries: refused from the count alone.
+    // n = 257 entries: refused from the count alone. The tags start at 0x0100, clear of the
+    // recognised 0x0001 and 0x0004 (ADR 0079 Open question 7), so every entry is unknown.
     let mut many = hex("0001");
     many.extend_from_slice(&(MAX_SETTINGS_ENTRIES + 1).to_be_bytes());
-    for tag in 2..=(MAX_SETTINGS_ENTRIES + 2) {
+    for tag in 0x0100..=(0x0100 + MAX_SETTINGS_ENTRIES) {
         many.extend_from_slice(&tag.to_be_bytes());
         many.extend_from_slice(&[0, 0, 0, 0]);
     }
@@ -235,7 +236,7 @@ fn an_oversize_entry_and_too_many_entries_are_rejected() {
     // n = 256 is the bound.
     let mut most = hex("0001");
     most.extend_from_slice(&MAX_SETTINGS_ENTRIES.to_be_bytes());
-    for tag in 2..(MAX_SETTINGS_ENTRIES + 2) {
+    for tag in 0x0100..(0x0100 + MAX_SETTINGS_ENTRIES) {
         most.extend_from_slice(&tag.to_be_bytes());
         most.extend_from_slice(&[0, 0, 0, 0]);
     }
