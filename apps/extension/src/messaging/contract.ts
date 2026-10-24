@@ -612,6 +612,11 @@ export interface MatchCandidateSummary {
   /** ADR 0076 §4.1: the item holds a valid time-based `login.totp` (a non-secret flag, like
    * `needsWarning`); the content script opens a menu at a TOTP-only step only if one has it. */
   readonly hasTotp: boolean;
+  /** ADR 0081 §A7 ("every list row shows its vault"): the item's vault label ("Personal", the
+   * vault's name, or "Untitled vault"), at most {@link MAX_VAULT_LABEL_LEN} code units. Shown in
+   * the extension-origin inline menu only, as the popup's rows show it; like the title, never a
+   * secret (ADR 0013 §3 rule 3). */
+  readonly vault?: string;
 }
 
 export interface CandidatesMessage {

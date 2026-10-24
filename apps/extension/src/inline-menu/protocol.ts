@@ -4,7 +4,8 @@
 // page's own window — isolated-world JS, but a shared DOM/BOM, including `window` itself) and
 // the extension-origin inline-menu iframe it creates (ADR 0036 §4/§5, ADR 0036 §6 "the
 // inline-menu iframe app"; INV-36, INV-40). Carries no secrets, only title/username summaries
-// (ADR 0013 §3 rule 3) in, and the user's chosen `itemId` out — never crosses
+// (ADR 0013 §3 rule 3) and each item's vault label (ADR 0081 §A7) in, and the user's chosen
+// `itemId` out — never crosses
 // `messaging/contract.ts`'s background-messaging boundary, and is validated on both ends all
 // the same, because `postMessage` delivers to any listener regardless of claimed source.
 //
@@ -45,7 +46,7 @@
 //     `inline_menu_fill_chosen` message that would have to follow only ever carries the real
 //     `itemId` the real iframe's own click handler holds — a forged show message cannot make
 //     the iframe send that for an id it never really rendered a trusted click for.
-import { MAX_CANDIDATES, MAX_FIELD_VALUE_LEN, MAX_HOST_LEN, MAX_TITLE_LEN, isFillOnly, isFillScope, isInstanceToken, type FillOnly, type FillScope } from "../messaging/contract.ts";
+import { MAX_CANDIDATES, MAX_FIELD_VALUE_LEN, MAX_HOST_LEN, MAX_TITLE_LEN, MAX_VAULT_LABEL_LEN, isFillOnly, isFillScope, isInstanceToken, type FillOnly, type FillScope } from "../messaging/contract.ts";
 
 export const INLINE_MENU_SHOW = "rizzy-inline-menu-show";
 export const INLINE_MENU_PICK = "rizzy-inline-menu-pick";
@@ -66,6 +67,9 @@ export interface InlineMenuCandidate {
   readonly savedHost: string;
   /** ADR 0076 §4.1: the item can produce a TOTP code. */
   readonly hasTotp?: boolean;
+  /** ADR 0081 §A7: the item's vault label, shown in the row as the popup shows it (never a
+   * secret; `MatchCandidateSummary.vault`). */
+  readonly vault?: string;
 }
 
 export interface InlineMenuShowMessage {
@@ -120,7 +124,8 @@ function isCandidate(value: unknown): value is InlineMenuCandidate {
     isBoundedString(v["username"], MAX_FIELD_VALUE_LEN) &&
     typeof v["needsWarning"] === "boolean" &&
     isBoundedString(v["savedHost"], MAX_HOST_LEN) &&
-    (v["hasTotp"] === undefined || typeof v["hasTotp"] === "boolean")
+    (v["hasTotp"] === undefined || typeof v["hasTotp"] === "boolean") &&
+    (v["vault"] === undefined || isBoundedString(v["vault"], MAX_VAULT_LABEL_LEN))
   );
 }
 

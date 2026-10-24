@@ -6,7 +6,7 @@
 // though only one direction is actually forgeable (see `protocol.ts`'s own comment).
 import { describe, expect, it } from "vitest";
 
-import { MAX_CANDIDATES, MAX_HOST_LEN } from "../src/messaging/contract.ts";
+import { MAX_CANDIDATES, MAX_HOST_LEN, MAX_VAULT_LABEL_LEN } from "../src/messaging/contract.ts";
 import {
   INLINE_MENU_PICK,
   INLINE_MENU_SHOW,
@@ -87,6 +87,22 @@ describe("isInlineMenuShowMessage", () => {
       ],
     };
     expect(isInlineMenuShowMessage(message)).toBe(false);
+  });
+
+  // ADR 0081 §A7: a candidate may carry its vault label, bounded like every string here.
+  it("accepts a vault label and refuses a malformed or oversized one", () => {
+    const candidate = { itemId: "item-1", title: "Example", username: "alice", needsWarning: false, savedHost: "example.com" };
+    const show = (c: Record<string, unknown>) => ({
+      type: INLINE_MENU_SHOW,
+      pageOrigin: "https://example.com",
+      instanceToken: TOKEN,
+      pageHost: "example.com",
+      candidates: [c],
+    });
+    expect(isInlineMenuShowMessage(show({ ...candidate, vault: "Work" }))).toBe(true);
+    expect(isInlineMenuShowMessage(show({ ...candidate, vault: "w".repeat(MAX_VAULT_LABEL_LEN) }))).toBe(true);
+    expect(isInlineMenuShowMessage(show({ ...candidate, vault: "w".repeat(MAX_VAULT_LABEL_LEN + 1) }))).toBe(false);
+    expect(isInlineMenuShowMessage(show({ ...candidate, vault: 7 }))).toBe(false);
   });
 
   it("accepts zero candidates", () => {

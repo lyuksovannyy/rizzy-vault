@@ -16,7 +16,7 @@ import { type BrowserContext, type FrameLocator, type Locator, type Page, chromi
 import { TEST_ACCOUNT_PASSWORD, logIn, signUp } from "./account.ts";
 import AxeBuilder from "@axe-core/playwright";
 
-import { AXE_TAGS } from "./a11y.ts";
+import { AXE_TAGS, expectAccessible } from "./a11y.ts";
 import { type RunningServer, startServer } from "./server.ts";
 import { withProfileDir } from "./profile.ts";
 
@@ -128,11 +128,16 @@ async function createItem(
     readonly password: string;
     readonly websiteUrl: string;
     readonly totp?: string;
+    /** The vault picked in the editor (ADR 0081 §A8); Personal, the preselected one, when absent. */
+    readonly vault?: string;
     readonly custom?: readonly { readonly label: string; readonly kind: "text" | "hidden"; readonly value: string; readonly id: string }[];
   },
 ): Promise<void> {
   await page.getByRole("button", { name: "New item" }).click();
   await page.getByRole("menuitem", { name: "Login" }).click();
+  if (item.vault !== undefined) {
+    await page.getByLabel("Vault", { exact: true }).selectOption({ label: item.vault });
+  }
   await page.getByLabel("Title").fill(item.title);
   await page.getByLabel("Username", { exact: true }).fill(item.username);
   await page.getByLabel("Password", { exact: true }).fill(item.password);
@@ -417,6 +422,79 @@ test("the save prompt's vault picker preselects Personal (ADR 0081 §A8)", async
     await popup.getByLabel("Search").fill("erin");
     // The row shows its vault: Personal, the preselected one.
     await expect(popup.getByRole("button", { name: /erin@example\.com.*Personal/ })).toBeVisible();
+  } finally {
+    await pages.stop();
+  }
+});
+
+// ADR 0081 §A7 ("every list row shows its vault") and §A8 ("fill offers items from every
+// vault"): the inline menu offers the page's logins of both vaults, each row naming its vault as
+// the popup's rows do, and fills one from the vault that is not Personal. The label is static
+// text in the extension-origin frame: no opacity or transform motion (a framed security
+// surface), and the page's DOM never holds it. The menu with the labels passes the axe audit.
+test("the inline menu's rows show their vault (ADR 0081 §A7, §A8)", async ({ context, extensionId, server }) => {
+  const pages = await startPages();
+  try {
+    const setup = await context.newPage();
+    const secretKey = await signUp(setup, server.origin, "acvaultrows");
+    await setup.getByRole("navigation", { name: "Vault navigation" }).getByRole("button", { name: "Manage vaults" }).click();
+    await setup.locator(".vaults-pane").getByLabel("Name", { exact: true }).fill("Work");
+    await setup.locator(".vaults-pane").getByRole("button", { name: "Create vault" }).click();
+    await expect(setup.locator(".vaults-pane tbody tr", { hasText: "Work" })).toBeVisible();
+    await setup.getByRole("navigation", { name: "Vault navigation" }).getByRole("button", { name: "All vaults" }).click();
+    const site = `http://127.0.0.1:${pages.port}/`;
+    await createItem(setup, { title: "Office Mail", username: "frank@work.example", password: "work-pw", websiteUrl: site, vault: "Work" });
+    await createItem(setup, { title: "Home Mail", username: "frank@home.example", password: "home-pw", websiteUrl: site });
+    await setup.close();
+    await (await enrol(context, extensionId, server, "acvaultrows", secretKey)).close();
+
+    const page = await context.newPage();
+    await page.goto(`http://127.0.0.1:${pages.port}/plain`);
+    const work = menu(page).getByRole("button", { name: /Office Mail/ });
+    const home = menu(page).getByRole("button", { name: /Home Mail/ });
+    await expect(work).toBeVisible({ timeout: 15_000 });
+    await expect(work).toHaveText("Office Mail (frank@work.example) · Work");
+    await expect(home).toHaveText("Home Mail (frank@home.example) · Personal");
+    // The page never sees a vault name; only the extension-origin frame shows it.
+    expect(await page.evaluate(() => document.body.innerText.includes("Work"))).toBe(false);
+    // No opacity or transform motion on the label in the framed surface.
+    const frame = page.frames().find((f) => f.url().includes("inline-menu"));
+    expect(frame, "the inline-menu frame").toBeDefined();
+    // The label and its row: no animation, and no transition that moves opacity or transform
+    // (`all` with a zero duration is the initial value, which animates nothing).
+    const motion = await frame?.evaluate(() =>
+      [...document.querySelectorAll(".item-vault")].flatMap((el) =>
+        [el, el.parentElement ?? el].map((node) => {
+          const style = getComputedStyle(node);
+          const properties = style.transitionProperty.split(",").map((p) => p.trim());
+          const durations = style.transitionDuration.split(",").map((d) => parseFloat(d));
+          return {
+            animation: style.animationName,
+            moving: properties.filter(
+              (p, i) => ["opacity", "transform", "all"].includes(p) && (durations[i % durations.length] ?? 0) > 0,
+            ),
+            animations: node.getAnimations().length,
+          };
+        }),
+      ),
+    );
+    expect(motion).toHaveLength(4);
+    for (const m of motion ?? []) {
+      expect(m.animation).toBe("none");
+      expect(m.moving).toEqual([]);
+      expect(m.animations).toBe(0);
+    }
+    // The page's audit runs in every frame, so it covers the extension-origin menu with its
+    // vault labels (`a11y.ts`), as `a11y.spec.ts` audits the menu.
+    await expectAccessible(page, "inline menu with vault labels (in a login page)");
+
+    // A login of the vault that is not Personal fills on the user's click. The rows wrap in the
+    // menu's fixed height, so the second one is scrolled fully into view first: the visibility
+    // gate refuses a click on a row it cannot see whole.
+    await work.scrollIntoViewIfNeeded();
+    await realClick(page, work);
+    await expect(page.locator("#user")).toHaveValue("frank@work.example", { timeout: 15_000 });
+    await expect(page.locator("#pass")).toHaveValue("work-pw");
   } finally {
     await pages.stop();
   }
