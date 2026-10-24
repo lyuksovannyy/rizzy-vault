@@ -284,6 +284,14 @@ fn a_vault_is_created_named_used_and_seen_by_another_session() {
     )
     .unwrap();
     assert_eq!(vault_name(&owned).unwrap().as_str(), "Work");
+    assert!(matches!(
+        crate::vaults::vault_label(&catalog, &owned),
+        crate::vaults::VaultLabel::Named(n) if n.as_str() == "Work"
+    ));
+    assert_eq!(
+        crate::vaults::vault_label(&catalog, find(&mut vaults, personal)),
+        crate::vaults::VaultLabel::Personal
+    );
     let p = find(&mut vaults, personal);
     assert_eq!(
         rename_vault(&mut rng, &web.unlocked, &catalog, p, "Mine", T0 + 21).unwrap_err(),
